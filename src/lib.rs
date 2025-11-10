@@ -1,8 +1,10 @@
 // use std::vec;
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 
+use sha2::Sha256;
 pub use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 pub mod encrypt;
@@ -33,6 +35,14 @@ pub fn get_static_keypair() -> (StaticSecret, PublicKey) {
     let epk = PublicKey::from(&esk);
 
     (esk, epk)
+}
+
+pub fn get_shared_key(shared_secret: &[u8; 32], salt: &str, info: &str) -> [u8; 32] {
+    let key = Hkdf::<Sha256>::new(Some(salt.as_bytes()), shared_secret);
+    let mut okm = [0u8; 32];
+    let _ = key.expand(info.as_bytes(), &mut okm);
+
+    okm
 }
 
 pub fn get_nonce<const N: usize>() -> [u8; N] {
