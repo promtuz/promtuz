@@ -27,5 +27,6 @@ async fn main() -> Result<()> {
     let acceptor_handle = tokio::spawn(run_acceptor(endpoint.clone()));
 
     _ = join!(acceptor_handle);
+    
     Ok(())
 }
