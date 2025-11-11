@@ -1,12 +1,15 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::anyhow;
 use quinn::ServerConfig as QuinnServerConfig;
+use quinn::TransportConfig;
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::PrivateKeyDer;
@@ -15,6 +18,16 @@ pub fn setup_crypto_provider() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
         .map_err(|_| anyhow!("ERROR: failed to install default crypto provider"))?;
     Ok(())
+}
+
+pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
+    let mut store = rustls::RootCertStore::empty();
+    let mut reader = BufReader::new(File::open(path)?);
+
+    let certs = rustls_pemfile::certs(&mut reader).flatten();
+    store.add_parsable_certificates(certs);
+
+    Ok(store)
 }
 
 /// Builds a QUIC server configuration using a TLS certificate, private key,
@@ -100,54 +113,69 @@ pub fn build_server_cfg(
     Ok(server_cfg)
 }
 
-/// Builds a TLS client configuration for an outbound QUIC connection,
-/// attaching exactly one ALPN protocol.
+/// Builds a `quinn::ClientConfig` configured for a specific ALPN protocol.
 ///
-/// This configuration represents a *single connection role*.  
-/// Whenever a node, resolver, or client dials another peer, it must
-/// specify exactly one ALPN value that identifies the purpose of that
-/// connection (e.g., `"node/1"`, `"resolver/1"`, `"peer/1"`, etc).
+/// This function is used whenever an outbound QUIC connection is made
+/// (resolver→resolver, node→resolver, node→node, client→resolver, etc).
 ///
-/// The server will only accept the connection if the ALPN offered here
-/// matches one of the protocols in its own server-side ALPN list.
+/// ## ALPN and roles
+/// The **ALPN string defines the role of this outbound connection**:
 ///
-/// ## Parameters
+/// - `"node/1"`     — a relay/node dialing a resolver  
+/// - `"resolver/1"` — a resolver dialing another resolver  
+/// - `"peer/1"`     — a relay/node dialing another relay/node  
+/// - `"client/1"`   — a client dialing a resolver  
 ///
-/// * `alpn_protocol`  
-///   A single ALPN string representing the intended role for this
-///   outbound connection.  
-///   For example:
-///   - `"node/1"`     → node → resolver
-///   - `"resolver/1"` → resolver → resolver
-///   - `"peer/1"`     → node → node
-///   - `"client/1"`   → client → resolver
+/// Each outbound QUIC connection must advertise **exactly one** ALPN.
+/// The receiving side uses the negotiated ALPN to route the connection
+/// to the correct handler.
+///
+/// ## Root certificates
+/// The caller must supply a `RootCertStore` containing the trusted
+/// certificate authorities (CA roots) for this client.
+/// This is what enables TLS verification of the remote endpoint.
+///
+/// Typically you load this from:
+/// - your custom root CA (`rootCA.pem`)  
+/// - system roots  
+/// - resolver-issued CA (future feature)  
 ///
 /// ## Returns
-///
-/// A fully initialized [`rustls::ClientConfig`] that Quinn can use when
-/// dialing outbound connections.  
-/// This config is typically wrapped in a `quinn::ClientConfig` and
-/// injected into an `Endpoint` via `set_default_client_config()`, or
-/// passed explicitly when calling `connect()`.
-///
-/// ## Errors
-///
-/// Returns an error if TLS configuration fails (e.g. no trusted roots,
-/// unsupported ALPN, or invalid crypto provider state).
+/// A fully initialized `quinn::ClientConfig`, ready to be:
+/// - passed to `Endpoint::set_default_client_config()`, or  
+/// - used directly when dialing:  
+///   `endpoint.connect(addr, "hostname")?.await?`
 ///
 /// ## Example
+/// ```ignore
+/// let roots = load_root_ca("cert/rootCA.pem")?;
+/// let cfg = build_client_cfg("node/1", &roots)?;
+/// endpoint.set_default_client_config(cfg);
 ///
-/// ```no_run
-/// let client_cfg = build_client_cfg("node/1")?;
-/// endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_cfg)));
-/// let conn = endpoint.connect("1.2.3.4:4433".parse()?, "resolver")?.await?;
+/// let conn = endpoint
+///     .connect("1.2.3.4:4433".parse().unwrap(), "resolver-host")?
+///     .await?;
 /// ```
-///
-/// ## Notes
-///
-/// * Outbound connections **must** specify exactly one ALPN.
-/// * ALPN chosen here defines the *role* of the connection.
-/// * This is separate from the server-side ALPN accept list.
-pub fn build_client_cfg(alpn_protocol: &'static str) -> Result<rustls::ClientConfig> {
-    todo!()
+pub fn build_client_cfg(
+    alpn_protocol: &'static str,
+    roots: &RootCertStore,
+) -> Result<quinn::ClientConfig> {
+    // --- rustls TLS config ---
+    let mut tls = rustls::ClientConfig::builder()
+        // .with_safe_defaults()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth(); // no client certificate auth
+
+    // Set ALPN (only one per outbound role)
+    tls.alpn_protocols = vec![alpn_protocol.as_bytes().to_vec()];
+
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
+
+    // Wrap TLS config for Quinn
+    let mut client = quinn::ClientConfig::new(Arc::new(quic_config));
+
+    // Optional: tune transport if you want
+    client.transport_config(Arc::new(TransportConfig::default()));
+
+    Ok(client)
 }
