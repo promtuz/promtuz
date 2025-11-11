@@ -14,7 +14,6 @@ use crate::util::cls;
 use crate::util::config::AppConfig;
 
 mod quic;
-mod router;
 mod util;
 
 #[tokio::main]
