@@ -1,5 +1,5 @@
 pub mod resolver;
-pub mod role;
+pub mod protorole;
 
 pub type NodeId = String;
 pub type UserId = String;
