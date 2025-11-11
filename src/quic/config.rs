@@ -25,7 +25,7 @@ pub fn setup_crypto_provider() -> Result<()> {
 /// and converts it into a `quinn::ServerConfig` suitable for creating
 /// a QUIC endpoint.
 ///
-/// # Parameters
+/// ## Parameters
 ///
 /// * `cert_path`  
 ///   Filesystem path to a PEM-encoded X.509 certificate chain.
@@ -38,7 +38,7 @@ pub fn setup_crypto_provider() -> Result<()> {
 ///   willing to negotiate.  
 ///   Only connections offering one of these protocols will be accepted.
 ///
-/// # Returns
+/// ## Returns
 ///
 /// Returns a fully initialized [`quinn::ServerConfig`] wrapped in an
 /// application-specific `QuinnServerConfig` type (or as defined in your
@@ -46,14 +46,14 @@ pub fn setup_crypto_provider() -> Result<()> {
 /// This configuration can be passed to `Endpoint::server` to create a
 /// listening QUIC endpoint.
 ///
-/// # Errors
+/// ## Errors
 ///
 /// Returns an error if:
 /// - certificate or key files cannot be read or parsed
 /// - TLS configuration cannot be constructed (e.g., invalid key format)
 /// - ALPN configuration is invalid for the TLS backend
 ///
-/// # Example
+/// ## Example
 ///
 /// ```no_run
 /// let cfg = build_server_cfg(
@@ -64,7 +64,7 @@ pub fn setup_crypto_provider() -> Result<()> {
 /// let endpoint = quinn::Endpoint::server(cfg, "0.0.0.0:4433".parse()?)?;
 /// ```
 ///
-/// # Notes
+/// ## Notes
 ///
 /// * ALPN determines *what roles* this server is willing to accept, but
 ///   the **dialer** decides the actual role of a connection by choosing
@@ -111,7 +111,7 @@ pub fn build_server_cfg(
 /// The server will only accept the connection if the ALPN offered here
 /// matches one of the protocols in its own server-side ALPN list.
 ///
-/// # Parameters
+/// ## Parameters
 ///
 /// * `alpn_protocol`  
 ///   A single ALPN string representing the intended role for this
@@ -122,7 +122,7 @@ pub fn build_server_cfg(
 ///   - `"peer/1"`     → node → node
 ///   - `"client/1"`   → client → resolver
 ///
-/// # Returns
+/// ## Returns
 ///
 /// A fully initialized [`rustls::ClientConfig`] that Quinn can use when
 /// dialing outbound connections.  
@@ -130,12 +130,12 @@ pub fn build_server_cfg(
 /// injected into an `Endpoint` via `set_default_client_config()`, or
 /// passed explicitly when calling `connect()`.
 ///
-/// # Errors
+/// ## Errors
 ///
 /// Returns an error if TLS configuration fails (e.g. no trusted roots,
 /// unsupported ALPN, or invalid crypto provider state).
 ///
-/// # Example
+/// ## Example
 ///
 /// ```no_run
 /// let client_cfg = build_client_cfg("node/1")?;
@@ -143,7 +143,7 @@ pub fn build_server_cfg(
 /// let conn = endpoint.connect("1.2.3.4:4433".parse()?, "resolver")?.await?;
 /// ```
 ///
-/// # Notes
+/// ## Notes
 ///
 /// * Outbound connections **must** specify exactly one ALPN.
 /// * ALPN chosen here defines the *role* of the connection.
