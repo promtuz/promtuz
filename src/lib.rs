@@ -1,4 +1,5 @@
-// use std::vec;
+//! TODO: SPLIT CONCERNS USING FEATURES
+
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 
 use hkdf::Hkdf;
@@ -9,6 +10,7 @@ pub use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 pub mod encrypt;
 pub mod msg;
+pub mod quic;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Bytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
