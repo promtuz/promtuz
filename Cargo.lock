@@ -95,6 +95,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "chacha20poly1305",
+ "hkdf",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "serde-big-array",
+ "serde_bytes",
+ "sha2",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -222,22 +238,6 @@ name = "libc"
 version = "0.2.177"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
-
-[[package]]
-name = "libcore"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "chacha20poly1305",
- "hkdf",
- "rand",
- "rmp-serde",
- "serde",
- "serde-big-array",
- "serde_bytes",
- "sha2",
- "x25519-dalek",
-]
 
 [[package]]
 name = "num-traits"

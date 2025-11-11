@@ -8,6 +8,7 @@ use sha2::Sha256;
 pub use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 pub mod encrypt;
+pub mod msg;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Bytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
