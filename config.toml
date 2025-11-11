@@ -1,0 +1,9 @@
+[network]
+address = "0.0.0.0:4432"
+cert_path = "cert/relay.crt"
+key_path = "cert/relay.key"
+
+[resolver]
+seed = [
+  "quic://arch.local:4433"
+]
