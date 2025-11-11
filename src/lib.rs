@@ -1,3 +1,5 @@
+pub static PROTOCOL_VERSION: u16 = 1;
+
 #[cfg(feature = "crypto")]
 pub mod crypto;
 

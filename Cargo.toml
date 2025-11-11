@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 crypto = ["dep:chacha20poly1305", "dep:hkdf", "dep:x25519-dalek", "dep:sha2"]
-msg = []
+msg = ["quic"]
 quic = ["dep:rustls", "dep:rustls-pemfile", "dep:quinn"]
 
 [dependencies]
