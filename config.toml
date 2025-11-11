@@ -2,6 +2,7 @@
 address = "0.0.0.0:4432"
 cert_path = "cert/relay.crt"
 key_path = "cert/relay.key"
+root_ca_path = "cert/root_ca.pem"
 
 [resolver]
 seed = [

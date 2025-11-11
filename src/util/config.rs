@@ -19,6 +19,7 @@ pub struct NetworkConfig {
     pub address: SocketAddr,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    pub root_ca_path: PathBuf,
 }
 
 #[derive(Deserialize, Debug)]
