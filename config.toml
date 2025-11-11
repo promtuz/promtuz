@@ -1,0 +1,10 @@
+[network]
+address = "0.0.0.0:4433"
+cert_path = "cert/resolver.crt"
+key_path = "cert/resolver.key"
+
+[resolver]
+seed = [
+  # addresses of other resolver nodes
+  "quic://resolver2:4433"
+]
