@@ -28,7 +28,11 @@ pub struct ResolverConfig {
 }
 
 impl AppConfig {
-    pub fn load() -> Self {
+    pub fn load(cls: bool) -> Self {
+        if cls {
+            print!("\x1B[2J\x1B[1;1H");
+        }
+
         let path = env::args().nth(1).unwrap_or_else(|| "config.toml".into());
         let path = Path::new(&path);
 
