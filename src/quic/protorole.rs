@@ -8,7 +8,7 @@ use crate::PROTOCOL_VERSION;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtoRole {
     Resolver,
-    Node,
+    Relay,
     Peer,
     Client,
 }
@@ -16,11 +16,11 @@ pub enum ProtoRole {
 impl ProtoRole {
     /// Return this role as an ALPN string, including version.
     ///
-    /// Example: `"node/1"`
+    /// Example: `"relay/1"`
     pub fn alpn(self) -> String {
         match self {
             ProtoRole::Resolver => format!("resolver/{PROTOCOL_VERSION}"),
-            ProtoRole::Node => format!("node/{PROTOCOL_VERSION}"),
+            ProtoRole::Relay => format!("relay/{PROTOCOL_VERSION}"),
             ProtoRole::Peer => format!("peer/{PROTOCOL_VERSION}"),
             ProtoRole::Client => format!("client/{PROTOCOL_VERSION}"),
         }
@@ -33,7 +33,7 @@ impl ProtoRole {
 
         match role {
             "resolver" => Some(ProtoRole::Resolver),
-            "node" => Some(ProtoRole::Node),
+            "relay" => Some(ProtoRole::Relay),
             "peer" => Some(ProtoRole::Peer),
             "client" => Some(ProtoRole::Client),
             _ => None,
@@ -62,7 +62,7 @@ impl fmt::Display for ProtoRole {
     }
 }
 
-/// Allows: `"node/1".parse::<ProtoRole>()?`
+/// Allows: `"relay/1".parse::<ProtoRole>()?`
 impl FromStr for ProtoRole {
     type Err = ();
 
@@ -75,7 +75,7 @@ impl AsRef<str> for ProtoRole {
     fn as_ref(&self) -> &str {
         match self {
             ProtoRole::Resolver => "resolver",
-            ProtoRole::Node => "node",
+            ProtoRole::Relay => "relay",
             ProtoRole::Peer => "peer",
             ProtoRole::Client => "client",
         }

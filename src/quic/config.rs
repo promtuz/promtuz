@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::BufReader;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +14,20 @@ use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::PrivateKeyDer;
+use serde::Deserialize;
+
+use crate::quic::protorole::ProtoRole;
+
+/// Network section of `config.toml` for both relay & resolver
+#[derive(Deserialize, Debug)]
+pub struct NetworkConfig {
+    /// address on which quic endpoint will start
+    pub address: SocketAddr,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// root ca to verify outgoing/incoming quic connections
+    pub root_ca_path: PathBuf,
+}
 
 pub fn setup_crypto_provider() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
@@ -25,7 +40,10 @@ pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
     let mut reader = BufReader::new(File::open(path)?);
 
     let certs = rustls_pemfile::certs(&mut reader).flatten();
-    store.add_parsable_certificates(certs);
+    let (certs_added, _) = store.add_parsable_certificates(certs);
+    if certs_added == 0 {
+        return Err(anyhow!("ERROR: could not add any root_ca"));
+    }
 
     Ok(store)
 }
@@ -87,7 +105,7 @@ pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
 pub fn build_server_cfg(
     cert_path: &Path,
     key_path: &Path,
-    alpn_protocols: &'static [&'static str],
+    alpn_protocols: &'static [ProtoRole],
 ) -> Result<QuinnServerConfig> {
     let mut cert_reader: BufReader<File> = BufReader::new(File::open(cert_path)?);
     let certs = rustls_pemfile::certs(&mut cert_reader).flatten().collect();
@@ -104,7 +122,7 @@ pub fn build_server_cfg(
 
     tls.alpn_protocols = alpn_protocols
         .iter()
-        .map(|prot| prot.as_bytes().to_vec())
+        .map(|prot| prot.alpn().into())
         .collect::<Vec<Vec<u8>>>();
 
     let quic_crypto = QuicServerConfig::try_from(tls)?;
@@ -121,7 +139,7 @@ pub fn build_server_cfg(
 /// ## ALPN and roles
 /// The **ALPN string defines the role of this outbound connection**:
 ///
-/// - `"node/1"`     — a relay/node dialing a resolver  
+/// - `"relay/1"`     — a relay/node dialing a resolver  
 /// - `"resolver/1"` — a resolver dialing another resolver  
 /// - `"peer/1"`     — a relay/node dialing another relay/node  
 /// - `"client/1"`   — a client dialing a resolver  
@@ -156,10 +174,7 @@ pub fn build_server_cfg(
 ///     .connect("1.2.3.4:4433".parse().unwrap(), "resolver-host")?
 ///     .await?;
 /// ```
-pub fn build_client_cfg(
-    alpn_protocol: &'static str,
-    roots: &RootCertStore,
-) -> Result<quinn::ClientConfig> {
+pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn::ClientConfig> {
     // --- rustls TLS config ---
     let mut tls = rustls::ClientConfig::builder()
         // .with_safe_defaults()
@@ -167,7 +182,7 @@ pub fn build_client_cfg(
         .with_no_client_auth(); // no client certificate auth
 
     // Set ALPN (only one per outbound role)
-    tls.alpn_protocols = vec![alpn_protocol.as_bytes().to_vec()];
+    tls.alpn_protocols = vec![role.alpn().into()];
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
 

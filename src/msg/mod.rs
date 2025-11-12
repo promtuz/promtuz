@@ -1,6 +1,6 @@
 pub mod resolver;
-pub mod protorole;
+pub mod cbor;
 
-pub type NodeId = String;
+pub type RelayId = String;
 pub type UserId = String;
 pub type ResolverId = String;

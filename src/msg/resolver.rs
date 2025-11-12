@@ -1,17 +1,18 @@
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
 
-use crate::msg::NodeId;
+use crate::msg::RelayId;
 
 /// Initial registration message sent by a relay node to a resolver.
 ///
 /// This announces the node's identity, network address, and basic
 /// capabilities so the resolver can track it in the live node set.
-#[derive(Serialize, Deserialize)]
-pub struct NodeHello {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RelayHello {
     /// Stable cryptographic ID derived from the node's public key.
-    pub node_id: NodeId,
-    pub address: (String, u16),
-    pub version: i16,
+    pub relay_id: RelayId,
+    pub version: u16,
     // TODO: I'd rather use bitset
     // pub capabilities: Vec<String>,
 }
