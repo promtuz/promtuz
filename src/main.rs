@@ -4,13 +4,15 @@
 
 use std::sync::Arc;
 
-use anyhow::Ok;
 use anyhow::Result;
+use common::quic::config::build_server_cfg;
+use common::quic::config::load_root_ca;
+use common::quic::config::setup_crypto_provider;
+use common::quic::protorole::ProtoRole;
+use quinn::Endpoint;
 use tokio::join;
 
 use crate::quic::acceptor::run_acceptor;
-use crate::quic::endpoint::QuicEndpoint;
-use crate::util::cls;
 use crate::util::config::AppConfig;
 
 mod quic;
@@ -18,15 +20,29 @@ mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    cls();
+    let cfg = AppConfig::load(false);
 
-    let config = AppConfig::load();
+    use ProtoRole as PR;
 
-    let endpoint = Arc::new(QuicEndpoint::new(&config)?);
+    setup_crypto_provider()?;
+    let server_cfg = {
+        build_server_cfg(
+            &cfg.network.cert_path,
+            &cfg.network.key_path,
+            &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
+        )?
+    };
+
+    let roots = load_root_ca(&cfg.network.root_ca_path)?;
+    let endpoint = Arc::new(Endpoint::server(server_cfg, cfg.network.address)?);
+
+    if let Ok(addr) = endpoint.local_addr() {
+        println!("QUIC: listening at {:?}", addr);
+    }
 
     let acceptor_handle = tokio::spawn(run_acceptor(endpoint.clone()));
 
     _ = join!(acceptor_handle);
-    
+
     Ok(())
 }

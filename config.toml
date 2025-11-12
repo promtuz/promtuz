@@ -2,6 +2,7 @@
 address = "0.0.0.0:4433"
 cert_path = "cert/resolver.crt"
 key_path = "cert/resolver.key"
+root_ca_path = "cert/root_ca.pem"
 
 [resolver]
 seed = [

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::quic::endpoint::QuicEndpoint;
+use quinn::Endpoint;
 
-pub async fn dial_resolver(qep: Arc<QuicEndpoint>) {
-  todo!("DIALER IS NOT NEEDED YET")
+pub async fn dial_resolver(qep: Arc<Endpoint>) {
+  unimplemented!("DIALER IS NOT NEEDED YET")
 }

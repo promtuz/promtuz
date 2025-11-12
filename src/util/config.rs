@@ -1,10 +1,9 @@
 use std::env;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process;
 
+use common::quic::config::NetworkConfig;
 use serde::Deserialize;
 use url::Url;
 
@@ -15,19 +14,16 @@ pub struct AppConfig {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct NetworkConfig {
-    pub address: SocketAddr,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-}
-
-#[derive(Deserialize, Debug)]
 pub struct ResolverConfig {
     pub seed: Vec<Url>,
 }
 
 impl AppConfig {
-    pub fn load() -> Self {
+    pub fn load(cls: bool) -> Self {
+        if cls {
+            print!("\x1B[2J\x1B[1;1H");
+        }
+
         let path = env::args().nth(1).unwrap_or_else(|| "config.toml".into());
         let path = Path::new(&path);
 
