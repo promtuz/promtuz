@@ -26,6 +26,8 @@ pub struct HelloAck {
     pub accepted: bool,
 
     /// Human-readable reason if `accepted == false`.
+    /// I wonder what human will read this reason,
+    /// TODO: use `enum RelayRejectReason` or something 
     pub reason: Option<String>,
 
     /// Resolver's current unix time (used for clock-drift checking).
@@ -38,7 +40,7 @@ pub struct HelloAck {
 /// Periodic heartbeat sent by a node to indicate that it is still alive
 /// and to provide useful runtime metrics to the resolver.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NodeHeartbeat {
+pub struct RelayHeartbeat {
     /// The node's stable cryptographic ID.
     pub node_id: String,
 
