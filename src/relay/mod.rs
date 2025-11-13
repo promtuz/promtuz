@@ -1,11 +1,23 @@
 use std::fs;
-use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
+use common::msg::cbor::FromCbor;
+use common::msg::cbor::ToCbor;
+use common::msg::resolver::HelloAck;
+use common::msg::resolver::RelayHeartbeat;
+use common::msg::resolver::RelayHello;
 use common::quic::id::derive_id;
 use p256::SecretKey;
+use quinn::Connection;
+use quinn::Endpoint;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
+use crate::quic::dialer::connect_to_any_seed;
 use crate::util::config::AppConfig;
+use crate::util::systime_sec;
 
 /// contains p256 private & public key
 #[derive(Debug, PartialEq, Eq)]
@@ -27,7 +39,9 @@ impl RelayKeys {
 ///
 /// It's *local identity* of the relay process,
 /// not a message exchanged over the wire.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// It's apparently like a core process handler
+#[derive(Debug)]
 pub struct Relay {
     /// Human readable relay id derived from public key
     pub id: String,
@@ -36,15 +50,98 @@ pub struct Relay {
 
     /// Protocol version this instance is running with
     pub version: u16,
+
+    /// SystemTime in ms since EPOCH when relay is started first
+    pub start_ms: u64,
+
+    /// Connection with one of resolver from given seed
+    pub resolver_conn: Arc<Connection>,
 }
 
 impl Relay {
-    pub fn from_cfg(cfg: &AppConfig) -> Result<Self> {
+    pub async fn init(cfg: &AppConfig, endpoint: Endpoint) -> Result<Arc<Mutex<Self>>> {
         let keys = RelayKeys::from_cfg(cfg)?;
         let id = derive_id(&keys.public);
 
-        println!("RELAY: Booting with ID({})", id);
+        println!("RELAY: Going online with ID({})", id);
 
-        Ok(Self { id, keys, version: common::PROTOCOL_VERSION })
+        let resolver_conn =
+            connect_to_any_seed(&endpoint, &cfg.resolver.seed, "arch.local").await?;
+
+        let relay = Arc::new(Mutex::new(Self {
+            id,
+            keys,
+            version: common::PROTOCOL_VERSION,
+            start_ms: systime_sec(),
+            resolver_conn: Arc::new(resolver_conn),
+        }));
+
+        println!("RELAY: Initialized");
+
+        Ok(relay)
+    }
+
+    async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
+        let conn = self.resolver_conn.clone();
+        let id = self.id.clone();
+        let start_ms = self.start_ms;
+
+        let interval = ack.interval_heartbeat_ms as u64;
+
+        tokio::spawn(async move {
+            let mut send = match conn.open_uni().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            loop {
+                if let Ok(heartbeat) = (RelayHeartbeat {
+                    node_id: id.clone(),
+                    load: 10,
+                    uptime_seconds: systime_sec() - start_ms,
+                })
+                .to_cbor()
+                {
+                    if send.write_all(&heartbeat).await.is_err() {
+                        break;
+                    }
+                    if send.flush().await.is_err() {
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(interval)).await;
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn hello(&self) -> Result<()> {
+        let hello = RelayHello { relay_id: self.id.clone() }.to_cbor()?;
+
+        let mut send = self.resolver_conn.open_uni().await?;
+        send.write_all(&hello).await?;
+        send.finish()?;
+        println!("SENT: RelayHello");
+
+        Ok(())
+    }
+
+    pub async fn handle_resolver(&self) -> Result<()> {
+        let conn = self.resolver_conn.clone();
+        while let Ok(mut recv) = conn.accept_uni().await {
+            let packet = recv.read_to_end(4096).await?;
+            if let Ok(ack) = HelloAck::from_cbor(&packet) {
+                println!("RECV_ACK: {:?}", ack);
+                self.start_heartbeat(ack).await?;
+                continue;
+            }
+
+            tokio::spawn(async move {
+                println!("RECV_PACKET: {:?}", packet);
+                Some(())
+            });
+        }
+        Ok(())
     }
 }
