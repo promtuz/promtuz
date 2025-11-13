@@ -11,8 +11,7 @@ use crate::msg::RelayId;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RelayHello {
     /// Stable cryptographic ID derived from the node's public key.
-    pub relay_id: RelayId,
-    pub version: u16,
+    pub relay_id: RelayId
     // TODO: I'd rather use bitset
     // pub capabilities: Vec<String>,
 }
