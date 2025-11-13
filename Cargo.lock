@@ -1042,6 +1042,7 @@ dependencies = [
  "anyhow",
  "common",
  "quinn",
+ "rand",
  "rustls",
  "rustls-pemfile",
  "serde",

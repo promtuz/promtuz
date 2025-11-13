@@ -20,7 +20,7 @@ mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = AppConfig::load(false);
+    let cfg = AppConfig::load(true);
 
     use ProtoRole as PR;
 
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let endpoint = Arc::new(Endpoint::server(server_cfg, cfg.network.address)?);
 
     if let Ok(addr) = endpoint.local_addr() {
-        println!("QUIC: listening at {:?}", addr);
+        println!("QUIC(RESOLVER): listening at {:?}", addr);
     }
 
     let acceptor_handle = tokio::spawn(run_acceptor(endpoint.clone()));
