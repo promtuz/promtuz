@@ -24,6 +24,7 @@ jobs:
         with:
           repository: promtuz/common
           path: common
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         working-directory: project
