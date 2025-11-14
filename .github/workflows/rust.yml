@@ -1,10 +1,10 @@
-name: Relay
+name: Rust CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main ]
   pull_request:
-    branches: ["main"]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,22 +14,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # checkout THIS repo into project/
-      - uses: actions/checkout@v4
-        with:
-          path: project
+    - name: Checkout current repository
+      uses: actions/checkout@v4
+      with:
+        path: main
 
-      # checkout the sibling repo into ../common
-      - uses: actions/checkout@v4
-        with:
-          repository: promtuz/common
-          path: common
-          token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Checkout common crate
+      uses: actions/checkout@v4
+      with:
+        repository: promtuz/common
+        token: ${{ secrets.GITHUB_TOKEN }}
+        path: common
 
-      - name: Build
-        working-directory: project
-        run: cargo build --verbose
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        cache: true
 
-      - name: Test
-        working-directory: project
-        run: cargo test --verbose
+    - name: Build
+      working-directory: ./main
+      run: cargo build --verbose
+
+    - name: Run tests
+      working-directory: ./main
+      run: cargo test --verbose
+
+    - name: Run clippy
+      working-directory: ./main
+      run: cargo clippy -- -D warnings
+
+    - name: Check formatting
+      working-directory: ./main
+      run: cargo fmt -- --check
