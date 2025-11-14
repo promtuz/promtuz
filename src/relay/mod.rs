@@ -9,6 +9,7 @@ use common::msg::resolver::HelloAck;
 use common::msg::resolver::RelayHeartbeat;
 use common::msg::resolver::RelayHello;
 use common::quic::id::derive_id;
+use common::sysutils::system_load;
 use p256::SecretKey;
 use quinn::Connection;
 use quinn::Endpoint;
@@ -96,7 +97,7 @@ impl Relay {
             loop {
                 if let Ok(heartbeat) = (RelayHeartbeat {
                     node_id: id.clone(),
-                    load: 10,
+                    load: system_load().await,
                     uptime_seconds: systime_sec() - start_ms,
                 })
                 .to_cbor()
