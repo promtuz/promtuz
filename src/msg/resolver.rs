@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 
-use crate::msg::RelayId;
+use crate::{msg::RelayId, sysutils::SystemLoad};
 
 /// Initial registration message sent by a relay node to a resolver.
 ///
@@ -11,9 +11,8 @@ use crate::msg::RelayId;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RelayHello {
     /// Stable cryptographic ID derived from the node's public key.
-    pub relay_id: RelayId
-    // TODO: I'd rather use bitset
-    // pub capabilities: Vec<String>,
+    pub relay_id: RelayId, // TODO: I'd rather use bitset
+                           // pub capabilities: Vec<String>,
 }
 
 /// Resolver's acknowledgement of a node registration (`NodeHello`).
@@ -26,7 +25,7 @@ pub struct HelloAck {
 
     /// Human-readable reason if `accepted == false`.
     /// I wonder what human will read this reason,
-    /// TODO: use `enum RelayRejectReason` or something 
+    /// TODO: use `enum RelayRejectReason` or something
     pub reason: Option<String>,
 
     /// Resolver's current unix time (used for clock-drift checking).
@@ -43,8 +42,10 @@ pub struct RelayHeartbeat {
     /// The node's stable cryptographic ID.
     pub node_id: String,
 
-    /// Current load percentage (0–100). Interpreted by your resolver logic.
-    pub load: u8,
+    /// Packed load value:
+    ///
+    /// upper 7 bits = CPU usage (0–100), lower 7 bits = memory usage (0–100).
+    pub load: SystemLoad,
 
     /// Node uptime in seconds since its last restart.
     pub uptime_seconds: u64,
