@@ -1,91 +1,131 @@
-
 # Resolver
 
-Small QUIC service that keeps track of online relay nodes.  
-Relays connect to the resolver, announce themselves, and send periodic
-heartbeats. The resolver stores the active set in memory and can return
-it to clients or other components.
+The resolver is the coordination layer of the system.  
+Relays come and go, clients appear at random, network conditions fluctuate —
+the resolver’s job is simply to keep track of who is online right now.
 
-This repo contains only the resolver side of the system.
+It doesn’t forward data.  
+It doesn’t store messages.  
+It doesn’t maintain long-term state.  
+It just keeps a live view of the network.
+
+Think of it as a directory with a pulse.
 
 ---
 
-## Running
+## What the Resolver Actually Does
 
+A resolver accepts QUIC connections from relays, clients, or other resolvers
+and identifies each peer using ALPN. The resolver only cares about relays and
+their health. Everything revolves around that.
+
+When a relay connects:
+
+1. The resolver identifies it (`relay/1`)  
+2. Receives a `RelayHello`  
+3. Responds with `HelloAck`  
+4. Waits for periodic heartbeats  
+5. Tracks the relay in its live registry  
+
+A relay vanishes → its heartbeat expires → it’s removed.  
+Simple, predictable, stateless.
+
+---
+
+## Why Resolvers Exist
+
+Relays are ephemeral. They reboot, restart, move hosts, or vanish for hours.
+Clients need a stable discovery point that isn’t one of those relays.
+
+The resolver provides:
+
+- a stable entry point  
+- a current list of available relays  
+- optional cross-resolver synchronization  
+- a neutral place to verify identity and protocol versions  
+
+There’s no “primary” resolver — they are interchangeable.  
+A node connects to whichever one responds first.
+
+---
+
+## Communication Model
+
+Everything uses QUIC with ALPN-based role routing:
+
+```rs
+enum ProtoRole {
+    Resolver,
+    Relay,
+    Peer,
+    Client,
+}
 ```
 
-cargo run --release
+Each category maps to a dedicated handler.  
+There’s no ambiguity about who’s speaking.
 
-````
+Control messages all use single unidirectional streams:
 
-The resolver binds to the address defined in `config.toml` and expects a
-TLS certificate + key to exist at the configured paths.
+- Relay → Resolver: `RelayHello`, heartbeats  
+- Resolver → Relay: `HelloAck`, updates  
+- Resolver ↔ Resolver: gossip (optional)  
+- Client → Resolver: queries (planned)
 
----
-
-## Configuration
-
-Everything is controlled through `config.toml` next to the binary.
-
-Example:
-
-```toml
-[network]
-address = "0.0.0.0:4433"
-cert_path = "cert/server.crt"
-key_path = "cert/server.key"
-
-[resolver]
-seed = []      # optional: list of other resolvers for gossip
-````
-
-* `address` – QUIC bind address
-* `cert_path` / `key_path` – TLS certificate (Rustls)
-* `seed` – optional list of other resolvers; if present, this instance
-  will try to link with them at startup
+Each message is a CBOR payload on its own stream — no multiplexing,
+no shared channels, no session semantics. QUIC’s cheap streams make this trivial.
 
 ---
 
-## What It Does
+## Resolver Philosophy
 
-* Accepts QUIC connections
-* Determines the peer type via ALPN
-* Handles the `RelayHello → HelloAck` handshake
-* Tracks connected relays in memory
-* Receives heartbeats from relays
-* Optionally syncs with other resolvers
-* Exposes the current relay list to clients (WIP)
+Resolvers aren’t authoritative. They don’t store anything long-term and don’t
+decide topology. They simply observe which relays are reachable and make that
+information available.
 
-This repo does **not** deal with message queues, user data, or storage.
-It is strictly presence + discovery.
+A resolver should:
 
----
+- stay online  
+- accept incoming peers  
+- record what it sees  
+- expire stale relays  
+- optionally gossip with other resolvers  
 
-## Development Notes
-
-* QUIC streams are all unidirectional for control messages
-* Handshake and heartbeat are intentionally minimal
-* Registry is in-memory; persistence may be added later
-* This repo is for internal tooling only, not distribution
+If a resolver dies, nothing breaks — relays reconnect to another one.
 
 ---
 
-## TLS
+## Lifecycle
 
-The resolver expects real certificate files.
-For local testing:
+A resolver loops through the same simple pattern:
 
-```
-cert/server.crt
-cert/server.key
-```
+1. Bind QUIC endpoint  
+2. Accept connections  
+3. Inspect ALPN  
+4. Route to appropriate handler  
+5. Update internal registry  
+6. Clean up expired relays  
 
-You can self-sign; the relays use certificate pinning.
+There’s no heavy coordination or negotiation.  
+Most of the resolver’s work is maintaining timestamps and responding to a
+small set of control messages.
+
+---
+
+## High-Level Goals
+
+- Track relays reliably  
+- Provide a list of active relays to others  
+- Make no assumptions about uptime  
+- Handle churn gracefully  
+- Stay protocol-agnostic on the data side  
+
+This keeps the resolver small, predictable, and easy to reason about.
 
 ---
 
 ## Status
 
-The resolver is functional enough for relay discovery and liveness
-tracking. Additional features (mesh gossip, client querying, metrics)
-are added as needed.
+The resolver is stable for presence tracking and connection routing.  
+Additional capabilities (resolver mesh, querying layer, metrics) can be
+added without changing the core behavior.
