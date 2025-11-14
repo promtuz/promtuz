@@ -1,4 +1,4 @@
-name: Rust CI
+name: Relay CI
 
 on:
   push:
@@ -19,11 +19,16 @@ jobs:
       with:
         path: main
 
+    - name: Setup SSH key for common repo
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.COMMON_DEPLOY_KEY }}
+
     - name: Checkout common crate
       uses: actions/checkout@v4
       with:
         repository: promtuz/common
-        token: ${{ secrets.GITHUB_TOKEN }}
+        ssh-key: ${{ secrets.COMMON_DEPLOY_KEY }}
         path: common
 
     - name: Setup Rust toolchain
