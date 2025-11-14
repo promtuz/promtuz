@@ -5,42 +5,28 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::quic::config::build_server_cfg;
-// use common::quic::config::load_root_ca;
-use common::quic::config::setup_crypto_provider;
-use common::quic::protorole::ProtoRole;
-use quinn::Endpoint;
 use tokio::join;
+use tokio::sync::Mutex;
 
-use crate::quic::acceptor::run_acceptor;
+use crate::quic::acceptor::Acceptor;
+use crate::resolver::Resolver;
 use crate::util::config::AppConfig;
 
 mod quic;
+mod resolver;
 mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = AppConfig::load(true);
 
-    use ProtoRole as PR;
+    let resolver = Resolver::new(cfg);
+    let acceptor = Acceptor::new(resolver.endpoint.clone());
 
-    setup_crypto_provider()?;
-    let server_cfg = {
-        build_server_cfg(
-            &cfg.network.cert_path,
-            &cfg.network.key_path,
-            &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
-        )?
-    };
+    let resolver_arc = Arc::new(Mutex::new(resolver));
 
-    // let roots = load_root_ca(&cfg.network.root_ca_path)?;
-    let endpoint = Arc::new(Endpoint::server(server_cfg, cfg.network.address)?);
-
-    if let Ok(addr) = endpoint.local_addr() {
-        println!("QUIC(RESOLVER): listening at {:?}", addr);
-    }
-
-    let acceptor_handle = tokio::spawn(run_acceptor(endpoint.clone()));
+    let resolver = resolver_arc.clone();
+    let acceptor_handle = tokio::spawn(async move { acceptor.run(resolver.clone()).await });
 
     _ = join!(acceptor_handle);
 
