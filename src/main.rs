@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use common::quic::config::build_server_cfg;
-use common::quic::config::load_root_ca;
+// use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
 use common::quic::protorole::ProtoRole;
 use quinn::Endpoint;
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         )?
     };
 
-    let roots = load_root_ca(&cfg.network.root_ca_path)?;
+    // let roots = load_root_ca(&cfg.network.root_ca_path)?;
     let endpoint = Arc::new(Endpoint::server(server_cfg, cfg.network.address)?);
 
     if let Ok(addr) = endpoint.local_addr() {
