@@ -38,11 +38,10 @@ async fn main() -> Result<()> {
     let client_cfg = build_client_cfg(PR::Relay, &roots)?;
     endpoint.set_default_client_config(client_cfg);
 
-    let relay_rc = Relay::init(&cfg, endpoint).await?;
-    let relay = relay_rc.lock().await;
+    let relay = Relay::init(&cfg, endpoint).await?;
 
     relay.hello().await?;
-    
+
     if let Err(err) = relay.handle_resolver().await {
         eprintln!("HANDLER_ERR: {}", err)
     }

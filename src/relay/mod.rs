@@ -49,9 +49,6 @@ pub struct Relay {
 
     pub keys: RelayKeys,
 
-    /// Protocol version this instance is running with
-    pub version: u16,
-
     /// SystemTime in ms since EPOCH when relay is started first
     pub start_ms: u64,
 
@@ -60,7 +57,7 @@ pub struct Relay {
 }
 
 impl Relay {
-    pub async fn init(cfg: &AppConfig, endpoint: Endpoint) -> Result<Arc<Mutex<Self>>> {
+    pub async fn init(cfg: &AppConfig, endpoint: Endpoint) -> Result<Self> {
         let keys = RelayKeys::from_cfg(cfg)?;
         let id = derive_id(&keys.public);
 
@@ -69,17 +66,7 @@ impl Relay {
         let resolver_conn =
             connect_to_any_seed(&endpoint, &cfg.resolver.seed, "arch.local").await?;
 
-        let relay = Arc::new(Mutex::new(Self {
-            id,
-            keys,
-            version: common::PROTOCOL_VERSION,
-            start_ms: systime_sec(),
-            resolver_conn: Arc::new(resolver_conn),
-        }));
-
-        println!("RELAY: Initialized");
-
-        Ok(relay)
+        Ok(Self { id, keys, start_ms: systime_sec(), resolver_conn: Arc::new(resolver_conn) })
     }
 
     async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
