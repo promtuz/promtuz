@@ -117,19 +117,25 @@ impl Relay {
 
     pub async fn handle_resolver(&self) -> Result<()> {
         let conn = self.resolver_conn.clone();
-        while let Ok(mut recv) = conn.accept_uni().await {
-            let packet = recv.read_to_end(4096).await?;
-            if let Ok(ack) = HelloAck::from_cbor(&packet) {
-                println!("RECV_ACK: {:?}", ack);
-                self.start_heartbeat(ack).await?;
-                continue;
+        loop {
+            match conn.accept_uni().await {
+                Ok(mut recv) => {
+                    let packet = recv.read_to_end(4096).await?;
+                    if let Ok(ack) = HelloAck::from_cbor(&packet) {
+                        println!("RECV_ACK: {:?}", ack);
+                        self.start_heartbeat(ack).await?;
+                        continue;
+                    }
+                    tokio::spawn(async move {
+                        println!("RECV_PACKET: {:?}", packet);
+                        Some(())
+                    });
+                },
+                Err(err) => {
+                    eprintln!("CONN_ERR: {}", err);
+                    return Err(err.into());
+                },
             }
-
-            tokio::spawn(async move {
-                println!("RECV_PACKET: {:?}", packet);
-                Some(())
-            });
         }
-        Ok(())
     }
 }
