@@ -4,6 +4,7 @@ use quinn::VarInt;
 pub enum CloseReason {
     DuplicateConnect,
     AlreadyConnected,
+    ShuttingDown,
 }
 
 impl CloseReason {
@@ -14,6 +15,7 @@ impl CloseReason {
         match self {
             CloseReason::DuplicateConnect => VarInt::from_u32(0x01),
             CloseReason::AlreadyConnected => VarInt::from_u32(0x02),
+            CloseReason::ShuttingDown => VarInt::from_u32(0x03),
         }
     }
 }
