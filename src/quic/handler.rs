@@ -57,7 +57,7 @@ impl Handler {
 
                                 send_uni(&conn, &hello_ack).await.ok();
                             } else if let Ok(_hb) = RelayHeartbeat::from_cbor(&bytes) {
-                                println!("RELAY_HB");
+                                // println!("RELAY_HB");
                             } else {
                                 println!("RELAY_PACKET: {}", String::from_utf8_lossy(&bytes));
                             }

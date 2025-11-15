@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::join;
 use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;
@@ -20,15 +19,26 @@ mod util;
 async fn main() -> Result<()> {
     let cfg = AppConfig::load(true);
 
-    let resolver = Resolver::new(cfg);
-    let acceptor = Acceptor::new(resolver.endpoint.clone());
+    let resolver = Arc::new(Mutex::new(Resolver::new(cfg)));
+    let acceptor = Acceptor::new(resolver.lock().await.endpoint.clone());
 
-    let resolver_arc = Arc::new(Mutex::new(resolver));
+    let acceptor_handle = tokio::spawn({
+        let resolver = resolver.clone();
+        async move { acceptor.run(resolver.clone()).await }
+    });
 
-    let resolver = resolver_arc.clone();
-    let acceptor_handle = tokio::spawn(async move { acceptor.run(resolver.clone()).await });
+    tokio::select! {
+        _ = acceptor_handle => {}
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+            
+            let r = resolver.lock().await;
+            r.close();
+            r.endpoint.wait_idle().await;
 
-    _ = join!(acceptor_handle);
+            println!("CLOSING RESOLVER");
+        }
+    }
 
     Ok(())
 }

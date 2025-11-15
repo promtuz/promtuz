@@ -13,9 +13,7 @@ use common::quic::config::setup_crypto_provider;
 use common::quic::id::derive_id;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
-use quinn::ApplicationClose;
 use quinn::Connection;
-use quinn::ConnectionError;
 use quinn::Endpoint;
 use quinn::ServerConfig;
 use tokio::sync::Mutex;
@@ -86,13 +84,17 @@ impl Resolver {
     /// Will return [HelloAck] if registered succesfully
     ///
     /// Returns [ConnectionError] instead of relay already exists
-    pub fn register_relay(&mut self, conn: Arc<Connection>, hello: &RelayHello) -> Result<HelloAck, CloseReason> {
+    pub fn register_relay(
+        &mut self, conn: Arc<Connection>, hello: &RelayHello,
+    ) -> Result<HelloAck, CloseReason> {
         if let Some(existing) = self.relays.remove(&hello.relay_id) {
             let close = CloseReason::DuplicateConnect;
             existing.conn.close(close.code(), &close.reason());
             // can toggle behavior by uncommenting this err return and commenting out previous line
             // return Err(CloseReason::AlreadyConnected);
         }
+
+        println!("RELAY_CONNECT: ID({})", hello.relay_id);
 
         self.relays.insert(hello.relay_id.clone(), RelayEntry { id: hello.relay_id.clone(), conn });
 
@@ -106,5 +108,12 @@ impl Resolver {
         };
 
         Ok(hello_ack)
+    }
+
+    /// Closes resolver
+    pub fn close(&self) {
+        self.relays.iter().for_each(|(_, r)| {
+            r.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
+        });
     }
 }
