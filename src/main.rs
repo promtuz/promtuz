@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg;
@@ -38,12 +40,25 @@ async fn main() -> Result<()> {
     let client_cfg = build_client_cfg(PR::Relay, &roots)?;
     endpoint.set_default_client_config(client_cfg);
 
-    let relay = Relay::init(&cfg, endpoint).await?;
+    let relay = Arc::new(Relay::init(&cfg, endpoint).await?);
 
     relay.hello().await?;
 
-    if let Err(err) = relay.handle_resolver().await {
-        eprintln!("HANDLER_ERR: {}", err)
+    let resolver_handle = tokio::spawn({
+        let relay = relay.clone();
+        async move { relay.handle_resolver().await }
+    });
+
+    tokio::select! {
+        _ = resolver_handle => {}
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+
+            relay.close();
+            relay.endpoint.wait_idle().await;
+            
+            println!("CLOSING RELAY");
+        }
     }
 
     Ok(())

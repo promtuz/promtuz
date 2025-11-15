@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
+use common::msg::reason::CloseReason;
 use common::msg::resolver::HelloAck;
 use common::msg::resolver::RelayHeartbeat;
 use common::msg::resolver::RelayHello;
@@ -14,7 +15,6 @@ use p256::SecretKey;
 use quinn::Connection;
 use quinn::Endpoint;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
 
 use crate::quic::dialer::connect_to_any_seed;
 use crate::util::config::AppConfig;
@@ -54,6 +54,8 @@ pub struct Relay {
 
     /// Connection with one of resolver from given seed
     pub resolver_conn: Arc<Connection>,
+
+    pub endpoint: Arc<Endpoint>,
 }
 
 impl Relay {
@@ -66,7 +68,13 @@ impl Relay {
         let resolver_conn =
             connect_to_any_seed(&endpoint, &cfg.resolver.seed, "arch.local").await?;
 
-        Ok(Self { id, keys, start_ms: systime_sec(), resolver_conn: Arc::new(resolver_conn) })
+        Ok(Self {
+            id,
+            keys,
+            start_ms: systime_sec(),
+            resolver_conn: Arc::new(resolver_conn),
+            endpoint: Arc::new(endpoint),
+        })
     }
 
     async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
@@ -133,9 +141,13 @@ impl Relay {
                 },
                 Err(err) => {
                     eprintln!("CONN_ERR: {}", err);
-                    return Err(err.into());
+                    return Ok(());
                 },
             }
         }
+    }
+
+    pub fn close(&self) {
+        self.resolver_conn.close(CloseReason::ShuttingDown.code(), b"RelayShuttingDown");
     }
 }
