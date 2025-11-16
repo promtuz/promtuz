@@ -1,37 +1,18 @@
-use std::sync::Arc;
-
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
-use common::msg::resolver::*;
-use common::quic::protorole::ProtoRole;
+use common::msg::resolver::RelayHeartbeat;
+use common::msg::resolver::RelayHello;
 use common::quic::send_uni;
-use quinn::Connection;
 
+use crate::quic::handler::Handler;
 use crate::resolver::ResolverRef;
 use crate::ret;
 
-pub struct Handler {
-    conn: Arc<Connection>,
+pub(super) trait HandleRelay {
+    async fn handle_relay(self, resolver: ResolverRef);
 }
 
-impl Handler {
-    pub async fn handle(conn: Connection, resolver: ResolverRef) {
-        let role = ret!(ProtoRole::from_conn(&conn));
-
-        let handler = Self { conn: Arc::new(conn) };
-
-        match role {
-            ProtoRole::Resolver => {
-                todo!("SUPPORT: resolver/1")
-            },
-            ProtoRole::Client => {
-                todo!("SUPPORT: client/1")
-            },
-            ProtoRole::Relay => handler.handle_relay(resolver).await,
-            _ => handler.conn.close(0u32.into(), b"UnsupportedALPN"),
-        };
-    }
-
+impl HandleRelay for Handler {
     async fn handle_relay(self, resolver: ResolverRef) {
         while let Ok(mut recv) = self.conn.accept_uni().await {
             let conn = self.conn.clone();
