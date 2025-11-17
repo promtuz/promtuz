@@ -13,6 +13,6 @@ pub struct RelayEntry {
 
 impl RelayEntry {
   pub fn to_descriptor(&self) -> RelayDescriptor {
-    todo!()
+    RelayDescriptor { id: self.id.clone(), addr: self.conn.remote_address().to_string() }
   }
 }

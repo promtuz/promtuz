@@ -10,8 +10,10 @@ mod util;
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::msg::cbor::ToCbor;
 use tokio::sync::Mutex;
 
+use crate::proto::client::ClientRequest;
 use crate::quic::acceptor::Acceptor;
 use crate::resolver::Resolver;
 use crate::util::config::AppConfig;
