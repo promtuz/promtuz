@@ -24,6 +24,7 @@ use crate::util::config::AppConfig;
 use crate::util::systime_sec;
 
 pub mod relays;
+pub mod rpc;
 
 pub type ResolverRef = Arc<Mutex<Resolver>>;
 

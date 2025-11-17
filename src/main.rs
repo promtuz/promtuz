@@ -2,6 +2,11 @@
 #![warn(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
+mod proto;
+mod quic;
+mod resolver;
+mod util;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,10 +15,6 @@ use tokio::sync::Mutex;
 use crate::quic::acceptor::Acceptor;
 use crate::resolver::Resolver;
 use crate::util::config::AppConfig;
-
-mod quic;
-mod resolver;
-mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +32,7 @@ async fn main() -> Result<()> {
         _ = acceptor_handle => {}
         _ = tokio::signal::ctrl_c() => {
             println!();
-            
+
             let r = resolver.lock().await;
             r.close();
             r.endpoint.wait_idle().await;
