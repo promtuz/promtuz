@@ -45,5 +45,7 @@ impl HandleClient for Handler {
                 Some(())
             });
         }
+
+        println!("CLIENT: CLOSE({})", self.conn.remote_address());
     }
 }
