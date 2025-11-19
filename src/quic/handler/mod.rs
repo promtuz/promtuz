@@ -5,13 +5,13 @@ mod resolver;
 use std::sync::Arc;
 
 use common::quic::protorole::ProtoRole;
+use common::ret;
 use quinn::Connection;
 use relay::HandleRelay;
 
 use crate::quic::handler::client::HandleClient;
 use crate::quic::handler::resolver::HandleResolver;
 use crate::resolver::ResolverRef;
-use crate::ret;
 
 pub struct Handler {
     conn: Arc<Connection>,

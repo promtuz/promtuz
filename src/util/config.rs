@@ -1,27 +1,26 @@
 use std::env;
 use std::fs;
+use std::io::stdout;
 use std::path::Path;
 use std::process;
 
-use common::quic::config::NetworkConfig;
+use common::node::config::NetworkConfig;
+// use common::node::config::ResolverConfig;
+use crossterm::execute;
+use crossterm::terminal::Clear;
+use crossterm::terminal::ClearType;
 use serde::Deserialize;
-use url::Url;
 
 #[derive(Deserialize, Debug)]
 pub struct AppConfig {
     pub network: NetworkConfig,
-    pub resolver: ResolverConfig,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct ResolverConfig {
-    pub seed: Vec<Url>,
+    // pub resolver: ResolverConfig,
 }
 
 impl AppConfig {
     pub fn load(cls: bool) -> Self {
         if cls {
-            print!("\x1B[2J\x1B[1;1H");
+            _ = execute!(stdout(), Clear(ClearType::All));
         }
 
         let path = env::args().nth(1).unwrap_or_else(|| "config.toml".into());
@@ -36,7 +35,7 @@ impl AppConfig {
             match toml::from_str(&raw) {
                 Ok(conf) => conf,
                 Err(err) => {
-                    eprintln!("ERROR: Failed to parse config : {:#?}", err);
+                    eprintln!("Failed to parse config\n{err}");
                     process::exit(1);
                 },
             }

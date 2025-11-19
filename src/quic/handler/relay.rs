@@ -6,7 +6,7 @@ use common::quic::send_uni;
 
 use crate::quic::handler::Handler;
 use crate::resolver::ResolverRef;
-use crate::ret;
+use common::ret;
 
 pub(super) trait HandleRelay {
     async fn handle_relay(self, resolver: ResolverRef);

@@ -4,8 +4,6 @@ cert_path = "cert/resolver.crt"
 key_path = "cert/resolver.key"
 root_ca_path = "cert/root_ca.pem"
 
-[resolver]
-seed = [
-  # addresses of other resolver nodes
-  "quic://resolver2:4433"
-]
+[[resolver.seed]]
+id = "ZD67HOMGMS69YKNO"
+url = "quic://resolver2:4433"

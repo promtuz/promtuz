@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::process;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::graceful;
 use common::msg::RelayId;
 use common::msg::ResolverId;
 use common::msg::reason::CloseReason;
@@ -12,6 +11,7 @@ use common::msg::resolver::HelloAck;
 use common::msg::resolver::RelayHello;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
+use common::quic::id::NodeId;
 use common::quic::id::derive_id;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
@@ -20,7 +20,6 @@ use quinn::Endpoint;
 use quinn::ServerConfig;
 use tokio::sync::Mutex;
 
-use crate::graceful;
 use crate::resolver::relays::RelayEntry;
 use crate::util::config::AppConfig;
 use crate::util::systime_sec;
@@ -52,7 +51,7 @@ impl Resolver {
         )
     }
 
-    fn id(cfg: &AppConfig) -> String {
+    fn id(cfg: &AppConfig) -> NodeId {
         let secret = match secret_from_key(&cfg.network.key_path) {
             Ok(sec) => sec,
             Err(err) => {
@@ -76,8 +75,12 @@ impl Resolver {
     }
 
     pub fn new(cfg: AppConfig) -> Self {
+        let id = Self::id(&cfg);
+
+        println!("RESOLVER: Initializing with ID({id})");
+
         Self {
-            id: Self::id(&cfg),
+            id,
             endpoint: Arc::new(Self::endpoint(&cfg)),
             relays: HashMap::new(),
             cfg,
@@ -99,7 +102,7 @@ impl Resolver {
 
         println!("RELAY_CONNECT: ID({})", hello.relay_id);
 
-        self.relays.insert(hello.relay_id.clone(), RelayEntry { id: hello.relay_id.clone(), conn });
+        self.relays.insert(hello.relay_id, RelayEntry { id: hello.relay_id, conn });
 
         let jitter = (rand::random::<f32>() * 2000.0 - 1000.0) as i32;
 
