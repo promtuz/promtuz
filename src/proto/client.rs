@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use crate::proto::api::RelayDescriptor;
 
-///
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientRequest {
     GetRelays(),
