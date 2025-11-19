@@ -19,6 +19,8 @@ pub struct Handler {
 
 impl Handler {
     pub async fn handle(conn: Connection, resolver: ResolverRef) {
+        println!("HANDLER: Connection from {}", conn.remote_address());
+
         let role = ret!(ProtoRole::from_conn(&conn));
 
         let handler = Self { conn: Arc::new(conn) };

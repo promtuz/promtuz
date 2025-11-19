@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 
 use crate::resolver::relays::RelayEntry;
 use crate::util::config::AppConfig;
-use crate::util::systime_sec;
+use crate::util::systime;
 
 pub mod relays;
 pub mod rpc;
@@ -100,7 +100,7 @@ impl Resolver {
             // return Err(CloseReason::AlreadyConnected);
         }
 
-        println!("RELAY_CONNECT: ID({})", hello.relay_id);
+        println!("RELAY_CONNECT: {:?}", hello);
 
         self.relays.insert(hello.relay_id, RelayEntry { id: hello.relay_id, conn });
 
@@ -110,7 +110,7 @@ impl Resolver {
             accepted: true,
             interval_heartbeat_ms: (25 * 1000 + jitter).max(0) as u32,
             reason: None,
-            resolver_time: systime_sec(),
+            resolver_time: systime().as_millis(),
         };
 
         Ok(hello_ack)
