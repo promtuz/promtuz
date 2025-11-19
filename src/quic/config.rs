@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::BufReader;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,20 +13,8 @@ use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::PrivateKeyDer;
-use serde::Deserialize;
-
 use crate::quic::protorole::ProtoRole;
 
-/// Network section of `config.toml` for both relay & resolver
-#[derive(Deserialize, Debug)]
-pub struct NetworkConfig {
-    /// address on which quic endpoint will start
-    pub address: SocketAddr,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-    /// root ca to verify outgoing/incoming quic connections
-    pub root_ca_path: PathBuf,
-}
 
 pub fn setup_crypto_provider() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())

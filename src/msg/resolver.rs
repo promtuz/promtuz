@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{msg::RelayId, sysutils::SystemLoad};
+use crate::{msg::RelayId, quic::id::NodeId, sysutils::SystemLoad};
 
 /// Initial registration message sent by a relay node to a resolver.
 ///
@@ -40,7 +40,7 @@ pub struct HelloAck {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RelayHeartbeat {
     /// The node's stable cryptographic ID.
-    pub node_id: String,
+    pub relay_id: RelayId,
 
     /// Packed load value:
     ///
