@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::quic::config::build_client_cfg;
-use common::quic::config::build_server_cfg;
-use common::quic::config::load_root_ca;
-use common::quic::config::setup_crypto_provider;
-use common::quic::protorole::ProtoRole;
-use quinn::Endpoint;
+use common::graceful;
+use tokio::sync::Mutex;
 
+use crate::quic::acceptor::Acceptor;
+use crate::quic::resolver_link::ResolverLink;
 use crate::relay::Relay;
+use crate::relay::RelayRef;
 use crate::util::config::AppConfig;
 
 mod quic;
@@ -19,44 +18,36 @@ mod util;
 async fn main() -> Result<()> {
     let cfg = AppConfig::load(true);
 
-    use ProtoRole as PR;
+    let relay: RelayRef = Arc::new(Mutex::new(Relay::new(cfg)));
+    let acceptor = Acceptor::new(relay.lock().await.endpoint.clone());
+    let resolver =
+        Arc::new(graceful!(ResolverLink::new(relay.clone()).await, "RESOLVER_LINK_ERR:"));
 
-    setup_crypto_provider()?;
-    let server_cfg = {
-        build_server_cfg(
-            &cfg.network.cert_path,
-            &cfg.network.key_path,
-            &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
-        )?
-    };
-
-    let roots = load_root_ca(&cfg.network.root_ca_path)?;
-    let mut endpoint = Endpoint::server(server_cfg, cfg.network.address)?;
-
-    if let Ok(addr) = endpoint.local_addr() {
-        println!("QUIC(RELAY): listening at {:?}", addr);
-    }
-
-    let client_cfg = build_client_cfg(PR::Relay, &roots)?;
-    endpoint.set_default_client_config(client_cfg);
-
-    let relay = Arc::new(Relay::init(&cfg, endpoint).await?);
-
-    relay.hello().await?;
+    let acceptor_handle = tokio::spawn({
+        let relay = relay.clone();
+        async move { acceptor.run(relay.clone()).await }
+    });
 
     let resolver_handle = tokio::spawn({
-        let relay = relay.clone();
-        async move { relay.handle_resolver().await }
+        let resolver = resolver.clone();
+        async move { resolver.handle().await }
     });
+
+    // Announcing Presence to Resolver
+    graceful!(resolver.hello().await, "RESOLVER_ERR(hello):");
 
     tokio::select! {
         _ = resolver_handle => {}
+        _ = acceptor_handle => {}
         _ = tokio::signal::ctrl_c() => {
             println!();
 
-            relay.close();
+            let relay = relay.lock().await;
+
+            resolver.close();
+
             relay.endpoint.wait_idle().await;
-            
+
             println!("CLOSING RELAY");
         }
     }

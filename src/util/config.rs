@@ -5,6 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 
+use common::node::config::ResolverConfig;
 use serde::Deserialize;
 use url::Url;
 
@@ -20,11 +21,6 @@ pub struct NetworkConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub root_ca_path: PathBuf,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct ResolverConfig {
-    pub seed: Vec<Url>,
 }
 
 impl AppConfig {
@@ -45,7 +41,7 @@ impl AppConfig {
             match toml::from_str(&raw) {
                 Ok(conf) => conf,
                 Err(err) => {
-                    eprintln!("ERROR: Failed to parse config : {:#?}", err);
+                    eprintln!("Failed to parse config\n{err}");
                     process::exit(1);
                 },
             }

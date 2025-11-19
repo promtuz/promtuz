@@ -4,7 +4,6 @@ cert_path = "cert/relay.crt"
 key_path = "cert/relay.key"
 root_ca_path = "cert/root_ca.pem"
 
-[resolver]
-seed = [
-  "quic://arch.local:4433"
-]
+[[resolver.seed]]
+id = "Z5GZTUGOK3IBNKYD"
+url = "quic://arch.local:4433"
