@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 
 use crate::quic::dialer::connect_to_any_seed;
 use crate::util::config::AppConfig;
-use crate::util::systime_sec;
+use crate::util::systime;
 
 /// contains p256 private & public key
 #[derive(Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub struct Relay {
     pub keys: RelayKeys,
 
     /// SystemTime in ms since EPOCH when relay is started first
-    pub start_ms: u64,
+    pub start_ms: u128,
 
     pub endpoint: Arc<Endpoint>,
 
@@ -99,6 +99,6 @@ impl Relay {
 
         println!("RELAY: Initializing with ID({})", id);
 
-        Self { id, keys, start_ms: systime_sec(), endpoint: Arc::new(Self::endpoint(&cfg)), cfg }
+        Self { id, keys, start_ms: systime().as_millis(), endpoint: Arc::new(Self::endpoint(&cfg)), cfg }
     }
 }

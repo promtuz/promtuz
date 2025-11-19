@@ -17,6 +17,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::quic::dialer::connect_to_any_seed;
 use crate::relay::RelayRef;
+use crate::util::systime;
 use crate::util::systime_sec;
 
 pub struct ResolverLink {
@@ -57,7 +58,7 @@ impl ResolverLink {
                 if let Ok(heartbeat) = (RelayHeartbeat {
                     relay_id: id,
                     load: system_load().await,
-                    uptime_seconds: systime_sec() - start_ms,
+                    uptime_seconds: systime_sec() - ((start_ms / 1000) as u64),
                 })
                 .to_cbor()
                 {
@@ -77,11 +78,12 @@ impl ResolverLink {
     }
 
     pub async fn hello(&self) -> Result<()> {
-        let hello = RelayHello { relay_id: self.id().await }.to_cbor()?;
+        let hello = RelayHello { relay_id: self.id().await, timestamp: systime().as_millis() }.to_cbor()?;
 
         let mut send = self.conn.open_uni().await?;
         send.write_all(&hello).await?;
         send.finish()?;
+
         println!("SENT: RelayHello");
 
         Ok(())

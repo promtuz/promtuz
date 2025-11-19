@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     });
 
     // Announcing Presence to Resolver
-    graceful!(resolver.hello().await, "RESOLVER_ERR(hello):");
+    resolver.hello().await?;
 
     tokio::select! {
         _ = resolver_handle => {}
