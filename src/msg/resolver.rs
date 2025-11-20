@@ -11,8 +11,12 @@ use crate::{msg::RelayId, quic::id::NodeId, sysutils::SystemLoad};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RelayHello {
     /// Stable cryptographic ID derived from the node's public key.
-    pub relay_id: RelayId, // TODO: I'd rather use bitset
-                           // pub capabilities: Vec<String>,
+    pub relay_id: RelayId,
+
+    pub timestamp: u128,
+
+    // TODO: I'd rather use bitset
+    // pub capabilities: Vec<String>,
 }
 
 /// Resolver's acknowledgement of a node registration (`NodeHello`).
@@ -29,7 +33,7 @@ pub struct HelloAck {
     pub reason: Option<String>,
 
     /// Resolver's current unix time (used for clock-drift checking).
-    pub resolver_time: u64,
+    pub resolver_time: u128,
 
     /// Heartbeat interval the node should follow when sending `NodeHeartbeat`.
     pub interval_heartbeat_ms: u32,
