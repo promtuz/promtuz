@@ -1,15 +1,8 @@
 use std::fs;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use common::graceful;
-use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
-use common::msg::reason::CloseReason;
-use common::msg::resolver::HelloAck;
-use common::msg::resolver::RelayHeartbeat;
-use common::msg::resolver::RelayHello;
 use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca;
@@ -17,14 +10,11 @@ use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
 use common::quic::id::derive_id;
 use common::quic::protorole::ProtoRole;
-use common::sysutils::system_load;
 use p256::SecretKey;
-use quinn::Connection;
+use p256::pkcs8::DecodePrivateKey;
 use quinn::Endpoint;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::quic::dialer::connect_to_any_seed;
 use crate::util::config::AppConfig;
 use crate::util::systime;
 
@@ -38,7 +28,12 @@ pub struct RelayKeys {
 impl RelayKeys {
     fn from_cfg(cfg: &AppConfig) -> Result<Self> {
         let sec = fs::read_to_string(&cfg.network.key_path)?;
-        let secret = SecretKey::from_sec1_pem(&sec)?;
+
+        let secret = if sec.starts_with("-----BEGIN EC PRIVATE KEY-----") {
+            SecretKey::from_sec1_pem(&sec)?
+        } else {
+            SecretKey::from_pkcs8_pem(&sec)?
+        };
 
         Ok(Self { public: secret.public_key(), secret })
     }
@@ -82,7 +77,8 @@ impl Relay {
         );
 
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "CA_ERR:");
-        let mut endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
+        let mut endpoint =
+            graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
 
         let client_cfg = graceful!(build_client_cfg(PR::Relay, &roots), "CLIENT_CFG_ERR:");
         endpoint.set_default_client_config(client_cfg);
@@ -99,6 +95,12 @@ impl Relay {
 
         println!("RELAY: Initializing with ID({})", id);
 
-        Self { id, keys, start_ms: systime().as_millis(), endpoint: Arc::new(Self::endpoint(&cfg)), cfg }
+        Self {
+            id,
+            keys,
+            start_ms: systime().as_millis(),
+            endpoint: Arc::new(Self::endpoint(&cfg)),
+            cfg,
+        }
     }
 }
