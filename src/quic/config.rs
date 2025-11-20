@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::quic::protorole::ProtoRole;
 use anyhow::Result;
 use anyhow::anyhow;
 use quinn::ServerConfig as QuinnServerConfig;
@@ -12,9 +13,6 @@ use quinn::crypto::rustls::QuicServerConfig;
 use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::PrivateKeyDer;
-use crate::quic::protorole::ProtoRole;
-
 
 pub fn setup_crypto_provider() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
@@ -98,10 +96,8 @@ pub fn build_server_cfg(
     let certs = rustls_pemfile::certs(&mut cert_reader).flatten().collect();
 
     let mut key_reader = BufReader::new(File::open(key_path)?);
-    let mut keys = rustls_pemfile::ec_private_keys(&mut key_reader)
-        .flatten()
-        .collect::<Vec<_>>();
-    let key = PrivateKeyDer::from(keys.remove(0));
+
+    let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or(anyhow!("No Private Key"))?;
 
     let mut tls = RustlsServerConfig::builder()
         .with_no_client_auth()
