@@ -14,6 +14,7 @@ quic = [
   "dep:data-encoding",
   "p256",
   "dep:url",
+  "macros",
   "node"
 ]
 p256 = ["dep:p256"]
@@ -21,6 +22,11 @@ sysutils = ["dep:sysinfo", "tokio"]
 tokio = ["dep:tokio"]
 macros = []
 node = []
+
+[[bin]]
+name = "certgen"
+path = "src/bin/certgen.rs"
+required-features = ["quic", "crypto"]
 
 [dependencies]
 anyhow = "1.0.100"
@@ -37,7 +43,7 @@ sha2 = { version = "0.10.9", optional = true }
 x25519-dalek = { version = "2.0.1", features = [
   "static_secrets",
 ], optional = true }
-p256 = { version = "0.13.2", optional = true }
+p256 = { version = "0.13.2", optional = true, features = ["pkcs8"]}
 toml = "0.9.8"
 ciborium = "0.2.2"
 sysinfo = { version = "0.37.2", optional = true }
