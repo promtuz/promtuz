@@ -1,16 +1,97 @@
+use common::crypto::PublicKey;
+use common::crypto::encrypt::Encrypted;
+use common::crypto::get_ephemeral_keypair;
+use common::crypto::get_nonce;
+use common::crypto::get_shared_key;
+use common::crypto::get_static_keypair;
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
+use tokio::io::AsyncReadExt;
 
+use crate::proto::client::HandshakePacket;
 use crate::quic::handler::Handler;
 use crate::relay::RelayRef;
+use crate::util::systime;
 
 pub trait HandleClient {
     async fn handle_client(self, relay: RelayRef);
 }
 
+fn frame_packet(packet: &[u8]) -> Vec<u8> {
+    let size: [u8; 4] = (packet.len() as u32).to_be_bytes();
+    [&size, packet].concat()
+}
 
 impl HandleClient for Handler {
     async fn handle_client(self, relay: RelayRef) {
-        todo!()
+        let conn = self.conn.clone();
+
+        println!("CLIENT: CONN({})", self.conn.remote_address());
+
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+            println!("CLIENT: OPENED BI STREAM");
+
+            tokio::spawn(async move {
+                // TEMPORARY; USE EPHEMERAL WITH DYNAMIC DATA STORAGE N SHI
+                let (mut esk, server_epk) = get_static_keypair();
+                let mut proof = None;
+
+                while let Ok(packet_size) = recv.read_u32().await {
+                    let mut packet = vec![0u8; packet_size as usize];
+                    if let Err(err) = recv.read_exact(&mut packet).await {
+                        println!("Read failed : {}", err); // temp
+                        break;
+                    }
+
+                    use HandshakePacket::*;
+
+                    if let ClientHello { ipk, epk: client_epk } =
+                        HandshakePacket::from_cbor(&packet).ok()?
+                    {
+                        println!("CLIENT HELLO: {:?} {:?}", ipk, client_epk);
+
+                        let dh = esk.diffie_hellman(&PublicKey::from(client_epk));
+
+                        let key =
+                            get_shared_key(dh.as_bytes(), &[0u8; 32], "handshake.challenge.key");
+
+                        proof = Some(get_nonce::<16>());
+
+                        let ct = Encrypted::encrypt_once(
+                            &proof.unwrap(),
+                            &key,
+                            &[&client_epk[..], &server_epk.to_bytes()[..]].concat(),
+                        );
+
+                        let challenge =
+                            ServerChallenge { epk: server_epk.to_bytes(), ct: ct.try_into().ok()? };
+
+                        send.write_all(&frame_packet(&challenge.to_cbor().ok()?)).await.ok()?;
+                    }
+                    if let ClientProof { proof: client_proof } =
+                        HandshakePacket::from_cbor(&packet).ok()?
+                        && let Some(proof) = proof
+                    {
+                        // println!("SERVER PROOF : {:?}", proof);
+                        // println!("CLIENT PROOF : {:?}", client_proof);
+
+                        if proof == client_proof {
+                            let accept = ServerAccept { timestamp: systime().as_secs() };
+                            send.write_all(&frame_packet(&accept.to_cbor().ok()?)).await.ok()?;
+                        } else {
+                            let accept = ServerReject { reason: "Proof Mismatch".into() };
+                            send.write_all(&frame_packet(&accept.to_cbor().ok()?)).await.ok()?;
+                        }
+
+                        _ = send.finish();
+                    } else {
+                        println!("PACKET: {:?}", packet);
+                    }
+                }
+                Some(())
+            });
+        }
+
+        println!("CLIENT: CLOSE({})", self.conn.remote_address());
     }
 }
