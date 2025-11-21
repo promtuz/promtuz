@@ -28,8 +28,8 @@ pub fn get_static_keypair() -> (StaticSecret, PublicKey) {
     (esk, epk)
 }
 
-pub fn get_shared_key(shared_secret: &[u8; 32], salt: &str, info: &str) -> [u8; 32] {
-    let key = Hkdf::<Sha256>::new(Some(salt.as_bytes()), shared_secret);
+pub fn get_shared_key(shared_secret: &[u8; 32], salt: &[u8], info: &str) -> [u8; 32] {
+    let key = Hkdf::<Sha256>::new(Some(salt), shared_secret);
     let mut okm = [0u8; 32];
     let _ = key.expand(info.as_bytes(), &mut okm);
 
