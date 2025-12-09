@@ -4,7 +4,11 @@ use hkdf::Hkdf;
 
 use sha2::Sha256;
 pub use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+
 pub mod encrypt;
+
+#[cfg(feature="sign")]
+pub mod sign;
 
 pub fn get_secret_key() -> StaticSecret {
     StaticSecret::random_from_rng(OsRng)
