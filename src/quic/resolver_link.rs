@@ -31,9 +31,7 @@ impl ResolverLink {
     }
 
     pub async fn new(relay: RelayRef) -> Result<Self> {
-        println!("CREATING RESOLVER LINK");
-
-        let conn = {
+        let conn: Connection = {
             let relay = relay.lock().await;
 
             connect_to_any_seed(&relay.endpoint, &relay.cfg.resolver.seed).await?
@@ -62,6 +60,8 @@ impl ResolverLink {
                 })
                 .to_cbor()
                 {
+                    println!("HEARTBEAT: RTT({}ms)", conn.rtt().as_millis());
+
                     if send.write_all(&heartbeat).await.is_err() {
                         break;
                     }
@@ -78,7 +78,8 @@ impl ResolverLink {
     }
 
     pub async fn hello(&self) -> Result<()> {
-        let hello = RelayHello { relay_id: self.id().await, timestamp: systime().as_millis() }.to_cbor()?;
+        let hello =
+            RelayHello { relay_id: self.id().await, timestamp: systime().as_millis() }.to_cbor()?;
 
         let mut send = self.conn.open_uni().await?;
         send.write_all(&hello).await?;
@@ -89,24 +90,25 @@ impl ResolverLink {
         Ok(())
     }
 
-    pub async fn handle(&self) -> Result<()> {
+    pub async fn handle(&mut self) -> Result<()> {
         let conn = self.conn.clone();
         loop {
             match conn.accept_uni().await {
                 Ok(mut recv) => {
                     let packet = recv.read_to_end(4096).await?;
                     if let Ok(ack) = HelloAck::from_cbor(&packet) {
-                        println!("RECV_ACK: {:?}", ack);
+                        println!("RECV_ACK: {ack:?}");
                         self.start_heartbeat(ack).await?;
                         continue;
                     }
                     tokio::spawn(async move {
-                        println!("RECV_PACKET: {:?}", packet);
+                        println!("RECV_PACKET: {packet:?}");
                         Some(())
                     });
                 },
                 Err(err) => {
-                    eprintln!("CONN_ERR: {}", err);
+                    eprintln!("CONN_ERR: {err}");
+                    // repeat
                     return Ok(());
                 },
             }

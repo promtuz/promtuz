@@ -14,9 +14,9 @@ pub enum HandshakePacket {
         /// Identity Public Key
         #[serde(with = "serde_bytes")]
         ipk: [u8; 32],
-        /// Client's Ephemeral Public Key
-        #[serde(with = "serde_bytes")]
-        epk: [u8; 32],
+        // /// Client's Ephemeral Public Key
+        // #[serde(with = "serde_bytes")]
+        // epk: [u8; 32],
     },
 
     ServerChallenge {
@@ -44,50 +44,15 @@ pub enum HandshakePacket {
     },
 }
 
-// impl HandshakePacket {
-//     pub fn to_bytes(&self) -> Vec<u8> {
-//         let mut enc = bincode::encode_to_vec(self, bincode::config::standard()).unwrap();
-//         if !enc.is_empty() {
-//             enc[0] += 1;
-//         }
-//         enc
-//     }
-
-//     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-//         let mut buf = Vec::from(bytes);
-//         if !buf.is_empty() {
-//             buf[0] -= 1;
-//         }
-//         println!("GONNA DECODE : {buf:?}");
-//         println!("GONNA DECODE : {bytes:?}");
-//         match bincode::borrow_decode_from_slice(&buf, bincode::config::standard()) {
-//             Ok(shi) => {
-//                 println!("SHII : {shi:?}");
-//                 shi.0
-//             },
-//             Err(err) => {
-//                 println!("Decode Error : {err}");
-
-//                 None
-//             },
-//         }
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::proto::client::HandshakePacket;
-
-//     #[test]
-//     fn test_handshake() {
-//         let stat = HandshakePacket::ServerChallenge { epk: [0; 32], ct: [255; 32] };
-
-//         let server_hello_buf = stat.to_bytes();
-//         let server_hello = HandshakePacket::from_bytes(&server_hello_buf);
-
-//         assert_eq!(
-//             server_hello,
-//             Some(HandshakePacket::ServerChallenge { epk: [0; 32], ct: [255; 32] })
-//         );
-//     }
-// }
+/// Miscellaneous Packets
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, PartialEq, Eq)]
+pub enum MiscPacket {
+    PubAddressReq {
+        // will response append `:<port>` in addr
+        // isn't needed but can't leave struct empty
+        port: bool,
+    },
+    PubAddressRes {
+        addr: String,
+    },
+}

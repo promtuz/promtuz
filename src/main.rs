@@ -2,11 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use common::graceful;
-use common::msg::cbor::ToCbor;
-use common::sysutils::Tap;
 use tokio::sync::Mutex;
 
-use crate::proto::client::HandshakePacket;
 use crate::quic::acceptor::Acceptor;
 use crate::quic::resolver_link::ResolverLink;
 use crate::relay::Relay;
@@ -24,8 +21,10 @@ async fn main() -> Result<()> {
 
     let relay: RelayRef = Arc::new(Mutex::new(Relay::new(cfg)));
     let acceptor = Acceptor::new(relay.lock().await.endpoint.clone());
-    let resolver =
-        Arc::new(graceful!(ResolverLink::new(relay.clone()).await, "RESOLVER_LINK_ERR:"));
+    let resolver = Arc::new(Mutex::new(graceful!(
+        ResolverLink::new(relay.clone()).await,
+        "RESOLVER_LINK_ERR:"
+    )));
 
     let acceptor_handle = tokio::spawn({
         let relay = relay.clone();
@@ -34,11 +33,15 @@ async fn main() -> Result<()> {
 
     let resolver_handle = tokio::spawn({
         let resolver = resolver.clone();
-        async move { resolver.handle().await }
+        async move {
+            // ResolverLink::run_with_reconnect(resolver).await
+            // let mut resolver = resolver.lock().await;
+            resolver.lock().await.handle().await
+        }
     });
 
     // Announcing Presence to Resolver
-    resolver.hello().await?;
+    resolver.lock().await.hello().await?;
 
     tokio::select! {
         _ = resolver_handle => {}
@@ -48,7 +51,7 @@ async fn main() -> Result<()> {
 
             let relay = relay.lock().await;
 
-            resolver.close();
+            resolver.lock().await.close();
 
             relay.endpoint.wait_idle().await;
 
