@@ -15,3 +15,10 @@ toml = "0.9.8"
 url = "2.5.7"
 rand = "0.9.2"
 crossterm = "0.29.0"
+
+[profile.release]
+opt-level = 3        # full optimizations
+lto = "fat"          # best cross-crate optimization
+codegen-units = 1    # maximize inlining (slower build, faster binary)
+strip = true         # remove symbols
+panic = "abort"      # smaller + faster

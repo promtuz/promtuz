@@ -1,7 +1,6 @@
-use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
+use common::msg::cbor::{FromCbor, ToCbor};
+use common::msg::client::ClientRequest;
 
-use crate::proto::client::ClientRequest;
 use crate::quic::handler::Handler;
 use crate::resolver::ResolverRef;
 use crate::resolver::rpc::HandleRPC;
@@ -46,6 +45,6 @@ impl HandleClient for Handler {
             });
         }
 
-        println!("CLIENT: CLOSE({})", self.conn.remote_address());
+        println!("CLIENT_CLOSE({}): {}", self.conn.remote_address(), self.conn.closed().await);
     }
 }

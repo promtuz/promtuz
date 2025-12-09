@@ -2,7 +2,7 @@
 #![warn(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
-mod proto;
+// mod proto;
 mod quic;
 mod resolver;
 mod util;

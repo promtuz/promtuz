@@ -23,7 +23,7 @@ impl Handler {
 
         let role = ret!(ProtoRole::from_conn(&conn));
 
-        let handler = Self { conn: Arc::new(conn) };
+        let handler = Self { conn: Arc::new(conn.clone()) };
 
         match role {
             ProtoRole::Resolver => handler.handle_resolver(resolver).await,
@@ -31,5 +31,7 @@ impl Handler {
             ProtoRole::Relay => handler.handle_relay(resolver).await,
             _ => handler.conn.close(0u32.into(), b"UnsupportedALPN"),
         };
+
+        println!("HANDLE_CLOSE: ({role})[{}]", conn.remote_address())
     }
 }
