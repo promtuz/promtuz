@@ -1,22 +1,17 @@
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 use crate::msg::RelayId;
 
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RelayDescriptor {
     pub id: RelayId,
-    #[serde(serialize_with = "ser_addr")]
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub addr: SocketAddr,
-}
-
-fn ser_addr<S>(addr: &SocketAddr, s: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    s.serialize_str(&addr.to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

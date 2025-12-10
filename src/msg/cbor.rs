@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 pub trait ToCbor {
     fn to_cbor(&self) -> Result<Vec<u8>>;
+    fn pack(&self) ->  Result<Vec<u8>>;
 }
 
 impl<T> ToCbor for T
@@ -16,6 +17,13 @@ where
         let mut buf = Vec::new();
         ciborium::ser::into_writer(self, &mut buf)?;
         Ok(buf)
+    }
+
+    /// Frames bytes after CBOR Encoding as ready to transmit Packet
+    fn pack(&self) ->  Result<Vec<u8>> {
+        let packet = self.to_cbor()?;
+        let size: [u8; 4] = (packet.len() as u32).to_be_bytes();
+        Ok([&size, packet.as_slice()].concat())
     }
 }
 
