@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::BufReader;
-use std::panic::catch_unwind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -165,42 +164,22 @@ pub fn build_server_cfg(
 ///     .await?;
 /// ```
 pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn::ClientConfig> {
-    log::info!("build_client_cfg: BEGIN");
     // --- rustls TLS config ---
-    let tls = catch_unwind(rustls::ClientConfig::builder).map_err(|e| anyhow!("shit panicked"))?;
-    log::info!("build_client_cfg: TLS BUILDER");
-
-    let tls = tls.with_root_certificates(roots.clone());
-    log::info!("build_client_cfg: TLS ROOT CERTS");
-    
-    let mut tls = tls.with_no_client_auth();
-
-    log::info!("build_client_cfg: TLS DONE");
+    let mut tls = rustls::ClientConfig::builder()
+        // .with_safe_defaults()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth(); // no client certificate auth
 
     // Set ALPN (only one per outbound role)
     tls.alpn_protocols = vec![role.alpn().into()];
 
-    log::info!("build_client_cfg: ALPN");
-
-    let quic_config = match quinn::crypto::rustls::QuicClientConfig::try_from(tls) {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("QUIC CONFIG ERROR: {:?}", e);
-            panic!("quic config failed");
-        }
-    };
-
-    log::info!("build_client_cfg: QUiC CONFIG");
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
 
     // Wrap TLS config for Quinn
     let mut client = quinn::ClientConfig::new(Arc::new(quic_config));
 
-    log::info!("build_client_cfg: CLIENT CONFIG CREATED FROM QUIC");
-
     // Optional: tune transport if you want
     client.transport_config(Arc::new(TransportConfig::default()));
-
-    log::info!("build_client_cfg: END");
 
     Ok(client)
 }
