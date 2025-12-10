@@ -1,5 +1,7 @@
-use common::msg::cbor::{FromCbor, ToCbor};
+use common::msg::cbor::FromCbor;
+use common::msg::cbor::ToCbor;
 use common::msg::client::ClientRequest;
+use tokio::io::AsyncReadExt;
 
 use crate::quic::handler::Handler;
 use crate::resolver::ResolverRef;
@@ -20,26 +22,29 @@ impl HandleClient for Handler {
                 break;
             };
 
-            println!("CLIENT: OPENED BI STREAM");
-
             let resolver = resolver.clone();
+
             tokio::spawn(async move {
-                let data = recv.read_to_end(64 * 1024).await.ok()?;
+                while let Ok(packet_size) = recv.read_u32().await {
+                    println!("CLIENT: PACKET({})", packet_size);
+                    let mut packet = vec![0u8; packet_size as usize];
 
-                println!("CLIENT: DATA({:?})", data);
-                
-                let req = ClientRequest::from_cbor(&data).ok()?;
+                    if let Err(err) = recv.read_exact(&mut packet).await {
+                        println!("Read failed : {}", err); // temp
+                        break;
+                    }
 
-                println!("CLIENT: REQUEST({:?})", req);
+                    println!("CLIENT: PACKET({})", hex::encode(&packet));
 
-                let res = resolver.lock().await.handle_rpc(req).await.ok()?;
+                    let req = ClientRequest::from_cbor(&packet).ok()?;
 
-                println!("CLIENT: RESPONSE({:?})", res);
+                    let res = resolver.lock().await.handle_rpc(req).await.ok()?;
 
-                let encoded = res.to_cbor().ok()?;
+                    let packet = res.pack().ok()?;
 
-                send.write_all(&encoded).await.ok()?;
-                send.finish().ok()?;
+                    send.write_all(&packet).await.ok()?;
+                    send.finish().ok()?;
+                }
 
                 Some(())
             });
