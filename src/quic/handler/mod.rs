@@ -8,9 +8,6 @@ use common::quic::protorole::ProtoRole;
 use common::ret;
 use quinn::Connection;
 
-use crate::quic::handler::client::HandleClient;
-use crate::quic::handler::peer::HandlePeer;
-use crate::quic::handler::resolver::HandleResolver;
 use crate::relay::RelayRef;
 
 pub struct Handler {

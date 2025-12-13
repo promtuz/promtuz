@@ -10,24 +10,18 @@ use tokio::io::AsyncReadExt;
 use crate::proto::client::HandshakePacket;
 use crate::proto::client::MiscPacket;
 use crate::quic::handler::Handler;
-use crate::quic::handler::client::events::ClientHandler;
-use crate::quic::handler::client::events::handshake::HandshakeHandler;
 use crate::relay::RelayRef;
 use crate::util::systime;
 
 mod events;
-
-pub trait HandleClient {
-    async fn handle_client(self, relay: RelayRef);
-}
 
 fn frame_packet(packet: &[u8]) -> Vec<u8> {
     let size: [u8; 4] = (packet.len() as u32).to_be_bytes();
     [&size, packet].concat()
 }
 
-impl HandleClient for Handler {
-    async fn handle_client(self, relay: RelayRef) {
+impl Handler {
+    pub async fn handle_client(self, relay: RelayRef) {
         let conn = self.conn.clone();
         let addr = conn.remote_address();
 
