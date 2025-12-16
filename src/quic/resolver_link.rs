@@ -13,6 +13,7 @@ use common::msg::resolver::RelayHello;
 use common::quic::id::NodeId;
 use common::sysutils::system_load;
 use quinn::Connection;
+use quinn::TransportConfig;
 use tokio::io::AsyncWriteExt;
 
 use crate::quic::dialer::connect_to_any_seed;
@@ -26,6 +27,15 @@ pub struct ResolverLink {
 }
 
 impl ResolverLink {
+    /// Transport config for `Relay <-> Resolver`
+    fn transport_cfg() -> Arc<TransportConfig> {
+        let mut cfg = TransportConfig::default();
+
+        cfg.keep_alive_interval(Some(Duration::from_secs(15)));
+
+        Arc::new(cfg)
+    }
+
     async fn id(&self) -> NodeId {
         self.relay.lock().await.id
     }
@@ -34,7 +44,10 @@ impl ResolverLink {
         let conn: Connection = {
             let relay = relay.lock().await;
 
-            connect_to_any_seed(&relay.endpoint, &relay.cfg.resolver.seed).await?
+            let mut cfg = (*relay.client_cfg).clone();
+            cfg.transport_config(Self::transport_cfg());
+
+            connect_to_any_seed(&relay.endpoint, &relay.cfg.resolver.seed, Some(cfg)).await?
         };
 
         Ok(Self { relay, conn: Arc::new(conn) })
@@ -98,7 +111,7 @@ impl ResolverLink {
                     let packet = recv.read_to_end(4096).await?;
                     if let Ok(ack) = HelloAck::from_cbor(&packet) {
                         println!("RECV_ACK: {ack:?}");
-                        self.start_heartbeat(ack).await?;
+                        // self.start_heartbeat(ack).await?;
                         continue;
                     }
                     tokio::spawn(async move {

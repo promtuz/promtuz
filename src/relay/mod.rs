@@ -12,6 +12,7 @@ use common::quic::id::derive_id;
 use common::quic::protorole::ProtoRole;
 use p256::SecretKey;
 use p256::pkcs8::DecodePrivateKey;
+use quinn::ClientConfig;
 use quinn::Endpoint;
 use tokio::sync::Mutex;
 
@@ -59,6 +60,8 @@ pub struct Relay {
     pub endpoint: Arc<Endpoint>,
 
     pub cfg: AppConfig,
+
+    pub client_cfg: Arc<ClientConfig>,
 }
 
 impl Relay {
@@ -76,13 +79,7 @@ impl Relay {
             "SERVER_CFG_ERR:"
         );
 
-        let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "CA_ERR:");
-        let mut endpoint =
-            graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
-
-        let client_cfg = graceful!(build_client_cfg(PR::Relay, &roots), "CLIENT_CFG_ERR:");
-        endpoint.set_default_client_config(client_cfg);
-
+        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
         if let Ok(addr) = endpoint.local_addr() {
             println!("QUIC(RELAY): listening at {:?}", addr);
         }
@@ -95,12 +92,22 @@ impl Relay {
 
         println!("RELAY: Initializing with ID({})", id);
 
+        let mut endpoint = Self::endpoint(&cfg);
+
+        let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "CA_ERR:");
+
+        let client_cfg =
+            Arc::new(graceful!(build_client_cfg(ProtoRole::Relay, &roots), "CLIENT_CFG_ERR:"));
+
+        endpoint.set_default_client_config((*client_cfg).clone());
+
         Self {
             id,
             keys,
             start_ms: systime().as_millis(),
-            endpoint: Arc::new(Self::endpoint(&cfg)),
+            endpoint: Arc::new(endpoint),
             cfg,
+            client_cfg,
         }
     }
 }
