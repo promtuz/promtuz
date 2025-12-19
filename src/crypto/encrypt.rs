@@ -4,7 +4,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 
-type ChachaRes<T> = Result<T, chacha20poly1305::Error>;
+type Result<T> = std::result::Result<T, chacha20poly1305::Error>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Encrypted {
@@ -14,7 +14,6 @@ pub struct Encrypted {
     pub cipher: Vec<u8>,
 }
 
-#[allow(deprecated)] // https://github.com/RustCrypto/traits/issues/2036
 impl Encrypted {
     /// does't use nonce
     pub fn encrypt_once(data: &[u8], key: &[u8; 32], ad: &[u8]) -> Vec<u8> {
@@ -46,7 +45,7 @@ impl Encrypted {
         }
     }
 
-    pub fn decrypt(self, key: &[u8; 32], ad: &[u8]) -> ChachaRes<Vec<u8>> {
+    pub fn decrypt(self, key: &[u8; 32], ad: &[u8]) -> Result<Vec<u8>> {
         let mut chacha20 = ChaCha20Poly1305::new(Key::from_slice(key));
         let mut buffer = self.cipher;
         chacha20
