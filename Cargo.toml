@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
 quinn = { version = "0.11.9", features = ["rustls", "runtime-tokio"] }
 rustls = { version = "0.23.35", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2.0"
@@ -15,6 +14,6 @@ toml = "0.9.8"
 url = "2.5.7"
 p256 = "0.13.2"
 pem = "3.0.6"
-bincode = "2.0.1"
 serde_bytes = "0.11.19"
 hex = "0.4.3"
+anyhow = "1.0.100"

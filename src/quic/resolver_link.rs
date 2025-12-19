@@ -15,6 +15,8 @@ use common::sysutils::system_load;
 use quinn::Connection;
 use quinn::TransportConfig;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::watch::Receiver;
+use tokio::task::JoinHandle;
 
 use crate::quic::dialer::connect_to_any_seed;
 use crate::relay::RelayRef;
@@ -24,6 +26,7 @@ use crate::util::systime_sec;
 pub struct ResolverLink {
     relay: RelayRef,
     conn: Arc<Connection>,
+    shutdown: Receiver<()>,
 }
 
 impl ResolverLink {
@@ -40,19 +43,36 @@ impl ResolverLink {
         self.relay.lock().await.id
     }
 
-    pub async fn new(relay: RelayRef) -> Result<Self> {
-        let conn: Connection = {
-            let relay = relay.lock().await;
+    /// Attaches with relay, it's job is to keep in contact with any resolver however possible.
+    ///
+    /// * `relay` - reference of relay to attach with
+    /// * `rx` - shutdown receiver, used for closing the loop
+    pub async fn attach(relay: RelayRef, rx: Receiver<()>) -> JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            let conn: Connection = {
+                let relay = relay.lock().await;
 
-            let mut cfg = (*relay.client_cfg).clone();
-            cfg.transport_config(Self::transport_cfg());
+                let mut cfg = (*relay.client_cfg).clone();
+                cfg.transport_config(Self::transport_cfg());
 
-            connect_to_any_seed(&relay.endpoint, &relay.cfg.resolver.seed, Some(cfg)).await?
-        };
+                connect_to_any_seed(&relay.endpoint, &relay.cfg.resolver.seed, Some(cfg)).await?
+            };
 
-        Ok(Self { relay, conn: Arc::new(conn) })
+            let mut resolver = Self { relay, conn: Arc::new(conn), shutdown: rx };
+
+            // Announcing Presence to Resolver
+            resolver.hello().await?;
+
+            let _ = resolver.handle().await;
+
+            Ok(())
+        })
     }
 
+    /// Sends node status to current resolver
+    ///
+    /// * `allow(unused)` - will use in future
+    #[allow(unused)]
     async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
         let conn = self.conn.clone();
         let id = self.id().await;
@@ -106,25 +126,23 @@ impl ResolverLink {
     pub async fn handle(&mut self) -> Result<()> {
         let conn = self.conn.clone();
         loop {
-            match conn.accept_uni().await {
-                Ok(mut recv) => {
-                    let packet = recv.read_to_end(4096).await?;
-                    if let Ok(ack) = HelloAck::from_cbor(&packet) {
-                        println!("RECV_ACK: {ack:?}");
-                        // self.start_heartbeat(ack).await?;
-                        continue;
-                    }
-                    tokio::spawn(async move {
-                        println!("RECV_PACKET: {packet:?}");
-                        Some(())
-                    });
+            let mut recv = tokio::select! {
+                _ = self.shutdown.changed() => {
+                    self.close();
+                    break Ok(())
                 },
-                Err(err) => {
-                    eprintln!("CONN_ERR: {err}");
-                    // repeat
-                    return Ok(());
-                },
+                res = conn.accept_uni() => res?,
+            };
+
+            let packet = recv.read_to_end(4096).await?;
+            if let Ok(ack) = HelloAck::from_cbor(&packet) {
+                println!("RECV_ACK: {ack:?}");
+                continue;
             }
+            tokio::spawn(async move {
+                println!("RECV_PACKET: {packet:?}");
+                Some(())
+            });
         }
     }
 

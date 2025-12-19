@@ -5,10 +5,11 @@ use common::crypto::get_shared_key;
 use common::crypto::get_static_keypair;
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
+use common::msg::relay::HandshakePacket;
+use common::msg::relay::MiscPacket;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
-use crate::proto::client::HandshakePacket;
-use crate::proto::client::MiscPacket;
 use crate::quic::handler::Handler;
 use crate::relay::RelayRef;
 use crate::util::systime;
@@ -46,17 +47,25 @@ impl Handler {
 
                     use HandshakePacket::*;
 
-                    // HandshakeHandler::handle(&packet);
+                    let msg = HandshakePacket::from_cbor(&packet);
 
-                    if let ClientHello { ipk } = HandshakePacket::from_cbor(&packet).ok()? {
+                    println!("MESSAGE: {:?}", msg);
+
+                    if let Ok(ClientHello { ipk }) = msg {
                         println!("CLIENT HELLO: {:?}", ipk);
 
+                        // Diffie hellman of our ephemeral static secret and their identity public
+                        // key proof must be decrypted using our ephemeral
+                        // public and their static secret this proves the
+                        // ownership of their identity public key
                         let dh = esk.diffie_hellman(&PublicKey::from(ipk));
 
                         let key =
                             get_shared_key(dh.as_bytes(), &[0u8; 32], "handshake.challenge.key");
 
                         proof = Some(get_nonce::<16>());
+
+                        println!("PROOF - {}", hex::encode(proof.unwrap()));
 
                         let ct = Encrypted::encrypt_once(
                             &proof.unwrap(),
@@ -68,27 +77,30 @@ impl Handler {
                             ServerChallenge { epk: server_epk.to_bytes(), ct: ct.try_into().ok()? };
 
                         send.write_all(&frame_packet(&challenge.to_cbor().ok()?)).await.ok()?;
-                    }
-                    if let ClientProof { proof: client_proof } =
-                        HandshakePacket::from_cbor(&packet).ok()?
+                        send.flush().await.ok()?;
+                    } else if let Ok(ClientProof { proof: client_proof }) = msg
                         && let Some(proof) = proof
                     {
-                        // println!("SERVER PROOF : {:?}", proof);
-                        // println!("CLIENT PROOF : {:?}", client_proof);
+                        println!("SERVER PROOF : {:?}", proof);
+                        println!("CLIENT PROOF : {:?}", client_proof);
 
                         if proof == client_proof {
+                            println!("ACCEPTED");
                             let accept =
                                 ServerAccept { timestamp: systime().as_secs() }.to_cbor().ok()?;
                             send.write_all(&frame_packet(&accept)).await.ok()?;
+                            send.flush().await.ok()?;
                         } else {
+                            println!("REJECTED");
                             let accept =
                                 ServerReject { reason: "Proof Mismatch".into() }.to_cbor().ok()?;
                             send.write_all(&frame_packet(&accept)).await.ok()?;
+                            send.flush().await.ok()?;
                         }
 
                         _ = send.finish();
-                    } else if let MiscPacket::PubAddressReq { port: _ } =
-                        MiscPacket::from_cbor(&packet).ok()?
+                    } else if let Ok(MiscPacket::PubAddressReq { port: _ }) =
+                        MiscPacket::from_cbor(&packet)
                     {
                         println!("GOT PUB ADDR REQ: {:?}", packet);
                         let pub_addr = addr.ip().to_string();
