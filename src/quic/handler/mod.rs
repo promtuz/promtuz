@@ -15,6 +15,7 @@ pub struct Handler {
 }
 
 impl Handler {
+    /// Handles **incoming** connection
     pub async fn handle(conn: Connection, relay: RelayRef) {
         let role = ret!(ProtoRole::from_conn(&conn));
 

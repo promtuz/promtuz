@@ -38,12 +38,9 @@ impl Handler {
 
                 while let Ok(packet_size) = recv.read_u32().await {
                     let mut packet = vec![0u8; packet_size as usize];
-                    println!("GOT PACKET SIZE : {packet_size}");
                     if let Err(err) = recv.read_exact(&mut packet).await {
-                        println!("Read failed : {}", err); // temp
                         break;
                     }
-                    println!("PACKET: {:?}", packet);
 
                     use HandshakePacket::*;
 
@@ -99,17 +96,12 @@ impl Handler {
                         }
 
                         _ = send.finish();
-                    } else if let Ok(MiscPacket::PubAddressReq { port: _ }) =
-                        MiscPacket::from_cbor(&packet)
-                    {
-                        println!("GOT PUB ADDR REQ: {:?}", packet);
-                        let pub_addr = addr.ip().to_string();
-                        println!("SENT ADDR: {:?}", pub_addr);
-
-                        let resp = MiscPacket::PubAddressRes { addr: pub_addr }.to_cbor().ok()?;
+                    } else if let Ok(MiscPacket::PubAddressReq) = MiscPacket::from_cbor(&packet) {
+                        let resp = MiscPacket::PubAddressRes { addr: addr.ip() }.to_cbor().ok()?;
 
                         send.write_all(&frame_packet(&resp)).await.ok()?;
-                        _ = send.finish();
+
+                        send.flush().await.ok()?;
                     } else {
                         // println!("PACKET: {:?}", packet);
                     }

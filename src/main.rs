@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::msg::reason::CloseReason;
 use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     });
 
     let resolver_handle = ResolverLink::attach(relay.clone(), shutdown_rx).await;
-    
+
     tokio::select! {
         _ = acceptor_handle => {}
         _ = resolver_handle => {}
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
 
             shutdown.send(()).ok();
 
-            relay.endpoint.wait_idle().await;
+            relay.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
 
             println!("CLOSING RELAY");
         }
