@@ -12,7 +12,7 @@ std = []
 
 [dependencies]
 android_logger = "0.15"
-common = { path = "../../../../../../common", features = [
+common = { path = "../../common", features = [
     "crypto",
     "sign",
     "msg",
