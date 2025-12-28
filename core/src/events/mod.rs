@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::JVM;
 use crate::events::connection::ConnectionState;
-use crate::events::identity::Identity;
+use crate::events::identity::IdentityEv;
 
 pub mod callback;
 pub mod connection;
@@ -22,7 +22,7 @@ pub trait Emittable {
 #[allow(unused)]
 pub enum InternalEvent {
     Connection { state: ConnectionState },
-    Identity { event: Identity },
+    Identity { event: IdentityEv },
 }
 
 pub fn emit_event(event: InternalEvent) {

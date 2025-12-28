@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use crate::ENDPOINT;
 use crate::data::ResolverSeed;
 use crate::db::NETWORK_DB;
+use crate::db::network::RelayRow;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::quic::dialer::connect_to_any_seed;
@@ -44,20 +45,6 @@ pub struct Relay {
 
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
-}
-
-/// Local Database Representation of Relay
-#[derive(Debug)]
-pub struct RelayRow {
-    pub id: String,
-    pub host: String,
-    pub port: u16,
-    last_avg_latency: Option<u64>,
-    last_seen: u64,
-    last_connect: Option<u64>,
-    last_version: u16,
-
-    reputation: i16,
 }
 
 /// TODO: Create unit testing for this
@@ -93,7 +80,7 @@ impl Relay {
                     reputation >= 0
                   ORDER BY 
                       reputation DESC,
-                      last_seen DESC, 
+                      last_seen_unix DESC, 
                       last_connect DESC, 
                       last_avg_latency ASC 
                   LIMIT 1",
@@ -114,7 +101,7 @@ impl Relay {
             host: row.get("host")?,
             port: row.get("port")?,
             last_avg_latency: row.get("last_avg_latency")?,
-            last_seen: row.get("last_seen")?,
+            last_seen_unix: row.get("last_seen")?,
             last_connect: row.get("last_connect")?,
             last_version: row.get("last_version")?,
             reputation: row.get("reputation")?,
@@ -127,13 +114,13 @@ impl Relay {
         // Increase reputation as resolver says so
         let mut stmt = conn.prepare(
             "INSERT INTO relays (
-                    id, host, port, last_seen, last_version
+                    id, host, port, last_seen_unix, last_version
                  )
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET
                     host         = excluded.host,
                     port         = excluded.port,
-                    last_seen    = excluded.last_seen,
+                    last_seen_unix    = excluded.last_seen_unix,
                     last_version = excluded.last_version,
                     reputation   = reputation + 1",
         )?;

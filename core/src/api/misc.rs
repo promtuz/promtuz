@@ -5,9 +5,9 @@ use jni_macro::jni;
 
 use crate::JC;
 use crate::RUNTIME;
+use crate::ndk::defer::KotlinDeferred;
 use crate::quic::server::RELAY;
 use crate::utils::AsJni;
-use crate::utils::r#async::KotlinDeferred;
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn getPublicAddr(mut env: JNIEnv, _: JC) -> jobject {

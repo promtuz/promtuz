@@ -6,26 +6,32 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
+pub mod identity;
+pub mod network;
+pub mod peers;
+
+pub use network::NETWORK_DB;
+
+// pub use users::USERS_DB;
 use crate::PACKAGE_NAME;
 
 fn db(file_name: &'static str) -> String {
     format!("/data/data/{PACKAGE_NAME}/databases/{file_name}.db")
 }
 
-/// Connection to any sqlite network db
-pub static NETWORK_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let db = Mutex::new(Connection::open(db("network")).expect("db open failed"));
-    info!("DB: Network Database Connected");
-    db
-});
+#[macro_export]
+macro_rules! PRAGMA {
+    ($conn:expr, $MIGRATIONS:expr) => {
+        // Set PRAGMAs before migrations
+        $conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        $conn.pragma_update(None, "foreign_keys", "ON").unwrap();
 
-const RELAYS_SQL: &str = include_str!("../db/relays.sql");
+        if cfg!(target_os = "android") {
+            $conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
+            $conn.pragma_update(None, "temp_store", "MEMORY").unwrap();
+        }
 
-pub fn initial_execute() -> anyhow::Result<()> {
-    ////////////////////////
-    //  NETWORK DATABASE  //
-    ////////////////////////
-    NETWORK_DB.lock().execute(RELAYS_SQL, ())?;
-
-    Ok(())
+        // Migrations
+        $MIGRATIONS.to_latest(&mut $conn).expect("db migration failed");
+    };
 }

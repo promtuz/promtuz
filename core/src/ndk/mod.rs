@@ -1,10 +1,11 @@
-//! Utilities for JNI
-
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JObject;
 use jni::objects::JString;
 use jni::sys::jint;
+
+pub mod defer;
+pub mod key_manager;
 
 pub fn get_package_name(env: &mut JNIEnv, context: &JObject) -> anyhow::Result<String> {
     let pkg_obj = env.call_method(context, "getPackageName", "()Ljava/lang/String;", &[])?.l()?;
@@ -42,4 +43,32 @@ pub fn read_raw_res(env: &mut JNIEnv, context: &JObject, name: &str) -> anyhow::
     let bytes = JByteArray::from(bytes);
 
     Ok(env.convert_byte_array(bytes)?)
+}
+
+#[macro_export]
+macro_rules! jni_try {
+    ($expr:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                let vm = $crate::JVM.get().unwrap();
+                let mut env = vm.attach_current_thread().unwrap();
+                let _ = env.throw_new("java/lang/Exception", e.to_string());
+                log::error!("{}", e);
+                return;
+            },
+        }
+    };
+    ($expr:expr, $ret:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                let vm = $crate::JVM.get().unwrap();
+                let mut env = vm.attach_current_thread().unwrap();
+                let _ = env.throw_new("java/lang/Exception", e.to_string());
+                log::error!("{}", e);
+                return $ret;
+            },
+        }
+    };
 }

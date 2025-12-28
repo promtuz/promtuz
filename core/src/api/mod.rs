@@ -1,16 +1,31 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use common::quic::{config::{build_client_cfg, load_root_ca_bytes, setup_crypto_provider}, protorole::ProtoRole};
-use jni::{JNIEnv, objects::JObject};
-use log::info;
+use common::quic::config::build_client_cfg;
+use common::quic::config::load_root_ca_bytes;
+use common::quic::config::setup_crypto_provider;
+use common::quic::protorole::ProtoRole;
+use jni::JNIEnv;
+use jni::objects::JObject;
 use jni_macro::jni;
-use quinn::{Endpoint, EndpointConfig, TransportConfig, default_runtime};
+use log::info;
+use quinn::Endpoint;
+use quinn::EndpointConfig;
+use quinn::TransportConfig;
+use quinn::default_runtime;
 
-use crate::{ENDPOINT, JC, RUNTIME, db::initial_execute, jni_try, utils::ujni::read_raw_res};
+use crate::ENDPOINT;
+use crate::JC;
+use crate::RUNTIME;
+use crate::data::identity::Identity;
+use crate::jni_try;
+use crate::ndk::read_raw_res;
 
 pub mod conn_stats;
 pub mod connection;
+pub mod identity;
 pub mod misc;
+pub mod welcome;
 
 #[macro_export]
 macro_rules! endpoint {
@@ -29,10 +44,6 @@ macro_rules! endpoint {
 /// Initializes Endpoint
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
-    android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Trace).with_tag("core"),
-    );
-    
     info!("API: INIT START");
 
     let rt = RUNTIME.handle().clone();
@@ -62,16 +73,9 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     endpoint.set_default_client_config(client_cfg);
 
     ENDPOINT.set(endpoint).expect("init was ran twice");
+}
 
-    //==||==||==||==||==||==||==||==||==||==||==||==||==//
-    info!("DB: STARTING SQLITE DATABASE");
-
-    let db_block = (|| {
-        info!("DB: INITIALIZING TABLES");
-        initial_execute()?;
-
-        Ok::<(), anyhow::Error>(())
-    })();
-
-    jni_try!(db_block);
+#[jni(base = "com.promtuz.core", class = "API")]
+pub extern "system" fn shouldLaunchApp(_: JNIEnv, _: JC) -> bool {
+    Identity::public_key().is_ok()
 }

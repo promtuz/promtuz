@@ -32,3 +32,4 @@ rusqlite = { version = "0.37.0", features = ["bundled"] }
 parking_lot = "0.12.5"
 rusqlite_migration = "2.3.0"
 anyhow = { version = "1.0.100" }
+unicode-normalization = "0.1.25"

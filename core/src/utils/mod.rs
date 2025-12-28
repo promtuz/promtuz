@@ -13,9 +13,7 @@ use jni::objects::JObject;
 
 use crate::JVM;
 
-pub mod r#async;
-pub mod error;
-pub mod ujni;
+pub mod unwrap_or;
 
 /// ### TEMPORARY:
 /// uses google's dns to verify internet availability

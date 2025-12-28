@@ -14,9 +14,9 @@ mod api;
 mod data;
 mod db;
 mod events;
-mod identity;
 mod quic;
 mod utils;
+mod ndk;
 
 type JE<'local> = JNIEnv<'local>;
 type JC<'local> = JClass<'local>;
@@ -41,5 +41,10 @@ pub static ENDPOINT: OnceCell<Endpoint> = OnceCell::new();
 #[unsafe(no_mangle)]
 pub extern "C" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jni::sys::jint {
     JVM.set(vm).unwrap();
+
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Trace).with_tag("core"),
+    );
+
     jni::sys::JNI_VERSION_1_6
 }

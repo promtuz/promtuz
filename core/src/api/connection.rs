@@ -2,35 +2,28 @@ use common::msg::reason::CloseReason;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JObject;
+use jni_macro::jni;
 use log::debug;
 use log::error;
 use log::info;
-use jni_macro::jni;
 
 use crate::JC;
 use crate::RUNTIME;
 use crate::data::ResolverSeeds;
+use crate::data::identity::Identity;
 use crate::data::relay::Relay;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::jni_try;
+use crate::ndk::read_raw_res;
 use crate::quic::server::KeyPair;
 use crate::quic::server::RELAY;
 use crate::quic::server::RelayConnError;
-use crate::utils::KeyConversion;
 use crate::utils::has_internet;
-use crate::utils::ujni::read_raw_res;
 
 /// Connects to Relay
 #[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn connect(
-    mut env: JNIEnv,
-    _: JC,
-    context: JObject,
-    ipk: JByteArray,
-    // SECURITY: idk, i feel like i should be concerned
-    isk: JByteArray,
-) {
+pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
     if let Some(Some(conn)) = RELAY.read().as_ref().map(|r| r.connection.clone())
         && conn.close_reason().is_some()
     {
@@ -49,8 +42,8 @@ pub extern "system" fn connect(
     let seeds = jni_try!(read_raw_res(&mut env, &context, "resolver_seeds"));
     let seeds = jni_try!(serde_json::from_slice::<ResolverSeeds>(&seeds)).seeds;
 
-    let ipk = ipk.to_public();
-    let isk = isk.to_secret();
+    let ipk = jni_try!(Identity::public_key());
+    let isk = jni_try!(Identity::secret_key(&mut env));
 
     let keypair = KeyPair { public: ipk, secret: isk };
 
