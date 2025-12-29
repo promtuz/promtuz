@@ -1,10 +1,4 @@
 //! TODO: Minify SQL before executing
-//! TODO: Integrate rusqlite_migrations
-
-use log::info;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
-use rusqlite::Connection;
 
 pub mod identity;
 pub mod network;
@@ -18,6 +12,23 @@ use crate::PACKAGE_NAME;
 fn db(file_name: &'static str) -> String {
     format!("/data/data/{PACKAGE_NAME}/databases/{file_name}.db")
 }
+
+/// TODO: maybe implement a proc-macro one day
+macro_rules! from_row {
+    ($ty:ident { $($field:ident),* $(,)? }) => {
+        impl $ty {
+            pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+                Ok(Self {
+                    $(
+                        $field: row.get(stringify!($field))?,
+                    )*
+                })
+            }
+        }
+    };
+}
+
+pub(super) use from_row;
 
 #[macro_export]
 macro_rules! PRAGMA {

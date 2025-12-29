@@ -11,7 +11,6 @@ use common::msg::client::RelayDescriptor;
 use log::info;
 use quinn::Connection;
 use quinn::VarInt;
-use rusqlite::Row;
 use rusqlite::params;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -80,12 +79,12 @@ impl Relay {
                     reputation >= 0
                   ORDER BY 
                       reputation DESC,
-                      last_seen_unix DESC, 
+                      last_seen DESC, 
                       last_connect DESC, 
                       last_avg_latency ASC 
                   LIMIT 1",
             [PROTOCOL_VERSION],
-            Self::from_row,
+            RelayRow::from_row,
         )
         .map(|r| Self {
             id: r.id.into(),
@@ -95,32 +94,19 @@ impl Relay {
         })
     }
 
-    fn from_row(row: &Row) -> rusqlite::Result<RelayRow> {
-        Ok(RelayRow {
-            id: row.get("id")?,
-            host: row.get("host")?,
-            port: row.get("port")?,
-            last_avg_latency: row.get("last_avg_latency")?,
-            last_seen_unix: row.get("last_seen")?,
-            last_connect: row.get("last_connect")?,
-            last_version: row.get("last_version")?,
-            reputation: row.get("reputation")?,
-        })
-    }
-
     pub fn refresh(relays: &[RelayDescriptor]) -> Result<u8> {
         let conn = NETWORK_DB.lock();
 
         // Increase reputation as resolver says so
         let mut stmt = conn.prepare(
             "INSERT INTO relays (
-                    id, host, port, last_seen_unix, last_version
+                    id, host, port, last_seen, last_version
                  )
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET
                     host         = excluded.host,
                     port         = excluded.port,
-                    last_seen_unix    = excluded.last_seen_unix,
+                    last_seen    = excluded.last_seen,
                     last_version = excluded.last_version,
                     reputation   = reputation + 1",
         )?;

@@ -7,6 +7,7 @@ use rusqlite_migration::Migrations;
 
 use crate::PRAGMA;
 use crate::db::db;
+use crate::db::from_row;
 
 #[derive(Debug)]
 pub struct RelayRow {
@@ -14,11 +15,22 @@ pub struct RelayRow {
     pub host: String,
     pub port: u16,
     pub last_avg_latency: Option<u64>,
-    pub last_seen_unix: u64,
+    pub last_seen: u64,
     pub last_connect: Option<u64>,
     pub last_version: u16,
     pub reputation: i16,
 }
+
+from_row!(RelayRow {
+    id,
+    host,
+    port,
+    last_avg_latency,
+    last_seen,
+    last_connect,
+    last_version,
+    reputation
+});
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
@@ -27,7 +39,7 @@ const MIGRATION_ARRAY: &[M] = &[
               host TEXT NOT NULL,
               port INTEGER NOT NULL CHECK(port > 0 AND port <= 65535),
               last_avg_latency INTEGER CHECK(last_avg_latency >= 0),
-              last_seen_unix INTEGER NOT NULL,
+              last_seen INTEGER NOT NULL,
               last_connect INTEGER,
               last_version INTEGER NOT NULL,
               reputation INTEGER NOT NULL DEFAULT 0

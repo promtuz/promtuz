@@ -1,5 +1,6 @@
 #![feature(ip_as_octets)]
 
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use jni::JNIEnv;
@@ -32,7 +33,7 @@ static PACKAGE_NAME: &str = "com.promtuz.chat";
 /// Global Tokio Runtime
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().unwrap());
 
-pub static ENDPOINT: OnceCell<Endpoint> = OnceCell::new();
+pub static ENDPOINT: OnceCell<Arc<Endpoint>> = OnceCell::new();
 
 //////////////////////////////////////////////
 //============ GLOBAL FUNCTIONS ============//

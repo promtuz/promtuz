@@ -1,5 +1,6 @@
 pub mod relay;
 pub mod identity;
+pub mod idqr;
 
 use serde::Deserialize;
 

@@ -7,6 +7,7 @@ use rusqlite_migration::Migrations;
 
 use crate::PRAGMA;
 use crate::db::db;
+use crate::db::from_row;
 
 #[derive(Debug)]
 pub struct IdentityRow {
@@ -19,6 +20,8 @@ pub struct IdentityRow {
     pub created_at: u64,
     pub name: String,
 }
+
+from_row!(IdentityRow { id, ipk, enc_isk, vfk, enc_vsk, created_at, name });
 
 const MIGRATION_ARRAY: &[M] = &[M::up(
     "CREATE TABLE identity (

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use anyhow::anyhow;
 use common::crypto::PublicKey;
 use common::crypto::StaticSecret;
 use jni::JNIEnv;
@@ -13,6 +12,23 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub fn ipk(&self) -> [u8; 32] {
+        self.inner.ipk
+    }
+    pub fn vfk(&self) -> [u8; 32] {
+        self.inner.vfk
+    }
+    pub fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    pub fn get() -> Option<Self> {
+        let conn = IDENTITY_DB.lock();
+        conn.query_row("SELECT * FROM identity WHERE id = 0", [], IdentityRow::from_row)
+            .ok()
+            .map(|ir| Self { inner: ir })
+    }
+
     pub fn save(identity: IdentityRow) -> rusqlite::Result<Self> {
         let conn = IDENTITY_DB.lock();
 

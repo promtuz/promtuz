@@ -72,7 +72,7 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
 
     endpoint.set_default_client_config(client_cfg);
 
-    ENDPOINT.set(endpoint).expect("init was ran twice");
+    ENDPOINT.set(Arc::new(endpoint)).expect("init was ran twice");
 }
 
 #[jni(base = "com.promtuz.core", class = "API")]
