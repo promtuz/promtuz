@@ -4,13 +4,25 @@ pub mod identity;
 pub mod network;
 pub mod peers;
 
+use std::fs;
+use std::path::Path;
+use std::process;
+
 pub use network::NETWORK_DB;
 
 // pub use users::USERS_DB;
 use crate::PACKAGE_NAME;
 
 fn db(file_name: &'static str) -> String {
-    format!("/data/data/{PACKAGE_NAME}/databases/{file_name}.db")
+    let db_dir = format!("/data/data/{PACKAGE_NAME}/databases");
+    let dir_path = Path::new(&db_dir);
+
+    if !dir_path.is_dir() && fs::create_dir(dir_path).is_err() {
+        log::error!("Failed to create database directory!");
+        process::exit(1);
+    }
+
+    format!("{db_dir}/{file_name}.db")
 }
 
 /// TODO: maybe implement a proc-macro one day
