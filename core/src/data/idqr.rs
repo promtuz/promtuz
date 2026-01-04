@@ -8,6 +8,7 @@ use crc32fast::Hasher;
 
 const MAGIC_BYTES: &[u8] = b"PIDQ";
 
+#[derive(Debug)]
 pub struct IdentityQr {
     pub ipk: [u8; 32],
     // pub vfk: [u8; 32],
@@ -56,7 +57,7 @@ impl IdentityQr {
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 4 + 1 + 1 + 32 * 3 + 1 + 2 + 1 + 4 {
+        if bytes.len() < 4 + 1 + 1 + 32 + 1 + 2 + 1 + 4 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "too short"));
         }
 
