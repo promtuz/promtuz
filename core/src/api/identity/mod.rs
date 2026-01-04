@@ -8,7 +8,10 @@ use jni::objects::JObject;
 use jni::objects::JValue;
 use jni_macro::jni;
 use log::info;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 mod qr;
 mod scanner;
@@ -25,6 +28,7 @@ use crate::quic::server::RELAY;
 use crate::unwrap_or_ret;
 
 // static ESK: RwLock<Option<StaticSecret>> = RwLock::new(None);
+static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
 
 async fn get_addr(relay: &Relay) -> Option<SocketAddr> {
     let ep = ENDPOINT.get().unwrap();
@@ -65,21 +69,35 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
 
         let ep = ENDPOINT.get().unwrap().clone();
 
+        let token = CancellationToken::new();
+        {
+            let mut guard = CONN_CANCEL.lock();
+            if let Some(old) = guard.take() {
+                old.cancel();
+            }
+            *guard = Some(token.clone())
+        }
+
         tokio::spawn(async move {
             loop {
-                if let Some(incoming) = ep.accept().await
-                    && let Ok(conn) = incoming.await
-                    && let Ok((mut _tx, mut rx)) = conn.accept_bi().await
-                {
-                    let len = rx.read_u32().await.ok()? as usize;
-                    let mut packet = vec![0; len];
-                    rx.read_exact(&mut packet).await.ok()?;
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        info!("IDENTITY: conn loop cancelled");
+                        break;
+                    }
+                    incoming = ep.accept() => {
+                        let Some(incoming) = incoming else { continue };
+                        let Ok(conn) = incoming.await else { continue };
+                        let Ok((_tx, mut rx)) = conn.accept_bi().await else { continue };
 
-                    let msg = IdentityEv::from_cbor(&packet);
+                        let len = rx.read_u32().await.ok()? as usize;
+                        let mut packet = vec![0; len];
+                        rx.read_exact(&mut packet).await.ok()?;
 
-                    info!("P2P_MSG: {msg:?}");
-
-                    break;
+                        let msg = IdentityEv::from_cbor(&packet);
+                        info!("P2P_MSG: {msg:?}");
+                        break;
+                    }
                 }
             }
 
@@ -96,5 +114,8 @@ pub extern "system" fn identityDestroy(
     _class: JC,
     // Further Arguments
 ) {
-    info!("IDENTITY: DESTROY")
+    info!("IDENTITY: DESTROY");
+    if let Some(tok) = CONN_CANCEL.lock().take() {
+        tok.cancel();
+    }
 }

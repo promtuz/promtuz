@@ -3,4 +3,4 @@
 # cargo ndk -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o ../jniLibs build --release
 
 # only what my phone needs for faster development
-cargo ndk -t arm64-v8a -o ../android/app/src/main/jniLibs -P 33 build --release
+cargo ndk -t arm64-v8a -t x86_64 -o ../android/app/src/main/jniLibs -P 33 build --release
