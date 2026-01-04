@@ -43,7 +43,7 @@ impl KeyConversion for JByteArray<'_> {
     }
 
     fn to_public(self) -> PublicKey {
-        PublicKey::from(self.to_bytes())
+        PublicKey::from_bytes(&self.to_bytes()).expect("not a ed25519 public key")
     }
 
     fn to_secret(self) -> StaticSecret {

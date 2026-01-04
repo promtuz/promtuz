@@ -50,10 +50,6 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
 
         let addr = get_addr(&relay).await?;
 
-        // let (esk, epk) = get_static_keypair();
-
-        // *ESK.write() = Some(esk);
-
         let qr = IdentityQr {
             ipk: identity.ipk(),
             // vfk: identity.vfk(),

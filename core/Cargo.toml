@@ -35,3 +35,5 @@ anyhow = { version = "1.0.100" }
 unicode-normalization = "0.1.25"
 crc32fast = "1.5.0"
 tokio-util = "0.7.17"
+sha2 = "0.10.9"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }

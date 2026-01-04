@@ -14,22 +14,20 @@ pub struct IdentityRow {
     pub id: u8,
     pub ipk: [u8; 32],
     pub enc_isk: Vec<u8>,
-    pub vfk: [u8; 32],
-    pub enc_vsk: Vec<u8>,
+    // pub vfk: [u8; 32],
+    // pub enc_vsk: Vec<u8>,
     /// Unix timestamp in milliseconds
     pub created_at: u64,
     pub name: String,
 }
 
-from_row!(IdentityRow { id, ipk, enc_isk, vfk, enc_vsk, created_at, name });
+from_row!(IdentityRow { id, ipk, enc_isk, created_at, name });
 
 const MIGRATION_ARRAY: &[M] = &[M::up(
     "CREATE TABLE identity (
             id INTEGER PRIMARY KEY CHECK (id = 0),
             ipk BLOB NOT NULL CHECK(length(ipk) = 32),
             enc_isk BLOB NOT NULL,
-            vfk BLOB NOT NULL CHECK(length(vfk) = 32),
-            enc_vsk BLOB NOT NULL,
             created_at INTEGER NOT NULL,
             name TEXT NOT NULL
         );",

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use common::crypto::PublicKey;
-use common::crypto::StaticSecret;
+use common::crypto::SecretKey;
 use jni::JNIEnv;
 
 use crate::db::identity::IDENTITY_DB;
@@ -14,9 +14,6 @@ pub struct Identity {
 impl Identity {
     pub fn ipk(&self) -> [u8; 32] {
         self.inner.ipk
-    }
-    pub fn vfk(&self) -> [u8; 32] {
-        self.inner.vfk
     }
     pub fn name(&self) -> String {
         self.inner.name.clone()
@@ -34,14 +31,12 @@ impl Identity {
 
         conn.execute(
             "INSERT INTO identity (
-                    id, ipk, enc_isk, vfk, enc_vsk, created_at, name
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                    id, ipk, enc_isk, created_at, name
+                 ) VALUES (?1, ?2, ?3, ?4, ?5);",
             (
-                0,
+                identity.id,
                 identity.ipk,
                 identity.enc_isk.clone(),
-                identity.vfk,
-                identity.enc_vsk.clone(),
                 identity.created_at,
                 identity.name.clone(),
             ),
@@ -54,11 +49,11 @@ impl Identity {
     pub fn public_key() -> rusqlite::Result<PublicKey> {
         let conn = IDENTITY_DB.lock();
         conn.query_one("SELECT ipk FROM identity WHERE id = 0", [], |row| {
-            row.get("ipk").map(|k: [u8; 32]| PublicKey::from(k))
+            row.get("ipk").map(|k: [u8; 32]| PublicKey::from_bytes(&k).expect("not a ed25519 public key"))
         })
     }
 
-    pub fn secret_key(env: &mut JNIEnv) -> Result<StaticSecret> {
+    pub fn secret_key(env: &mut JNIEnv) -> Result<SecretKey> {
         let key_manager = KeyManager::new(env)?;
         let conn = IDENTITY_DB.lock();
 
@@ -68,7 +63,7 @@ impl Identity {
             let secret: [u8; 32] =
                 secret.try_into().map_err(|_| rusqlite::Error::UnwindingPanic)?;
 
-            Ok(StaticSecret::from(secret))
+            Ok(SecretKey::from(secret))
         })?)
     }
 }

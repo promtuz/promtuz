@@ -3,19 +3,19 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
-use anyhow::anyhow;
-use common::crypto::PublicKey;
-use common::crypto::encrypt::Encrypted;
-use common::crypto::get_shared_key;
+use common::PROTOCOL_VERSION;
+use common::crypto::SigningKey;
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
 use common::msg::relay::HandshakePacket;
 use common::msg::relay::MiscPacket;
+use ed25519_dalek::ed25519::signature::SignerMut;
 use log::debug;
 use log::error;
 use log::info;
 use parking_lot::RwLock;
 use quinn::ConnectionError;
+use sha2::Digest;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
@@ -39,15 +39,10 @@ where
     }
 }
 
-pub struct KeyPair {
-    pub public: common::crypto::PublicKey,
-    pub secret: common::crypto::StaticSecret,
-}
-
 pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);
 
 impl Relay {
-    pub async fn connect(mut self, keypair: &KeyPair) -> Result<(), RelayConnError> {
+    pub async fn connect(mut self, mut isk: SigningKey) -> Result<(), RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host.clone())?, self.port);
 
         info!("RELAY({}): CONNECTING AT {}", self.id, addr);
@@ -64,7 +59,8 @@ impl Relay {
 
                 use HandshakePacket::*;
 
-                let client_hello = ClientHello { ipk: keypair.public.to_bytes() }.pack().unwrap();
+                let client_hello =
+                    ClientHello { ipk: isk.verifying_key().to_bytes() }.pack().unwrap();
                 send.write_all(&client_hello).await?;
                 send.flush().await?;
 
@@ -79,28 +75,17 @@ impl Relay {
 
                     debug!("RELAY({}): RECEIVED {:?}", self.id, msg);
 
-                    if let ServerChallenge { ct, epk } = msg {
-                        let secret = keypair.secret.diffie_hellman(&PublicKey::from(epk));
+                    if let ServerChallenge { nonce } = msg {
+                        let digest =
+                            [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
+                                .concat();
 
-                        let key = get_shared_key(
-                            secret.as_bytes(),
-                            &[0u8; 32],
-                            "handshake.challenge.key",
-                        );
+                        let hash = &sha2::Sha512::digest(&digest)[..];
+                        let sig = isk.sign(hash);
 
-                        // Authenticated Data
-                        let ad = &[&keypair.public.as_bytes()[..], &epk[..]].concat();
-
-                        let encrypted = Encrypted { cipher: ct.to_vec(), nonce: vec![0u8; 12] };
-
-                        let proof = encrypted.decrypt(&key, ad)?.try_into().map_err(|_| {
-                            RelayConnError::Error(anyhow!("server proof is invalid"))
-                        })?;
-
-                        debug!("RELAY({}): DECRYPTED PROOF - {}", self.id, hex::encode(proof));
-
-                        let client_proof =
-                            ClientProof { proof }.pack().map_err(RelayConnError::Error)?;
+                        let client_proof = ClientProof { sig: sig.to_bytes() }
+                            .pack()
+                            .map_err(RelayConnError::Error)?;
 
                         debug!("RELAY({}): SENDING {}", self.id, hex::encode(&client_proof));
                         send.write_all(&client_proof).await?;

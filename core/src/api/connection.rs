@@ -1,3 +1,4 @@
+use common::crypto::SigningKey;
 use common::msg::reason::CloseReason;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
@@ -16,7 +17,7 @@ use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::jni_try;
 use crate::ndk::read_raw_res;
-use crate::quic::server::KeyPair;
+// use crate::quic::server::KeyPair;
 use crate::quic::server::RELAY;
 use crate::quic::server::RelayConnError;
 use crate::utils::has_internet;
@@ -42,10 +43,10 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
     let seeds = jni_try!(read_raw_res(&mut env, &context, "resolver_seeds"));
     let seeds = jni_try!(serde_json::from_slice::<ResolverSeeds>(&seeds)).seeds;
 
-    let ipk = jni_try!(Identity::public_key());
+    // let ipk = jni_try!(Identity::public_key());
     let isk = jni_try!(Identity::secret_key(&mut env));
 
-    let keypair = KeyPair { public: ipk, secret: isk };
+    let isk = SigningKey::from_bytes(&isk);
 
     RUNTIME.spawn(async move {
         loop {
@@ -54,7 +55,8 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
                 Ok(relay) => {
                     let id = relay.id.clone();
                     debug!("RELAY(BEST): Found [{}]", id);
-                    match relay.connect(&keypair).await {
+                    // FIXME: temporaily cloned, for future safety only pass public key and move `sign` helper function somewhere else
+                    match relay.connect(isk.clone()).await {
                         Ok(_) => break,
                         Err(RelayConnError::Continue) => continue,
                         Err(RelayConnError::Error(err)) => {

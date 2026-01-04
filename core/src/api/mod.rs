@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::quic::config::build_client_cfg;
+use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca_bytes;
 use common::quic::config::setup_crypto_provider;
 use common::quic::protorole::ProtoRole;
@@ -50,6 +51,8 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     let _guard = rt.enter();
 
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+
+    // let server_cfg = build_server_cfg(cert_path, key_path, alpn_protocols);
 
     let mut endpoint =
         Endpoint::new(EndpointConfig::default(), None, socket, default_runtime().unwrap()).unwrap();
