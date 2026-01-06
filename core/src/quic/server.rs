@@ -6,18 +6,16 @@ use std::sync::atomic::Ordering;
 use common::PROTOCOL_VERSION;
 use common::crypto::SigningKey;
 use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
-use common::msg::relay::HandshakePacket;
-use common::msg::relay::MiscPacket;
+use common::msg::relay::HandshakeP;
+use common::msg::relay::MiscP;
+use common::msg::relay::RelayPacket;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use log::debug;
 use log::error;
 use log::info;
 use parking_lot::RwLock;
 use quinn::ConnectionError;
-use sha2::Digest;
 use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
@@ -57,62 +55,50 @@ impl Relay {
 
                 let (mut send, mut recv) = conn.open_bi().await?;
 
-                use HandshakePacket::*;
+                use HandshakeP::*;
+                use RelayPacket::*;
 
-                let client_hello =
-                    ClientHello { ipk: isk.verifying_key().to_bytes() }.pack().unwrap();
-                send.write_all(&client_hello).await?;
-                send.flush().await?;
+                RelayPacket::Handshake(ClientHello { ipk: isk.verifying_key().to_bytes() })
+                    .send(&mut send)
+                    .await
+                    .map_err(RelayConnError::Error)?;
 
-                debug!("RELAY({}): SENDING {}", self.id, hex::encode(client_hello));
-
-                // let conn = Arc::new(conn;
                 loop {
                     let mut packet = vec![0u8; recv.read_u32().await? as usize];
                     recv.read_exact(&mut packet).await?;
 
-                    let msg = HandshakePacket::from_cbor(&packet).map_err(RelayConnError::Error)?;
+                    let msg = RelayPacket::from_cbor(&packet).map_err(RelayConnError::Error)?;
 
-                    debug!("RELAY({}): RECEIVED {:?}", self.id, msg);
+                    match msg {
+                        Handshake(ServerChallenge { nonce }) => {
+                            let msg =
+                                [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
+                                    .concat();
 
-                    if let ServerChallenge { nonce } = msg {
-                        let digest =
-                            [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
-                                .concat();
-
-                        let hash = &sha2::Sha512::digest(&digest)[..];
-                        let sig = isk.sign(hash);
-
-                        let client_proof = ClientProof { sig: sig.to_bytes() }
-                            .pack()
-                            .map_err(RelayConnError::Error)?;
-
-                        debug!("RELAY({}): SENDING {}", self.id, hex::encode(&client_proof));
-                        send.write_all(&client_proof).await?;
-                        send.flush().await?;
-                    } else if let ServerAccept { timestamp } = msg {
-                        info!("RELAY({}): Authenticated at {timestamp}", self.id);
-
-                        CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
-
-                        // Informing App UI about conn status
-                        ConnectionState::Connected.emit();
-
-                        // Respect++
-                        self.upvote().map_err(RelayConnError::Error)?;
-
-                        self.connection = Some(conn);
-                        *RELAY.write() = Some(self);
-
-                        // Starting the handler, handles until it's connected
-                        Self::handle();
-
-                        return Ok(());
-                    } else if let ServerReject { reason } = msg {
-                        info!("RELAY({}): Rejected because {reason}", self.id);
-
-                        // or something else maybe
-                        return Err(RelayConnError::Continue);
+                            RelayPacket::Handshake(ClientProof { sig: isk.sign(&msg).to_bytes() })
+                                .send(&mut send)
+                                .await
+                                .map_err(RelayConnError::Error)?;
+                        },
+                        Handshake(ServerAccept { timestamp }) => {
+                            info!("RELAY({}): Authenticated at {timestamp}", self.id);
+                            CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
+                            // Informing App UI about conn status
+                            ConnectionState::Connected.emit();
+                            // Respect++
+                            self.upvote().map_err(RelayConnError::Error)?;
+                            self.connection = Some(conn);
+                            *RELAY.write() = Some(self);
+                            // Starting the handler, handles until it's connected
+                            Self::handle();
+                            return Ok(());
+                        },
+                        Handshake(ServerReject { reason }) => {
+                            info!("RELAY({}): Rejected because {reason}", self.id);
+                            // or something else maybe
+                            return Err(RelayConnError::Continue);
+                        },
+                        _ => {},
                     }
                 }
             },
@@ -135,15 +121,14 @@ impl Relay {
         let conn = self.connection.as_ref()?;
         let (mut tx, mut rx) = conn.open_bi().await.ok()?;
 
-        tx.write_all(&MiscPacket::PubAddressReq.pack().ok()?).await.ok()?;
-        tx.flush().await.ok()?;
+        RelayPacket::Misc(MiscP::PubAddressReq).send(&mut tx).await.ok()?;
 
         let len = rx.read_u32().await.ok()? as usize;
         let mut packet = vec![0; len];
         rx.read_exact(&mut packet).await.ok()?;
 
-        match MiscPacket::from_cbor(&packet).ok()? {
-            MiscPacket::PubAddressRes { addr } => Some(addr),
+        match RelayPacket::from_cbor(&packet).ok()? {
+            RelayPacket::Misc(MiscP::PubAddressRes { addr }) => Some(addr),
             _ => None,
         }
     }
