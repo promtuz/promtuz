@@ -8,7 +8,7 @@ use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
-use common::quic::id::derive_id;
+use common::quic::id::derive_node_id;
 use common::quic::protorole::ProtoRole;
 use p256::SecretKey;
 use p256::pkcs8::DecodePrivateKey;
@@ -88,7 +88,7 @@ impl Relay {
 
     pub fn new(cfg: AppConfig) -> Self {
         let keys = graceful!(RelayKeys::from_cfg(&cfg), "RELAY_ERR:");
-        let id = derive_id(&keys.public);
+        let id = derive_node_id(&keys.public);
 
         println!("RELAY: Initializing with ID({})", id);
 

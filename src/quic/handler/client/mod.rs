@@ -1,12 +1,11 @@
-use common::crypto::PublicKey;
-use common::crypto::encrypt::Encrypted;
+use common::PROTOCOL_VERSION;
 use common::crypto::get_nonce;
-use common::crypto::get_shared_key;
-use common::crypto::get_static_keypair;
 use common::msg::cbor::FromCbor;
 use common::msg::cbor::ToCbor;
 use common::msg::relay::HandshakePacket;
 use common::msg::relay::MiscPacket;
+use ed25519_dalek::Signature;
+use ed25519_dalek::VerifyingKey;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
@@ -33,8 +32,9 @@ impl Handler {
 
             tokio::spawn(async move {
                 // TEMPORARY; USE EPHEMERAL WITH DYNAMIC DATA STORAGE N SHI
-                let (esk, server_epk) = get_static_keypair();
-                let mut proof = None;
+                // let (esk, server_epk) = get_static_keypair();
+                let nonce = get_nonce::<32>();
+                let mut user_ipk = None;
 
                 while let Ok(packet_size) = recv.read_u32().await {
                     let mut packet = vec![0u8; packet_size as usize];
@@ -51,56 +51,35 @@ impl Handler {
                     if let Ok(ClientHello { ipk }) = msg {
                         println!("CLIENT HELLO: {:?}", ipk);
 
-                        // Diffie hellman of our ephemeral static secret and their identity public
-                        // key proof must be decrypted using our ephemeral
-                        // public and their static secret this proves the
-                        // ownership of their identity public key
-                        let dh = esk.diffie_hellman(&PublicKey::from(ipk));
+                        user_ipk = Some(VerifyingKey::from_bytes(&ipk).ok()?);
 
-                        let key =
-                            get_shared_key(dh.as_bytes(), &[0u8; 32], "handshake.challenge.key");
-
-                        proof = Some(get_nonce::<16>());
-
-                        println!("PROOF - {}", hex::encode(proof.unwrap()));
-
-                        let ct = Encrypted::encrypt_once(
-                            &proof.unwrap(),
-                            &key,
-                            &[&ipk[..], &server_epk.to_bytes()[..]].concat(),
-                        );
-
-                        let challenge =
-                            ServerChallenge { epk: server_epk.to_bytes(), ct: ct.try_into().ok()? };
+                        let challenge = ServerChallenge { nonce };
 
                         send.write_all(&frame_packet(&challenge.to_cbor().ok()?)).await.ok()?;
                         send.flush().await.ok()?;
-                    } else if let Ok(ClientProof { proof: client_proof }) = msg
-                        && let Some(proof) = proof
+                    } else if let Ok(ClientProof { sig }) = msg
+                        && let Some(ipk) = user_ipk
                     {
-                        println!("SERVER PROOF : {:?}", proof);
-                        println!("CLIENT PROOF : {:?}", client_proof);
+                        let msg =
+                            [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
+                                .concat();
 
-                        if proof == client_proof {
-                            println!("ACCEPTED");
-                            let accept =
-                                ServerAccept { timestamp: systime().as_secs() }.to_cbor().ok()?;
-                            send.write_all(&frame_packet(&accept)).await.ok()?;
-                            send.flush().await.ok()?;
+                        let packet = if Signature::from_slice(&sig)
+                            .and_then(|sig| ipk.verify_strict(&msg, &sig))
+                            .is_ok()
+                        {
+                            ServerAccept { timestamp: systime().as_secs() }
                         } else {
-                            println!("REJECTED");
-                            let accept =
-                                ServerReject { reason: "Proof Mismatch".into() }.to_cbor().ok()?;
-                            send.write_all(&frame_packet(&accept)).await.ok()?;
-                            send.flush().await.ok()?;
-                        }
+                            ServerReject { reason: "Invalid Signature".into() }
+                        };
 
+                        send.write_all(&frame_packet(&packet.to_cbor().ok()?)).await.ok()?;
+                        send.flush().await.ok()?;
                         _ = send.finish();
                     } else if let Ok(MiscPacket::PubAddressReq) = MiscPacket::from_cbor(&packet) {
                         let resp = MiscPacket::PubAddressRes { addr: addr.ip() }.to_cbor().ok()?;
 
                         send.write_all(&frame_packet(&resp)).await.ok()?;
-
                         send.flush().await.ok()?;
                     } else {
                         // println!("PACKET: {:?}", packet);
