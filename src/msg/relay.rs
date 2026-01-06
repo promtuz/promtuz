@@ -1,29 +1,28 @@
+use std::net::{IpAddr};
+
 use serde::{Deserialize, Serialize};
+
+use serde_bytes;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum HandshakePacket {
     ClientHello {
-        /// Identity Public Key
+        /// Identity Public Key (Ed25519)
         #[serde(with = "serde_bytes")]
         ipk: [u8; 32],
-        // /// Client's Ephemeral Public Key
-        // #[serde(with = "serde_bytes")]
-        // epk: [u8; 32],
     },
 
     ServerChallenge {
-        /// Server's Ephemeral Public Key
+        /// Random, single-use nonce
         #[serde(with = "serde_bytes")]
-        epk: [u8; 32],
-        /// Encrypted Payload that client shall decrypt and send
-        #[serde(with = "serde_bytes")]
-        ct: [u8; 32],
+        nonce: [u8; 32],
     },
 
     ClientProof {
-        /// Decrypted ServerChallenge#msg
+        /// Ed25519 signature over:
+        /// hash("relay-auth-v1" || nonce)
         #[serde(with = "serde_bytes")]
-        proof: [u8; 16],
+        sig: [u8; 64],
     },
 
     ServerAccept {
@@ -39,12 +38,8 @@ pub enum HandshakePacket {
 /// Miscellaneous Packets
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum MiscPacket {
-    PubAddressReq {
-        // will response append `:<port>` in addr
-        // isn't needed but can't leave struct empty
-        port: bool,
-    },
+    PubAddressReq,
     PubAddressRes {
-        addr: String,
+        addr: IpAddr,
     },
 }

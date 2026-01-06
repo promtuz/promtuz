@@ -4,17 +4,16 @@
 //! ```
 
 use std::{
-    env::args,
     error::Error,
     fs,
     process::{self, Command},
 };
 
 use chacha20poly1305::aead::OsRng;
-use common::quic::id::derive_id;
+use common::quic::id::derive_node_id;
 
-use p256::{self, SecretKey, pkcs8::LineEnding};
 use p256::pkcs8::EncodePrivateKey;
+use p256::{self, SecretKey, pkcs8::LineEnding};
 
 static OUT_DIR: &str = "out";
 
@@ -34,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pubkey = seckey.public_key();
 
     // === derive node ID from pubkey ===
-    let id: common::quic::id::NodeId = derive_id(&pubkey);
+    let id: common::quic::id::NodeId = derive_node_id(&pubkey);
 
     let out_name = out_name.unwrap_or(id.to_string());
 

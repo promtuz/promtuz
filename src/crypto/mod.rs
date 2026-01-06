@@ -1,35 +1,43 @@
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 
+#[cfg(feature = "sign")]
+pub use ed25519_dalek::{SecretKey, SigningKey, VerifyingKey as PublicKey};
+
 use hkdf::Hkdf;
 
 use sha2::Sha256;
-pub use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+pub use x25519_dalek::{EphemeralSecret, SharedSecret, StaticSecret, PublicKey as xPublicKey};
 
 pub mod encrypt;
 
-#[cfg(feature="sign")]
+#[cfg(feature = "sign")]
 pub mod sign;
 
 pub fn get_secret_key() -> StaticSecret {
     StaticSecret::random_from_rng(OsRng)
 }
 
-pub fn derive_public_key(key: &StaticSecret) -> PublicKey {
-    PublicKey::from(key)
+pub fn derive_public_key(key: &StaticSecret) -> x25519_dalek::PublicKey {
+    x25519_dalek::PublicKey::from(key)
 }
 
-pub fn get_ephemeral_keypair() -> (EphemeralSecret, PublicKey) {
+pub fn get_ephemeral_keypair() -> (EphemeralSecret, x25519_dalek::PublicKey) {
     let esk = EphemeralSecret::random_from_rng(OsRng);
-    let epk = PublicKey::from(&esk);
+    let epk = x25519_dalek::PublicKey::from(&esk);
 
     (esk, epk)
 }
 
-pub fn get_static_keypair() -> (StaticSecret, PublicKey) {
+pub fn get_static_keypair() -> (StaticSecret, x25519_dalek::PublicKey) {
     let esk = StaticSecret::random_from_rng(OsRng);
-    let epk = PublicKey::from(&esk);
+    let epk = x25519_dalek::PublicKey::from(&esk);
 
     (esk, epk)
+}
+
+#[cfg(feature = "sign")]
+pub fn get_signing_key() -> SigningKey {
+    SigningKey::generate(&mut OsRng)
 }
 
 pub fn get_shared_key(shared_secret: &[u8; 32], salt: &[u8], info: &str) -> [u8; 32] {

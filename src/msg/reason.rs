@@ -1,10 +1,12 @@
-use quinn::VarInt;
+use quinn::{Connection, VarInt};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
 pub enum CloseReason {
     DuplicateConnect,
     AlreadyConnected,
     ShuttingDown,
+    Reconnecting,
 }
 
 impl CloseReason {
@@ -12,10 +14,10 @@ impl CloseReason {
         format!("{:?}", self).into()
     }
     pub fn code(&self) -> VarInt {
-        match self {
-            CloseReason::DuplicateConnect => VarInt::from_u32(0x01),
-            CloseReason::AlreadyConnected => VarInt::from_u32(0x02),
-            CloseReason::ShuttingDown => VarInt::from_u32(0x03),
-        }
+        VarInt::from_u32(*self as u32 + 1)
+    }
+
+    pub fn close(self, conn: &Connection) {
+        conn.close(self.code(), &self.reason());
     }
 }
