@@ -12,7 +12,7 @@ use common::msg::resolver::RelayHello;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
-use common::quic::id::derive_id;
+use common::quic::id::derive_node_id;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
 use quinn::Connection;
@@ -60,7 +60,7 @@ impl Resolver {
             },
         };
 
-        derive_id(&secret.public_key())
+        derive_node_id(&secret.public_key())
     }
 
     fn endpoint(cfg: &AppConfig) -> Endpoint {

@@ -32,9 +32,7 @@ impl HandleRelay for Handler {
                                             .register_relay(conn.clone(), &hello)
                                         {
                                             Ok(ack) => ret!(ack.to_cbor().ok()),
-                                            Err(close) => {
-                                                return conn.close(close.code(), &close.reason());
-                                            },
+                                            Err(close) => return close.close(&conn),
                                         };
                                         send_uni(&conn, &hello_ack).await.ok();
                                     } else if let Ok(_hb) = RelayHeartbeat::from_cbor(&bytes) {

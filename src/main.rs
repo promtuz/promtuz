@@ -10,6 +10,7 @@ mod util;
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::msg::reason::CloseReason;
 use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;
@@ -34,8 +35,7 @@ async fn main() -> Result<()> {
             println!();
 
             let r = resolver.lock().await;
-            r.close();
-            r.endpoint.wait_idle().await;
+            r.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
 
             println!("CLOSING RESOLVER");
         }
