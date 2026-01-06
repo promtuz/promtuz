@@ -1,11 +1,14 @@
-use std::net::{IpAddr};
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use serde_bytes;
 
+use crate::msg::cbor::ToCbor;
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum HandshakePacket {
+pub enum HandshakeP {
     ClientHello {
         /// Identity Public Key (Ed25519)
         #[serde(with = "serde_bytes")]
@@ -37,9 +40,22 @@ pub enum HandshakePacket {
 
 /// Miscellaneous Packets
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum MiscPacket {
+pub enum MiscP {
     PubAddressReq,
-    PubAddressRes {
-        addr: IpAddr,
-    },
+    PubAddressRes { addr: IpAddr },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum RelayPacket {
+    Handshake(HandshakeP),
+    Misc(MiscP),
+}
+
+impl RelayPacket {
+    pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
+        let packet = self.pack()?;
+
+        tx.write_all(&packet).await?;
+        Ok(tx.flush().await?)
+    }
 }
