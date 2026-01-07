@@ -1,5 +1,5 @@
-use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
+use common::msg::pack::Unpacker;
+use common::msg::pack::Packer;
 use common::msg::client::ClientRequest;
 use tokio::io::AsyncReadExt;
 
@@ -26,15 +26,12 @@ impl HandleClient for Handler {
 
             tokio::spawn(async move {
                 while let Ok(packet_size) = recv.read_u32().await {
-                    println!("CLIENT: PACKET({})", packet_size);
                     let mut packet = vec![0u8; packet_size as usize];
 
                     if let Err(err) = recv.read_exact(&mut packet).await {
                         println!("Read failed : {}", err); // temp
                         break;
                     }
-
-                    println!("CLIENT: PACKET({})", hex::encode(&packet));
 
                     let req = ClientRequest::from_cbor(&packet).ok()?;
 
@@ -49,7 +46,5 @@ impl HandleClient for Handler {
                 Some(())
             });
         }
-
-        println!("CLIENT_CLOSE({}): {}", self.conn.remote_address(), self.conn.closed().await);
     }
 }

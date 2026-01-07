@@ -7,8 +7,7 @@ use common::graceful;
 use common::msg::RelayId;
 use common::msg::ResolverId;
 use common::msg::reason::CloseReason;
-use common::msg::resolver::HelloAck;
-use common::msg::resolver::RelayHello;
+use common::msg::resolver::LifetimeP;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
@@ -79,21 +78,20 @@ impl Resolver {
 
         println!("RESOLVER: Initializing with ID({id})");
 
-        Self {
-            id,
-            endpoint: Arc::new(Self::endpoint(&cfg)),
-            relays: HashMap::new(),
-            cfg,
-        }
+        Self { id, endpoint: Arc::new(Self::endpoint(&cfg)), relays: HashMap::new(), cfg }
     }
 
     /// Will return [HelloAck] if registered succesfully
     ///
     /// Returns [ConnectionError] instead of relay already exists
     pub fn register_relay(
-        &mut self, conn: Arc<Connection>, hello: &RelayHello,
-    ) -> Result<HelloAck, CloseReason> {
-        if let Some(existing) = self.relays.remove(&hello.relay_id) {
+        &mut self, conn: Arc<Connection>, hello: &LifetimeP,
+    ) -> Result<LifetimeP, CloseReason> {
+        let LifetimeP::RelayHello { relay_id, .. } = *hello else {
+            return Err(CloseReason::PacketMismatch);
+        };
+
+        if let Some(existing) = self.relays.remove(&relay_id) {
             let close = CloseReason::DuplicateConnect;
             existing.conn.close(close.code(), &close.reason());
             // can toggle behavior by uncommenting this err return and commenting out previous line
@@ -102,11 +100,11 @@ impl Resolver {
 
         println!("RELAY_CONNECT: {:?}", hello);
 
-        self.relays.insert(hello.relay_id, RelayEntry { id: hello.relay_id, conn });
+        self.relays.insert(relay_id, RelayEntry { id: relay_id, conn });
 
         let jitter = (rand::random::<f32>() * 2000.0 - 1000.0) as i32;
 
-        let hello_ack = HelloAck {
+        let hello_ack = LifetimeP::HelloAck {
             accepted: true,
             interval_heartbeat_ms: (25 * 1000 + jitter).max(0) as u32,
             reason: None,

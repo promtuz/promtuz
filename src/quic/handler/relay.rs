@@ -1,9 +1,10 @@
-use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
-use common::msg::resolver::RelayHeartbeat;
-use common::msg::resolver::RelayHello;
-use common::quic::send_uni;
-use common::ret;
+use std::sync::Arc;
+
+use anyhow::Result;
+use anyhow::anyhow;
+use common::msg::resolver::LifetimeP;
+use common::msg::resolver::ResolverPacket;
+use quinn::Connection;
 
 use crate::quic::handler::Handler;
 use crate::resolver::ResolverRef;
@@ -15,46 +16,61 @@ pub(super) trait HandleRelay {
 impl HandleRelay for Handler {
     async fn handle_relay(self, resolver: ResolverRef) {
         loop {
-            match self.conn.accept_uni().await {
-                Ok(mut recv) => {
-                    let conn = self.conn.clone();
-                    let resolver = resolver.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            let conn = conn.clone();
-                            match recv.read_chunk(4096, true).await {
-                                Ok(Some(chunk)) => {
-                                    let bytes = chunk.bytes;
-                                    if let Ok(hello) = RelayHello::from_cbor(&bytes) {
-                                        let hello_ack = match resolver
-                                            .lock()
-                                            .await
-                                            .register_relay(conn.clone(), &hello)
-                                        {
-                                            Ok(ack) => ret!(ack.to_cbor().ok()),
-                                            Err(close) => return close.close(&conn),
-                                        };
-                                        send_uni(&conn, &hello_ack).await.ok();
-                                    } else if let Ok(_hb) = RelayHeartbeat::from_cbor(&bytes) {
-                                        // println!("RELAY_HB");
-                                    } else {
-                                        println!(
-                                            "RELAY_PACKET: {}",
-                                            String::from_utf8_lossy(&bytes)
-                                        );
-                                    }
-                                },
-                                Ok(None) => break,
-                                Err(_) => break,
-                            }
-                        }
-                    });
-                },
+            let mut recv = match self.conn.accept_uni().await {
+                Ok(recv) => recv,
                 Err(err) => {
                     println!("RELAY_CLOSE: {err}");
                     break;
                 },
-            }
+            };
+
+            let conn = self.conn.clone();
+            let resolver = resolver.clone();
+
+            tokio::spawn(async move {
+                while let Ok(packet) = ResolverPacket::unpack(&mut recv).await {
+                    if let Err(e) = handle_packet(conn.clone(), resolver.clone(), packet).await {
+                        eprintln!("Packet handling error: {e}");
+                    }
+                }
+            });
         }
+    }
+}
+
+async fn handle_packet(
+    conn: Arc<Connection>, resolver: ResolverRef, packet: ResolverPacket,
+) -> Result<()> {
+    use ResolverPacket::*;
+    match packet {
+        Lifetime(liftime) => handle_lifetime(conn.clone(), resolver.clone(), liftime).await,
+        // _ => Err(anyhow!("No!")),
+    }
+}
+
+async fn handle_lifetime(
+    conn: Arc<Connection>, resolver: ResolverRef, packet: LifetimeP,
+) -> Result<()> {
+    use LifetimeP::*;
+    match packet {
+        hello @ RelayHello { .. } => {
+            let hello_ack = match resolver.lock().await.register_relay(conn.clone(), &hello) {
+                Ok(ack) => ResolverPacket::Lifetime(ack),
+                Err(close) => {
+                    return {
+                        close.close(&conn);
+                        Err(anyhow!("closed"))
+                    };
+                },
+            };
+
+            let mut send = conn.open_uni().await?;
+            hello_ack.send(&mut send).await?;
+            send.finish()?;
+
+            Ok(())
+        },
+        RelayHeartbeat { .. } => Ok(()),
+        _ => Err(anyhow!("No!")),
     }
 }
