@@ -4,11 +4,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use common::crypto::PublicKey;
-use common::crypto::StaticSecret;
-use common::crypto::sign::SigningKey;
 use jni::objects::GlobalRef;
-use jni::objects::JByteArray;
 use jni::objects::JObject;
 
 use crate::JVM;
@@ -24,35 +20,6 @@ pub fn has_internet() -> bool {
 pub fn systime() -> Duration {
     let now = SystemTime::now();
     now.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0))
-}
-
-pub trait KeyConversion {
-    fn to_bytes(self) -> [u8; 32];
-    fn to_public(self) -> PublicKey;
-    fn to_secret(self) -> StaticSecret;
-    fn to_signing(self) -> SigningKey;
-}
-
-impl KeyConversion for JByteArray<'_> {
-    fn to_bytes(self) -> [u8; 32] {
-        let vm = JVM.get().unwrap();
-        let env = vm.attach_current_thread().unwrap();
-
-        let vec_arr = env.convert_byte_array(self).unwrap();
-        (*vec_arr).try_into().unwrap()
-    }
-
-    fn to_public(self) -> PublicKey {
-        PublicKey::from_bytes(&self.to_bytes()).expect("not a ed25519 public key")
-    }
-
-    fn to_secret(self) -> StaticSecret {
-        StaticSecret::from(self.to_bytes())
-    }
-
-    fn to_signing(self) -> SigningKey {
-        SigningKey::from(self.to_bytes())
-    }
 }
 
 pub trait AsJni {
