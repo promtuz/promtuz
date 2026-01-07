@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::msg::RelayId;
+use crate::msg::{RelayId, pack::Packable};
 
 
 #[serde_as]
@@ -19,8 +19,14 @@ pub enum ClientRequest {
     GetRelays(),
 }
 
+// TEMPORARY
+impl Packable for ClientRequest {}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientResponse {
     /// Resolver's response to [ClientRequest::GetRelays]
     GetRelays { relays: Vec<RelayDescriptor> },
 }
+
+// TEMPORARY
+impl Packable for ClientResponse {}

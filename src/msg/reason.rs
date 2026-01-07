@@ -7,6 +7,7 @@ pub enum CloseReason {
     AlreadyConnected,
     ShuttingDown,
     Reconnecting,
+    PacketMismatch
 }
 
 impl CloseReason {

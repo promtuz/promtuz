@@ -1,6 +1,6 @@
 use crate::quic::id::NodeId;
 
-pub mod cbor;
+pub mod pack;
 pub mod client;
 pub mod reason;
 pub mod relay;

@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 
 use serde_bytes;
 
-use crate::msg::cbor::ToCbor;
+use crate::msg::pack::{Packable, Packer, Unpacker};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum HandshakeP {
@@ -50,6 +50,8 @@ pub enum RelayPacket {
     Handshake(HandshakeP),
     Misc(MiscP),
 }
+
+impl Packable for RelayPacket {}
 
 impl RelayPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {

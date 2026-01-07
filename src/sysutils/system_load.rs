@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{RefreshKind, System};
 
 /// (CPU_USAGE, RAM_USAGE)
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub struct SystemLoad(u8, u8);
 
 impl SystemLoad {
