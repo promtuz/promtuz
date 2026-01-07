@@ -123,13 +123,9 @@ impl Relay {
 
         RelayPacket::Misc(MiscP::PubAddressReq).send(&mut tx).await.ok()?;
 
-        let len = rx.read_u32().await.ok()? as usize;
-        let mut packet = vec![0; len];
-        rx.read_exact(&mut packet).await.ok()?;
-
-        match RelayPacket::from_cbor(&packet).ok()? {
+        match RelayPacket::unpack(&mut rx).await.ok()? {
             RelayPacket::Misc(MiscP::PubAddressRes { addr }) => Some(addr),
-            _ => None,
+            _ => None
         }
     }
 

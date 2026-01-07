@@ -1,4 +1,3 @@
-use common::msg::pack::{Packable, Packer};
 use jni::objects::GlobalRef;
 use log::trace;
 use parking_lot::Mutex;
@@ -25,12 +24,11 @@ pub enum InternalEvent {
     Identity { event: IdentityEv },
 }
 
-impl Packable for InternalEvent {}
-
 pub fn emit_event(event: InternalEvent) {
     trace!("EVENT_EMIT: {:?}", event);
-
-    let event_bytes = event.to_cbor().unwrap();
+    
+    let mut event_bytes = vec![0u8; 0];
+    ciborium::into_writer(&event, &mut event_bytes).unwrap();
 
     let vm = JVM.get().expect("JVM not initialized");
     let mut env = vm.attach_current_thread().unwrap();

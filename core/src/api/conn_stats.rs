@@ -4,8 +4,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::PROTOCOL_VERSION;
-use common::msg::pack::Packable;
-use common::msg::pack::Packer;
 use jni::JNIEnv;
 use jni::sys::jint;
 use jni::sys::jobject;
@@ -135,8 +133,6 @@ pub struct NetworkStats {
     pub version: u16,
 }
 
-impl Packable for NetworkStats {}
-
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn getInternalConnectionState(_: JNIEnv, _: JC) -> jint {
     CONNECTION_STATE.load(Ordering::Relaxed)
@@ -186,9 +182,11 @@ fn gather_stats() -> NetworkStats {
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn getNetworkStats(env: JNIEnv, _: JC) -> jobject {
-    let stats = gather_stats();
+    let netstats = gather_stats();
+    let mut stats = vec![];
 
-    let stats = stats.to_cbor().unwrap();
+    ciborium::into_writer(&netstats, &mut stats).unwrap();
+
     let barray = env.byte_array_from_slice(&stats).unwrap();
 
     barray.into_raw()
