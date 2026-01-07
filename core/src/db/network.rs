@@ -10,6 +10,7 @@ use crate::db::db;
 use crate::db::from_row;
 
 #[derive(Debug)]
+#[allow(unused)]
 pub struct RelayRow {
     pub id: String,
     pub host: String,

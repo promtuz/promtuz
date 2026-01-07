@@ -1,4 +1,4 @@
-use common::msg::cbor::ToCbor;
+use common::msg::pack::{Packable, Packer};
 use jni::objects::GlobalRef;
 use log::trace;
 use parking_lot::Mutex;
@@ -24,6 +24,8 @@ pub enum InternalEvent {
     Connection { state: ConnectionState },
     Identity { event: IdentityEv },
 }
+
+impl Packable for InternalEvent {}
 
 pub fn emit_event(event: InternalEvent) {
     trace!("EVENT_EMIT: {:?}", event);

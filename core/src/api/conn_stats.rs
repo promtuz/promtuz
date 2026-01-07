@@ -4,7 +4,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::PROTOCOL_VERSION;
-use common::msg::cbor::ToCbor;
+use common::msg::pack::Packable;
+use common::msg::pack::Packer;
 use jni::JNIEnv;
 use jni::sys::jint;
 use jni::sys::jobject;
@@ -133,6 +134,8 @@ pub struct NetworkStats {
 
     pub version: u16,
 }
+
+impl Packable for NetworkStats {}
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn getInternalConnectionState(_: JNIEnv, _: JC) -> jint {

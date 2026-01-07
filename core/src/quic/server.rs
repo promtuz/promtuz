@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use common::PROTOCOL_VERSION;
 use common::crypto::SigningKey;
-use common::msg::cbor::FromCbor;
+use common::msg::pack::Unpacker;
 use common::msg::relay::HandshakeP;
 use common::msg::relay::MiscP;
 use common::msg::relay::RelayPacket;

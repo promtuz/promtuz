@@ -1,7 +1,6 @@
 use common::crypto::SigningKey;
 use common::msg::reason::CloseReason;
 use jni::JNIEnv;
-use jni::objects::JByteArray;
 use jni::objects::JObject;
 use jni_macro::jni;
 use log::debug;

@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::quic::config::build_client_cfg;
-use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca_bytes;
 use common::quic::config::setup_crypto_provider;
 use common::quic::protorole::ProtoRole;

@@ -28,7 +28,7 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
     debug!("IDENTITY_QR: {identity:?}");
     debug!("PUBLIC ID ?? {}", derive_user_id(&identity.ipk));
 
-    if let Some(ep) = ENDPOINT.get().cloned() {
+    if let Some(_ep) = ENDPOINT.get().cloned() {
         // FREEZE THE SCANNER - Call back to Android ViewModel
         match env.call_static_method(
             "com/promtuz/chat/presentation/viewmodel/QrScannerVM",

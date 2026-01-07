@@ -73,6 +73,7 @@ impl KotlinDeferred {
         .unwrap();
     }
 
+    #[allow(unused)]
     pub fn fail_str(self, msg: &str) {
         let jvm = JVM.get().unwrap();
         let mut env = jvm.attach_current_thread().unwrap();

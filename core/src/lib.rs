@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::JClass;
 use once_cell::sync::Lazy;
@@ -15,11 +14,10 @@ mod api;
 mod data;
 mod db;
 mod events;
+mod ndk;
 mod quic;
 mod utils;
-mod ndk;
 
-type JE<'local> = JNIEnv<'local>;
 type JC<'local> = JClass<'local>;
 
 //////////////////////////////////////////////
