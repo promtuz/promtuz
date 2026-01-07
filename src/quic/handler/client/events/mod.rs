@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::msg::cbor::FromCbor;
+use common::msg::pack::Unpacker;
 use common::msg::relay::RelayPacket;
 
 use crate::quic::handler::client::ClientCtxHandle;

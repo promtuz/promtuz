@@ -1,21 +1,18 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use common::msg::cbor::{FromCbor, ToCbor};
+use common::msg::pack::Unpacker;
 use quinn::Connection;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
+use super::super::msg::dht::DhtRequest;
+use super::super::msg::dht::DhtResponse;
 use crate::dht::NodeContact;
 use crate::dht::UserRecord;
 use crate::quic::handler::Handler;
-use super::super::msg::dht::{DhtRequest, DhtResponse};
 use crate::relay::RelayRef;
 use crate::util::systime;
-
-fn frame_packet(packet: &[u8]) -> Vec<u8> {
-    let size: [u8; 4] = (packet.len() as u32).to_be_bytes();
-    [&size, packet].concat()
-}
 
 async fn read_framed(recv: &mut (impl AsyncReadExt + Unpin)) -> Option<Vec<u8>> {
     let len = recv.read_u32().await.ok()?;
@@ -26,9 +23,7 @@ async fn read_framed(recv: &mut (impl AsyncReadExt + Unpin)) -> Option<Vec<u8>> 
 
 /// Send a single DHT request over a fresh peer connection.
 pub async fn send_dht_request(
-    relay: RelayRef,
-    target: NodeContact,
-    req: DhtRequest,
+    relay: RelayRef, target: NodeContact, _req: DhtRequest,
 ) -> Result<DhtResponse> {
     let (endpoint, cfg) = {
         let r = relay.lock().await;
@@ -37,9 +32,11 @@ pub async fn send_dht_request(
     let conn: Connection =
         endpoint.connect_with((*cfg).clone(), target.addr, &target.id.to_string())?.await?;
 
-    let (mut send, mut recv) = conn.open_bi().await?;
-    send.write_all(&frame_packet(&req.to_cbor()?)).await?;
-    send.flush().await?;
+    let (mut _send, mut recv) = conn.open_bi().await?;
+
+    // TODO: 
+    // send.write_all(&frame_packet(&req.to_cbor()?)).await?;
+    // send.flush().await?;
 
     if let Some(bytes) = read_framed(&mut recv).await {
         let resp = DhtResponse::from_cbor(&bytes)?;
@@ -84,7 +81,8 @@ impl Handler {
                         let _ = send_error(&mut send, "bad packet").await;
                         continue;
                     };
-                    if let Err(err) = handle_request(relay.clone(), req, &mut send, remote_addr).await
+                    if let Err(err) =
+                        handle_request(relay.clone(), req, &mut send, remote_addr).await
                     {
                         println!("PEER: handler error: {err}");
                         let _ = send_error(&mut send, "internal error").await;
@@ -96,10 +94,9 @@ impl Handler {
     }
 }
 
+#[allow(unused)]
 async fn handle_request(
-    relay: RelayRef,
-    req: DhtRequest,
-    send: &mut (impl AsyncWriteExt + Unpin),
+    relay: RelayRef, req: DhtRequest, send: &mut (impl AsyncWriteExt + Unpin),
     _remote_addr: SocketAddr,
 ) -> Result<()> {
     match req {
@@ -111,9 +108,10 @@ async fn handle_request(
                 dht.upsert_node(NodeContact { id: from, addr, last_seen: now });
             }
             let resp = DhtResponse::Pong { from: relay.lock().await.id };
-            send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            send.flush().await?;
-        }
+            todo!();
+            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+            // send.flush().await?;
+        },
         DhtRequest::StoreUser { record } => {
             let ok = {
                 let dht = { relay.lock().await.dht.clone() };
@@ -125,38 +123,42 @@ async fn handle_request(
             } else {
                 DhtResponse::Error { reason: "store rejected".into() }
             };
-            send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            send.flush().await?;
-        }
+            todo!();
+            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+            // send.flush().await?;
+        },
         DhtRequest::FindUser { ipk } => {
             let (record, nodes) = {
                 let dht = { relay.lock().await.dht.clone() };
                 let dht = dht.read().await;
                 (dht.get_user(&ipk), dht.replication_targets(&ipk))
             };
+            todo!();
             if let Some(rec) = record {
                 let resp = DhtResponse::UserResult { records: vec![rec] };
-                send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+                // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
             } else {
                 let resp = DhtResponse::NodeResult { nodes };
-                send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+                // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
             }
             send.flush().await?;
-        }
+        },
         DhtRequest::FindNode { target } => {
             let dht = { relay.lock().await.dht.clone() };
             let nodes = { dht.read().await.get_closest_nodes(target, 8) };
             let resp = DhtResponse::NodeResult { nodes };
-            send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            send.flush().await?;
-        }
+            todo!();
+            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+            // send.flush().await?;
+        },
     }
     Ok(())
 }
 
-async fn send_error(send: &mut (impl AsyncWriteExt + Unpin), reason: &str) -> Result<()> {
-    let resp = DhtResponse::Error { reason: reason.to_string() };
-    send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-    send.flush().await?;
-    Ok(())
+async fn send_error(_send: &mut (impl AsyncWriteExt + Unpin), reason: &str) -> Result<()> {
+    let _resp = DhtResponse::Error { reason: reason.to_string() };
+    todo!();
+    // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+    // send.flush().await?;
+    // Ok(())
 }

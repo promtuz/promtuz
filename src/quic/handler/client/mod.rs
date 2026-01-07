@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use common::crypto::PublicKey;
 use common::crypto::get_nonce;
+use quinn::Connection;
 use quinn::SendStream;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
@@ -19,6 +20,7 @@ pub struct ClientContext {
     pub ipk: Option<PublicKey>,
     pub relay: RelayRef,
     pub send: Option<SendStream>,
+    pub conn: Arc<Connection>,
 }
 
 pub type ClientCtxHandle = Arc<RwLock<ClientContext>>;
@@ -34,6 +36,7 @@ impl Handler {
             ipk: None,
             relay: relay.clone(),
             send: None,
+            conn: conn.clone(),
         }));
 
         while let Ok((send, mut recv)) = conn.accept_bi().await {

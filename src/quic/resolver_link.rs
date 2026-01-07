@@ -4,24 +4,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use common::msg::cbor::FromCbor;
-use common::msg::cbor::ToCbor;
+use common::msg::pack::Unpacker;
 use common::msg::reason::CloseReason;
-use common::msg::resolver::HelloAck;
-use common::msg::resolver::RelayHeartbeat;
-use common::msg::resolver::RelayHello;
+use common::msg::resolver::LifetimeP;
+use common::msg::resolver::ResolverPacket;
 use common::quic::id::NodeId;
-use common::sysutils::system_load;
 use quinn::Connection;
 use quinn::TransportConfig;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::watch::Receiver;
 use tokio::task::JoinHandle;
 
 use crate::quic::dialer::connect_to_any_seed;
 use crate::relay::RelayRef;
 use crate::util::systime;
-use crate::util::systime_sec;
 
 pub struct ResolverLink {
     relay: RelayRef,
@@ -69,53 +64,46 @@ impl ResolverLink {
         })
     }
 
-    /// Sends node status to current resolver
-    ///
-    /// * `allow(unused)` - will use in future
-    #[allow(unused)]
-    async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = self.id().await;
-        let start_ms = self.relay.lock().await.start_ms;
-
-        let interval = ack.interval_heartbeat_ms as u64;
-
-        tokio::spawn(async move {
-            let mut send = match conn.open_uni().await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            loop {
-                if let Ok(heartbeat) = (RelayHeartbeat {
-                    relay_id: id,
-                    load: system_load().await,
-                    uptime_seconds: systime_sec() - ((start_ms / 1000) as u64),
-                })
-                .to_cbor()
-                {
-                    println!("HEARTBEAT: RTT({}ms)", conn.rtt().as_millis());
-
-                    if send.write_all(&heartbeat).await.is_err() {
-                        break;
-                    }
-                    if send.flush().await.is_err() {
-                        break;
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_millis(interval)).await;
-            }
-        });
-
-        Ok(())
-    }
+    // /// Sends node status to current resolver
+    // ///
+    // /// * `allow(unused)` - will use in future
+    // #[allow(unused)]
+    // async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
+    //     let conn = self.conn.clone();
+    //     let id = self.id().await;
+    //     let start_ms = self.relay.lock().await.start_ms;
+    //     let interval = ack.interval_heartbeat_ms as u64;
+    //     tokio::spawn(async move {
+    //         let mut send = match conn.open_uni().await {
+    //             Ok(s) => s,
+    //             Err(_) => return,
+    //         };
+    //         loop {
+    //             if ResolverPacket::Lifetime(common::msg::resolver::LifetimeP::RelayHeartbeat {
+    //                 relay_id: id,
+    //                 load: system_load().await,
+    //                 uptime_seconds: systime_sec() - ((start_ms / 1000) as u64),
+    //             })
+    //             .send(&mut send)
+    //             .await
+    //             .is_err()
+    //             {
+    //                 break;
+    //             };
+    //             tokio::time::sleep(Duration::from_millis(interval)).await;
+    //         }
+    //     });
+    //     Ok(())
+    // }
 
     pub async fn hello(&self) -> Result<()> {
-        let hello =
-            RelayHello { relay_id: self.id().await, timestamp: systime().as_millis() }.to_cbor()?;
-
         let mut send = self.conn.open_uni().await?;
-        send.write_all(&hello).await?;
+        ResolverPacket::Lifetime(LifetimeP::RelayHello {
+            relay_id: self.id().await,
+            timestamp: systime().as_millis(),
+        })
+        .send(&mut send)
+        .await?;
         send.finish()?;
 
         println!("SENT: RelayHello");
@@ -135,7 +123,9 @@ impl ResolverLink {
             };
 
             let packet = recv.read_to_end(4096).await?;
-            if let Ok(ack) = HelloAck::from_cbor(&packet) {
+            if let Ok(ResolverPacket::Lifetime(ack @ LifetimeP::HelloAck { .. })) =
+                ResolverPacket::from_cbor(&packet)
+            {
                 println!("RECV_ACK: {ack:?}");
                 continue;
             }
