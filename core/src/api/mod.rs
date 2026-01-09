@@ -1,10 +1,13 @@
+use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::quic::config::build_client_cfg;
+// use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca_bytes;
 use common::quic::config::setup_crypto_provider;
 use common::quic::protorole::ProtoRole;
+use ed25519_dalek::SigningKey;
 use jni::JNIEnv;
 use jni::objects::JObject;
 use jni_macro::jni;
@@ -20,6 +23,7 @@ use crate::RUNTIME;
 use crate::data::identity::Identity;
 use crate::jni_try;
 use crate::ndk::read_raw_res;
+use crate::quic::peer_config::build_peer_server_cfg;
 
 pub mod conn_stats;
 pub mod connection;
@@ -49,12 +53,15 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     let rt = RUNTIME.handle().clone();
     let _guard = rt.enter();
 
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
 
-    // let server_cfg = build_server_cfg(cert_path, key_path, alpn_protocols);
+    let server_cfg = Identity::secret_key(&mut env)
+        .and_then(|key| build_peer_server_cfg(SigningKey::from(key)))
+        .ok();
 
     let mut endpoint =
-        Endpoint::new(EndpointConfig::default(), None, socket, default_runtime().unwrap()).unwrap();
+        Endpoint::new(EndpointConfig::default(), server_cfg, socket, default_runtime().unwrap())
+            .unwrap();
 
     if let Ok(addr) = endpoint.local_addr() {
         info!("API: ENDPOINT BIND TO {}", addr);

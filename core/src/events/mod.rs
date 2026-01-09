@@ -1,3 +1,6 @@
+//! Internal Events used for inter-op between ui and libcore
+//! Should not be used for events transmitted over network 
+
 use jni::objects::GlobalRef;
 use log::trace;
 use parking_lot::Mutex;

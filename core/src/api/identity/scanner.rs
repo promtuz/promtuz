@@ -1,3 +1,6 @@
+use anyhow::Result;
+use common::quic::config::build_client_cfg;
+use common::quic::id::UserId;
 use common::quic::id::derive_user_id;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
@@ -6,10 +9,14 @@ use jni_macro::jni;
 use log::debug;
 use log::error;
 use log::info;
+use tokio::task::JoinHandle;
 
 use crate::ENDPOINT;
 use crate::JC;
+use crate::RUNTIME;
 use crate::data::idqr::IdentityQr;
+use crate::events::identity::IdentityEv;
+use crate::quic::peer_config::build_peer_client_cfg;
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
@@ -28,7 +35,7 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
     debug!("IDENTITY_QR: {identity:?}");
     debug!("PUBLIC ID ?? {}", derive_user_id(&identity.ipk));
 
-    if let Some(_ep) = ENDPOINT.get().cloned() {
+    if let Some(ep) = ENDPOINT.get().cloned() {
         // FREEZE THE SCANNER - Call back to Android ViewModel
         match env.call_static_method(
             "com/promtuz/chat/presentation/viewmodel/QrScannerVM",
@@ -40,6 +47,21 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
             Err(e) => error!("Failed to call onIdentityQrScanned: {:?}", e),
         }
 
-        // ep.connect_with(config, identity.addr, server_name)
+        RUNTIME.spawn(async move {
+            let conn = ep
+                .connect_with(
+                    build_peer_client_cfg().unwrap(),
+                    identity.addr,
+                    &UserId::derive(&identity.ipk),
+                )?
+                .await?;
+
+            let (mut send, mut recv) = conn.open_bi().await?;
+
+
+            // IdentityEv
+
+            Ok::<(), anyhow::Error>(())
+        });
     }
 }
