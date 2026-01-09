@@ -1,8 +1,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
-use common::msg::relay::HandshakeP;
-use common::msg::relay::RelayPacket;
+use common::proto::client_rel::HandshakeP;
+use common::proto::client_rel::RelayPacket;
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 

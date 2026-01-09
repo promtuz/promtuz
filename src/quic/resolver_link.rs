@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use common::msg::pack::Unpacker;
-use common::msg::reason::CloseReason;
-use common::msg::resolver::LifetimeP;
-use common::msg::resolver::ResolverPacket;
+use common::proto::pack::Unpacker;
+use common::quic::CloseReason;
+use common::proto::relay_res::LifetimeP;
+use common::proto::relay_res::ResolverPacket;
 use common::quic::id::NodeId;
 use quinn::Connection;
 use quinn::TransportConfig;
@@ -79,7 +79,7 @@ impl ResolverLink {
     //             Err(_) => return,
     //         };
     //         loop {
-    //             if ResolverPacket::Lifetime(common::msg::resolver::LifetimeP::RelayHeartbeat {
+    //             if ResolverPacket::Lifetime(common::proto::relay_res::LifetimeP::RelayHeartbeat {
     //                 relay_id: id,
     //                 load: system_load().await,
     //                 uptime_seconds: systime_sec() - ((start_ms / 1000) as u64),

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::msg::reason::CloseReason;
-use common::msg::relay::RelayPacket;
+use common::quic::CloseReason;
+use common::proto::client_rel::RelayPacket;
 use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;

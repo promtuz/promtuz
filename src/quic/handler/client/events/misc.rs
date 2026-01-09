@@ -1,7 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
-use common::msg::relay::MiscP;
-use common::msg::relay::RelayPacket;
+use common::proto::client_rel::MiscP;
+use common::proto::client_rel::RelayPacket;
 
 use crate::quic::handler::client::ClientCtxHandle;
 

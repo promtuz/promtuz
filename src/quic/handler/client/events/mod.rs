@@ -1,6 +1,6 @@
 use anyhow::Result;
-use common::msg::pack::Unpacker;
-use common::msg::relay::RelayPacket;
+use common::proto::pack::Unpacker;
+use common::proto::client_rel::RelayPacket;
 
 use crate::quic::handler::client::ClientCtxHandle;
 use crate::quic::handler::client::events::handshake::handle_handshake;
