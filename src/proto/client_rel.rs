@@ -1,3 +1,5 @@
+//! Client to Relay Proto
+
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use serde_bytes;
 
-use crate::msg::pack::{Packable, Packer, Unpacker};
+use crate::proto::pack::{Packable, Packer};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum HandshakeP {

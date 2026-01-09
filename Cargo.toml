@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-crypto = ["dep:chacha20poly1305", "dep:hkdf", "dep:x25519-dalek", "dep:sha2"]
-sign = ["crypto", "dep:ed25519-dalek"]
-msg = ["quic", "sysutils"]
+crypto = ["dep:chacha20poly1305", "dep:hkdf", "dep:x25519-dalek", "dep:ed25519-dalek", "dep:sha2"]
+proto = ["quic", "sysutils"]
 quic = [
   "dep:rustls",
   "dep:rustls-pemfile",
@@ -23,6 +22,8 @@ sysutils = ["dep:sysinfo", "tokio"]
 tokio = ["dep:tokio"]
 macros = []
 node = []
+# aka libcore
+client = []
 
 [[bin]]
 name = "certgen"

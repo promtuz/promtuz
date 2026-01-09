@@ -1,12 +1,14 @@
+//! Relay to Resolver Proto
+
 use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
-    msg::{
+    proto::{
         RelayId,
-        pack::{Packable, Packer, Unpacker},
+        pack::{Packable, Packer},
     },
     sysutils::SystemLoad,
 };

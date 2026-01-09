@@ -1,6 +1,5 @@
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 
-#[cfg(feature = "sign")]
 pub use ed25519_dalek::{SecretKey, SigningKey, VerifyingKey as PublicKey};
 
 use hkdf::Hkdf;
@@ -10,7 +9,6 @@ pub use x25519_dalek::{EphemeralSecret, SharedSecret, StaticSecret, PublicKey as
 
 pub mod encrypt;
 
-#[cfg(feature = "sign")]
 pub mod sign;
 
 pub fn get_secret_key() -> StaticSecret {
@@ -35,7 +33,6 @@ pub fn get_static_keypair() -> (StaticSecret, x25519_dalek::PublicKey) {
     (esk, epk)
 }
 
-#[cfg(feature = "sign")]
 pub fn get_signing_key() -> SigningKey {
     SigningKey::generate(&mut OsRng)
 }

@@ -1,10 +1,11 @@
+//! Client to Resolver Proto
+
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::msg::{RelayId, pack::Packable};
-
+use crate::proto::{RelayId, pack::Packable};
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]

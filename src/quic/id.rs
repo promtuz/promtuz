@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::{fmt, ops::Deref, str::FromStr};
 
 use data_encoding::BASE32_NOPAD;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -29,6 +29,13 @@ impl<const N: usize> fmt::Display for BaseId<N> {
 impl<const N: usize> fmt::Debug for BaseId<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
+    }
+}
+impl<const N: usize> Deref for BaseId<N> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        str::from_utf8(self.as_bytes()).unwrap()
     }
 }
 
@@ -76,6 +83,12 @@ pub fn derive_node_id(pubkey: &p256::PublicKey) -> NodeId {
 }
 
 pub type UserId = BaseId<12>;
+
+impl UserId {
+    pub fn derive(seed: &[u8; 32]) -> Self {
+        derive_user_id(seed)
+    }
+}
 
 pub fn derive_user_id(seed: &[u8; 32]) -> UserId {
     let hash = blake3::hash(seed);
