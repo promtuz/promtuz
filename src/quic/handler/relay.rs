@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::anyhow;
-use common::msg::pack::Unpacker;
-use common::msg::resolver::LifetimeP;
-use common::msg::resolver::ResolverPacket;
+use common::proto::pack::Unpacker;
+use common::proto::relay_res::LifetimeP;
+use common::proto::relay_res::ResolverPacket;
 use quinn::Connection;
 
 use crate::quic::handler::Handler;

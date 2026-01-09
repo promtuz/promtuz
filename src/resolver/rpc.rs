@@ -1,8 +1,8 @@
 use anyhow::Result;
 
-use common::msg::client::RelayDescriptor;
-use common::msg::client::ClientRequest;
-use common::msg::client::ClientResponse;
+use common::proto::client_res::RelayDescriptor;
+use common::proto::client_res::ClientRequest;
+use common::proto::client_res::ClientResponse;
 use crate::resolver::Resolver;
 
 pub trait HandleRPC {

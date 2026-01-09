@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use common::graceful;
-use common::msg::RelayId;
-use common::msg::ResolverId;
-use common::msg::reason::CloseReason;
-use common::msg::resolver::LifetimeP;
+use common::proto::RelayId;
+use common::proto::ResolverId;
+use common::proto::relay_res::LifetimeP;
+use common::quic::CloseReason;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;

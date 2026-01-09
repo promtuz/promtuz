@@ -10,7 +10,7 @@ mod util;
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::msg::reason::CloseReason;
+use common::quic::CloseReason;
 use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;

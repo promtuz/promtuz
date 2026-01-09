@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use common::msg::RelayId;
+use common::proto::RelayId;
 use serde::Deserialize;
 use serde::Serialize;
 
