@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 
 use common::PROTOCOL_VERSION;
 use common::crypto::SigningKey;
-use common::msg::pack::Unpacker;
-use common::msg::relay::HandshakeP;
-use common::msg::relay::MiscP;
-use common::msg::relay::RelayPacket;
+use common::proto::pack::Unpacker;
+use common::proto::client_rel::HandshakeP;
+use common::proto::client_rel::MiscP;
+use common::proto::client_rel::RelayPacket;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use log::debug;
 use log::error;

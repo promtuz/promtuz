@@ -14,7 +14,7 @@ std = []
 # Workspace Crates
 jni_macro = { path = "../jni_macro" }
 db = { path = "../db" }
-common = { path = "../../common", features = ["crypto", "sign", "msg"] }
+common = { path = "../../common", features = ["crypto", "proto"] }
 
 # Public Crates
 android_logger = "0.15"

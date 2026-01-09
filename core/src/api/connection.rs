@@ -1,5 +1,5 @@
 use common::crypto::SigningKey;
-use common::msg::reason::CloseReason;
+use common::quic::CloseReason;
 use jni::JNIEnv;
 use jni::objects::JObject;
 use jni_macro::jni;
@@ -54,7 +54,8 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
                 Ok(relay) => {
                     let id = relay.id.clone();
                     debug!("RELAY(BEST): Found [{}]", id);
-                    // FIXME: temporaily cloned, for future safety only pass public key and move `sign` helper function somewhere else
+                    // FIXME: temporaily cloned, for future safety only pass public key and move
+                    // `sign` helper function somewhere else
                     match relay.connect(isk.clone()).await {
                         Ok(_) => break,
                         Err(RelayConnError::Continue) => continue,

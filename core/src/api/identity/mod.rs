@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use common::msg::pack::Unpacker;
+use common::proto::pack::Unpacker;
 use jni::JNIEnv;
 use jni::objects::JObject;
 use jni::objects::JValue;
