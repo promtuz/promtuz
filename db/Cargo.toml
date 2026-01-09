@@ -1,0 +1,12 @@
+[package]
+name = "db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log.workspace = true
+once_cell.workspace = true
+rusqlite.workspace = true
+parking_lot.workspace = true
+rusqlite_migration.workspace = true
+anyhow.workspace = true

@@ -12,7 +12,6 @@ use tokio::runtime::Runtime;
 
 mod api;
 mod data;
-mod db;
 mod events;
 mod ndk;
 mod quic;
@@ -24,9 +23,6 @@ type JC<'local> = JClass<'local>;
 //============ GLOBAL VARIABLES ============//
 //////////////////////////////////////////////
 static JVM: OnceLock<JavaVM> = OnceLock::new();
-
-/// App's Package Name
-static PACKAGE_NAME: &str = "com.promtuz.chat";
 
 /// Global Tokio Runtime
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().unwrap());

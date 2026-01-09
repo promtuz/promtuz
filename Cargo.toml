@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "jni_macro"]
+members = ["core", "db", "jni_macro"]
 resolver = "3"
 
 # [profile.release]
@@ -13,3 +13,11 @@ resolver = "3"
 # debug = false
 # debug-assertions = false
 # overflow-checks = false
+
+[workspace.dependencies]
+log = "0.4.28"
+once_cell = "1.21.3"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+parking_lot = "0.12.5"
+rusqlite_migration = "2.3.0"
+anyhow = { version = "1.0.100" }

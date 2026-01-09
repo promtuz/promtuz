@@ -5,9 +5,9 @@ use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
 
-use crate::PRAGMA;
-use crate::db::db;
-use crate::db::from_row;
+use crate::db;
+use crate::macros::PRAGMA;
+use crate::macros::from_row;
 
 #[derive(Debug)]
 #[allow(unused)]

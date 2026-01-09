@@ -1,4 +1,5 @@
 use common::crypto::get_signing_key;
+use db::identity::IdentityRow;
 use jni::JNIEnv;
 use jni::objects::JString;
 use jni_macro::jni;
@@ -6,7 +7,6 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::JC;
 use crate::data::identity::Identity;
-use crate::db::identity::IdentityRow;
 use crate::ndk::key_manager::KeyManager;
 use crate::unwrap_or_ret;
 use crate::utils::systime;
