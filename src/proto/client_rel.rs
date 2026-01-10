@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 
+use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -56,10 +57,14 @@ pub enum RelayPacket {
 impl Packable for RelayPacket {}
 
 impl RelayPacket {
-    pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
+    pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin + Send)) -> anyhow::Result<()> {
         let packet = self.pack()?;
 
         tx.write_all(&packet).await?;
-        Ok(tx.flush().await?)
+        tx.flush().await?;
+
+        debug!("PACKET_SENT: {}", hex::encode(packet));
+
+        Ok(())
     }
 }

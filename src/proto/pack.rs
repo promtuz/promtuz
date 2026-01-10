@@ -1,4 +1,5 @@
 use anyhow::Result;
+use anyhow::anyhow;
 use async_trait::async_trait;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -30,7 +31,7 @@ where
     #[inline]
     fn pack(&self) -> Result<Vec<u8>> {
         let packet = self.to_cbor()?;
-        let size: [u8; 4] = (packet.len() as u32).to_be_bytes();
+        let size: [u8; 2] = (packet.len() as u16).to_be_bytes();
         Ok([&size, packet.as_slice()].concat())
     }
 }
@@ -61,10 +62,20 @@ where
     where
         R: AsyncReadExt + Unpin + Send,
     {
-        let frame_size = rx.read_u32().await?;
-        let mut frame = vec![0u8; frame_size as usize];
-        rx.read_exact(&mut frame).await?;
-
-        T::from_cbor(&frame)
+        unpack(rx).await
     }
+}
+
+#[inline(always)]
+pub async fn unpack<T: DeserializeOwned, R: AsyncReadExt + Unpin + Send>(rx: &mut R) -> Result<T> {
+    let frame_size = rx
+        .read_u16()
+        .await
+        .map_err(|e| anyhow!("can't read packet len: {e}"))?;
+    let mut frame = vec![0u8; frame_size as usize];
+    rx.read_exact(&mut frame)
+        .await
+        .map_err(|e| anyhow!("failed to read packet of size {frame_size}: {e}"))?;
+
+    T::from_cbor(&frame)
 }
