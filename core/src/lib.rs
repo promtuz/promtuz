@@ -38,7 +38,7 @@ pub extern "C" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jn
     JVM.set(vm).unwrap();
 
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Trace).with_tag("core"),
+        android_logger::Config::default().with_max_level(log::LevelFilter::Debug).with_tag("core"),
     );
 
     jni::sys::JNI_VERSION_1_6

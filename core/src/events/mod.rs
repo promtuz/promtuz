@@ -20,7 +20,7 @@ pub trait Emittable {
     fn emit(self);
 }
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone)]
 #[allow(unused)]
 pub enum InternalEvent {
     Connection { state: ConnectionState },

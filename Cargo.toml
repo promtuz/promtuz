@@ -2,17 +2,17 @@
 members = ["core", "db", "jni_macro"]
 resolver = "3"
 
-[profile.release]
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
-incremental = false
+# [profile.release]
+# opt-level = "z"
+# lto = "fat"
+# codegen-units = 1
+# panic = "abort"
+# strip = true
+# incremental = false
 
-debug = false
-debug-assertions = false
-overflow-checks = false
+# debug = false
+# debug-assertions = false
+# overflow-checks = false
 
 [workspace.dependencies]
 log = "0.4.28"

@@ -2,6 +2,9 @@
 
 use std::net::SocketAddr;
 
+use anyhow::Result;
+use anyhow::anyhow;
+use common::proto::client_peer::ClientPeerPacket;
 use common::proto::pack::Unpacker;
 use jni::JNIEnv;
 use jni::objects::JObject;
@@ -23,19 +26,17 @@ use crate::RUNTIME;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::data::relay::Relay;
-use crate::events::identity::IdentityEv;
 use crate::quic::server::RELAY;
-use crate::unwrap_or_ret;
 
 // static ESK: RwLock<Option<StaticSecret>> = RwLock::new(None);
 static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
 
-async fn get_addr(relay: &Relay) -> Option<SocketAddr> {
+async fn get_addr(relay: &Relay) -> Result<SocketAddr> {
     let ep = ENDPOINT.get().unwrap();
-    let local = ep.local_addr().ok()?; // no await yet
+    let local = ep.local_addr()?; // no await yet
 
     let ip = relay.public_addr().await?;
-    Some(SocketAddr::new(ip, local.port()))
+    Ok(SocketAddr::new(ip, local.port()))
 }
 
 #[jni(base = "com.promtuz.core", class = "API")]
@@ -43,62 +44,71 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
     info!("IDENTITY: INIT");
     let class = env.new_global_ref(class).unwrap();
 
-    let identity = unwrap_or_ret!(Identity::get());
+    let identity = Identity::get().expect("identity not found");
 
     RUNTIME.spawn(async move {
-        let relay = RELAY.read().clone()?;
+        let block: Result<()> = async move {
+            let relay = RELAY.read().clone().ok_or(anyhow!("relay unavailable"))?;
 
-        let addr = get_addr(&relay).await?;
+            let addr = get_addr(&relay).await?;
+            info!("IDENTITY: PUBLIC ADDR {addr}");
 
-        let qr = IdentityQr {
-            ipk: identity.ipk(),
-            // vfk: identity.vfk(),
-            // epk: epk.to_bytes(),
-            addr,
-            name: identity.name(),
-        };
+            let qr = IdentityQr {
+                ipk: identity.ipk(),
+                // vfk: identity.vfk(),
+                // epk: epk.to_bytes(),
+                addr,
+                name: identity.name(),
+            };
 
-        let jvm = JVM.get().unwrap();
-        let mut env = jvm.attach_current_thread().unwrap();
-        let qr_arr = &env.byte_array_from_slice(&qr.to_bytes()).unwrap();
-        env.call_method(&class, "onQRCreate", "([B)V", &[JValue::Object(qr_arr)]).unwrap();
+            info!("IDENTITY: QR {qr:?}");
 
-        let ep = ENDPOINT.get().unwrap().clone();
+            let jvm = JVM.get().unwrap();
+            let mut env = jvm.attach_current_thread().unwrap();
+            let qr_arr = &env.byte_array_from_slice(&qr.to_bytes()).unwrap();
+            env.call_method(&class, "onQRCreate", "([B)V", &[JValue::Object(qr_arr)]).unwrap();
 
-        let token = CancellationToken::new();
-        {
-            let mut guard = CONN_CANCEL.lock();
-            if let Some(old) = guard.take() {
-                old.cancel();
+            let ep = ENDPOINT.get().unwrap().clone();
+
+            let token = CancellationToken::new();
+            {
+                let mut guard = CONN_CANCEL.lock();
+                if let Some(old) = guard.take() {
+                    old.cancel();
+                }
+                *guard = Some(token.clone())
             }
-            *guard = Some(token.clone())
-        }
 
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        info!("IDENTITY: conn loop cancelled");
-                        break;
-                    }
-                    incoming = ep.accept() => {
-                        let Some(incoming) = incoming else { continue };
-                        let Ok(conn) = incoming.await else { continue };
-                        let Ok((_tx, mut rx)) = conn.accept_bi().await else { continue };
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            info!("IDENTITY: conn loop cancelled");
+                            break;
+                        }
+                        incoming = ep.accept() => {
+                            let Some(incoming) = incoming else { continue };
+                            let Ok(conn) = incoming.await else { continue };
+                            let Ok((_tx, mut recv)) = conn.accept_bi().await else { continue };
 
-                        let len = rx.read_u32().await.ok()? as usize;
-                        let mut packet = vec![0; len];
-                        rx.read_exact(&mut packet).await.ok()?;
-
-                        let msg = IdentityEv::from_cbor(&packet);
-                        info!("P2P_MSG: {msg:?}");
-                        break;
+                            while let Ok(packet) = ClientPeerPacket::unpack(&mut recv).await {
+                                info!("PEER_PACKET: {packet:?}");
+                            };
+                            break;
+                        }
                     }
                 }
-            }
 
-            Some(())
-        });
+                Some(())
+            });
+
+            Ok(())
+        }
+        .await;
+
+        if let Some(err) = block.err() {
+            log::error!("IDENTITY_ERR: {err}")
+        }
 
         Some(())
     });

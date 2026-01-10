@@ -31,24 +31,14 @@ pub mod identity;
 pub mod misc;
 pub mod welcome;
 
-#[macro_export]
-macro_rules! endpoint {
-    () => {
-        if let Some(ep) = $crate::ENDPOINT.get() {
-            ep
-        } else {
-            log::error!("API is not initialized.");
-            return;
-        }
-    };
-}
-
 /// Entry point for API
 ///
 /// Initializes Endpoint
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     info!("API: INIT START");
+    
+    jni_try!(setup_crypto_provider());
 
     let rt = RUNTIME.handle().clone();
     let _guard = rt.enter();
@@ -66,8 +56,6 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     if let Ok(addr) = endpoint.local_addr() {
         info!("API: ENDPOINT BIND TO {}", addr);
     }
-
-    jni_try!(setup_crypto_provider());
 
     let root_ca_bytes = jni_try!(read_raw_res(&mut env, &context, "root_ca"));
     let roots = jni_try!(load_root_ca_bytes(&root_ca_bytes));

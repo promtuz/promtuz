@@ -3,19 +3,21 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
+use anyhow::Result;
+use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
 use common::crypto::SigningKey;
-use common::proto::pack::Unpacker;
 use common::proto::client_rel::HandshakeP;
 use common::proto::client_rel::MiscP;
 use common::proto::client_rel::RelayPacket;
+use common::proto::pack::Unpacker;
+use common::proto::pack::unpack;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use log::debug;
 use log::error;
 use log::info;
 use parking_lot::RwLock;
 use quinn::ConnectionError;
-use tokio::io::AsyncReadExt;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
@@ -64,17 +66,11 @@ impl Relay {
                     .map_err(RelayConnError::Error)?;
 
                 loop {
-                    let mut packet = vec![0u8; recv.read_u32().await? as usize];
-                    recv.read_exact(&mut packet).await?;
-
-                    let msg = RelayPacket::from_cbor(&packet).map_err(RelayConnError::Error)?;
-
-                    match msg {
+                    match RelayPacket::unpack(&mut recv).await.map_err(RelayConnError::Error)? {
                         Handshake(ServerChallenge { nonce }) => {
                             let msg =
                                 [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
                                     .concat();
-
                             RelayPacket::Handshake(ClientProof { sig: isk.sign(&msg).to_bytes() })
                                 .send(&mut send)
                                 .await
@@ -117,15 +113,18 @@ impl Relay {
     }
 
     /// fetches public address
-    pub async fn public_addr(&self) -> Option<IpAddr> {
-        let conn = self.connection.as_ref()?;
-        let (mut tx, mut rx) = conn.open_bi().await.ok()?;
+    pub async fn public_addr(&self) -> Result<IpAddr> {
+        let conn = self.connection.as_ref().ok_or(anyhow!("relay not connected"))?;
+        let (mut tx, mut rx) =
+            conn.open_bi().await.map_err(|e| anyhow!("failed to open stream: {e}"))?;
 
-        RelayPacket::Misc(MiscP::PubAddressReq).send(&mut tx).await.ok()?;
+        RelayPacket::Misc(MiscP::PubAddressReq).send(&mut tx).await?;
 
-        match RelayPacket::unpack(&mut rx).await.ok()? {
-            RelayPacket::Misc(MiscP::PubAddressRes { addr }) => Some(addr),
-            _ => None
+        tx.finish()?;
+
+        match unpack(&mut rx).await.map_err(|e| anyhow!("failed to unpack packet: {e}"))? {
+            RelayPacket::Misc(MiscP::PubAddressRes { addr }) => Ok(addr),
+            unknown => Err(anyhow!("got unknown response: {unknown:?}")),
         }
     }
 

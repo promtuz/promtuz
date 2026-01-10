@@ -19,7 +19,7 @@ pub extern "system" fn getPublicAddr(mut env: JNIEnv, _: JC) -> jobject {
         let relay = RELAY.read().clone();
 
         let res = match relay {
-            Some(r) => r.public_addr().await,
+            Some(r) => r.public_addr().await.ok(),
             None => None,
         };
 
