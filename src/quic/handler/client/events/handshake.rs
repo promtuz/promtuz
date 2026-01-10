@@ -5,6 +5,7 @@ use common::proto::client_rel::HandshakeP;
 use common::proto::client_rel::RelayPacket;
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
+use quinn::SendStream;
 
 use crate::dht::UserMetadata;
 use crate::dht::UserRecord;
@@ -12,7 +13,9 @@ use crate::quic::handler::client::ClientCtxHandle;
 use crate::quic::handler::peer::replicate_user;
 use crate::util::systime;
 
-pub(super) async fn handle_handshake(packet: HandshakeP, ctx: ClientCtxHandle) -> Result<()> {
+pub(super) async fn handle_handshake(
+    packet: HandshakeP, ctx: ClientCtxHandle, tx: &mut SendStream,
+) -> Result<()> {
     use HandshakeP::*;
     use RelayPacket::*;
 
@@ -22,9 +25,7 @@ pub(super) async fn handle_handshake(packet: HandshakeP, ctx: ClientCtxHandle) -
         ClientHello { ipk } => {
             println!("CLIENT HELLO: {:?}", ipk);
             ctx.ipk = Some(VerifyingKey::from_bytes(&ipk)?);
-            Handshake(ServerChallenge { nonce: ctx.nonce })
-                .send(ctx.send.as_mut().unwrap())
-                .await?;
+            Handshake(ServerChallenge { nonce: ctx.nonce }).send(tx).await?;
         },
         ClientProof { sig } => {
             let ipk = ctx.ipk.ok_or(anyhow!("no ipk yet"))?;
@@ -40,8 +41,8 @@ pub(super) async fn handle_handshake(packet: HandshakeP, ctx: ClientCtxHandle) -
                 _ => ServerReject { reason: "Invalid Signature".into() },
             };
 
-            Handshake(packet).send(ctx.send.as_mut().unwrap()).await?;
-            _ = ctx.send.as_mut().unwrap().finish();
+            Handshake(packet).send(tx).await?;
+            _ = tx.finish();
 
             let relay_ref = ctx.relay.clone();
             tokio::spawn(async move {

@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use common::crypto::PublicKey;
 use common::crypto::get_nonce;
+use common::proto::client_rel::RelayPacket;
+use common::proto::pack::Unpacker;
 use quinn::Connection;
-use quinn::SendStream;
-use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
 use crate::quic::handler::Handler;
@@ -19,7 +19,7 @@ pub struct ClientContext {
     pub nonce: [u8; 32],
     pub ipk: Option<PublicKey>,
     pub relay: RelayRef,
-    pub send: Option<SendStream>,
+    // pub send: Option<SendStream>,
     pub conn: Arc<Connection>,
 }
 
@@ -35,22 +35,15 @@ impl Handler {
             nonce: get_nonce(),
             ipk: None,
             relay: relay.clone(),
-            send: None,
+            // send: None,
             conn: conn.clone(),
         }));
 
-        while let Ok((send, mut recv)) = conn.accept_bi().await {
-            ctx.write().await.send = Some(send);
-
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let ctx = ctx.clone();
             tokio::spawn(async move {
-                while let Ok(packet_size) = recv.read_u32().await {
-                    let mut packet = vec![0u8; packet_size as usize];
-                    if let Err(_err) = recv.read_exact(&mut packet).await {
-                        break;
-                    }
-
-                    handle_packet(&packet, ctx.clone()).await.ok()?;
+                while let Ok(packet) = RelayPacket::unpack(&mut recv).await {
+                    handle_packet(packet, ctx.clone(), &mut send).await.ok()?;
                 }
                 Some(())
             });

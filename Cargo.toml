@@ -21,6 +21,10 @@ cmake = "0.1.57"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 sha2 = "0.10.9"
 postcard = "1.1.3"
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = "0.3.22"
+tracing-log = "0.2.0"
+log = "0.4.29"
 
 [dev-dependencies]
 rand = "0.8.5"
