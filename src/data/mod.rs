@@ -15,3 +15,8 @@ pub struct ResolverSeed {
     pub host: String,
     pub port: u16,
 }
+
+
+// impl ResolverSeeds {
+//     pub fn from_raw
+// }

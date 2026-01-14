@@ -1,5 +1,5 @@
 use common::crypto::get_signing_key;
-use db::identity::IdentityRow;
+use crate::db::identity::IdentityRow;
 use jni::JNIEnv;
 use jni::objects::JString;
 use jni_macro::jni;

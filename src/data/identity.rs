@@ -3,8 +3,8 @@ use common::crypto::PublicKey;
 use common::crypto::SecretKey;
 use jni::JNIEnv;
 
-use db::identity::IDENTITY_DB;
-use db::identity::IdentityRow;
+use crate::db::identity::IDENTITY_DB;
+use crate::db::identity::IdentityRow;
 use crate::ndk::key_manager::KeyManager;
 
 pub struct Identity {

@@ -1,23 +1,36 @@
-[workspace]
-members = ["core", "db", "jni_macro"]
-resolver = "3"
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2024"
 
-# [profile.release]
-# opt-level = "z"
-# lto = "fat"
-# codegen-units = 1
-# panic = "abort"
-# strip = true
-# incremental = false
+[lib]
+crate-type = ["cdylib"]
 
-# debug = false
-# debug-assertions = false
-# overflow-checks = false
+[dependencies]
+# Workspace Crates
+jni_macro = { path = "../jni_macro" }
+common = { path = "../common", features = ["crypto", "proto", "client"] }
 
-[workspace.dependencies]
-log = "0.4.28"
+# Shared
+anyhow.workspace = true
+quinn.workspace = true
+tokio.workspace = true
+rustls.workspace = true
+serde.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+hex.workspace = true
+log.workspace = true
+
+# Public Crates
+android_logger = "0.15"
+jni = "0.21.1"
 once_cell = "1.21.3"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 parking_lot = "0.12.5"
 rusqlite_migration = "2.3.0"
-anyhow = { version = "1.0.100" }
+unicode-normalization = "0.1.25"
+crc32fast = "1.5.0"
+ciborium = "0.2.2"
+rcgen = { version = "0.14.6", features = ["x509-parser"] }
+if-addrs = "0.14.0"

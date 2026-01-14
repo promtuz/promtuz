@@ -40,7 +40,10 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
     }
 
     let seeds = jni_try!(read_raw_res(&mut env, &context, "resolver_seeds"));
-    let seeds = jni_try!(serde_json::from_slice::<ResolverSeeds>(&seeds)).seeds;
+    let seeds = {
+        todo!("implement seeds from raw");
+        jni_try!(serde_json::from_slice::<ResolverSeeds>(&seeds)).seeds
+    };
 
     // let ipk = jni_try!(Identity::public_key());
     let isk = jni_try!(Identity::secret_key(&mut env));

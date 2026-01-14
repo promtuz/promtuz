@@ -5,9 +5,8 @@ use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
 
-use crate::db;
-use crate::macros::PRAGMA;
-use crate::macros::from_row;
+use super::macros::PRAGMA;
+use super::macros::from_row;
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -51,7 +50,7 @@ const MIGRATION_ARRAY: &[M] = &[
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static NETWORK_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let mut conn = Connection::open(db("network")).expect("db open failed");
+    let mut conn = Connection::open(super::db("network")).expect("db open failed");
     info!("DB: NETWORK_DB CONNECTED");
 
     PRAGMA!(conn, MIGRATIONS);

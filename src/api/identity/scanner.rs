@@ -92,7 +92,7 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                 debug!("OPENED BI STREAM");
 
                 use IdentityP::*;
-                let (esk, epk) = get_static_keypair();
+                let (_esk, epk) = get_static_keypair();
 
                 ClientPeerPacket::Identity(AddMe { ipk, epk: epk.to_bytes(), name })
                     .send(&mut send)

@@ -16,6 +16,7 @@ mod events;
 mod ndk;
 mod quic;
 mod utils;
+mod db;
 
 type JC<'local> = JClass<'local>;
 
