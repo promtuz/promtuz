@@ -148,15 +148,10 @@ impl Relay {
         send.write_all(&req).await?;
         send.flush().await?;
 
-        use CRes::*;
-        use ClientResponse as CRes;
+        use ClientResponse;
+        use ClientResponse::*;
 
-        let packet_size = recv.read_u32().await?;
-        let mut packet = vec![0u8; packet_size as usize];
-
-        recv.read_exact(&mut packet).await?;
-
-        match CRes::from_cbor(&packet) {
+        match ClientResponse::unpack(&mut recv).await {
             Ok(cres) =>
             {
                 #[allow(irrefutable_let_patterns)]

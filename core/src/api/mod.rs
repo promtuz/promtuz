@@ -12,10 +12,12 @@ use jni::JNIEnv;
 use jni::objects::JObject;
 use jni_macro::jni;
 use log::info;
+use once_cell::sync::OnceCell;
 use quinn::Endpoint;
 use quinn::EndpointConfig;
 use quinn::TransportConfig;
 use quinn::default_runtime;
+use rcgen::Certificate;
 
 use crate::ENDPOINT;
 use crate::JC;
@@ -31,13 +33,14 @@ pub mod identity;
 pub mod misc;
 pub mod welcome;
 
+pub static CERTIFICATE: OnceCell<Certificate> = OnceCell::new();
+
 /// Entry point for API
 ///
 /// Initializes Endpoint
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     info!("API: INIT START");
-    
     jni_try!(setup_crypto_provider());
 
     let rt = RUNTIME.handle().clone();

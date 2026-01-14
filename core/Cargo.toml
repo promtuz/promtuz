@@ -40,3 +40,4 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "rand_core"] }
 ciborium = "0.2.2"
 rcgen = { version = "0.14.6", features = ["x509-parser"] }
 x509-parser = "0.18.0"
+if-addrs = "0.14.0"

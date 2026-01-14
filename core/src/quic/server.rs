@@ -113,7 +113,7 @@ impl Relay {
     }
 
     /// fetches public address
-    pub async fn public_addr(&self) -> Result<IpAddr> {
+    pub async fn public_addr(&self) -> Result<SocketAddr> {
         let conn = self.connection.as_ref().ok_or(anyhow!("relay not connected"))?;
         let (mut tx, mut rx) =
             conn.open_bi().await.map_err(|e| anyhow!("failed to open stream: {e}"))?;

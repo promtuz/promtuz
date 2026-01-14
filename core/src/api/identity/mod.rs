@@ -1,10 +1,9 @@
-// use crate;
-
-use std::net::SocketAddr;
+// use std::net::SocketAddr;
 
 use anyhow::Result;
 use anyhow::anyhow;
 use common::proto::client_peer::ClientPeerPacket;
+use common::proto::client_peer::IdentityP;
 use common::proto::pack::Unpacker;
 use jni::JNIEnv;
 use jni::objects::JObject;
@@ -13,7 +12,6 @@ use jni_macro::jni;
 use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 mod qr;
@@ -25,23 +23,14 @@ use crate::JVM;
 use crate::RUNTIME;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
-use crate::data::relay::Relay;
 use crate::quic::server::RELAY;
 
 // static ESK: RwLock<Option<StaticSecret>> = RwLock::new(None);
 static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
 
-async fn get_addr(relay: &Relay) -> Result<SocketAddr> {
-    let ep = ENDPOINT.get().unwrap();
-    let local = ep.local_addr()?; // no await yet
-
-    let ip = relay.public_addr().await?;
-    Ok(SocketAddr::new(ip, local.port()))
-}
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
-    info!("IDENTITY: INIT");
     let class = env.new_global_ref(class).unwrap();
 
     let identity = Identity::get().expect("identity not found");
@@ -50,8 +39,15 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
         let block: Result<()> = async move {
             let relay = RELAY.read().clone().ok_or(anyhow!("relay unavailable"))?;
 
-            let addr = get_addr(&relay).await?;
+            // we advertise our ACTUAL public address including port as NAT can port forward
+            let addr = relay.public_addr().await?;
             info!("IDENTITY: PUBLIC ADDR {addr}");
+            
+            // if let Ok(addrs) = if_addrs::get_if_addrs() {
+            //     for interface in addrs {
+            //         info!("INTERFACE: {interface:?}");
+            //     }
+            // }
 
             let qr = IdentityQr {
                 ipk: identity.ipk(),
@@ -80,26 +76,37 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
             }
 
             tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            info!("IDENTITY: conn loop cancelled");
-                            break;
-                        }
-                        incoming = ep.accept() => {
-                            let Some(incoming) = incoming else { continue };
-                            let Ok(conn) = incoming.await else { continue };
-                            let Ok((_tx, mut recv)) = conn.accept_bi().await else { continue };
+                let block: anyhow::Result<()> = async move {
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                info!("IDENTITY: conn loop cancelled");
+                                break;
+                            }
+                            incoming = ep.accept() => {
+                                let Some(incoming) = incoming else { continue };
+                                let conn = incoming.await.map_err(|e| anyhow!("failed to accept incoming conn: {e}"))?;
+                                let (_tx, mut recv) = conn.accept_bi().await.map_err(|e| anyhow!("failed to accept stream: {e}"))?;
 
-                            while let Ok(packet) = ClientPeerPacket::unpack(&mut recv).await {
-                                info!("PEER_PACKET: {packet:?}");
-                            };
-                            break;
+                                use ClientPeerPacket::*;
+                                use IdentityP::*;
+                                loop {
+                                    match ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))? {
+                                        Identity(AddMe { ipk, epk, name }) => {
+                                            info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk))
+                                        },
+                                    }
+                                }
+                            }
                         }
                     }
-                }
 
-                Some(())
+                    Ok(())
+                }.await;
+                
+                if let Some(err) = block.err() {
+                    log::error!("ACCEPTOR_ERR: {err}")
+                }
             });
 
             Ok(())
@@ -109,8 +116,6 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
         if let Some(err) = block.err() {
             log::error!("IDENTITY_ERR: {err}")
         }
-
-        Some(())
     });
 }
 
@@ -120,7 +125,6 @@ pub extern "system" fn identityDestroy(
     _class: JC,
     // Further Arguments
 ) {
-    info!("IDENTITY: DESTROY");
     if let Some(tok) = CONN_CANCEL.lock().take() {
         tok.cancel();
     }

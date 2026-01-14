@@ -24,7 +24,7 @@ pub extern "system" fn getPublicAddr(mut env: JNIEnv, _: JC) -> jobject {
         };
 
         match res {
-            Some(addr) => deferred.complete_object(addr.as_jni().as_obj()),
+            Some(addr) => deferred.complete_object(addr.ip().as_jni().as_obj()),
             None => deferred.complete_object(&JObject::null()),
         }
     });

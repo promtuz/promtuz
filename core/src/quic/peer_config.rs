@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::quic::id::UserId;
 use common::quic::protorole::ProtoRole;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -9,6 +10,7 @@ use quinn::ServerConfig;
 use quinn::TransportConfig;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
+use rcgen::KeyPair;
 use rustls::DigitallySignedStruct;
 use rustls::DistinguishedName;
 use rustls::SignatureScheme;
@@ -23,6 +25,8 @@ use rustls::pki_types::UnixTime;
 use rustls::server::danger::ClientCertVerified;
 use rustls::server::danger::ClientCertVerifier;
 
+use crate::api::CERTIFICATE;
+
 #[derive(Debug)]
 struct PeerClientVerifier;
 
@@ -32,7 +36,7 @@ impl ClientCertVerifier for PeerClientVerifier {
     }
 
     fn verify_client_cert(
-        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        &self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
         // let (_, cert) = X509Certificate::from_der(end_entity.as_ref()).map_err(|_| {
@@ -68,10 +72,20 @@ pub fn build_peer_server_cfg(isk: SigningKey) -> Result<ServerConfig> {
 
     let key_pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&isk_der, &rcgen::PKCS_ED25519)?;
 
+    let user_id = UserId::derive(isk.verifying_key().as_bytes()).to_string();
+
     // rcgen::PKCS_ED25519
-    let params = rcgen::CertificateParams::new(vec![])?;
+    let mut params = rcgen::CertificateParams::new(vec![user_id.clone()])?;
+
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params.distinguished_name.push(rcgen::DnType::CommonName, &user_id);
 
     let cert = params.self_signed(&key_pair)?;
+
+    CERTIFICATE.set(cert.clone()).unwrap_or_else(|_| {
+        log::error!("ERROR: failed to set global client certificate");
+    });
+
     let cert_der = CertificateDer::from(cert.der().to_vec());
 
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
@@ -90,8 +104,8 @@ struct PeerServerVerifier;
 
 impl ServerCertVerifier for PeerServerVerifier {
     fn verify_server_cert(
-        &self, end_entity: &CertificateDer<'_>, intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>, ocsp_response: &[u8], now: UnixTime,
+        &self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>, _ocsp_response: &[u8], _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         // todo!()
 
@@ -99,13 +113,13 @@ impl ServerCertVerifier for PeerServerVerifier {
     }
 
     fn verify_tls12_signature(
-        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
         Err(rustls::Error::General("TLS 1.2 not supported".into()))
     }
 
     fn verify_tls13_signature(
-        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
@@ -115,11 +129,19 @@ impl ServerCertVerifier for PeerServerVerifier {
     }
 }
 
-pub fn build_peer_client_cfg() -> Result<ClientConfig> {
+pub fn build_peer_client_cfg(key_pair: KeyPair) -> Result<ClientConfig> {
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+
+    let cert_der = {
+        // unwrapping as `..._server_cfg` must run before `..._client_cfg` setting `CERTIFICATE`
+        let cert = CERTIFICATE.get().unwrap();
+        CertificateDer::from(cert.der().to_vec())
+    };
+
     let mut tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PeerServerVerifier))
-        .with_no_client_auth();
+        .with_client_auth_cert(vec![cert_der], key_der)?;
 
     tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
 
