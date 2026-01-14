@@ -1,6 +1,6 @@
-use std::{net::SocketAddr, path::PathBuf};
 use serde::Deserialize;
-use url::Url;
+use serde_with::serde_as;
+use std::{net::SocketAddr, path::PathBuf};
 
 use crate::quic::id::NodeId;
 
@@ -15,17 +15,18 @@ pub struct NetworkConfig {
     pub root_ca_path: PathBuf,
 }
 
+#[serde_as]
 #[derive(Deserialize, Debug)]
 pub struct ResolverSeed {
     pub id: NodeId,
-    pub url: Url,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub addr: SocketAddr,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct ResolverConfig {
     pub seed: Vec<ResolverSeed>,
 }
-
 
 // pub fn print_config_err(err: &toml::de::Error, source: &str) -> String {
 //     if let Some(core::ops::Range { start, end }) = err.span() {

@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 
-use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -62,8 +61,6 @@ impl RelayPacket {
 
         tx.write_all(&packet).await?;
         tx.flush().await?;
-
-        debug!("PACKET_SENT: {}", hex::encode(packet));
 
         Ok(())
     }
