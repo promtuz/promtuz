@@ -1,0 +1,24 @@
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../common", features = [
+    "proto",
+    "sysutils",
+    "macros",
+    "crypto",
+    "server",
+] }
+quinn.workspace = true
+rustls.workspace = true
+serde.workspace = true
+tokio.workspace = true
+rustls-pemfile.workspace = true
+anyhow.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+crossterm.workspace = true
+toml.workspace = true
+serde_bytes.workspace = true
