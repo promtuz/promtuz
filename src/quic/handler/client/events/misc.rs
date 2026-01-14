@@ -15,7 +15,7 @@ pub(super) async fn handle_misc(packet: MiscP, ctx: ClientCtxHandle, tx: &mut Se
         PubAddressReq => {
             let addr = ctx.conn.remote_address();
 
-            RelayPacket::Misc(PubAddressRes { addr: addr.ip() })
+            RelayPacket::Misc(PubAddressRes { addr })
                 .send(tx)
                 .await
         },

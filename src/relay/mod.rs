@@ -30,13 +30,19 @@ pub struct RelayKeys {
 }
 
 impl RelayKeys {
-    fn from_cfg(cfg: &AppConfig) -> Result<Self> {
-        let sec = fs::read_to_string(&cfg.network.key_path)?;
-
+    fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
+        let sec = fs::read_to_string(&cfg.network.key_path).map_err(|err| {
+            eprintln!("ERROR: failed to read file {path:?}: {err}", path = &cfg.network.key_path);
+        })?;
+        
         let secret = if sec.starts_with("-----BEGIN EC PRIVATE KEY-----") {
-            SecretKey::from_sec1_pem(&sec)?
+            SecretKey::from_sec1_pem(&sec).map_err(|err| { 
+                eprintln!("ERROR: failed to parse sec1 secret key: {err}");
+            })?
         } else {
-            SecretKey::from_pkcs8_pem(&sec)?
+            SecretKey::from_pkcs8_pem(&sec).map_err(|err| {
+                eprintln!("ERROR: failed to parse pkcs8 secret key: {err}");
+            })?
         };
 
         Ok(Self { public: secret.public_key(), secret })
@@ -94,7 +100,7 @@ impl Relay {
     }
 
     pub fn new(cfg: AppConfig) -> Self {
-        let keys = graceful!(RelayKeys::from_cfg(&cfg), "RELAY_ERR:");
+        let keys = RelayKeys::from_cfg(&cfg).expect("config failed");
         let id = derive_node_id(&keys.public);
 
         println!("RELAY: Initializing with ID({})", id);
