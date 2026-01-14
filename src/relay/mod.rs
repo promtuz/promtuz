@@ -11,8 +11,9 @@ use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
 use common::quic::id::derive_node_id;
 use common::quic::protorole::ProtoRole;
-use p256::SecretKey;
-use p256::pkcs8::DecodePrivateKey;
+use common::quic::p256::SecretKey;
+use common::quic::p256::PublicKey;
+use common::quic::p256::pkcs8::DecodePrivateKey;
 use quinn::ClientConfig;
 use quinn::Endpoint;
 use tokio::sync::{Mutex, RwLock};
@@ -25,8 +26,8 @@ use crate::util::systime;
 /// contains p256 private & public key
 #[derive(Debug, PartialEq, Eq)]
 pub struct RelayKeys {
-    pub secret: p256::SecretKey,
-    pub public: p256::PublicKey,
+    pub secret: SecretKey,
+    pub public: PublicKey,
 }
 
 impl RelayKeys {

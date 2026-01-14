@@ -184,13 +184,15 @@ impl Dht {
 
 #[cfg(test)]
 mod inline_tests {
+    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+
     use super::*;
 
     #[test]
     fn user_record_sign_verify_roundtrip() {
         use ed25519_dalek::{Signer, SigningKey};
 
-        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = SigningKey::generate(&mut OsRng);
         let ipk = sk.verifying_key().to_bytes();
         let mut rec = UserRecord {
             ipk,

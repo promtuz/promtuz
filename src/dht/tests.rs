@@ -2,12 +2,13 @@
 // mod tests {
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
+use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 
 use crate::dht::routing::xor_distance;
 use crate::dht::*;
 
 fn sample_record() -> UserRecord {
-    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let sk = SigningKey::generate(&mut OsRng);
     let ipk = sk.verifying_key().to_bytes();
     let relay = NodeId::from_bytes([0xAA; NodeId::LEN]);
     let relay_addr = "127.0.0.1:5001".parse().unwrap();
