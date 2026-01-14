@@ -1,8 +1,9 @@
 use std::{fs, path::Path};
 
 use anyhow::Result;
-use p256::{SecretKey, pkcs8::DecodePrivateKey};
+use p256::pkcs8::DecodePrivateKey;
 
+pub use p256::*;
 
 /// Tries to read a valid SEC1 PEM Private key at `key_path`
 pub fn secret_from_key(key_path: &Path) -> Result<SecretKey> {

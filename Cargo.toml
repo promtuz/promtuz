@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-crypto = ["dep:chacha20poly1305", "dep:hkdf", "dep:x25519-dalek", "dep:ed25519-dalek", "dep:sha2"]
+crypto = [
+  "dep:chacha20poly1305",
+  "dep:hkdf",
+  "dep:x25519-dalek",
+  "dep:ed25519-dalek",
+  "dep:sha2",
+]
 proto = ["quic", "sysutils"]
 quic = [
   "dep:rustls",
@@ -14,13 +20,15 @@ quic = [
   "dep:data-encoding",
   "p256",
   "macros",
-  "node"
+  "node",
 ]
 p256 = ["dep:p256"]
 sysutils = ["dep:sysinfo", "tokio"]
 tokio = ["dep:tokio"]
 macros = []
 node = []
+# aka relay & resolver
+server = []
 # aka libcore
 client = []
 
@@ -30,28 +38,27 @@ path = "src/bin/certgen.rs"
 required-features = ["quic", "crypto"]
 
 [dependencies]
-anyhow = { version = "1.0.100", features = ["std"] }
+log.workspace = true
+hex.workspace = true
+toml.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+serde_bytes.workspace = true
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["io-util", "time"], optional = true }
+
 blake3 = { version = "1.8.2", optional = true }
 data-encoding = { version = "2.9.0", optional = true }
 chacha20poly1305 = { version = "0.10.1", features = ["std"], optional = true }
 hkdf = { version = "0.12.4", optional = true }
-quinn = { version = "0.11.9", features = ["rustls"], optional = true }
-rustls = { version = "0.23.35", features = ["aws-lc-rs"], optional = true }
-rustls-pemfile = { version = "2.2.0", optional = true }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_bytes = "0.11.19"
 sha2 = { version = "0.10.9", optional = true }
-x25519-dalek = { version = "2.0.1", features = [
-  "static_secrets",
-], optional = true }
-p256 = { version = "0.13.2", optional = true, features = ["pkcs8"]}
-toml = "0.9.8"
+p256 = { version = "0.13.2", optional = true, features = ["pkcs8"] }
 ciborium = "0.2.2"
 sysinfo = { version = "0.37.2", optional = true }
-tokio = { version = "1.48.0", features = ["io-util", "time"], optional = true }
-ed25519-dalek = { version = "2.2.0", optional = true, features = ["rand_core"] }
-log = "0.4.29"
 serde_with = "3.16.1"
 postcard = { version = "1.1.3", features = ["alloc", "postcard-derive"] }
 async-trait = "0.1.89"
-hex = "0.4.3"
