@@ -310,7 +310,6 @@ dependencies = [
  "sysinfo",
  "tokio",
  "toml",
- "url",
 ]
 
 [[package]]
