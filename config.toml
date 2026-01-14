@@ -6,4 +6,4 @@ root_ca_path = "cert/root_ca.pem"
 
 [[resolver.seed]]
 id = "I2DRYSCOMXODBJ47"
-url = "quic://192.168.100.2:4433"
+addr = "192.168.100.2:4433"

@@ -61,10 +61,10 @@ pub type RelayRef = Arc<Mutex<Relay>>;
 pub struct Relay {
     pub id: NodeId,
 
-    pub keys: RelayKeys,
+    // pub keys: RelayKeys,
 
     /// SystemTime in ms since EPOCH when relay is started first
-    pub start_ms: u128,
+    // pub start_ms: u128,
 
     pub endpoint: Arc<Endpoint>,
 
@@ -128,8 +128,8 @@ impl Relay {
 
         Self {
             id,
-            keys,
-            start_ms: systime().as_millis(),
+            // keys,
+            // start_ms: systime().as_millis(),
             endpoint: Arc::new(endpoint),
             cfg,
             client_cfg,

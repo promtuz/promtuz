@@ -13,33 +13,23 @@ pub async fn connect_to_any_seed(
 
     let cfg = cfg.as_ref();
     for seed in seeds {
-        // Resolve URL → socket addresses
-        let addrs = match seed.url.socket_addrs(|| None) {
-            Ok(a) if !a.is_empty() => a,
-            _ => {
-                last_err = Some(anyhow!("failed to resolve seed: {}", seed.url));
-                continue;
+        let addr = seed.addr;
+
+        println!("INFO: connecting to resolver: {}", addr);
+
+        match if let Some(cfg) = cfg {
+            endpoint.connect_with(cfg.clone(), addr, &seed.id.to_string())?.await
+        } else {
+            endpoint.connect(addr, &seed.id.to_string())?.await
+        } {
+            Ok(conn) => {
+                println!("INFO: connected to resolver: {}", addr);
+                return Ok(conn);
             },
-        };
-
-        // Try each resolved IP for this seed
-        for addr in addrs {
-            println!("RESOLVER: Trying to connect: {} ({})", seed.url, addr);
-
-            match if let Some(cfg) = cfg {
-                endpoint.connect_with(cfg.clone(), addr, &seed.id.to_string())?.await
-            } else {
-                endpoint.connect(addr, &seed.id.to_string())?.await
-            } {
-                Ok(conn) => {
-                    println!("RESOLVER: Connected to: {} ({})", seed.url, addr);
-                    return Ok(conn);
-                },
-                Err(err) => {
-                    println!("ERROR: Failed to connect {} ({:?}): {}", seed.url, addr, err);
-                    last_err = Some(err.into());
-                },
-            }
+            Err(err) => {
+                eprintln!("ERROR: resolver {} connection failed: {}", addr, err);
+                last_err = Some(err.into());
+            },
         }
     }
 

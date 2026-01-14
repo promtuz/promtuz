@@ -19,7 +19,7 @@ pub struct AppConfig {
 #[derive(Deserialize, Debug)]
 pub struct NetworkConfig {
     /// Local Address of relay where endpoint will bind
-    /// 
+    ///
     /// Not to be confused with public address
     pub address: SocketAddr,
     pub cert_path: PathBuf,
@@ -33,36 +33,27 @@ pub struct PeerSeed {
     pub address: SocketAddr,
 }
 
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct DhtConfig {
-    #[serde(default)]
     pub bootstrap: Vec<PeerSeed>,
-    #[serde(default = "default_bucket_size")]
     pub bucket_size: usize,
-    #[serde(default = "default_k")]
     pub k: usize,
-    #[serde(default = "default_alpha")]
     pub alpha: usize,
-    #[serde(default = "default_user_ttl_secs")]
     pub user_ttl_secs: u64,
-    #[serde(default = "default_republish_secs")]
     pub republish_secs: u64,
 }
 
-const fn default_bucket_size() -> usize {
-    20
-}
-const fn default_k() -> usize {
-    8
-}
-const fn default_alpha() -> usize {
-    3
-}
-const fn default_user_ttl_secs() -> u64 {
-    300
-}
-const fn default_republish_secs() -> u64 {
-    120
+impl Default for DhtConfig {
+    fn default() -> Self {
+        DhtConfig {
+            bootstrap: vec![],
+            bucket_size: 20,
+            k: 8,
+            alpha: 3,
+            user_ttl_secs: 300,
+            republish_secs: 120,
+        }
+    }
 }
 
 impl AppConfig {
@@ -83,7 +74,7 @@ impl AppConfig {
             match toml::from_str(&raw) {
                 Ok(conf) => conf,
                 Err(err) => {
-                    eprintln!("Failed to parse config\n{err}");
+                    eprintln!("ERROR: Failed to parse config\n{err}");
                     process::exit(1);
                 },
             }
