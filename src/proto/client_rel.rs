@@ -1,6 +1,6 @@
 //! Client to Relay Proto
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ pub enum HandshakeP {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum MiscP {
     PubAddressReq,
-    PubAddressRes { addr: IpAddr },
+    PubAddressRes { addr: SocketAddr },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]

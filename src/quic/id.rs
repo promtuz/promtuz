@@ -85,8 +85,8 @@ pub fn derive_node_id(pubkey: &p256::PublicKey) -> NodeId {
 pub type UserId = BaseId<12>;
 
 impl UserId {
-    pub fn derive(seed: &[u8; 32]) -> Self {
-        derive_user_id(seed)
+    pub fn derive(ed25519_pubkey: &[u8; 32]) -> Self {
+        derive_user_id(ed25519_pubkey)
     }
 }
 
