@@ -297,6 +297,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "data-encoding",
+ "hex",
  "log",
  "p256",
  "postcard",

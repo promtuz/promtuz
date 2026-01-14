@@ -25,7 +25,7 @@ impl HandleClient for Handler {
             let resolver = resolver.clone();
 
             tokio::spawn(async move {
-                while let Ok(packet_size) = recv.read_u32().await {
+                while let Ok(packet_size) = recv.read_u16().await {
                     let mut packet = vec![0u8; packet_size as usize];
 
                     if let Err(err) = recv.read_exact(&mut packet).await {
