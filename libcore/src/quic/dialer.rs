@@ -1,5 +1,3 @@
-use std::net::ToSocketAddrs;
-
 use anyhow::Result;
 use anyhow::anyhow;
 use quinn::Connection;
@@ -13,26 +11,19 @@ pub async fn connect_to_any_seed(
     let mut last_err: Option<anyhow::Error> = None;
 
     for seed in seeds {
-        let url = format!("{}:{}", seed.host, seed.port);
-        
-        let addrs = (seed.host.as_str(), seed.port)
-            .to_socket_addrs()?
-            .filter(|a| a.is_ipv4())
-            .collect::<Vec<_>>();
+        let addr = seed.addr;
 
-        // Try each resolved IP for this seed
-        for addr in addrs {
-            println!("RESOLVER: Trying to connect: {} ({})", url, addr);
-            match endpoint.connect(addr, &seed.id.to_string())?.await {
-                Ok(conn) => {
-                    println!("RESOLVER: Connected to: {} ({})", url, addr);
-                    return Ok(conn);
-                },
-                Err(err) => {
-                    println!("ERROR: Failed to connect {} ({:?}): {}", url, addr, err);
-                    last_err = Some(err.into());
-                },
-            }
+        log::info!("INFO: connecting to resolver: {}", addr);
+
+        match endpoint.connect(addr, &seed.id.to_string())?.await {
+            Ok(conn) => {
+                log::info!("INFO: connected to resolver: {}", addr);
+                return Ok(conn);
+            },
+            Err(err) => {
+                log::error!("ERROR: resolver {} connection failed: {}", addr, err);
+                last_err = Some(err.into());
+            },
         }
     }
 

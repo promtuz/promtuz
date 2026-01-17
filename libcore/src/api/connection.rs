@@ -39,16 +39,13 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
         return;
     }
 
-    let seeds = jni_try!(read_raw_res(&mut env, &context, "resolver_seeds"));
-    let seeds = {
-        todo!("implement seeds from raw");
-        jni_try!(serde_json::from_slice::<ResolverSeeds>(&seeds)).seeds
-    };
+    let seeds = jni_try!(
+        read_raw_res(&mut env, &context, "resolver_seeds")
+            .and_then(|bytes| Ok(String::from_utf8(bytes)?))
+            .and_then(|str| ResolverSeeds::from_str(&str))
+    );
 
-    // let ipk = jni_try!(Identity::public_key());
-    let isk = jni_try!(Identity::secret_key(&mut env));
-
-    let isk = SigningKey::from_bytes(&isk);
+    let isk = jni_try!(Identity::secret_key(&mut env).map(|isk| SigningKey::from_bytes(&isk)));
 
     RUNTIME.spawn(async move {
         loop {

@@ -54,7 +54,7 @@ macro_rules! jni_try {
                 let vm = $crate::JVM.get().unwrap();
                 let mut env = vm.attach_current_thread().unwrap();
                 let _ = env.throw_new("java/lang/Exception", e.to_string());
-                log::error!("{}", e);
+                log::error!("ERROR: {}", e);
                 return;
             },
         }
@@ -66,7 +66,7 @@ macro_rules! jni_try {
                 let vm = $crate::JVM.get().unwrap();
                 let mut env = vm.attach_current_thread().unwrap();
                 let _ = env.throw_new("java/lang/Exception", e.to_string());
-                log::error!("{}", e);
+                log::error!("ERROR: {}", e);
                 return $ret;
             },
         }
