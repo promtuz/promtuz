@@ -23,7 +23,6 @@ pub(super) async fn handle_handshake(
 
     match packet {
         ClientHello { ipk } => {
-            println!("CLIENT HELLO: {:?}", ipk);
             ctx.ipk = Some(VerifyingKey::from_bytes(&ipk)?);
             Handshake(ServerChallenge { nonce: ctx.nonce }).send(tx).await?;
         },

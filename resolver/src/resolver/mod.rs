@@ -53,21 +53,21 @@ impl Resolver {
     fn id(cfg: &AppConfig) -> NodeId {
         let secret = match secret_from_key(&cfg.network.key_path) {
             Ok(sec) => sec,
-            Err(err) => {
-                eprintln!("RESOLVER_ERR: {}", err);
-                process::exit(0);
-            },
+            Err(_) => process::exit(0),
         };
 
         derive_node_id(&secret.public_key())
     }
 
     fn endpoint(cfg: &AppConfig) -> Endpoint {
-        let server_config = graceful!(Self::get_server_cfg(cfg), "CONFIG_ERR:");
-        let endpoint = graceful!(Endpoint::server(server_config, cfg.network.address), "QUIC_ERR:");
+        let server_config = graceful!(Self::get_server_cfg(cfg), "failed to setup server config:");
+        let endpoint = graceful!(
+            Endpoint::server(server_config, cfg.network.address),
+            "failed to start quic server:"
+        );
 
         if let Ok(addr) = endpoint.local_addr() {
-            println!("QUIC(RESOLVER): listening at {:?}", addr);
+            info!("resolver listening at QUIC({:?})", addr);
         }
 
         endpoint
@@ -76,7 +76,7 @@ impl Resolver {
     pub fn new(cfg: AppConfig) -> Self {
         let id = Self::id(&cfg);
 
-        println!("RESOLVER: Initializing with ID({id})");
+        info!("initializing resolver with ID({id})");
 
         Self { id, endpoint: Arc::new(Self::endpoint(&cfg)), relays: HashMap::new(), cfg }
     }
@@ -94,11 +94,9 @@ impl Resolver {
         if let Some(existing) = self.relays.remove(&relay_id) {
             let close = CloseReason::DuplicateConnect;
             existing.conn.close(close.code(), &close.reason());
-            // can toggle behavior by uncommenting this err return and commenting out previous line
-            // return Err(CloseReason::AlreadyConnected);
+            // can toggle behavior by uncommenting this err return and commenting out previous 2
+            // lines return Err(CloseReason::AlreadyConnected);
         }
-
-        println!("RELAY_CONNECT: {:?}", hello);
 
         self.relays.insert(relay_id, RelayEntry { id: relay_id, conn });
 

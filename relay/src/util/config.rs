@@ -66,7 +66,7 @@ impl AppConfig {
         let path = Path::new(&path);
 
         if !path.exists() {
-            eprintln!("ERROR: config.toml not found: {}", path.display());
+            common::error!("config.toml not found: {}", path.display());
             std::process::exit(1);
         }
 
@@ -74,12 +74,12 @@ impl AppConfig {
             match toml::from_str(&raw) {
                 Ok(conf) => conf,
                 Err(err) => {
-                    eprintln!("ERROR: Failed to parse config\n{err}");
+                    common::error!("Failed to parse config\n{err}");
                     process::exit(1);
                 },
             }
         } else {
-            eprintln!("ERROR: Failed to read config");
+            common::error!("Failed to read config");
             process::exit(1);
         }
     }

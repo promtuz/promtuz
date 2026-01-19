@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use common::debug;
 use common::proto::pack::Unpacker;
-use common::quic::CloseReason;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
+use common::quic::CloseReason;
 use common::quic::id::NodeId;
 use quinn::Connection;
 use quinn::TransportConfig;
@@ -98,15 +99,17 @@ impl ResolverLink {
 
     pub async fn hello(&self) -> Result<()> {
         let mut send = self.conn.open_uni().await?;
+
+        debug!("sending to resolver({})", self.conn.remote_address());
+
         ResolverPacket::Lifetime(LifetimeP::RelayHello {
             relay_id: self.id().await,
             timestamp: systime().as_millis(),
         })
         .send(&mut send)
         .await?;
-        send.finish()?;
 
-        println!("SENT: RelayHello");
+        send.finish()?;
 
         Ok(())
     }
@@ -122,17 +125,21 @@ impl ResolverLink {
                 res = conn.accept_uni() => res?,
             };
 
-            let packet = recv.read_to_end(4096).await?;
-            if let Ok(ResolverPacket::Lifetime(ack @ LifetimeP::HelloAck { .. })) =
-                ResolverPacket::from_cbor(&packet)
-            {
-                println!("RECV_ACK: {ack:?}");
-                continue;
+            use LifetimeP::*;
+            use ResolverPacket::*;
+            match ResolverPacket::unpack(&mut recv).await? {
+                Lifetime(HelloAck { resolver_time, .. }) => {
+                    debug!(
+                        "acknowledged by resolver({}) at {}",
+                        self.conn.remote_address(),
+                        resolver_time
+                    );
+                    continue;
+                },
+                packet => {
+                    debug!("recv packet {:?}", packet);
+                },
             }
-            tokio::spawn(async move {
-                println!("RECV_PACKET: {packet:?}");
-                Some(())
-            });
         }
     }
 

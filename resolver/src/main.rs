@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             let r = resolver.lock().await;
             r.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
 
-            println!("CLOSING RESOLVER");
+            common::info!("CLOSING RESOLVER");
         }
     }
 

@@ -5,7 +5,7 @@ mod resolver;
 use std::sync::Arc;
 
 use common::quic::protorole::ProtoRole;
-use common::ret;
+use common::{debug, ret};
 use quinn::Connection;
 use relay::HandleRelay;
 
@@ -19,7 +19,7 @@ pub struct Handler {
 
 impl Handler {
     pub async fn handle(conn: Connection, resolver: ResolverRef) {
-        println!("HANDLER: Connection from {}", conn.remote_address());
+        debug!("Incoming conn from {}", conn.remote_address());
 
         let role = ret!(ProtoRole::from_conn(&conn));
 
@@ -31,7 +31,5 @@ impl Handler {
             ProtoRole::Relay => handler.handle_relay(resolver).await,
             _ => handler.conn.close(0u32.into(), b"UnsupportedALPN"),
         };
-
-        println!("HANDLE_CLOSE: ({role})[{}]", conn.remote_address())
     }
 }

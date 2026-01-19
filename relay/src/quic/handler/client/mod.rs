@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use common::crypto::PublicKey;
 use common::crypto::get_nonce;
+use common::debug;
 use common::proto::client_rel::RelayPacket;
 use common::proto::pack::Unpacker;
 use quinn::Connection;
@@ -28,8 +29,9 @@ pub type ClientCtxHandle = Arc<RwLock<ClientContext>>;
 impl Handler {
     pub async fn handle_client(self, relay: RelayRef) {
         let conn = self.conn.clone();
+        let addr = self.conn.remote_address();
 
-        println!("CLIENT: CONN({})", self.conn.remote_address());
+        debug!("incoming conn from client({addr})");
 
         let ctx = Arc::new(RwLock::new(ClientContext {
             nonce: get_nonce(),
@@ -50,7 +52,7 @@ impl Handler {
         }
 
         if let Some(close_reason) = self.conn.close_reason() {
-            println!("CLIENT({}): CLOSE({})", self.conn.remote_address(), close_reason);
+            debug!("conn client({addr}) closed: {close_reason}");
         }
     }
 }

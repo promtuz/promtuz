@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use common::debug;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
@@ -20,7 +21,7 @@ impl HandleRelay for Handler {
             let mut recv = match self.conn.accept_uni().await {
                 Ok(recv) => recv,
                 Err(err) => {
-                    println!("RELAY_CLOSE: {err}");
+                    common::error!("relay stream accept failed: {err}");
                     break;
                 },
             };
@@ -64,6 +65,8 @@ async fn handle_lifetime(
                     };
                 },
             };
+
+            debug!("sending to relay({})", conn.remote_address());
 
             let mut send = conn.open_uni().await?;
             hello_ack.send(&mut send).await?;

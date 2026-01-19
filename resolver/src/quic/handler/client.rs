@@ -1,3 +1,4 @@
+use common::debug;
 use common::proto::client_res::ClientRequest;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -14,8 +15,9 @@ pub trait HandleClient {
 impl HandleClient for Handler {
     async fn handle_client(self, resolver: ResolverRef) {
         let conn = self.conn.clone();
+        let addr = self.conn.remote_address();
 
-        println!("CLIENT: CONN({})", self.conn.remote_address());
+        debug!("incoming client({}) conn", addr);
 
         loop {
             let Ok((mut send, mut recv)) = conn.accept_bi().await else {
@@ -29,7 +31,7 @@ impl HandleClient for Handler {
                     let mut packet = vec![0u8; packet_size as usize];
 
                     if let Err(err) = recv.read_exact(&mut packet).await {
-                        println!("Read failed : {}", err); // temp
+                        common::error!("failed to read from client({addr}): {err}");
                         break;
                     }
 

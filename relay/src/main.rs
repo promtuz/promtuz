@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::info;
 use common::quic::CloseReason;
 use tokio::sync::Mutex;
 
@@ -45,7 +46,7 @@ async fn main() -> Result<()> {
 
             relay.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
 
-            println!("INFO: closing relay!");
+            info!("closing relay!");
         }
     }
 

@@ -1,5 +1,3 @@
-
-
 /// MUST BE USED AT STARTUP
 /// NEVER USE AT RUNTIME
 #[macro_export]
@@ -8,7 +6,7 @@ macro_rules! graceful {
         match $expr {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("{} {}", $msg, e);
+                $crate::error!("{} {}", $msg, e);
                 std::process::exit(1);
             },
         }

@@ -1,24 +1,27 @@
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use common::graceful;
+use common::info;
 use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeId;
 use common::quic::id::derive_node_id;
-use common::quic::protorole::ProtoRole;
-use common::quic::p256::SecretKey;
 use common::quic::p256::PublicKey;
-use common::quic::p256::pkcs8::DecodePrivateKey;
+use common::quic::p256::SecretKey;
+use common::quic::p256::secret_from_key;
+use common::quic::protorole::ProtoRole;
 use quinn::ClientConfig;
 use quinn::Endpoint;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
-use crate::dht::{Dht, DhtParams, NodeContact};
+use crate::dht::Dht;
+use crate::dht::DhtParams;
+use crate::dht::NodeContact;
 use crate::util::config::AppConfig;
 use crate::util::config::PeerSeed;
 use crate::util::systime;
@@ -32,19 +35,7 @@ pub struct RelayKeys {
 
 impl RelayKeys {
     fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
-        let sec = fs::read_to_string(&cfg.network.key_path).map_err(|err| {
-            eprintln!("ERROR: failed to read file {path:?}: {err}", path = &cfg.network.key_path);
-        })?;
-        
-        let secret = if sec.starts_with("-----BEGIN EC PRIVATE KEY-----") {
-            SecretKey::from_sec1_pem(&sec).map_err(|err| { 
-                eprintln!("ERROR: failed to parse sec1 secret key: {err}");
-            })?
-        } else {
-            SecretKey::from_pkcs8_pem(&sec).map_err(|err| {
-                eprintln!("ERROR: failed to parse pkcs8 secret key: {err}");
-            })?
-        };
+        let secret = secret_from_key(&cfg.network.key_path)?;
 
         Ok(Self { public: secret.public_key(), secret })
     }
@@ -63,10 +54,8 @@ pub struct Relay {
     pub id: NodeId,
 
     // pub keys: RelayKeys,
-
     /// SystemTime in ms since EPOCH when relay is started first
     // pub start_ms: u128,
-
     pub endpoint: Arc<Endpoint>,
 
     pub cfg: AppConfig,
@@ -95,7 +84,7 @@ impl Relay {
 
         let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
         if let Ok(addr) = endpoint.local_addr() {
-            println!("QUIC(RELAY): listening at {:?}", addr);
+            info!("relay listening at QUIC({:?})", addr);
         }
         endpoint
     }
@@ -104,7 +93,7 @@ impl Relay {
         let keys = RelayKeys::from_cfg(&cfg).expect("config failed");
         let id = derive_node_id(&keys.public);
 
-        println!("RELAY: Initializing with ID({})", id);
+        info!("initializing Relay with ID({})", id);
 
         let mut endpoint = Self::endpoint(&cfg);
 
