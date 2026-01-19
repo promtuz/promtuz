@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use common::graceful;
+use common::info;
 use common::proto::RelayId;
 use common::proto::ResolverId;
 use common::proto::relay_res::LifetimeP;
@@ -100,14 +101,7 @@ impl Resolver {
 
         self.relays.insert(relay_id, RelayEntry { id: relay_id, conn });
 
-        let jitter = (rand::random::<f32>() * 2000.0 - 1000.0) as i32;
-
-        let hello_ack = LifetimeP::HelloAck {
-            accepted: true,
-            interval_heartbeat_ms: (25 * 1000 + jitter).max(0) as u32,
-            reason: None,
-            resolver_time: systime().as_millis(),
-        };
+        let hello_ack = LifetimeP::HelloAck { resolver_time: systime().as_millis() };
 
         Ok(hello_ack)
     }

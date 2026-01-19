@@ -2,16 +2,15 @@
 
 use std::fmt::Debug;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::{
-    proto::{
-        RelayId,
-        pack::{Packable, Packer},
-    },
-    sysutils::SystemLoad,
-};
+use crate::proto::RelayId;
+use crate::proto::pack::Packable;
+use crate::proto::pack::Packer;
+use crate::sysutils::SystemLoad;
+use crate::trace;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum LifetimeP {
@@ -31,19 +30,8 @@ pub enum LifetimeP {
     ///
     /// Confirms acceptance, conveys heartbeat timing, or explains rejection.
     HelloAck {
-        /// Whether the resolver accepts this node into the active set.
-        accepted: bool,
-
-        /// Human-readable reason if `accepted == false`.
-        /// I wonder what human will read this reason,
-        /// TODO: use `enum RelayRejectReason` or something
-        reason: Option<String>,
-
         /// Resolver's current unix time (used for clock-drift checking).
         resolver_time: u128,
-
-        /// Heartbeat interval the node should follow when sending `NodeHeartbeat`.
-        interval_heartbeat_ms: u32,
     },
 
     /// Periodic heartbeat sent by a node to indicate that it is still alive
@@ -72,6 +60,8 @@ impl Packable for ResolverPacket {}
 impl ResolverPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
         let packet = self.pack()?;
+
+        trace!("sent packet {}", hex::encode(&packet));
 
         tx.write_all(&packet).await?;
         Ok(tx.flush().await?)
