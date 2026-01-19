@@ -12,11 +12,11 @@ use tokio::runtime::Runtime;
 
 mod api;
 mod data;
+mod db;
 mod events;
 mod ndk;
 mod quic;
 mod utils;
-mod db;
 
 type JC<'local> = JClass<'local>;
 
@@ -39,7 +39,15 @@ pub extern "C" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jn
     JVM.set(vm).unwrap();
 
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Debug).with_tag("core"),
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("core")
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .filter(None, log::LevelFilter::Off)
+                    .filter_module("core", log::LevelFilter::Debug)
+                    .build(),
+            ),
     );
 
     jni::sys::JNI_VERSION_1_6

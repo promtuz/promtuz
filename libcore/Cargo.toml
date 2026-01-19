@@ -21,6 +21,7 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 hex.workspace = true
 log.workspace = true
+serde_bytes.workspace = true
 
 # Public Crates
 android_logger = "0.15"

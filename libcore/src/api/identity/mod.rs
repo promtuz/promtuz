@@ -1,5 +1,4 @@
 // use std::net::SocketAddr;
-
 use anyhow::Result;
 use anyhow::anyhow;
 use common::proto::client_peer::ClientPeerPacket;
@@ -23,11 +22,12 @@ use crate::JVM;
 use crate::RUNTIME;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
+use crate::events::Emittable;
+use crate::events::identity::IdentityEv;
 use crate::quic::server::RELAY;
 
 // static ESK: RwLock<Option<StaticSecret>> = RwLock::new(None);
 static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
-
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
@@ -93,7 +93,9 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
                                 loop {
                                     match ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))? {
                                         Identity(AddMe { ipk, epk, name }) => {
-                                            info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk))
+                                            info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk));
+                                            
+                                            IdentityEv::AddMe { ipk, name }.emit();
                                         },
                                     }
                                 }

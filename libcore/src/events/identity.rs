@@ -1,7 +1,21 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+use crate::events::Emittable;
+use crate::events::InternalEvent;
+
 #[allow(unused)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IdentityEv {
-    AddMe { ipk: [u8; 32], name: String }
+    AddMe {
+        #[serde(with = "serde_bytes")]
+        ipk: [u8; 32],
+        name: String,
+    },
+}
+
+impl Emittable for IdentityEv {
+    fn emit(self) {
+        InternalEvent::emit("IDENTITY", &self);
+    }
 }
