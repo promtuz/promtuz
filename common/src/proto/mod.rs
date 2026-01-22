@@ -10,6 +10,7 @@ pub mod client_res;
 pub mod pack;
 pub mod peer;
 pub mod relay_peer;
+#[cfg(feature = "server")]
 pub mod relay_res;
 
 pub type RelayId = NodeId;

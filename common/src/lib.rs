@@ -20,5 +20,4 @@ pub mod macros;
 pub mod node;
 
 #[cfg(feature = "server")]
-#[macro_use]
 pub mod server;

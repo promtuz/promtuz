@@ -4,6 +4,7 @@ use quinn::VarInt;
 
 pub mod config;
 pub mod id;
+#[cfg(feature = "server")]
 pub mod p256;
 pub mod protorole;
 
