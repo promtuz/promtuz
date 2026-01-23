@@ -33,7 +33,6 @@ rusqlite_migration = "2.3.0"
 unicode-normalization = "0.1.25"
 crc32fast = "1.5.0"
 ciborium = "0.2.2"
-rcgen = { version = "0.14.6", features = ["x509-parser"] }
 if-addrs = "0.14.0"
 tokio-util = "0.7.18"
 thiserror = "2.0.18"

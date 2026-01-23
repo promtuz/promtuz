@@ -5,7 +5,6 @@ use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use jni::JNIEnv;
-use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 use crate::db::identity::IDENTITY_DB;

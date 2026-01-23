@@ -16,8 +16,6 @@ use quinn::Endpoint;
 use quinn::EndpointConfig;
 use quinn::TransportConfig;
 use quinn::default_runtime;
-use rcgen::Certificate;
-
 use crate::ENDPOINT;
 use crate::JC;
 use crate::RUNTIME;
@@ -32,8 +30,6 @@ pub mod connection;
 pub mod identity;
 pub mod misc;
 pub mod welcome;
-
-pub static CERTIFICATE: OnceCell<Certificate> = OnceCell::new();
 
 /// Identity used in connecting with peer clients
 pub static PEER_IDENTITY: OnceCell<PeerIdentity> = OnceCell::new();

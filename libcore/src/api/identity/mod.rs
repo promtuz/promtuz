@@ -1,4 +1,3 @@
-// use std::net::SocketAddr;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::proto::client_peer::ClientPeerPacket;
@@ -41,23 +40,12 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
 
             // we advertise our ACTUAL public address including port as NAT can port forward
             let addr = relay.public_addr().await?;
-            info!("IDENTITY: PUBLIC ADDR {addr}");
-            
-            // if let Ok(addrs) = if_addrs::get_if_addrs() {
-            //     for interface in addrs {
-            //         info!("INTERFACE: {interface:?}");
-            //     }
-            // }
-
+       
             let qr = IdentityQr {
                 ipk: identity.ipk(),
-                // vfk: identity.vfk(),
-                // epk: epk.to_bytes(),
                 addr,
                 name: identity.name(),
             };
-
-            info!("IDENTITY: QR {qr:?}");
 
             let jvm = JVM.get().unwrap();
             let mut env = jvm.attach_current_thread().unwrap();
