@@ -8,20 +8,22 @@ use common::proto::client_res::ClientResponse;
 use common::proto::client_res::RelayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
-use crate::db::network::NETWORK_DB;
-use crate::db::network::RelayRow;
 use log::info;
 use quinn::Connection;
 use quinn::VarInt;
 use rusqlite::params;
 use serde::Serialize;
+use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
-use crate::ENDPOINT;
 use crate::data::ResolverSeed;
+use crate::db::network::NETWORK_DB;
+use crate::db::network::RelayRow;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
+use crate::quic::dialer::DialerError;
 use crate::quic::dialer::connect_to_any_seed;
+use crate::quic::dialer::quinn_err;
 use crate::utils::systime;
 
 /// Shareable Statistical Data
@@ -43,6 +45,18 @@ pub struct Relay {
 
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
+}
+
+#[derive(Error, Debug)]
+pub enum ResolveError {
+    #[error("resolver did not return any relay")]
+    EmptyResponse,
+
+    #[error("dialer error: {0}")]
+    DialerError(#[from] DialerError),
+
+    #[error("failed to unpack: {0}")]
+    UnpackError(#[from] anyhow::Error),
 }
 
 /// TODO: Create unit testing for this
@@ -126,51 +140,44 @@ impl Relay {
     /// Resolves relays by connected to one of the resolver seed provided
     ///
     /// Any type of failure except ui related is not tolerated and will return an error
-    pub async fn resolve(seeds: &[ResolverSeed]) -> anyhow::Result<()> {
-        ConnectionState::Resolving.emit();
+    pub async fn resolve(seeds: &[ResolverSeed]) -> Result<(), ResolveError> {
+        use ConnectionState as CS;
 
-        let conn =
-            match connect_to_any_seed(ENDPOINT.get().ok_or(anyhow!("API not initialized"))?, seeds)
-                .await
-            {
-                Ok(conn) => conn,
-                Err(err) => {
-                    ConnectionState::Failed.emit();
-                    return Err(err);
-                },
-            };
+        CS::Resolving.emit();
+
+        let conn = connect_to_any_seed(seeds).await.inspect_err(|_| CS::Failed.emit())?;
 
         let req = ClientRequest::GetRelays().pack().unwrap();
 
-        let (mut send, mut recv) = conn.open_bi().await?;
-
-        send.write_all(&req).await?;
-        send.flush().await?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(quinn_err)?;
+        send.write_all(&req).await.map_err(quinn_err)?;
+        send.flush().await.map_err(quinn_err)?;
 
         use ClientResponse;
         use ClientResponse::*;
 
-        match ClientResponse::unpack(&mut recv).await {
-            Ok(cres) =>
-            {
-                #[allow(irrefutable_let_patterns)]
-                if let GetRelays { relays } = cres {
-                    Relay::refresh(&relays)?;
+        loop {
+            let client_resp = ClientResponse::unpack(&mut recv).await?;
 
-                    conn.close(VarInt::from_u32(1), &[]);
+            #[allow(irrefutable_let_patterns)]
+            if let GetRelays { relays } = client_resp {
+                if relays.is_empty() {
+                    break Err(ResolveError::EmptyResponse);
                 }
-            },
-            Err(err) => return Err(err),
-        }
 
-        Ok(())
+                Relay::refresh(&relays)?;
+                conn.close(VarInt::from_u32(1), &[]);
+
+                break Ok(());
+            }
+        }
     }
 
     /// Reduces reputation of relay by 1
     ///
     /// Returns updated reputation
     pub fn downvote(&self) -> anyhow::Result<i16> {
-        info!("RELAY({}): Downvoting", self.id);
+        info!("INFO: downvoting relay({})", self.id);
         let conn = NETWORK_DB.lock();
 
         Ok(conn.query_one(
@@ -184,7 +191,7 @@ impl Relay {
     ///
     /// Returns updated reputation
     pub fn upvote(&self) -> anyhow::Result<i16> {
-        info!("RELAY({}): Upvoting", self.id);
+        info!("INFO: upvoting relay({})", self.id);
         let conn = NETWORK_DB.lock();
 
         Ok(conn.query_one(

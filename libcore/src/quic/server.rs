@@ -6,13 +6,12 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
-use common::crypto::SigningKey;
 use common::proto::client_rel::HandshakeP;
 use common::proto::client_rel::MiscP;
 use common::proto::client_rel::RelayPacket;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
-use ed25519_dalek::ed25519::signature::SignerMut;
+use ed25519_dalek::VerifyingKey;
 use log::debug;
 use log::error;
 use log::info;
@@ -21,6 +20,7 @@ use quinn::ConnectionError;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
+use crate::data::identity::IdentitySigner;
 use crate::data::relay::Relay;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
@@ -42,16 +42,18 @@ where
 pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);
 
 impl Relay {
-    pub async fn connect(mut self, mut isk: SigningKey) -> Result<(), RelayConnError> {
+    pub async fn connect(
+        mut self, ipk: VerifyingKey, signer: &IdentitySigner,
+    ) -> Result<(), RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host.clone())?, self.port);
 
-        info!("RELAY({}): CONNECTING AT {}", self.id, addr);
+        debug!("DEBUG: connecting to relay at {}", addr);
 
         ConnectionState::Connecting.emit();
 
         match ENDPOINT.get().unwrap().connect(addr, &self.id)?.await {
             Ok(conn) => {
-                info!("RELAY({}): Connected", self.id);
+                info!("INFO: relay({}) connected", self.id);
 
                 ConnectionState::Handshaking.emit();
 
@@ -60,7 +62,7 @@ impl Relay {
                 use HandshakeP::*;
                 use RelayPacket::*;
 
-                RelayPacket::Handshake(ClientHello { ipk: isk.verifying_key().to_bytes() })
+                RelayPacket::Handshake(ClientHello { ipk: ipk.to_bytes() })
                     .send(&mut send)
                     .await
                     .map_err(RelayConnError::Error)?;
@@ -71,26 +73,29 @@ impl Relay {
                             let msg =
                                 [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
                                     .concat();
-                            RelayPacket::Handshake(ClientProof { sig: isk.sign(&msg).to_bytes() })
-                                .send(&mut send)
-                                .await
-                                .map_err(RelayConnError::Error)?;
+
+                            RelayPacket::Handshake(ClientProof {
+                                sig: signer.sign(&msg).map_err(RelayConnError::Error)?.to_bytes(),
+                            })
+                            .send(&mut send)
+                            .await
+                            .map_err(RelayConnError::Error)?;
                         },
                         Handshake(ServerAccept { timestamp }) => {
-                            info!("RELAY({}): Authenticated at {timestamp}", self.id);
+                            info!("INFO: authenticated with relay({}) at {timestamp}", self.id);
+
                             CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
-                            // Informing App UI about conn status
                             ConnectionState::Connected.emit();
-                            // Respect++
+
                             self.upvote().map_err(RelayConnError::Error)?;
                             self.connection = Some(conn);
                             *RELAY.write() = Some(self);
-                            // Starting the handler, handles until it's connected
+
                             Self::handle();
                             return Ok(());
                         },
                         Handshake(ServerReject { reason }) => {
-                            info!("RELAY({}): Rejected because {reason}", self.id);
+                            error!("ERROR: handshake with relay({}) rejected: {reason}", self.id);
                             // or something else maybe
                             return Err(RelayConnError::Continue);
                         },
@@ -106,7 +111,7 @@ impl Relay {
                 Err(RelayConnError::Continue)
             },
             Err(err) => {
-                debug!("RELAY({}): Connection Fail because {:?}", self.id, err);
+                error!("ERROR: connection with relay({}) failed: {}", self.id, err);
                 Err(err.into())
             },
         }
@@ -130,7 +135,7 @@ impl Relay {
 
     fn handle() {
         tokio::spawn(async {
-            debug!("RELAY_HANDLE: STANDBY");
+            debug!("DEBUG: waiting for incoming streams");
             loop {
                 let conn = {
                     let guard = RELAY.read();
@@ -148,11 +153,13 @@ impl Relay {
                             // cleanup
                             *RELAY.write() = None;
 
-                            return error!("RELAY_HANDLE: {err}");
+                            // need auto re-connect
+
+                            return error!("ERROR: failed to accept stream: {err}");
                         },
                     };
                 } else {
-                    debug!("RELAY_HANDLE: NO CONN, BYE!");
+                    error!("ERROR: current relay is not connected yet");
 
                     break;
                 }

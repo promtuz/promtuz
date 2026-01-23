@@ -45,7 +45,7 @@ impl InternalEvent {
 
         event_bytes = [&event_bytes as &[u8], &value_encoded].concat();
 
-        log::debug!("DEBUG: InternalEvent({tag}): {val:?}");
+        log::trace!("TRACE: InternalEvent({tag}): {val:?}");
 
         let vm = JVM.get().expect("JVM not initialized");
         let mut env = vm.attach_current_thread().unwrap();

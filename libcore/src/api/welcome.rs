@@ -42,7 +42,6 @@ pub extern "system" fn welcome(mut env: JNIEnv, _: JC, name: JString) -> bool {
 
     // Generating long-term identity secret key
     let isk = get_signing_key();
-
     let ipk = isk.verifying_key();
 
     // ENCRYPTING THE KEY

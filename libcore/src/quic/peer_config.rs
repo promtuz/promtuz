@@ -1,31 +1,30 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::quic::id::UserId;
 use common::quic::protorole::ProtoRole;
-use ed25519_dalek::SigningKey;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use quinn::ClientConfig;
 use quinn::ServerConfig;
 use quinn::TransportConfig;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
-use rcgen::KeyPair;
 use rustls::DigitallySignedStruct;
 use rustls::DistinguishedName;
 use rustls::SignatureScheme;
+use rustls::client::ResolvesClientCert;
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::client::danger::ServerCertVerified;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::CertificateDer;
-use rustls::pki_types::PrivateKeyDer;
-use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::ServerName;
 use rustls::pki_types::UnixTime;
+use rustls::server::ResolvesServerCert;
 use rustls::server::danger::ClientCertVerified;
 use rustls::server::danger::ClientCertVerifier;
+use rustls::sign::CertifiedKey;
+use rustls::sign::SigningKey;
 
-use crate::api::CERTIFICATE;
+use crate::quic::keystore_signer::KeystoreSigner;
+use crate::quic::peer_identity::PeerIdentity;
 
 #[derive(Debug)]
 struct PeerClientVerifier;
@@ -64,35 +63,51 @@ impl ClientCertVerifier for PeerClientVerifier {
     }
 }
 
+#[derive(Debug)]
+struct CustomCertResolver {
+    certified_key: Arc<CertifiedKey>,
+}
+
+impl CustomCertResolver {
+    fn new(cert_chain: Vec<CertificateDer<'static>>, signer: Arc<dyn SigningKey>) -> Self {
+        let certified_key = Arc::new(CertifiedKey::new(cert_chain, signer));
+        Self { certified_key }
+    }
+}
+
+impl ResolvesServerCert for CustomCertResolver {
+    fn resolve(&self, _client_hello: rustls::server::ClientHello) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.certified_key))
+    }
+}
+
+impl ResolvesClientCert for CustomCertResolver {
+    fn resolve(
+        &self, _root_hint_subjects: &[&[u8]], _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(Arc::clone(&self.certified_key))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 /// Builds server config where clients connect with each other
 /// basically peer to peer
-pub fn build_peer_server_cfg(isk: SigningKey) -> Result<ServerConfig> {
-    let der = isk.to_pkcs8_der()?;
-    let isk_der = PrivatePkcs8KeyDer::from(der.as_bytes());
+pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
+    let cert_der = CertificateDer::from(identity.certificate.der().to_vec());
 
-    let key_pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&isk_der, &rcgen::PKCS_ED25519)?;
+    // Create signer that fetches key on-demand from Android Keystore
+    let signer: Arc<dyn SigningKey> =
+        Arc::new(KeystoreSigner::new(identity.public_key.to_bytes().to_vec()));
 
-    let user_id = UserId::derive(isk.verifying_key().as_bytes()).to_string();
-
-    // rcgen::PKCS_ED25519
-    let mut params = rcgen::CertificateParams::new(vec![user_id.clone()])?;
-
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params.distinguished_name.push(rcgen::DnType::CommonName, &user_id);
-
-    let cert = params.self_signed(&key_pair)?;
-
-    CERTIFICATE.set(cert.clone()).unwrap_or_else(|_| {
-        log::error!("ERROR: failed to set global client certificate");
-    });
-
-    let cert_der = CertificateDer::from(cert.der().to_vec());
-
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    // Create cert resolver with certificate and lazy signer
+    let cert_resolver = Arc::new(CustomCertResolver::new(vec![cert_der.clone()], signer));
 
     let mut crypto = rustls::ServerConfig::builder()
         .with_client_cert_verifier(Arc::new(PeerClientVerifier))
-        .with_single_cert(vec![cert_der], key_der)?;
+        .with_cert_resolver(cert_resolver);
 
     crypto.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
 
@@ -129,19 +144,21 @@ impl ServerCertVerifier for PeerServerVerifier {
     }
 }
 
-pub fn build_peer_client_cfg(key_pair: KeyPair) -> Result<ClientConfig> {
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
+    // Get the certificate (no private key involved)
+    let cert_der = CertificateDer::from(identity.certificate.der().to_vec());
 
-    let cert_der = {
-        // unwrapping as `..._server_cfg` must run before `..._client_cfg` setting `CERTIFICATE`
-        let cert = CERTIFICATE.get().unwrap();
-        CertificateDer::from(cert.der().to_vec())
-    };
+    // Create signer that fetches key on-demand from Android Keystore
+    let signer: Arc<dyn SigningKey> =
+        Arc::new(KeystoreSigner::new(identity.public_key.to_bytes().to_vec()));
+
+    // Create cert resolver for client authentication
+    let cert_resolver = Arc::new(CustomCertResolver::new(vec![cert_der.clone()], signer));
 
     let mut tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PeerServerVerifier))
-        .with_client_auth_cert(vec![cert_der], key_der)?;
+        .with_client_cert_resolver(cert_resolver);
 
     tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
 

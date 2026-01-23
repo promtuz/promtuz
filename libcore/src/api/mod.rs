@@ -2,12 +2,11 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use common::quic::config::build_client_cfg;
-// use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca_bytes;
 use common::quic::config::setup_crypto_provider;
 use common::quic::protorole::ProtoRole;
-use ed25519_dalek::SigningKey;
 use jni::JNIEnv;
 use jni::objects::JObject;
 use jni_macro::jni;
@@ -26,6 +25,7 @@ use crate::data::identity::Identity;
 use crate::jni_try;
 use crate::ndk::read_raw_res;
 use crate::quic::peer_config::build_peer_server_cfg;
+use crate::quic::peer_identity::PeerIdentity;
 
 pub mod conn_stats;
 pub mod connection;
@@ -34,6 +34,9 @@ pub mod misc;
 pub mod welcome;
 
 pub static CERTIFICATE: OnceCell<Certificate> = OnceCell::new();
+
+/// Identity used in connecting with peer clients
+pub static PEER_IDENTITY: OnceCell<PeerIdentity> = OnceCell::new();
 
 /// Entry point for API
 ///
@@ -48,9 +51,20 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
 
     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
 
-    let server_cfg = Identity::secret_key(&mut env)
-        .and_then(|key| build_peer_server_cfg(SigningKey::from(key)))
+    PeerIdentity::initialize(&mut env)
+        .and_then(|pi| {
+            PEER_IDENTITY
+                .set(pi)
+                .map_err(|_| anyhow!("Failed to set PEER_IDENTITY (already initialized?)"))
+        })
+        .inspect_err(|e| log::error!("ERROR: failed to initialize peer identity: {e}"))
         .ok();
+
+    let server_cfg = PEER_IDENTITY.get().and_then(|pi| {
+        build_peer_server_cfg(pi)
+            .inspect_err(|e| log::error!("ERROR: server config builder failed: {e}"))
+            .ok()
+    });
 
     let mut endpoint =
         Endpoint::new(EndpointConfig::default(), server_cfg, socket, default_runtime().unwrap())

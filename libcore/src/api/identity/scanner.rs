@@ -5,8 +5,6 @@ use common::proto::client_peer::IdentityP;
 use common::proto::pack::Unpacker;
 use common::quic::id::UserId;
 use common::quic::id::derive_user_id;
-use ed25519_dalek::SigningKey;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JValue;
@@ -14,17 +12,14 @@ use jni_macro::jni;
 use log::debug;
 use log::error;
 use log::info;
-use rcgen::KeyPair;
-use rustls::pki_types::PrivatePkcs8KeyDer;
 
 use crate::ENDPOINT;
 use crate::JC;
-use crate::JVM;
 use crate::RUNTIME;
+use crate::api::PEER_IDENTITY;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::quic::peer_config::build_peer_client_cfg;
-use crate::try_ret;
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
@@ -55,19 +50,7 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
             Err(e) => error!("Failed to call onIdentityQrScanned: {:?}", e),
         }
 
-        let key_der = try_ret!((|| {
-            let mut env = JVM.get().unwrap().attach_current_thread()?;
-
-            let isk: SigningKey = Identity::secret_key(&mut env)?.into();
-            let der = isk.to_pkcs8_der()?;
-            let isk_der = PrivatePkcs8KeyDer::from(der.as_bytes());
-            Ok::<_, anyhow::Error>(KeyPair::from_pkcs8_der_and_sign_algo(
-                &isk_der,
-                &rcgen::PKCS_ED25519,
-            )?)
-        })().map_err(|err| {
-            log::error!("ERROR: failed to get identity secret key der: {err}");
-        }));
+        let peer_identity = PEER_IDENTITY.get().unwrap();
 
         RUNTIME.spawn(async move {
             let block = async move {
@@ -79,7 +62,7 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
 
                 let conn = ep
                     .connect_with(
-                        build_peer_client_cfg(key_der)?,
+                        build_peer_client_cfg(peer_identity)?,
                         identity.addr,
                         &UserId::derive(&identity.ipk).to_string(),
                     )?
