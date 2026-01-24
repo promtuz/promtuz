@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::events::Emittable;
 use crate::events::InternalEvent;
 
+/// For InternalEvents
 #[allow(unused)]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IdentityEv {

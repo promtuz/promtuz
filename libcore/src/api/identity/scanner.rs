@@ -76,7 +76,6 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                     let (_esk, epk) = get_static_keypair();
 
                     ClientPeerPacket::Identity(AddMe {
-                        ipk: our_ipk,
                         epk: epk.to_bytes(),
                         name: our_name.clone(),
                     })

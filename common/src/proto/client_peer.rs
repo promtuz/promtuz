@@ -18,14 +18,14 @@ use crate::proto::pack::Packer;
 pub enum IdentityP {
     AddMe {
         #[serde(with = "serde_bytes")]
-        ipk: [u8; 32],
-        #[serde(with = "serde_bytes")]
         epk: [u8; 32],
         name: String,
     },
+    /// Cancels the [`IdentityP::AddMe`] request
+    NeverMind {},
+
     /// Rejection for [`IdentityP::AddMe`]
     No { reason: String },
-
     /// Proceeding with [`IdentityP::AddMe`]
     AddedYou {
         /// Ephemeral key of sharer as it was not included in the IdentityQr
