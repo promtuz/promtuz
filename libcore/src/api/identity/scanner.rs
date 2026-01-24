@@ -4,7 +4,6 @@ use common::proto::client_peer::ClientPeerPacket;
 use common::proto::client_peer::IdentityP;
 use common::proto::pack::Unpacker;
 use common::quic::id::UserId;
-use common::quic::id::derive_user_id;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JValue;
@@ -20,69 +19,91 @@ use crate::api::PEER_IDENTITY;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::quic::peer_config::build_peer_client_cfg;
+use crate::try_ret;
 
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
     let bytes = env.convert_byte_array(bytes).unwrap();
-    info!("GOT QR CODE : {}", hex::encode(&bytes));
 
-    let identity = match IdentityQr::decode(&bytes) {
-        Ok(iqr) => iqr,
-        Err(err) => {
-            error!("PARSE_QR: {err}");
+    // this is peer's identity qr
+    let peer_identity_qr = try_ret!(
+        IdentityQr::decode(&bytes).map_err(|e| error!("ERROR: failed to parse qr code: {e}"))
+    );
 
-            return;
-        },
-    };
+    debug!("DEBUG: parsed qr code: {peer_identity_qr:?}");
 
-    debug!("IDENTITY_QR: {identity:?}");
-    debug!("PUBLIC ID ?? {}", derive_user_id(&identity.ipk));
+    let peer_ipk_hex = hex::encode(peer_identity_qr.ipk);
 
     if let Some(ep) = ENDPOINT.get().cloned() {
-        // FREEZE THE SCANNER - Call back to Android ViewModel
         match env.call_static_method(
             "com/promtuz/chat/presentation/viewmodel/QrScannerVM",
             "onIdentityQrScanned",
             "(Ljava/lang/String;)V",
-            &[JValue::Object(&env.new_string(&identity.name).unwrap())],
+            &[JValue::Object(&env.new_string(&peer_identity_qr.name).unwrap())],
         ) {
-            Ok(_) => info!("Successfully triggered identity processing for: {}", identity.name),
+            Ok(_) => {
+                info!("Successfully triggered identity processing for: {}", peer_identity_qr.name)
+            },
             Err(e) => error!("Failed to call onIdentityQrScanned: {:?}", e),
         }
 
-        let peer_identity = PEER_IDENTITY.get().unwrap();
+        // our own peer identity used to connect with peers, not peer's identity
+        let our_peer_identity = PEER_IDENTITY.get().unwrap();
 
         RUNTIME.spawn(async move {
             let block = async move {
-                debug!("IN ASYNC RUNTIME");
-                let (ipk, name) = Identity::get()
+                let (our_ipk, our_name) = Identity::get()
                     .map(|i| (i.ipk(), i.name()))
                     .ok_or(anyhow!("could not find ipk"))?;
-                debug!("IPK: {ipk:?} AND NAME {name}");
 
                 let conn = ep
                     .connect_with(
-                        build_peer_client_cfg(peer_identity)?,
-                        identity.addr,
-                        &UserId::derive(&identity.ipk).to_string(),
+                        build_peer_client_cfg(our_peer_identity)?,
+                        peer_identity_qr.addr,
+                        &UserId::derive(&peer_identity_qr.ipk).to_string(),
                     )?
                     .await?;
 
-                debug!("CONNECTED");
+                debug!(
+                    "DEBUG: connected with peer({}) on {}",
+                    &peer_ipk_hex, peer_identity_qr.addr
+                );
 
                 let (mut send, mut recv) = conn.open_bi().await?;
 
-                debug!("OPENED BI STREAM");
+                {
+                    use IdentityP::*;
+                    let (_esk, epk) = get_static_keypair();
 
-                use IdentityP::*;
-                let (_esk, epk) = get_static_keypair();
-
-                ClientPeerPacket::Identity(AddMe { ipk, epk: epk.to_bytes(), name })
+                    ClientPeerPacket::Identity(AddMe {
+                        ipk: our_ipk,
+                        epk: epk.to_bytes(),
+                        name: our_name.clone(),
+                    })
                     .send(&mut send)
                     .await?;
 
-                while let Ok(packet) = ClientPeerPacket::unpack(&mut recv).await {
-                    debug!("PEER_PACKET: {packet:?}");
+                    use ClientPeerPacket::*;
+
+                    while let Ok(Identity(packet)) = ClientPeerPacket::unpack(&mut recv).await {
+                        match packet {
+                            AddedYou { epk } => {
+                                // epk of sharer
+                                info!(
+                                    "INFO: *{}* has accepted the request with EPK({})",
+                                    &peer_identity_qr.name,
+                                    hex::encode(epk)
+                                )
+                            },
+                            No { reason } => {
+                                info!(
+                                    "INFO: *{}* rejected request: {reason}",
+                                    &peer_identity_qr.name
+                                )
+                            },
+                            _ => { /* shouldn't reach this */ },
+                        }
+                    }
                 }
 
                 Ok::<(), anyhow::Error>(())
@@ -90,7 +111,10 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
             .await;
 
             if let Some(err) = block.err() {
-                log::error!("SCANNER_ERR: {err}")
+                error!(
+                    "ERROR: connection with peer({}) failed: {err}",
+                    hex::encode(peer_identity_qr.ipk)
+                )
             }
         });
     }

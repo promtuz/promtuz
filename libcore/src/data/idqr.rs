@@ -11,8 +11,6 @@ const MAGIC_BYTES: &[u8] = b"PIDQ";
 #[derive(Debug)]
 pub struct IdentityQr {
     pub ipk: [u8; 32],
-    // pub vfk: [u8; 32],
-    // pub epk: [u8; 32],
     pub addr: SocketAddr,
     pub name: String,
 }
@@ -27,8 +25,6 @@ impl IdentityQr {
         out.push(0); // flags
 
         out.extend_from_slice(&self.ipk);
-        // out.extend_from_slice(&self.vfk);
-        // out.extend_from_slice(&self.epk);
 
         match self.addr.ip() {
             std::net::IpAddr::V4(ip) => {
@@ -94,8 +90,6 @@ impl IdentityQr {
         };
 
         let ipk = take32(body, &mut i);
-        // let vfk = take32(body, &mut i);
-        // let epk = take32(body, &mut i);
 
         let ip = match body[i] {
             4 => {
