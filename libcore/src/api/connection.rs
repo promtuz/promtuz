@@ -4,6 +4,7 @@ use jni::objects::JObject;
 use jni_macro::jni;
 use log::debug;
 use log::error;
+use log::trace;
 
 use crate::JC;
 use crate::RUNTIME;
@@ -51,10 +52,23 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
                 Ok(relay) => {
                     let id = relay.id.clone();
 
-                    log::trace!("TRACE: connecting to relay({})", id);
+                    trace!("TRACE: connecting to relay({})", id);
 
                     match relay.connect(ipk, &identity_signer).await {
-                        Ok(_) => break,
+                        Ok(handle) => {
+                            // disconnection or closed for some reason
+                            match handle.await {
+                                Ok(conn_err) => {
+                                    error!("ERROR: relay connection closed: {conn_err}");
+                                },
+                                Err(join_err) => {
+                                    error!("ERROR: failed to join relay handle: {join_err}");
+                                },
+                            }
+
+                            // reconnecting by re-running da loop
+                            continue;
+                        },
                         Err(RelayConnError::Continue) => continue,
                         Err(RelayConnError::Error(err)) => {
                             error!("ERROR: connection to relay({}) failed: {}", id, err);

@@ -15,8 +15,11 @@ use ed25519_dalek::VerifyingKey;
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
 use parking_lot::RwLock;
+use quinn::Connection;
 use quinn::ConnectionError;
+use tokio::task::JoinHandle;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
@@ -44,7 +47,7 @@ pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);
 impl Relay {
     pub async fn connect(
         mut self, ipk: VerifyingKey, signer: &IdentitySigner,
-    ) -> Result<(), RelayConnError> {
+    ) -> Result<JoinHandle<ConnectionError>, RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host.clone())?, self.port);
 
         debug!("DEBUG: connecting to relay at {}", addr);
@@ -88,11 +91,16 @@ impl Relay {
                             ConnectionState::Connected.emit();
 
                             self.upvote().map_err(RelayConnError::Error)?;
-                            self.connection = Some(conn);
+                            self.connection = Some(conn.clone());
+
+                            let handle = tokio::spawn({
+                                let relay_clone = self.clone();
+                                async move { relay_clone.handle(conn).await }
+                            });
+
                             *RELAY.write() = Some(self);
 
-                            Self::handle();
-                            return Ok(());
+                            return Ok(handle);
                         },
                         Handshake(ServerReject { reason }) => {
                             error!("ERROR: handshake with relay({}) rejected: {reason}", self.id);
@@ -133,37 +141,28 @@ impl Relay {
         }
     }
 
-    fn handle() {
-        tokio::spawn(async {
-            debug!("DEBUG: waiting for incoming streams");
-            loop {
-                let conn = {
-                    let guard = RELAY.read();
-                    guard.as_ref().map(|r| r.connection.clone())
-                };
+    /// keep waiting for new incoming streams
+    /// IF,
+    /// - [`Relay::connection`] is not empty
+    /// - [`Relay::connection`] is not closed
+    async fn handle(&self, conn: Connection) -> ConnectionError {
+        debug!("DEBUG: waiting for incoming streams");
+        loop {
+            match conn.accept_bi().await {
+                Ok((_, _)) => {
+                    // Server will not send client anything, YET
+                    warn!("WARN: this shouldn't have logged")
+                },
+                Err(err) => {
+                    ConnectionState::Disconnected.emit();
 
-                if let Some(Some(conn)) = conn {
-                    match conn.accept_bi().await {
-                        Ok((_, _)) => {
-                            // Server will not send client anything, YET
-                        },
-                        Err(err) => {
-                            ConnectionState::Disconnected.emit();
+                    // cleanup
+                    *RELAY.write() = None;
+                    error!("ERROR: failed to accept stream: {err}");
 
-                            // cleanup
-                            *RELAY.write() = None;
-
-                            // need auto re-connect
-
-                            return error!("ERROR: failed to accept stream: {err}");
-                        },
-                    };
-                } else {
-                    error!("ERROR: current relay is not connected yet");
-
-                    break;
-                }
-            }
-        });
+                    return err;
+                },
+            };
+        }
     }
 }
