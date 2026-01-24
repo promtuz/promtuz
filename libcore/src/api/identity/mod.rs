@@ -31,6 +31,7 @@ use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
 use crate::events::identity::IdentityEv;
+use crate::quic::peer_config::extract_peer_public_key;
 use crate::quic::server::RELAY;
 
 static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
@@ -135,69 +136,79 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
     use IdentityP::*;
 
     // Wait for the AddMe packet
-    if let Identity(AddMe { ipk, epk, name }) =
-        ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))?
-    {
-        info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk));
+    let Identity(ipack) =
+        ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))?;
 
-        // Check if there's already a pending identity
-        let already_pending = PENDING_IDENTITY.lock().is_some();
-        if already_pending {
-            // Already have a pending request, reject this one
-            warn!("IDENTITY: already have pending request, rejecting {name}");
-            ClientPeerPacket::Identity(No { reason: "busy".to_string() }).send(&mut tx).await?;
-            return Ok(());
-        }
+    match ipack {
+        AddMe { epk, name } => {
+            let ipk = extract_peer_public_key(&conn)
+                .ok_or_else(|| anyhow!("failed to extract peer identity from TLS certificate"))?;
 
-        // Create oneshot channel for the decision
-        let (decision_tx, decision_rx) = oneshot::channel();
+            info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk));
 
-        // Store pending identity
-        {
-            let mut pending = PENDING_IDENTITY.lock();
-            *pending =
-                Some(PendingIdentity { conn, respond: decision_tx, ipk, epk, name: name.clone() });
-        }
+            // Check if there's already a pending identity
+            let already_pending = PENDING_IDENTITY.lock().is_some();
+            if already_pending {
+                // Already have a pending request, reject this one
+                warn!("IDENTITY: already have pending request, rejecting {name}");
+                ClientPeerPacket::Identity(No { reason: "busy".to_string() }).send(&mut tx).await?;
+                return Ok(());
+            }
 
-        // Emit event to Android (this will hide the QR and show the request card)
-        IdentityEv::AddMe { ipk, name: name.clone() }.emit();
+            // Create oneshot channel for the decision
+            let (decision_tx, decision_rx) = oneshot::channel();
 
-        // Wait for decision with timeout (60 seconds)
-        let decision = timeout(Duration::from_secs(60), decision_rx).await;
+            // Store pending identity
+            {
+                let mut pending = PENDING_IDENTITY.lock();
+                *pending =
+                    Some(PendingIdentity { conn, respond: decision_tx, ipk, epk, name: name.clone() });
+            }
 
-        // Send response based on decision
-        match decision {
-            Ok(Ok(true)) => {
-                info!("IDENTITY: {name} accepted");
-                let (_, our_epk) = get_static_keypair();
-                ClientPeerPacket::Identity(AddedYou { epk: our_epk.to_bytes() })
-                    .send(&mut tx)
-                    .await?;
+            // Emit event to Android (this will hide the QR and show the request card)
+            IdentityEv::AddMe { ipk, name: name.clone() }.emit();
 
-                // TODO: save their n our identity to contacts
-            },
-            Ok(Ok(false)) => {
-                info!("IDENTITY: {name} rejected");
-                ClientPeerPacket::Identity(No { reason: "rejected".to_string() })
-                    .send(&mut tx)
-                    .await?;
-            },
-            Ok(Err(_)) => {
-                debug!("IDENTITY: {name} decision channel closed");
-                ClientPeerPacket::Identity(No { reason: "cancelled".to_string() })
-                    .send(&mut tx)
-                    .await?;
-            },
-            Err(_) => {
-                warn!("IDENTITY: {name} timed out waiting for decision");
-                ClientPeerPacket::Identity(No { reason: "timeout".to_string() })
-                    .send(&mut tx)
-                    .await?;
-                // Clean up
-                *PENDING_IDENTITY.lock() = None;
-            },
-        }
-    }
+            // Wait for decision with timeout (60 seconds)
+            let decision = timeout(Duration::from_secs(60), decision_rx).await;
+
+            // Send response based on decision
+            match decision {
+                Ok(Ok(true)) => {
+                    info!("IDENTITY: {name} accepted");
+                    let (_, our_epk) = get_static_keypair();
+                    ClientPeerPacket::Identity(AddedYou { epk: our_epk.to_bytes() })
+                        .send(&mut tx)
+                        .await?;
+
+                    // TODO: save their n our identity to contacts
+                },
+                Ok(Ok(false)) => {
+                    info!("IDENTITY: {name} rejected");
+                    ClientPeerPacket::Identity(No { reason: "rejected".to_string() })
+                        .send(&mut tx)
+                        .await?;
+                },
+                Ok(Err(_)) => {
+                    debug!("IDENTITY: {name} decision channel closed");
+                    ClientPeerPacket::Identity(No { reason: "cancelled".to_string() })
+                        .send(&mut tx)
+                        .await?;
+                },
+                Err(_) => {
+                    warn!("IDENTITY: {name} timed out waiting for decision");
+                    ClientPeerPacket::Identity(No { reason: "timeout".to_string() })
+                        .send(&mut tx)
+                        .await?;
+                    // Clean up
+                    *PENDING_IDENTITY.lock() = None;
+                },
+            }
+        },
+        NeverMind {  } => {
+            todo!("Implement cancellation of request box")
+        },
+        _ => { /* mustn't reach this */}
+    } 
 
     Ok(())
 }

@@ -77,6 +77,7 @@ impl Identity {
     }
 }
 
+#[derive(Debug)]
 pub struct IdentitySigner {
     // caching the keymanager, due to JNI lifetime shenanigans
     key_manager: KeyManager,
@@ -88,7 +89,8 @@ impl IdentitySigner {
         Ok(Self { key_manager })
     }
 
-    // both secret and key should be zeroized
+    /// Signs message using the identity key.
+    /// The secret key is decrypted on-demand and immediately dropped.
     pub fn sign(&self, message: &[u8]) -> Result<Signature> {
         let secret = Identity::secret_key_with_manager(&self.key_manager)?;
         let key = SigningKey::from_bytes(&secret);

@@ -8,6 +8,7 @@ use jni::objects::JValue;
 
 use crate::JVM;
 
+#[derive(Debug)]
 pub struct KeyManager {
     class: GlobalRef,
 }
