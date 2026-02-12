@@ -2,6 +2,10 @@
 members = ["resolver", "relay", "common", "libcore", "jni_macro"]
 resolver = "2"
 
+[workspace.package]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/promtuz/promtuz"
+
 [workspace.dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "rand_core"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }

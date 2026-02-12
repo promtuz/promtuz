@@ -2,6 +2,9 @@
 name = "common"
 version = "0.1.0"
 edition = "2024"
+description = "Shared library — crypto, protocols, QUIC config, identity"
+license.workspace = true
+repository.workspace = true
 
 [features]
 crypto = [

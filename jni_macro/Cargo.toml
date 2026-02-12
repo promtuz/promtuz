@@ -2,6 +2,9 @@
 name = "jni_macro"
 version = "0.1.0"
 edition = "2021"
+description = "JNI proc-macro for Android FFI"
+license.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true
