@@ -1,14 +1,10 @@
 package com.promtuz.chat.presentation.viewmodel
 
-import android.app.Application
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.promtuz.chat.utils.media.ImageUtils
 import com.promtuz.core.API
 import com.promtuz.core.events.IdentityEvent
 import com.promtuz.core.events.InternalEvents
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -18,11 +14,11 @@ import kotlinx.serialization.ExperimentalSerializationApi
 
 @OptIn(ExperimentalSerializationApi::class)
 class ShareIdentityVM(
-    private val application: Application,
-    private val imgUtils: ImageUtils,
+//    private val application: Application,
+//    private val imgUtils: ImageUtils,
     private val api: API,
 ) : ViewModel() {
-    private val context: Context get() = application.applicationContext
+//    private val context: Context get() = application.applicationContext
 
     private var _qrData = MutableStateFlow<ByteArray?>(null)
     val qrData = _qrData.asStateFlow()
@@ -39,17 +35,20 @@ class ShareIdentityVM(
         _identityRequest.value = null
     }
 
+    fun acceptRequest() {
+        api.identityAccept()
+        _identityRequest.value = null
+    }
+
     init {
         viewModelScope.launch {
-            val events = api.eventsFlow.filterIsInstance<InternalEvents.IdentityEv>()
+            val identityEvents = api.eventsFlow.filterIsInstance<InternalEvents.IdentityEv>()
                 .distinctUntilChanged()
 
-            events.collect { ev ->
+            identityEvents.collect { ev ->
                 when (ev) {
                     is IdentityEvent.AddMe -> {
                         _identityRequest.value = ev
-                        // remove the qr cuz it's been used
-                        _qrData.value = null
                     }
                 }
             }

@@ -10,7 +10,6 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.promtuz.chat.domain.model.Identity
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.core.API
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -134,14 +133,5 @@ class QrScannerVM(
         _frozenFrameBitmap.value = null
         _backPressedOnce.value = false
         // TODO: Notify peer if connected (for future implementation)
-    }
-
-
-    /// logic for adding user
-
-    private lateinit var keyPair: Pair<ByteArray, ByteArray>
-
-    suspend fun connect(identity: Identity) = coroutineScope {
-        // TODO: TO BE REIMPLEMENTED IN `licore`
     }
 }
