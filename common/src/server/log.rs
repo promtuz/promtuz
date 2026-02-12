@@ -12,7 +12,7 @@ macro_rules! debug {
 macro_rules! info {
     ($($arg:tt)*) => {{
         println!(
-            "\x1b[48;5;236m\x1b[38;5;34m INFO \x1b[0m\x1b[48;5;236m{} \x1b[0m",
+            "\x1b[48;5;236m\x1b[38;5;34m INFO  \x1b[0m\x1b[48;5;236m{} \x1b[0m",
             format!($($arg)*)
         );
     }};
@@ -22,7 +22,7 @@ macro_rules! info {
 macro_rules! warn {
     ($($arg:tt)*) => {{
         println!(
-            "\x1b[48;5;58m\x1b[38;5;220m WARN \x1b[0m\
+            "\x1b[48;5;58m\x1b[38;5;220m WARN  \x1b[0m\
 \x1b[48;5;58m\x1b[38;5;15m{} \x1b[0m",
             format!($($arg)*)
         );

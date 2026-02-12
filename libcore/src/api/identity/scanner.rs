@@ -52,9 +52,8 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
 
         RUNTIME.spawn(async move {
             let block = async move {
-                let (our_ipk, our_name) = Identity::get()
-                    .map(|i| (i.ipk(), i.name()))
-                    .ok_or(anyhow!("could not find ipk"))?;
+                let our_name =
+                    Identity::get().map(|i| i.name()).ok_or(anyhow!("could not find ipk"))?;
 
                 let conn = ep
                     .connect_with(

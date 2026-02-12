@@ -9,9 +9,9 @@ use tokio::io::AsyncReadExt;
 /// Only for data sent over network, not for local
 pub(crate) trait Packable {}
 
-/// FIXME: DO THIS TODO
+/// TODO: DO THIS
 /// 
-/// TODO: Fix naming confusion between cbor and postcard
+/// FIXME: Fix naming confusion between cbor and postcard
 pub trait Packer {
     fn to_cbor(&self) -> Result<Vec<u8>>;
     fn pack(&self) -> Result<Vec<u8>>;
