@@ -6,8 +6,9 @@ use serde::de::DeserializeOwned;
 use tokio::io::AsyncReadExt;
 
 /// Decides which structs and enums can be packed for network transmission
-/// Only for data sent over network, not for local
-pub(crate) trait Packable {}
+/// 
+/// Only use for data that is sent over network and not locally
+pub trait Packable {}
 
 /// TODO: DO THIS
 /// 
