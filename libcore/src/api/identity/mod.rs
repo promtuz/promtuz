@@ -27,6 +27,7 @@ use crate::ENDPOINT;
 use crate::JC;
 use crate::JVM;
 use crate::RUNTIME;
+use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
@@ -180,7 +181,10 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                         .send(&mut tx)
                         .await?;
 
-                    // TODO: save their n our identity to contacts
+                    match Contact::save(ipk, epk, name.clone()) {
+                        Ok(_) => info!("IDENTITY: saved contact {name}"),
+                        Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
+                    }
                 },
                 Ok(Ok(false)) => {
                     info!("IDENTITY: {name} rejected");

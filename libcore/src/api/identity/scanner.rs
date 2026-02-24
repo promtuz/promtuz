@@ -16,6 +16,7 @@ use crate::ENDPOINT;
 use crate::JC;
 use crate::RUNTIME;
 use crate::api::PEER_IDENTITY;
+use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::quic::peer_config::build_peer_client_cfg;
@@ -86,12 +87,19 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                     while let Ok(Identity(packet)) = ClientPeerPacket::unpack(&mut recv).await {
                         match packet {
                             AddedYou { epk } => {
-                                // epk of sharer
                                 info!(
                                     "INFO: *{}* has accepted the request with EPK({})",
                                     &peer_identity_qr.name,
                                     hex::encode(epk)
-                                )
+                                );
+                                match Contact::save(
+                                    peer_identity_qr.ipk,
+                                    epk,
+                                    peer_identity_qr.name.clone(),
+                                ) {
+                                    Ok(_) => info!("INFO: saved contact {}", peer_identity_qr.name),
+                                    Err(e) => error!("ERROR: failed to save contact: {e}"),
+                                }
                             },
                             No { reason } => {
                                 info!(
