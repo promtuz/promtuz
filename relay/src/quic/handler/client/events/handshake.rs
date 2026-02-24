@@ -43,6 +43,14 @@ pub(super) async fn handle_handshake(
             Handshake(packet).send(tx).await?;
             _ = tx.finish();
 
+            // Register this client as connected
+            {
+                let relay_ref = ctx.relay.clone();
+                let conn = ctx.conn.clone();
+                let mut relay = relay_ref.lock().await;
+                relay.clients.insert(ipk_bytes, conn);
+            }
+
             let relay_ref = ctx.relay.clone();
             tokio::spawn(async move {
                 let record = {

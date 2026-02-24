@@ -47,10 +47,46 @@ pub enum MiscP {
     PubAddressRes { addr: SocketAddr },
 }
 
+/// Message forwarding through the relay
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct ForwardP {
+    /// Recipient identity public key
+    #[serde(with = "serde_bytes")]
+    pub to: [u8; 32],
+    /// Sender identity public key
+    #[serde(with = "serde_bytes")]
+    pub from: [u8; 32],
+    /// E2E encrypted payload (relay-blind)
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
+    /// Ed25519 signature over (to ‖ from ‖ payload)
+    #[serde(with = "serde_bytes")]
+    pub sig: [u8; 64],
+}
+
+/// Relay's response to a Forward request
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum ForwardResult {
+    /// Message accepted for delivery
+    Accepted,
+    /// Recipient not found in DHT
+    NotFound,
+    /// Signature verification failed
+    InvalidSig,
+    /// Generic error
+    Error { reason: String },
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum RelayPacket {
     Handshake(HandshakeP),
     Misc(MiscP),
+    /// Client sends a message to be forwarded to another user
+    Forward(ForwardP),
+    /// Relay responds to a Forward request
+    ForwardResult(ForwardResult),
+    /// Relay delivers a message to the connected recipient
+    Deliver(ForwardP),
 }
 
 impl Packable for RelayPacket {}

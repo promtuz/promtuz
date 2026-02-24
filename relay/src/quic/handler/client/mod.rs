@@ -54,5 +54,11 @@ impl Handler {
         if let Some(close_reason) = self.conn.close_reason() {
             debug!("conn client({addr}) closed: {close_reason}");
         }
+
+        // Deregister client on disconnect
+        let ipk = ctx.read().await.ipk.map(|k| k.to_bytes());
+        if let Some(ipk) = ipk {
+            relay.lock().await.clients.remove(&ipk);
+        }
     }
 }

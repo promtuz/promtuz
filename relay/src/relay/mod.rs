@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use common::quic::p256::SecretKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
 use quinn::ClientConfig;
+use quinn::Connection;
 use quinn::Endpoint;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -67,6 +69,9 @@ pub struct Relay {
 
     /// Shared in-memory DHT state
     pub dht: Arc<RwLock<Dht>>,
+
+    /// Connected + authenticated clients, keyed by IPK
+    pub clients: HashMap<[u8; 32], Arc<Connection>>,
 }
 
 impl Relay {
@@ -127,6 +132,7 @@ impl Relay {
             client_cfg,
             peer_client_cfg,
             dht,
+            clients: HashMap::new(),
         }
     }
 
