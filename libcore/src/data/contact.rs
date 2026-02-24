@@ -1,29 +1,33 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
+use common::crypto::StaticSecret;
+use common::crypto::get_shared_key;
 
-use crate::db::peers::{CONTACTS_DB, ContactRow};
+use crate::JVM;
+use crate::db::peers::CONTACTS_DB;
+use crate::db::peers::ContactRow;
+use crate::ndk::key_manager::KeyManager;
 
+#[derive(Debug, Clone)]
 pub struct Contact {
-    pub inner: ContactRow,
+    pub inner: Arc<ContactRow>,
 }
 
 impl Contact {
-    pub fn save(ipk: [u8; 32], epk: [u8; 32], name: String) -> Result<Self> {
-        let added_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    /// Save a contact with their EPK and our encrypted ephemeral secret key.
+    pub fn save(ipk: [u8; 32], epk: [u8; 32], enc_esk: Vec<u8>, name: String) -> Result<Self> {
+        let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         let conn = CONTACTS_DB.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO contacts (ipk, epk, name, added_at) VALUES (?1, ?2, ?3, ?4)",
-            (ipk, epk, name.clone(), added_at),
+            "INSERT OR REPLACE INTO contacts (ipk, epk, enc_esk, name, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (ipk, epk, enc_esk.clone(), name.clone(), added_at),
         )?;
 
-        Ok(Self {
-            inner: ContactRow { ipk, epk, name, added_at },
-        })
+        Ok(Self { inner: Arc::new(ContactRow { ipk, epk, enc_esk, name, added_at }) })
     }
 
     pub fn get(ipk: &[u8; 32]) -> Option<Self> {
@@ -34,7 +38,7 @@ impl Contact {
             ContactRow::from_row,
         )
         .ok()
-        .map(|inner| Self { inner })
+        .map(|inner| Self { inner: Arc::new(inner) })
     }
 
     pub fn list() -> Vec<ContactRow> {
@@ -50,11 +54,28 @@ impl Contact {
 
     pub fn exists(ipk: &[u8; 32]) -> bool {
         let conn = CONTACTS_DB.lock();
-        conn.query_row(
-            "SELECT 1 FROM contacts WHERE ipk = ?1",
-            [ipk.as_slice()],
-            |_| Ok(()),
-        )
-        .is_ok()
+        conn.query_row("SELECT 1 FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// Derive the shared symmetric key for this friendship.
+    /// Decrypts our stored ephemeral secret, does DH with their EPK.
+    pub fn shared_key(&self) -> Result<[u8; 32]> {
+        let jvm = JVM.get().unwrap();
+        let mut env = jvm.attach_current_thread().unwrap();
+        let km = KeyManager::new(&mut env)?;
+        drop(env);
+
+        let esk_bytes = km
+            .decrypt(&self.inner.enc_esk)
+            .map_err(|e| anyhow::anyhow!("failed to decrypt esk: {e:?}"))?;
+        let esk_arr: [u8; 32] =
+            esk_bytes.try_into().map_err(|_| anyhow::anyhow!("esk wrong length"))?;
+
+        let our_secret = StaticSecret::from(esk_arr);
+        let their_pk = common::crypto::xPublicKey::from(self.inner.epk);
+        let shared = our_secret.diffie_hellman(&their_pk);
+
+        Ok(get_shared_key(shared.as_bytes(), b"promtuz-msg-v1", ""))
     }
 }

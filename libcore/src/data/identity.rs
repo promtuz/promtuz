@@ -7,6 +7,7 @@ use ed25519_dalek::SigningKey;
 use jni::JNIEnv;
 use zeroize::Zeroizing;
 
+use crate::JVM;
 use crate::db::identity::IDENTITY_DB;
 use crate::db::identity::IdentityRow;
 use crate::ndk::key_manager::KeyManager;
@@ -61,6 +62,17 @@ impl Identity {
 
     pub fn secret_key(env: &mut JNIEnv) -> Result<Zeroizing<SecretKey>> {
         Self::secret_key_with_manager(&KeyManager::new(env)?)
+    }
+
+    /// Get secret key bytes without requiring a JNIEnv parameter.
+    /// Attaches to JVM internally. Safe to call from async contexts.
+    pub fn secret_key_bytes() -> [u8; 32] {
+        let jvm = JVM.get().unwrap();
+        let mut env = jvm.attach_current_thread().unwrap();
+        let km = KeyManager::new(&mut env).unwrap();
+        drop(env);
+        let sk = Self::secret_key_with_manager(&km).unwrap();
+        *sk
     }
 
     fn secret_key_with_manager(key_manager: &KeyManager) -> Result<Zeroizing<SecretKey>> {

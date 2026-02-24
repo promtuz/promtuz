@@ -12,6 +12,7 @@ use crate::JVM;
 pub mod callback;
 pub mod connection;
 pub mod identity;
+pub mod messaging;
 
 pub static CALLBACK: Mutex<Option<GlobalRef>> = Mutex::new(None);
 

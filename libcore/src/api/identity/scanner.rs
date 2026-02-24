@@ -71,12 +71,14 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
 
                 let (mut send, mut recv) = conn.open_bi().await?;
 
+                // Generate a unique ephemeral keypair for this friendship
+                let (our_esk, our_epk) = get_static_keypair();
+
                 {
                     use IdentityP::*;
-                    let (_esk, epk) = get_static_keypair();
 
                     ClientPeerPacket::Identity(AddMe {
-                        epk: epk.to_bytes(),
+                        epk: our_epk.to_bytes(),
                         name: our_name.clone(),
                     })
                     .send(&mut send)
@@ -92,9 +94,22 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                                     &peer_identity_qr.name,
                                     hex::encode(epk)
                                 );
+
+                                // Encrypt our ephemeral secret for storage
+                                let enc_esk = {
+                                    let jvm = crate::JVM.get().unwrap();
+                                    let mut env = jvm.attach_current_thread().unwrap();
+                                    let km = crate::ndk::key_manager::KeyManager::new(&mut env)
+                                        .expect("KeyManager init failed");
+                                    drop(env);
+                                    km.encrypt(&our_esk.to_bytes())
+                                        .expect("failed to encrypt esk")
+                                };
+
                                 match Contact::save(
                                     peer_identity_qr.ipk,
                                     epk,
+                                    enc_esk,
                                     peer_identity_qr.name.clone(),
                                 ) {
                                     Ok(_) => info!("INFO: saved contact {}", peer_identity_qr.name),

@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
+use common::proto::client_rel::ForwardP;
 use common::proto::client_rel::HandshakeP;
 use common::proto::client_rel::MiscP;
 use common::proto::client_rel::RelayPacket;
@@ -23,10 +24,14 @@ use tokio::task::JoinHandle;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
+use crate::api::messaging::decode_encrypted;
+use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
 use crate::data::relay::Relay;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
+use crate::events::messaging::MessageEv;
+use crate::utils::systime;
 
 pub enum RelayConnError {
     Continue,
@@ -149,9 +154,19 @@ impl Relay {
         debug!("DEBUG: waiting for incoming streams");
         loop {
             match conn.accept_bi().await {
-                Ok((_, _)) => {
-                    // Server will not send client anything, YET
-                    warn!("WARN: this shouldn't have logged")
+                Ok((_, mut recv)) => {
+                    tokio::spawn(async move {
+                        while let Ok(packet) = RelayPacket::unpack(&mut recv).await {
+                            match packet {
+                                RelayPacket::Deliver(fwd) => {
+                                    handle_deliver(fwd);
+                                },
+                                other => {
+                                    debug!("DEBUG: unexpected packet from relay: {other:?}");
+                                },
+                            }
+                        }
+                    });
                 },
                 Err(err) => {
                     ConnectionState::Disconnected.emit();
@@ -165,4 +180,57 @@ impl Relay {
             };
         }
     }
+}
+
+fn handle_deliver(fwd: ForwardP) {
+    // 1. Check if sender is a known contact
+    let contact = match Contact::get(&fwd.from) {
+        Some(c) => c,
+        None => {
+            info!("MESSAGE: dropped message from unknown sender {}", hex::encode(fwd.from));
+            return;
+        },
+    };
+
+    // 2. Derive per-friendship shared key and decrypt
+    let shared_key = match contact.shared_key() {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("MESSAGE: failed to derive shared key: {e}");
+            return;
+        },
+    };
+
+    let encrypted = match decode_encrypted(&fwd.payload) {
+        Some(e) => e,
+        None => {
+            warn!("MESSAGE: payload too short from {}", hex::encode(fwd.from));
+            return;
+        },
+    };
+
+    let plaintext = match encrypted.decrypt(&shared_key, &fwd.to) {
+        Ok(p) => p,
+        Err(_) => {
+            warn!("MESSAGE: decryption failed from {}", hex::encode(fwd.from));
+            return;
+        },
+    };
+
+    let content = match String::from_utf8(plaintext) {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(fwd.from));
+            return;
+        },
+    };
+
+    info!("MESSAGE: received from {}", hex::encode(fwd.from));
+
+    MessageEv::Received {
+        from: fwd.from,
+        content,
+        timestamp: systime().as_secs(),
+    }
+    .emit();
 }

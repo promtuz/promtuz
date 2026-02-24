@@ -176,12 +176,24 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
             match decision {
                 Ok(Ok(true)) => {
                     info!("IDENTITY: {name} accepted");
-                    let (_, our_epk) = get_static_keypair();
+                    let (our_esk, our_epk) = get_static_keypair();
+
                     ClientPeerPacket::Identity(AddedYou { epk: our_epk.to_bytes() })
                         .send(&mut tx)
                         .await?;
 
-                    match Contact::save(ipk, epk, name.clone()) {
+                    // Encrypt our ephemeral secret for storage
+                    let enc_esk = {
+                        let jvm = crate::JVM.get().unwrap();
+                        let mut env = jvm.attach_current_thread().unwrap();
+                        let km = crate::ndk::key_manager::KeyManager::new(&mut env)
+                            .expect("KeyManager init failed");
+                        drop(env);
+                        km.encrypt(&our_esk.to_bytes())
+                            .expect("failed to encrypt esk")
+                    };
+
+                    match Contact::save(ipk, epk, enc_esk, name.clone()) {
                         Ok(_) => info!("IDENTITY: saved contact {name}"),
                         Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
                     }
