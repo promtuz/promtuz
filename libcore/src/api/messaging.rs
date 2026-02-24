@@ -7,6 +7,7 @@ use common::proto::pack::Unpacker;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JString;
+use jni::sys::jobject;
 use jni_macro::jni;
 use log::error;
 use log::info;
@@ -15,6 +16,7 @@ use crate::JC;
 use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
+use crate::data::message::Message;
 use crate::events::Emittable;
 use crate::events::messaging::MessageEv;
 use crate::quic::server::RELAY;
@@ -39,15 +41,34 @@ pub extern "system" fn sendMessage(mut env: JNIEnv, _: JC, to_ipk: JByteArray, c
     RUNTIME.spawn(async move {
         if let Err(e) = send_message_inner(to, content).await {
             error!("MESSAGE: send failed: {e}");
-            MessageEv::Failed { to, reason: e.to_string() }.emit();
         }
     });
 }
 
 async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()> {
+    // 0. Save to local DB first (status = pending)
+    let msg = Message::save_outgoing(to, &content)?;
+    let msg_id = msg.inner.id.clone();
+    let msg_timestamp = msg.inner.timestamp;
+
     // 1. Look up contact and derive per-friendship shared key
-    let contact = Contact::get(&to).ok_or_else(|| anyhow!("recipient not in contacts"))?;
-    let shared_key = contact.shared_key()?;
+    let contact = match Contact::get(&to) {
+        Some(c) => c,
+        None => {
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: "recipient not in contacts".into() }.emit();
+            return Err(anyhow!("recipient not in contacts"));
+        },
+    };
+
+    let shared_key = match contact.shared_key() {
+        Ok(k) => k,
+        Err(e) => {
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: e.to_string() }.emit();
+            return Err(e);
+        },
+    };
 
     // 2. Encrypt
     let encrypted = Encrypted::encrypt(content.as_bytes(), &shared_key, &to);
@@ -72,7 +93,12 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
         relay
             .as_ref()
             .and_then(|r| r.connection.clone())
-            .ok_or_else(|| anyhow!("not connected to relay"))?
+            .ok_or_else(|| {
+                Message::mark_failed(&msg_id);
+                MessageEv::Failed { id: msg_id.clone(), to, reason: "not connected to relay".into() }
+                    .emit();
+                anyhow!("not connected to relay")
+            })?
     };
 
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -83,21 +109,63 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
     match RelayPacket::unpack(&mut recv).await? {
         RelayPacket::ForwardResult(ForwardResult::Accepted) => {
             info!("MESSAGE: sent to {}", hex::encode(to));
-            MessageEv::Sent { to }.emit();
+            Message::mark_sent(&msg_id);
+            MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
         },
         RelayPacket::ForwardResult(ForwardResult::NotFound) => {
-            MessageEv::Failed { to, reason: "recipient not found".into() }.emit();
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: "recipient not found".into() }.emit();
         },
         RelayPacket::ForwardResult(ForwardResult::InvalidSig) => {
-            MessageEv::Failed { to, reason: "invalid signature".into() }.emit();
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: "invalid signature".into() }.emit();
         },
         RelayPacket::ForwardResult(ForwardResult::Error { reason }) => {
-            MessageEv::Failed { to, reason }.emit();
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason }.emit();
         },
         other => {
-            MessageEv::Failed { to, reason: format!("unexpected: {other:?}") }.emit();
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: format!("unexpected: {other:?}") }.emit();
         },
     }
 
     Ok(())
+}
+
+/// Get paginated message history for a conversation.
+/// Returns CBOR-encoded Vec<MessageRow>.
+#[jni(base = "com.promtuz.core", class = "API")]
+pub extern "system" fn getMessages(
+    mut env: JNIEnv, _: JC, peer_ipk: JByteArray, limit: i32, before_id: JString,
+) -> jobject {
+    let peer: [u8; 32] = {
+        let bytes = env.convert_byte_array(peer_ipk).unwrap();
+        bytes.try_into().unwrap()
+    };
+
+    let before = if before_id.is_null() {
+        String::new()
+    } else {
+        env.get_string(&before_id).map(|s| s.into()).unwrap_or_default()
+    };
+
+    let messages = Message::get_messages(&peer, limit.max(0) as u32, &before);
+
+    let mut buf = vec![];
+    ciborium::into_writer(&messages, &mut buf).unwrap();
+
+    env.byte_array_from_slice(&buf).unwrap().into_raw()
+}
+
+/// Get all conversations (one entry per peer, latest message).
+/// Returns CBOR-encoded Vec<MessageRow>.
+#[jni(base = "com.promtuz.core", class = "API")]
+pub extern "system" fn getConversations(env: JNIEnv, _: JC) -> jobject {
+    let conversations = Message::get_conversations();
+
+    let mut buf = vec![];
+    ciborium::into_writer(&conversations, &mut buf).unwrap();
+
+    env.byte_array_from_slice(&buf).unwrap().into_raw()
 }

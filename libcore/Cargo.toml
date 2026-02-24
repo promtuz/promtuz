@@ -33,6 +33,7 @@ once_cell = "1.21.3"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 parking_lot = "0.12.5"
 rusqlite_migration = "2.3.0"
+ulid = { version = "1.2.1", features = ["serde"] }
 unicode-normalization = "0.1.25"
 crc32fast = "1.5.0"
 ciborium = "0.2.2"

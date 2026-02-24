@@ -1,6 +1,7 @@
 pub mod contact;
 pub mod identity;
 pub mod idqr;
+pub mod message;
 pub mod relay;
 
 use std::net::SocketAddr;

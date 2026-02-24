@@ -27,6 +27,7 @@ use crate::api::conn_stats::CONNECTION_START_TIME;
 use crate::api::messaging::decode_encrypted;
 use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
+use crate::data::message::Message;
 use crate::data::relay::Relay;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
@@ -225,12 +226,17 @@ fn handle_deliver(fwd: ForwardP) {
         },
     };
 
+    let timestamp = systime().as_secs();
+
     info!("MESSAGE: received from {}", hex::encode(fwd.from));
 
-    MessageEv::Received {
-        from: fwd.from,
-        content,
-        timestamp: systime().as_secs(),
-    }
-    .emit();
+    // 3. Save to local DB
+    match Message::save_incoming(fwd.from, &content, timestamp) {
+        Ok(m) => {
+            MessageEv::Received { id: m.inner.id, from: fwd.from, content, timestamp }.emit();
+        },
+        Err(e) => {
+            warn!("MESSAGE: failed to save incoming: {e}");
+        },
+    };
 }

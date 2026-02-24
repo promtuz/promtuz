@@ -3,8 +3,10 @@ use std::{fs, path::Path, process};
 mod macros;
 
 pub mod identity;
+pub mod messages;
 pub mod network;
 pub mod peers;
+pub mod utils;
 
 static PACKAGE_NAME: &str = "com.promtuz.chat";
 
