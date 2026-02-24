@@ -7,6 +7,7 @@ use common::crypto::StaticSecret;
 use common::crypto::get_shared_key;
 
 use crate::JVM;
+use crate::KEY_MANAGER;
 use crate::db::peers::CONTACTS_DB;
 use crate::db::peers::ContactRow;
 use crate::ndk::key_manager::KeyManager;
@@ -61,10 +62,7 @@ impl Contact {
     /// Derive the shared symmetric key for this friendship.
     /// Decrypts our stored ephemeral secret, does DH with their EPK.
     pub fn shared_key(&self) -> Result<[u8; 32]> {
-        let jvm = JVM.get().unwrap();
-        let mut env = jvm.attach_current_thread().unwrap();
-        let km = KeyManager::new(&mut env)?;
-        drop(env);
+        let km = KEY_MANAGER.get().unwrap();
 
         let esk_bytes = km
             .decrypt(&self.inner.enc_esk)

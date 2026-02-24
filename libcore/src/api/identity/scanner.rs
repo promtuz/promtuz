@@ -1,3 +1,4 @@
+
 use anyhow::anyhow;
 use common::crypto::get_static_keypair;
 use common::proto::client_peer::ClientPeerPacket;
@@ -14,6 +15,7 @@ use log::info;
 
 use crate::ENDPOINT;
 use crate::JC;
+use crate::KEY_MANAGER;
 use crate::RUNTIME;
 use crate::api::PEER_IDENTITY;
 use crate::data::contact::Contact;
@@ -97,13 +99,8 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
 
                                 // Encrypt our ephemeral secret for storage
                                 let enc_esk = {
-                                    let jvm = crate::JVM.get().unwrap();
-                                    let mut env = jvm.attach_current_thread().unwrap();
-                                    let km = crate::ndk::key_manager::KeyManager::new(&mut env)
-                                        .expect("KeyManager init failed");
-                                    drop(env);
-                                    km.encrypt(&our_esk.to_bytes())
-                                        .expect("failed to encrypt esk")
+                                    let km = KEY_MANAGER.get().unwrap();
+                                    km.encrypt(&our_esk.to_bytes()).expect("failed to encrypt esk")
                                 };
 
                                 match Contact::save(
@@ -112,7 +109,15 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                                     enc_esk,
                                     peer_identity_qr.name.clone(),
                                 ) {
-                                    Ok(_) => info!("INFO: saved contact {}", peer_identity_qr.name),
+                                    Ok(_) => {
+                                        info!("INFO: saved contact {}", peer_identity_qr.name);
+
+                                        // Confirm to sharer so they can save too
+                                        ClientPeerPacket::Identity(Confirmed)
+                                            .send(&mut send)
+                                            .await?;
+                                        send.finish()?;
+                                    },
                                     Err(e) => error!("ERROR: failed to save contact: {e}"),
                                 }
                             },

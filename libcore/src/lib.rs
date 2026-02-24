@@ -10,6 +10,8 @@ use once_cell::sync::OnceCell;
 use quinn::Endpoint;
 use tokio::runtime::Runtime;
 
+use crate::ndk::key_manager::KeyManager;
+
 mod api;
 mod data;
 mod db;
@@ -29,6 +31,8 @@ static JVM: OnceLock<JavaVM> = OnceLock::new();
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().unwrap());
 
 pub static ENDPOINT: OnceCell<Arc<Endpoint>> = OnceCell::new();
+
+pub static KEY_MANAGER: OnceCell<Arc<KeyManager>> = OnceCell::new();
 
 //////////////////////////////////////////////
 //============ GLOBAL FUNCTIONS ============//

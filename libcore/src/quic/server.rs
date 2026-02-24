@@ -52,7 +52,7 @@ pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);
 
 impl Relay {
     pub async fn connect(
-        mut self, ipk: VerifyingKey, signer: &IdentitySigner,
+        mut self, ipk: VerifyingKey,
     ) -> Result<JoinHandle<ConnectionError>, RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host.clone())?, self.port);
 
@@ -84,7 +84,7 @@ impl Relay {
                                     .concat();
 
                             RelayPacket::Handshake(ClientProof {
-                                sig: signer.sign(&msg).map_err(RelayConnError::Error)?.to_bytes(),
+                                sig: IdentitySigner::sign(&msg).map_err(RelayConnError::Error)?.to_bytes(),
                             })
                             .send(&mut send)
                             .await

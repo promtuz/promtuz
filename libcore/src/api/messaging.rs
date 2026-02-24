@@ -11,6 +11,7 @@ use jni::sys::jobject;
 use jni_macro::jni;
 use log::error;
 use log::info;
+use serde::Serialize;
 
 use crate::JC;
 use crate::RUNTIME;
@@ -48,7 +49,7 @@ pub extern "system" fn sendMessage(mut env: JNIEnv, _: JC, to_ipk: JByteArray, c
 async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()> {
     // 0. Save to local DB first (status = pending)
     let msg = Message::save_outgoing(to, &content)?;
-    let msg_id = msg.inner.id.clone();
+    let msg_id = msg.inner.id;
     let msg_timestamp = msg.inner.timestamp;
 
     // 1. Look up contact and derive per-friendship shared key
@@ -95,7 +96,7 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
             .and_then(|r| r.connection.clone())
             .ok_or_else(|| {
                 Message::mark_failed(&msg_id);
-                MessageEv::Failed { id: msg_id.clone(), to, reason: "not connected to relay".into() }
+                MessageEv::Failed { id: msg_id, to, reason: "not connected to relay".into() }
                     .emit();
                 anyhow!("not connected to relay")
             })?
@@ -166,6 +167,30 @@ pub extern "system" fn getConversations(env: JNIEnv, _: JC) -> jobject {
 
     let mut buf = vec![];
     ciborium::into_writer(&conversations, &mut buf).unwrap();
+
+    env.byte_array_from_slice(&buf).unwrap().into_raw()
+}
+
+/// Public-safe contact info for Kotlin side.
+#[derive(Serialize)]
+struct ContactInfo {
+    #[serde(with = "serde_bytes")]
+    ipk: [u8; 32],
+    name: String,
+    added_at: u64,
+}
+
+/// Get all contacts.
+/// Returns CBOR-encoded Vec<ContactInfo>.
+#[jni(base = "com.promtuz.core", class = "API")]
+pub extern "system" fn getContacts(env: JNIEnv, _: JC) -> jobject {
+    let contacts: Vec<ContactInfo> = Contact::list()
+        .into_iter()
+        .map(|c| ContactInfo { ipk: c.ipk, name: c.name, added_at: c.added_at })
+        .collect();
+
+    let mut buf = vec![];
+    ciborium::into_writer(&contacts, &mut buf).unwrap();
 
     env.byte_array_from_slice(&buf).unwrap().into_raw()
 }

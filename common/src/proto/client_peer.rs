@@ -13,7 +13,8 @@ use crate::proto::pack::Packer;
 /// 1. [`libcore:..:IdentityQr`] is shared.
 /// 2. Scanner will connect to sharer and send [`IdentityP::AddMe`]
 /// 3. Sharer can either send [`IdentityP::No`] or [`IdentityP::AddedYou`]
-/// 4. Scanner will also save epk of sharer if [`IdentityP::AddedYou`]
+/// 4. Scanner saves contact and sends [`IdentityP::Confirmed`]
+/// 5. Sharer saves contact only after receiving [`IdentityP::Confirmed`]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IdentityP {
     AddMe {
@@ -32,6 +33,8 @@ pub enum IdentityP {
         #[serde(with = "serde_bytes")]
         epk: [u8; 32],
     },
+    /// Scanner confirms it saved the contact, sharer can now save too
+    Confirmed,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

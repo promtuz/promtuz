@@ -10,7 +10,6 @@ use crate::JC;
 use crate::RUNTIME;
 use crate::data::ResolverSeeds;
 use crate::data::identity::Identity;
-use crate::data::identity::IdentitySigner;
 use crate::data::relay::Relay;
 use crate::data::relay::ResolveError;
 use crate::events::Emittable;
@@ -44,7 +43,6 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
     );
 
     let ipk = jni_try!(Identity::public_key());
-    let identity_signer = jni_try!(IdentitySigner::new(&mut env));
 
     RUNTIME.spawn(async move {
         loop {
@@ -54,7 +52,7 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
 
                     trace!("TRACE: connecting to relay({})", id);
 
-                    match relay.connect(ipk, &identity_signer).await {
+                    match relay.connect(ipk).await {
                         Ok(handle) => {
                             // disconnection or closed for some reason
                             match handle.await {

@@ -16,11 +16,14 @@ use quinn::Endpoint;
 use quinn::EndpointConfig;
 use quinn::TransportConfig;
 use quinn::default_runtime;
+
 use crate::ENDPOINT;
 use crate::JC;
+use crate::KEY_MANAGER;
 use crate::RUNTIME;
 use crate::data::identity::Identity;
 use crate::jni_try;
+use crate::ndk::key_manager::KeyManager;
 use crate::ndk::read_raw_res;
 use crate::quic::peer_config::build_peer_server_cfg;
 use crate::quic::peer_identity::PeerIdentity;
@@ -43,12 +46,14 @@ pub extern "system" fn initApi(mut env: JNIEnv, _: JC, context: JObject) {
     info!("API: INIT START");
     jni_try!(setup_crypto_provider());
 
+    KEY_MANAGER.set(Arc::new(KeyManager::new(&mut env).unwrap())).expect("init was ran twice");
+
     let rt = RUNTIME.handle().clone();
     let _guard = rt.enter();
 
     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
 
-    PeerIdentity::initialize(&mut env)
+    PeerIdentity::initialize()
         .and_then(|pi| {
             PEER_IDENTITY
                 .set(pi)

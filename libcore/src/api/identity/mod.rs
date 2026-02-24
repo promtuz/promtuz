@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,7 +16,6 @@ use log::info;
 use log::warn;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use quinn::Connection;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -26,12 +26,15 @@ mod scanner;
 use crate::ENDPOINT;
 use crate::JC;
 use crate::JVM;
+use crate::KEY_MANAGER;
 use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
 use crate::events::identity::IdentityEv;
+use crate::jni_try;
+use crate::ndk::key_manager::KeyManager;
 use crate::quic::peer_config::extract_peer_public_key;
 use crate::quic::server::RELAY;
 
@@ -41,8 +44,6 @@ static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex:
 static PENDING_IDENTITY: Lazy<Mutex<Option<PendingIdentity>>> = Lazy::new(|| Mutex::new(None));
 
 struct PendingIdentity {
-    #[allow(dead_code)]
-    conn: Connection,
     respond: oneshot::Sender<bool>,
     ipk: [u8; 32],
     epk: [u8; 32],
@@ -50,7 +51,7 @@ struct PendingIdentity {
 }
 
 #[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
+pub extern "system" fn identityInit(mut env: JNIEnv, _: JC, class: JObject) {
     let class = env.new_global_ref(class).unwrap();
 
     let identity = Identity::get().expect("identity not found");
@@ -108,6 +109,7 @@ pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
                             let Some(incoming) = incoming else { continue };
 
                             // Spawn a task for each connection
+                            // let km = km.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_identity_connection(incoming).await {
                                     warn!("IDENTITY: connection handler error: {e}");
@@ -159,11 +161,12 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
             // Create oneshot channel for the decision
             let (decision_tx, decision_rx) = oneshot::channel();
 
-            // Store pending identity
+            // Store pending identity (conn stays alive as a local variable
+            // to keep the QUIC connection open until AddedYou is sent)
             {
                 let mut pending = PENDING_IDENTITY.lock();
                 *pending =
-                    Some(PendingIdentity { conn, respond: decision_tx, ipk, epk, name: name.clone() });
+                    Some(PendingIdentity { respond: decision_tx, ipk, epk, name: name.clone() });
             }
 
             // Emit event to Android (this will hide the QR and show the request card)
@@ -182,20 +185,31 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                         .send(&mut tx)
                         .await?;
 
-                    // Encrypt our ephemeral secret for storage
-                    let enc_esk = {
-                        let jvm = crate::JVM.get().unwrap();
-                        let mut env = jvm.attach_current_thread().unwrap();
-                        let km = crate::ndk::key_manager::KeyManager::new(&mut env)
-                            .expect("KeyManager init failed");
-                        drop(env);
-                        km.encrypt(&our_esk.to_bytes())
-                            .expect("failed to encrypt esk")
-                    };
+                    // Wait for scanner to confirm they saved the contact
+                    match timeout(Duration::from_secs(15), ClientPeerPacket::unpack(&mut recv)).await {
+                        Ok(Ok(Identity(Confirmed))) => {
+                            info!("IDENTITY: {name} confirmed");
 
-                    match Contact::save(ipk, epk, enc_esk, name.clone()) {
-                        Ok(_) => info!("IDENTITY: saved contact {name}"),
-                        Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
+                            let enc_esk = {
+                                let km = KEY_MANAGER.get().unwrap();
+                                km.encrypt(&our_esk.to_bytes())
+                                    .expect("failed to encrypt esk")
+                            };
+
+                            match Contact::save(ipk, epk, enc_esk, name.clone()) {
+                                Ok(_) => info!("IDENTITY: saved contact {name}"),
+                                Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
+                            }
+                        },
+                        Ok(Ok(other)) => {
+                            warn!("IDENTITY: unexpected packet from {name}: {other:?}");
+                        },
+                        Ok(Err(e)) => {
+                            warn!("IDENTITY: failed to read confirmation from {name}: {e}");
+                        },
+                        Err(_) => {
+                            warn!("IDENTITY: {name} did not confirm in time, not saving contact");
+                        },
                     }
                 },
                 Ok(Ok(false)) => {

@@ -1,16 +1,15 @@
 use anyhow::Result;
+use anyhow::anyhow;
 use common::crypto::PublicKey;
 use common::crypto::SecretKey;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use jni::JNIEnv;
 use zeroize::Zeroizing;
 
-use crate::JVM;
+use crate::KEY_MANAGER;
 use crate::db::identity::IDENTITY_DB;
 use crate::db::identity::IdentityRow;
-use crate::ndk::key_manager::KeyManager;
 
 pub struct Identity {
     inner: IdentityRow,
@@ -60,22 +59,19 @@ impl Identity {
         })
     }
 
-    pub fn secret_key(env: &mut JNIEnv) -> Result<Zeroizing<SecretKey>> {
-        Self::secret_key_with_manager(&KeyManager::new(env)?)
+    pub fn secret_key() -> Result<Zeroizing<SecretKey>> {
+        Self::secret_key_with_manager()
     }
 
     /// Get secret key bytes without requiring a JNIEnv parameter.
     /// Attaches to JVM internally. Safe to call from async contexts.
     pub fn secret_key_bytes() -> [u8; 32] {
-        let jvm = JVM.get().unwrap();
-        let mut env = jvm.attach_current_thread().unwrap();
-        let km = KeyManager::new(&mut env).unwrap();
-        drop(env);
-        let sk = Self::secret_key_with_manager(&km).unwrap();
+        let sk = Self::secret_key_with_manager().unwrap();
         *sk
     }
 
-    fn secret_key_with_manager(key_manager: &KeyManager) -> Result<Zeroizing<SecretKey>> {
+    fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
+        let key_manager = KEY_MANAGER.get().ok_or(anyhow!("API is not initialized"))?;
         let conn = IDENTITY_DB.lock();
 
         Ok(conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {
@@ -90,21 +86,13 @@ impl Identity {
 }
 
 #[derive(Debug)]
-pub struct IdentitySigner {
-    // caching the keymanager, due to JNI lifetime shenanigans
-    key_manager: KeyManager,
-}
+pub struct IdentitySigner;
 
 impl IdentitySigner {
-    pub fn new(env: &mut JNIEnv) -> Result<IdentitySigner> {
-        let key_manager = KeyManager::new(env)?;
-        Ok(Self { key_manager })
-    }
-
     /// Signs message using the identity key.
     /// The secret key is decrypted on-demand and immediately dropped.
-    pub fn sign(&self, message: &[u8]) -> Result<Signature> {
-        let secret = Identity::secret_key_with_manager(&self.key_manager)?;
+    pub fn sign(message: &[u8]) -> Result<Signature> {
+        let secret = Identity::secret_key_with_manager()?;
         let key = SigningKey::from_bytes(&secret);
         Ok(key.sign(message))
     }

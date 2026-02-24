@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use common::quic::protorole::ProtoRole;
@@ -96,15 +97,12 @@ impl ServerCertVerifier for SkipServerVerifier {
 #[derive(Debug)]
 struct IdentitySigningKey {
     public_key: VerifyingKey,
-    signer: Arc<IdentitySigner>,
 }
 
 impl rustls::sign::SigningKey for IdentitySigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
         if offered.contains(&SignatureScheme::ED25519) {
-            Some(Box::new(IdentityTlsSigner {
-                signer: self.signer.clone(),
-            }))
+            Some(Box::new(IdentityTlsSigner))
         } else {
             None
         }
@@ -123,14 +121,11 @@ impl rustls::sign::SigningKey for IdentitySigningKey {
 
 /// Custom rustls Signer that performs on-demand signing via IdentitySigner.
 #[derive(Debug)]
-struct IdentityTlsSigner {
-    signer: Arc<IdentitySigner>,
-}
+struct IdentityTlsSigner;
 
 impl rustls::sign::Signer for IdentityTlsSigner {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        self.signer
-            .sign(message)
+        IdentitySigner::sign(message)
             .map(|sig| sig.to_bytes().to_vec())
             .map_err(|e| rustls::Error::General(e.to_string()))
     }
@@ -147,16 +142,14 @@ fn generate_identity_cert(identity: &PeerIdentity) -> Result<CertifiedKey> {
 
     // Sign the TBS certificate using identity signer
     let tbs = build_tbs_certificate(public_key.as_bytes());
-    let signature = identity.signer.sign(&tbs)?;
+    let signature = IdentitySigner::sign(&tbs)?;
 
     let cert_der = build_certificate_der(&tbs, &signature.to_bytes());
     let certs = vec![CertificateDer::from(cert_der)];
 
     // Create custom signing key that signs on-demand
-    let signing_key: Arc<dyn rustls::sign::SigningKey> = Arc::new(IdentitySigningKey {
-        public_key,
-        signer: identity.signer.clone(),
-    });
+    let signing_key: Arc<dyn rustls::sign::SigningKey> =
+        Arc::new(IdentitySigningKey { public_key });
 
     Ok(CertifiedKey::new(certs, signing_key))
 }
@@ -183,8 +176,8 @@ fn build_tbs_certificate(public_key: &[u8; 32]) -> Vec<u8> {
     let validity: &[u8] = &[
         0x30, 0x1e, // SEQUENCE, 30 bytes
         0x17, 0x0d, // UTCTime, 13 bytes
-        b'7', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
-        0x17, 0x0d, // UTCTime, 13 bytes
+        b'7', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z', 0x17,
+        0x0d, // UTCTime, 13 bytes
         b'5', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
     ];
 
@@ -205,9 +198,9 @@ fn build_tbs_certificate(public_key: &[u8; 32]) -> Vec<u8> {
         version,
         &serial_der,
         sig_alg,
-        empty_name,  // issuer
+        empty_name, // issuer
         validity,
-        empty_name,  // subject
+        empty_name, // subject
         &spki,
     ]
     .concat();
@@ -243,6 +236,12 @@ fn encode_sequence(data: &[u8]) -> Vec<u8> {
     }
 }
 
+fn peer_transport_cfg() -> Arc<TransportConfig> {
+    let mut cfg = TransportConfig::default();
+    cfg.keep_alive_interval(Some(Duration::from_secs(5)));
+    Arc::new(cfg)
+}
+
 /// Builds server config for P2P connections.
 /// Uses identity-based certs with on-demand signing.
 pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
@@ -254,7 +253,9 @@ pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
 
     crypto.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
 
-    Ok(ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?)))
+    let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
+    cfg.transport_config(peer_transport_cfg());
+    Ok(cfg)
 }
 
 /// Builds client config for P2P connections.
@@ -272,7 +273,7 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
     let quic_config = QuicClientConfig::try_from(tls)?;
 
     let mut client = ClientConfig::new(Arc::new(quic_config));
-    client.transport_config(Arc::new(TransportConfig::default()));
+    client.transport_config(peer_transport_cfg());
 
     Ok(client)
 }
@@ -316,15 +317,14 @@ fn extract_ed25519_pubkey_from_cert(cert_der: &[u8]) -> Option<[u8; 32]> {
     //   BIT STRING (0x03, 0x21, 0x00) followed by 32-byte public key
 
     let spki_pattern: &[u8] = &[
-        0x30, 0x2a,             // SEQUENCE, 42 bytes
-        0x30, 0x05,             // SEQUENCE, 5 bytes (AlgorithmIdentifier)
-        0x06, 0x03, 0x2b, 0x65, 0x70,  // OID 1.3.101.112 (Ed25519)
-        0x03, 0x21, 0x00,       // BIT STRING, 33 bytes, 0 unused bits
+        0x30, 0x2a, // SEQUENCE, 42 bytes
+        0x30, 0x05, // SEQUENCE, 5 bytes (AlgorithmIdentifier)
+        0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112 (Ed25519)
+        0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
     ];
 
     // Find the SPKI pattern in the certificate
-    let pos = cert_der.windows(spki_pattern.len())
-        .position(|window| window == spki_pattern)?;
+    let pos = cert_der.windows(spki_pattern.len()).position(|window| window == spki_pattern)?;
 
     // Public key starts right after the pattern
     let key_start = pos + spki_pattern.len();

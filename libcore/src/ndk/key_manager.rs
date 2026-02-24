@@ -16,6 +16,10 @@ pub struct KeyManager {
 const KEY_MANAGER_CLASS: &str = "com/promtuz/chat/security/KeyManager";
 
 impl KeyManager {
+    /// `env` must be original env passed from JNI
+    ///
+    /// not from `JVM::attach_current_thread`,
+    /// as [`KEY_MANAGER_CLASS`] only exists in original thread
     pub fn new(env: &mut JNIEnv) -> jni::errors::Result<Self> {
         let local_class = env.find_class(KEY_MANAGER_CLASS)?;
         let class = env.new_global_ref(&local_class)?;
