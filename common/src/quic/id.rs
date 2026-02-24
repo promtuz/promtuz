@@ -82,6 +82,13 @@ pub fn derive_node_id(pubkey: &p256::PublicKey) -> NodeId {
     NodeId::from_bytes(hash.as_bytes()[..10].try_into().unwrap())
 }
 
+/// Derive a NodeId from arbitrary bytes via BLAKE3.
+/// Used by the DHT to map user keys into the routing keyspace.
+pub fn derive_node_id_from_bytes(data: &[u8]) -> NodeId {
+    let hash = blake3::hash(data);
+    NodeId::from_bytes(hash.as_bytes()[..NodeId::LEN].try_into().unwrap())
+}
+
 pub type UserId = BaseId<12>;
 
 impl UserId {

@@ -137,6 +137,8 @@ impl Dht {
         self.routing.closest_nodes(target, count)
     }
 
+    /// Store or update a user record. Returns `true` on success,
+    /// `false` if the record fails validation or is stale.
     pub fn upsert_user(&mut self, record: UserRecord) -> bool {
         if !record.validates() {
             return false;
@@ -146,8 +148,8 @@ impl Dht {
             return false;
         }
         let key = record.ipk;
-        let replaced = self.users.insert(key, record);
-        replaced.is_some()
+        self.users.insert(key, record);
+        true
     }
 
     pub fn get_user(&self, ipk: &[u8; 32]) -> Option<UserRecord> {
@@ -167,11 +169,9 @@ impl Dht {
     }
 
     fn derive_target_from_ipk(&self, ipk: &[u8; 32]) -> NodeId {
-        // Map 32-byte user key down to NodeId length using the XOR metric:
-        // take closest NodeId whose bytes equal prefix of ipk.
-        let mut bytes = [0u8; NodeId::LEN];
-        bytes.copy_from_slice(&ipk[..NodeId::LEN]);
-        NodeId::from_bytes(bytes)
+        // Hash the full key to get uniform distribution across the NodeId space,
+        // same way NodeId/UserId derivation works elsewhere (BLAKE3 → truncate).
+        common::quic::id::derive_node_id_from_bytes(ipk)
     }
 
     pub fn closest_distance_to(&self, target: NodeId) -> Option<[u8; NodeId::LEN]> {

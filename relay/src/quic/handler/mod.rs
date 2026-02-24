@@ -1,5 +1,5 @@
 mod client;
-mod peer;
+pub(crate) mod peer;
 mod resolver;
 
 use std::sync::Arc;

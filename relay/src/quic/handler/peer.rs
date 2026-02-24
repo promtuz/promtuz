@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use common::proto::pack::Unpacker;
+use common::debug;
+use common::proto::pack::{Packable, Packer, Unpacker};
 use quinn::Connection;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::super::msg::dht::DhtRequest;
@@ -14,16 +14,12 @@ use crate::quic::handler::Handler;
 use crate::relay::RelayRef;
 use crate::util::systime;
 
-async fn read_framed(recv: &mut (impl AsyncReadExt + Unpin)) -> Option<Vec<u8>> {
-    let len = recv.read_u32().await.ok()?;
-    let mut buf = vec![0u8; len as usize];
-    recv.read_exact(&mut buf).await.ok()?;
-    Some(buf)
-}
+impl Packable for DhtRequest {}
+impl Packable for DhtResponse {}
 
 /// Send a single DHT request over a fresh peer connection.
 pub async fn send_dht_request(
-    relay: RelayRef, target: NodeContact, _req: DhtRequest,
+    relay: RelayRef, target: NodeContact, req: DhtRequest,
 ) -> Result<DhtResponse> {
     let (endpoint, cfg) = {
         let r = relay.lock().await;
@@ -32,18 +28,13 @@ pub async fn send_dht_request(
     let conn: Connection =
         endpoint.connect_with((*cfg).clone(), target.addr, &target.id.to_string())?.await?;
 
-    let (mut _send, mut recv) = conn.open_bi().await?;
+    let (mut send, mut recv) = conn.open_bi().await?;
 
-    // TODO: 
-    // send.write_all(&frame_packet(&req.to_cbor()?)).await?;
-    // send.flush().await?;
+    send.write_all(&req.pack()?).await?;
+    send.flush().await?;
 
-    if let Some(bytes) = read_framed(&mut recv).await {
-        let resp = DhtResponse::from_cbor(&bytes)?;
-        Ok(resp)
-    } else {
-        anyhow::bail!("empty response from peer");
-    }
+    let resp = DhtResponse::unpack(&mut recv).await?;
+    Ok(resp)
 }
 
 /// Replicate a user record to k closest peers based on current routing table.
@@ -71,30 +62,28 @@ impl Handler {
     pub async fn handle_peer(self, relay: RelayRef) {
         let conn = self.conn.clone();
         let remote_addr = conn.remote_address();
-        println!("PEER: CONN({})", remote_addr);
+        debug!("connection from peer({remote_addr})");
 
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let relay = relay.clone();
             tokio::spawn(async move {
-                while let Some(packet) = read_framed(&mut recv).await {
-                    let Ok(req) = DhtRequest::from_cbor(&packet) else {
-                        let _ = send_error(&mut send, "bad packet").await;
-                        continue;
+                loop {
+                    let req = match DhtRequest::unpack(&mut recv).await {
+                        Ok(req) => req,
+                        Err(_) => break,
                     };
                     if let Err(err) =
                         handle_request(relay.clone(), req, &mut send, remote_addr).await
                     {
-                        println!("PEER: handler error: {err}");
+                        common::error!("failed to handle peer({remote_addr}) request: {err}");
                         let _ = send_error(&mut send, "internal error").await;
                     }
                 }
-                Some(())
             });
         }
     }
 }
 
-#[allow(unused)]
 async fn handle_request(
     relay: RelayRef, req: DhtRequest, send: &mut (impl AsyncWriteExt + Unpin),
     _remote_addr: SocketAddr,
@@ -108,9 +97,8 @@ async fn handle_request(
                 dht.upsert_node(NodeContact { id: from, addr, last_seen: now });
             }
             let resp = DhtResponse::Pong { from: relay.lock().await.id };
-            todo!();
-            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            // send.flush().await?;
+            send.write_all(&resp.pack()?).await?;
+            send.flush().await?;
         },
         DhtRequest::StoreUser { record } => {
             let ok = {
@@ -123,9 +111,8 @@ async fn handle_request(
             } else {
                 DhtResponse::Error { reason: "store rejected".into() }
             };
-            todo!();
-            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            // send.flush().await?;
+            send.write_all(&resp.pack()?).await?;
+            send.flush().await?;
         },
         DhtRequest::FindUser { ipk } => {
             let (record, nodes) = {
@@ -133,32 +120,28 @@ async fn handle_request(
                 let dht = dht.read().await;
                 (dht.get_user(&ipk), dht.replication_targets(&ipk))
             };
-            todo!();
-            if let Some(rec) = record {
-                let resp = DhtResponse::UserResult { records: vec![rec] };
-                // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
+            let resp = if let Some(rec) = record {
+                DhtResponse::UserResult { records: vec![rec] }
             } else {
-                let resp = DhtResponse::NodeResult { nodes };
-                // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            }
+                DhtResponse::NodeResult { nodes }
+            };
+            send.write_all(&resp.pack()?).await?;
             send.flush().await?;
         },
         DhtRequest::FindNode { target } => {
             let dht = { relay.lock().await.dht.clone() };
             let nodes = { dht.read().await.get_closest_nodes(target, 8) };
             let resp = DhtResponse::NodeResult { nodes };
-            todo!();
-            // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-            // send.flush().await?;
+            send.write_all(&resp.pack()?).await?;
+            send.flush().await?;
         },
     }
     Ok(())
 }
 
-async fn send_error(_send: &mut (impl AsyncWriteExt + Unpin), reason: &str) -> Result<()> {
-    let _resp = DhtResponse::Error { reason: reason.to_string() };
-    todo!();
-    // send.write_all(&frame_packet(&resp.to_cbor()?)).await?;
-    // send.flush().await?;
-    // Ok(())
+async fn send_error(send: &mut (impl AsyncWriteExt + Unpin), reason: &str) -> Result<()> {
+    let resp = DhtResponse::Error { reason: reason.to_string() };
+    send.write_all(&resp.pack()?).await?;
+    send.flush().await?;
+    Ok(())
 }

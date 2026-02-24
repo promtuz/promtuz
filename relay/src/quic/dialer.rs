@@ -1,14 +1,14 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use common::info;
-use common::node::config::ResolverSeed;
+use common::node::config::NodeSeed;
 use quinn::ClientConfig;
 use quinn::Connection;
 
 /// Try all seed resolvers and return the first successful connection.
 /// TODO: implement concurrent connection trial
 pub async fn connect_to_any_seed(
-    endpoint: &quinn::Endpoint, seeds: &[ResolverSeed], cfg: Option<ClientConfig>,
+    endpoint: &quinn::Endpoint, seeds: &[NodeSeed], cfg: Option<ClientConfig>,
 ) -> Result<Connection> {
     let mut last_err: Option<anyhow::Error> = None;
 

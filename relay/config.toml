@@ -7,3 +7,15 @@ root_ca_path = "cert/root_ca.pem"
 [[resolver.seed]]
 id = "I2DRYSCOMXODBJ47"
 addr = "192.168.100.2:4433"
+
+
+[dht]
+bucket_size = 20
+k = 8
+alpha = 3
+user_ttl_secs = 300
+republish_secs = 120
+
+[[dht.bootstrap]]
+id = "XREDJEULEB72GXBV"
+addr = "192.168.100.2:4435"

@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use common::graceful;
 use common::info;
+use common::node::config::NodeSeed;
 use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca;
@@ -22,8 +23,9 @@ use tokio::sync::RwLock;
 use crate::dht::Dht;
 use crate::dht::DhtParams;
 use crate::dht::NodeContact;
+use crate::quic::handler::peer::{send_dht_request};
+use crate::quic::msg::dht::{DhtRequest, DhtResponse};
 use crate::util::config::AppConfig;
-use crate::util::config::PeerSeed;
 use crate::util::systime;
 
 /// contains p256 private & public key
@@ -130,47 +132,107 @@ impl Relay {
 
     /// Spawn background maintenance for the DHT: cleanup & refresh.
     pub fn spawn_dht_tasks(relay: RelayRef) {
-        // periodic cleanup and republish placeholder
+        // periodic cleanup of expired user records
         tokio::spawn({
             let relay = relay.clone();
             async move {
                 loop {
-                    let (republish_interval, user_ttl) = {
-                        let r = relay.lock().await;
-                        (r.cfg.dht.republish_secs, r.cfg.dht.user_ttl_secs)
+                    let republish_interval = {
+                        relay.lock().await.cfg.dht.republish_secs
                     };
                     {
                         let dht = { relay.lock().await.dht.clone() };
                         let mut dht = dht.write().await;
                         dht.cleanup_expired();
-                        // future: republish of active users can hook here
-                        let _ = user_ttl;
                     }
                     tokio::time::sleep(Duration::from_secs(republish_interval)).await;
                 }
             }
         });
 
-        // Bootstrap routing table with configured peers
+        // Bootstrap: ping seeds then do a self-lookup to populate routing table
         tokio::spawn(async move {
             let seeds = { relay.lock().await.cfg.dht.bootstrap.clone() };
             for seed in seeds {
-                let _ = Self::bootstrap_peer(relay.clone(), seed).await;
+                if let Err(err) = Self::bootstrap_peer(relay.clone(), seed.clone()).await {
+                    common::error!("DHT: bootstrap peer {} failed: {}", seed.addr, err);
+                }
+            }
+            // After pinging seeds, look up our own ID to discover nearby nodes
+            if let Err(err) = Self::self_lookup(relay.clone()).await {
+                common::error!("DHT: self-lookup failed: {}", err);
             }
         });
     }
 
-    async fn bootstrap_peer(relay: RelayRef, seed: PeerSeed) -> Result<()> {
-        {
-            let dht = { relay.lock().await.dht.clone() };
-            let mut dht = dht.write().await;
-            dht.upsert_node(NodeContact {
-                id: seed.id,
-                addr: seed.address,
-                last_seen: systime().as_secs(),
-            });
+    /// Ping a seed peer and add it to the routing table if it responds.
+    async fn bootstrap_peer(relay: RelayRef, seed: NodeSeed) -> Result<()> {
+        let contact = NodeContact {
+            id: seed.id,
+            addr: seed.addr,
+            last_seen: systime().as_secs(),
+        };
+
+        let (local_id, local_addr) = {
+            let r = relay.lock().await;
+            let addr = r.endpoint.local_addr().unwrap_or(r.cfg.network.address);
+            (r.id, addr)
+        };
+
+        let req = DhtRequest::Ping { from: local_id, addr: local_addr };
+        let resp = send_dht_request(relay.clone(), contact.clone(), req).await?;
+
+        match resp {
+            DhtResponse::Pong { from } => {
+                info!("DHT: bootstrap pong from {} ({})", from, seed.addr);
+                let dht = { relay.lock().await.dht.clone() };
+                let mut dht = dht.write().await;
+                dht.upsert_node(NodeContact {
+                    id: from,
+                    addr: seed.addr,
+                    last_seen: systime().as_secs(),
+                });
+            },
+            other => {
+                anyhow::bail!("unexpected response from seed: {:?}", other);
+            },
         }
-        // Outbound ping can be added here once peer RPC client is wired.
+        Ok(())
+    }
+
+    /// Kademlia self-lookup: ask known nodes for nodes closest to our own ID.
+    /// This populates our routing table beyond just the configured seeds.
+    async fn self_lookup(relay: RelayRef) -> Result<()> {
+        let (local_id, k) = {
+            let r = relay.lock().await;
+            let k = r.cfg.dht.k;
+            (r.id, k)
+        };
+
+        let targets = {
+            let dht = { relay.lock().await.dht.clone() };
+            let dht = dht.read().await;
+            dht.get_closest_nodes(local_id, k)
+        };
+
+        for target in targets {
+            let req = DhtRequest::FindNode { target: local_id };
+            match send_dht_request(relay.clone(), target.clone(), req).await {
+                Ok(DhtResponse::NodeResult { nodes }) => {
+                    let dht = { relay.lock().await.dht.clone() };
+                    let mut dht = dht.write().await;
+                    for node in nodes {
+                        dht.upsert_node(node);
+                    }
+                },
+                Ok(other) => {
+                    info!("DHT: self-lookup to {} unexpected: {:?}", target.id, other);
+                },
+                Err(err) => {
+                    info!("DHT: self-lookup to {} failed: {}", target.id, err);
+                },
+            }
+        }
         Ok(())
     }
 }

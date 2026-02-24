@@ -5,13 +5,16 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 
-use common::node::config::ResolverConfig;
-use common::quic::id::NodeId;
+use common::node::config::NodeConfig;
+use common::node::config::NodeSeed;
 use serde::Deserialize;
+
+
 #[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub network: NetworkConfig,
-    pub resolver: ResolverConfig,
+    pub resolver: NodeConfig,
     #[serde(default)]
     pub dht: DhtConfig,
 }
@@ -28,14 +31,8 @@ pub struct NetworkConfig {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct PeerSeed {
-    pub id: NodeId,
-    pub address: SocketAddr,
-}
-
-#[derive(Deserialize, Debug, Clone)]
 pub struct DhtConfig {
-    pub bootstrap: Vec<PeerSeed>,
+    pub bootstrap: Vec<NodeSeed>,
     pub bucket_size: usize,
     pub k: usize,
     pub alpha: usize,

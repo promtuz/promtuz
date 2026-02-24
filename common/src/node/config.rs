@@ -16,16 +16,19 @@ pub struct NetworkConfig {
 }
 
 #[serde_as]
-#[derive(Deserialize, Debug)]
-pub struct ResolverSeed {
+#[derive(Deserialize, Debug, Clone)]
+pub struct NodeSeed {
     pub id: NodeId,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub addr: SocketAddr,
 }
 
+/// Node Config
+/// 
+/// Can be either resolver or relay
 #[derive(Deserialize, Debug)]
-pub struct ResolverConfig {
-    pub seed: Vec<ResolverSeed>,
+pub struct NodeConfig {
+    pub seed: Vec<NodeSeed>,
 }
 
 // pub fn print_config_err(err: &toml::de::Error, source: &str) -> String {
