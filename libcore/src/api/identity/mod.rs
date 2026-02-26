@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,8 +32,6 @@ use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
 use crate::events::identity::IdentityEv;
-use crate::jni_try;
-use crate::ndk::key_manager::KeyManager;
 use crate::quic::peer_config::extract_peer_public_key;
 use crate::quic::server::RELAY;
 
@@ -51,7 +48,7 @@ struct PendingIdentity {
 }
 
 #[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn identityInit(mut env: JNIEnv, _: JC, class: JObject) {
+pub extern "system" fn identityInit(env: JNIEnv, _: JC, class: JObject) {
     let class = env.new_global_ref(class).unwrap();
 
     let identity = Identity::get().expect("identity not found");

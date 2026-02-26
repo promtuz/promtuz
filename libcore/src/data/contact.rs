@@ -6,11 +6,9 @@ use anyhow::Result;
 use common::crypto::StaticSecret;
 use common::crypto::get_shared_key;
 
-use crate::JVM;
 use crate::KEY_MANAGER;
 use crate::db::peers::CONTACTS_DB;
 use crate::db::peers::ContactRow;
-use crate::ndk::key_manager::KeyManager;
 
 #[derive(Debug, Clone)]
 pub struct Contact {

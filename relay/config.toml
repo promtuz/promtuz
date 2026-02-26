@@ -16,6 +16,8 @@ alpha = 3
 user_ttl_secs = 300
 republish_secs = 120
 
+# this shouldn't be "very" important, as all relays online reports to a resolver,
+# connecting to a resolver would provide us all our peers to bootstrap DHT
 [[dht.bootstrap]]
 id = "XREDJEULEB72GXBV"
 addr = "192.168.100.2:4435"
