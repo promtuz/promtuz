@@ -7,10 +7,7 @@ use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use quinn::SendStream;
 
-use crate::dht::UserMetadata;
-use crate::dht::UserRecord;
 use crate::quic::handler::client::ClientCtxHandle;
-use crate::quic::handler::peer::replicate_user;
 use crate::util::systime;
 
 pub(super) async fn handle_handshake(
@@ -50,31 +47,6 @@ pub(super) async fn handle_handshake(
                 let mut relay = relay_ref.lock().await;
                 relay.clients.insert(ipk_bytes, conn);
             }
-
-            let relay_ref = ctx.relay.clone();
-            tokio::spawn(async move {
-                let record = {
-                    let relay_guard = relay_ref.lock().await;
-                    UserRecord {
-                        ipk: ipk_bytes,
-                        relay: relay_guard.id,
-                        // FIXME: relay_addr is currently storing local address, which is no use
-                        relay_addr: relay_guard.cfg.network.address,
-                        timestamp: systime().as_secs(),
-                        signature: None,
-                        metadata: UserMetadata {
-                            status: Some("online".into()),
-                            // capabilities: vec![],
-                        },
-                    }
-                };
-                let dht = { relay_ref.lock().await.dht.clone() };
-                {
-                    let mut dht = dht.write().await;
-                    dht.upsert_user(record.clone());
-                }
-                replicate_user(relay_ref.clone(), record).await;
-            });
         },
         _ => return Err(anyhow!("No!")),
     }

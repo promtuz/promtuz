@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use serde_with::serde_as;
-use std::{net::SocketAddr, path::PathBuf};
 
-use crate::quic::id::NodeId;
+use crate::quic::id::NodeKey;
 
 /// Network section of `config.toml` for both relay & resolver
 #[derive(Deserialize, Debug)]
@@ -18,33 +20,15 @@ pub struct NetworkConfig {
 #[serde_as]
 #[derive(Deserialize, Debug, Clone)]
 pub struct NodeSeed {
-    pub id: NodeId,
+    pub key: NodeKey,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub addr: SocketAddr,
 }
 
 /// Node Config
-/// 
+///
 /// Can be either resolver or relay
 #[derive(Deserialize, Debug)]
 pub struct NodeConfig {
     pub seed: Vec<NodeSeed>,
 }
-
-// pub fn print_config_err(err: &toml::de::Error, source: &str) -> String {
-//     if let Some(core::ops::Range { start, end }) = err.span() {
-//         let line_idx = line.saturating_sub(1);
-//         let src_line = source.lines().nth(line_idx).unwrap_or("");
-
-//         format!(
-//             "TOML Parse Error:\n  → Line {}, Column {}\n    {}\n    {}^\n  {}\n",
-//             line,
-//             col,
-//             src_line,
-//             " ".repeat(col.saturating_sub(1)),
-//             err
-//         )
-//     } else {
-//         format!("TOML Parse Error: {}", err)
-//     }
-// }

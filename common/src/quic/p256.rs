@@ -1,28 +1,22 @@
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use anyhow::Result;
-use p256::pkcs8::DecodePrivateKey;
-
-pub use p256::*;
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 
 use crate::error;
 
-/// Tries to read a valid SEC1 PEM Private key at `
+/// Tries to read a valid SEC1 PEM Private key
 #[allow(clippy::result_unit_err)]
-pub fn secret_from_key(key_path: &Path) -> Result<SecretKey, ()> {
-    let sec = fs::read_to_string(key_path).map_err(|err| {
+pub fn secret_from_key(key_path: &Path) -> Result<SigningKey, ()> {
+    let pem = fs::read_to_string(key_path).map_err(|err| {
         error!("failed to read file {path:?}: {err}", path = &key_path);
     })?;
 
-    let secret = if sec.starts_with("-----BEGIN EC PRIVATE KEY-----") {
-        SecretKey::from_sec1_pem(&sec).map_err(|err| {
-            error!("failed to parse sec1 secret key: {err}");
-        })?
-    } else {
-        SecretKey::from_pkcs8_pem(&sec).map_err(|err| {
-            error!("failed to parse pkcs8 secret key: {err}");
-        })?
-    };
+    let secret = SigningKey::from_pkcs8_pem(&pem).map_err(|err| {
+        error!("failed to parse pkcs8 secret key: {err}");
+    })?;
 
     Ok(secret)
 }

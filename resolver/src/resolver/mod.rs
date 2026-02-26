@@ -6,13 +6,11 @@ use anyhow::Result;
 use common::graceful;
 use common::info;
 use common::proto::RelayId;
-use common::proto::ResolverId;
 use common::proto::relay_res::LifetimeP;
 use common::quic::CloseReason;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
-use common::quic::id::NodeId;
-use common::quic::id::derive_node_id;
+use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
 use quinn::Connection;
@@ -34,7 +32,7 @@ pub type ResolverRef = Arc<Mutex<Resolver>>;
 /// contains all necessary information instead of a global state
 #[derive(Debug)]
 pub struct Resolver {
-    pub id: ResolverId,
+    pub key: NodeKey,
     pub cfg: AppConfig,
     pub endpoint: Arc<Endpoint>,
     relays: HashMap<RelayId, RelayEntry>,
@@ -51,13 +49,13 @@ impl Resolver {
         )
     }
 
-    fn id(cfg: &AppConfig) -> NodeId {
+    fn key(cfg: &AppConfig) -> NodeKey {
         let secret = match secret_from_key(&cfg.network.key_path) {
             Ok(sec) => sec,
             Err(_) => process::exit(0),
         };
 
-        derive_node_id(&secret.public_key())
+        graceful!(NodeKey::new(secret.verifying_key()), "unexpected key length mismatch")
     }
 
     fn endpoint(cfg: &AppConfig) -> Endpoint {
@@ -75,11 +73,11 @@ impl Resolver {
     }
 
     pub fn new(cfg: AppConfig) -> Self {
-        let id = Self::id(&cfg);
+        let key = Self::key(&cfg);
 
-        info!("initializing resolver with ID({id})");
+        info!("initializing resolver with IPK({})", key.key());
 
-        Self { id, endpoint: Arc::new(Self::endpoint(&cfg)), relays: HashMap::new(), cfg }
+        Self { key, endpoint: Arc::new(Self::endpoint(&cfg)), relays: HashMap::new(), cfg }
     }
 
     /// Will return [HelloAck] if registered succesfully

@@ -29,6 +29,7 @@ p256 = ["dep:p256"]
 sysutils = ["dep:sysinfo", "tokio"]
 tokio = ["dep:tokio"]
 macros = []
+certgen = ["quic", "crypto", "dep:rcgen"]
 node = []
 # aka relay & resolver
 server = []
@@ -38,7 +39,7 @@ client = []
 [[bin]]
 name = "certgen"
 path = "src/bin/certgen.rs"
-required-features = ["quic", "crypto"]
+required-features = ["certgen"]
 
 [dependencies]
 log.workspace = true
@@ -50,7 +51,7 @@ serde_bytes.workspace = true
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 x25519-dalek = { workspace = true, optional = true }
-ed25519-dalek = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"], optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "time"], optional = true }
 
@@ -60,6 +61,7 @@ chacha20poly1305 = { version = "0.10.1", features = ["std"], optional = true }
 hkdf = { version = "0.12.4", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 p256 = { version = "0.13.2", optional = true, features = ["pkcs8"] }
+rcgen = { version = "0.14.7", features = ["x509-parser"], optional = true }
 ciborium = "0.2.2"
 sysinfo = { version = "0.37.2", optional = true }
 serde_with = "3.16.1"

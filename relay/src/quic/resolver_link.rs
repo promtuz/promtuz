@@ -36,7 +36,7 @@ impl ResolverLink {
     }
 
     async fn id(&self) -> NodeId {
-        self.relay.lock().await.id
+        self.relay.lock().await.key.id()
     }
 
     /// Attaches with relay, it's job is to keep in contact with any resolver however possible.
@@ -64,38 +64,6 @@ impl ResolverLink {
             Ok(())
         })
     }
-
-    // /// Sends node status to current resolver
-    // ///
-    // /// * `allow(unused)` - will use in future
-    // #[allow(unused)]
-    // async fn start_heartbeat(&self, ack: HelloAck) -> Result<()> {
-    //     let conn = self.conn.clone();
-    //     let id = self.id().await;
-    //     let start_ms = self.relay.lock().await.start_ms;
-    //     let interval = ack.interval_heartbeat_ms as u64;
-    //     tokio::spawn(async move {
-    //         let mut send = match conn.open_uni().await {
-    //             Ok(s) => s,
-    //             Err(_) => return,
-    //         };
-    //         loop {
-    //             if ResolverPacket::Lifetime(common::proto::relay_res::LifetimeP::RelayHeartbeat {
-    //                 relay_id: id,
-    //                 load: system_load().await,
-    //                 uptime_seconds: systime_sec() - ((start_ms / 1000) as u64),
-    //             })
-    //             .send(&mut send)
-    //             .await
-    //             .is_err()
-    //             {
-    //                 break;
-    //             };
-    //             tokio::time::sleep(Duration::from_millis(interval)).await;
-    //         }
-    //     });
-    //     Ok(())
-    // }
 
     pub async fn hello(&self) -> Result<()> {
         let mut send = self.conn.open_uni().await?;

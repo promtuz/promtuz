@@ -11,7 +11,6 @@ use crate::relay::Relay;
 use crate::relay::RelayRef;
 use crate::util::config::AppConfig;
 
-mod dht;
 mod quic;
 mod relay;
 mod util;
@@ -23,7 +22,6 @@ async fn main() -> Result<()> {
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(());
 
     let relay: RelayRef = Arc::new(Mutex::new(Relay::new(cfg)));
-    Relay::spawn_dht_tasks(relay.clone());
 
     let acceptor = Acceptor::new(relay.lock().await.endpoint.clone());
 

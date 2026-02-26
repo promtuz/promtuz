@@ -1,14 +1,10 @@
 use std::env;
 use std::fs;
-use std::io::stdout;
+use std::io::Write;
 use std::path::Path;
 use std::process;
 
 use common::node::config::NetworkConfig;
-// use common::node::config::ResolverConfig;
-use crossterm::execute;
-use crossterm::terminal::Clear;
-use crossterm::terminal::ClearType;
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -20,7 +16,8 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load(cls: bool) -> Self {
         if cls {
-            _ = execute!(stdout(), Clear(ClearType::All));
+            print!("\x1B[2J\x1B[1;1H");
+            std::io::stdout().flush().ok();
         }
 
         let path = env::args().nth(1).unwrap_or_else(|| "config.toml".into());

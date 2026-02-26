@@ -5,19 +5,6 @@ key_path = "cert/relay.key"
 root_ca_path = "cert/root_ca.pem"
 
 [[resolver.seed]]
-id = "I2DRYSCOMXODBJ47"
+# Resolver's Identity Public Key
+key = "A038F54EC3EBC391F423236E0091413C7275EFEDC65E89D3BFF9DF055FEFE4CC"
 addr = "192.168.100.2:4433"
-
-
-[dht]
-bucket_size = 20
-k = 8
-alpha = 3
-user_ttl_secs = 300
-republish_secs = 120
-
-# this shouldn't be "very" important, as all relays online reports to a resolver,
-# connecting to a resolver would provide us all our peers to bootstrap DHT
-[[dht.bootstrap]]
-id = "XREDJEULEB72GXBV"
-addr = "192.168.100.2:4435"

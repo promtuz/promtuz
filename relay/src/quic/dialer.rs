@@ -19,9 +19,9 @@ pub async fn connect_to_any_seed(
         info!("connecting to resolver: {}", addr);
 
         match if let Some(cfg) = cfg {
-            endpoint.connect_with(cfg.clone(), addr, &seed.id.to_string())?.await
+            endpoint.connect_with(cfg.clone(), addr, &seed.key.to_string())?.await
         } else {
-            endpoint.connect(addr, &seed.id.to_string())?.await
+            endpoint.connect(addr, &seed.key.to_string())?.await
         } {
             Ok(conn) => {
                 info!("connected to resolver: {}", addr);
