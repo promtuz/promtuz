@@ -31,7 +31,7 @@ pub async fn connect_to_any_seed(seeds: &[ResolverSeed]) -> Result<Connection, D
 
         log::info!("INFO: connecting to resolver: {}", addr);
 
-        match endpoint.connect(addr, &seed.id.to_string()).map_err(quinn_err)?.await {
+        match endpoint.connect(addr, &seed.key.to_string()).map_err(quinn_err)?.await {
             Ok(conn) => {
                 log::info!("INFO: connected to resolver: {}", addr);
                 return Ok(conn);

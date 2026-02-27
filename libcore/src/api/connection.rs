@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use common::quic::CloseReason;
 use jni::JNIEnv;
 use jni::objects::JObject;
@@ -11,6 +13,7 @@ use crate::RUNTIME;
 use crate::data::ResolverSeeds;
 use crate::data::identity::Identity;
 use crate::data::relay::Relay;
+use crate::data::relay::RelayError;
 use crate::data::relay::ResolveError;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
@@ -20,17 +23,16 @@ use crate::quic::server::RELAY;
 use crate::quic::server::RelayConnError;
 use crate::utils::has_internet;
 
-/// Connects to Relay
 #[jni(base = "com.promtuz.core", class = "API")]
 pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
-    if let Some(Some(conn)) = RELAY.read().as_ref().map(|r| r.connection.clone())
-        && conn.close_reason().is_some()
+    // Close any stale connection before attempting a new one
+    if let Some(conn) = RELAY.read().as_ref().and_then(|r| r.connection.clone())
+        && conn.close_reason().is_none()
     {
-        log::warn!("WARNING: connection already exists, ignoring connect request!");
+        log::warn!("connection already active, closing before reconnect");
         CloseReason::Reconnecting.close(&conn);
-    };
+    }
 
-    // Checking Internet Connectivity
     if !has_internet() {
         ConnectionState::NoInternet.emit();
         return;
@@ -49,51 +51,44 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
             match Relay::fetch_best() {
                 Ok(relay) => {
                     let id = relay.id.clone();
-
-                    trace!("TRACE: connecting to relay({})", id);
+                    trace!("connecting to relay({})", id);
 
                     match relay.connect(ipk).await {
                         Ok(handle) => {
-                            // disconnection or closed for some reason
                             match handle.await {
                                 Ok(conn_err) => {
-                                    error!("ERROR: relay connection closed: {conn_err}");
+                                    error!("relay({}) connection closed: {conn_err}", id)
                                 },
                                 Err(join_err) => {
-                                    error!("ERROR: failed to join relay handle: {join_err}");
+                                    error!("relay({}) handle join failed: {join_err}", id)
                                 },
                             }
-
-                            // reconnecting by re-running da loop
-                            continue;
+                            // connection dropped, fall through to reconnect
                         },
-                        Err(RelayConnError::Continue) => continue,
+                        Err(RelayConnError::Continue) => {},
                         Err(RelayConnError::Error(err)) => {
-                            error!("ERROR: connection to relay({}) failed: {}", id, err);
+                            error!("relay({}) connect error: {err}", id);
                         },
                     }
                 },
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    debug!("DEBUG: relay not found in database, resolving!");
+                Err(RelayError::NoneAvailable) => {
+                    debug!("no relays in database, resolving");
                     match Relay::resolve(&seeds).await {
-                        Ok(_) => continue,
+                        Ok(_) => {},
                         Err(ResolveError::EmptyResponse) => {
-                            error!("ERROR: resolver returned no relays");
-                            // either break or a pause to prevent a loop by new users
+                            error!("resolver returned no relays");
                             ConnectionState::Failed.emit();
-                            break;
+                            return;
                         },
-                        Err(err) => {
-                            error!("ERROR: resolver failed: {err}");
-                        },
+                        Err(err) => error!("resolver failed: {err}"),
                     }
                 },
                 Err(err) => {
-                    error!("ERROR: failed to fetch relay from database: {err}")
+                    error!("failed to fetch relay: {err}");
                 },
             }
 
-            break;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
 }
