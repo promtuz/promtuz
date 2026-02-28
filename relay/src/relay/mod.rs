@@ -16,9 +16,10 @@ use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
-
+use rust_rocksdb::DB as RocksDB;
 
 use crate::util::config::AppConfig;
+use crate::util::rocksdb::rocksdb;
 
 /// contains p256 private & public key
 #[derive(Debug, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub struct Relay {
 
     pub client_cfg: Arc<ClientConfig>,
     pub peer_client_cfg: Arc<ClientConfig>,
+
+    pub rocks: RocksDB,
 
     /// Shared in-memory DHT state
     // pub dht: Arc<RwLock<Dht>>,
@@ -117,6 +120,7 @@ impl Relay {
             cfg,
             client_cfg,
             peer_client_cfg,
+            rocks: graceful!(rocksdb(), "failed to setup rocksdb"),
             // dht,
             endpoint: Arc::new(endpoint),
             clients: RwLock::new(HashMap::new()),

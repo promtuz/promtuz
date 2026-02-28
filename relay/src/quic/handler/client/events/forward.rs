@@ -52,10 +52,20 @@ pub(super) async fn handle_forward(
             },
         }
     } else {
-        // TODO: DHT lookup → forward to recipient's relay (cross-relay routing)
+        // // TODO: DHT lookup → forward to recipient's relay (cross-relay routing)
         info!("FORWARD: recipient {} not connected locally", hex::encode(fwd.to));
-        RelayPacket::ForwardResult(ForwardResult::NotFound)
-            .send(tx).await?;
+
+        let packet = RelayPacket::Deliver(fwd).pack()?;
+
+        let timestamp: [u8; 8] = (systime().as_millis() as u64).to_be_bytes();
+        let rand = get_nonce::<4>();
+
+        let mut key = [0u8; 44];
+        key[..32].copy_from_slice(&recipient);
+        key[32..40].copy_from_slice(&timestamp);
+        key[40..44].copy_from_slice(&rand);
+
+        ctx.relay.rocks.put(key, packet)?;
     }
 
     Ok(())
