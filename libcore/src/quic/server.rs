@@ -1,3 +1,4 @@
+use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
+use common::proto::Sender;
 use common::proto::client_rel::ForwardP;
 use common::proto::client_rel::HandshakeP;
 use common::proto::client_rel::MiscP;
@@ -87,12 +89,11 @@ impl Relay {
 
         RelayPacket::Handshake(HandshakeP::ClientHello { ipk: ipk.to_bytes() })
             .send(&mut send)
-            .await
-            .map_err(RelayConnError::Error)?;
-
+            .await?;
+        // TODO: flatten out handshake
         let handshake = timeout(HANDSHAKE_TIMEOUT, async {
             loop {
-                match RelayPacket::unpack(&mut recv).await.map_err(RelayConnError::Error)? {
+                match RelayPacket::unpack(&mut recv).await? {
                     RelayPacket::Handshake(HandshakeP::ServerChallenge { nonce }) => {
                         let msg =
                             [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
@@ -104,8 +105,7 @@ impl Relay {
                                 .to_bytes(),
                         })
                         .send(&mut send)
-                        .await
-                        .map_err(RelayConnError::Error)?;
+                        .await?;
                     },
                     RelayPacket::Handshake(HandshakeP::ServerAccept { timestamp }) => {
                         let latency_ms = systime().as_millis() as u64 - connect_start;

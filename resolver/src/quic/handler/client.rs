@@ -35,8 +35,7 @@ impl HandleClient for Handler {
                         break;
                     }
 
-                    let req = ClientRequest::from_cbor(&packet).ok()?;
-
+                    let req = ClientRequest::deser(&packet).ok()?;
                     let res = resolver.lock().await.handle_rpc(req).await.ok()?;
 
                     let packet = res.pack().ok()?;

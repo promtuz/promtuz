@@ -36,7 +36,7 @@ impl ResolverLink {
     }
 
     async fn id(&self) -> NodeId {
-        self.relay.lock().await.key.id()
+        self.relay.key.id()
     }
 
     /// Attaches with relay, it's job is to keep in contact with any resolver however possible.
@@ -46,8 +46,6 @@ impl ResolverLink {
     pub async fn attach(relay: RelayRef, rx: Receiver<()>) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             let conn: Connection = {
-                let relay = relay.lock().await;
-
                 let mut cfg = (*relay.client_cfg).clone();
                 cfg.transport_config(Self::transport_cfg());
 

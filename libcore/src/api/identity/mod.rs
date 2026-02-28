@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::crypto::get_static_keypair;
+use common::proto::Sender;
 use common::proto::client_peer::ClientPeerPacket;
 use common::proto::client_peer::IdentityP;
 use common::proto::pack::Unpacker;

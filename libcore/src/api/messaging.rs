@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use common::crypto::encrypt::Encrypted;
+use common::proto::Sender;
 use common::proto::client_rel::ForwardP;
 use common::proto::client_rel::ForwardResult;
 use common::proto::client_rel::RelayPacket;

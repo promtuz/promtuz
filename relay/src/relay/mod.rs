@@ -12,10 +12,11 @@ use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
 use ed25519_dalek::VerifyingKey;
+use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
-use tokio::sync::Mutex;
+
 
 use crate::util::config::AppConfig;
 
@@ -33,7 +34,7 @@ impl RelayKeys {
     }
 }
 
-pub type RelayRef = Arc<Mutex<Relay>>;
+pub type RelayRef = Arc<Relay>;
 
 /// Represents a single relay node running in the network.
 ///
@@ -59,7 +60,7 @@ pub struct Relay {
     // pub dht: Arc<RwLock<Dht>>,
 
     /// Connected + authenticated clients, keyed by IPK
-    pub clients: HashMap<[u8; 32], Arc<Connection>>,
+    pub clients: RwLock<HashMap<[u8; 32], Connection>>,
 }
 
 impl Relay {
@@ -118,7 +119,7 @@ impl Relay {
             peer_client_cfg,
             // dht,
             endpoint: Arc::new(endpoint),
-            clients: HashMap::new(),
+            clients: RwLock::new(HashMap::new()),
         }
     }
 }

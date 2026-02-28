@@ -1,13 +1,16 @@
 //! Client to Relay Proto
 
+use std::io;
 use std::net::SocketAddr;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_bytes;
 use tokio::io::AsyncWriteExt;
 
-use serde_bytes;
-
-use crate::proto::pack::{Packable, Packer};
+use crate::proto::Sender;
+use crate::proto::pack::Packable;
+use crate::proto::pack::Packer;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum HandshakeP {
@@ -50,18 +53,15 @@ pub enum MiscP {
 /// Message forwarding through the relay
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ForwardP {
-    /// Recipient identity public key
     #[serde(with = "serde_bytes")]
-    pub to: [u8; 32],
-    /// Sender identity public key
+    pub to:      [u8; 32],
     #[serde(with = "serde_bytes")]
-    pub from: [u8; 32],
-    /// E2E encrypted payload (relay-blind)
+    pub from:    [u8; 32],
     #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
     /// Ed25519 signature over (to ‖ from ‖ payload)
     #[serde(with = "serde_bytes")]
-    pub sig: [u8; 64],
+    pub sig:     [u8; 64],
 }
 
 /// Relay's response to a Forward request
@@ -91,13 +91,11 @@ pub enum RelayPacket {
 
 impl Packable for RelayPacket {}
 
-impl RelayPacket {
-    pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin + Send)) -> anyhow::Result<()> {
-        let packet = self.pack()?;
+impl Sender for RelayPacket {
+    async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin + Send)) -> Result<(), io::Error> {
+        let packet = self.pack().map_err(io::Error::other)?;
 
         tx.write_all(&packet).await?;
-        tx.flush().await?;
-
-        Ok(())
+        tx.flush().await
     }
 }

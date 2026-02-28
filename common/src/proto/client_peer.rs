@@ -1,9 +1,12 @@
 //! Client to Client (P2P) Proto
 
+use std::io;
+
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
+use crate::proto::Sender;
 use crate::proto::pack::Packable;
 use crate::proto::pack::Packer;
 
@@ -19,7 +22,7 @@ use crate::proto::pack::Packer;
 pub enum IdentityP {
     AddMe {
         #[serde(with = "serde_bytes")]
-        epk: [u8; 32],
+        epk:  [u8; 32],
         name: String,
     },
     /// Cancels the [`IdentityP::AddMe`] request
@@ -44,11 +47,11 @@ pub enum ClientPeerPacket {
 
 impl Packable for ClientPeerPacket {}
 
-impl ClientPeerPacket {
-    pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
-        let packet = self.pack()?;
+impl Sender for ClientPeerPacket {
+    async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> Result<(), io::Error> {
+        let packet = self.pack().map_err(io::Error::other)?;
 
         tx.write_all(&packet).await?;
-        Ok(tx.flush().await?)
+        tx.flush().await
     }
 }
