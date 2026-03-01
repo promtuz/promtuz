@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::CRelayPacket;
 use quinn::SendStream;
 
 use crate::quic::handler::client::ClientCtxHandle;
@@ -11,16 +11,13 @@ pub mod handshake;
 pub mod misc;
 
 pub(super) async fn handle_packet(
-    packet: RelayPacket, ctx: ClientCtxHandle, tx: &mut SendStream,
+    packet: CRelayPacket, ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
-    use RelayPacket::*;
+    use CRelayPacket::*;
 
     match packet {
         // Handshake(packet) => handle_handshake(packet, ctx.clone(), tx).await,
-        Misc(packet) => handle_misc(packet, ctx.clone(), tx).await,
+        Query(query) => handle_misc(query, ctx.clone(), tx).await,
         Forward(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
-
-        // Unsupported
-        _ => Ok(()),
     }
 }

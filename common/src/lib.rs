@@ -21,3 +21,6 @@ pub mod node;
 
 #[cfg(feature = "server")]
 pub mod server;
+
+#[cfg(feature = "types")]
+pub mod types;

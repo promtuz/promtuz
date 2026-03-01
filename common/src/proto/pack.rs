@@ -23,8 +23,6 @@ pub enum UnpackError {
 /// Decides which structs and enums can be packed for network transmission
 ///
 /// Only use for data that is sent over network and not locally
-pub trait Packable {}
-
 pub trait Packer {
     fn ser(&self) -> Result<Vec<u8>, PackError>;
     fn pack(&self) -> Result<Vec<u8>, PackError>;
@@ -32,7 +30,7 @@ pub trait Packer {
 
 impl<T> Packer for T
 where
-    T: Serialize + Packable,
+    T: Serialize,
 {
     #[inline]
     fn ser(&self) -> Result<Vec<u8>, PackError> {
@@ -77,7 +75,6 @@ where
         unpack(rx).await
     }
 }
-
 
 #[inline(always)]
 pub async fn unpack<T: DeserializeOwned, R: AsyncReadExt + Unpin + Send>(

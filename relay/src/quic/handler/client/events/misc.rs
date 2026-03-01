@@ -1,23 +1,25 @@
 use anyhow::Result;
-use anyhow::bail;
 use common::proto::Sender;
-use common::proto::client_rel::MiscP;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::QueryP;
+use common::proto::client_rel::QueryResultP;
+use common::proto::client_rel::SRelayPacket;
 use quinn::SendStream;
 
 use crate::quic::handler::client::ClientCtxHandle;
 
 pub(super) async fn handle_misc(
-    packet: MiscP, ctx: ClientCtxHandle, tx: &mut SendStream,
+    packet: QueryP, ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
-    use MiscP::*;
+    use QueryP::*;
+    use SRelayPacket::*;
 
     match packet {
-        PubAddressReq => {
+        PubAddress => {
             let addr = ctx.conn.remote_address();
 
-            RelayPacket::Misc(PubAddressRes { addr }).send(tx).await.map_err(|e| e.into())
+            use QueryResultP::*;
+
+            QueryResult(PubAddress { addr }).send(tx).await.map_err(|e| e.into())
         },
-        _ => bail!("No"),
     }
 }

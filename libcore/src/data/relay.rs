@@ -7,6 +7,7 @@ use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
 use common::proto::client_res::RelayDescriptor;
 use common::proto::pack::Packer;
+use common::proto::pack::UnpackError;
 use common::proto::pack::Unpacker;
 use log::info;
 use quinn::Connection;
@@ -94,7 +95,10 @@ pub enum ResolveError {
     DialerError(#[from] DialerError),
 
     #[error("failed to unpack: {0}")]
-    UnpackError(#[from] anyhow::Error),
+    UnpackError(#[from] UnpackError),
+
+    #[error("relay error: {0}")]
+    RelayError(#[from] RelayError),
 }
 
 // // // // // // // // // // // // // // // // // //
@@ -196,7 +200,7 @@ impl Relay {
     /// Selection: 80% weighted random from top-3, 20% uniform exploratory from the rest.
     pub fn fetch_best() -> Result<Self, RelayError> {
         let conn = NETWORK_DB.lock();
-        let now  = systime().as_millis() as i64;
+        let now = systime().as_millis() as i64;
 
         conn.execute("BEGIN", [])?;
 
@@ -209,10 +213,10 @@ impl Relay {
         )?;
 
         struct Candidate {
-            id:      String,
-            host:    String,
-            port:    u16,
-            latency: Option<i64>,
+            id:           String,
+            host:         String,
+            port:         u16,
+            latency:      Option<i64>,
             success_rate: f64,
         }
 
@@ -229,11 +233,11 @@ impl Relay {
 
         let rows: Vec<Candidate> = stmt
             .query_map(params![PROTOCOL_VERSION], |row| {
-                let latency:      Option<i64> = row.get(3)?;
-                let success_rate: f64         = row.get(4)?;
+                let latency: Option<i64> = row.get(3)?;
+                let success_rate: f64 = row.get(4)?;
 
                 Ok(Candidate {
-                    id:   row.get(0)?,
+                    id: row.get(0)?,
                     host: row.get(1)?,
                     port: row.get::<_, i64>(2)? as u16,
                     latency,
@@ -253,16 +257,18 @@ impl Relay {
             let min_lat = rows.iter().filter_map(|c| c.latency).min().unwrap_or(0);
             let max_lat = rows.iter().filter_map(|c| c.latency).max().unwrap_or(0);
 
-            rows.iter().map(|c| {
-                let norm_latency = match (c.latency, max_lat > min_lat) {
-                    (Some(l), true)  => (l - min_lat) as f64 / (max_lat - min_lat) as f64,
-                    (Some(_), false) => 0.0,
-                    (None, _)        => 1.0,
-                };
-                let score = SCORE_WEIGHT_SUCCESS * c.success_rate
-                          + SCORE_WEIGHT_LATENCY * (1.0 - norm_latency);
-                (score, c)
-            }).collect()
+            rows.iter()
+                .map(|c| {
+                    let norm_latency = match (c.latency, max_lat > min_lat) {
+                        (Some(l), true) => (l - min_lat) as f64 / (max_lat - min_lat) as f64,
+                        (Some(_), false) => 0.0,
+                        (None, _) => 1.0,
+                    };
+                    let score = SCORE_WEIGHT_SUCCESS * c.success_rate
+                        + SCORE_WEIGHT_LATENCY * (1.0 - norm_latency);
+                    (score, c)
+                })
+                .collect()
         };
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -270,13 +276,13 @@ impl Relay {
         let chosen = if scored.len() > TOP_N && rand::random::<f64>() < EXPLORE_PROBABILITY {
             // Exploratory: uniform random from outside top-N
             let tail = &scored[TOP_N..];
-            let idx  = (rand::random::<f64>() * tail.len() as f64) as usize;
+            let idx = (rand::random::<f64>() * tail.len() as f64) as usize;
             tail[idx.min(tail.len() - 1)].1
         } else {
             // Exploitation: weighted random from top-N
             let pool: &[(f64, &Candidate)] = &scored[..TOP_N.min(scored.len())];
             let total: f64 = pool.iter().map(|(s, _)| s).sum();
-            let mut pick  = rand::random::<f64>() * total;
+            let mut pick = rand::random::<f64>() * total;
             let mut chosen = pool.last().unwrap().1;
             for (score, candidate) in pool {
                 pick -= score;
@@ -440,7 +446,7 @@ impl Relay {
                     break Err(ResolveError::EmptyResponse);
                 }
 
-                Relay::refresh(&relays).map_err(|e| anyhow::anyhow!(e))?;
+                Relay::refresh(&relays)?;
                 conn.close(quinn::VarInt::from_u32(1), &[]);
 
                 break Ok(());

@@ -1,4 +1,3 @@
-use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -10,10 +9,14 @@ use anyhow::Result;
 use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
 use common::proto::Sender;
-use common::proto::client_rel::ForwardP;
-use common::proto::client_rel::HandshakeP;
-use common::proto::client_rel::MiscP;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::CHandshakePacket;
+use common::proto::client_rel::CRelayPacket;
+use common::proto::client_rel::DeliverP;
+use common::proto::client_rel::QueryP;
+use common::proto::client_rel::QueryResultP;
+use common::proto::client_rel::SHandshakePacket as SHSP;
+use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
 use ed25519_dalek::VerifyingKey;
@@ -25,7 +28,6 @@ use parking_lot::RwLock;
 use quinn::ConnectionError;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
@@ -85,55 +87,50 @@ impl Relay {
 
         ConnectionState::Handshaking.emit();
 
-        let (mut send, mut recv) = conn.open_bi().await?;
+        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 
-        RelayPacket::Handshake(HandshakeP::ClientHello { ipk: ipk.to_bytes() })
-            .send(&mut send)
-            .await?;
-        // TODO: flatten out handshake
-        let handshake = timeout(HANDSHAKE_TIMEOUT, async {
-            loop {
-                match RelayPacket::unpack(&mut recv).await? {
-                    RelayPacket::Handshake(HandshakeP::ServerChallenge { nonce }) => {
-                        let msg =
-                            [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce]
-                                .concat();
+        // 0. Open first bi-stream just for handshake
 
-                        RelayPacket::Handshake(HandshakeP::ClientProof {
-                            sig: IdentitySigner::sign(&msg)
-                                .map_err(RelayConnError::Error)?
-                                .to_bytes(),
-                        })
-                        .send(&mut send)
-                        .await?;
-                    },
-                    RelayPacket::Handshake(HandshakeP::ServerAccept { timestamp }) => {
-                        let latency_ms = systime().as_millis() as u64 - connect_start;
-                        break Ok((timestamp, latency_ms));
-                    },
-                    RelayPacket::Handshake(HandshakeP::ServerReject { reason }) => {
-                        error!("handshake with relay({}) rejected: {reason}", self.id);
-                        break Err(RelayConnError::Continue);
-                    },
-                    unexpected => {
-                        error!(
-                            "unexpected packet during handshake with relay({}): {unexpected:?}",
-                            self.id
-                        );
-                        break Err(RelayConnError::Continue);
-                    },
-                }
-            }
-        })
-        .await;
+        let (mut tx, mut rx) = conn.open_bi().await?;
 
-        let (timestamp, latency_ms) = match handshake {
-            Ok(Ok(inner)) => inner,
-            Ok(Err(e)) => {
-                _ = self.record_failure();
-                return Err(e);
+        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
+
+        // 1. Server is expecting `Hello` from client
+
+        CHandshakePacket::Hello { ipk: ipk.to_bytes().into() }.send(&mut tx).await?;
+
+        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
+
+        // 2. Server must respond with challenge
+
+        let SHSP::Challenge { nonce } = SHSP::unpack(&mut rx).await? else {
+            return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
+        };
+
+        let msg = [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &*nonce].concat();
+
+        CHandshakePacket::Proof {
+            sig: IdentitySigner::sign(&msg).map_err(RelayConnError::Error)?.to_bytes().into(),
+        }
+        .send(&mut tx)
+        .await?;
+
+        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
+
+        // 3. Server either accepts or rejects
+
+        let SHSP::HandshakeResult(result) = SHSP::unpack(&mut rx).await? else {
+            return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
+        };
+
+        let (timestamp, latency_ms) = match result {
+            SHSRP::Accept { timestamp } => {
+                let latency_ms = systime().as_millis() as u64 - connect_start;
+                _ = self.record_success(latency_ms);
+                (timestamp, latency_ms)
             },
-            Err(_elapsed) => {
+            SHSRP::Reject { reason } => {
+                warn!("relay handshake failed : {reason}");
                 _ = self.record_failure();
                 return Err(RelayConnError::Continue);
             },
@@ -148,7 +145,7 @@ impl Relay {
 
         let handle = tokio::spawn({
             let relay = self.clone();
-            async move { relay.handle().await }
+            async move { relay.handle(ipk).await }
         });
 
         *RELAY.write() = Some(self);
@@ -157,7 +154,7 @@ impl Relay {
     }
 
     /// Waits for incoming streams. Runs until the connection is lost.
-    async fn handle(&self) -> ConnectionError {
+    async fn handle(&self, ipk: VerifyingKey) -> ConnectionError {
         let conn = self.connection.as_ref().expect("handle called without active connection");
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
 
@@ -176,9 +173,9 @@ impl Relay {
 
                     tokio::spawn(async move {
                         let _permit = permit; // dropped when stream task ends
-                        while let Ok(packet) = RelayPacket::unpack(&mut recv).await {
+                        while let Ok(packet) = SRelayPacket::unpack(&mut recv).await {
                             match packet {
-                                RelayPacket::Deliver(fwd) => handle_deliver(fwd),
+                                SRelayPacket::Deliver(msg) => handle_deliver(ipk, msg),
                                 other => debug!("unexpected packet from relay: {other:?}"),
                             }
                         }
@@ -208,21 +205,21 @@ impl Relay {
         let (mut tx, mut rx) =
             conn.open_bi().await.map_err(|e| anyhow!("failed to open stream: {e}"))?;
 
-        RelayPacket::Misc(MiscP::PubAddressReq).send(&mut tx).await?;
+        CRelayPacket::Query(QueryP::PubAddress).send(&mut tx).await?;
 
         tx.finish()?;
 
         match unpack(&mut rx).await.map_err(|e| anyhow!("failed to unpack packet: {e}"))? {
-            RelayPacket::Misc(MiscP::PubAddressRes { addr }) => Ok(addr),
+            SRelayPacket::QueryResult(QueryResultP::PubAddress { addr }) => Ok(addr),
             unknown => Err(anyhow!("got unknown response: {unknown:?}")),
         }
     }
 }
 
-fn handle_deliver(fwd: ForwardP) {
+fn handle_deliver(ipk: VerifyingKey, msg: DeliverP) {
     // 1. Check if sender is a known contact
-    let Some(contact) = Contact::get(&fwd.from) else {
-        info!("MESSAGE: dropped message from unknown sender {}", hex::encode(fwd.from));
+    let Some(contact) = Contact::get(&msg.from) else {
+        info!("MESSAGE: dropped message from unknown sender {}", hex::encode(msg.from));
         return;
     };
 
@@ -233,29 +230,29 @@ fn handle_deliver(fwd: ForwardP) {
         return;
     };
 
-    let Some(encrypted) = decode_encrypted(&fwd.payload) else {
-        warn!("MESSAGE: payload too short from {}", hex::encode(fwd.from));
+    let Some(encrypted) = decode_encrypted(&msg.payload) else {
+        warn!("MESSAGE: payload too short from {}", hex::encode(msg.from));
         return;
     };
 
-    let Ok(plaintext) = encrypted.decrypt(&shared_key, &fwd.to) else {
-        warn!("MESSAGE: decryption failed from {}", hex::encode(fwd.from));
+    let Ok(plaintext) = encrypted.decrypt(&shared_key, ipk.as_bytes()) else {
+        warn!("MESSAGE: decryption failed from {}", hex::encode(msg.from));
         return;
     };
 
     let Ok(content) = String::from_utf8(plaintext) else {
-        warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(fwd.from));
+        warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(msg.from));
         return;
     };
 
     let timestamp = systime().as_secs();
 
-    info!("MESSAGE: received from {}", hex::encode(fwd.from));
+    info!("MESSAGE: received from {}", hex::encode(msg.from));
 
     // 3. Save to local DB
-    match Message::save_incoming(fwd.from, &content, timestamp) {
+    match Message::save_incoming(*msg.from, &content, timestamp) {
         Ok(m) => {
-            MessageEv::Received { id: m.inner.id, from: fwd.from, content, timestamp }.emit();
+            MessageEv::Received { id: m.inner.id, from: *msg.from, content, timestamp }.emit();
         },
         Err(e) => {
             warn!("MESSAGE: failed to save incoming: {e}");

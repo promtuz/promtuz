@@ -1,101 +1,132 @@
 //! Client to Relay Proto
 
-use std::io;
 use std::net::SocketAddr;
 
 use serde::Deserialize;
 use serde::Serialize;
-use serde_bytes;
-use tokio::io::AsyncWriteExt;
 
 use crate::proto::Sender;
-use crate::proto::pack::Packable;
-use crate::proto::pack::Packer;
+use crate::types::bytes::ByteVec;
+use crate::types::bytes::Bytes;
+
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+//===:===:===:===:==: HANDSHAKE :==:===:===:===:===||
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum HandshakeP {
-    ClientHello {
-        /// Identity Public Key (Ed25519)
-        #[serde(with = "serde_bytes")]
-        ipk: [u8; 32],
-    },
-
-    ServerChallenge {
-        /// Random, single-use nonce
-        #[serde(with = "serde_bytes")]
-        nonce: [u8; 32],
-    },
-
-    ClientProof {
-        /// Ed25519 signature over:
-        /// hash("relay-auth-v1" || nonce)
-        #[serde(with = "serde_bytes")]
-        sig: [u8; 64],
-    },
-
-    ServerAccept {
-        /// System time in seconds
-        timestamp: u64,
-    },
-
-    ServerReject {
-        reason: String,
-    },
+pub enum ServerHandshakeResultP {
+    Accept { timestamp: u64 },
+    Reject { reason: String },
 }
 
-/// Miscellaneous Packets
+/// Client Handshake Packet
+///
+/// Handshake initiates from Client
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum MiscP {
-    PubAddressReq,
-    PubAddressRes { addr: SocketAddr },
+pub enum CHandshakePacket {
+    Hello { ipk: Bytes<32> },
+    Proof { sig: Bytes<64> },
 }
 
-/// Message forwarding through the relay
+/// Server Handshake Packet
+///
+/// Server's response to client handshake
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct ForwardP {
-    #[serde(with = "serde_bytes")]
-    pub to:      [u8; 32],
-    #[serde(with = "serde_bytes")]
-    pub from:    [u8; 32],
-    #[serde(with = "serde_bytes")]
-    pub payload: Vec<u8>,
-    /// Ed25519 signature over (to ‖ from ‖ payload)
-    #[serde(with = "serde_bytes")]
-    pub sig:     [u8; 64],
+pub enum SHandshakePacket {
+    Challenge { nonce: Bytes<32> },
+    HandshakeResult(ServerHandshakeResultP),
 }
 
-/// Relay's response to a Forward request
+#[cfg(feature = "client")]
+impl Sender for CHandshakePacket {}
+
+#[cfg(feature = "server")]
+impl Sender for SHandshakePacket {}
+
+// // // // // // // // // // // // // // // // // //
+
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+//===:===:===:===:===: QUERIES :===:===:===:===:===||
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum ForwardResult {
-    /// Message accepted for delivery
-    Accepted,
-    /// Recipient not found in DHT
+pub enum QueryP {
+    PubAddress,
+    // room to grow
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum QueryResultP {
+    PubAddress { addr: SocketAddr },
     NotFound,
-    /// Signature verification failed
-    InvalidSig,
-    /// Generic error
     Error { reason: String },
 }
 
+// // // // // // // // // // // // // // // // // //
+
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+//===:===:===:===:===: FORWARD :===:===:===:===:===||
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+
+/// Client → Relay
+/// sig covers: "relay-forward-v1" || to || from || payload
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum RelayPacket {
-    Handshake(HandshakeP),
-    Misc(MiscP),
-    /// Client sends a message to be forwarded to another user
+pub struct ForwardP {
+    pub to:      Bytes<32>,
+    pub from:    Bytes<32>,
+    pub payload: ByteVec,
+    pub sig:     Bytes<64>,
+}
+
+/// Relay → Client (relay-verified delivery)
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct DeliverP {
+    pub from:    Bytes<32>,
+    pub payload: ByteVec,
+    pub sig:     Bytes<64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum ForwardResultP {
+    Accepted,
+    NotFound,
+    InvalidSig,
+    Error { reason: String },
+}
+
+// // // // // // // // // // // // // // // // // //
+
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+//===:===:===:===:===: RELAY-P :===:===:===:===:===||
+//===:===:===:===:===:===:=:===:===:===:===:===:===||
+
+/// Client Relay Packet
+///
+/// Packets sent from Client to Server
+///
+/// CLIENT --> SERVER
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum CRelayPacket {
+    Query(QueryP),
     Forward(ForwardP),
-    /// Relay responds to a Forward request
-    ForwardResult(ForwardResult),
-    /// Relay delivers a message to the connected recipient
-    Deliver(ForwardP),
 }
 
-impl Packable for RelayPacket {}
-
-impl Sender for RelayPacket {
-    async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin + Send)) -> Result<(), io::Error> {
-        let packet = self.pack().map_err(io::Error::other)?;
-
-        tx.write_all(&packet).await?;
-        tx.flush().await
-    }
+/// Server Relay Packet
+///
+/// Packets sent from Server to Client
+///
+/// SERVER --> CLIENT
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum SRelayPacket {
+    QueryResult(QueryResultP),
+    ForwardResult(ForwardResultP),
+    Deliver(DeliverP),
 }
+
+#[cfg(feature = "client")]
+impl Sender for CRelayPacket {}
+
+#[cfg(feature = "server")]
+impl Sender for SRelayPacket {}
+
+// // // // // // // // // // // // // // // // // //

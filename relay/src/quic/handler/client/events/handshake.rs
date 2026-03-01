@@ -4,8 +4,9 @@ use common::PROTOCOL_VERSION;
 use common::crypto::PublicKey;
 use common::crypto::get_nonce;
 use common::proto::Sender;
-use common::proto::client_rel::HandshakeP;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::CHandshakePacket;
+use common::proto::client_rel::SHandshakePacket;
+use common::proto::client_rel::ServerHandshakeResultP;
 use common::proto::pack::Unpacker;
 use ed25519_dalek::Signature;
 use quinn::Connection;
@@ -17,10 +18,11 @@ use crate::util::systime;
 pub async fn handle_handshake(
     relay: RelayRef, conn: &Connection,
 ) -> Result<PublicKey, anyhow::Error> {
-    use HandshakeP::*;
-    use RelayPacket::*;
+    use CHandshakePacket::*;
+    use SHandshakePacket::*;
 
-    let order_mismatch = Handshake(ServerReject { reason: "Packet Order Mismatch".into() });
+    let order_mismatch =
+        HandshakeResult(ServerHandshakeResultP::Reject { reason: "Packet Order Mismatch".into() });
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 
@@ -32,34 +34,34 @@ pub async fn handle_handshake(
 
     // 1. Client must send `ClientHello`
 
-    let Handshake(ClientHello { ipk }) = RelayPacket::unpack(&mut rx).await? else {
+    let Hello { ipk } = CHandshakePacket::unpack(&mut rx).await? else {
         order_mismatch.send(&mut tx).await.err();
         bail!("Packet Mismatch");
     };
     let ipk = PublicKey::from_bytes(&ipk)?;
 
-    let nonce = get_nonce::<32>();
+    let nonce = get_nonce::<32>().into();
 
-    Handshake(ServerChallenge { nonce }).send(&mut tx).await?;
+    SHandshakePacket::Challenge { nonce }.send(&mut tx).await?;
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 
     // 2. Client must respond with proof of his identity
 
-    let Handshake(ClientProof { sig }) = RelayPacket::unpack(&mut rx).await? else {
+    let Proof { sig } = CHandshakePacket::unpack(&mut rx).await? else {
         order_mismatch.send(&mut tx).await.err();
         bail!("Packet Mismatch");
     };
 
     let ipk_bytes = ipk.to_bytes();
-    let msg = [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &nonce].concat();
-    let packet = match Signature::from_slice(&sig) {
+    let msg = [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &*nonce].concat();
+    let packet = match Signature::from_slice(&*sig) {
         Ok(sig) if ipk.verify_strict(&msg, &sig).is_ok() => {
-            ServerAccept { timestamp: systime().as_secs() }
+            ServerHandshakeResultP::Accept { timestamp: systime().as_secs() }
         },
-        _ => ServerReject { reason: "Invalid Signature".into() },
+        _ => ServerHandshakeResultP::Reject { reason: "Invalid Signature".into() },
     };
-    Handshake(packet).send(&mut tx).await?;
+    HandshakeResult(packet).send(&mut tx).await?;
     _ = tx.finish();
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//

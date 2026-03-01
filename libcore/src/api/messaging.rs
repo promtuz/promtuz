@@ -1,10 +1,13 @@
 use anyhow::anyhow;
 use common::crypto::encrypt::Encrypted;
 use common::proto::Sender;
+use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::ForwardP;
-use common::proto::client_rel::ForwardResult;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::ForwardResultP;
+use common::proto::client_rel::SRelayPacket;
 use common::proto::pack::Unpacker;
+use common::types::bytes::ByteVec;
+use common::types::bytes::Bytes;
 use jni::JNIEnv;
 use jni::objects::JByteArray;
 use jni::objects::JString;
@@ -87,42 +90,43 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
         signing_key.sign(&sig_message).to_bytes()
     };
 
-    let fwd = ForwardP { to, from: our_ipk, payload, sig };
+    let fwd = ForwardP {
+        to:      Bytes(to),
+        from:    Bytes(our_ipk),
+        payload: ByteVec(payload),
+        sig:     Bytes(sig),
+    };
 
     // 4. Send to relay
     let conn = {
         let relay = RELAY.read();
-        relay
-            .as_ref()
-            .and_then(|r| r.connection.clone())
-            .ok_or_else(|| {
-                Message::mark_failed(&msg_id);
-                MessageEv::Failed { id: msg_id, to, reason: "not connected to relay".into() }
-                    .emit();
-                anyhow!("not connected to relay")
-            })?
+        relay.as_ref().and_then(|r| r.connection.clone()).ok_or_else(|| {
+            Message::mark_failed(&msg_id);
+            MessageEv::Failed { id: msg_id, to, reason: "not connected to relay".into() }.emit();
+            anyhow!("not connected to relay")
+        })?
     };
 
     let (mut send, mut recv) = conn.open_bi().await?;
-    RelayPacket::Forward(fwd).send(&mut send).await?;
+    CRelayPacket::Forward(fwd).send(&mut send).await?;
     send.finish()?;
 
     // 5. Wait for result
-    match RelayPacket::unpack(&mut recv).await? {
-        RelayPacket::ForwardResult(ForwardResult::Accepted) => {
+    match SRelayPacket::unpack(&mut recv).await? {
+        SRelayPacket::ForwardResult(ForwardResultP::Accepted) => {
             info!("MESSAGE: sent to {}", hex::encode(to));
             Message::mark_sent(&msg_id);
             MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
         },
-        RelayPacket::ForwardResult(ForwardResult::NotFound) => {
+        SRelayPacket::ForwardResult(ForwardResultP::NotFound) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason: "recipient not found".into() }.emit();
         },
-        RelayPacket::ForwardResult(ForwardResult::InvalidSig) => {
+        SRelayPacket::ForwardResult(ForwardResultP::InvalidSig) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason: "invalid signature".into() }.emit();
         },
-        RelayPacket::ForwardResult(ForwardResult::Error { reason }) => {
+        SRelayPacket::ForwardResult(ForwardResultP::Error { reason }) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason }.emit();
         },
@@ -176,8 +180,8 @@ pub extern "system" fn getConversations(env: JNIEnv, _: JC) -> jobject {
 #[derive(Serialize)]
 struct ContactInfo {
     #[serde(with = "serde_bytes")]
-    ipk: [u8; 32],
-    name: String,
+    ipk:      [u8; 32],
+    name:     String,
     added_at: u64,
 }
 

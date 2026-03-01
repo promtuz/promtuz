@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use common::crypto::PublicKey;
 use common::debug;
-use common::proto::client_rel::RelayPacket;
+use common::proto::client_rel::CRelayPacket;
 use common::proto::pack::Unpacker;
 use common::warn;
 use quinn::Connection;
@@ -57,7 +57,7 @@ impl Handler {
             tokio::spawn(async move {
                 let _permit = permit;
 
-                while let Ok(packet) = RelayPacket::unpack(&mut recv).await {
+                while let Ok(packet) = CRelayPacket::unpack(&mut recv).await {
                     if let Err(err) = handle_packet(packet, context.clone(), &mut send).await {
                         warn!("client({addr}) packet handler failed: {err}");
                     }

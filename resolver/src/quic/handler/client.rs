@@ -1,7 +1,6 @@
 use common::debug;
 use common::proto::client_res::ClientRequest;
-use common::proto::pack::Packer;
-use common::proto::pack::Unpacker;
+use common::proto::pack::{Packer, Unpacker};
 use tokio::io::AsyncReadExt;
 
 use crate::quic::handler::Handler;

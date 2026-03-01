@@ -1,14 +1,9 @@
 //! Client to Client (P2P) Proto
 
-use std::io;
-
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::io::AsyncWriteExt;
 
 use crate::proto::Sender;
-use crate::proto::pack::Packable;
-use crate::proto::pack::Packer;
 
 /// Packets for exchanging identity over peer to peer network
 ///
@@ -45,13 +40,4 @@ pub enum ClientPeerPacket {
     Identity(IdentityP),
 }
 
-impl Packable for ClientPeerPacket {}
-
-impl Sender for ClientPeerPacket {
-    async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> Result<(), io::Error> {
-        let packet = self.pack().map_err(io::Error::other)?;
-
-        tx.write_all(&packet).await?;
-        tx.flush().await
-    }
-}
+impl Sender for ClientPeerPacket {}

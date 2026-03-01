@@ -31,10 +31,11 @@ tokio = ["dep:tokio"]
 macros = []
 certgen = ["quic", "crypto", "dep:rcgen"]
 node = []
+types = []
 # aka relay & resolver
-server = []
+server = ["types"]
 # aka libcore
-client = []
+client = ["types"]
 
 [[bin]]
 name = "certgen"

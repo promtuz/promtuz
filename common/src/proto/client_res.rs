@@ -2,15 +2,16 @@
 
 use std::net::SocketAddr;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use serde_with::serde_as;
 
-use crate::proto::{RelayId, pack::Packable};
+use crate::proto::RelayId;
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RelayDescriptor {
-    pub id: RelayId,
+    pub id:   RelayId,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub addr: SocketAddr,
 }
@@ -20,14 +21,8 @@ pub enum ClientRequest {
     GetRelays(),
 }
 
-// TEMPORARY
-impl Packable for ClientRequest {}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientResponse {
     /// Resolver's response to [ClientRequest::GetRelays]
     GetRelays { relays: Vec<RelayDescriptor> },
 }
-
-// TEMPORARY
-impl Packable for ClientResponse {}

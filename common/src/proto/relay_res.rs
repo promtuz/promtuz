@@ -7,7 +7,6 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::proto::RelayId;
-use crate::proto::pack::Packable;
 use crate::proto::pack::Packer;
 use crate::sysutils::SystemLoad;
 use crate::trace;
@@ -20,7 +19,7 @@ pub enum LifetimeP {
     /// capabilities so the resolver can track it in the live node set.
     RelayHello {
         /// Stable cryptographic ID derived from the node's public key.
-        relay_id: RelayId,
+        relay_id:  RelayId,
         timestamp: u128,
         // TODO: I'd rather use bitset
         // pub capabilities: Vec<String>,
@@ -54,8 +53,6 @@ pub enum LifetimeP {
 pub enum ResolverPacket {
     Lifetime(LifetimeP),
 }
-
-impl Packable for ResolverPacket {}
 
 impl ResolverPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
