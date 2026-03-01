@@ -15,7 +15,7 @@ use crate::relay::RelayRef;
 use crate::util::systime;
 
 /// Handles handshake linearly
-pub async fn handle_handshake(
+pub(super) async fn handle_handshake(
     relay: RelayRef, conn: &Connection,
 ) -> Result<PublicKey, anyhow::Error> {
     use CHandshakePacket::*;

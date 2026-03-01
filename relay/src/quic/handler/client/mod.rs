@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use common::crypto::PublicKey;
 use common::debug;
@@ -10,16 +11,19 @@ use tokio::sync::Semaphore;
 
 use crate::quic::handler::Handler;
 use crate::quic::handler::client::events::handle_packet;
-use crate::quic::handler::client::events::handshake::handle_handshake;
+use crate::quic::handler::client::handshake::handle_handshake;
 use crate::relay::RelayRef;
 
 mod events;
+mod handshake;
 
 /// Context for client connection
 pub struct ClientContext {
     pub ipk: PublicKey,
     pub relay: RelayRef,
     pub conn: Connection,
+    /// Whether user requested for all pending queues or not
+    pub drained: AtomicBool,
 }
 
 pub type ClientCtxHandle = Arc<ClientContext>;
@@ -39,7 +43,12 @@ impl Handler {
             },
         };
 
-        let context = Arc::new(ClientContext { ipk, relay: relay.clone(), conn: conn.clone() });
+        let context = Arc::new(ClientContext {
+            ipk,
+            relay: relay.clone(),
+            conn: conn.clone(),
+            drained: false.into(),
+        });
 
         // only 16 concurrent streams can run at once per connection
         let limiter = Arc::new(Semaphore::new(16));

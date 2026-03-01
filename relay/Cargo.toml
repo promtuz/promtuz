@@ -5,6 +5,7 @@ edition = "2024"
 description = "Relay server — DHT node, client auth, presence replication"
 license.workspace = true
 repository.workspace = true
+default-run = "relay"
 
 [dependencies]
 common = { path = "../common", features = [
@@ -14,17 +15,20 @@ common = { path = "../common", features = [
     "crypto",
     "server",
 ] }
+hex.workspace = true
+toml.workspace = true
+rand.workspace = true
 quinn.workspace = true
-rustls.workspace = true
 serde.workspace = true
 tokio.workspace = true
-rustls-pemfile.workspace = true
+rustls.workspace = true
 anyhow.workspace = true
-ed25519-dalek.workspace = true
-rand.workspace = true
+thiserror.workspace = true
 crossterm.workspace = true
-toml.workspace = true
-hex.workspace = true
 serde_bytes.workspace = true
-rust-rocksdb = "0.46.0"
+ed25519-dalek.workspace = true
+rustls-pemfile.workspace = true
+rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
 parking_lot = "0.12.5"
+zerocopy = "0.8.40"
+uuid = { version = "1.21.0", features = ["v7"] }

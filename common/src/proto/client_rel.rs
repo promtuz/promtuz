@@ -79,8 +79,10 @@ pub struct ForwardP {
 }
 
 /// Relay → Client (relay-verified delivery)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DeliverP {
+    /// UUIDv7
+    pub id:      Bytes<16>,
     pub from:    Bytes<32>,
     pub payload: ByteVec,
     pub sig:     Bytes<64>,
@@ -109,6 +111,14 @@ pub enum ForwardResultP {
 pub enum CRelayPacket {
     Query(QueryP),
     Forward(ForwardP),
+
+    /// User acknowledges receiving valid delivery of messages
+    DeliverAck,
+
+    /// Drains Queue, user requesting for all incoming messages
+    DrainQueue,
+    /// User confirms storing messages hence queue can be cleared from server
+    AckDrain,
 }
 
 /// Server Relay Packet
@@ -121,6 +131,9 @@ pub enum SRelayPacket {
     QueryResult(QueryResultP),
     ForwardResult(ForwardResultP),
     Deliver(DeliverP),
+    /// All the pending deliveries for user in chronological order
+    /// TODO: might need debouncing in future if TOO MANY messages were queued at once
+    QueueDrain(Vec<DeliverP>),
 }
 
 #[cfg(feature = "client")]

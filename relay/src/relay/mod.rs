@@ -50,7 +50,7 @@ pub struct Relay {
     // pub keys: RelayKeys,
     /// SystemTime in ms since EPOCH when relay is started first
     // pub start_ms: u128,
-    pub endpoint: Arc<Endpoint>,
+    pub endpoint: Endpoint,
 
     pub cfg: AppConfig,
 
@@ -105,25 +105,9 @@ impl Relay {
 
         endpoint.set_default_client_config((*client_cfg).clone());
 
-        // let params = DhtParams {
-        //     bucket_size: cfg.dht.bucket_size,
-        //     k: cfg.dht.k,
-        //     alpha: cfg.dht.alpha,
-        //     user_ttl: Duration::from_secs(cfg.dht.user_ttl_secs),
-        //     republish_interval: Duration::from_secs(cfg.dht.republish_secs),
-        // };
+        let rocks = graceful!(rocksdb(), "failed to setup rocksdb");
+        let clients = RwLock::new(HashMap::new());
 
-        // let dht = Arc::new(RwLock::new(Dht::new(key, Some(params))));
-
-        Self {
-            key,
-            cfg,
-            client_cfg,
-            peer_client_cfg,
-            rocks: graceful!(rocksdb(), "failed to setup rocksdb"),
-            // dht,
-            endpoint: Arc::new(endpoint),
-            clients: RwLock::new(HashMap::new()),
-        }
+        Self { key, cfg, client_cfg, peer_client_cfg, rocks, endpoint, clients }
     }
 }

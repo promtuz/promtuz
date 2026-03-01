@@ -14,7 +14,8 @@ pub const STATUS_FAILED: u8 = 2;
 pub struct Message {
     pub inner: MessageRow,
 }
-
+/// FIXME: 
+/// This code is bullshit crap written by AI
 impl Message {
     /// Save an outgoing message (status = pending until relay confirms).
     pub fn save_outgoing(peer_ipk: [u8; 32], content: &str) -> Result<Self> {

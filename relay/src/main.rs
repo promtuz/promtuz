@@ -21,7 +21,6 @@ async fn main() -> Result<()> {
 
     // let relay: RelayRef = Arc::new(Mutex::new(Relay::new(cfg)));
     let relay = Arc::new(Relay::new(cfg));
-
     let acceptor = Acceptor::new(relay.endpoint.clone());
 
     let acceptor_handle = tokio::spawn({
@@ -29,7 +28,7 @@ async fn main() -> Result<()> {
         async move { acceptor.run(relay.clone()).await }
     });
 
-    let resolver_handle = ResolverLink::attach(relay.clone(), shutdown_rx).await;
+    let resolver_handle = ResolverLink::new(relay.clone(), shutdown_rx).attach();
 
     tokio::select! {
         _ = acceptor_handle => {}

@@ -23,3 +23,14 @@ macro_rules! try_ret {
         }
     };
 }
+
+
+#[macro_export]
+macro_rules! ret_err {
+    ($expr:expr) => {
+        match $expr {
+            Ok(val) => val,
+            Err(err) => return err,
+        }
+    };
+}

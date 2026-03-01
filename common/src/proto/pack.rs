@@ -41,8 +41,10 @@ where
     #[inline]
     fn pack(&self) -> Result<Vec<u8>, PackError> {
         let packet = self.ser()?;
-        let size: [u8; 2] = (packet.len() as u16).to_be_bytes();
-        Ok([&size, packet.as_slice()].concat())
+        let mut out = Vec::with_capacity(2 + packet.len());
+        out.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+        out.extend_from_slice(&packet);
+        Ok(out)
     }
 }
 
