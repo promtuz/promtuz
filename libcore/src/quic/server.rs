@@ -278,22 +278,23 @@ async fn handle_deliver(tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP) -
         bail!("invalid UTF-8")
     };
 
-    // early returning, if deliver ack fails, it'll be queued anyway
-    CRelayPacket::DeliverAck.send(tx).await?;
-
     let timestamp = systime().as_secs();
 
-    info!("MESSAGE: received from {}", hex::encode(msg.from));
-
-    // 3. Save to local DB
-    match Message::save_incoming(*msg.from, &content, timestamp) {
-        Ok(m) => {
-            MessageEv::Received { id: m.inner.id, from: *msg.from, content, timestamp }.emit();
-        },
+    // Persist BEFORE acking. If we ack first and the relay dequeues, a crash
+    // (or DB failure) between ack and save loses the message permanently.
+    let saved = match Message::save_incoming(*msg.from, &content, timestamp) {
+        Ok(m) => m,
         Err(e) => {
             warn!("MESSAGE: failed to save incoming: {e}");
+            // Skip the ack so the relay redelivers next time.
+            bail!("save failed: {e}");
         },
     };
+
+    CRelayPacket::DeliverAck.send(tx).await?;
+
+    info!("MESSAGE: received from {}", hex::encode(msg.from));
+    MessageEv::Received { id: saved.inner.id, from: *msg.from, content, timestamp }.emit();
 
     Ok(())
 }
