@@ -31,4 +31,3 @@ rustls-pemfile.workspace = true
 rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
 parking_lot = "0.12.5"
 zerocopy = "0.8.40"
-uuid = { version = "1.21.0", features = ["v7"] }

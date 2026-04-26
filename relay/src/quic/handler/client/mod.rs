@@ -1,13 +1,15 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use common::crypto::PublicKey;
 use common::debug;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::pack::Unpacker;
 use common::warn;
+use parking_lot::Mutex;
 use quinn::Connection;
 use tokio::sync::Semaphore;
+
+use crate::storage::MessageKey;
 
 use crate::quic::handler::Handler;
 use crate::quic::handler::client::events::handle_packet;
@@ -22,8 +24,10 @@ pub struct ClientContext {
     pub ipk: PublicKey,
     pub relay: RelayRef,
     pub conn: Connection,
-    /// Whether user requested for all pending queues or not
-    pub drained: AtomicBool,
+    /// Keys delivered in the most recent `DrainQueue` whose `AckDrain` we are
+    /// still waiting for. Cleared *only* on `AckDrain` so that a re-drain
+    /// before the ack lands re-sends the same set rather than dropping it.
+    pub pending_drain: Mutex<Vec<MessageKey>>,
 }
 
 pub type ClientCtxHandle = Arc<ClientContext>;
@@ -47,7 +51,7 @@ impl Handler {
             ipk,
             relay: relay.clone(),
             conn: conn.clone(),
-            drained: false.into(),
+            pending_drain: Mutex::new(Vec::new()),
         });
 
         // only 16 concurrent streams can run at once per connection

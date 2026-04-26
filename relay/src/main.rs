@@ -11,6 +11,7 @@ use crate::util::config::AppConfig;
 
 mod quic;
 mod relay;
+mod storage;
 mod util;
 
 #[tokio::main]

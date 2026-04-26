@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use common::crypto::get_nonce;
 use common::proto::Sender;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::trace;
@@ -16,22 +16,29 @@ use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use quinn::ConnectionError;
 use quinn::SendStream;
+use rust_rocksdb::WriteOptions;
 
 use crate::quic::handler::client::ClientCtxHandle;
+use crate::storage::MessageKey;
 use crate::util::systime;
-
-pub fn uuid() -> Bytes<16> {
-    Bytes(uuid::Uuid::now_v7().into_bytes())
-}
 
 pub(super) async fn handle_forward(
     fwd: DispatchP, ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
-    // 1. Verify signature: sender must prove authorship
+    // 1. Sender must match the authenticated session identity. Otherwise any
+    //    authenticated client could spoof messages on behalf of someone else
+    //    (the signature check below would still pass for a forged `from`).
+    if fwd.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
+        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig).send(tx).await?;
+        return Ok(());
+    }
+
+    // 2. Verify signature: sender must prove authorship under the canonical
+    //    domain-separated, version-tagged, id-bound construction.
     let sig_valid = (|| {
         let vk = VerifyingKey::from_bytes(&fwd.from).ok()?;
         let sig = Signature::from_slice(&*fwd.sig).ok()?;
-        let msg = [fwd.to.as_slice(), fwd.from.as_slice(), &fwd.payload].concat();
+        let msg = dispatch_sig_message(&fwd.to, &fwd.from, &fwd.id, &fwd.payload);
         vk.verify_strict(&msg, &sig).ok()
     })();
 
@@ -41,11 +48,11 @@ pub(super) async fn handle_forward(
     }
 
     let (recipient, delivery) = {
-        let DispatchP { to, from, payload, sig } = fwd;
-        (to, DeliverP { id: uuid(), from, payload, sig })
+        let DispatchP { to, from, id, payload, sig } = fwd;
+        (to, DeliverP { id, from, payload, sig })
     };
 
-    // 2. Check if recipient is connected locally
+    // 3. Check if recipient is connected locally
     let recipient_conn = { ctx.relay.clients.read().get(&*recipient).cloned() };
 
     let dispatch = if let Some(conn) = recipient_conn {
@@ -91,15 +98,16 @@ pub(super) async fn handle_forward(
 fn store_in_rocks(ctx: &ClientCtxHandle, recipient: Bytes<32>, delivery: DeliverP) -> Result<()> {
     trace!("FORWARD: recipient {} not connected locally, queuing", hex::encode(recipient));
 
-    let timestamp: [u8; 8] = (systime().as_millis() as u64).to_be_bytes();
-    let rand = get_nonce::<4>();
+    let ts_ms = systime().as_millis() as u64;
+    let key = MessageKey::new(&recipient.0, ts_ms, &delivery.id.0);
 
-    let mut key = [0u8; 44];
-    key[..32].copy_from_slice(&*recipient);
-    key[32..40].copy_from_slice(&timestamp);
-    key[40..44].copy_from_slice(&rand);
+    // Durable write: we acknowledge `Queued` to the sender as soon as this
+    // returns, so a crash before the WAL hits disk would silently lose the
+    // message. `set_sync(true)` guarantees fsync of the WAL before ack.
+    let mut wopts = WriteOptions::default();
+    wopts.set_sync(true);
 
-    ctx.relay.rocks.put(key, delivery.ser()?)?;
+    ctx.relay.rocks.put_opt(key.as_bytes(), delivery.ser()?, &wopts)?;
 
     Ok(())
 }

@@ -5,6 +5,7 @@ use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Unpacker;
 use common::types::bytes::ByteVec;
 use common::types::bytes::Bytes;
@@ -82,7 +83,12 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
     // 3. Get our IPK and sign
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
 
-    let sig_message = [to.as_slice(), our_ipk.as_slice(), &payload].concat();
+    // Mint a UUIDv7 message id on the *sender*. This id is bound by the
+    // signature below, so the relay can never substitute a different id when
+    // it stores or forwards the message.
+    let id: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+
+    let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
     let sig = {
         let isk = Identity::secret_key_bytes();
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&isk);
@@ -93,6 +99,7 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
     let fwd = DispatchP {
         to:      Bytes(to),
         from:    Bytes(our_ipk),
+        id:      Bytes(id),
         payload: ByteVec(payload),
         sig:     Bytes(sig),
     };
