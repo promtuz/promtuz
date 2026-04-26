@@ -4,10 +4,12 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.*
 import androidx.compose.ui.unit.*
 import com.promtuz.chat.domain.model.UiMessage
+import com.promtuz.chat.domain.model.UiMessageStatus
 import com.promtuz.chat.ui.theme.adjustLight
 import com.promtuz.chat.ui.util.composeBubble
 import com.promtuz.chat.domain.model.UiMessagePosition as UiMsgPos
@@ -60,12 +62,26 @@ fun MessageBubble(
                         }
                         .padding(9.dp, 5.dp)
                 ) {
-                    Text(
-                        message.content,
-                        style = textStyle.bodyLargeEmphasized.copy(
-                            lineHeight = 20.0.sp
+                    Column {
+                        Text(
+                            message.content,
+                            style = textStyle.bodyLargeEmphasized.copy(
+                                lineHeight = 20.0.sp
+                            )
                         )
-                    )
+                        if (message.isSent) {
+                            Text(
+                                text = when (message.status) {
+                                    UiMessageStatus.Pending -> "⏳"
+                                    UiMessageStatus.Sent -> "✓"
+                                    UiMessageStatus.Failed -> "!"
+                                    else -> ""
+                                },
+                                style = textStyle.labelSmall,
+                                modifier = Modifier.align(Alignment.End)
+                            )
+                        }
+                    }
                 }
             }
         }

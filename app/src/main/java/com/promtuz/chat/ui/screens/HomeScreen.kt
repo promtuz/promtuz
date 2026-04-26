@@ -16,6 +16,6 @@ fun HomeScreen(
         topBar = { HomeTopBar(appViewModel) },
         floatingActionButton = { HomeFab(appViewModel) }
     ) { innerPadding ->
-        HomeChatList(innerPadding)
+        HomeChatList(innerPadding, appViewModel)
     }
 }

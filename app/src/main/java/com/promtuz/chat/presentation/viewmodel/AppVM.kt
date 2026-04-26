@@ -8,11 +8,16 @@ import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Chat
+import com.promtuz.chat.domain.model.ContactData
+import com.promtuz.chat.domain.model.LastMessage
+import com.promtuz.chat.domain.model.MessageData
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.security.KeyManager
+import com.promtuz.chat.utils.serialization.AppCbor
 import com.promtuz.core.API
 import com.promtuz.core.events.InternalEvents
+import com.promtuz.core.events.MessageEvent
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +26,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.decodeFromByteArray
 import timber.log.Timber
 import com.promtuz.chat.presentation.state.ConnectionState as CS
 
@@ -36,6 +43,12 @@ class AppVM(
 
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
+
+    private val _chats = MutableStateFlow(emptyList<Chat>())
+    val chats: StateFlow<List<Chat>> = _chats.asStateFlow()
+
+    private val _chatsLoading = MutableStateFlow(false)
+    val chatsLoading: StateFlow<Boolean> = _chatsLoading.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -62,6 +75,13 @@ class AppVM(
                     }
                 }
         }
+
+        // Listen for incoming messages to update chat list
+        viewModelScope.launch {
+            api.eventsFlow.filterIsInstance<MessageEvent>().collect {
+                refreshChats()
+            }
+        }
     }
 
     companion object {
@@ -80,6 +100,7 @@ class AppVM(
         api.initApi(context)
 
         connection()
+        refreshChats()
     }
 
     fun connection() {
@@ -87,6 +108,39 @@ class AppVM(
 
         viewModelScope.launch {
             api.connect(context)
+        }
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    fun refreshChats() {
+        viewModelScope.launch {
+            _chatsLoading.value = true
+            try {
+                val contactBytes = api.getContacts()
+                val contacts = AppCbor.instance.decodeFromByteArray<List<ContactData>>(contactBytes)
+
+                val convBytes = api.getConversations()
+                val conversations = AppCbor.instance.decodeFromByteArray<List<MessageData>>(convBytes)
+
+                // Build a map of peer_ipk -> latest message
+                val convMap = conversations.associateBy { it.peer_ipk.toList() }
+
+                _chats.value = contacts.map { contact ->
+                    val lastMsg = convMap[contact.ipk.toList()]
+                    Chat(
+                        identity = contact.ipk,
+                        nickname = contact.name,
+                        lastMessage = if (lastMsg != null) {
+                            LastMessage(lastMsg.content, lastMsg.timestamp * 1000)
+                        } else {
+                            LastMessage(null, contact.added_at * 1000)
+                        }
+                    )
+                }.sortedByDescending { it.lastMessage.timestamp }
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "Failed to load chats")
+            }
+            _chatsLoading.value = false
         }
     }
 }

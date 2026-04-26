@@ -37,6 +37,7 @@ fun HomeChatListItem(chat: ChatModel, roundShape: Shape) {
             .combinedClickable(onClick = {
                 context.startActivity(Intent(context, ChatActivity::class.java).apply {
                     putExtra("user", chat.identity)
+                    putExtra("name", chat.nickname)
                 })
             }, onLongClick = {
 
@@ -59,11 +60,13 @@ fun HomeChatListItem(chat: ChatModel, roundShape: Shape) {
                     color = colors.onSecondaryContainer
                 )
 
-                Text(
-                    parseMessageDate(msg.timestamp),
-                    style = textTheme.bodySmallEmphasized,
-                    color = colors.onSecondaryContainer.copy(0.5f)
-                )
+                if (msg.timestamp > 0) {
+                    Text(
+                        parseMessageDate(msg.timestamp),
+                        style = textTheme.bodySmallEmphasized,
+                        color = colors.onSecondaryContainer.copy(0.5f)
+                    )
+                }
             }
 
             msg.content?.let {

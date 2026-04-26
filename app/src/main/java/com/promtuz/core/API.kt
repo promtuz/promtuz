@@ -39,6 +39,7 @@ object API {
                 val value = when (tag) {
                     "CONNECTION" -> decode<InternalEvents.ConnectionEv>(valueBytes)
                     "IDENTITY" -> decode<InternalEvents.IdentityEv>(valueBytes)
+                    "MESSAGE" -> decode<InternalEvents.MessageEv>(valueBytes)
                     else -> error("Unknown InternalEvent $tag")
                 }
 
@@ -93,6 +94,14 @@ object API {
 
     external fun parseQRBytes(bytes: ByteArray)
     external fun computeQrMask(grid: ByteArray, size: Int): ByteArray
+
+
+    //=||=||=||=||=||==| MESSAGING |==||=||=||=||=||=//
+
+    external fun sendMessage(toIpk: ByteArray, content: String)
+    external fun getMessages(peerIpk: ByteArray, limit: Int, beforeId: String?): ByteArray
+    external fun getConversations(): ByteArray
+    external fun getContacts(): ByteArray
 
 
     //=||=||=||=||=||==| WELCOME! |==||=||=||=||=||=//

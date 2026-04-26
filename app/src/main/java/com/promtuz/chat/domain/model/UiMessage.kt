@@ -4,6 +4,11 @@ enum class UiMessagePosition {
     Single, Start, Middle, End
 }
 
+
+enum class UiMessageStatus {
+    Pending, Sent, Failed
+}
+
 /**
  * UI friendly Message model.
  * Basically plain text content and ui related information
@@ -16,5 +21,7 @@ class UiMessage(
     // UI Decorations
     val position: UiMessagePosition,
 
-    private val timestamp: Long
+    val timestamp: Long,
+
+    val status: UiMessageStatus?
 )

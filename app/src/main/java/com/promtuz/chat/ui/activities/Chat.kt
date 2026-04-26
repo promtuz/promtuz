@@ -6,28 +6,30 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.ui.graphics.*
-import com.promtuz.chat.data.dummy.dummyChats
-import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.domain.model.Chat
+import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.presentation.viewmodel.ChatVM
-import com.promtuz.chat.security.KeyManager
 import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.theme.PromtuzTheme
-import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
 
 class Chat : AppCompatActivity() {
-    private val appViewModel: AppVM by inject()
     private val viewModel: ChatVM by viewModel()
-//    private val keyManager: KeyManager by inject<KeyManager>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val userIdentity =
             intent.getByteArrayExtra("user")?.takeIf { it.size == 32 } ?: return finish()
-        // FIXME: very temporary
-        val chat = dummyChats.find { it.identity.contentEquals(userIdentity) } ?: return finish()
+        val userName = intent.getStringExtra("name") ?: "Unknown"
 
+        val chat = Chat(
+            identity = userIdentity,
+            nickname = userName,
+            lastMessage = LastMessage(null, 0)
+        )
+
+        viewModel.init(userIdentity)
 
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
