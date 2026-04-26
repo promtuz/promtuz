@@ -71,7 +71,7 @@ pub enum QueryResultP {
 /// Client → Relay
 /// sig covers: "relay-forward-v1" || to || from || payload
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct ForwardP {
+pub struct DispatchP {
     pub to:      Bytes<32>,
     pub from:    Bytes<32>,
     pub payload: ByteVec,
@@ -89,8 +89,9 @@ pub struct DeliverP {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum ForwardResultP {
-    Accepted,
+pub enum DispatchAckP {
+    Queued,
+    Delivered,
     NotFound,
     InvalidSig,
     Error { reason: String },
@@ -110,7 +111,7 @@ pub enum ForwardResultP {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum CRelayPacket {
     Query(QueryP),
-    Forward(ForwardP),
+    Dispatch(DispatchP),
 
     /// User acknowledges receiving valid delivery of messages
     DeliverAck,
@@ -129,11 +130,11 @@ pub enum CRelayPacket {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum SRelayPacket {
     QueryResult(QueryResultP),
-    ForwardResult(ForwardResultP),
+    DispatchAck(DispatchAckP),
     Deliver(DeliverP),
-    /// All the pending deliveries for user in chronological order
-    /// TODO: might need debouncing in future if TOO MANY messages were queued at once
-    QueueDrain(Vec<DeliverP>),
+    // /// All the pending deliveries for user in chronological order
+    // /// TODO: might need debouncing in future if TOO MANY messages were queued at once
+    // QueueDrain(Vec<DeliverP>),
 }
 
 #[cfg(feature = "client")]

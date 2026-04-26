@@ -5,8 +5,8 @@ use common::crypto::get_nonce;
 use common::proto::Sender;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
-use common::proto::client_rel::ForwardP;
-use common::proto::client_rel::ForwardResultP;
+use common::proto::client_rel::DispatchAckP;
+use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -25,7 +25,7 @@ pub fn uuid() -> Bytes<16> {
 }
 
 pub(super) async fn handle_forward(
-    fwd: ForwardP, ctx: ClientCtxHandle, tx: &mut SendStream,
+    fwd: DispatchP, ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
     // 1. Verify signature: sender must prove authorship
     let sig_valid = (|| {
@@ -36,19 +36,19 @@ pub(super) async fn handle_forward(
     })();
 
     if sig_valid.is_none() {
-        SRelayPacket::ForwardResult(ForwardResultP::InvalidSig).send(tx).await?;
+        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig).send(tx).await?;
         return Ok(());
     }
 
     let (recipient, delivery) = {
-        let ForwardP { to, from, payload, sig } = fwd;
+        let DispatchP { to, from, payload, sig } = fwd;
         (to, DeliverP { id: uuid(), from, payload, sig })
     };
 
     // 2. Check if recipient is connected locally
     let recipient_conn = { ctx.relay.clients.read().get(&*recipient).cloned() };
 
-    if let Some(conn) = recipient_conn {
+    let dispatch = if let Some(conn) = recipient_conn {
         let delivered = async {
             let (mut deliver_tx, mut deliver_rx) = conn.open_bi().await?;
 
@@ -72,12 +72,18 @@ pub(super) async fn handle_forward(
         if delivered.is_err() {
             // Connection was stale — store for later pickup
             store_in_rocks(&ctx, recipient, delivery)?;
+
+            DispatchAckP::Queued
+        } else {
+            DispatchAckP::Delivered
         }
     } else {
         store_in_rocks(&ctx, recipient, delivery)?;
-    }
 
-    SRelayPacket::ForwardResult(ForwardResultP::Accepted).send(tx).await?;
+        DispatchAckP::Queued
+    };
+
+    SRelayPacket::DispatchAck(dispatch).send(tx).await?;
 
     Ok(())
 }

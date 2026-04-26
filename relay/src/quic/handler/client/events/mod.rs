@@ -22,7 +22,7 @@ pub(super) async fn handle_packet(
     match packet {
         // Handshake(packet) => handle_handshake(packet, ctx.clone(), tx).await,
         Query(query) => handle_misc(query, ctx.clone(), tx).await,
-        Forward(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
+        Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue | AckDrain => handle_drain(ctx.clone(), tx).await,
 
         // Ignore Extra

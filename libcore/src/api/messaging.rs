@@ -2,8 +2,8 @@ use anyhow::anyhow;
 use common::crypto::encrypt::Encrypted;
 use common::proto::Sender;
 use common::proto::client_rel::CRelayPacket;
-use common::proto::client_rel::ForwardP;
-use common::proto::client_rel::ForwardResultP;
+use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::pack::Unpacker;
 use common::types::bytes::ByteVec;
@@ -90,7 +90,7 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
         signing_key.sign(&sig_message).to_bytes()
     };
 
-    let fwd = ForwardP {
+    let fwd = DispatchP {
         to:      Bytes(to),
         from:    Bytes(our_ipk),
         payload: ByteVec(payload),
@@ -108,25 +108,25 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
     };
 
     let (mut send, mut recv) = conn.open_bi().await?;
-    CRelayPacket::Forward(fwd).send(&mut send).await?;
+    CRelayPacket::Dispatch(fwd).send(&mut send).await?;
     send.finish()?;
 
     // 5. Wait for result
     match SRelayPacket::unpack(&mut recv).await? {
-        SRelayPacket::ForwardResult(ForwardResultP::Accepted) => {
+        SRelayPacket::DispatchAck(DispatchAckP::Queued) => {
             info!("MESSAGE: sent to {}", hex::encode(to));
             Message::mark_sent(&msg_id);
             MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
         },
-        SRelayPacket::ForwardResult(ForwardResultP::NotFound) => {
+        SRelayPacket::DispatchAck(DispatchAckP::NotFound) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason: "recipient not found".into() }.emit();
         },
-        SRelayPacket::ForwardResult(ForwardResultP::InvalidSig) => {
+        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason: "invalid signature".into() }.emit();
         },
-        SRelayPacket::ForwardResult(ForwardResultP::Error { reason }) => {
+        SRelayPacket::DispatchAck(DispatchAckP::Error { reason }) => {
             Message::mark_failed(&msg_id);
             MessageEv::Failed { id: msg_id, to, reason }.emit();
         },
