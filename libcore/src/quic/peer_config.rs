@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use common::quic::protorole::ProtoRole;
+use ed25519_dalek::Signature as Ed25519Signature;
+use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
 use quinn::ClientConfig;
 use quinn::ServerConfig;
@@ -24,24 +26,56 @@ use rustls::pki_types::UnixTime;
 use rustls::server::danger::ClientCertVerified;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::sign::CertifiedKey;
+use x509_parser::oid_registry::asn1_rs::oid;
+use x509_parser::prelude::FromDer;
+use x509_parser::prelude::X509Certificate;
 
 use crate::data::identity::IdentitySigner;
 use crate::quic::peer_identity::PeerIdentity;
 
-/// Verifier that accepts any client cert (identity verified post-handshake)
-#[derive(Debug)]
-struct SkipClientVerifier;
+/// OID for Ed25519 signature/key algorithm (1.3.101.112 / id-Ed25519, RFC 8410).
+const ED25519_OID: x509_parser::der_parser::Oid<'static> = oid!(1.3.101 .112);
 
-impl ClientCertVerifier for SkipClientVerifier {
+// ===========================================================================
+// Peer-to-peer TLS verifiers.
+//
+// These verifiers DO NOT validate:
+//   * an issuer / CA chain (peer certs are self-signed; there is no PKI)
+//   * notBefore/notAfter validity windows (peers don't share a clock and the
+//     identity is the long-term Ed25519 SPKI, which doesn't expire)
+//   * the certificate Subject / SAN (the peer's identity is its public key,
+//     not a DNS name; we look it up out-of-band via the QR code)
+//
+// What they DO validate:
+//   * the presented end-entity cert parses as X.509 with an Ed25519 SPKI
+//   * (in `verify_tls13_signature`) the TLS handshake transcript signature
+//     is a valid Ed25519 signature under the SPKI from the cert
+//
+// On top of that, the application performs `verify_peer_self_signature` on
+// the peer cert post-handshake (see `extract_peer_public_key`). That step
+// rejects certs whose embedded SPKI does not match the key that signed the
+// cert itself, closing the substring-search spoof of the old extractor.
+// ===========================================================================
+
+/// Verifier for the P2P server side: validates the client's cert is a
+/// well-formed Ed25519 X.509 cert and verifies the TLS handshake signature.
+#[derive(Debug)]
+struct PeerClientCertVerifier;
+
+impl ClientCertVerifier for PeerClientCertVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         &[]
     }
 
     fn verify_client_cert(
-        &self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        // Accept any cert - real identity verification happens post-handshake
+        // Reject anything that isn't a parsable Ed25519 X.509 cert at handshake
+        // time. Identity (matching the expected peer) is checked post-handshake
+        // by `extract_peer_public_key`.
+        ed25519_pubkey_from_cert_der(end_entity.as_ref())
+            .ok_or_else(|| rustls::Error::General("peer cert is not a valid Ed25519 X.509".into()))?;
         Ok(ClientCertVerified::assertion())
     }
 
@@ -52,9 +86,9 @@ impl ClientCertVerifier for SkipClientVerifier {
     }
 
     fn verify_tls13_signature(
-        &self, _msg: &[u8], _crt: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
+        &self, msg: &[u8], crt: &CertificateDer<'_>, dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_ed25519(msg, crt, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -62,16 +96,19 @@ impl ClientCertVerifier for SkipClientVerifier {
     }
 }
 
-/// Verifier that accepts any server cert (identity verified post-handshake)
+/// Verifier for the P2P client side: validates the server's cert is a
+/// well-formed Ed25519 X.509 cert and verifies the TLS handshake signature.
 #[derive(Debug)]
-struct SkipServerVerifier;
+struct PeerServerCertVerifier;
 
-impl ServerCertVerifier for SkipServerVerifier {
+impl ServerCertVerifier for PeerServerCertVerifier {
     fn verify_server_cert(
-        &self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>, _ocsp_response: &[u8], _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        // Accept any cert - real identity verification happens post-handshake
+        ed25519_pubkey_from_cert_der(end_entity.as_ref()).ok_or_else(|| {
+            rustls::Error::General("peer cert is not a valid Ed25519 X.509".into())
+        })?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -82,14 +119,44 @@ impl ServerCertVerifier for SkipServerVerifier {
     }
 
     fn verify_tls13_signature(
-        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
+        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_ed25519(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![SignatureScheme::ED25519]
     }
+}
+
+/// Shared implementation for verifying a TLS 1.3 handshake signature using the
+/// Ed25519 SPKI extracted from the presented certificate.
+fn verify_tls13_ed25519(
+    message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, rustls::Error> {
+    if dss.scheme != SignatureScheme::ED25519 {
+        return Err(rustls::Error::General(format!(
+            "unsupported handshake signature scheme: {:?}",
+            dss.scheme
+        )));
+    }
+
+    let pubkey_bytes = ed25519_pubkey_from_cert_der(cert.as_ref())
+        .ok_or_else(|| rustls::Error::General("peer cert SPKI is not Ed25519".into()))?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| rustls::Error::General(format!("invalid Ed25519 SPKI: {e}")))?;
+
+    let sig_bytes: &[u8] = dss.signature();
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| rustls::Error::General("Ed25519 handshake signature must be 64 bytes".into()))?;
+    let signature = Ed25519Signature::from_bytes(&sig_arr);
+
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|e| rustls::Error::General(format!("Ed25519 handshake signature failed: {e}")))?;
+
+    Ok(HandshakeSignatureValid::assertion())
 }
 
 /// Custom rustls SigningKey that wraps IdentitySigner for on-demand signing.
@@ -248,7 +315,7 @@ pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
     let certified_key = generate_identity_cert(identity)?;
 
     let mut crypto = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(Arc::new(SkipClientVerifier))
+        .with_client_cert_verifier(Arc::new(PeerClientCertVerifier))
         .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
 
     crypto.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
@@ -265,7 +332,7 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
 
     let mut tls = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerifier))
+        .with_custom_certificate_verifier(Arc::new(PeerServerCertVerifier))
         .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
 
     tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
@@ -280,61 +347,154 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
 
 /// Extracts the Ed25519 identity public key from a peer's certificate.
 ///
-/// The certificate structure we generate has the public key at a known location
-/// within the SubjectPublicKeyInfo field of the TBSCertificate.
+/// Performs three checks:
+///   1. The cert is a parsable X.509 cert.
+///   2. The SPKI algorithm OID is Ed25519 (1.3.101.112).
+///   3. The cert is *self-signed* with that SPKI key. Without (3), an attacker
+///      who controlled the TLS handshake (a la the old skip-everything verifier)
+///      could substitute a cert whose embedded SPKI is some target's key while
+///      the cert is actually signed by the attacker's key. Even with the
+///      stricter handshake verifier in this file we keep this check as
+///      defense-in-depth and to anchor the peer's identity on the SPKI alone.
 pub fn extract_peer_public_key(conn: &quinn::Connection) -> Option<[u8; 32]> {
-    // Get peer certificates from the connection
     let peer_identity = conn.peer_identity()?;
     let certs = peer_identity.downcast_ref::<Vec<CertificateDer<'static>>>()?;
-    let cert = certs.first()?;
+    let cert_der = certs.first()?;
 
-    extract_ed25519_pubkey_from_cert(cert.as_ref())
+    extract_ed25519_pubkey_from_cert(cert_der.as_ref())
 }
 
-/// Parse Ed25519 public key from certificate DER bytes.
+/// Parse + verify the peer cert's Ed25519 SPKI.
 ///
-/// Our minimal certificate structure:
-/// Certificate ::= SEQUENCE {
-///   TBSCertificate ::= SEQUENCE {
-///     version [0] INTEGER,
-///     serialNumber INTEGER,
-///     signature AlgorithmIdentifier,
-///     issuer Name (empty),
-///     validity Validity,
-///     subject Name (empty),
-///     subjectPublicKeyInfo ::= SEQUENCE {
-///       algorithm AlgorithmIdentifier (Ed25519 OID),
-///       subjectPublicKey BIT STRING (33 bytes: 0x00 + 32-byte key)
-///     }
-///   },
-///   signatureAlgorithm AlgorithmIdentifier,
-///   signature BIT STRING
-/// }
+/// Returns the 32-byte public key only if:
+///   - the DER is a valid X.509 cert,
+///   - the SPKI algorithm is Ed25519,
+///   - the SPKI subjectPublicKey is a 32-byte BIT STRING,
+///   - the cert's signature over its TBS is valid under the SPKI key
+///     (i.e. the cert is properly self-signed by the embedded key).
 fn extract_ed25519_pubkey_from_cert(cert_der: &[u8]) -> Option<[u8; 32]> {
-    // Look for the Ed25519 SPKI pattern:
-    // SEQUENCE (0x30, 0x2a = 42 bytes) containing:
-    //   SEQUENCE (0x30, 0x05) with Ed25519 OID (0x06, 0x03, 0x2b, 0x65, 0x70)
-    //   BIT STRING (0x03, 0x21, 0x00) followed by 32-byte public key
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    let pubkey = ed25519_pubkey_from_parsed(&cert)?;
+    verify_self_signature(&cert, &pubkey).ok()?;
+    Some(pubkey)
+}
 
-    let spki_pattern: &[u8] = &[
-        0x30, 0x2a, // SEQUENCE, 42 bytes
-        0x30, 0x05, // SEQUENCE, 5 bytes (AlgorithmIdentifier)
-        0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112 (Ed25519)
-        0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
-    ];
+/// Cheaper variant used inside the rustls verifier callbacks: only parse +
+/// extract the SPKI, do *not* verify the self-signature. The handshake-time
+/// verifier already checks the TLS transcript signature against this same
+/// SPKI; the application path adds the self-signature check on top.
+fn ed25519_pubkey_from_cert_der(cert_der: &[u8]) -> Option<[u8; 32]> {
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    ed25519_pubkey_from_parsed(&cert)
+}
 
-    // Find the SPKI pattern in the certificate
-    let pos = cert_der.windows(spki_pattern.len()).position(|window| window == spki_pattern)?;
+fn ed25519_pubkey_from_parsed(cert: &X509Certificate<'_>) -> Option<[u8; 32]> {
+    let spki = cert.public_key();
 
-    // Public key starts right after the pattern
-    let key_start = pos + spki_pattern.len();
-    let key_end = key_start + 32;
-
-    if key_end > cert_der.len() {
+    // RFC 8410: Ed25519 SPKI uses algorithm OID 1.3.101.112 with no parameters.
+    if spki.algorithm.algorithm != ED25519_OID {
         return None;
     }
 
-    let mut pubkey = [0u8; 32];
-    pubkey.copy_from_slice(&cert_der[key_start..key_end]);
-    Some(pubkey)
+    // subject_public_key is a BIT STRING; for Ed25519 its data is exactly the
+    // 32-byte raw public key (no leading 0x00 unused-bits prefix here — that's
+    // already stripped by the parser).
+    let raw: &[u8] = &spki.subject_public_key.data;
+    if raw.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(raw);
+    Some(out)
+}
+
+/// Verify the cert's signatureValue is a valid Ed25519 signature over its
+/// tbs_certificate, using the embedded SPKI as the verification key.
+fn verify_self_signature(cert: &X509Certificate<'_>, pubkey_bytes: &[u8; 32]) -> Result<()> {
+    use anyhow::anyhow;
+
+    // The cert's signatureAlgorithm must also be Ed25519.
+    if cert.signature_algorithm.algorithm != ED25519_OID {
+        return Err(anyhow!("cert signatureAlgorithm is not Ed25519"));
+    }
+
+    let tbs_der: &[u8] = cert.tbs_certificate.as_ref();
+    let sig_bytes: &[u8] = &cert.signature_value.data;
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| anyhow!("Ed25519 cert signature must be 64 bytes"))?;
+
+    let verifying_key = VerifyingKey::from_bytes(pubkey_bytes)
+        .map_err(|e| anyhow!("invalid Ed25519 SPKI bytes: {e}"))?;
+    let signature = Ed25519Signature::from_bytes(&sig_arr);
+
+    verifying_key
+        .verify(tbs_der, &signature)
+        .map_err(|e| anyhow!("cert self-signature did not verify: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey;
+
+    /// Build a minimal Ed25519 self-signed cert using the same hand-rolled DER
+    /// builder as production, but signed with an explicit caller-supplied key
+    /// (so the test doesn't need the JNI-backed `IdentitySigner`).
+    fn build_self_signed(signing_key: &SigningKey) -> Vec<u8> {
+        let pubkey = signing_key.verifying_key();
+        let pubkey_bytes = pubkey.to_bytes();
+        let tbs = build_tbs_certificate(&pubkey_bytes);
+        let sig = signing_key.sign(&tbs);
+        build_certificate_der(&tbs, &sig.to_bytes())
+    }
+
+    #[test]
+    fn parses_and_verifies_self_signed_cert() {
+        let mut seed = [0u8; 32];
+        for (i, b) in seed.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        let key = SigningKey::from_bytes(&seed);
+        let cert_der = build_self_signed(&key);
+
+        let parsed = extract_ed25519_pubkey_from_cert(&cert_der)
+            .expect("self-signed cert must round-trip through parser+self-sig");
+        assert_eq!(parsed, key.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn rejects_cert_with_tampered_spki() {
+        let mut seed = [0u8; 32];
+        for (i, b) in seed.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(11).wrapping_add(1);
+        }
+        let key = SigningKey::from_bytes(&seed);
+        let cert_der = build_self_signed(&key);
+
+        // Find the SPKI key bytes inside the DER and flip a bit. After this,
+        // the embedded SPKI no longer matches the key the cert was signed
+        // with, so self-sig verification must fail.
+        let spki_pattern: &[u8] = &[
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let pos = cert_der
+            .windows(spki_pattern.len())
+            .position(|w| w == spki_pattern)
+            .expect("SPKI pattern present in our generated cert");
+        let key_start = pos + spki_pattern.len();
+        let mut tampered = cert_der.clone();
+        tampered[key_start] ^= 0x01;
+
+        assert!(extract_ed25519_pubkey_from_cert(&tampered).is_none());
+    }
+
+    #[test]
+    fn rejects_garbage_bytes() {
+        assert!(extract_ed25519_pubkey_from_cert(&[]).is_none());
+        assert!(extract_ed25519_pubkey_from_cert(&[0u8; 32]).is_none());
+        assert!(extract_ed25519_pubkey_from_cert(&[0x30, 0x82, 0xff, 0xff]).is_none());
+    }
 }

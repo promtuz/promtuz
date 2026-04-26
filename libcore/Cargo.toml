@@ -40,4 +40,6 @@ ciborium = "0.2.2"
 if-addrs = "0.14.0"
 tokio-util = "0.7.18"
 thiserror = "2.0.18"
+uuid = { version = "1.21.0", features = ["v7"] }
 zeroize = { version = "1.8.2", features = ["aarch64", "derive"] }
+x509-parser = "0.18"
