@@ -9,9 +9,12 @@ use common::info;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
+use common::proto::relay_res::relay_heartbeat_signing_input;
 use common::proto::relay_res::relay_hello_signing_input;
 use common::quic::CloseReason;
+use common::quic::RESOLVER_RELAY_HEARTBEAT_INTERVAL;
 use common::quic::id::NodeId;
+use common::sysutils::system_load;
 use common::types::bytes::Bytes;
 use common::warn;
 use ed25519_dalek::Signer;
@@ -133,9 +136,18 @@ impl ResolverLink {
             .await
             .inspect_err(|e| warn!("hello to resolver({}) failed: {e}", conn.remote_address()))?;
 
-        self.handle(&conn).await?;
+        // Spawn the periodic heartbeat alongside the inbound handler. Both
+        // share the same `Connection`; whichever ends first cancels the
+        // other via the abort handle.
+        let heartbeat = tokio::spawn(Self::heartbeat_loop(
+            conn.clone(),
+            self.relay.clone(),
+            self.shutdown.clone(),
+        ));
 
-        Ok(())
+        let res = self.handle(&conn).await;
+        heartbeat.abort();
+        res
     }
 
     async fn hello(&self, conn: &Connection) -> Result<()> {
@@ -162,6 +174,70 @@ impl ResolverLink {
 
         send.finish()?;
 
+        Ok(())
+    }
+
+    /// Sends a periodic, signed [`LifetimeP::RelayHeartbeat`] over a fresh
+    /// uni-stream every [`RESOLVER_RELAY_HEARTBEAT_INTERVAL`] seconds.
+    ///
+    /// Each heartbeat is independently authenticated (full pubkey + Ed25519
+    /// signature + fresh timestamp) so the resolver can verify liveness
+    /// without trusting the connection alone — this matters for any future
+    /// liveness / load-aware routing logic that consumes these packets.
+    async fn heartbeat_loop(
+        conn: Connection, relay: Arc<Relay>, mut shutdown: Receiver<()>,
+    ) {
+        let mut tick =
+            tokio::time::interval(Duration::from_secs(RESOLVER_RELAY_HEARTBEAT_INTERVAL));
+        // Skip the immediate first tick — we just sent `RelayHello`, the
+        // resolver doesn't need a heartbeat in the same instant.
+        tick.tick().await;
+
+        let start = std::time::Instant::now();
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {},
+                _ = shutdown.changed() => return,
+            }
+
+            if let Err(e) = Self::send_heartbeat(&conn, &relay, start).await {
+                warn!(
+                    "heartbeat to resolver({}) failed: {e}",
+                    conn.remote_address()
+                );
+                return;
+            }
+        }
+    }
+
+    async fn send_heartbeat(
+        conn: &Connection, relay: &Relay, start: std::time::Instant,
+    ) -> Result<()> {
+        let relay_id = relay.key.id();
+        let pubkey = relay.keys.public.to_bytes();
+        let timestamp = systime().as_millis();
+
+        let msg = relay_heartbeat_signing_input(&relay_id, &pubkey, timestamp);
+        let sig = relay.keys.signing.sign(&msg).to_bytes();
+
+        let load = system_load().await;
+        let uptime_seconds = start.elapsed().as_secs();
+
+        let mut send = conn.open_uni().await?;
+        ResolverPacket::Lifetime(LifetimeP::RelayHeartbeat {
+            relay_id,
+            pubkey: Bytes(pubkey),
+            timestamp,
+            sig: Bytes(sig),
+            load,
+            uptime_seconds,
+        })
+        .send(&mut send)
+        .await?;
+
+        send.finish()?;
+        debug!("heartbeat -> resolver({})", conn.remote_address());
         Ok(())
     }
 

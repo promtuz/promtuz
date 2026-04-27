@@ -104,7 +104,18 @@ async fn handle_lifetime(
 
             Ok(())
         },
-        RelayHeartbeat { .. } => Ok(()),
+        ref hb @ RelayHeartbeat { .. } => {
+            // Per-packet auth so liveness/load metrics can't be spoofed by
+            // any peer that happens to know the registered `relay_id`.
+            if let Err(close) = resolver.verify_heartbeat(&conn, hb) {
+                close.close(&conn);
+                return Err(PacketError::PolicyClose);
+            }
+            // Liveness/load consumption is not implemented yet — once it
+            // is, plug it in here. Verification still runs unconditionally
+            // so the auth path can't regress quietly.
+            Ok(())
+        },
         _ => {
             warn!("unexpected lifetime packet from relay({})", conn.remote_address());
             Err(PacketError::Other(anyhow!("unexpected lifetime packet")))

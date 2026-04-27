@@ -35,6 +35,13 @@ pub enum CloseReason {
     /// Resolver: registry is at capacity, no more relays can be admitted
     /// until existing ones disconnect.
     RegistryFull,
+    /// Peer ALPN-negotiated a protocol role (e.g. `resolver/1`) for which
+    /// this side has no implementation. Closing politely is preferable to
+    /// panicking the spawned per-connection task.
+    UnsupportedRole,
+    /// Source address has exceeded its accept-side rate-limit quota.
+    /// Returned at the acceptor before any per-connection state is created.
+    RateLimited,
 }
 
 impl CloseReason {

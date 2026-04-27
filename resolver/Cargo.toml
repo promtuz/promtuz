@@ -19,3 +19,6 @@ rand.workspace = true
 rustls-pemfile.workspace = true
 ed25519-dalek.workspace = true
 parking_lot = "0.12.5"
+# Per-source-IP accept-side rate limiter. Token bucket implementation with
+# automatic state expiry (we don't keep an entry per IP forever).
+governor = "0.7"

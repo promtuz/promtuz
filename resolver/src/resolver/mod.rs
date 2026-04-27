@@ -6,6 +6,7 @@ use common::graceful;
 use common::info;
 use common::proto::RelayId;
 use common::proto::relay_res::LifetimeP;
+use common::proto::relay_res::relay_heartbeat_signing_input;
 use common::proto::relay_res::relay_hello_signing_input;
 use common::quic::CloseReason;
 use common::quic::config::build_server_cfg;
@@ -50,7 +51,16 @@ const HELLO_MAX_SKEW_MS: u128 = 60_000;
 /// contains all necessary information instead of a global state
 #[derive(Debug)]
 pub struct Resolver {
+    /// Long-term identity / verification key. Currently unread but kept here
+    /// so the planned resolver-to-resolver gossip path (see
+    /// [`crate::quic::handler::resolver`]) can sign outbound packets without
+    /// re-reading the on-disk PKCS#8 file. Remove this `allow` once the
+    /// gossip layer actually consumes it.
+    #[allow(dead_code)]
     pub key: NodeKey,
+    /// Held for the same reason as [`Self::key`] — the gossip layer will
+    /// need access to peer-resolver seed addresses, TLS roots, etc.
+    #[allow(dead_code)]
     pub cfg: AppConfig,
     pub endpoint: Arc<Endpoint>,
     /// Live relay registry. Read-mostly: every client `GetRelays` RPC reads
@@ -142,39 +152,19 @@ impl Resolver {
         };
         let (relay_id, timestamp) = (*relay_id, *timestamp);
 
-        // 1. id <-> pubkey binding
-        let expected_id = NodeId::new(pubkey.as_ref());
-        if expected_id != relay_id {
-            warn!(
-                "relay({}) rejected: relay_id does not match pubkey",
-                conn.remote_address()
-            );
-            return Err(CloseReason::BadSignature);
-        }
-
-        // 2. signature verification
-        let vk = VerifyingKey::from_bytes(&pubkey.0).map_err(|_| {
-            warn!("relay({}) rejected: malformed Ed25519 pubkey", conn.remote_address());
-            CloseReason::BadSignature
-        })?;
-        let signature = Signature::from_bytes(&sig.0);
+        // 1-3. shared id-binding + signature + freshness check.
         let msg = relay_hello_signing_input(&relay_id, &pubkey.0, timestamp);
-        if vk.verify_strict(&msg, &signature).is_err() {
-            warn!("relay({}) rejected: invalid hello signature", conn.remote_address());
-            return Err(CloseReason::BadSignature);
-        }
+        verify_signed_packet(
+            conn.remote_address(),
+            "hello",
+            &relay_id,
+            &pubkey.0,
+            &sig.0,
+            &msg,
+            timestamp,
+        )?;
 
-        // 3. timestamp freshness (replay protection)
         let now = systime().as_millis();
-        let skew = now.abs_diff(timestamp);
-        if skew > HELLO_MAX_SKEW_MS {
-            warn!(
-                "relay({}) rejected: stale hello timestamp ({}ms skew)",
-                conn.remote_address(),
-                skew
-            );
-            return Err(CloseReason::StaleTimestamp);
-        }
 
         // 4-6. registry mutation under write lock
         let mut relays = self.relays.write();
@@ -243,6 +233,49 @@ impl Resolver {
         self.relays.read().values().cloned().collect()
     }
 
+    /// Authenticate an inbound [`LifetimeP::RelayHeartbeat`].
+    ///
+    /// Mirrors `register_relay`'s id-binding + signature + freshness checks.
+    /// Heartbeats need their own signature (not just connection-bound trust)
+    /// so future liveness/load-aware routing logic can't be poisoned by a
+    /// peer that knew a registered relay's `relay_id`.
+    ///
+    /// Additionally requires that the `relay_id` is currently registered:
+    /// a heartbeat for an unknown relay is meaningless and is rejected.
+    pub fn verify_heartbeat(
+        &self, conn: &Connection, packet: &LifetimeP,
+    ) -> Result<(), CloseReason> {
+        let LifetimeP::RelayHeartbeat { relay_id, pubkey, timestamp, sig, .. } = packet else {
+            return Err(CloseReason::PacketMismatch);
+        };
+        let (relay_id, timestamp) = (*relay_id, *timestamp);
+
+        let msg = relay_heartbeat_signing_input(&relay_id, &pubkey.0, timestamp);
+        verify_signed_packet(
+            conn.remote_address(),
+            "heartbeat",
+            &relay_id,
+            &pubkey.0,
+            &sig.0,
+            &msg,
+            timestamp,
+        )?;
+
+        // The signature is valid for *some* relay; require that it's the
+        // one currently using this connection. Holding the read lock only
+        // for the lookup keeps this lock-cheap.
+        if !self.relays.read().contains_key(&relay_id) {
+            warn!(
+                "relay({}) heartbeat rejected: relay_id {} not registered",
+                conn.remote_address(),
+                relay_id
+            );
+            return Err(CloseReason::PacketMismatch);
+        }
+
+        Ok(())
+    }
+
     /// Closes resolver — best-effort kicks every registered relay so they
     /// stop trying to send into a soon-to-be-dead endpoint.
     pub fn close(&self) {
@@ -250,4 +283,51 @@ impl Resolver {
             r.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
         }
     }
+}
+
+/// Shared id-binding + Ed25519 signature + timestamp-skew check used by
+/// every authenticated [`LifetimeP`] packet that carries `(relay_id,
+/// pubkey, timestamp, sig)`. Centralising the three checks in one place
+/// keeps the policy uniform across packet kinds and makes future audits
+/// trivial — the verification logic exists exactly once.
+///
+/// `kind` is a short tag inserted into rejection log lines (e.g. `"hello"`,
+/// `"heartbeat"`) so operators can tell at a glance which packet was
+/// rejected without parsing the rest of the line.
+///
+/// `signing_input` is the per-packet-kind transcript built by the matching
+/// `relay_*_signing_input` helper; passing it in (instead of reconstructing
+/// inside) keeps domain separation a caller-side concern and avoids this
+/// helper having to know about every packet kind.
+fn verify_signed_packet(
+    addr: std::net::SocketAddr, kind: &str, relay_id: &RelayId, pubkey: &[u8; 32],
+    sig: &[u8; 64], signing_input: &[u8], timestamp: u128,
+) -> Result<(), CloseReason> {
+    // 1. id <-> pubkey binding
+    let expected_id = NodeId::new(pubkey);
+    if &expected_id != relay_id {
+        warn!("relay({addr}) rejected: {kind} relay_id does not match pubkey");
+        return Err(CloseReason::BadSignature);
+    }
+
+    // 2. signature verification
+    let vk = VerifyingKey::from_bytes(pubkey).map_err(|_| {
+        warn!("relay({addr}) rejected: {kind} malformed Ed25519 pubkey");
+        CloseReason::BadSignature
+    })?;
+    let signature = Signature::from_bytes(sig);
+    if vk.verify_strict(signing_input, &signature).is_err() {
+        warn!("relay({addr}) rejected: invalid {kind} signature");
+        return Err(CloseReason::BadSignature);
+    }
+
+    // 3. timestamp freshness (replay protection)
+    let now = systime().as_millis();
+    let skew = now.abs_diff(timestamp);
+    if skew > HELLO_MAX_SKEW_MS {
+        warn!("relay({addr}) rejected: stale {kind} timestamp ({skew}ms skew)");
+        return Err(CloseReason::StaleTimestamp);
+    }
+
+    Ok(())
 }
