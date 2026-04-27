@@ -13,6 +13,7 @@ crypto = [
   "dep:x25519-dalek",
   "dep:ed25519-dalek",
   "dep:sha2",
+  "dep:zeroize",
 ]
 proto = ["quic", "sysutils", "types"]
 quic = [
@@ -33,7 +34,7 @@ certgen = ["quic", "crypto", "dep:rcgen"]
 node = []
 types = []
 # aka relay & resolver
-server = ["types"]
+server = ["types", "dep:rand"]
 # aka libcore
 client = ["types"]
 
@@ -53,15 +54,17 @@ serde_bytes.workspace = true
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 x25519-dalek = { workspace = true, optional = true }
-ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"], optional = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "zeroize"], optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "time"], optional = true }
+rand = { workspace = true, optional = true }
 
 blake3 = { version = "1.8.2", optional = true }
 data-encoding = { version = "2.9.0", optional = true }
 chacha20poly1305 = { version = "0.10.1", features = ["std"], optional = true }
 hkdf = { version = "0.12.4", optional = true }
 sha2 = { version = "0.10.9", optional = true }
+zeroize = { workspace = true, optional = true }
 p256 = { version = "0.13.2", optional = true, features = ["pkcs8"] }
 rcgen = { version = "0.14.7", features = ["x509-parser"], optional = true }
 ciborium = "0.2.2"

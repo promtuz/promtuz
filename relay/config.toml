@@ -1,7 +1,11 @@
 [network]
 address = "0.0.0.0:4432"
 cert_path = "cert/relay.crt"
+# TLS server key (used by rustls during the handshake)
 key_path = "cert/relay.key"
+# Long-term Ed25519 identity key (used to sign RelayHello, derives relay_id).
+# Auto-generated with 0o600 perms on first boot if missing.
+identity_key_path = "cert/relay.identity.key"
 root_ca_path = "cert/root_ca.pem"
 
 [[resolver.seed]]

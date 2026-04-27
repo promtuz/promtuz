@@ -24,7 +24,24 @@ pub struct NetworkConfig {
     /// Not to be confused with public address
     pub address: SocketAddr,
     pub cert_path: PathBuf,
+
+    /// PKCS#8 PEM private key used as the **TLS server key**. This is the
+    /// material rustls hands to its TLS handshake signer; a key compromise
+    /// here is bounded to the lifetime of the issued cert.
     pub key_path: PathBuf,
+
+    /// PKCS#8 PEM Ed25519 private key used as this relay's **long-term
+    /// identity key**, separate from the TLS server key. Anything signed
+    /// "as this relay" (e.g. `RelayHello` to the resolver) uses this key.
+    ///
+    /// Kept separate from `key_path` so a TLS-layer compromise (memory
+    /// disclosure in rustls/aws-lc-rs, a leaked cert key, …) does not
+    /// silently turn into a permanent identity compromise.
+    ///
+    /// The file is auto-generated with `0o600` perms on first boot if it
+    /// does not exist; treat it like an SSH host key thereafter.
+    pub identity_key_path: PathBuf,
+
     pub root_ca_path: PathBuf,
 }
 

@@ -20,7 +20,7 @@ quinn.workspace = true
 tokio.workspace = true
 rustls.workspace = true
 serde.workspace = true
-ed25519-dalek.workspace = true
+ed25519-dalek = { workspace = true, features = ["zeroize"] }
 rand.workspace = true
 hex.workspace = true
 log.workspace = true

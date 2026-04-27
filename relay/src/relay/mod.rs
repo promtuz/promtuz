@@ -9,7 +9,7 @@ use common::quic::config::build_server_cfg;
 use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeKey;
-use common::quic::p256::secret_from_key;
+use common::quic::p256::secret_from_key_or_create;
 use common::quic::protorole::ProtoRole;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
@@ -22,7 +22,16 @@ use rust_rocksdb::DB as RocksDB;
 use crate::util::config::AppConfig;
 use crate::util::rocksdb::rocksdb;
 
-/// contains p256 private & public key
+/// Long-term Ed25519 *identity* keypair for this relay.
+///
+/// This is **not** the TLS server key. The TLS key (loaded directly by
+/// `build_server_cfg` from `cfg.network.key_path`) lives only inside
+/// rustls/aws-lc-rs and never touches the application layer. The identity
+/// key here is what signs application-layer messages on this relay's
+/// behalf — currently `RelayHello` to the resolver — and is what derives
+/// the public-facing `relay_id`. Splitting the two trust roots means a
+/// TLS-layer key disclosure does not turn into a permanent identity
+/// compromise.
 #[derive(Debug)]
 pub struct RelayKeys {
     pub signing: SigningKey,
@@ -31,7 +40,9 @@ pub struct RelayKeys {
 
 impl RelayKeys {
     fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
-        let secret = secret_from_key(&cfg.network.key_path)?;
+        // Loaded from `identity_key_path`, distinct from `key_path` (which
+        // is the TLS server key). The file is auto-created on first run.
+        let secret = secret_from_key_or_create(&cfg.network.identity_key_path)?;
         let public = secret.verifying_key();
 
         Ok(Self { signing: secret, public })

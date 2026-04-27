@@ -21,8 +21,12 @@ use crate::RUNTIME;
 use crate::api::PEER_IDENTITY;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
+use crate::data::identity::IdentitySigner;
 use crate::data::idqr::IdentityQr;
 use crate::quic::peer_config::build_peer_client_cfg;
+use crate::quic::peer_config::extract_peer_tls_pubkey;
+use crate::quic::peer_config::ipk_binding_message;
+use crate::quic::peer_config::verify_ipk_binding;
 use crate::try_ret;
 
 #[jni(base = "com.promtuz.core", class = "API")]
@@ -80,9 +84,19 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                 {
                     use IdentityP::*;
 
+                    // Build the IPK<->TLS-subkey binding for our outgoing
+                    // AddMe so the sharer can verify our long-term IPK
+                    // matches the cert SPKI it just handshaked against.
+                    let our_tls_subkey = IdentitySigner::tls_subkey()?;
+                    let binding_msg =
+                        ipk_binding_message(&our_tls_subkey.verifying_key().to_bytes());
+                    let (our_ipk_sig, our_ipk) = IdentitySigner::sign_with_ipk(&binding_msg)?;
+
                     ClientPeerPacket::Identity(AddMe {
                         epk: our_epk.to_bytes(),
                         name: our_name.clone(),
+                        ipk: our_ipk,
+                        ipk_sig: our_ipk_sig.to_bytes(),
                     })
                     .send(&mut send)
                     .await?;
@@ -91,7 +105,31 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
 
                     while let Ok(Identity(packet)) = ClientPeerPacket::unpack(&mut recv).await {
                         match packet {
-                            AddedYou { epk } => {
+                            AddedYou { epk, ipk: claimed_ipk, ipk_sig } => {
+                                // Verify the sharer's IPK signs the TLS sub-key
+                                // we just handshaked against. The QR-advertised
+                                // IPK is the source of truth for *which* peer
+                                // we expect; if either the binding fails or the
+                                // claimed IPK doesn't match the QR, abort and
+                                // do not save.
+                                let peer_tls_pubkey = extract_peer_tls_pubkey(&conn).ok_or_else(
+                                    || anyhow!("failed to extract peer TLS pubkey from cert"),
+                                )?;
+                                if claimed_ipk != peer_identity_qr.ipk {
+                                    error!(
+                                        "ERROR: sharer's claimed IPK does not match scanned QR"
+                                    );
+                                    break;
+                                }
+                                if let Err(e) = verify_ipk_binding(
+                                    &claimed_ipk,
+                                    &peer_tls_pubkey,
+                                    &ipk_sig,
+                                ) {
+                                    error!("ERROR: peer IPK<->TLS binding rejected: {e}");
+                                    break;
+                                }
+
                                 info!(
                                     "INFO: *{}* has accepted the request with EPK({})",
                                     &peer_identity_qr.name,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use common::crypto::PublicKey;
 use common::crypto::SecretKey;
+use common::crypto::sign::derive_p2p_tls_key;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
@@ -59,18 +60,14 @@ impl Identity {
         })
     }
 
-    pub fn secret_key() -> Result<Zeroizing<SecretKey>> {
-        Self::secret_key_with_manager()
-    }
-
-    /// Get secret key bytes without requiring a JNIEnv parameter.
-    /// Attaches to JVM internally. Safe to call from async contexts.
-    pub fn secret_key_bytes() -> [u8; 32] {
-        let sk = Self::secret_key_with_manager().unwrap();
-        *sk
-    }
-
-    fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
+    /// Decrypts and returns the identity secret key wrapped in `Zeroizing`.
+    ///
+    /// Visibility is intentionally `pub(super)` (module-private to `data`):
+    /// callers outside the data layer must go through [`IdentitySigner`] so
+    /// raw key material never leaves this module. Returning the bare
+    /// `[u8; 32]` (the previous `secret_key_bytes`) defeated the
+    /// `Zeroizing` wrapper and let the secret persist on caller stacks.
+    pub(super) fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
         let key_manager = KEY_MANAGER.get().ok_or(anyhow!("API is not initialized"))?;
         let conn = IDENTITY_DB.lock();
 
@@ -95,5 +92,41 @@ impl IdentitySigner {
         let secret = Identity::secret_key_with_manager()?;
         let key = SigningKey::from_bytes(&secret);
         Ok(key.sign(message))
+    }
+
+    /// Derive the per-identity Ed25519 sub-key dedicated to TLS-layer signing
+    /// in peer-to-peer QUIC handshakes.
+    ///
+    /// The derivation is HKDF-SHA256 over the long-term identity secret with
+    /// the IPK as salt — deterministic, so callers may safely re-derive the
+    /// same key (the cert SPKI binds the connection to it). See
+    /// [`common::crypto::sign::derive_p2p_tls_key`] for the rationale; in
+    /// short, we never want one Ed25519 key to be the signer for both the
+    /// rustls TLS 1.3 transcript *and* application-layer messages
+    /// (`DispatchP`, IPK<->TLS sub-key bindings, …).
+    ///
+    /// `SigningKey` self-zeroizes on drop (the workspace enables the
+    /// `zeroize` feature on `ed25519-dalek`); callers should still hold it
+    /// behind an `Arc` for the lifetime of a `rustls::sign::SigningKey`
+    /// (one per peer connection) rather than re-deriving per signature.
+    pub fn tls_subkey() -> Result<SigningKey> {
+        let secret = Identity::secret_key_with_manager()?;
+        let public = SigningKey::from_bytes(&secret).verifying_key();
+        Ok(derive_p2p_tls_key(&secret, public.as_bytes()))
+    }
+
+    /// Sign a message with the long-term identity key, returning both the
+    /// signature and the long-term IPK pubkey.
+    ///
+    /// Used by the peer-to-peer identity-exchange flow to bind the TLS
+    /// sub-key (carried as the cert SPKI) back to the user's true IPK: the
+    /// scanner/sharer signs the peer's TLS sub-key pubkey with their IPK,
+    /// the receiver verifies, and only then is the contact saved against
+    /// the IPK rather than the TLS sub-key.
+    pub fn sign_with_ipk(message: &[u8]) -> Result<(Signature, [u8; 32])> {
+        let secret = Identity::secret_key_with_manager()?;
+        let key = SigningKey::from_bytes(&secret);
+        let pub_bytes = key.verifying_key().to_bytes();
+        Ok((key.sign(message), pub_bytes))
     }
 }

@@ -22,6 +22,7 @@ use crate::JC;
 use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
+use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
 use crate::events::Emittable;
 use crate::events::messaging::MessageEv;
@@ -89,12 +90,11 @@ async fn send_message_inner(to: [u8; 32], content: String) -> anyhow::Result<()>
     let id: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
 
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
-    let sig = {
-        let isk = Identity::secret_key_bytes();
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&isk);
-        use ed25519_dalek::Signer;
-        signing_key.sign(&sig_message).to_bytes()
-    };
+    // Route through `IdentitySigner::sign` so the secret key never escapes
+    // the data layer as a plain `[u8; 32]`. `IdentitySigner` decrypts inside
+    // `Zeroizing<SecretKey>`, signs, and drops — no bare key bytes survive
+    // on this stack frame across multiple dispatch sends.
+    let sig = IdentitySigner::sign(&sig_message)?.to_bytes();
 
     let fwd = DispatchP {
         to:      Bytes(to),

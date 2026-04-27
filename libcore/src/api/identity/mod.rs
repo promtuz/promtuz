@@ -33,7 +33,15 @@ use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
 use crate::events::identity::IdentityEv;
-use crate::quic::peer_config::extract_peer_public_key;
+// Identity-key separation (Group A): the cert SPKI is now the peer's TLS
+// sub-key, not their long-term IPK. The IPK is carried in `IdentityP` and
+// bound to the TLS sub-key by `verify_ipk_binding`. Group D should keep the
+// `ipk` field in `PendingIdentity` populated from the *verified* IPK rather
+// than the cert SPKI.
+use crate::data::identity::IdentitySigner;
+use crate::quic::peer_config::extract_peer_tls_pubkey;
+use crate::quic::peer_config::ipk_binding_message;
+use crate::quic::peer_config::verify_ipk_binding;
 use crate::quic::server::RELAY;
 
 static CONN_CANCEL: Lazy<Mutex<Option<CancellationToken>>> = Lazy::new(|| Mutex::new(None));
@@ -43,7 +51,11 @@ static PENDING_IDENTITY: Lazy<Mutex<Option<PendingIdentity>>> = Lazy::new(|| Mut
 
 struct PendingIdentity {
     respond: oneshot::Sender<bool>,
+    // Kept for potential diagnostic logging on the accept/reject path; not
+    // currently read because the responder only needs `respond` and `name`.
+    #[allow(dead_code)]
     ipk: [u8; 32],
+    #[allow(dead_code)]
     epk: [u8; 32],
     name: String,
 }
@@ -141,30 +153,53 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
         ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))?;
 
     match ipack {
-        AddMe { epk, name } => {
-            let ipk = extract_peer_public_key(&conn)
-                .ok_or_else(|| anyhow!("failed to extract peer identity from TLS certificate"))?;
+        AddMe { epk, name, ipk, ipk_sig } => {
+            // The cert SPKI is the peer's TLS sub-key, not their IPK. We
+            // accept the IPK from the application packet only after
+            // verifying the IPK has signed the TLS sub-key it just used to
+            // complete the handshake — that proves the peer presenting the
+            // cert really controls the long-term IPK.
+            let tls_pubkey = extract_peer_tls_pubkey(&conn)
+                .ok_or_else(|| anyhow!("failed to extract peer TLS pubkey from certificate"))?;
+            verify_ipk_binding(&ipk, &tls_pubkey, &ipk_sig)
+                .map_err(|e| anyhow!("peer IPK<->TLS binding rejected: {e}"))?;
 
             info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk));
 
-            // Check if there's already a pending identity
-            let already_pending = PENDING_IDENTITY.lock().is_some();
+            // Atomically check-and-set the pending slot. Doing this in two
+            // separate `lock()` calls (check, then set) is a TOCTOU race: two
+            // inbound peers can both observe `is_some() == false`, both create
+            // their own oneshot, and the second `Some(..)` would silently drop
+            // the first peer's `respond` Sender — making its `decision_rx`
+            // resolve to `Err(Cancelled)` instead of "busy". That confuses the
+            // first peer (its task sends "cancelled" rather than holding the
+            // happy path), and it's purely an artifact of releasing the lock
+            // between the two operations. Combining them under a single
+            // critical section makes "first one wins, others see busy"
+            // unambiguous.
+            let (decision_tx, decision_rx) = oneshot::channel();
+            let already_pending = {
+                let mut pending = PENDING_IDENTITY.lock();
+                if pending.is_some() {
+                    true
+                } else {
+                    *pending = Some(PendingIdentity {
+                        respond: decision_tx,
+                        ipk,
+                        epk,
+                        name: name.clone(),
+                    });
+                    false
+                }
+            };
+
             if already_pending {
-                // Already have a pending request, reject this one
+                // First-arrival lost: tell this peer we're busy and tear down.
+                // `decision_tx` was never installed, so it drops here, which
+                // is fine — no awaiter is watching it.
                 warn!("IDENTITY: already have pending request, rejecting {name}");
                 ClientPeerPacket::Identity(No { reason: "busy".to_string() }).send(&mut tx).await?;
                 return Ok(());
-            }
-
-            // Create oneshot channel for the decision
-            let (decision_tx, decision_rx) = oneshot::channel();
-
-            // Store pending identity (conn stays alive as a local variable
-            // to keep the QUIC connection open until AddedYou is sent)
-            {
-                let mut pending = PENDING_IDENTITY.lock();
-                *pending =
-                    Some(PendingIdentity { respond: decision_tx, ipk, epk, name: name.clone() });
             }
 
             // Emit event to Android (this will hide the QR and show the request card)
@@ -179,9 +214,25 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                     info!("IDENTITY: {name} accepted");
                     let (our_esk, our_epk) = get_static_keypair();
 
-                    ClientPeerPacket::Identity(AddedYou { epk: our_epk.to_bytes() })
-                        .send(&mut tx)
-                        .await?;
+                    // Build the IPK<->TLS-subkey binding for our own response.
+                    // We sign with our long-term IPK over the canonical
+                    // transcript that names *our* TLS sub-key pubkey, derived
+                    // identically on both sides via HKDF. The receiver verifies
+                    // against the TLS sub-key it observed in our cert.
+                    let our_tls_subkey = IdentitySigner::tls_subkey()
+                        .map_err(|e| anyhow!("failed to derive our TLS sub-key: {e}"))?;
+                    let binding_msg =
+                        ipk_binding_message(&our_tls_subkey.verifying_key().to_bytes());
+                    let (our_ipk_sig, our_ipk) = IdentitySigner::sign_with_ipk(&binding_msg)
+                        .map_err(|e| anyhow!("failed to sign IPK binding: {e}"))?;
+
+                    ClientPeerPacket::Identity(AddedYou {
+                        epk: our_epk.to_bytes(),
+                        ipk: our_ipk,
+                        ipk_sig: our_ipk_sig.to_bytes(),
+                    })
+                    .send(&mut tx)
+                    .await?;
 
                     // Wait for scanner to confirm they saved the contact
                     match timeout(Duration::from_secs(15), ClientPeerPacket::unpack(&mut recv)).await {

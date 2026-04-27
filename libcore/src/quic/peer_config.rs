@@ -4,6 +4,8 @@ use std::time::Duration;
 use anyhow::Result;
 use common::quic::protorole::ProtoRole;
 use ed25519_dalek::Signature as Ed25519Signature;
+use ed25519_dalek::Signer as _;
+use ed25519_dalek::SigningKey;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
 use quinn::ClientConfig;
@@ -51,10 +53,16 @@ const ED25519_OID: x509_parser::der_parser::Oid<'static> = oid!(1.3.101 .112);
 //   * (in `verify_tls13_signature`) the TLS handshake transcript signature
 //     is a valid Ed25519 signature under the SPKI from the cert
 //
-// On top of that, the application performs `verify_peer_self_signature` on
-// the peer cert post-handshake (see `extract_peer_public_key`). That step
-// rejects certs whose embedded SPKI does not match the key that signed the
-// cert itself, closing the substring-search spoof of the old extractor.
+// On top of that, the application performs `verify_self_signature` on the
+// peer cert post-handshake (see `extract_peer_tls_pubkey`). That step rejects
+// certs whose embedded SPKI does not match the key that signed the cert
+// itself, closing the substring-search spoof of the old extractor.
+//
+// IMPORTANT: the SPKI in a peer's cert is the peer's **TLS sub-key**, not
+// their long-term IPK. The IPK is bound to the connection out-of-band by
+// the application-level identity exchange (a signature by the IPK over the
+// TLS sub-key pubkey, verified before the contact is saved). See the
+// `IdentityP::AddMe` flow in `crate::api::identity`.
 // ===========================================================================
 
 /// Verifier for the P2P server side: validates the client's cert is a
@@ -73,7 +81,7 @@ impl ClientCertVerifier for PeerClientCertVerifier {
     ) -> Result<ClientCertVerified, rustls::Error> {
         // Reject anything that isn't a parsable Ed25519 X.509 cert at handshake
         // time. Identity (matching the expected peer) is checked post-handshake
-        // by `extract_peer_public_key`.
+        // by `extract_peer_tls_pubkey` + the application-layer IPK binding.
         ed25519_pubkey_from_cert_der(end_entity.as_ref())
             .ok_or_else(|| rustls::Error::General("peer cert is not a valid Ed25519 X.509".into()))?;
         Ok(ClientCertVerified::assertion())
@@ -159,17 +167,49 @@ fn verify_tls13_ed25519(
     Ok(HandshakeSignatureValid::assertion())
 }
 
-/// Custom rustls SigningKey that wraps IdentitySigner for on-demand signing.
-/// The secret key is only decrypted during the actual sign operation.
+// ===========================================================================
+// TLS sub-key separation
+//
+// rustls hands its TLS 1.3 transcript to the configured Signer; whatever key
+// signs the application-layer `DispatchP` transcript MUST NOT also sign that
+// rustls transcript. Even though the two prefixes differ today, deterministic
+// Ed25519 means a single shared key turns any future cross-protocol
+// confusion into a permanent identity compromise. We therefore derive a
+// stable, per-identity TLS sub-key (HKDF-SHA256, info `promtuz-p2p-tls-v1`,
+// salt = IPK pub bytes; see `common::crypto::sign::derive_p2p_tls_key`),
+// embed *its* pubkey in the cert SPKI, and sign the cert plus all TLS-layer
+// signatures with it. The long-term IPK never reaches rustls.
+//
+// The IPK<->TLS-subkey binding for the application's "who is this peer?"
+// question is carried at the application layer (option (b) in the design
+// notes): the identity-exchange handshake includes the IPK + an Ed25519
+// signature by the IPK over the TLS sub-key pubkey. Receivers verify and
+// only then save the contact under the IPK. See
+// [`crate::api::identity`] for that flow.
+// ===========================================================================
+
+/// Custom rustls SigningKey backed by a cached TLS sub-key.
+///
+/// We cache the derived sub-key on the struct so we don't have to hit the
+/// JNI/key-manager path (which decrypts the long-term IPK) on every TLS
+/// handshake signature. The sub-key public component is what ends up in the
+/// cert SPKI handed to the peer; the long-term IPK never enters rustls.
 #[derive(Debug)]
 struct IdentitySigningKey {
+    /// Public component of the derived TLS sub-key — this is what the peer
+    /// sees in the cert SPKI and in `verify_tls13_signature`.
     public_key: VerifyingKey,
+    /// Shared cache of the derived sub-key. `Arc` so cloning into the
+    /// per-handshake `IdentityTlsSigner` is cheap; `SigningKey` self-wipes
+    /// on drop (via the workspace's `ed25519-dalek` `zeroize` feature) so
+    /// the secret bytes are wiped when the last reference drops.
+    subkey:     Arc<SigningKey>,
 }
 
 impl rustls::sign::SigningKey for IdentitySigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
         if offered.contains(&SignatureScheme::ED25519) {
-            Some(Box::new(IdentityTlsSigner))
+            Some(Box::new(IdentityTlsSigner { subkey: Arc::clone(&self.subkey) }))
         } else {
             None
         }
@@ -186,15 +226,19 @@ impl rustls::sign::SigningKey for IdentitySigningKey {
     }
 }
 
-/// Custom rustls Signer that performs on-demand signing via IdentitySigner.
+/// Per-handshake rustls Signer that signs with the derived TLS sub-key.
+///
+/// rustls constructs a fresh `Signer` per handshake via `choose_scheme`; we
+/// hand it a cheap clone of the cached sub-key `Arc` so signing stays
+/// allocation-free on the hot path.
 #[derive(Debug)]
-struct IdentityTlsSigner;
+struct IdentityTlsSigner {
+    subkey: Arc<SigningKey>,
+}
 
 impl rustls::sign::Signer for IdentityTlsSigner {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        IdentitySigner::sign(message)
-            .map(|sig| sig.to_bytes().to_vec())
-            .map_err(|e| rustls::Error::General(e.to_string()))
+        Ok(self.subkey.sign(message).to_bytes().to_vec())
     }
 
     fn scheme(&self) -> SignatureScheme {
@@ -202,21 +246,33 @@ impl rustls::sign::Signer for IdentityTlsSigner {
     }
 }
 
-/// Generates an X.509 certificate using the peer's identity key.
-/// The cert embeds the identity public key for authenticity.
-fn generate_identity_cert(identity: &PeerIdentity) -> Result<CertifiedKey> {
-    let public_key = identity.public_key;
+/// Generate an X.509 self-signed cert for this identity's TLS sub-key.
+///
+/// The SPKI embedded in the cert is the **TLS sub-key's** public bytes (NOT
+/// the long-term IPK). The cert's signature is also produced by the TLS
+/// sub-key, so `extract_ed25519_pubkey_from_cert`'s self-signature check
+/// passes against the embedded SPKI without ever touching the IPK.
+///
+/// `_identity` is currently unused — the SPKI/sub-key is derived from the
+/// IPK by `IdentitySigner::tls_subkey()` rather than passed in. The
+/// argument is kept for call-site symmetry and so future versions can carry
+/// per-identity options through it.
+fn generate_identity_cert(_identity: &PeerIdentity) -> Result<CertifiedKey> {
+    let subkey = IdentitySigner::tls_subkey()?;
+    let subkey_arc = Arc::new(subkey);
+    let public_key = subkey_arc.verifying_key();
 
-    // Sign the TBS certificate using identity signer
+    // Self-sign the TBS with the TLS sub-key so cert SPKI ↔ cert sig key
+    // match. Anything else would break the post-handshake self-signature
+    // check in `extract_ed25519_pubkey_from_cert`.
     let tbs = build_tbs_certificate(public_key.as_bytes());
-    let signature = IdentitySigner::sign(&tbs)?;
+    let signature = subkey_arc.sign(&tbs);
 
     let cert_der = build_certificate_der(&tbs, &signature.to_bytes());
     let certs = vec![CertificateDer::from(cert_der)];
 
-    // Create custom signing key that signs on-demand
     let signing_key: Arc<dyn rustls::sign::SigningKey> =
-        Arc::new(IdentitySigningKey { public_key });
+        Arc::new(IdentitySigningKey { public_key, subkey: subkey_arc });
 
     Ok(CertifiedKey::new(certs, signing_key))
 }
@@ -345,7 +401,13 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
     Ok(client)
 }
 
-/// Extracts the Ed25519 identity public key from a peer's certificate.
+/// Extracts the peer's **TLS sub-key** Ed25519 public key from their cert.
+///
+/// Note: this is the *TLS-layer* identity, not the user's long-term IPK.
+/// The IPK is bound to the connection at the application layer via the
+/// identity-exchange protocol (see `IdentityP::AddMe` and
+/// `verify_ipk_binding`). Storing this key as a contact identifier would
+/// be a bug — always pair it with the verified IPK from the app layer.
 ///
 /// Performs three checks:
 ///   1. The cert is a parsable X.509 cert.
@@ -355,13 +417,45 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
 ///      could substitute a cert whose embedded SPKI is some target's key while
 ///      the cert is actually signed by the attacker's key. Even with the
 ///      stricter handshake verifier in this file we keep this check as
-///      defense-in-depth and to anchor the peer's identity on the SPKI alone.
-pub fn extract_peer_public_key(conn: &quinn::Connection) -> Option<[u8; 32]> {
+///      defense-in-depth and to anchor the peer's TLS-layer identity on the
+///      SPKI alone.
+pub fn extract_peer_tls_pubkey(conn: &quinn::Connection) -> Option<[u8; 32]> {
     let peer_identity = conn.peer_identity()?;
     let certs = peer_identity.downcast_ref::<Vec<CertificateDer<'static>>>()?;
     let cert_der = certs.first()?;
 
     extract_ed25519_pubkey_from_cert(cert_der.as_ref())
+}
+
+/// Verify that `ipk` claims authorship of `tls_pubkey` by signing the
+/// canonical binding transcript. This is the application-layer half of the
+/// identity-key separation: cert SPKI carries the TLS sub-key, this proof
+/// carries the long-term IPK.
+///
+/// Used by both ends of `IdentityP::AddMe` after TLS comes up to decide
+/// what IPK to store the contact under.
+pub fn verify_ipk_binding(
+    ipk: &[u8; 32], tls_pubkey: &[u8; 32], sig: &[u8; 64],
+) -> Result<(), rustls::Error> {
+    let vk = VerifyingKey::from_bytes(ipk)
+        .map_err(|e| rustls::Error::General(format!("invalid IPK bytes: {e}")))?;
+    let signature = Ed25519Signature::from_bytes(sig);
+    let msg = ipk_binding_message(tls_pubkey);
+    vk.verify_strict(&msg, &signature)
+        .map_err(|e| rustls::Error::General(format!("IPK binding signature failed: {e}")))
+}
+
+/// Canonical transcript for "this IPK authorizes that TLS sub-key".
+///
+/// Bumping the prefix rotates the binding format; keep stable across
+/// releases for backwards compatibility with already-saved contacts.
+pub fn ipk_binding_message(tls_pubkey: &[u8; 32]) -> [u8; 64] {
+    const PREFIX: &[u8; 32] = b"promtuz-ipk-tls-binding-v1......";
+    debug_assert_eq!(PREFIX.len(), 32);
+    let mut out = [0u8; 64];
+    out[..32].copy_from_slice(PREFIX);
+    out[32..].copy_from_slice(tls_pubkey);
+    out
 }
 
 /// Parse + verify the peer cert's Ed25519 SPKI.
@@ -437,8 +531,6 @@ fn verify_self_signature(cert: &X509Certificate<'_>, pubkey_bytes: &[u8; 32]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Signer as _;
-    use ed25519_dalek::SigningKey;
 
     /// Build a minimal Ed25519 self-signed cert using the same hand-rolled DER
     /// builder as production, but signed with an explicit caller-supplied key
@@ -496,5 +588,71 @@ mod tests {
         assert!(extract_ed25519_pubkey_from_cert(&[]).is_none());
         assert!(extract_ed25519_pubkey_from_cert(&[0u8; 32]).is_none());
         assert!(extract_ed25519_pubkey_from_cert(&[0x30, 0x82, 0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn derive_p2p_tls_key_is_deterministic_and_distinct_from_identity() {
+        use common::crypto::sign::derive_p2p_tls_key;
+        let seed = [7u8; 32];
+        let ipk = SigningKey::from_bytes(&seed);
+        let ipk_pub = ipk.verifying_key().to_bytes();
+
+        let sub_a = derive_p2p_tls_key(&seed, &ipk_pub);
+        let sub_b = derive_p2p_tls_key(&seed, &ipk_pub);
+        assert_eq!(sub_a.to_bytes(), sub_b.to_bytes(), "derivation must be deterministic");
+
+        // The whole point: the TLS sub-key must NOT equal the long-term IPK.
+        assert_ne!(
+            sub_a.to_bytes(),
+            seed,
+            "TLS sub-key seed must differ from identity seed"
+        );
+        assert_ne!(
+            sub_a.verifying_key().to_bytes(),
+            ipk_pub,
+            "TLS sub-key pubkey must differ from IPK pubkey"
+        );
+    }
+
+    #[test]
+    fn ipk_binding_roundtrips() {
+        // Simulates what `IdentitySigner::sign_with_ipk` + `verify_ipk_binding`
+        // do at the application layer to bind a TLS sub-key to an IPK.
+        let ipk = SigningKey::from_bytes(&[3u8; 32]);
+        let ipk_pub = ipk.verifying_key().to_bytes();
+        let tls_pub = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
+
+        let msg = ipk_binding_message(&tls_pub);
+        let sig = ipk.sign(&msg).to_bytes();
+
+        verify_ipk_binding(&ipk_pub, &tls_pub, &sig).expect("binding must verify");
+
+        // Tampered TLS pubkey: must fail.
+        let mut other_tls = tls_pub;
+        other_tls[0] ^= 0x01;
+        assert!(verify_ipk_binding(&ipk_pub, &other_tls, &sig).is_err());
+
+        // Wrong claimed IPK: must fail.
+        let other_ipk = SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes();
+        assert!(verify_ipk_binding(&other_ipk, &tls_pub, &sig).is_err());
+    }
+
+    #[test]
+    fn cert_built_with_subkey_self_verifies() {
+        // The production cert is signed with the TLS sub-key and embeds the
+        // sub-key's pubkey in the SPKI. The post-handshake extractor MUST
+        // accept that pairing — this test guards against accidentally
+        // re-introducing IPK-as-SPKI signing.
+        use common::crypto::sign::derive_p2p_tls_key;
+        let ipk_seed = [42u8; 32];
+        let ipk_pub = SigningKey::from_bytes(&ipk_seed).verifying_key().to_bytes();
+        let subkey = derive_p2p_tls_key(&ipk_seed, &ipk_pub);
+
+        let cert_der = build_self_signed(&subkey);
+
+        let parsed = extract_ed25519_pubkey_from_cert(&cert_der)
+            .expect("subkey-signed cert must verify against subkey SPKI");
+        assert_eq!(parsed, subkey.verifying_key().to_bytes());
+        assert_ne!(parsed, ipk_pub, "cert SPKI must be the sub-key, not the IPK");
     }
 }
