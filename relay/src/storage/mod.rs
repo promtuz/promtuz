@@ -3,6 +3,18 @@ use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 
+/// Per-recipient queue cap. Past this, new dispatches for the recipient are
+/// rejected with `DispatchAckP::QueueFull` and the sender is expected to back
+/// off rather than continuing to push.
+///
+/// Why a cap at all: a single sender can otherwise queue millions of messages
+/// for an offline recipient, exhausting disk and ballooning per-recipient
+/// drain time. 1024 is a rough ceiling on a per-user backlog before a drain
+/// starts becoming expensive — at ~4 KiB per `DeliverP` that's ~4 MiB worst
+/// case per offline user. Operators can revisit this once we have better
+/// telemetry on real backlogs.
+pub const MAX_QUEUED_PER_RECIPIENT: usize = 1024;
+
 /// On-disk RocksDB key for a queued message.
 ///
 /// Layout (`#[repr(C, packed)]`):

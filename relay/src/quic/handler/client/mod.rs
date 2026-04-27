@@ -8,6 +8,7 @@ use common::warn;
 use parking_lot::Mutex;
 use quinn::Connection;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::storage::MessageKey;
 
@@ -32,8 +33,26 @@ pub struct ClientContext {
 
 pub type ClientCtxHandle = Arc<ClientContext>;
 
+/// Remove the entry for `ipk` only if its `Connection` is the same one we
+/// own (compared by `stable_id()`). This prevents a stale cleanup task from
+/// wiping a freshly-registered re-handshake's entry.
+///
+/// `Connection` is internally an `Arc`, so cloning is cheap, but it does
+/// not expose its inner pointer for `Arc::ptr_eq`. `stable_id()` returns a
+/// per-connection unique id that survives clones — equivalent guarantee.
+pub(crate) fn remove_client_if_same(relay: &RelayRef, ipk: &[u8; 32], owned: &Connection) {
+    let mut clients = relay.clients.write();
+    let same = clients
+        .get(ipk)
+        .map(|c| c.stable_id() == owned.stable_id())
+        .unwrap_or(false);
+    if same {
+        clients.remove(ipk);
+    }
+}
+
 impl Handler {
-    pub async fn handle_client(self, relay: RelayRef) {
+    pub async fn handle_client(self, relay: RelayRef, cancel: CancellationToken) {
         let conn = self.conn.clone();
         let addr = self.conn.remote_address();
 
@@ -57,7 +76,20 @@ impl Handler {
         // only 16 concurrent streams can run at once per connection
         let limiter = Arc::new(Semaphore::new(16));
 
-        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+        loop {
+            let accept = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    debug!("client({addr}) loop cancelled by shutdown");
+                    break;
+                }
+                accept = conn.accept_bi() => accept,
+            };
+            let (mut send, mut recv) = match accept {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+
             let permit = match limiter.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
@@ -82,7 +114,10 @@ impl Handler {
             debug!("conn client({addr}) closed: {close_reason}");
         }
 
-        // Deregister client on disconnect
-        relay.clients.write().remove(ipk.as_bytes());
+        // Deregister client on disconnect — but only if the entry still
+        // points at *our* connection. A re-handshake for the same IPK that
+        // raced past our `accept_bi` failure would have already replaced
+        // the entry; in that case we must leave it alone.
+        remove_client_if_same(&relay, ipk.as_bytes(), &self.conn);
     }
 }

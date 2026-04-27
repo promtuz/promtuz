@@ -8,6 +8,7 @@ use common::proto::client_rel::CHandshakePacket;
 use common::proto::client_rel::SHandshakePacket;
 use common::proto::client_rel::ServerHandshakeResultP;
 use common::proto::pack::Unpacker;
+use common::quic::CloseReason;
 use ed25519_dalek::Signature;
 use quinn::Connection;
 
@@ -66,11 +67,36 @@ pub(super) async fn handle_handshake(
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 
-    // 3. Register this client as connected
-
-    let relay = relay.clone();
-    let conn = conn.clone();
-    relay.clients.write().insert(ipk_bytes, conn);
+    // 3. Register this client as connected.
+    //
+    // Race-safety: a second valid handshake from the same identity must NOT
+    // silently displace the live entry — that would orphan the previous
+    // connection in the map and, worse, the eventual disconnect cleanup of
+    // *either* connection would unconditionally `remove(ipk)` and leave the
+    // user unreachable on this relay (see `handle_client`'s cleanup, which
+    // is now ptr-equality-guarded).
+    //
+    // Policy: if a live entry already exists for this IPK, reject the new
+    // connection with `AlreadyConnected`. Only sweep entries whose
+    // connection has already been torn down.
+    {
+        let relay = relay.clone();
+        let new_conn = conn.clone();
+        let mut clients = relay.clients.write();
+        if let Some(existing) = clients.get(&ipk_bytes) {
+            if existing.close_reason().is_none() {
+                CloseReason::AlreadyConnected.close(&new_conn);
+                bail!(
+                    "client({:?}) rejected: ipk already has a live connection",
+                    hex::encode(ipk_bytes)
+                );
+            }
+            // Stale entry — drop it, the dead task's cleanup will be a no-op
+            // because the stable_id no longer matches.
+            clients.remove(&ipk_bytes);
+        }
+        clients.insert(ipk_bytes, new_conn);
+    }
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 

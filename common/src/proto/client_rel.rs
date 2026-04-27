@@ -131,6 +131,10 @@ pub enum DispatchAckP {
     Delivered,
     NotFound,
     InvalidSig,
+    /// Recipient's per-user RocksDB queue is at capacity. Sender should back
+    /// off; the message was *not* stored. See
+    /// `relay::storage::MAX_QUEUED_PER_RECIPIENT`.
+    QueueFull,
     Error { reason: String },
 }
 
