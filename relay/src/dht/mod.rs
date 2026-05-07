@@ -48,6 +48,7 @@ use quinn::Endpoint;
 use rust_rocksdb::ColumnFamilyDescriptor;
 use rust_rocksdb::DB as RocksDB;
 use rust_rocksdb::Options;
+use rust_rocksdb::SliceTransform;
 
 use crate::quic::resolver_link::ResolverLinkHandle;
 
@@ -58,6 +59,7 @@ use self::metrics::Metrics;
 use self::routing::RoutingTable;
 use self::store::CF_DHT_MERKLE;
 use self::store::CF_DHT_PRESENCE;
+use self::store::CF_DHT_QUEUE;
 use self::sync::MerkleState;
 
 /// Top-level DHT runtime state.
@@ -209,6 +211,14 @@ impl Dht {
         rocks
             .cf_handle(CF_DHT_MERKLE)
             .with_context(|| format!("missing column family `{CF_DHT_MERKLE}` in DB"))?;
+        // Sticky-home queue CF (phase 2a). Idempotent on a fresh DB
+        // because `crate::util::rocksdb` opens with
+        // `create_missing_column_families(true)`. On an upgrade against
+        // an existing DB, the CF is auto-created at first open by the
+        // same flag — `Dht::new` only re-verifies the handle exists.
+        rocks
+            .cf_handle(CF_DHT_QUEUE)
+            .with_context(|| format!("missing column family `{CF_DHT_QUEUE}` in DB"))?;
 
         Ok(Self {
             routing: RwLock::new(RoutingTable::empty(node_id)),
@@ -278,16 +288,25 @@ impl Dht {
 /// Used by `crate::util::rocksdb` so DB-open and DHT-init aren't two
 /// places that have to stay in sync about which CFs exist.
 ///
-/// design-doc: §1.2.
+/// design-doc: `misc/specs/DHT.md` §1.2 (presence + merkle CFs);
+/// `misc/specs/STICKY_HOME_RELAY.md` §6.1 (queue CF).
 pub fn dht_cf_descriptors() -> Vec<ColumnFamilyDescriptor> {
-    // No prefix extractor on either CF — point lookups only on
-    // `dht_presence` (32-byte keys), and `dht_merkle` keys are 3 bytes
-    // (slice/level/index) which would be malformed under a 32-byte
-    // prefix extractor anyway (§1.2 trade-off note).
+    // - `dht_presence`: no prefix extractor — point lookups only on
+    //   32-byte keys (§1.2 trade-off note).
+    // - `dht_merkle`: no prefix extractor — keys are 3 bytes
+    //   (slice/level/index) which would be malformed under any
+    //   non-trivial extractor.
+    // - `dht_queue`: 32-byte fixed prefix extractor matching the
+    //   `recipient` field at offset 0 in `crate::storage::MessageKey`.
+    //   Same shape as the relay's existing message-queue (default CF)
+    //   so the per-recipient drain iterator works the same way.
     let presence_opts = Options::default();
     let merkle_opts = Options::default();
+    let mut queue_opts = Options::default();
+    queue_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
     vec![
         ColumnFamilyDescriptor::new(CF_DHT_PRESENCE, presence_opts),
         ColumnFamilyDescriptor::new(CF_DHT_MERKLE, merkle_opts),
+        ColumnFamilyDescriptor::new(CF_DHT_QUEUE, queue_opts),
     ]
 }

@@ -119,8 +119,20 @@ impl RpcClass {
             | DhtRequest::FindNode(_)
             | DhtRequest::FindValue(_)
             | DhtRequest::MerkleSummary(_)
-            | DhtRequest::MerkleDiff(_) => RpcClass::Cheap,
-            DhtRequest::Store(_) | DhtRequest::Tombstone(_) => RpcClass::Expensive,
+            | DhtRequest::MerkleDiff(_)
+            // Sticky-home phase 2a: ack is a small bookkeeping write
+            // (delete by id), no signature-heavy work beyond the
+            // bounded id-list verify. Slot it in the cheap bucket.
+            | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
+            DhtRequest::Store(_)
+            | DhtRequest::Tombstone(_)
+            // Sticky-home phase 2a: `Forward` does an outer-sig verify
+            // plus a disk write (queue) or stream open (deliver).
+            // `QueueFetch` does a user-sig verify plus a per-recipient
+            // prefix iterator over `cf_dht_queue`. Both belong in the
+            // expensive bucket per `STICKY_HOME_RELAY.md` §6.2.
+            | DhtRequest::Forward(_)
+            | DhtRequest::QueueFetch(_) => RpcClass::Expensive,
             DhtRequest::FetchRecord(_) => RpcClass::Bulk,
         }
     }

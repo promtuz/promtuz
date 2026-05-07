@@ -68,6 +68,32 @@ pub const CF_DHT_PRESENCE: &str = "dht_presence";
 /// index_within_level(1)`, values are 32-byte BLAKE3 hashes.
 pub const CF_DHT_MERKLE: &str = "dht_merkle";
 
+/// Column-family name for the per-recipient offline-message queue this
+/// relay holds when it is in a user's k-closest set.
+///
+/// **Key shape** mirrors the existing `cf_messages` (default CF) layout:
+/// `MessageKey { recipient: user_ipk, ts_ms, dispatch_id }` (56 bytes,
+/// see [`crate::storage::MessageKey`]). Reusing the same type lets the
+/// existing prefix-iterator / range-iterator helpers work unchanged for
+/// per-recipient drains and per-recipient cap enforcement
+/// ([`crate::storage::MAX_QUEUED_PER_RECIPIENT`]).
+///
+/// **Value**: postcard-encoded
+/// [`common::proto::client_rel::DispatchP`]. The dispatch is stored
+/// verbatim — its `sig` is the user's end-to-end signature and is
+/// preserved unchanged so the recipient can verify the chain on drain.
+///
+/// **Prefix extractor**: 32-byte fixed prefix (matches the recipient
+/// field at offset 0 in [`crate::storage::MessageKey`]). Same options
+/// the default CF uses for its message queue — the two key spaces are
+/// identical 56-byte tuples differing only in *which* relay holds them
+/// (this CF: home-relay's k-closest queue; default CF: sender-relay's
+/// fallback safety net).
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (cf_dht_queue);
+/// `misc/specs/DHT.md` §1.2 (CF taxonomy convention).
+pub const CF_DHT_QUEUE: &str = "dht_queue";
+
 /// Single-byte prefix that distinguishes tombstone entries from presence
 /// records inside [`CF_DHT_PRESENCE`]. Records use a bare 32-byte IPK key;
 /// tombstones use `TOMB_PREFIX || ipk` (33 bytes).

@@ -555,6 +555,34 @@ pub(crate) async fn handle_dht_request(dht: &Arc<Dht>, req: DhtRequest) -> DhtRe
         DhtRequest::FetchRecord(f) => {
             DhtResponse::FetchRecord(super::sync::rpc::handle_fetch_record(dht, f))
         }
+        // ----- Sticky-home phase 2a: wire-type stubs --------------------
+        //
+        // Phase 2a (this commit) lands only the wire-format contract; the
+        // real handlers ship in phase 2d (`STICKY_HOME_RELAY.md` §8 row
+        // 2d). Until then, return defensive "we declined" outcomes so
+        // an early adopter that speaks the new variant doesn't deadlock
+        // on a missing dispatcher arm — they will see `NotOwner` /
+        // empty-batch / `ok=false` and back off cleanly.
+        //
+        // The metrics counters / actual delivery path land in 2d; here
+        // we deliberately do not increment any DHT metric so phase 2d's
+        // observability story can be designed wholesale.
+        DhtRequest::Forward(_) => {
+            DhtResponse::Forward(common::proto::dht_p2p::ForwardResp {
+                outcome: common::proto::dht_p2p::ForwardOutcome::NotOwner,
+            })
+        }
+        DhtRequest::QueueFetch(_) => {
+            DhtResponse::QueueFetch(common::proto::dht_p2p::QueueFetchResp {
+                messages:  Vec::new(),
+                exhausted: true,
+            })
+        }
+        DhtRequest::QueueFetchAck(_) => {
+            DhtResponse::QueueFetchAck(common::proto::dht_p2p::QueueFetchAckResp {
+                ok: false,
+            })
+        }
     }
 }
 

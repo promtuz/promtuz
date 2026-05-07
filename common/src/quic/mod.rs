@@ -58,6 +58,14 @@ pub enum CloseReason {
     /// DHT (`peer/1`): a wire field violated its declared length bound
     /// (see `dht_p2p`'s `MAX_*` consts). Per §2.5 / §2.6.
     DhtMalformedKey,
+    /// DHT (`peer/1`): sticky-home `Forward` / `QueueFetch` /
+    /// `QueueFetchAck` RPC was rejected for a hard protocol violation
+    /// the wire-format validator surfaced (e.g. bad outer signature on
+    /// `Forward`, ack-id list overflow on `QueueFetchAck`). The
+    /// soft-reject outcomes (`QueueFull`, `NotOwner`, `RateLimited`)
+    /// are returned in the response body and do **not** close the
+    /// connection. Per `misc/specs/STICKY_HOME_RELAY.md` §5.3.
+    DhtForwardRejected,
 }
 
 impl CloseReason {

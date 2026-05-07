@@ -105,7 +105,7 @@ pub enum QueryResultP {
 /// the signature above validates under `from`. The `id` is signed by the
 /// client, never minted by the relay, so it survives forward-and-store as
 /// authenticated metadata.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DispatchP {
     pub to:      Bytes<32>,
     pub from:    Bytes<32>,
