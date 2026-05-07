@@ -296,9 +296,26 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
 
     let mut wopts = WriteOptions::default();
     wopts.set_sync(true);
-    if dht.rocks.put_cf_opt(&cf, key, bytes, &wopts).is_err() {
+    if dht.rocks.put_cf_opt(&cf, key, &bytes, &wopts).is_err() {
         dht.metrics.inc_stores_rejected();
         return StoreOutcome::BadSig;
+    }
+
+    // 5. Update the Merkle anti-entropy state. This is in-process only
+    //    (the §6.1 design accepts that the Merkle CF is a cache of the
+    //    record CF — we rebuild on restart from `cf_dht_presence`).
+    //    Hold the merkle write lock briefly; never across an await
+    //    (this whole function is sync).
+    //
+    //    Reuse the bytes we just serialised for the put — saves a
+    //    second postcard pass.
+    //
+    //    design-doc: §6.1 (per-slice Merkle tree update on every accepted
+    //    record).
+    let vh = super::sync::record_value_hash(&bytes);
+    {
+        let mut merkle = dht.merkle.write();
+        merkle.insert(&key, vh);
     }
 
     dht.metrics.inc_stores_accepted();
@@ -370,6 +387,20 @@ pub(crate) fn store_tombstone(
     let _ = dht.rocks.delete_cf(&cf, record_key);
     if dht.rocks.put_cf_opt(&cf, tk, bytes, &wopts).is_err() {
         return TombstoneOutcome::BadSig;
+    }
+
+    // 6. Update the Merkle tree: remove the record's leaf entry. Phase
+    //    1g v1 does NOT advertise tombstones via Merkle (§6.3 calls for
+    //    it but `FetchRecord` only carries `PresenceRecord`s; phase 2
+    //    adds a `FetchTombstone` RPC). Removing the leaf means a peer
+    //    that still has the live record sees their root diverge, asks
+    //    via `FetchRecord`, and we return an empty response — so the
+    //    peer keeps its record and waits for *its* tombstone via the
+    //    relay-to-relay tombstone Store path. This is a known gap;
+    //    documented in the dispatch's "follow-ups" section.
+    {
+        let mut merkle = dht.merkle.write();
+        merkle.remove(&tomb.user_ipk.0);
     }
 
     TombstoneOutcome::Stored

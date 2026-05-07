@@ -48,7 +48,6 @@ use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::CloseReason;
 use common::quic::id::NodeId;
-use common::warn;
 use quinn::Connection;
 use quinn::SendStream;
 use tokio::sync::Semaphore;
@@ -276,31 +275,15 @@ pub(crate) async fn handle_dht_request(dht: &Arc<Dht>, req: DhtRequest) -> DhtRe
             let outcome = store::store_tombstone(dht, t.record, now_ms());
             DhtResponse::Tombstone(TombstoneResp { outcome })
         }
-        // Phase 1g territory — anti-entropy / sync. Until then we
-        // return per-variant empty responses so peers that ask don't
-        // get their connection killed; an honest peer treats an empty
-        // reply as "this responder has nothing for that slice / path"
-        // and continues with its next peer.
-        //
-        // Phase 1g replaces these arms with the real handlers
-        // (`super::sync::rpc::handle_*`).
-        DhtRequest::MerkleSummary(_) => {
-            warn!("DHT: MerkleSummary handler is phase 1g territory; returning empty roots");
-            DhtResponse::MerkleSummary(common::proto::dht_p2p::MerkleSummaryResp {
-                roots: Vec::new(),
-            })
+        // Phase 1g: real anti-entropy / sync handlers.
+        DhtRequest::MerkleSummary(s) => {
+            DhtResponse::MerkleSummary(super::sync::rpc::handle_merkle_summary(dht, s))
         }
-        DhtRequest::MerkleDiff(_) => {
-            warn!("DHT: MerkleDiff handler is phase 1g territory; returning empty children");
-            DhtResponse::MerkleDiff(common::proto::dht_p2p::MerkleDiffResp::Children {
-                hashes: Vec::new(),
-            })
+        DhtRequest::MerkleDiff(d) => {
+            DhtResponse::MerkleDiff(super::sync::rpc::handle_merkle_diff(dht, d))
         }
-        DhtRequest::FetchRecord(_) => {
-            warn!("DHT: FetchRecord handler is phase 1g territory; returning empty records");
-            DhtResponse::FetchRecord(common::proto::dht_p2p::FetchRecordResp {
-                records: Vec::new(),
-            })
+        DhtRequest::FetchRecord(f) => {
+            DhtResponse::FetchRecord(super::sync::rpc::handle_fetch_record(dht, f))
         }
     }
 }
@@ -657,10 +640,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_merkle_summary_returns_empty_placeholder() {
-        // Phase 1g implements the real anti-entropy handlers; phase 1d
-        // ships a placeholder that returns an empty `MerkleSummaryResp`
-        // so peers don't get their connections killed for asking.
+    async fn handle_merkle_summary_with_zero_bitset_returns_no_roots() {
+        // Empty bitset = "I'm interested in no slices" → empty reply
+        // even on a populated relay. Mirrors the pre-phase-1g
+        // placeholder behaviour for the empty-bitset case so any
+        // existing peer that asks with a zero bitset gets the same
+        // shape of answer.
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
@@ -672,7 +657,7 @@ mod tests {
         let resp = handle_dht_request(&dht, req).await;
         match resp {
             DhtResponse::MerkleSummary(r) => assert!(r.roots.is_empty()),
-            other => panic!("expected MerkleSummary placeholder, got {other:?}"),
+            other => panic!("expected MerkleSummary, got {other:?}"),
         }
     }
 }

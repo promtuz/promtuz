@@ -8,6 +8,7 @@ use common::warn;
 use tokio_util::sync::CancellationToken;
 
 use crate::dht::bootstrap;
+use crate::dht::sync;
 use crate::quic::acceptor::Acceptor;
 use crate::quic::resolver_link::ResolverLink;
 use crate::relay::Relay;
@@ -58,8 +59,9 @@ async fn main() -> Result<()> {
     if let Some(dht) = relay.dht.clone() {
         if dht.cfg.enabled {
             let resolver_handle_for_bootstrap = resolver_handle.clone();
+            let dht_for_bootstrap = dht.clone();
             tokio::spawn(async move {
-                match bootstrap::bootstrap(dht, resolver_handle_for_bootstrap).await {
+                match bootstrap::bootstrap(dht_for_bootstrap, resolver_handle_for_bootstrap).await {
                     Ok(state) => info!("DHT bootstrap reached state {state:?}"),
                     // EmptyRegistry is the legitimate brand-new-network
                     // case — log at info, not warn, so an operator
@@ -69,6 +71,17 @@ async fn main() -> Result<()> {
                     },
                     Err(e) => warn!("DHT bootstrap failed: {e}"),
                 }
+            });
+
+            // Phase 1g: anti-entropy + maintenance scheduler. Cooperative
+            // with the cancellation token so Ctrl-C exits cleanly within
+            // one cadence-tick. Spawned regardless of whether bootstrap
+            // succeeds — the scheduler degrades gracefully under empty
+            // routing tables (just logs and re-checks next tick).
+            let dht_for_sched = dht.clone();
+            let cancel_for_sched = cancel.clone();
+            tokio::spawn(async move {
+                sync::run_scheduler(dht_for_sched, cancel_for_sched).await;
             });
         }
     }
