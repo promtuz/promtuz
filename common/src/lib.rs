@@ -1,4 +1,4 @@
-pub static PROTOCOL_VERSION: u16 = 1;
+pub static PROTOCOL_VERSION: u16 = 2;
 
 #[cfg(feature = "crypto")]
 pub mod crypto;

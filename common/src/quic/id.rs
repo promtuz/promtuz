@@ -89,13 +89,17 @@ impl<'de, const N: usize> Deserialize<'de> for BaseId<N> {
 //===:===:===:===:===: NODE ID :===:===:===:===:===||
 //===:===:===:===:===:===:=:===:===:===:===:===:===||
 
-pub type NodeId = BaseId<10>;
+pub type NodeId = BaseId<32>;
 
 impl NodeId {
-    /// Generate new NodeId from public key
+    /// Generate new NodeId from public key.
+    ///
+    /// Returns the full 32-byte BLAKE3 hash of `key`. The full width is
+    /// required so relay NodeIds and user IPKs share a coherent 256-bit
+    /// keyspace under XOR distance (see `misc/specs/DHT.md` §0).
     pub fn new<K: AsRef<[u8]>>(key: K) -> Self {
         let hash = blake3::hash(key.as_ref());
-        Self::from_bytes(hash.as_bytes()[..Self::LEN].try_into().unwrap())
+        Self::from_bytes(*hash.as_bytes())
     }
 }
 
@@ -126,9 +130,9 @@ impl NodeKey {
     }
 
     #[inline]
-    fn derive_id(&self) -> BaseId<{ NodeId::LEN }> {
+    fn derive_id(&self) -> NodeId {
         let hash = blake3::hash(&self.0);
-        BaseId::from_bytes(hash.as_bytes()[..NodeId::LEN].try_into().unwrap())
+        NodeId::from_bytes(*hash.as_bytes())
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
