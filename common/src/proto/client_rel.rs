@@ -135,6 +135,19 @@ pub enum DispatchAckP {
     /// off; the message was *not* stored. See
     /// `relay::storage::MAX_QUEUED_PER_RECIPIENT`.
     QueueFull,
+    /// Recipient was offline locally and the dispatch was successfully
+    /// queued at ≥ K_MIN of the recipient's K-closest "home" relays via
+    /// the sticky-home DHT-forward path. Distinct from [`Self::Queued`]
+    /// (which is the local-only fallback) so the sender knows the
+    /// dispatch is held by a deterministic K-relay set keyed off the
+    /// recipient's IPK rather than only on the originating relay.
+    ///
+    /// Semantics per `misc/specs/STICKY_HOME_RELAY.md` §4.2 step 5: the
+    /// dispatch is queued at K_MIN homes; eventual delivery depends on
+    /// the recipient draining one of those homes on reconnect. Sender
+    /// has no further proof of delivery — read receipts are out of
+    /// scope (§9 of the same spec).
+    Forwarded,
     Error { reason: String },
 }
 

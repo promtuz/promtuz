@@ -191,6 +191,43 @@ pub const MERKLE_DIFF_PATH_MAX: usize = 4;
 pub const FETCH_RECORD_CONCURRENCY: usize = 8;
 
 // ---------------------------------------------------------------------------
+// Sticky-home Forward fan-out (phase 2b)
+// ---------------------------------------------------------------------------
+
+/// Total wall-clock budget for the K parallel `Forward` RPCs the sender
+/// relay issues during sticky-home fan-out.
+///
+/// Sized to match [`LOOKUP_RPC_TIMEOUT_MS`] (1500 ms): each individual
+/// `Forward` is a single bi-stream that opens, writes a small request,
+/// reads a small response, and finishes — the same network round-trip
+/// shape as a `Store`. A K=3 fan-out completes well inside this window
+/// in steady state; the cap is a fail-safe so a wedged peer can't stall
+/// a sender's `Dispatch` ack indefinitely. On timeout the sender treats
+/// in-flight homes as "no response" and falls back to the local queue.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.2 step 5 (the K_MIN
+/// quorum window). 1500 ms aligns with the per-RPC ceiling already
+/// enforced by `lookup`/`publish` so all parallel-fan-out paths share
+/// one timeout-budget contract.
+pub const FORWARD_TIMEOUT_MS: u64 = 1500;
+
+/// Minimum number of "Delivered or Stored" outcomes from the K homes
+/// required for the sender relay to ack the originating client with
+/// [`common::proto::client_rel::DispatchAckP::Forwarded`].
+///
+/// Set to 2 (= 2-of-3 with `K = 3`), mirroring [`publish::K_MIN`] and
+/// [`LOOKUP_QUORUM`]: the sticky-home spec §4.2 step 5 explicitly calls
+/// out the same threshold so cross-checked reads on the recipient side
+/// have at least the same redundancy as cross-checked writes on the
+/// sender side. Below this threshold the sender falls back to local
+/// queueing per §4.2 step 7 (and §4.5 "Forwarding fails (<2 of K
+/// accept)" row).
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.2 step 5, §7
+/// question 1 (recommended: K_MIN = 2 for K = 3).
+pub const FORWARD_K_MIN: usize = 2;
+
+// ---------------------------------------------------------------------------
 // Per-peer inbound-RPC rate limits (§8.4 / §8.7 DoS hardening)
 // ---------------------------------------------------------------------------
 //

@@ -75,6 +75,40 @@ pub struct Metrics {
     /// rejected connection. See `relay/src/dht/handler.rs` for the
     /// per-failure-mode close-reason mapping.
     pub dht_hello_rejected: AtomicU64,
+
+    // --- sticky-home fan-out (phase 2b) ---
+    /// `Forward` RPCs the sender relay successfully *opened* (i.e.
+    /// invocations that reached the K-fan-out stage). Bumped once per
+    /// `forward_to_homes` call regardless of outcome — pair with
+    /// `forwards_delivered`/`forwards_stored`/`forward_fallbacks_to_local_queue`
+    /// to compute the success-rate.
+    pub forwards_sent: AtomicU64,
+
+    /// At least one of the K homes returned `Delivered` (recipient was
+    /// online there). Sender acked `DispatchAckP::Delivered` to the
+    /// originating client.
+    pub forwards_delivered: AtomicU64,
+
+    /// `success >= FORWARD_K_MIN` was reached without any `Delivered`
+    /// — i.e. ≥2 of K homes queued the dispatch. Sender acked
+    /// `DispatchAckP::Forwarded`.
+    pub forwards_stored: AtomicU64,
+
+    /// Fewer than `FORWARD_K_MIN` homes accepted the `Forward`. Sender
+    /// fell back to the local queue safety net (§4.2 step 7) and
+    /// acked `DispatchAckP::Queued` (or `QueueFull` if the local cap
+    /// was hit too).
+    pub forward_fallbacks_to_local_queue: AtomicU64,
+
+    /// `enqueue_for_home` writes to `cf_dht_queue` that succeeded —
+    /// either the self-is-K-closest path inside `forward_to_homes`
+    /// (phase 2b) or the inbound `Forward` handler once it lands
+    /// (phase 2d).
+    pub dht_queue_writes: AtomicU64,
+
+    /// `enqueue_for_home` rejections because the per-recipient
+    /// `MAX_QUEUED_PER_RECIPIENT` cap was hit on `cf_dht_queue`.
+    pub dht_queue_full_rejections: AtomicU64,
 }
 
 impl Metrics {
@@ -178,5 +212,31 @@ impl Metrics {
 
     pub fn inc_dht_hello_rejected(&self) {
         self.dht_hello_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- sticky-home fan-out (phase 2b) ---
+
+    pub fn inc_forwards_sent(&self) {
+        self.forwards_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_forwards_delivered(&self) {
+        self.forwards_delivered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_forwards_stored(&self) {
+        self.forwards_stored.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_forward_fallbacks_to_local_queue(&self) {
+        self.forward_fallbacks_to_local_queue.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_dht_queue_writes(&self) {
+        self.dht_queue_writes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_dht_queue_full_rejections(&self) {
+        self.dht_queue_full_rejections.fetch_add(1, Ordering::Relaxed);
     }
 }

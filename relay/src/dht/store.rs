@@ -34,6 +34,8 @@
 //! §1.1.3 (TTL and republish semantics),
 //! §5.3 (multi-writer conflict resolution).
 
+use common::proto::client_rel::DispatchP;
+use common::proto::dht_p2p::ForwardOutcome;
 use common::proto::dht_p2p::PresenceRecord;
 use common::proto::dht_p2p::PresenceVerifyError;
 use common::proto::dht_p2p::StoreOutcome;
@@ -52,6 +54,8 @@ use rust_rocksdb::WriteOptions;
 use super::Dht;
 use super::config::K;
 use super::config::PRESENCE_TTL_MS;
+use crate::storage::MAX_QUEUED_PER_RECIPIENT;
+use crate::storage::MessageKey;
 
 /// Column-family name for the `(user_ipk → PresenceRecord)` map this relay
 /// holds as a replica. Also holds tombstones under a `TOMB_PREFIX`-prefixed
@@ -572,6 +576,101 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     evicted
 }
 
+/// Persist a queued [`DispatchP`] into [`CF_DHT_QUEUE`] for the recipient's
+/// home-relay queue. Used by:
+///
+/// - `forward_to_homes` (phase 2b) when the sender relay discovers it is
+///   itself in the recipient's K-closest set — the self-store short-circuit
+///   that mirrors the publish-path's "self in K" optimisation in
+///   [`super::publish::publish`].
+/// - The home-side `DhtRequest::Forward` handler (phase 2d, not yet wired)
+///   to durably enqueue an inbound dispatch for an offline recipient.
+///
+/// **Cap enforcement.** Mirrors the [`crate::storage::MAX_QUEUED_PER_RECIPIENT`]
+/// check in `relay/src/quic/handler/client/events/forward.rs::store_in_rocks`,
+/// using a bounded prefix-iterator scan over `cf_dht_queue` and the same
+/// `starts_with` filter (the prefix-extractor is a *seek hint*; the iterator
+/// can walk past the recipient's keyspace without it).
+///
+/// Returns:
+/// - [`ForwardOutcome::Stored`] on a successful queue write.
+/// - [`ForwardOutcome::QueueFull`] when the recipient already has
+///   `MAX_QUEUED_PER_RECIPIENT` entries on disk; the dispatch is *not*
+///   stored.
+/// - [`ForwardOutcome::BadSig`] as a defensive surface for an internal
+///   error (CF handle missing, postcard serialisation failure, RocksDB
+///   write failure). The on-the-wire semantics of `BadSig` is "we will
+///   not accept this dispatch" — surfacing infrastructure failures the
+///   same way avoids a silent message-loss path.
+///
+/// Durability: writes use `WriteOptions::set_sync(true)` so the WAL fsyncs
+/// before this returns — same pattern as
+/// [`store_record`] and the legacy `store_in_rocks` in
+/// `relay/src/quic/handler/client/events/forward.rs`.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (`cf_dht_queue` key
+/// shape and per-recipient cap).
+pub(crate) fn enqueue_for_home(
+    dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
+) -> ForwardOutcome {
+    let cf = match dht.rocks.cf_handle(CF_DHT_QUEUE) {
+        Some(cf) => cf,
+        None => return ForwardOutcome::BadSig,
+    };
+
+    // Per-recipient cap. Bounded scan: stop as soon as we've confirmed
+    // the user is at-or-over the cap so we don't walk a million-entry
+    // queue on every Forward. The `prefix_iterator` is seeded by the
+    // 32-byte prefix-extractor configured on `cf_dht_queue`
+    // (`crate::dht::dht_cf_descriptors`); we re-apply the `starts_with`
+    // filter because the iterator is allowed to walk into the next
+    // user's keyspace.
+    let mut count: usize = 0;
+    let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
+    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
+        let (key_bytes, _) = match entry {
+            Ok(kv) => kv,
+            // Treat a corrupted iterator as "we can't be sure we're under
+            // the cap" — better to reject than silently overrun. Same
+            // policy as the legacy local-queue store.
+            Err(_) => return ForwardOutcome::BadSig,
+        };
+        if !key_bytes.starts_with(user_ipk) {
+            // Walked past our prefix; we're done.
+            break;
+        }
+        count += 1;
+        if count >= stop_at {
+            break;
+        }
+    }
+    if count >= MAX_QUEUED_PER_RECIPIENT {
+        dht.metrics.inc_dht_queue_full_rejections();
+        return ForwardOutcome::QueueFull;
+    }
+
+    let key = MessageKey::new(user_ipk, now_ms, &dispatch.id.0);
+    let value = match dispatch.ser() {
+        Ok(b) => b,
+        Err(_) => return ForwardOutcome::BadSig,
+    };
+
+    // fsync WAL before returning so the home relay's "Stored" reply is
+    // a durable promise.
+    let mut wopts = WriteOptions::default();
+    wopts.set_sync(true);
+    if dht
+        .rocks
+        .put_cf_opt(&cf, key.as_bytes(), &value, &wopts)
+        .is_err()
+    {
+        return ForwardOutcome::BadSig;
+    }
+
+    dht.metrics.inc_dht_queue_writes();
+    ForwardOutcome::Stored
+}
+
 /// Look up a tombstone by IPK. Returns `None` if no tombstone is stored.
 /// Used by anti-entropy (phase 1g) to decide whether a peer's apparent
 /// "missing record" is genuinely gone or just stale.
@@ -984,5 +1083,188 @@ mod tests {
         let root_after_tomb = dht.merkle.read().root(user_slice);
         assert_ne!(root_after_tomb, [0u8; 32]);
         assert_ne!(root_after_record, root_after_tomb);
+    }
+
+    // -----------------------------------------------------------------
+    // Sticky-home phase 2b — `enqueue_for_home` (cf_dht_queue writes)
+    // -----------------------------------------------------------------
+
+    use common::proto::client_rel::DispatchP;
+    use common::proto::client_rel::dispatch_sig_message;
+
+    /// Build a fresh, internally-consistent `DispatchP` from `from_user`
+    /// to `to_user`. Identical to the `build_dispatch` fixture in
+    /// `dht/forward.rs::tests` and `common/src/proto/dht_p2p.rs::tests` —
+    /// the duplication is intentional: each test module is self-contained
+    /// and a shared fixture would create test-only cross-module deps.
+    fn build_dispatch(
+        from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
+    ) -> DispatchP {
+        let from_ipk: [u8; 32] = from_user.verifying_key().to_bytes();
+        let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
+        let sig = from_user.sign(&msg);
+        DispatchP {
+            to:      (*to_ipk).into(),
+            from:    from_ipk.into(),
+            id:      id.into(),
+            payload: payload.to_vec().into(),
+            sig:     sig.to_bytes().into(),
+        }
+    }
+
+    #[test]
+    fn enqueue_for_home_writes_with_correct_key_shape() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let id: [u8; 16] = [0xAB; 16];
+        let dispatch = build_dispatch(&from_user, &to_ipk, id, b"payload-x");
+        let now: u64 = 1_700_000_000_000;
+
+        let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now);
+        assert_eq!(outcome, ForwardOutcome::Stored);
+
+        // Read back via the prefix iterator the way the home-side
+        // QueueFetch handler will (phase 2c). The key shape is
+        // `MessageKey { recipient: to_ipk, ts_be: now, id }` per
+        // `enqueue_for_home`.
+        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut values: Vec<Vec<u8>> = Vec::new();
+        for entry in dht.rocks.prefix_iterator_cf(&cf, &to_ipk) {
+            let (k, v) = entry.expect("iter");
+            if !k.starts_with(&to_ipk) {
+                break;
+            }
+            keys.push(k.to_vec());
+            values.push(v.to_vec());
+        }
+        assert_eq!(keys.len(), 1, "exactly one queued message expected");
+        let key = &keys[0];
+        // 32-byte recipient + 8-byte big-endian ts + 16-byte id = 56.
+        assert_eq!(key.len(), 56, "MessageKey is 56 bytes");
+        assert_eq!(&key[0..32], &to_ipk[..]);
+        assert_eq!(&key[32..40], &now.to_be_bytes()[..]);
+        assert_eq!(&key[40..56], &id[..]);
+
+        // Value is a postcard-encoded DispatchP — round-trip it.
+        let decoded = DispatchP::deser(&values[0]).expect("postcard");
+        assert_eq!(decoded, dispatch);
+    }
+
+    #[test]
+    fn enqueue_for_home_returns_queue_full_at_cap() {
+        // Fill `cf_dht_queue` for one recipient up to the cap; the next
+        // write returns `QueueFull` and does NOT actually write the new
+        // entry (we observe by checking the count remained at the cap).
+        //
+        // We use a deliberately *small* test cap by just exhausting the
+        // real `MAX_QUEUED_PER_RECIPIENT = 1024` cap — it's slow but
+        // bounded, and the test budget tolerates it (~30 ms in
+        // practice). This keeps the test honest: we exercise the
+        // production constant rather than mocking it out.
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let now: u64 = 1_700_000_000_000;
+
+        // Direct CF write to bypass the cap (so we can fill quickly).
+        // Each entry needs a distinct `(ts, id)` so the keys don't
+        // collide. Fill exactly to the cap.
+        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
+        for i in 0..MAX_QUEUED_PER_RECIPIENT {
+            let mut id = [0u8; 16];
+            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let key = MessageKey::new(&to_ipk, now + (i as u64), &id);
+            // Tiny dummy value — only the count matters for the cap
+            // check; the actual deserializability of the value is
+            // unrelated to the cap-enforcement path under test.
+            dht.rocks.put_cf(&cf, key.as_bytes(), b"x").expect("put");
+        }
+
+        // One more should be rejected with QueueFull.
+        let dispatch = build_dispatch(&from_user, &to_ipk, [0xFF; 16], b"overflow");
+        let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now + 99_999);
+        assert_eq!(outcome, ForwardOutcome::QueueFull);
+
+        // And the rejected entry must NOT have been written. Count
+        // remains exactly at the cap (the `[0xFF; 16]` id we'd have
+        // used absent the cap is not in the queue).
+        let mut found_overflow = false;
+        for entry in dht.rocks.prefix_iterator_cf(&cf, &to_ipk) {
+            let (k, _) = entry.expect("iter");
+            if !k.starts_with(&to_ipk) {
+                break;
+            }
+            if k.ends_with(&[0xFF; 16]) {
+                found_overflow = true;
+                break;
+            }
+        }
+        assert!(!found_overflow, "QueueFull rejection must not write the entry");
+    }
+
+    #[test]
+    fn enqueue_for_home_accepts_under_cap() {
+        // Sanity gate: a small number of writes succeeds and each
+        // returns `Stored`. Catches a regression where the cap-check
+        // accidentally fires immediately (e.g. an `>=` flipped to `>`
+        // with the wrong base).
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let now: u64 = 1_700_000_000_000;
+
+        for i in 0..5u8 {
+            let mut id = [0u8; 16];
+            id[0] = i;
+            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"under-cap");
+            let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now + i as u64);
+            assert_eq!(outcome, ForwardOutcome::Stored, "iter {i}");
+        }
+    }
+
+    #[test]
+    fn enqueue_for_home_does_not_count_other_recipients_against_cap() {
+        // Cap is per-recipient. Filling user A's queue must not cause
+        // user B to see `QueueFull`. Catches a regression where the
+        // `starts_with` filter is dropped and the iterator walks into
+        // adjacent users' keyspaces.
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let user_a = fresh_signing_key();
+        let user_b = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let ipk_a: [u8; 32] = user_a.verifying_key().to_bytes();
+        let ipk_b: [u8; 32] = user_b.verifying_key().to_bytes();
+        let now: u64 = 1_700_000_000_000;
+
+        // Fill user A's queue to the cap.
+        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
+        for i in 0..MAX_QUEUED_PER_RECIPIENT {
+            let mut id = [0u8; 16];
+            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let key = MessageKey::new(&ipk_a, now + (i as u64), &id);
+            dht.rocks.put_cf(&cf, key.as_bytes(), b"x").expect("put");
+        }
+
+        // User B's first write must succeed.
+        let dispatch_b = build_dispatch(&from_user, &ipk_b, [1u8; 16], b"hi-B");
+        let outcome = enqueue_for_home(&dht, &ipk_b, &dispatch_b, now);
+        assert_eq!(outcome, ForwardOutcome::Stored);
     }
 }

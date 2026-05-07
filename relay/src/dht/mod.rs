@@ -23,6 +23,7 @@
 pub(crate) mod bootstrap;
 pub(crate) mod cache;
 pub mod config;
+pub(crate) mod forward;
 pub(crate) mod handler;
 pub(crate) mod lookup;
 pub mod metrics;
