@@ -13,11 +13,12 @@ use tokio_util::sync::CancellationToken;
 use crate::storage::MessageKey;
 
 use crate::quic::handler::Handler;
+use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::quic::handler::client::events::handle_packet;
 use crate::quic::handler::client::handshake::handle_handshake;
 use crate::relay::RelayRef;
 
-mod events;
+pub(crate) mod events;
 mod handshake;
 
 /// Context for client connection
@@ -29,6 +30,23 @@ pub struct ClientContext {
     /// still waiting for. Cleared *only* on `AckDrain` so that a re-drain
     /// before the ack lands re-sends the same set rather than dropping it.
     pub pending_drain: Mutex<Vec<MessageKey>>,
+
+    /// Sticky-home phase 2c — the most recent user-signed `DrainAuth` the
+    /// client supplied, or `None` if the client never sent one (legacy
+    /// libcore, or the client predates phase 2c).
+    ///
+    /// Set by `events::drain_auth::handle_drain_auth` after verifying the
+    /// transcript signature plus the ±60s freshness window. Read by
+    /// `events::drain::handle_drain_queue` when this relay is *not* in
+    /// the user's K-closest set and therefore must dial the home relays
+    /// to fetch the queue (`STICKY_HOME_RELAY.md` §4.3 step 3).
+    ///
+    /// Replace-on-set semantics: a second valid `DrainAuth` overwrites
+    /// the first. Because the transcript carries a freshness timestamp,
+    /// keeping a stale auth would only force the next remote-fetch
+    /// round-trip to fail with `StaleTimestamp` at the home — letting
+    /// the client refresh is cheaper.
+    pub drain_auth: Mutex<Option<DrainAuth>>,
 }
 
 pub type ClientCtxHandle = Arc<ClientContext>;
@@ -71,6 +89,7 @@ impl Handler {
             relay: relay.clone(),
             conn: conn.clone(),
             pending_drain: Mutex::new(Vec::new()),
+            drain_auth: Mutex::new(None),
         });
 
         // only 16 concurrent streams can run at once per connection

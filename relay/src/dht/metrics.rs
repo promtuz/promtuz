@@ -109,6 +109,41 @@ pub struct Metrics {
     /// `enqueue_for_home` rejections because the per-recipient
     /// `MAX_QUEUED_PER_RECIPIENT` cap was hit on `cf_dht_queue`.
     pub dht_queue_full_rejections: AtomicU64,
+
+    // --- sticky-home recipient drain (phase 2c) ---
+
+    /// `CRelayPacket::DrainAuth` packets that verified successfully
+    /// (signature + freshness window) and were buffered on
+    /// `ClientContext.drain_auth`. One bump per accepted packet — a
+    /// later refresh (replace-on-set) bumps again. Pair with
+    /// `drain_auth_rejected` to compute the verification error rate.
+    pub drain_auth_received: AtomicU64,
+
+    /// `CRelayPacket::DrainAuth` packets rejected by
+    /// `verify_drain_auth` for any reason (`BadSig`, `StaleTimestamp`,
+    /// `FutureTimestamp`). Lumped together so a single counter tells
+    /// operators "the drain-auth surface is being abused"; tracing
+    /// logs (TRACE level in `drain_auth.rs`) carry the per-reason
+    /// breakdown for incident investigation.
+    pub drain_auth_rejected: AtomicU64,
+
+    /// `QueueFetch` RPCs the recipient relay sent to home relays
+    /// during a `fetch_remote_queues` fan-out. Bumped once per RPC
+    /// attempt (per home, per page) regardless of outcome — pair with
+    /// `queue_fetch_failures` to compute success rate.
+    pub queue_fetches_sent: AtomicU64,
+
+    /// `QueueFetch` RPCs that failed at the wire layer (connect
+    /// failed, write/read failed, peer returned the wrong response
+    /// variant, total wall-clock budget exhausted). Per-home failures
+    /// are non-fatal to the fan-out (`fetch_remote_queues` returns a
+    /// per-home best-effort sum).
+    pub queue_fetch_failures: AtomicU64,
+
+    /// `fetch_remote_queues` calls that completed and returned at
+    /// least one dispatch. Counts the *successful drain* event, not
+    /// the per-RPC success — see `queue_fetches_sent` for that.
+    pub queue_fetches_succeeded: AtomicU64,
 }
 
 impl Metrics {
@@ -238,5 +273,27 @@ impl Metrics {
 
     pub fn inc_dht_queue_full_rejections(&self) {
         self.dht_queue_full_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- sticky-home recipient drain (phase 2c) ---
+
+    pub fn inc_drain_auth_received(&self) {
+        self.drain_auth_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_drain_auth_rejected(&self) {
+        self.drain_auth_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_queue_fetches_sent(&self) {
+        self.queue_fetches_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_queue_fetch_failures(&self) {
+        self.queue_fetch_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_queue_fetches_succeeded(&self) {
+        self.queue_fetches_succeeded.fetch_add(1, Ordering::Relaxed);
     }
 }

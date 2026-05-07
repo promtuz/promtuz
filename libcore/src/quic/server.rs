@@ -18,8 +18,11 @@ use common::proto::client_rel::QueryResultP;
 use common::proto::client_rel::SHandshakePacket as SHSP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
+use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
+use common::quic::id::NodeId;
+use common::types::bytes::Bytes;
 use ed25519_dalek::VerifyingKey;
 use log::debug;
 use log::error;
@@ -156,6 +159,32 @@ impl Relay {
         Ok(handle)
     }
 
+    /// Build and send a one-shot `CRelayPacket::DrainAuth` permit so this relay
+    /// can pull our offline-queue from the K-closest DHT homes on our behalf.
+    ///
+    /// The transcript binds (self_ipk, this_relay_id, timestamp); the same
+    /// signature is reusable across all K homes (no per-home identity in the
+    /// transcript) within the ±60s skew window. Phase 2c sticky-home flow.
+    async fn send_drain_auth(
+        &self, conn: &quinn::Connection, ipk: VerifyingKey,
+    ) -> Result<()> {
+        let timestamp = systime().as_millis() as u64;
+        let relay_node_id = NodeId::from_str(&self.id)
+            .map_err(|e| anyhow!("relay id {:?} not parseable as NodeId: {e:?}", self.id))?;
+        let self_ipk = ipk.to_bytes();
+        let transcript = queue_fetch_signing_input(&self_ipk, &relay_node_id, timestamp);
+        let sig = IdentitySigner::sign(&transcript)?;
+
+        let (mut tx, _rx) = conn.open_bi().await?;
+        let packet = CRelayPacket::DrainAuth {
+            timestamp,
+            sig: Bytes::from(sig.to_bytes()),
+        };
+        packet.send(&mut tx).await?;
+        _ = tx.finish();
+        Ok(())
+    }
+
     // TODO: make custom error type for relay handling and handle it, supporting io errors from
     // send, unpack etc utils
     fn handle_err(&self, err: &ConnectionError) {
@@ -177,6 +206,17 @@ impl Relay {
     async fn handle(&self, ipk: VerifyingKey) -> ConnectionError {
         let conn = self.connection.as_ref().expect("handle called without active connection");
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
+
+        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
+
+        // Sticky-home auth: hand the relay a one-shot signed permit it can use to
+        // QueueFetch our offline queue from the K-closest homes. Sig is reusable
+        // across all K homes within the ±60s skew window. Best-effort; if it
+        // fails we still proceed with DrainQueue (relay will only be able to
+        // serve its own local queue, falling back to natural TTL convergence).
+        if let Err(err) = self.send_drain_auth(conn, ipk).await {
+            warn!("relay({}) drain-auth send failed: {err}", self.id);
+        }
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 

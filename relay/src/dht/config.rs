@@ -228,6 +228,52 @@ pub const FORWARD_TIMEOUT_MS: u64 = 1500;
 pub const FORWARD_K_MIN: usize = 2;
 
 // ---------------------------------------------------------------------------
+// Sticky-home QueueFetch fan-out (phase 2c)
+// ---------------------------------------------------------------------------
+
+/// Total wall-clock budget for the K-1 (or K) parallel `QueueFetch`
+/// RPCs the recipient relay issues to home relays when this relay is
+/// not in the user's K-closest set (`STICKY_HOME_RELAY.md` §4.3 step 3).
+///
+/// Sized 2× [`FORWARD_TIMEOUT_MS`] (3000 ms vs 1500 ms) because a
+/// single `QueueFetch` can page over multiple round-trips when the
+/// home's queue exceeds [`MAX_FETCH_QUEUE_BATCH`] entries — each page
+/// is one bi-stream + verify + iterator + serialize at the home, so a
+/// 1024-entry user can need 16 pages × 3 homes worst case. The 3 s
+/// cap is the absolute fail-safe; in steady state a typical drain is
+/// 1-2 pages and completes well inside [`FORWARD_TIMEOUT_MS`].
+///
+/// On timeout, the recipient relay treats in-flight homes as "no
+/// response" (best-effort) and still delivers whatever pages
+/// completed. The user can retry the drain — the homes won't have
+/// deleted anything until a `QueueFetchAck` lands (phase 2d).
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.3 step 3 (the K
+/// home-fetch fan-out window).
+pub const QUEUE_FETCH_TIMEOUT_MS: u64 = 3000;
+
+/// Defensive upper bound on the number of pages the recipient relay
+/// will request from a single home in one `fetch_remote_queues` call.
+/// Each page is one round-trip carrying up to
+/// [`crate::storage::MAX_QUEUED_PER_RECIPIENT`] / 16 (=
+/// `MAX_FETCH_QUEUE_BATCH = 64`) dispatches.
+///
+/// The legitimate maximum is `ceil(MAX_QUEUED_PER_RECIPIENT /
+/// MAX_FETCH_QUEUE_BATCH) = ceil(1024 / 64) = 16`. We cap at **10**
+/// because a misbehaving home that never returns `exhausted = true`
+/// would otherwise spin forever — `MAX_FETCH_QUEUE_BATCH * 10 = 640`
+/// dispatches is well past any plausible per-user backlog and far
+/// below the theoretical 1024-entry cap. A user at the cap will see
+/// 10 pages × 64 = 640 messages drained on first reconnect; the
+/// remainder lingers at the home until natural TTL expiry and
+/// becomes ineligible at next reconnect.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.3 — paging
+/// implied by `QueueFetchResp::exhausted`. The bound is a
+/// phase-2c-introduced safety rail and is not on the wire.
+pub const MAX_QUEUE_FETCH_PAGES: usize = 10;
+
+// ---------------------------------------------------------------------------
 // Per-peer inbound-RPC rate limits (§8.4 / §8.7 DoS hardening)
 // ---------------------------------------------------------------------------
 //

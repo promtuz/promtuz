@@ -28,6 +28,7 @@ pub(crate) mod handler;
 pub(crate) mod lookup;
 pub mod metrics;
 pub(crate) mod publish;
+pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
 pub(crate) mod store;
