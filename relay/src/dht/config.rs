@@ -140,6 +140,26 @@ pub const DHT_DOMAIN_PREFIX: &[u8] = b"promtuz-dht-v1";
 /// design-doc: §4.4 (cross-checking, `min_quorum = 2`)
 pub const MIN_QUORUM: usize = 2;
 
+/// Strict-quorum threshold for the iterative `lookup_value` walk. A
+/// `Found` reply is only honoured if at least `LOOKUP_QUORUM` peers
+/// (out of the K-closest contacted) returned an *agreeing* `Found` —
+/// agreement defined as "same `(generation, relay_id)` pair" per §4.4.
+/// Otherwise the iteration treats the lone `Found` as suspect and
+/// returns `NotPresent`.
+///
+/// **Tradeoff documented inline:** a record that was just published
+/// (and only stored on its first replica so far — natural during the
+/// ~30 s anti-entropy window) appears as a 1-hit, K-1 NotPresent
+/// situation here, so a strict quorum returns false-NotPresent for up
+/// to one anti-entropy round. The publishing relay is the canonical
+/// home; any cache that lives there bridges that window. See §6.3.
+///
+/// One-line tunable so the quorum threshold can be loosened in test
+/// clusters without a code edit ripple.
+///
+/// design-doc: §4.4 (Sybil/eclipse mitigation — quorum read).
+pub const LOOKUP_QUORUM: usize = 2;
+
 /// Cap on the number of entries the lookup-result cache holds.
 ///
 /// design-doc: §4.4 (cache for repeat recipients)
@@ -169,6 +189,54 @@ pub const MERKLE_DIFF_PATH_MAX: usize = 4;
 ///
 /// design-doc: §7.3 (`Rate-limit: J caps concurrent FetchRecord to 8`)
 pub const FETCH_RECORD_CONCURRENCY: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Per-peer inbound-RPC rate limits (§8.4 / §8.7 DoS hardening)
+// ---------------------------------------------------------------------------
+//
+// `governor::Quota` is configured `per_second(rate).allow_burst(burst)`.
+// Each RPC-class limiter is keyed on the *requester's* NodeId so a
+// single misbehaving peer can be sanctioned without affecting others.
+//
+// Quota values were picked to leave the legitimate anti-entropy
+// scheduler firing every `ANTI_ENTROPY_INTERVAL_MS = 30_000` ms (§0)
+// well below their thresholds:
+//   - Anti-entropy: ~1 MerkleSummary + ~5 MerkleDiffs per round → ~1
+//     RPC/3s per pair, < CHEAP quota by 100x.
+//   - Cold-join (§7.3): worst-case `FETCH_RECORD_CONCURRENCY = 8`
+//     parallel FetchRecords spread over 1 s. The BULK quota allows 50
+//     in 1 s → 6x headroom.
+//   - Publish (§5.2): 1 Store per replica per record, K = 3 replicas.
+//     Steady state at 100 publishes/s/relay = 100 Stores/s into K
+//     replicas distributed → ~33/s into the busiest one. The EXPENSIVE
+//     quota of 20/s is below this; in steady-state high load the
+//     quota would trip. Tradeoff is acceptable for v1: a publishing
+//     relay sees `RateLimited` from a single overloaded replica and
+//     re-tries via the §5.2 escalation path. Phase 2 telemetry
+//     (§11.4) will revisit.
+
+/// Cheap RPCs (Ping, FindNode, FindValue, MerkleSummary, MerkleDiff):
+/// no on-disk crypto verification and only routing-table reads. Quota
+/// is generous enough to absorb iterative-lookup batches that include
+/// hedged retries (§4.1). Sustained 100 req/s with bursts of 50 means
+/// a steady-state of 50 req/s with one in-flight batch of 50 spikes
+/// not getting flagged.
+pub const RATE_LIMIT_CHEAP_PER_SEC: u32 = 100;
+pub const RATE_LIMIT_CHEAP_BURST: u32 = 50;
+
+/// Expensive verify RPCs (Store, Tombstone). Each triggers Ed25519
+/// signature verification and a synced RocksDB write. Tighter quota
+/// than CHEAP because the per-op cost is ~100 µs of crypto + an fsync;
+/// at 20/s sustained the verify load is 0.2% of one CPU.
+pub const RATE_LIMIT_EXPENSIVE_PER_SEC: u32 = 20;
+pub const RATE_LIMIT_EXPENSIVE_BURST: u32 = 10;
+
+/// Bulk RPCs (FetchRecord). Each request is bounded by
+/// [`FETCH_RECORD_MAX = 64`] entries; sustained 50 req/s × 64 ipks/req
+/// = 3200 record reads/s, which is well within RocksDB's hot-path
+/// ceiling and matches the §7.3 cold-join concurrency budget.
+pub const RATE_LIMIT_BULK_PER_SEC: u32 = 50;
+pub const RATE_LIMIT_BULK_BURST: u32 = 25;
 
 // ---------------------------------------------------------------------------
 // Operator-tunable config (TOML-deserialisable)

@@ -41,10 +41,13 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use common::info;
+use common::warn;
 use rust_rocksdb::IteratorMode;
 use tokio_util::sync::CancellationToken;
 
 use super::Dht;
+use super::bootstrap::BootstrapError;
+use super::bootstrap::bootstrap;
 use super::config;
 use super::store::CF_DHT_PRESENCE;
 
@@ -369,13 +372,16 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
     sync_tick.tick().await;
     evict_tick.tick().await;
 
-    // Bootstrap-retry counter: the spec wants exponential back-off when
-    // the routing table is sparse. Rather than running a separate
-    // bootstrap task we observe the condition once per `sync_tick` and
-    // log the warning — the resolver-side retry itself lands when the
-    // scheduler is re-wired with a `ResolverLinkHandle` (phase 1h+).
+    // Bootstrap-retry state (phase 1h item 5):
+    // - `bootstrap_backoff_ms` doubles after each failed retry, capped
+    //   at `BOOTSTRAP_RETRY_MAX_BACKOFF_MS`.
+    // - `last_bootstrap_attempt_ms` is the wall-clock of the last
+    //   *attempt* (not just warning) — we only retry when the backoff
+    //   window has fully elapsed. Renamed from the phase-1g
+    //   `_warn_ms` because the scheduler now actually drives the
+    //   bootstrap RPC, not just emits a warning.
     let mut bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
-    let mut last_bootstrap_warn_ms: u64 = 0;
+    let mut last_bootstrap_attempt_ms: u64 = 0;
 
     loop {
         tokio::select! {
@@ -389,22 +395,71 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 // expected churn, not a scheduler bug.
                 let _ = rpc::sync_round(dht.clone()).await;
 
-                // Check routing-table density. If it's below the
-                // threshold we log; the actual re-bootstrap call is
-                // wired up in a follow-up dispatch once the scheduler
-                // has access to a `ResolverLinkHandle`.
+                // Bootstrap-retry: when the routing table is sparse,
+                // re-ask the resolver. The handle is `Option`-wrapped
+                // on `Dht` so unit-test fixtures (no resolver link)
+                // skip this branch silently. See `Dht::attach_resolver`.
                 let known = dht.routing.read().total_known();
                 if known < BOOTSTRAP_RETRY_THRESHOLD {
                     let now = now_ms();
-                    if now.saturating_sub(last_bootstrap_warn_ms) >= bootstrap_backoff_ms {
-                        info!(
-                            "DHT scheduler: routing table sparse ({known} < {}); will retry bootstrap (next backoff {}ms)",
-                            BOOTSTRAP_RETRY_THRESHOLD,
-                            bootstrap_backoff_ms,
-                        );
-                        last_bootstrap_warn_ms = now;
-                        bootstrap_backoff_ms =
-                            (bootstrap_backoff_ms * 2).min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
+                    if now.saturating_sub(last_bootstrap_attempt_ms) >= bootstrap_backoff_ms {
+                        last_bootstrap_attempt_ms = now;
+
+                        // Snapshot the resolver handle out of the
+                        // RwLock so the lock isn't held across the
+                        // `await`. The handle itself is cheap to
+                        // clone — internally an `Arc<RwLock<Option<Connection>>>`.
+                        let handle_opt = dht.resolver.read().clone();
+                        match handle_opt {
+                            Some(handle) => {
+                                info!(
+                                    "DHT scheduler: routing table sparse ({known} < {}); retrying bootstrap (backoff {}ms)",
+                                    BOOTSTRAP_RETRY_THRESHOLD,
+                                    bootstrap_backoff_ms,
+                                );
+                                match bootstrap(dht.clone(), handle).await {
+                                    Ok(state) => {
+                                        info!(
+                                            "DHT scheduler: bootstrap retry succeeded (state {state:?}); resetting backoff"
+                                        );
+                                        bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                                    },
+                                    // EmptyRegistry is the legitimate
+                                    // brand-new-network case — log at
+                                    // info, keep backoff at base so a
+                                    // peer joining shortly after lets
+                                    // us re-converge promptly.
+                                    Err(BootstrapError::EmptyRegistry) => {
+                                        info!(
+                                            "DHT scheduler: bootstrap retry got empty registry (new network?); holding base backoff"
+                                        );
+                                        bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                                    },
+                                    Err(e) => {
+                                        warn!(
+                                            "DHT scheduler: bootstrap retry failed: {e}; doubling backoff"
+                                        );
+                                        bootstrap_backoff_ms = (bootstrap_backoff_ms * 2)
+                                            .min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
+                                    },
+                                }
+                            },
+                            None => {
+                                // No resolver handle attached — this
+                                // is the unit-test path, or a relay
+                                // that never wired one in. Same
+                                // behaviour as phase 1g: log once per
+                                // backoff window and double the
+                                // backoff so we don't flood logs.
+                                info!(
+                                    "DHT scheduler: routing table sparse ({known} < {}); no resolver handle attached, skipping retry (next backoff {}ms)",
+                                    BOOTSTRAP_RETRY_THRESHOLD,
+                                    bootstrap_backoff_ms,
+                                );
+                                bootstrap_backoff_ms = (bootstrap_backoff_ms * 2)
+                                    .min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
+                            },
+                        }
                     }
                 } else {
                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;

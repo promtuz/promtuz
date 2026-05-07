@@ -44,6 +44,21 @@ pub struct Metrics {
     // --- peer connection lifecycle (§7.1) ---
     pub peer_conns_opened: AtomicU64,
     pub peer_conns_closed: AtomicU64,
+
+    // --- DoS hardening (phase 1h) ---
+    /// Per-peer rate limit was tripped on an inbound RPC. Bumped once
+    /// per rejected stream — multiple denied calls within one
+    /// connection still bump exactly once before the close.
+    pub rate_limit_rejections: AtomicU64,
+
+    /// Inbound `peer/1` connection rejected because the post-handshake
+    /// TLS-pubkey extraction failed (cert chain absent, malformed
+    /// SPKI, self-sig invalid, or `BLAKE3(spki) != claimed_node_id`).
+    /// Bumped on the dial-side path in `lookup::connect_to_peer` and
+    /// on the inbound path if the cert chain is parseable. See item 1
+    /// in the phase 1h dispatch report for the inbound-path gap
+    /// (peer_identity is `None` under `with_no_client_auth()`).
+    pub cert_pubkey_extraction_failures: AtomicU64,
 }
 
 impl Metrics {
@@ -127,5 +142,15 @@ impl Metrics {
 
     pub fn inc_peer_conns_closed(&self) {
         self.peer_conns_closed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- DoS hardening (phase 1h) ---
+
+    pub fn inc_rate_limit_rejections(&self) {
+        self.rate_limit_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_cert_pubkey_extraction_failures(&self) {
+        self.cert_pubkey_extraction_failures.fetch_add(1, Ordering::Relaxed);
     }
 }

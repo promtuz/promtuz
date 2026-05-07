@@ -105,21 +105,37 @@ pub(crate) fn handle_merkle_diff(dht: &Arc<Dht>, req: MerkleDiff) -> MerkleDiffR
     dht.merkle.read().diff(req.slice_id, &req.path)
 }
 
-/// Handle an inbound `FetchRecord` RPC. Per §2.4.8, returns the
-/// `PresenceRecord` for each requested IPK that we currently hold,
-/// up to [`FETCH_RECORD_MAX`] entries.
+/// Handle an inbound `FetchRecord` RPC. Per §2.4.8 plus the phase 1h
+/// widening: returns *both* live records and tombstones for each
+/// requested IPK that we currently hold, up to [`FETCH_RECORD_MAX`]
+/// entries combined.
+///
+/// **Tombstone preference:** when both a record and a tombstone exist
+/// for the same IPK (which should not normally happen — `store_tombstone`
+/// deletes the record and writes the tombstone in one step) the
+/// tombstone wins. It's the authoritative deletion and the requester
+/// needs it to converge.
+///
+/// design-doc: §6.3 (anti-entropy carries tombstones too).
 pub(crate) fn handle_fetch_record(dht: &Arc<Dht>, req: FetchRecord) -> FetchRecordResp {
     let now = now_ms();
-    let mut records = Vec::with_capacity(req.user_ipks.len().min(FETCH_RECORD_MAX));
+    let mut records = Vec::new();
+    let mut tombstones = Vec::new();
+    let max = FETCH_RECORD_MAX;
     for (i, ipk) in req.user_ipks.iter().enumerate() {
-        if i >= FETCH_RECORD_MAX {
+        if i >= max || records.len() + tombstones.len() >= max {
             break;
+        }
+        // Tombstone first: if present, it's the authoritative state.
+        if let Some(t) = store::lookup_tombstone(dht, &ipk.0) {
+            tombstones.push(t);
+            continue;
         }
         if let Some(rec) = store::lookup_record(dht, &ipk.0, now) {
             records.push(rec);
         }
     }
-    FetchRecordResp { records }
+    FetchRecordResp { records, tombstones }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +360,13 @@ fn diff_leaves(
 }
 
 /// Issue `FetchRecord` against `peer` for a list of IPKs and apply each
-/// returned record via [`store::store_record`]. Caps the request size
-/// at [`MAX_FETCH_RECORD_BATCH`]; longer lists are split across
-/// multiple RPCs.
+/// returned record / tombstone. Caps the request size at
+/// [`MAX_FETCH_RECORD_BATCH`]; longer lists are split across multiple
+/// RPCs.
+///
+/// design-doc: §6.3 — anti-entropy carries both records and tombstones,
+/// so deletions converge even when a peer's view of `(ipk → state)`
+/// differs only by record-vs-tombstone, not record-vs-record.
 async fn fetch_and_apply(
     dht: &Arc<Dht>, conn: &Connection, ipks: &[[u8; 32]],
 ) -> Result<(), anyhow::Error> {
@@ -355,8 +375,8 @@ async fn fetch_and_apply(
             user_ipks: chunk.iter().map(|b| (*b).into()).collect(),
         });
         let resp = rpc_one(conn, req).await?;
-        let records = match resp {
-            DhtResponse::FetchRecord(r) => r.records,
+        let (records, tombstones) = match resp {
+            DhtResponse::FetchRecord(r) => (r.records, r.tombstones),
             other => {
                 return Err(anyhow::anyhow!(
                     "fetch_and_apply: expected FetchRecord response, got {other:?}"
@@ -369,6 +389,11 @@ async fn fetch_and_apply(
             // We don't surface its outcome to the scheduler — it's
             // logged via metrics on the store path.
             let _ = store::store_record(dht, rec, now);
+        }
+        for tomb in tombstones {
+            // Same conflict-resolution discipline applies on the
+            // tombstone side via `store_tombstone`.
+            let _ = store::store_tombstone(dht, tomb, now);
         }
     }
     Ok(())
@@ -713,9 +738,146 @@ mod tests {
     }
 
     #[test]
+    fn handle_fetch_record_returns_tombstones_for_known_ipks() {
+        // Phase 1h, item 6: `FetchRecord` reply now carries both
+        // records and tombstones. A peer that holds a tombstone for
+        // `ipk` returns it under `tombstones`, not `records`.
+        let user = fresh_signing_key();
+        let relay = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let now = wall_clock_ms();
+        // Build & store a record, then tombstone it.
+        let rec = build_record(&user, &relay, 1, now, 600_000);
+        assert_eq!(
+            store::store_record(&dht, rec.clone(), now + 1),
+            StoreOutcome::Stored
+        );
+        let user_ipk: [u8; 32] = rec.user_ipk.0;
+        let relay_pubkey: [u8; 32] = relay.verifying_key().to_bytes();
+        let relay_id = NodeId::new(relay_pubkey);
+        let msg = common::proto::dht_p2p::tombstone_signing_input(
+            &user_ipk, &relay_id, &relay_pubkey, 1, now,
+        );
+        let tomb_sig = relay.sign(&msg);
+        let tomb = common::proto::dht_p2p::TombstoneRecord {
+            user_ipk:     user_ipk.into(),
+            relay_id,
+            relay_pubkey: relay_pubkey.into(),
+            generation:   1,
+            deleted_at:   now,
+            relay_sig:    tomb_sig.to_bytes().into(),
+        };
+        assert_eq!(
+            store::store_tombstone(&dht, tomb.clone(), now),
+            common::proto::dht_p2p::TombstoneOutcome::Stored
+        );
+
+        let resp = handle_fetch_record(
+            &dht,
+            FetchRecord { user_ipks: vec![user_ipk.into()] },
+        );
+        // No live record (tombstone supersedes it at store time).
+        assert_eq!(resp.records.len(), 0);
+        // Exactly one tombstone returned.
+        assert_eq!(resp.tombstones.len(), 1);
+        assert_eq!(resp.tombstones[0].generation, 1);
+        assert_eq!(resp.tombstones[0].user_ipk.0, user_ipk);
+    }
+
+    #[test]
+    fn fetch_record_carries_tombstone_to_peer_with_record() {
+        // Phase 1h, item 6 — anti-entropy convergence test.
+        // Simulate the §6.3 sequence directly:
+        // - dht_a holds a tombstone for `(user, gen 1)`.
+        // - dht_b holds the live record for same `(user, gen 1)`.
+        // - dht_b would (in the real flow) call `handle_fetch_record`
+        //   on dht_a; we invoke the handler directly.
+        // - Apply the response back into dht_b via `store_tombstone`.
+        // - Verify dht_b now has the tombstone, not the record.
+        let user = fresh_signing_key();
+        let relay = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht_a = fresh_dht(self_id);
+        let dht_b = fresh_dht(self_id);
+
+        let now = wall_clock_ms();
+        let rec = build_record(&user, &relay, 1, now, 600_000);
+
+        // dht_b has the live record.
+        assert_eq!(
+            store::store_record(&dht_b, rec.clone(), now + 1),
+            StoreOutcome::Stored
+        );
+
+        // dht_a tombstones the same key.
+        let user_ipk: [u8; 32] = rec.user_ipk.0;
+        let relay_pubkey: [u8; 32] = relay.verifying_key().to_bytes();
+        let relay_id = NodeId::new(relay_pubkey);
+        let msg = common::proto::dht_p2p::tombstone_signing_input(
+            &user_ipk, &relay_id, &relay_pubkey, 1, now + 100,
+        );
+        let tomb_sig = relay.sign(&msg);
+        let tomb = common::proto::dht_p2p::TombstoneRecord {
+            user_ipk:     user_ipk.into(),
+            relay_id,
+            relay_pubkey: relay_pubkey.into(),
+            generation:   1,
+            deleted_at:   now + 100,
+            relay_sig:    tomb_sig.to_bytes().into(),
+        };
+        assert_eq!(
+            store::store_tombstone(&dht_a, tomb.clone(), now + 100),
+            common::proto::dht_p2p::TombstoneOutcome::Stored
+        );
+
+        // Sanity: dht_b's Merkle root for this slice differs from
+        // dht_a's (record-leaf vs tombstone-leaf domain tags).
+        let user_slice = user_ipk[0];
+        assert_ne!(
+            dht_a.merkle.read().root(user_slice),
+            dht_b.merkle.read().root(user_slice),
+        );
+
+        // Simulated FetchRecord: dht_b asks dht_a for `user_ipk`. The
+        // handler returns the tombstone in `tombstones`, not the
+        // record in `records`.
+        let resp = handle_fetch_record(
+            &dht_a,
+            FetchRecord { user_ipks: vec![user_ipk.into()] },
+        );
+        assert!(resp.records.is_empty());
+        assert_eq!(resp.tombstones.len(), 1);
+
+        // dht_b applies the tombstone — same conflict resolution that
+        // `fetch_and_apply` would use.
+        let outcome = store::store_tombstone(
+            &dht_b,
+            resp.tombstones[0].clone(),
+            now + 100,
+        );
+        assert_eq!(
+            outcome,
+            common::proto::dht_p2p::TombstoneOutcome::Stored
+        );
+
+        // dht_b now has the tombstone, no live record. The two
+        // relays' Merkle roots converge.
+        assert!(store::lookup_record(&dht_b, &user_ipk, now + 100).is_none());
+        assert!(store::lookup_tombstone(&dht_b, &user_ipk).is_some());
+        assert_eq!(
+            dht_a.merkle.read().root(user_slice),
+            dht_b.merkle.read().root(user_slice),
+        );
+    }
+
+    #[test]
     fn handle_fetch_record_caps_response_length() {
         // Build FETCH_RECORD_MAX + 5 records and request all of them in
-        // one call — handler must cap at FETCH_RECORD_MAX.
+        // one call — handler must cap the *combined* (records +
+        // tombstones) response at FETCH_RECORD_MAX (phase 1h item 6
+        // widening).
         let relay = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
         let dht = fresh_dht(self_id);
@@ -733,6 +895,6 @@ mod tests {
         }
 
         let resp = handle_fetch_record(&dht, FetchRecord { user_ipks: all_ipks });
-        assert!(resp.records.len() <= FETCH_RECORD_MAX);
+        assert!(resp.records.len() + resp.tombstones.len() <= FETCH_RECORD_MAX);
     }
 }

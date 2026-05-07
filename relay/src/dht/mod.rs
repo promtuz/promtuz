@@ -27,9 +27,11 @@ pub(crate) mod handler;
 pub(crate) mod lookup;
 pub mod metrics;
 pub(crate) mod publish;
+pub(crate) mod rate_limit;
 pub(crate) mod routing;
 pub(crate) mod store;
 pub(crate) mod sync;
+pub(crate) mod tls_extract;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +48,8 @@ use quinn::Endpoint;
 use rust_rocksdb::ColumnFamilyDescriptor;
 use rust_rocksdb::DB as RocksDB;
 use rust_rocksdb::Options;
+
+use crate::quic::resolver_link::ResolverLinkHandle;
 
 pub use config::DhtConfig;
 
@@ -102,7 +106,41 @@ pub struct Dht {
 
     /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
     /// reference held here; routing-table entries hold a `Weak` (§1.3).
-    pub(crate) peer_conns: RwLock<HashMap<NodeId, Connection>>,
+    ///
+    /// **Phase 1h, item 1 — verified TLS pubkey caching.** The value is a
+    /// `(Connection, [u8; 32])` tuple where the second element is the
+    /// peer's Ed25519 cert SPKI extracted post-handshake from
+    /// `connection.peer_identity()`. The relay-side TLS verifier ALSO
+    /// checks `BLAKE3(spki) == claimed_node_id` (defense-in-depth) at
+    /// dial time; a mismatch closes the connection with
+    /// `CloseReason::DhtMalformedKey` before the entry is cached. See
+    /// `dht::lookup::connect_to_peer` and `dht::handler::handle_peer_connection`
+    /// for the two callsite paths.
+    ///
+    /// Inbound (server-side) entries do *not* populate the pubkey
+    /// because the relay's QUIC server config currently uses
+    /// `with_no_client_auth()` — clients (peer dialers) do not present
+    /// certs during the handshake, so `peer_identity()` returns `None`.
+    /// In that case we cache the connection with `[0u8; 32]` and rely
+    /// on outbound dials (and `NodeDescriptor.pubkey` in
+    /// `FindNode`/`FindValue` responses) to backfill the verified
+    /// pubkey before any cert-pinning consumer reads it. This gap is
+    /// documented as a follow-up; closing it requires enabling mTLS
+    /// on `peer/1`, which lives in `common/src/quic/config.rs` and
+    /// is out of scope for this dispatch.
+    pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
+
+    /// Resolver session handle for the bootstrap-retry path (phase 1h
+    /// item 5). Wired in after `Dht::new` via [`Self::attach_resolver`]
+    /// because `ResolverLinkHandle` is a relay-side type that can't
+    /// be passed through the constructor without a circular import
+    /// (this module is reachable from `relay/src/relay/mod.rs`).
+    ///
+    /// `None` in unit-test fixtures (`fresh_dht`) and in legacy
+    /// configs where the DHT runs without a resolver link. The
+    /// scheduler's bootstrap-retry branch checks `Option` and degrades
+    /// to "log the warning, do nothing" when absent.
+    pub(crate) resolver: parking_lot::RwLock<Option<ResolverLinkHandle>>,
 
     /// This relay's NodeId — `BLAKE3(NodeKey)` (§0).
     pub node_id: NodeId,
@@ -131,6 +169,15 @@ pub struct Dht {
     /// to dial outbound DHT peer connections. Same `Option` rationale
     /// as [`endpoint`].
     pub(crate) peer_client_cfg: Option<Arc<ClientConfig>>,
+
+    /// Per-peer inbound-RPC rate limiters (phase 1h item 2). One
+    /// `governor::RateLimiter` per RPC class (cheap / expensive /
+    /// bulk), keyed on the requester's `NodeId`. The default keyed
+    /// state store evicts idle peers automatically so a churn-heavy
+    /// workload doesn't grow the limiters unboundedly. Shared
+    /// reference because the dispatcher in `handler.rs` checks the
+    /// limiter on every inbound stream.
+    pub(crate) rate_limiters: rate_limit::PerPeerLimiters,
 }
 
 impl Dht {
@@ -169,12 +216,14 @@ impl Dht {
             merkle: RwLock::new(MerkleState::empty()),
             cache: Mutex::new(LookupCache::empty()),
             peer_conns: RwLock::new(HashMap::new()),
+            resolver: parking_lot::RwLock::new(None),
             node_id,
             signing_key,
             cfg,
             metrics: Metrics::new(),
             endpoint: None,
             peer_client_cfg: None,
+            rate_limiters: rate_limit::PerPeerLimiters::new(),
         })
     }
 
@@ -185,6 +234,21 @@ impl Dht {
     pub fn attach_dialer(&mut self, endpoint: Endpoint, peer_client_cfg: Arc<ClientConfig>) {
         self.endpoint = Some(endpoint);
         self.peer_client_cfg = Some(peer_client_cfg);
+    }
+
+    /// Wire the resolver-session handle for the bootstrap-retry path
+    /// (phase 1h item 5). Called by `relay/src/main.rs` after
+    /// `ResolverLink::new` produces its `client_handle`.
+    ///
+    /// Idempotent: a second call replaces the cached handle. The
+    /// scheduler reads `dht.resolver.read().clone()` on each tick so
+    /// the swap is visible to the next bootstrap-retry attempt.
+    ///
+    /// Takes `&self` (not `&mut self`) so the call-site can pass an
+    /// `Arc<Dht>` without unwrapping — the field is interior-mutable
+    /// behind a `parking_lot::RwLock`.
+    pub fn attach_resolver(&self, handle: ResolverLinkHandle) {
+        *self.resolver.write() = Some(handle);
     }
 
     /// Close every cached peer connection and clear the map. Called by
@@ -199,7 +263,7 @@ impl Dht {
         // (synchronous, but still capability-effecting) close calls.
         let conns: Vec<Connection> = {
             let mut guard = self.peer_conns.write();
-            guard.drain().map(|(_, c)| c).collect()
+            guard.drain().map(|(_, (c, _pk))| c).collect()
         };
         for conn in conns {
             CloseReason::ShuttingDown.close(&conn);

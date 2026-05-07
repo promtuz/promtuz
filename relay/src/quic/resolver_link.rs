@@ -87,7 +87,7 @@ impl BackoffConfig {
 /// jitter — implemented in phase 1g).
 ///
 /// Cheap to clone: just the `Arc<RwLock<Option<Connection>>>` inside.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResolverLinkHandle {
     /// Current resolver connection, if a session is live. Written by
     /// `ResolverLink::run_session` on connect/disconnect. The

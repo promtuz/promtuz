@@ -51,7 +51,6 @@ use common::proto::dht_p2p::PresenceRecord;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
-use common::warn;
 use quinn::Connection;
 use thiserror::Error;
 use tokio::time::timeout;
@@ -61,6 +60,7 @@ use super::config::ALPHA;
 use super::config::K;
 use super::config::LOOKUP_HEDGE_MS;
 use super::config::LOOKUP_MAX_HOPS;
+use super::config::LOOKUP_QUORUM;
 use super::config::LOOKUP_RPC_TIMEOUT_MS;
 
 // ---------------------------------------------------------------------------
@@ -139,10 +139,22 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 // Connection management
 // ---------------------------------------------------------------------------
 
-/// Open (or reuse) a QUIC connection to `peer`. Cached in `dht.peer_conns`.
+/// Open (or reuse) a QUIC connection to `peer`. Cached in `dht.peer_conns`
+/// alongside the verified Ed25519 cert pubkey extracted post-handshake.
 ///
 /// On any cached-but-dead connection, we evict and re-dial. Drops are
 /// cheap because the inner `quinn::Connection` is `Arc`-shared internally.
+///
+/// **Phase 1h, item 1 — TLS pubkey check:** after the handshake
+/// completes, we extract the server's leaf-cert SPKI via
+/// [`crate::dht::tls_extract::extract_and_verify_pubkey`] and
+/// **reject** the connection if `BLAKE3(spki) != peer.id`. The TLS
+/// layer already validated the cert chain against the configured root
+/// CA; this post-handshake check is defense-in-depth for the
+/// (hypothetical) scenario where a CA mints a cert whose SPKI does
+/// not match the relay's NodeId. On rejection we close with
+/// `CloseReason::DhtMalformedKey` and bump
+/// `metrics.cert_pubkey_extraction_failures`.
 ///
 /// Visible to the rest of `dht/` (notably `publish.rs`) so the cache +
 /// dial path is shared rather than duplicated.
@@ -150,21 +162,12 @@ pub(crate) async fn connect_to_peer(
     dht: &Arc<Dht>, peer: &NodeDescriptor,
 ) -> anyhow::Result<Connection> {
     // Fast path: hit the cache.
-    if let Some(conn) = dht.peer_conns.read().get(&peer.id).cloned() {
-        // If the cached connection is dead, fall through to reconnect.
+    if let Some((conn, _pk)) = dht.peer_conns.read().get(&peer.id).cloned() {
         if conn.close_reason().is_none() {
             return Ok(conn);
         }
     }
 
-    // Slow path: open a fresh QUIC connection using the dialer machinery
-    // wired up in `Dht::attach_dialer`. The `peer_client_cfg` carries
-    // ALPN `peer/1` so the responder routes us into the DHT handler.
-    //
-    // The `Option<...>` shape on `endpoint`/`peer_client_cfg` exists so
-    // the unit tests can build a `Dht` without a live QUIC stack — in
-    // those tests, `connect_to_peer` is never reached. In production,
-    // `Relay::new` always calls `attach_dialer`.
     let endpoint = match dht.endpoint.as_ref() {
         Some(ep) => ep.clone(),
         None => return Err(anyhow::anyhow!("DHT has no endpoint configured")),
@@ -174,12 +177,27 @@ pub(crate) async fn connect_to_peer(
         None => return Err(anyhow::anyhow!("DHT has no peer_client_cfg configured")),
     };
 
-    // SNI string: the peer's NodeId (base32-encoded). The relay's TLS
-    // certs use the NodeId as the SNI/CN per `common/src/bin/certgen.rs`.
     let sni = peer.id.to_string();
     let conn = endpoint
         .connect_with(client_cfg.as_ref().clone(), peer.addr, &sni)?
         .await?;
+
+    // Post-handshake cert-pubkey extraction + binding check (item 1).
+    let verified_pubkey = match crate::dht::tls_extract::extract_and_verify_pubkey(&conn, &peer.id) {
+        Ok(pk) => pk,
+        Err(e) => {
+            dht.metrics.inc_cert_pubkey_extraction_failures();
+            common::warn!(
+                "DHT connect_to_peer: post-handshake pubkey extraction failed for {}: {e}",
+                peer.id
+            );
+            common::quic::CloseReason::DhtMalformedKey.close(&conn);
+            return Err(anyhow::anyhow!(
+                "post-handshake pubkey check failed for {}: {e}",
+                peer.id
+            ));
+        }
+    };
 
     // Cache. Race: another task may have raced ahead with a connection
     // to the same peer; if so, drop the loser. Both `Connection`s are
@@ -187,12 +205,12 @@ pub(crate) async fn connect_to_peer(
     // *which* one future calls reuse.
     {
         let mut conns = dht.peer_conns.write();
-        if let Some(existing) = conns.get(&peer.id).cloned() {
+        if let Some((existing, _)) = conns.get(&peer.id).cloned() {
             if existing.close_reason().is_none() {
                 return Ok(existing);
             }
         }
-        conns.insert(peer.id, conn.clone());
+        conns.insert(peer.id, (conn.clone(), verified_pubkey));
     }
     dht.metrics.inc_peer_conns_opened();
     Ok(conn)
@@ -290,7 +308,7 @@ pub(crate) async fn lookup_node(
             Ok(closest_so_far.into_iter().take(K).map(|c| c.desc).collect())
         }
         Err(IterError::ValueFound(_)) => {
-            // Cannot happen — value lookup is disabled for this call.
+            // Cannot happen — `lookup_node` sends `FindNode` only.
             unreachable!("FindNode walk surfaced a ValueFound branch")
         }
         Err(IterError::Lookup(e)) => {
@@ -309,16 +327,30 @@ pub(crate) async fn lookup_node(
 /// Same structure as `lookup_node` but each hop sends `FindValue` and
 /// honours `Found` / `NotPresent` / `Closer` per §4.2.
 ///
-/// Quorum behaviour:
-/// - The first `Found(record)` ends the iteration immediately and is
-///   returned (§4.2 — "return the record up the lookup stack").
-/// - If we've queried K peers and none returned `Found`, the result is
-///   `NotPresent` (§4.4 cross-check: K-of-K NotPresent => authoritative).
-/// - **§4.4 sybil/eclipse mitigation:** if we collected at least 1 hit
-///   alongside K-1 `NotPresent`, this *could* be honest (record was
-///   just published) or hostile (eclipse). For v1 we log a warning and
-///   prefer the `Found` reply; phase 1h hardens with a quorum-of-2
-///   policy.
+/// **Quorum behaviour (phase 1h, item 3 — §4.4 sybil/eclipse mitigation):**
+///
+/// - Continue iterating even after a `Found` reply arrives — collect
+///   replies from all K-closest peers (or as many as respond before
+///   the deadline / max-hop bound).
+/// - When the iteration terminates, hand the collected replies to
+///   [`decide_lookup_outcome`], which returns `Found` only if at least
+///   [`LOOKUP_QUORUM`] peers agree on `(generation, relay_id)`.
+///   Otherwise return `NotPresent` even if a single peer claimed
+///   `Found` — the lone-hit scenario is treated as a likely eclipse
+///   attempt rather than trusted blindly.
+/// - Among the `Found` replies that exceed quorum, the highest
+///   `(generation, not_before, relay_id)` wins per the canonical
+///   ordering on `PresenceRecord::compare` (§5.3).
+///
+/// **Tradeoff:** a record JUST published — and therefore stored only
+/// on its first replica so far, before anti-entropy has propagated —
+/// triggers the lone-hit path and returns `NotPresent` for up to one
+/// `ANTI_ENTROPY_INTERVAL_MS` window (§0 = 30 s). The publishing
+/// relay is the canonical home and any follow-up Dispatch into it
+/// succeeds via the local-first short-circuit; lookups from other
+/// relays see `NotPresent` until anti-entropy spreads the record.
+/// Phase 2 telemetry (§11.4) will determine whether this window
+/// causes user-visible delivery delays in practice.
 ///
 /// design-doc: §4.2, §4.4.
 pub(crate) async fn lookup_value(
@@ -355,7 +387,12 @@ pub(crate) async fn lookup_value(
     let deadline = Instant::now() + Duration::from_millis(LOOKUP_RPC_TIMEOUT_MS);
     let mut hops: u32 = 0;
 
-    let res = run_iterative_loop(
+    // Collected replies for the quorum decision. We accumulate here
+    // (rather than aborting on the first Found, like `lookup_node`)
+    // so the §4.4 cross-check can run on a complete picture.
+    let mut value_replies: Vec<ValueReply> = Vec::new();
+
+    let res = run_iterative_loop_value(
         &dht,
         &user_ipk,
         &mut candidates,
@@ -363,22 +400,17 @@ pub(crate) async fn lookup_value(
         &mut closest_so_far,
         &mut hops,
         deadline,
-        true, // is_value_lookup = true
+        &mut value_replies,
     )
     .await;
 
     match res {
         Ok(()) => {
-            // Walk completed without surfacing a `Found`. K closest
-            // (or what we could reach) all said `NotPresent`/`Closer`.
+            // The walk converged — apply the quorum decision.
             dht.metrics.inc_lookups_succeeded();
-            Ok(FindValueOutcome::NotPresent)
+            Ok(decide_lookup_outcome(value_replies))
         }
-        Err(IterError::ValueFound(record)) => {
-            dht.metrics.inc_lookups_succeeded();
-            Ok(FindValueOutcome::Found(*record))
-        }
-        Err(IterError::Lookup(e)) => {
+        Err(e) => {
             dht.metrics.inc_lookups_failed();
             Err(e)
         }
@@ -391,31 +423,33 @@ pub(crate) async fn lookup_value(
 
 /// Internal control-flow error from `run_iterative_loop`. Splits the
 /// "caller-visible failure" from the "found-the-value, exit early"
-/// signal so `lookup_value` can return on the first hit without doing
-/// extra hops.
+/// signal — the latter is only used by `lookup_node`'s shape; the
+/// value-lookup path uses a separate driver that accumulates replies
+/// for the quorum decision (`run_iterative_loop_value`).
 enum IterError {
-    /// A `Found(record)` arrived during a value lookup; abort the loop
-    /// and ship this record back to the caller.
+    /// A `Found(record)` arrived during a node lookup. Cannot occur in
+    /// practice — node lookups never see `FindValueFound` results
+    /// because they send `FindNode`, not `FindValue`. Kept as a
+    /// hard-unreachable on the code side for clarity.
     ValueFound(Box<PresenceRecord>),
     /// A genuine lookup failure (timeout, max-hops, etc.).
     Lookup(LookupError),
 }
 
-/// Drive the α-parallel iterative loop with hedging. Used by both
-/// `lookup_node` (with `is_value_lookup = false`) and `lookup_value`
-/// (with `is_value_lookup = true`).
+/// Drive the α-parallel iterative loop with hedging. Used by
+/// `lookup_node`. The value-lookup variant (`lookup_value`) uses
+/// [`run_iterative_loop_value`] which accumulates `Found` replies for
+/// the §4.4 quorum decision.
 ///
-/// Returns `Ok(())` when the walk converged peacefully (closest_so_far
-/// is now populated), `Err(IterError::ValueFound)` for an early-exit
-/// value hit, or `Err(IterError::Lookup(_))` for failures.
+/// Returns `Ok(())` when the walk converged peacefully
+/// (`closest_so_far` is now populated), `Err(IterError::Lookup(_))` for
+/// failures.
 async fn run_iterative_loop(
     dht: &Arc<Dht>, target: &[u8; 32], candidates: &mut Vec<Candidate>,
     queried: &mut HashSet<NodeId>, closest_so_far: &mut Vec<Candidate>, hops: &mut u32,
     deadline: Instant, is_value_lookup: bool,
 ) -> Result<(), IterError> {
     use tokio::task::JoinSet;
-
-    let mut not_present_count: usize = 0;
 
     loop {
         if Instant::now() >= deadline {
@@ -440,8 +474,7 @@ async fn run_iterative_loop(
             return Ok(());
         }
 
-        // 2. Fire α requests in parallel. Each is bounded by the
-        //    `LOOKUP_HEDGE_MS` (per-hop hedging) and the overall deadline.
+        // 2. Fire α requests in parallel.
         let mut set: JoinSet<RpcResult> = JoinSet::new();
         for desc in batch.iter() {
             queried.insert(desc.id);
@@ -454,38 +487,19 @@ async fn run_iterative_loop(
             });
         }
 
-        // 3. Drain results. The first reply that arrives unblocks the
-        //    next batch; later replies still inform `closest_so_far`.
-        //
-        // Control flow:
-        // - Keep calling `set.join_next()` to harvest replies.
-        // - The whole drain is bounded by `deadline`; if we've already
-        //   got `>=1` reply we additionally bound subsequent waits by
-        //   `LOOKUP_HEDGE_MS` so the next batch can fire (the hedging
-        //   that §4.1 paragraph 2 describes).
         let hedge_window = Duration::from_millis(LOOKUP_HEDGE_MS);
         let mut got_one = false;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                // Out of overall budget. Abort outstanding tasks and
-                // surface the timeout.
                 set.abort_all();
                 return Err(IterError::Lookup(LookupError::Timeout));
             }
-            // Smaller of: hedge window if we already got something, or
-            // the remaining wall-clock budget.
             let wait = if got_one { hedge_window.min(remaining) } else { remaining };
 
             let joined = match timeout(wait, set.join_next()).await {
                 Ok(j) => j,
                 Err(_) => {
-                    // Hit the wait window without a new reply. If
-                    // we've already harvested at least one, leave the
-                    // outstanding tasks running and break to fire the
-                    // next batch (the hedging behaviour). Otherwise
-                    // we're still waiting on the very first reply and
-                    // the next loop iter will re-check the deadline.
                     if got_one {
                         break;
                     } else {
@@ -494,69 +508,241 @@ async fn run_iterative_loop(
                 }
             };
             let Some(task_result) = joined else {
-                // No more in-flight tasks — break to advance the loop.
                 break;
             };
             let result = match task_result {
                 Ok(r) => r,
-                Err(_join) => continue, // task panicked / was aborted
+                Err(_join) => continue,
             };
             got_one = true;
             match result {
                 RpcResult::FindNodeReply(closer) => {
                     integrate_descriptors(target, candidates, &closer);
                 }
-                RpcResult::FindValueClose(closer) => {
-                    integrate_descriptors(target, candidates, &closer);
+                RpcResult::FindValueClose(_)
+                | RpcResult::FindValueFound(_)
+                | RpcResult::FindValueNotPresent => {
+                    // Should not occur — `lookup_node` sends FindNode
+                    // exclusively, so the responder cannot return any
+                    // FindValue variant. Defensive: ignore.
                 }
-                RpcResult::FindValueFound(record) => {
-                    // Eclipse mitigation per §4.4: if we *already*
-                    // observed K-1 NotPresent and now get a Found,
-                    // log a warning. Otherwise the Found is the
-                    // canonical answer.
-                    if not_present_count >= K.saturating_sub(1) {
-                        warn!(
-                            "DHT lookup_value: {} NotPresent + 1 Found — possible eclipse \
-                             attempt, continuing with the Found reply",
-                            not_present_count
-                        );
-                    }
-                    set.abort_all();
-                    return Err(IterError::ValueFound(Box::new(record)));
-                }
-                RpcResult::FindValueNotPresent => {
-                    not_present_count += 1;
-                }
-                RpcResult::Failed => {
-                    // Peer error — fold silently. The peer remains in
-                    // `queried` so we don't re-try it within this
-                    // walk; routing-table-level eviction handles
-                    // permanent failures.
-                }
+                RpcResult::Failed => {}
             }
         }
 
         *hops += 1;
-
-        // 4. Update `closest_so_far` from the candidate pool.
         candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
         closest_so_far.clear();
         for c in candidates.iter().take(K) {
             closest_so_far.push(c.clone());
         }
-
-        // 5. Termination: if no unqueried peer is closer than the
-        //    farthest entry in closest_so_far, we're done.
         let farthest = closest_so_far.last().map(|c| c.distance);
         let any_closer_unqueried = candidates.iter().any(|c| {
             !queried.contains(&c.desc.id)
                 && farthest.map(|f| c.distance < f).unwrap_or(true)
         });
         if !any_closer_unqueried {
-            // No peer not-yet-queried is closer than the K-th best —
-            // standard Kademlia termination per §4.3 case (1)/(2).
             return Ok(());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Value-lookup driver (§4.4 quorum)
+// ---------------------------------------------------------------------------
+
+/// One peer's reply to a `FindValue` issued during the iterative walk.
+/// The collection of these is fed into [`decide_lookup_outcome`] for
+/// the §4.4 sybil/eclipse-mitigation quorum decision.
+#[derive(Debug, Clone)]
+pub(crate) enum ValueReply {
+    /// Peer claimed it has the record. Carried so the quorum can
+    /// compare `(generation, relay_id)` across replies.
+    Found(PresenceRecord),
+    /// Peer is in the k-closest but reports no record.
+    NotPresent,
+}
+
+/// Drive the α-parallel iterative loop for `lookup_value`, accumulating
+/// `Found`/`NotPresent` replies in `replies` for the eventual quorum
+/// decision. Termination matches the standard Kademlia rule (§4.3) but
+/// **does not short-circuit on a `Found`** — every peer that responds
+/// before the deadline contributes to the decision.
+async fn run_iterative_loop_value(
+    dht: &Arc<Dht>, target: &[u8; 32], candidates: &mut Vec<Candidate>,
+    queried: &mut HashSet<NodeId>, closest_so_far: &mut Vec<Candidate>, hops: &mut u32,
+    deadline: Instant, replies: &mut Vec<ValueReply>,
+) -> Result<(), LookupError> {
+    use tokio::task::JoinSet;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(LookupError::Timeout);
+        }
+        if *hops >= LOOKUP_MAX_HOPS {
+            return Err(LookupError::MaxHopsExceeded);
+        }
+
+        let mut batch: Vec<NodeDescriptor> = Vec::with_capacity(ALPHA);
+        for c in candidates.iter() {
+            if !queried.contains(&c.desc.id) {
+                batch.push(c.desc.clone());
+                if batch.len() >= ALPHA {
+                    break;
+                }
+            }
+        }
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let mut set: JoinSet<RpcResult> = JoinSet::new();
+        for desc in batch.iter() {
+            queried.insert(desc.id);
+            let dht_ref = dht.clone();
+            let desc_clone = desc.clone();
+            let target_arr = *target;
+            set.spawn(async move {
+                send_one_hop(&dht_ref, desc_clone, target_arr, true).await
+            });
+        }
+
+        let hedge_window = Duration::from_millis(LOOKUP_HEDGE_MS);
+        let mut got_one = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                set.abort_all();
+                return Err(LookupError::Timeout);
+            }
+            let wait = if got_one { hedge_window.min(remaining) } else { remaining };
+            let joined = match timeout(wait, set.join_next()).await {
+                Ok(j) => j,
+                Err(_) => {
+                    if got_one {
+                        break;
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            let Some(task_result) = joined else {
+                break;
+            };
+            let result = match task_result {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            got_one = true;
+            match result {
+                RpcResult::FindValueClose(closer)
+                | RpcResult::FindNodeReply(closer) => {
+                    integrate_descriptors(target, candidates, &closer);
+                }
+                RpcResult::FindValueFound(record) => {
+                    replies.push(ValueReply::Found(record));
+                }
+                RpcResult::FindValueNotPresent => {
+                    replies.push(ValueReply::NotPresent);
+                }
+                RpcResult::Failed => {}
+            }
+        }
+
+        *hops += 1;
+        candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+        closest_so_far.clear();
+        for c in candidates.iter().take(K) {
+            closest_so_far.push(c.clone());
+        }
+        let farthest = closest_so_far.last().map(|c| c.distance);
+        let any_closer_unqueried = candidates.iter().any(|c| {
+            !queried.contains(&c.desc.id)
+                && farthest.map(|f| c.distance < f).unwrap_or(true)
+        });
+        if !any_closer_unqueried {
+            return Ok(());
+        }
+    }
+}
+
+/// Pure §4.4 quorum decision. Extracted from `lookup_value` so it can
+/// be unit-tested without a network stack.
+///
+/// Decision rules:
+/// 1. Group `Found` replies by `(generation, relay_id)`. Among groups
+///    of size `>= LOOKUP_QUORUM`, pick the one whose record wins the
+///    canonical §5.3 ordering (`PresenceRecord::compare`).
+/// 2. If no group reaches quorum, return `NotPresent` — even if a
+///    single peer claimed `Found`. The lone-hit scenario is the
+///    eclipse threat described in §4.4.
+///
+/// design-doc: §4.4 (Sybil/eclipse mitigation).
+pub(crate) fn decide_lookup_outcome(replies: Vec<ValueReply>) -> FindValueOutcome {
+    if replies.is_empty() {
+        return FindValueOutcome::NotPresent;
+    }
+
+    // Group `Found` replies by their (generation, relay_id) pair —
+    // the §4.4 "agreement" definition. We keep the *highest* record
+    // (by §5.3 compare) within each group so two peers with the same
+    // generation but slightly different `not_before` republish times
+    // still cluster together (the higher `not_before` wins inside
+    // the group, which converges to the same canonical answer).
+    use std::collections::HashMap;
+    let mut groups: HashMap<(u64, common::proto::RelayId), Vec<PresenceRecord>> = HashMap::new();
+    let mut not_present_count = 0usize;
+    for r in replies {
+        match r {
+            ValueReply::Found(rec) => {
+                let key = (rec.generation, rec.relay_id);
+                groups.entry(key).or_default().push(rec);
+            }
+            ValueReply::NotPresent => not_present_count += 1,
+        }
+    }
+
+    // Pick the largest group that reaches quorum. Ties between groups
+    // of equal size break by the §5.3 ordering on the group's
+    // canonical record, so two relays that disagree on the exact
+    // record produce the same deterministic winner across all
+    // observers.
+    let mut quorum_winner: Option<PresenceRecord> = None;
+    let mut winner_group_size: usize = 0;
+    for (_key, recs) in groups.into_iter() {
+        let count = recs.len();
+        if count < LOOKUP_QUORUM {
+            continue;
+        }
+        // Pick the canonical winner inside the group via
+        // `PresenceRecord::compare` (§5.3).
+        let mut best = recs[0].clone();
+        for r in &recs[1..] {
+            if r.compare(&best) == std::cmp::Ordering::Greater {
+                best = r.clone();
+            }
+        }
+        let prefer_new = match &quorum_winner {
+            None => true,
+            Some(_) if count > winner_group_size => true,
+            Some(prev) if count == winner_group_size => {
+                best.compare(prev) == std::cmp::Ordering::Greater
+            }
+            _ => false,
+        };
+        if prefer_new {
+            quorum_winner = Some(best);
+            winner_group_size = count;
+        }
+    }
+
+    if let Some(rec) = quorum_winner {
+        FindValueOutcome::Found(rec)
+    } else {
+        // Either no `Found` at all (everyone said `NotPresent`) or
+        // the lone-hit eclipse scenario. Both map to `NotPresent`.
+        let _ = not_present_count;
+        FindValueOutcome::NotPresent
     }
 }
 
@@ -709,5 +895,171 @@ mod tests {
         let user_ipk = [7u8; 32];
         let result = lookup_value(dht, user_ipk).await;
         assert!(matches!(result, Err(LookupError::NoCandidates)));
+    }
+
+    // -----------------------------------------------------------------
+    // §4.4 quorum decision tests (phase 1h item 3)
+    // -----------------------------------------------------------------
+
+    use common::proto::dht_p2p::PresenceRecord;
+    use common::proto::dht_p2p::presence_record_relay_signing_input;
+    use common::proto::dht_p2p::presence_record_user_signing_input;
+    use ed25519_dalek::Signer;
+
+    /// Build a record matching what the handler/store tests use, but
+    /// minimised — we only feed it through `decide_lookup_outcome`,
+    /// which never touches signatures.
+    fn record_for(generation: u64, relay: &SigningKey, user: &SigningKey) -> PresenceRecord {
+        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
+        let relay_pubkey: [u8; 32] = relay.verifying_key().to_bytes();
+        let relay_id = NodeId::new(relay_pubkey);
+        let not_before = 1_700_000_000_000;
+        let not_after = not_before + 600_000;
+
+        let user_msg = presence_record_user_signing_input(&user_ipk, &relay_id, generation);
+        let user_sig = user.sign(&user_msg);
+        let relay_msg = presence_record_relay_signing_input(
+            &user_ipk,
+            &relay_id,
+            &relay_pubkey,
+            not_before,
+            not_after,
+            generation,
+            0,
+            &user_sig.to_bytes(),
+        );
+        let relay_sig = relay.sign(&relay_msg);
+
+        PresenceRecord {
+            user_ipk: user_ipk.into(),
+            relay_id,
+            relay_pubkey: relay_pubkey.into(),
+            not_before,
+            not_after,
+            generation,
+            capabilities: 0,
+            user_sig: user_sig.to_bytes().into(),
+            relay_sig: relay_sig.to_bytes().into(),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_empty_replies_returns_not_present() {
+        match decide_lookup_outcome(Vec::new()) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => panic!("empty replies must not return Found"),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_lone_found_with_two_not_present_returns_not_present() {
+        // The §4.4 eclipse case: 2 NotPresent + 1 Found from the
+        // K-closest. Strict quorum (= 2) requires 2 *Found* to agree;
+        // 1 alone is insufficient → NotPresent.
+        let user = fresh_signing_key();
+        let relay = fresh_signing_key();
+        let rec = record_for(5, &relay, &user);
+
+        let replies = vec![
+            ValueReply::NotPresent,
+            ValueReply::NotPresent,
+            ValueReply::Found(rec),
+        ];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => {
+                panic!("lone Found must not pass quorum")
+            }
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_two_agreeing_found_passes_quorum() {
+        // 2 Found + 1 NotPresent: the two `Found` replies agree on
+        // `(generation, relay_id)` because they're produced from the
+        // same fixture — quorum reached, return that record.
+        let user = fresh_signing_key();
+        let relay = fresh_signing_key();
+        let rec = record_for(5, &relay, &user);
+
+        let replies = vec![
+            ValueReply::Found(rec.clone()),
+            ValueReply::Found(rec.clone()),
+            ValueReply::NotPresent,
+        ];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::Found(r) => {
+                assert_eq!(r.generation, rec.generation);
+                assert_eq!(r.relay_id, rec.relay_id);
+            }
+            FindValueOutcome::NotPresent => panic!("2 agreeing Found must pass quorum"),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_picks_higher_generation_when_two_groups_quorum() {
+        // 2 Found(rec_v5) + 2 Found(rec_v7) — both groups reach quorum.
+        // The §5.3 ordering picks the higher generation.
+        let user = fresh_signing_key();
+        let relay_a = fresh_signing_key();
+        let relay_b = fresh_signing_key();
+        let rec_v5 = record_for(5, &relay_a, &user);
+        let rec_v7 = record_for(7, &relay_b, &user);
+
+        let replies = vec![
+            ValueReply::Found(rec_v5.clone()),
+            ValueReply::Found(rec_v5.clone()),
+            ValueReply::Found(rec_v7.clone()),
+            ValueReply::Found(rec_v7.clone()),
+        ];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::Found(r) => assert_eq!(r.generation, 7),
+            FindValueOutcome::NotPresent => panic!("two groups at quorum should yield Found"),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_one_each_no_quorum_returns_not_present() {
+        // 1 Found + 1 NotPresent: neither path reaches quorum.
+        // Returns NotPresent (the doubt-defaults-to-offline rule).
+        let user = fresh_signing_key();
+        let relay = fresh_signing_key();
+        let rec = record_for(1, &relay, &user);
+
+        let replies = vec![ValueReply::Found(rec), ValueReply::NotPresent];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => panic!("no group reached quorum"),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_all_not_present_returns_not_present() {
+        let replies = vec![
+            ValueReply::NotPresent,
+            ValueReply::NotPresent,
+            ValueReply::NotPresent,
+        ];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => panic!("all NotPresent → NotPresent"),
+        }
+    }
+
+    #[test]
+    fn decide_lookup_outcome_two_found_diff_groups_no_quorum() {
+        // 1 Found(rec_v5) + 1 Found(rec_v7): two different groups,
+        // each of size 1. Neither reaches quorum. Result: NotPresent.
+        let user = fresh_signing_key();
+        let relay_a = fresh_signing_key();
+        let relay_b = fresh_signing_key();
+        let rec_v5 = record_for(5, &relay_a, &user);
+        let rec_v7 = record_for(7, &relay_b, &user);
+
+        let replies = vec![ValueReply::Found(rec_v5), ValueReply::Found(rec_v7)];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => panic!("disagreeing single Founds must not pass quorum"),
+        }
     }
 }

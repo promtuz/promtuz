@@ -654,11 +654,36 @@ pub struct FetchRecord {
     pub user_ipks: Vec<Bytes<32>>,
 }
 
+/// Reply to a [`FetchRecord`] request.
+///
+/// Carries **both** live records and tombstones so anti-entropy
+/// converges on deletions, not only insertions (§6.3 — "Tombstones
+/// converge the same way"). The combined length
+/// `records.len() + tombstones.len()` is bounded by
+/// [`MAX_FETCH_RECORD_BATCH`] per §2.6; a single IPK never appears in
+/// both lists (the responder returns the tombstone if present, else the
+/// record, never both — tombstones supersede live records at store time
+/// per §5.3, but anti-entropy still has to ship the chosen one).
+///
+/// **Wire-format compatibility note:** prior to this widening,
+/// `FetchRecordResp` was a single `records` vec. The shape change is
+/// implicit-versioned by `PROTOCOL_VERSION = 2` (declared in
+/// `common::PROTOCOL_VERSION`); peers running the older shape are
+/// gated by ALPN and refuse to interop. There is no separate version
+/// flag because the reply payload is *not* signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchRecordResp {
-    /// Bounded by [`MAX_FETCH_RECORD_BATCH`] per §2.6, matching the
-    /// request batch size.
-    pub records: Vec<PresenceRecord>,
+    /// Live records the responder holds for the requested IPKs.
+    /// Bounded — combined with [`Self::tombstones`] — by
+    /// [`MAX_FETCH_RECORD_BATCH`] per §2.6.
+    pub records:    Vec<PresenceRecord>,
+    /// Tombstones the responder holds for the requested IPKs. A
+    /// tombstone supersedes any local live record (per §5.3 conflict
+    /// rules applied at store time), so anti-entropy carrying
+    /// tombstones makes deletions converge across replicas. Bounded —
+    /// combined with [`Self::records`] — by [`MAX_FETCH_RECORD_BATCH`]
+    /// per §2.6.
+    pub tombstones: Vec<TombstoneRecord>,
 }
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -1021,7 +1046,10 @@ mod tests {
             DhtResponse::MerkleDiff(MerkleDiffResp::Children {
                 hashes: vec![[0u8; 32].into(); MERKLE_FANOUT],
             }),
-            DhtResponse::FetchRecord(FetchRecordResp { records: vec![dummy_record] }),
+            DhtResponse::FetchRecord(FetchRecordResp {
+                records:    vec![dummy_record],
+                tombstones: Vec::new(),
+            }),
         ];
 
         for req in cases {

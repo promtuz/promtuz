@@ -32,3 +32,12 @@ rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
 parking_lot = "0.12.5"
 zerocopy = "0.8.40"
 tokio-util = "0.7.18"
+# Per-peer DHT inbound-RPC rate limiter. Same crate / same version as
+# the resolver side (`resolver/Cargo.toml`); we pick a `governor::Quota`
+# per-RPC-class and key the limiter on `NodeId` instead of `IpAddr`.
+# design-doc: §8.4 (storage flooding), §8.7 (DoS — request floods).
+governor = "0.7"
+# Used by the post-handshake TLS pubkey extractor in
+# `dht::handler::handle_peer_connection`. Mirrors the parser libcore
+# uses in `libcore/src/quic/peer_config.rs`.
+x509-parser = "0.18"

@@ -51,6 +51,7 @@ use rust_rocksdb::WriteOptions;
 
 use super::Dht;
 use super::config::K;
+use super::config::PRESENCE_TTL_MS;
 
 /// Column-family name for the `(user_ipk → PresenceRecord)` map this relay
 /// holds as a replica. Also holds tombstones under a `TOMB_PREFIX`-prefixed
@@ -385,22 +386,35 @@ pub(crate) fn store_tombstone(
     //    next anti-entropy round (§6.3) re-converges by replaying the
     //    same tombstone from a peer.
     let _ = dht.rocks.delete_cf(&cf, record_key);
-    if dht.rocks.put_cf_opt(&cf, tk, bytes, &wopts).is_err() {
+    if dht.rocks.put_cf_opt(&cf, tk, &bytes, &wopts).is_err() {
         return TombstoneOutcome::BadSig;
     }
 
-    // 6. Update the Merkle tree: remove the record's leaf entry. Phase
-    //    1g v1 does NOT advertise tombstones via Merkle (§6.3 calls for
-    //    it but `FetchRecord` only carries `PresenceRecord`s; phase 2
-    //    adds a `FetchTombstone` RPC). Removing the leaf means a peer
-    //    that still has the live record sees their root diverge, asks
-    //    via `FetchRecord`, and we return an empty response — so the
-    //    peer keeps its record and waits for *its* tombstone via the
-    //    relay-to-relay tombstone Store path. This is a known gap;
-    //    documented in the dispatch's "follow-ups" section.
+    // 6. Advertise the tombstone via Merkle (phase 1h, item 6 of the
+    //    DoS-hardening dispatch). Insert the tombstone's value-hash
+    //    *under the same IPK key* as the live record would have been —
+    //    the leaf hash is order-sensitive on its `(ipk, value_hash)`
+    //    entries, and `tombstone_value_hash` carries a distinct
+    //    domain tag (`MERKLE_TOMBSTONE_DOMAIN`) so the tombstone-leaf
+    //    hash for `(ipk, gen)` cannot collide with the record-leaf
+    //    hash for the same `(ipk, gen)`. A peer still holding the live
+    //    record sees a root divergence on this slice → bisect →
+    //    FetchRecord → we return the tombstone in the new
+    //    `FetchRecordResp::tombstones` field (also phase 1h) → peer
+    //    applies it via `store_tombstone` and converges.
+    //
+    //    We `insert` rather than `remove` so anti-entropy converges on
+    //    deletions. The eventual GC of tombstones at `2 ×
+    //    PRESENCE_TTL_MS` (`evict_expired`) calls `merkle.remove`
+    //    explicitly so the leaf disappears from the bitset only after
+    //    the honour window has expired and no peer can resurrect.
+    //
+    //    design-doc: §1.2 (Tombstones honoured for `2 × PRESENCE_TTL_MS`),
+    //    §6.3 ("Tombstones converge the same way").
+    let vh = super::sync::tombstone_value_hash(&bytes);
     {
         let mut merkle = dht.merkle.write();
-        merkle.remove(&tomb.user_ipk.0);
+        merkle.insert(&tomb.user_ipk.0, vh);
     }
 
     TombstoneOutcome::Stored
@@ -438,26 +452,43 @@ pub(crate) fn lookup_record(
     }
 }
 
-/// Periodic cleanup pass: scan `cf_presence` and delete any expired
-/// records (records whose `not_after <= now_ms`).
+/// Periodic cleanup pass: scan `cf_presence` and delete:
+/// 1. Expired *records* (whose `not_after <= now_ms`), and
+/// 2. Expired *tombstones* (whose `deleted_at + 2 × PRESENCE_TTL_MS <
+///    now_ms` — the §1.1.3 / §1.2 honour window has fully elapsed).
 ///
-/// Returns the number of entries evicted. Tombstones are *not* swept
-/// here — they're honoured for `2 × PRESENCE_TTL_MS` per §1.2 and the
-/// phase 1g anti-entropy scheduler handles their longer lifecycle.
+/// The 2× window for tombstones is deliberate: §1.1.3 says replicas
+/// honour a tombstone for that long *after* `deleted_at`. By the time
+/// 2× TTL has passed, no peer in the network can still hold a stale
+/// live record they could resurrect — they would have hit `not_after`
+/// long before. Dropping the tombstone after that is safe.
+///
+/// When a tombstone is deleted, its leaf is also removed from the
+/// in-memory Merkle tree (phase 1h, item 6). The leaf was advertised
+/// during the honour window so anti-entropy could carry the deletion;
+/// once the window expires, the leaf disappears from the slice's bitset
+/// and a new live record for the same IPK can re-occupy the leaf
+/// without diverging from a peer that GC'd theirs first.
+///
+/// Returns the number of entries evicted (records + tombstones).
 ///
 /// **Caller responsibility:** this is meant to be called from a periodic
 /// scheduler (phase 1g's anti-entropy task), not on a hot RPC path. A
 /// full CF scan is `O(records held)` which is small per relay (~300
 /// records at design-doc §6.4 scale) but still costs an iterator open.
 ///
-/// design-doc: §1.1.2 (`now > not_after` rejection), §1.2 (tombstone GC
-/// is its own concern).
+/// design-doc: §1.1.2 (`now > not_after` rejection), §1.1.3 / §1.2
+/// (tombstone honour window = `2 × PRESENCE_TTL_MS`), §6.3 (anti-entropy
+/// of tombstones).
 pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     let Some(cf) = dht.rocks.cf_handle(CF_DHT_PRESENCE) else {
         return 0;
     };
 
+    let tomb_horizon = 2 * PRESENCE_TTL_MS;
+
     let mut victims: Vec<Vec<u8>> = Vec::new();
+    let mut tomb_victim_ipks: Vec<[u8; 32]> = Vec::new();
     for entry in dht.rocks.iterator_cf(&cf, IteratorMode::Start) {
         let (key, value) = match entry {
             Ok(kv) => kv,
@@ -471,12 +502,29 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
                     }
                 }
             }
-            // Tombstones expire after `2 × PRESENCE_TTL_MS` after
-            // `deleted_at`. Phase 1g extends the sweep here; for now
-            // leave them alone — better to over-retain a tombstone (a
-            // few hundred bytes) than to risk resurrecting deleted
-            // records.
-            KeyKind::Tombstone(_) | KeyKind::Unknown => {}
+            KeyKind::Tombstone(ipk_slice) => {
+                // Honour-window check: drop only if the wall clock has
+                // moved past `deleted_at + 2 × PRESENCE_TTL_MS`.
+                if let Ok(t) = TombstoneRecord::deser(&value) {
+                    let cutoff = t.deleted_at.saturating_add(tomb_horizon);
+                    if now_ms >= cutoff {
+                        victims.push(key.to_vec());
+                        // Snapshot the IPK so we can remove the
+                        // Merkle leaf below — `t.user_ipk.0` is also
+                        // the same value as `ipk_slice`, but going via
+                        // the parsed record avoids re-validating the
+                        // 33-byte key shape.
+                        let mut ipk = [0u8; 32];
+                        ipk.copy_from_slice(&t.user_ipk.0);
+                        // Sanity: classified-slice and parsed IPK
+                        // should agree; if not, prefer the parsed
+                        // one (the value is what we hashed).
+                        debug_assert_eq!(ipk_slice, &ipk);
+                        tomb_victim_ipks.push(ipk);
+                    }
+                }
+            }
+            KeyKind::Unknown => {}
         }
     }
 
@@ -484,6 +532,15 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     for k in victims {
         if dht.rocks.delete_cf(&cf, k).is_ok() {
             evicted += 1;
+        }
+    }
+    if !tomb_victim_ipks.is_empty() {
+        // Drop the Merkle leaves for all GC'd tombstones in a single
+        // write-guard scope; never held across an `await` (this whole
+        // function is sync).
+        let mut merkle = dht.merkle.write();
+        for ipk in &tomb_victim_ipks {
+            merkle.remove(ipk);
         }
     }
     evicted
@@ -801,7 +858,10 @@ mod tests {
     }
 
     #[test]
-    fn evict_expired_does_not_touch_tombstones() {
+    fn evict_expired_keeps_tombstones_inside_honour_window() {
+        // Phase 1h, item 4: tombstones are honoured for 2 × TTL after
+        // their `deleted_at`. Inside that window `evict_expired` must
+        // leave them alone.
         let relay = fresh_signing_key();
         let user = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -811,14 +871,92 @@ mod tests {
         let tomb = build_tombstone(&user, &relay, 1, now);
         assert_eq!(store_tombstone(&dht, tomb.clone(), now), TombstoneOutcome::Stored);
 
-        // Even with a `now` deep in the future, evict_expired() should
-        // leave tombstones alone — they have their own honour window
-        // managed by phase 1g.
-        let evicted = evict_expired(&dht, now + 7 * 24 * 3_600_000);
+        // 2 × PRESENCE_TTL_MS minus a millisecond — still inside the
+        // honour window.
+        let evict_at = now + 2 * super::super::config::PRESENCE_TTL_MS - 1;
+        let evicted = evict_expired(&dht, evict_at);
         assert_eq!(evicted, 0);
 
         let still_there =
             lookup_tombstone(&dht, &tomb.user_ipk.0).expect("tombstone still present");
         assert_eq!(still_there.generation, 1);
+    }
+
+    #[test]
+    fn evict_expired_drops_tombstones_past_honour_window() {
+        // Phase 1h, item 4: once `deleted_at + 2 × PRESENCE_TTL_MS` has
+        // elapsed, the tombstone should be GC'd — both the on-disk
+        // entry and its Merkle leaf (so the slice bitset stops
+        // advertising it).
+        let relay = fresh_signing_key();
+        let user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let now: u64 = 1_700_000_000_000;
+        let tomb = build_tombstone(&user, &relay, 1, now);
+        assert_eq!(store_tombstone(&dht, tomb.clone(), now), TombstoneOutcome::Stored);
+        // Confirm the Merkle tree now advertises this tombstone (item
+        // 6 — store_tombstone inserts the value-hash into the slice).
+        let slice_id = tomb.user_ipk.0[0];
+        assert_ne!(dht.merkle.read().root(slice_id), [0u8; 32]);
+
+        // Past the honour window by one ms.
+        let evict_at = now + 2 * super::super::config::PRESENCE_TTL_MS + 1;
+        let evicted = evict_expired(&dht, evict_at);
+        assert_eq!(evicted, 1);
+
+        // Tombstone gone from disk and Merkle tree.
+        assert!(lookup_tombstone(&dht, &tomb.user_ipk.0).is_none());
+        assert_eq!(dht.merkle.read().root(slice_id), [0u8; 32]);
+    }
+
+    #[test]
+    fn store_tombstone_advertises_via_merkle() {
+        // Phase 1h, item 6: storing a tombstone must update the Merkle
+        // tree (insert with tombstone domain), not remove the leaf
+        // entry — so anti-entropy carries deletions.
+        let relay = fresh_signing_key();
+        let user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let now: u64 = 1_700_000_000_000;
+        // Empty start state.
+        let slice_id = NodeId::new(user.verifying_key().to_bytes()).as_bytes()[0];
+        let _ = slice_id; // sanity: the slice is whatever the IPK's first byte is
+
+        let tomb = build_tombstone(&user, &relay, 1, now);
+        let user_slice = tomb.user_ipk.0[0];
+        assert_eq!(dht.merkle.read().root(user_slice), [0u8; 32]);
+
+        assert_eq!(store_tombstone(&dht, tomb.clone(), now), TombstoneOutcome::Stored);
+        // Now non-zero — the tombstone leaf populated the slice.
+        assert_ne!(dht.merkle.read().root(user_slice), [0u8; 32]);
+    }
+
+    #[test]
+    fn record_then_tombstone_changes_merkle_root() {
+        // The leaf hash for a record vs the leaf hash for a tombstone
+        // differ by domain tag (`MERKLE_RECORD_DOMAIN` vs
+        // `MERKLE_TOMBSTONE_DOMAIN`). Storing one then the other for
+        // the same IPK must produce two different roots in sequence.
+        let relay = fresh_signing_key();
+        let user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let now: u64 = 1_700_000_000_000;
+        let rec = build_record(&user, &relay, 1, now, 600_000);
+        assert_eq!(store_record(&dht, rec.clone(), now + 1), StoreOutcome::Stored);
+        let user_slice = rec.user_ipk.0[0];
+        let root_after_record = dht.merkle.read().root(user_slice);
+        assert_ne!(root_after_record, [0u8; 32]);
+
+        let tomb = build_tombstone(&user, &relay, 1, now + 100);
+        assert_eq!(store_tombstone(&dht, tomb, now + 100), TombstoneOutcome::Stored);
+        let root_after_tomb = dht.merkle.read().root(user_slice);
+        assert_ne!(root_after_tomb, [0u8; 32]);
+        assert_ne!(root_after_record, root_after_tomb);
     }
 }

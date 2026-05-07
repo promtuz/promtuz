@@ -1943,6 +1943,7 @@ dependencies = [
  "common",
  "crossterm",
  "ed25519-dalek",
+ "governor",
  "hex",
  "parking_lot",
  "quinn",
@@ -1956,6 +1957,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "x509-parser",
  "zerocopy",
 ]
 
