@@ -579,7 +579,13 @@ pub(crate) async fn handle_dht_request(
             DhtResponse::Forward(super::forward::handle_forward_rpc(dht, fwd, now_ms()).await)
         }
         DhtRequest::QueueFetch(req) => DhtResponse::QueueFetch(
-            super::queue_drain::handle_queue_fetch_rpc(dht, req, now_ms()).await,
+            super::queue_drain::handle_queue_fetch_rpc(
+                dht,
+                req,
+                authenticated_peer_id,
+                now_ms(),
+            )
+            .await,
         ),
         DhtRequest::QueueFetchAck(req) => DhtResponse::QueueFetchAck(
             super::queue_drain::handle_queue_fetch_ack_rpc(
@@ -1367,7 +1373,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
+        let resp = handle_dht_request(&dht, req, self_id).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), 3, "all three queued returned");
@@ -1438,7 +1444,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
+        let resp = handle_dht_request(&dht, req, self_id).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert!(r.messages.is_empty());
@@ -1481,7 +1487,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
+        let resp = handle_dht_request(&dht, req, self_id).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
@@ -1525,7 +1531,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
+        let resp = handle_dht_request(&dht, req, self_id).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
@@ -1654,6 +1660,52 @@ mod tests {
         // Queue untouched.
         let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
         assert_eq!(remaining.len(), 1, "queue untouched after rejection");
+    }
+
+    /// 2e cross-cutting review fix — same defense for the read path. A
+    /// malicious relay that captured a signed `QueueFetch` cannot replay
+    /// it on a different connection to leak the user's queue, because
+    /// the home enforces `req.requester_relay_id == authenticated_peer_id`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_queue_fetch_rpc_rejects_redirected_requester() {
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 1;
+        let self_id = NodeId::new(self_seed);
+        let dht = fresh_dht(self_id);
+
+        let user = fresh_signing_key();
+        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
+        let from_user = fresh_signing_key();
+        let now = wall_clock_ms();
+
+        let dispatch = build_dispatch(&from_user, &user_ipk, [7u8; 16], b"qf-redirect");
+        super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
+
+        let mut a = [0u8; 32];
+        a[0] = 0xAA;
+        let requester_a = NodeId::new(a);
+        let mut b = [0u8; 32];
+        b[0] = 0xBB;
+        let requester_b = NodeId::new(b);
+
+        let msg = queue_fetch_signing_input(&user_ipk, &requester_a, now);
+        let sig = user.sign(&msg).to_bytes();
+        let req = DhtRequest::QueueFetch(QueueFetch {
+            user_ipk: Bytes(user_ipk),
+            requester_relay_id: requester_a,
+            timestamp: now,
+            user_sig: Bytes(sig),
+        });
+
+        // Authenticated peer is `requester_b`, not `requester_a`. Reject.
+        let resp = handle_dht_request(&dht, req, requester_b).await;
+        match resp {
+            DhtResponse::QueueFetch(r) => {
+                assert!(r.messages.is_empty(), "must not leak queue to redirector");
+                assert!(r.exhausted);
+            }
+            other => panic!("expected QueueFetch, got {other:?}"),
+        }
     }
 
     /// Phase 2d — bad ack signature → `ok = false`, queue untouched.

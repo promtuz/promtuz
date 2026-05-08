@@ -400,16 +400,34 @@ async fn remote_fetch_one(
 ///    set `exhausted = false` correctly without a second range
 ///    query when the queue extends past the cap.
 ///
+/// **Verification ladder** (mirrors `handle_queue_fetch_ack_rpc`):
+/// 1. `req.requester_relay_id == authenticated_peer_id` — the
+///    connection's authenticated `DhtHello` peer id must equal the
+///    `requester_relay_id` field on the wire. Closes the cross-relay
+///    replay vector where a captured signed `QueueFetch` could be
+///    forwarded by a different relay to read the user's queue. Done
+///    first because a mismatch shortcuts the Ed25519 verify.
+/// 2. `QueueFetch::verify(req, now_ms)` — user_sig + skew.
+/// 3. `self_is_in_k_closest_qd` — defensive K-set check.
+///
 /// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetch` shape).
 pub(crate) async fn handle_queue_fetch_rpc(
-    dht: &Arc<Dht>, req: QueueFetch, now_ms: u64,
+    dht: &Arc<Dht>, req: QueueFetch, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> QueueFetchResp {
-    // 1. Verify the user signature + freshness window.
+    // 1. Requester binding — the wire-claimed `requester_relay_id` must
+    //    match the connection's authenticated peer id. Closes the
+    //    cross-relay replay vector. Same shape as the ack handler's
+    //    check (phase 2d-fix).
+    if req.requester_relay_id != authenticated_peer_id {
+        return QueueFetchResp { messages: Vec::new(), exhausted: true };
+    }
+
+    // 2. Verify the user signature + freshness window.
     if req.verify(now_ms).is_err() {
         return QueueFetchResp { messages: Vec::new(), exhausted: true };
     }
 
-    // 2. Confirm we are in the user's K-closest. Defensive — caller
+    // 3. Confirm we are in the user's K-closest. Defensive — caller
     //    shouldn't have routed here otherwise; under K-set drift races
     //    we may legitimately not be K-closest by the time the request
     //    arrives.
