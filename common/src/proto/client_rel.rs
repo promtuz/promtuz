@@ -207,6 +207,27 @@ pub enum CRelayPacket {
     /// reconnects multiple times within the TTL window. The client
     /// dedupes by [`DispatchP::id`].
     DrainAuth { timestamp: u64, sig: Bytes<64> },
+
+    /// Sticky-home phase 2d — user-signed authorisation for the K
+    /// home relays to GC the listed dispatch ids from their
+    /// `cf_dht_queue` after the relay successfully delivered them to
+    /// this client.
+    ///
+    /// Sent in response to [`SRelayPacket::AckAuthRequest`] (the relay
+    /// asks libcore to sign the union of delivered ids drawn from all
+    /// K homes). The transcript is
+    /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
+    /// `(self_ipk, delivered_ids, timestamp)` — it does **not** bind a
+    /// specific home identity, so a single signature serves all K
+    /// homes; each home only deletes the ids it actually holds from
+    /// the union list.
+    ///
+    /// **Why the user signs (not the relay)**: a malicious relay could
+    /// otherwise forge an ack and force every home to drop a user's
+    /// queued messages without delivery. Routing the ack through the
+    /// user's IPK signature mirrors the existing `DrainAuth` design
+    /// for the fetch direction.
+    AckAuth { sig: Bytes<64>, timestamp: u64 },
 }
 
 /// Server Relay Packet
@@ -222,6 +243,30 @@ pub enum SRelayPacket {
     // /// All the pending deliveries for user in chronological order
     // /// TODO: might need debouncing in future if TOO MANY messages were queued at once
     // QueueDrain(Vec<DeliverP>),
+    /// Sticky-home phase 2d — relay-side request for the user to sign a
+    /// `QueueFetchAck` transcript over the union of dispatch ids the
+    /// recipient relay just drained from the K home relays.
+    ///
+    /// The relay sends this **after** the client's `AckDrain` arrives
+    /// (i.e. once the client has durably stored the delivered set).
+    /// Libcore signs
+    /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
+    /// `(self_ipk, delivered_ids, timestamp)` and replies with
+    /// [`CRelayPacket::AckAuth`]. The relay then fans out a
+    /// `QueueFetchAck` to each of the K homes with the same signed
+    /// `(timestamp, sig)` pair — the transcript doesn't bind a home
+    /// identity, so one signature works for all homes.
+    ///
+    /// `suggested_timestamp` is the relay's wall-clock at the moment
+    /// of the request; libcore is free to substitute its own
+    /// `systime()` (drift is allowed within ±60s) but echoing the
+    /// suggested value avoids forcing libcore to query its clock.
+    ///
+    /// `delivered_ids` is bounded by
+    /// [`crate::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS`] (= 64) — the
+    /// same ceiling the home-side verifier enforces on
+    /// [`crate::proto::dht_p2p::QueueFetchAck::delivered_ids`].
+    AckAuthRequest { delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64 },
 }
 
 #[cfg(feature = "client")]
@@ -293,5 +338,60 @@ mod tests {
                 + 8,
             "transcript length must match the documented layout"
         );
+    }
+
+    /// Phase 2d — postcard round-trip for `CRelayPacket::AckAuth`.
+    /// Catches a missing `serde` derive on the new variant the same
+    /// way `drain_auth_round_trip` does for `DrainAuth`.
+    #[test]
+    fn ack_auth_round_trip() {
+        let pkt = CRelayPacket::AckAuth {
+            sig:       Bytes([0xCD; 64]),
+            timestamp: 1_700_000_000_002,
+        };
+        let bytes = pkt.ser().expect("postcard serialize");
+        let decoded = CRelayPacket::deser(&bytes).expect("postcard deserialize");
+        assert_eq!(decoded, pkt);
+    }
+
+    /// Phase 2d — postcard round-trip for
+    /// `SRelayPacket::AckAuthRequest`. Mirrors `ack_auth_round_trip`
+    /// for the request side; both variants must serialize stably so
+    /// libcore and the relay agree byte-for-byte.
+    #[test]
+    fn ack_auth_request_round_trip() {
+        use super::SRelayPacket;
+        let pkt = SRelayPacket::AckAuthRequest {
+            delivered_ids:       vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
+            suggested_timestamp: 1_700_000_000_003,
+        };
+        let bytes = pkt.ser().expect("postcard serialize");
+        let decoded = SRelayPacket::deser(&bytes).expect("postcard deserialize");
+        assert_eq!(decoded, pkt);
+    }
+
+    /// Phase 2d — pin the transcript libcore signs in response to an
+    /// `AckAuthRequest`. Same byte-stability discipline as
+    /// `drain_auth_transcript_matches_queue_fetch_signing_input`: if
+    /// the helper's layout drifts, this test surfaces it.
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn ack_auth_transcript_matches_queue_fetch_ack_signing_input() {
+        use crate::proto::dht_p2p::queue_fetch_ack_signing_input;
+
+        let user_ipk: [u8; 32] = [0x11; 32];
+        let ids: Vec<[u8; 16]> = vec![[0xAA; 16], [0xBB; 16]];
+        let ts: u64 = 1_700_000_000_004;
+
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
+        // Layout: domain || version(BE u16) || ipk(32) || count(BE u32)
+        //   || n*16 || ts(BE u64).
+        let expected_len = crate::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
+            + 2
+            + 32
+            + 4
+            + ids.len() * 16
+            + 8;
+        assert_eq!(transcript.len(), expected_len);
     }
 }

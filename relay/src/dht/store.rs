@@ -576,6 +576,129 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     evicted
 }
 
+/// Phase 2d — sync planning half of the K-set drift migration in
+/// `evict_expired` (`STICKY_HOME_RELAY.md` §4.4 / §7.2).
+///
+/// Walks `cf_dht_queue` once and identifies up to `max` queue entries
+/// whose recipient `user_ipk` is no longer in this relay's K-closest
+/// set. Returns the (key, dispatch) pairs the caller should attempt to
+/// migrate via outbound `Forward` RPCs. A successful migration deletes
+/// the local entry — but the deletion is the *async* caller's
+/// responsibility because it must wait for ≥`FORWARD_K_MIN`
+/// confirmations from the new K-closest set first.
+///
+/// **Why split this from the I/O half**: `evict_expired` is a sync
+/// function called from the periodic scheduler. K-set drift migration
+/// requires outbound `Forward` RPCs (async, parallel, deadline-bounded
+/// — all the machinery in [`super::forward::forward_to_homes`]). The
+/// scheduler driver is the right place to compose those: it calls
+/// `evict_expired` synchronously, then (when async) `plan_drift_migrations`
+/// → spawn a tokio task per candidate → on success the migrator deletes
+/// the local queue entry.
+///
+/// **Per-message K-set check**: §7.2 says "lazy on `evict_expired`
+/// sweep" — meaning per-sweep, not per-message-write — so checking
+/// each queued message's K-set membership at sweep time is exactly
+/// what the spec calls for. The cost is one routing-table read per
+/// queued entry; bounded by `MAX_MIGRATE_PER_SWEEP` (256) so a
+/// pathologically full disk can't stall the sweep.
+///
+/// **Out of scope**: `cf_messages` (default CF) entries are *not*
+/// migrated — per `STICKY_HOME_RELAY.md` §6, that CF is the local-
+/// fallback safety net and the assumption is the sender's relay still
+/// owns it. Only `cf_dht_queue` (the home-replica queue) is subject
+/// to drift.
+pub(crate) fn plan_drift_migrations(
+    dht: &Dht, max: usize,
+) -> Vec<(MessageKey, DispatchP)> {
+    let mut out: Vec<(MessageKey, DispatchP)> = Vec::new();
+    if max == 0 {
+        return out;
+    }
+    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
+        return out;
+    };
+
+    let self_id = dht.node_id;
+
+    // Cache the per-recipient drift decision so we don't recompute it
+    // for every message of the same recipient. The cap is per-sweep,
+    // so if a single recipient has 1000 messages and we drifted out
+    // of K for them, we'd otherwise issue 1000 routing-table reads
+    // for the same answer. Bounded by O(distinct recipients with
+    // drifted queues), which in practice is far smaller than the
+    // per-sweep cap.
+    let mut drifted: std::collections::HashMap<[u8; 32], bool> =
+        std::collections::HashMap::new();
+
+    for entry in dht.rocks.iterator_cf(&cf, IteratorMode::Start) {
+        let (key_bytes, value) = match entry {
+            Ok(kv) => kv,
+            Err(_) => continue,
+        };
+        // Validate the key shape and pull the 32-byte recipient prefix.
+        if key_bytes.len() != MessageKey::SIZE {
+            continue;
+        }
+        let mut user_ipk = [0u8; 32];
+        user_ipk.copy_from_slice(&key_bytes[0..32]);
+
+        let is_drifted = match drifted.get(&user_ipk) {
+            Some(b) => *b,
+            None => {
+                let target_id = NodeId::from_bytes(user_ipk);
+                let candidates = dht.routing.read().find_closest(&target_id, K);
+                // §3.5 / §store.rs::self_is_owner permissive policy:
+                // sparse routing (< K candidates) means we *might* still
+                // be K-closest by virtue of nobody else being closer.
+                // Treat that as "not drifted" so a freshly-bootstrapped
+                // relay doesn't migrate every entry away on its first
+                // sweep.
+                let drifted_now = if candidates.len() < K {
+                    false
+                } else {
+                    let self_dist = xor32(self_id.as_bytes(), &user_ipk);
+                    let kth_dist = xor32(candidates[K - 1].id.as_bytes(), &user_ipk);
+                    self_dist > kth_dist
+                };
+                drifted.insert(user_ipk, drifted_now);
+                drifted_now
+            }
+        };
+        if !is_drifted {
+            continue;
+        }
+
+        let Some(key) = MessageKey::parse(&key_bytes) else {
+            continue;
+        };
+        let Ok(dispatch) = DispatchP::deser(&value) else {
+            continue;
+        };
+        out.push((key, dispatch));
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// Phase 2d — delete a single migrated `cf_dht_queue` entry by its
+/// composite `MessageKey`. Used by the migration driver after an
+/// outbound `Forward` to the new K-closest succeeded. Returns
+/// `true` on a successful delete.
+///
+/// Public-to-the-crate so the `evict_expired` driver in the scheduler
+/// can call it from its async migration loop. Lock-free; the RocksDB
+/// `multi-threaded-cf` feature already permits concurrent writes from
+/// multiple tasks.
+pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
+    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
+        return false;
+    };
+    dht.rocks.delete_cf(&cf, key.as_bytes()).is_ok()
+}
+
 /// Persist a queued [`DispatchP`] into [`CF_DHT_QUEUE`] for the recipient's
 /// home-relay queue. Used by:
 ///
@@ -680,6 +803,144 @@ pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<Tombsto
     let key = tombstone_key(user_ipk);
     let bytes = dht.rocks.get_cf(&cf, key).ok().flatten()?;
     TombstoneRecord::deser(&bytes).ok()
+}
+
+/// Phase 2d — read up to `max` queued [`DispatchP`]s for `user_ipk`
+/// from `cf_dht_queue`, oldest first.
+///
+/// **Ordering** is naturally chronological: the on-disk `MessageKey`
+/// shape `recipient(32) || ts_be(8) || dispatch_id(16)` makes the
+/// big-endian timestamp the secondary sort key, so a prefix iterator
+/// yields older messages before newer ones for a given recipient. The
+/// home-side `QueueFetch` handler returns this Vec verbatim into a
+/// `QueueFetchResp`, then the `exhausted` flag is computed by the
+/// caller (whether more keys exist past the cap).
+///
+/// Returns:
+/// - `Vec<(MessageKey, DispatchP)>` — bounded by `max` entries.
+///   The `MessageKey` is included so the caller can also
+///   `delete_queue_entries` on the same iterator pass if it wants to
+///   build a one-shot drain instead of a fetch-then-ack cycle (the
+///   sticky-home flow does the latter, but the former is a useful
+///   primitive for the migration pass).
+/// - Empty Vec when there's no queue for `user_ipk` (or the CF handle
+///   is missing — surfaced as a soft "nothing to drain" instead of an
+///   error because the home-side handler also accepts an empty
+///   response shape).
+///
+/// **Caller's contract**: `parking_lot` lock-discipline applies (no
+/// guards held across `await`); this function is sync and takes none.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (cf_dht_queue).
+pub(crate) fn lookup_queue_for_user(
+    dht: &Dht, user_ipk: &[u8; 32], max: usize,
+) -> Vec<(MessageKey, DispatchP)> {
+    let mut out: Vec<(MessageKey, DispatchP)> = Vec::new();
+    if max == 0 {
+        return out;
+    }
+    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
+        return out;
+    };
+
+    // The `prefix_iterator` is seeded by the 32-byte prefix-extractor;
+    // we re-apply `starts_with` because the iterator may walk past the
+    // recipient's keyspace into the next user's.
+    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
+        let (key_bytes, value) = match entry {
+            Ok(kv) => kv,
+            // Soft-fail on iterator corruption: return what we collected
+            // so the caller still drains *something*. The next sweep
+            // re-attempts.
+            Err(_) => break,
+        };
+        if !key_bytes.starts_with(user_ipk) {
+            break;
+        }
+        let Some(key) = MessageKey::parse(&key_bytes) else {
+            // Malformed key (length mismatch, etc.) — skip and continue;
+            // this is the same defensive policy the legacy local-queue
+            // drain uses.
+            continue;
+        };
+        let Ok(dispatch) = DispatchP::deser(&value) else {
+            continue;
+        };
+        out.push((key, dispatch));
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// Phase 2d — delete every `cf_dht_queue` entry for `user_ipk` whose
+/// `dispatch_id` appears in `dispatch_ids`. Returns the count of
+/// successful deletions.
+///
+/// **Why we iterate-and-filter** rather than computing the full
+/// 56-byte `MessageKey` from `(user_ipk, ts, id)` directly: we don't
+/// know the original `ts_ms` (it was the `now_ms` at write time, which
+/// the requesting relay doesn't have access to). The `dispatch_id`
+/// alone identifies the write — but the on-disk key includes the
+/// timestamp as a non-prefix component, so the only way to find the
+/// matching key is a prefix scan. Bounded by the per-recipient cap
+/// (`MAX_QUEUED_PER_RECIPIENT = 1024`), so the worst-case scan is
+/// trivial relative to the rest of the RPC's signature-verify cost.
+///
+/// **Idempotent**: a `dispatch_id` that's already gone (or never
+/// existed) contributes 0 to the count. The home-side
+/// `QueueFetchAck` handler retries on transient failures, so a partial
+/// delete on the first attempt converges over a few rounds.
+///
+/// Durability: deletions use the default `WriteOptions` (no fsync).
+/// This is intentional — losing a delete on crash means the dispatch
+/// is re-delivered next reconnect (the client dedupes by id), which
+/// is strictly better than the alternative cost of fsyncing every
+/// per-id delete.
+pub(crate) fn delete_queue_entries(
+    dht: &Dht, user_ipk: &[u8; 32], dispatch_ids: &[[u8; 16]],
+) -> usize {
+    if dispatch_ids.is_empty() {
+        return 0;
+    }
+    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
+        return 0;
+    };
+
+    // Collect target keys via a prefix-bounded scan. We cannot delete
+    // mid-iteration (RocksDB iterator semantics under the C++ binding
+    // can surface stale data), so build the victim list first and
+    // delete in a second pass.
+    let target: std::collections::HashSet<[u8; 16]> = dispatch_ids.iter().copied().collect();
+    let mut victims: Vec<Vec<u8>> = Vec::new();
+
+    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
+        let (key_bytes, _) = match entry {
+            Ok(kv) => kv,
+            Err(_) => break,
+        };
+        if !key_bytes.starts_with(user_ipk) {
+            break;
+        }
+        // Last 16 bytes of the 56-byte key are the dispatch_id.
+        if key_bytes.len() != MessageKey::SIZE {
+            continue;
+        }
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&key_bytes[40..56]);
+        if target.contains(&id) {
+            victims.push(key_bytes.to_vec());
+        }
+    }
+
+    let mut count = 0usize;
+    for k in victims {
+        if dht.rocks.delete_cf(&cf, k).is_ok() {
+            count += 1;
+        }
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,5 +1527,212 @@ mod tests {
         let dispatch_b = build_dispatch(&from_user, &ipk_b, [1u8; 16], b"hi-B");
         let outcome = enqueue_for_home(&dht, &ipk_b, &dispatch_b, now);
         assert_eq!(outcome, ForwardOutcome::Stored);
+    }
+
+    // -----------------------------------------------------------------
+    // Sticky-home phase 2d — `lookup_queue_for_user` + `delete_queue_entries`
+    // + `plan_drift_migrations` (the K-set migration planner)
+    // -----------------------------------------------------------------
+
+    use common::proto::dht_p2p::NodeDescriptor;
+
+    #[test]
+    fn lookup_queue_for_user_returns_chronological_order() {
+        // The on-disk key shape is `recipient(32) || ts_be(8) || id(16)`,
+        // so the prefix iterator naturally yields oldest-first within a
+        // single user. Catches a regression where a future change to
+        // the prefix-extractor or key shape breaks ordering.
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        // Insert in non-chronological order (later ts first).
+        let dispatch_b = build_dispatch(&from_user, &to_ipk, [2u8; 16], b"second");
+        let dispatch_a = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"first");
+        enqueue_for_home(&dht, &to_ipk, &dispatch_b, 200);
+        enqueue_for_home(&dht, &to_ipk, &dispatch_a, 100);
+
+        let got = lookup_queue_for_user(&dht, &to_ipk, 8);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].1.id.0, [1u8; 16]); // ts=100 first
+        assert_eq!(got[1].1.id.0, [2u8; 16]); // ts=200 second
+    }
+
+    #[test]
+    fn lookup_queue_for_user_caps_at_max() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        for i in 0..10u8 {
+            let mut id = [0u8; 16];
+            id[0] = i;
+            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"x");
+            enqueue_for_home(&dht, &to_ipk, &dispatch, 100 + i as u64);
+        }
+
+        let got = lookup_queue_for_user(&dht, &to_ipk, 3);
+        assert_eq!(got.len(), 3);
+        // First three by ts.
+        for (i, item) in got.iter().enumerate() {
+            assert_eq!(item.1.id.0[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn lookup_queue_for_user_returns_empty_for_unknown_recipient() {
+        let relay = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let unknown_ipk = [0xFFu8; 32];
+        let got = lookup_queue_for_user(&dht, &unknown_ipk, 8);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn delete_queue_entries_removes_listed_ids_only() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        let ids = [[1u8; 16], [2u8; 16], [3u8; 16], [4u8; 16]];
+        for &id in &ids {
+            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"d");
+            enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+        }
+
+        let removed = delete_queue_entries(&dht, &to_ipk, &[ids[1], ids[3]]);
+        assert_eq!(removed, 2);
+
+        let remaining = lookup_queue_for_user(&dht, &to_ipk, 8);
+        assert_eq!(remaining.len(), 2);
+        let remaining_ids: std::collections::HashSet<[u8; 16]> =
+            remaining.iter().map(|(_, d)| d.id.0).collect();
+        assert!(remaining_ids.contains(&[1u8; 16]));
+        assert!(remaining_ids.contains(&[3u8; 16]));
+    }
+
+    #[test]
+    fn delete_queue_entries_idempotent_for_missing_ids() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        let dispatch = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"alone");
+        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+
+        // Delete a never-stored id alongside the one that exists.
+        let removed = delete_queue_entries(&dht, &to_ipk, &[[1u8; 16], [2u8; 16]]);
+        assert_eq!(removed, 1, "only the present id contributes");
+
+        let remaining = lookup_queue_for_user(&dht, &to_ipk, 8);
+        assert!(remaining.is_empty());
+    }
+
+    /// Phase 2d — `plan_drift_migrations` returns entries whose
+    /// recipient is no longer K-closest to self. Set self_id far
+    /// from the recipient and install K peers strictly closer; the
+    /// planner returns the entry.
+    #[test]
+    fn evict_expired_migrates_queue_when_drifted_out_of_k_closest() {
+        // Build a relay whose self_id is `[0xFF; 32]` (far from
+        // a recipient at `[0; 32]`); K closer peers force drift.
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 0xFF;
+        let self_id = NodeId::new(self_seed);
+        let dht = fresh_dht(self_id);
+
+        // Install K=3 peers strictly closer to all-zeros target.
+        for i in 0..3u8 {
+            let mut s = [0u8; 32];
+            s[31] = i;
+            let id = NodeId::new(s);
+            let desc = NodeDescriptor {
+                id,
+                addr: "127.0.0.1:1".parse().unwrap(),
+                pubkey: [0u8; 32].into(),
+            };
+            dht.routing.write().insert(desc);
+        }
+
+        // Pre-populate the queue for an all-zeros recipient.
+        let from_user = fresh_signing_key();
+        let to_ipk: [u8; 32] = [0u8; 32];
+        let dispatch = build_dispatch(&from_user, &to_ipk, [9u8; 16], b"drifted");
+        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+
+        let migrations = plan_drift_migrations(&dht, 16);
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].1.id.0, [9u8; 16]);
+    }
+
+    /// Phase 2d — when self is *still* in K-closest, the planner
+    /// returns nothing (no migration needed). The default fixture
+    /// has an empty routing table → permissive sparse policy → self
+    /// counts as K-closest → no entries returned.
+    #[test]
+    fn evict_expired_no_migration_when_still_owner() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        let dispatch = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"stay");
+        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+
+        // Empty routing table → permissive → not drifted.
+        let migrations = plan_drift_migrations(&dht, 16);
+        assert!(migrations.is_empty());
+    }
+
+    /// Phase 2d — cap respected.
+    #[test]
+    fn evict_expired_caps_migration_at_max_per_sweep() {
+        // Force drift for many users, then verify the planner stops
+        // at the requested cap.
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 0xFF;
+        let self_id = NodeId::new(self_seed);
+        let dht = fresh_dht(self_id);
+
+        // K closer peers for all-zeros prefix targets.
+        for i in 0..3u8 {
+            let mut s = [0u8; 32];
+            s[31] = i;
+            let id = NodeId::new(s);
+            let desc = NodeDescriptor {
+                id,
+                addr: "127.0.0.1:1".parse().unwrap(),
+                pubkey: [0u8; 32].into(),
+            };
+            dht.routing.write().insert(desc);
+        }
+
+        // 5 distinct users with leading-zero-byte IPKs so drift
+        // applies to all of them.
+        let from_user = fresh_signing_key();
+        for i in 0..5u8 {
+            let mut to_ipk = [0u8; 32];
+            to_ipk[31] = 0xA0 | i; // distinct but still "close to 0" target
+            let dispatch = build_dispatch(&from_user, &to_ipk, [i; 16], b"cap");
+            enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+        }
+
+        let migrations = plan_drift_migrations(&dht, 3);
+        assert_eq!(migrations.len(), 3, "cap respected");
     }
 }

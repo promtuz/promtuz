@@ -50,8 +50,11 @@ use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
+use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::dht_p2p::QueueFetch;
+use common::proto::dht_p2p::QueueFetchAck;
+use common::proto::dht_p2p::QueueFetchAckResp;
 use common::proto::dht_p2p::QueueFetchResp;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -143,6 +146,38 @@ pub(crate) async fn fetch_remote_queues(
     dht: Arc<Dht>, user_ipk: &[u8; 32], drain_auth: &DrainAuth,
     self_relay_id: NodeId,
 ) -> Result<Vec<DispatchP>, QueueDrainError> {
+    fetch_remote_queues_with_homes(dht, user_ipk, drain_auth, self_relay_id)
+        .await
+        .map(|(messages, _)| messages)
+}
+
+/// Phase 2d — extended variant of [`fetch_remote_queues`] that *also*
+/// returns the per-home `delivered_ids` map the recipient relay needs
+/// for the `QueueFetchAck` deletion path.
+///
+/// **Map semantics**: each home contributing to the drain is keyed by
+/// its `NodeId`; the value is the list of `DispatchP.id`s that home
+/// supplied (pre-dedupe — the cross-home overlap is handled by the
+/// returned `Vec<DispatchP>`'s union). Empty replies from a home are
+/// recorded with an empty Vec so the caller knows the home was
+/// reachable. Homes that hard-failed (timeout, wrong-variant) are
+/// omitted entirely.
+///
+/// **Why we track per-home**: the `QueueFetchAck` transcript binds
+/// `(user_ipk, delivered_ids, timestamp)` — *not* a home identity. So
+/// a single signature is reusable across all K homes. But each home
+/// will only delete the ids it actually has from the `delivered_ids`
+/// list; a home that returned a subset of the union won't delete ids
+/// it never sent. That's the correct shape: per-home set membership
+/// is the home's job, the requesting relay just ships the union and
+/// lets each home GC what it owns.
+///
+/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetchAck` shape).
+pub(crate) async fn fetch_remote_queues_with_homes(
+    dht: Arc<Dht>, user_ipk: &[u8; 32], drain_auth: &DrainAuth,
+    self_relay_id: NodeId,
+) -> Result<(Vec<DispatchP>, std::collections::HashMap<NodeId, Vec<[u8; 16]>>), QueueDrainError>
+{
     dht.metrics.inc_queue_fetches_sent();
 
     // 1. Compute K-closest. The user's IPK is the DHT key directly
@@ -182,34 +217,44 @@ pub(crate) async fn fetch_remote_queues(
     //    [`QUEUE_FETCH_TIMEOUT_MS`] total wall-clock. Each home runs
     //    its own page-loop locally — we don't centralise paging here
     //    because that would head-of-line block one slow home behind
-    //    a fast one.
-    let per_home: Vec<Vec<DispatchP>> = remote_fetch_parallel(&dht, &homes, &fetch_pkt).await;
+    //    a fast one. Phase 2d: we now track `(NodeId, Vec<DispatchP>)`
+    //    so the caller can build per-home `delivered_ids` lists for
+    //    the `QueueFetchAck` round.
+    let per_home_with_id: Vec<(NodeId, Vec<DispatchP>)> =
+        remote_fetch_parallel_with_homes(&dht, &homes, &fetch_pkt).await;
 
-    // Did anyone respond? `per_home` is non-empty even when every
-    // home timed out (we push empty vecs for failed homes? — no, we
-    // skip them, see `remote_fetch_parallel`). So an empty
-    // `per_home` means "every home failed".
-    if per_home.is_empty() {
+    // Did anyone respond? An empty per_home means "every home failed".
+    if per_home_with_id.is_empty() {
         return Err(QueueDrainError::AllFailed);
     }
 
-    // 5. Concat + dedupe by `DispatchP.id`. Order preserved (first
-    //    occurrence wins) so the home returning oldest-first stays
-    //    chronological at the client.
+    // 5. Build the per-home delivered-id map AND the union with first-
+    //    occurrence dedupe. Order preserved (first-home wins) so the
+    //    home returning oldest-first stays chronological at the client.
+    let mut per_home_ids: std::collections::HashMap<NodeId, Vec<[u8; 16]>> =
+        std::collections::HashMap::new();
     let mut seen: HashSet<[u8; 16]> = HashSet::new();
     let mut out: Vec<DispatchP> = Vec::new();
-    for batch in per_home {
+    for (node, batch) in per_home_with_id {
+        let mut ids: Vec<[u8; 16]> = Vec::with_capacity(batch.len());
         for d in batch {
+            ids.push(d.id.0);
             if seen.insert(d.id.0) {
                 out.push(d);
             }
         }
+        // If the same home appears twice (shouldn't, but defensive
+        // against a future change to remote_fetch_parallel), merge.
+        per_home_ids
+            .entry(node)
+            .and_modify(|v| v.extend_from_slice(&ids))
+            .or_insert(ids);
     }
 
     if !out.is_empty() {
         dht.metrics.inc_queue_fetches_succeeded();
     }
-    Ok(out)
+    Ok((out, per_home_ids))
 }
 
 // ---------------------------------------------------------------------------
@@ -229,16 +274,36 @@ pub(crate) async fn fetch_remote_queues(
 async fn remote_fetch_parallel(
     dht: &Arc<Dht>, homes: &[NodeDescriptor], fetch: &QueueFetch,
 ) -> Vec<Vec<DispatchP>> {
+    remote_fetch_parallel_with_homes(dht, homes, fetch)
+        .await
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect()
+}
+
+/// Phase 2d — variant of [`remote_fetch_parallel`] that preserves the
+/// per-home origin so the caller can build a `(NodeId →
+/// delivered_ids)` map for the `QueueFetchAck` fan-out.
+///
+/// Same fan-out shape (parallel `JoinSet` bounded by
+/// [`QUEUE_FETCH_TIMEOUT_MS`]) — only the result type changes.
+async fn remote_fetch_parallel_with_homes(
+    dht: &Arc<Dht>, homes: &[NodeDescriptor], fetch: &QueueFetch,
+) -> Vec<(NodeId, Vec<DispatchP>)> {
     use tokio::task::JoinSet;
-    let mut set: JoinSet<Option<Vec<DispatchP>>> = JoinSet::new();
+    let mut set: JoinSet<Option<(NodeId, Vec<DispatchP>)>> = JoinSet::new();
 
     for peer in homes.iter().cloned() {
         let dht_ref = dht.clone();
         let fetch_clone = fetch.clone();
-        set.spawn(async move { remote_fetch_one(&dht_ref, &peer, &fetch_clone).await });
+        set.spawn(async move {
+            remote_fetch_one(&dht_ref, &peer, &fetch_clone)
+                .await
+                .map(|v| (peer.id, v))
+        });
     }
 
-    let mut results: Vec<Vec<DispatchP>> = Vec::with_capacity(homes.len());
+    let mut results: Vec<(NodeId, Vec<DispatchP>)> = Vec::with_capacity(homes.len());
     let deadline = tokio::time::Instant::now() + Duration::from_millis(QUEUE_FETCH_TIMEOUT_MS);
     while !set.is_empty() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -247,7 +312,7 @@ async fn remote_fetch_parallel(
             break;
         }
         match timeout(remaining, set.join_next()).await {
-            Ok(Some(Ok(Some(batch)))) => results.push(batch),
+            Ok(Some(Ok(Some(item)))) => results.push(item),
             Ok(Some(Ok(None))) => {
                 // RPC failed without an outcome — bump failure metric.
                 dht.metrics.inc_queue_fetch_failures();
@@ -309,6 +374,221 @@ async fn remote_fetch_one(
         }
     }
     Some(all)
+}
+
+// ---------------------------------------------------------------------------
+// Home-side handlers (sticky-home phase 2d)
+// ---------------------------------------------------------------------------
+
+/// Phase 2d — home-side handler for `DhtRequest::QueueFetch`.
+///
+/// Verifies the user's signature on the fetch request, confirms this
+/// relay is in the user's K-closest set, and returns up to
+/// [`MAX_FETCH_QUEUE_BATCH`] queued dispatches from `cf_dht_queue`,
+/// oldest first.
+///
+/// **Defensive returns** — every rejection path returns an empty
+/// response with `exhausted = true` (rather than closing the
+/// connection). The connection-level rejection (for hard protocol
+/// violations) is the per-stream dispatcher's job; this handler only
+/// produces soft "no data for you" responses so a misbehaving
+/// requester is silently rate-limited rather than disconnecting.
+///
+/// 1. `QueueFetch::verify(req, now_ms)` — user_sig + skew check.
+/// 2. `self_is_in_k_closest(user_ipk)` — defensive.
+/// 3. Read up to `MAX_FETCH_QUEUE_BATCH + 1` entries; the +1 lets us
+///    set `exhausted = false` correctly without a second range
+///    query when the queue extends past the cap.
+///
+/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetch` shape).
+pub(crate) async fn handle_queue_fetch_rpc(
+    dht: &Arc<Dht>, req: QueueFetch, now_ms: u64,
+) -> QueueFetchResp {
+    // 1. Verify the user signature + freshness window.
+    if req.verify(now_ms).is_err() {
+        return QueueFetchResp { messages: Vec::new(), exhausted: true };
+    }
+
+    // 2. Confirm we are in the user's K-closest. Defensive — caller
+    //    shouldn't have routed here otherwise; under K-set drift races
+    //    we may legitimately not be K-closest by the time the request
+    //    arrives.
+    let user_ipk = req.user_ipk.0;
+    if !self_is_in_k_closest_qd(dht, &user_ipk) {
+        return QueueFetchResp { messages: Vec::new(), exhausted: true };
+    }
+
+    // 3. Read up to MAX_FETCH_QUEUE_BATCH + 1 entries; the +1 is the
+    //    lookahead that tells us whether more remain.
+    let probe_max = MAX_FETCH_QUEUE_BATCH + 1;
+    let mut peek = super::store::lookup_queue_for_user(dht, &user_ipk, probe_max);
+
+    let exhausted = peek.len() <= MAX_FETCH_QUEUE_BATCH;
+    if peek.len() > MAX_FETCH_QUEUE_BATCH {
+        peek.truncate(MAX_FETCH_QUEUE_BATCH);
+    }
+
+    let messages: Vec<DispatchP> = peek.into_iter().map(|(_k, d)| d).collect();
+    QueueFetchResp { messages, exhausted }
+}
+
+/// Phase 2d — home-side handler for `DhtRequest::QueueFetchAck`.
+///
+/// The ack signature only proves the user authorised deletion of the
+/// listed dispatch ids — it does **not** bind a home identity (the
+/// transcript is shared across all K homes by design, so one
+/// signature drains all). Each home only deletes the ids it actually
+/// holds; the rest are no-ops.
+///
+/// 1. `QueueFetchAck::verify(req, now_ms)` — user_sig + skew + length
+///    bound (`delivered_ids.len() <= MAX_FETCH_QUEUE_ACK_IDS`).
+/// 2. `delete_queue_entries(dht, &user_ipk, &delivered_ids)` —
+///    bounded prefix-scan + delete.
+///
+/// On signature/skew/length failure we return `ok = false`; the
+/// per-stream dispatcher does NOT additionally close the connection
+/// because (per phase 2a contract) the per-RPC verifier returns soft
+/// rejects in the response body. Length-overflow specifically *would*
+/// merit a hard close (`CloseReason::DhtForwardRejected`) but the
+/// dispatcher contract is "one request, one response", so the soft
+/// reject is the only path available.
+///
+/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetchAck` shape).
+pub(crate) async fn handle_queue_fetch_ack_rpc(
+    dht: &Arc<Dht>, req: QueueFetchAck, now_ms: u64,
+) -> QueueFetchAckResp {
+    if req.verify(now_ms).is_err() {
+        return QueueFetchAckResp { ok: false };
+    }
+    let user_ipk = req.user_ipk.0;
+    let _deleted = super::store::delete_queue_entries(dht, &user_ipk, &req.delivered_ids);
+    QueueFetchAckResp { ok: true }
+}
+
+/// Inline copy of `forward.rs::self_is_in_k_closest` — duplicated
+/// rather than `pub(crate)`-ed to keep `forward.rs` private to its
+/// module. Same permissive sparse-table policy.
+fn self_is_in_k_closest_qd(dht: &Dht, target: &[u8; 32]) -> bool {
+    let target_id = NodeId::from_bytes(*target);
+    let descriptors = {
+        let routing = dht.routing.read();
+        routing.find_closest(&target_id, K)
+    };
+    if descriptors.len() < K {
+        return true;
+    }
+    let self_id = dht.node_id;
+    let self_dist = xor_dist_qd(self_id.as_bytes(), target);
+    let kth_dist = xor_dist_qd(descriptors[K - 1].id.as_bytes(), target);
+    self_dist <= kth_dist
+}
+
+fn xor_dist_qd(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = a[i] ^ b[i];
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Recipient-side ack fan-out (sticky-home phase 2d)
+// ---------------------------------------------------------------------------
+
+/// Phase 2d — recipient-relay → home-relays `QueueFetchAck` fan-out.
+///
+/// Called from the post-`AckDrain` flow after the recipient client
+/// has durably stored the drained dispatches *and* libcore has
+/// returned a signed `(timestamp, sig)` over the union of
+/// `delivered_ids` (transcript:
+/// [`common::proto::dht_p2p::queue_fetch_ack_signing_input`]).
+///
+/// Sends a `QueueFetchAck` to each home in `homes` in parallel,
+/// bounded by [`QUEUE_FETCH_TIMEOUT_MS`] total wall-clock. Best-
+/// effort: failures are logged and counted but **not** propagated —
+/// a queue-not-deleted at one home means duplicate delivery on the
+/// next reconnect, which the client already dedupes by id.
+///
+/// **Empty-`delivered_ids` short-circuit**: if the union is empty
+/// (no homes contributed messages), we still send the ack so the
+/// homes' rate-limiters log the ack RPC. Caller can also choose to
+/// skip the call entirely; both are correct.
+pub(crate) async fn ack_remote_queues(
+    dht: Arc<Dht>, user_ipk: &[u8; 32], delivered_ids: Vec<[u8; 16]>,
+    timestamp: u64, sig: [u8; 64], homes: Vec<NodeDescriptor>,
+) {
+    if homes.is_empty() {
+        return;
+    }
+    let ack_pkt = QueueFetchAck {
+        user_ipk: Bytes(*user_ipk),
+        delivered_ids,
+        timestamp,
+        user_sig: Bytes(sig),
+    };
+
+    use tokio::task::JoinSet;
+    let mut set: JoinSet<()> = JoinSet::new();
+
+    for peer in homes.into_iter() {
+        let dht_ref = dht.clone();
+        let ack_clone = ack_pkt.clone();
+        set.spawn(async move {
+            remote_ack_one(&dht_ref, &peer, &ack_clone).await;
+        });
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(QUEUE_FETCH_TIMEOUT_MS);
+    while !set.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            set.abort_all();
+            break;
+        }
+        match timeout(remaining, set.join_next()).await {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(_))) => {}
+            Ok(None) => break,
+            Err(_) => {
+                set.abort_all();
+                break;
+            }
+        }
+    }
+}
+
+/// Single `QueueFetchAck` RPC against `peer`. Returns void: the only
+/// observable signal is the metrics counter (failures bump
+/// `queue_fetch_failures` for parity with the fetch path; we don't
+/// have a dedicated ack-failure counter because acks are best-effort
+/// and operators don't get a useful signal from a separate metric).
+async fn remote_ack_one(dht: &Arc<Dht>, peer: &NodeDescriptor, ack: &QueueFetchAck) {
+    let conn = match super::lookup::connect_to_peer(dht, peer).await {
+        Ok(c) => c,
+        Err(_) => {
+            dht.metrics.inc_queue_fetch_failures();
+            return;
+        }
+    };
+    let pkt = DhtPacket::Request(DhtRequest::QueueFetchAck(ack.clone()));
+    let bytes = match pkt.pack() {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let (mut send, mut recv) = match conn.open_bi().await {
+        Ok(s) => s,
+        Err(_) => {
+            dht.metrics.inc_queue_fetch_failures();
+            return;
+        }
+    };
+    if send.write_all(&bytes).await.is_err() {
+        return;
+    }
+    let _ = send.finish();
+    // Drain the response (we don't act on `ok`); failure to read is
+    // best-effort.
+    let _ = DhtPacket::unpack(&mut recv).await;
 }
 
 // ---------------------------------------------------------------------------

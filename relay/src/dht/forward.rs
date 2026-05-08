@@ -50,6 +50,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
@@ -61,7 +62,9 @@ use common::proto::dht_p2p::forward_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
+use ed25519_dalek::VerifyingKey;
 use thiserror::Error;
 use tokio::time::timeout;
 
@@ -412,6 +415,191 @@ async fn remote_forward_one(
         // a buggy-but-not-malicious peer.
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Home-side `Forward` handler (sticky-home phase 2d)
+// ---------------------------------------------------------------------------
+
+/// Phase 2d — home-side handler for `DhtRequest::Forward`. Mirror of
+/// the sender-side [`forward_to_homes`] fan-out: receives a `Forward`,
+/// verifies the outer sender-relay signature plus the embedded
+/// dispatch signature, then either delivers to the recipient locally
+/// (online) or queues into `cf_dht_queue` (offline).
+///
+/// **Verification ladder** (per `STICKY_HOME_RELAY.md` §5.1):
+///
+/// 1. Look up the sender-relay's verifying pubkey from the routing
+///    table entry for `fwd.sender_relay_id`. The DhtHello handshake
+///    populates that entry post-1i, so an unauthenticated dialer
+///    cannot land here. If the pubkey is missing entirely, return
+///    `BadSig` — there's nothing to verify against.
+/// 2. `Forward::verify(&fwd, sender_relay_pubkey, now_ms)` — outer
+///    sig + skew check.
+/// 3. Confirm we *are* in the recipient's K-closest. The sender
+///    shouldn't have routed to us if we're not, but K-set drift races
+///    are real (§4.4); return `NotOwner` so the sender re-fans-out.
+/// 4. Verify the embedded `dispatch.sig` (user-layer) — `Forward::verify`
+///    deliberately doesn't, per §5.1's two-layer signing contract.
+/// 5. Online recipient short-circuit: if the recipient is currently
+///    authenticated on this relay, deliver via the same `try_deliver`
+///    path the sender-side `handle_forward` uses. Return `Delivered`
+///    on success.
+/// 6. Otherwise enqueue via [`super::store::enqueue_for_home`] (which
+///    enforces the per-recipient cap and returns `Stored` /
+///    `QueueFull` accordingly).
+///
+/// **Outcome semantics**: see [`ForwardOutcome`] — every rejection
+/// path returns a distinct outcome variant; the dispatcher does not
+/// close the connection (only the wire-validator's hard-protocol
+/// failures do). Phase 2a's `CloseReason::DhtForwardRejected` is
+/// reserved for outer-validator failures; this handler returns
+/// soft-rejects in the response body so the sender can attribute
+/// failures to specific homes.
+///
+/// **Lock contract**: routing-table read is scoped + cloned out
+/// before any `await`; the connected-clients read is the same.
+pub(crate) async fn handle_forward_rpc(
+    dht: &Arc<Dht>, fwd: Forward, now_ms: u64,
+) -> ForwardResp {
+    // 1. Resolve sender_relay's verifying pubkey from the routing
+    //    table. The DhtHello handshake populates the routing entry's
+    //    `pubkey` field; if it's the placeholder `[0u8; 32]` (the
+    //    `with_no_client_auth()` inbound case from phase 1h), we
+    //    cannot verify and conservatively reject. The peer_conns
+    //    cache is the secondary source — it's populated for outbound
+    //    dials and may have a verified pubkey when the routing entry
+    //    doesn't.
+    let sender_pubkey = match resolve_sender_pubkey(dht, &fwd.sender_relay_id) {
+        Some(pk) => pk,
+        None => return ForwardResp { outcome: ForwardOutcome::BadSig },
+    };
+
+    // 2. Outer sender-relay signature + skew check.
+    if fwd.verify(&sender_pubkey, now_ms).is_err() {
+        return ForwardResp { outcome: ForwardOutcome::BadSig };
+    }
+
+    // 3. Are we in the recipient's K-closest? Defensive — sender
+    //    shouldn't have routed here otherwise.
+    let recipient_ipk: [u8; 32] = fwd.dispatch.to.0;
+    if !self_is_in_k_closest(dht, &recipient_ipk) {
+        return ForwardResp { outcome: ForwardOutcome::NotOwner };
+    }
+
+    // 4. Embedded user-layer dispatch signature.
+    if !verify_dispatch_user_sig(&fwd.dispatch) {
+        return ForwardResp { outcome: ForwardOutcome::BadSig };
+    }
+
+    // 5. Online-recipient short-circuit. Snapshot the connection out
+    //    of the lock before any await (project-wide rule); the
+    //    `clients` map field is `Option` so unit-test fixtures can
+    //    skip the local-deliver path entirely.
+    let recipient_conn = dht.clients.as_ref().and_then(|map| {
+        let guard = map.read();
+        guard.get(&recipient_ipk).cloned()
+    });
+
+    if let Some(conn) = recipient_conn {
+        let delivery = crate::quic::handler::client::events::forward::dispatch_to_deliver(
+            &fwd.dispatch,
+        );
+        if crate::quic::handler::client::events::forward::try_deliver(&conn, &delivery)
+            .await
+            .is_ok()
+        {
+            return ForwardResp { outcome: ForwardOutcome::Delivered };
+        }
+        // Local entry was stale (peer reset, ack timeout, etc.). Fall
+        // through to the queue path — same fallback shape as
+        // `handle_forward`. We do NOT evict the stale entry here:
+        // that's a per-relay concern owned by the sender-side
+        // forward path, and races with re-handshakes complicate it.
+        // The next `Forward` for the same recipient will trigger the
+        // same fall-through and the queue grows by one extra entry —
+        // bounded by `MAX_QUEUED_PER_RECIPIENT`.
+    }
+
+    // 6. Offline (or local-deliver failed): durably enqueue.
+    let outcome =
+        super::store::enqueue_for_home(dht, &recipient_ipk, &fwd.dispatch, now_ms);
+    ForwardResp { outcome }
+}
+
+/// Look up `sender_relay_id` in the routing table and `peer_conns`
+/// cache; return the verifying pubkey if either source has one.
+///
+/// The routing-table source is authoritative under the `DhtHello`
+/// handshake (phase 1i). The `peer_conns` source is a fallback for
+/// the case where a peer has connected and we cached the cert SPKI
+/// but the routing-table insert lost a race. Either source's
+/// `[0u8; 32]` placeholder (the inbound `with_no_client_auth()`
+/// case from phase 1h) is treated as "no pubkey known".
+fn resolve_sender_pubkey(dht: &Dht, sender_relay_id: &NodeId) -> Option<[u8; 32]> {
+    // Try routing table first.
+    let from_routing: Option<[u8; 32]> = {
+        let routing = dht.routing.read();
+        let candidates = routing.find_closest(sender_relay_id, 1);
+        candidates
+            .into_iter()
+            .find(|d| &d.id == sender_relay_id)
+            .map(|d| d.pubkey.0)
+            .filter(|pk| pk != &[0u8; 32])
+    };
+    if let Some(pk) = from_routing {
+        return Some(pk);
+    }
+    // Fallback to peer_conns.
+    let from_conns: Option<[u8; 32]> = {
+        let conns = dht.peer_conns.read();
+        conns
+            .get(sender_relay_id)
+            .map(|(_, pk)| *pk)
+            .filter(|pk| pk != &[0u8; 32])
+    };
+    from_conns
+}
+
+/// Verify the user-layer `dispatch.sig` against `dispatch.from` and
+/// the canonical [`dispatch_sig_message`] transcript. This is the
+/// *embedded* signature `Forward::verify` deliberately does not check
+/// (phase 2a §5.1 contract).
+fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
+    let Ok(vk) = VerifyingKey::from_bytes(&dispatch.from.0) else {
+        return false;
+    };
+    let sig = Signature::from_bytes(&dispatch.sig.0);
+    let msg = dispatch_sig_message(
+        &dispatch.to.0,
+        &dispatch.from.0,
+        &dispatch.id.0,
+        &dispatch.payload,
+    );
+    vk.verify_strict(&msg, &sig).is_ok()
+}
+
+/// True iff `dht.self_id` would be in the K-closest for `target` under
+/// the current routing table. Same permissive sparse-table policy as
+/// `forward_to_homes::self_is_in_k`.
+fn self_is_in_k_closest(dht: &Dht, target: &[u8; 32]) -> bool {
+    let target_id = NodeId::from_bytes(*target);
+    let descriptors = {
+        let routing = dht.routing.read();
+        routing.find_closest(&target_id, K)
+    };
+    if descriptors.len() < K {
+        // Sparse-table permissive: same policy as `store::self_is_owner`
+        // and `forward_to_homes::self_is_in_k`. A fresh-joiner relay
+        // accepts forwards for users it might not yet know are in
+        // someone else's K-closest — better to over-accept and let
+        // the next sweep re-balance than under-accept and silently
+        // drop messages.
+        return true;
+    }
+    let self_dist = xor_dist(dht.node_id.as_bytes(), target);
+    let kth_dist = xor_dist(descriptors[K - 1].id.as_bytes(), target);
+    self_dist <= kth_dist
 }
 
 // ---------------------------------------------------------------------------

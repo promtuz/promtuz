@@ -153,7 +153,17 @@ fn ack_for_summary(summary: &ForwardSummary) -> DispatchAckP {
 /// Attempt direct delivery. All failure modes (open_bi, send, ack timeout,
 /// wrong-packet) collapse into `Err(ConnectionError::TimedOut)` because the
 /// caller only needs to distinguish success from "give up and queue".
-async fn try_deliver(conn: &Connection, delivery: &DeliverP) -> Result<(), ConnectionError> {
+///
+/// **Phase 2d** — exposed at `pub(crate)` and accepting only `(conn,
+/// delivery)` so the home-side `Forward` RPC handler in
+/// [`crate::dht::forward::handle_forward_rpc`] can reuse the exact same
+/// deliver-then-ack protocol when the recipient is online here. Keeping
+/// one implementation across the sender-side and home-side delivery
+/// paths means a future tweak (e.g. tightening the 3s ack window) lands
+/// in one place and stays consistent.
+pub(crate) async fn try_deliver(
+    conn: &Connection, delivery: &DeliverP,
+) -> Result<(), ConnectionError> {
     let (mut deliver_tx, mut deliver_rx) = conn.open_bi().await?;
 
     SRelayPacket::Deliver(delivery.clone())
@@ -165,6 +175,27 @@ async fn try_deliver(conn: &Connection, delivery: &DeliverP) -> Result<(), Conne
     {
         Ok(Ok(CRelayPacket::DeliverAck)) => Ok(()),
         _ => Err(ConnectionError::TimedOut),
+    }
+}
+
+/// Build a [`DeliverP`] from a [`DispatchP`]. Strips the recipient
+/// (`to`) field — `DeliverP` is the recipient's view, where the
+/// recipient is implicit. Used by the home-side `Forward` handler in
+/// [`crate::dht::forward::handle_forward_rpc`] to convert an inbound
+/// dispatch into the on-the-wire delivery shape before calling
+/// [`try_deliver`].
+///
+/// Mirrors the field-by-field shape used in
+/// `events/drain.rs::dispatch_to_deliver`; the duplication is
+/// intentional — both modules are end-points of the dispatch ladder
+/// and a shared util would only export one extra symbol without
+/// reducing the per-callsite line count.
+pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
+    DeliverP {
+        id:      d.id,
+        from:    d.from,
+        payload: d.payload.clone(),
+        sig:     d.sig,
     }
 }
 

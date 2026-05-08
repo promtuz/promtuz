@@ -40,29 +40,51 @@
 //! reconnect.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use common::proto::Sender;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
+use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
 use common::trace;
 use common::warn;
 use quinn::SendStream;
 use rust_rocksdb::WriteBatch;
+use tokio::sync::oneshot;
 
 use crate::dht::Dht;
 use crate::dht::config::K;
+use crate::quic::handler::client::AckAuthPayload;
 use crate::quic::handler::client::ClientCtxHandle;
+use crate::quic::handler::client::RemoteDrainState;
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::storage::MessageKey;
+use crate::util::systime;
+
+/// Phase 2d — extended fetch result that carries the per-home
+/// `delivered_ids` map and the home descriptors so the post-`AckDrain`
+/// flow can issue `QueueFetchAck` to each home.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RemoteFetchResult {
+    pub messages: Vec<DispatchP>,
+    pub per_home: std::collections::HashMap<NodeId, Vec<[u8; 16]>>,
+    pub homes:    Vec<NodeDescriptor>,
+}
 
 /// Pluggable seam for the remote-fetch path. The default
-/// implementation calls [`crate::dht::queue_drain::fetch_remote_queues`];
+/// implementation calls [`crate::dht::queue_drain::fetch_remote_queues_with_homes`];
 /// tests override this to inject deterministic homes-returned-x stubs
 /// without standing up real two-relay QUIC.
+///
+/// **Phase 2d**: result type is now [`RemoteFetchResult`] (carries
+/// per-home metadata for the `QueueFetchAck` round). Tests that don't
+/// care about the ack-fanout half can return a `RemoteFetchResult`
+/// with empty `per_home`/`homes`.
 ///
 /// `Send + Sync` because the closure stores in
 /// `static`-equivalent state in a relay's `Arc<Dht>`-powered fan-out
@@ -74,7 +96,7 @@ pub type RemoteFetcher = std::sync::Arc<
             DrainAuth,
             NodeId,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Vec<DispatchP>> + Send + 'static>,
+            Box<dyn std::future::Future<Output = RemoteFetchResult> + Send + 'static>,
         > + Send
         + Sync,
 >;
@@ -160,13 +182,22 @@ pub(crate) async fn handle_drain_queue_with(
         {
             let self_id = dht.node_id;
             // Hand off to the (possibly-stubbed) remote fetcher.
-            let dispatches: Vec<DispatchP> =
+            let result: RemoteFetchResult =
                 (remote_fetcher)(dht.clone(), recipient_arr, auth, self_id).await;
-            for d in dispatches {
+            for d in result.messages {
                 if seen_ids.insert(d.id.0) {
                     deduped.push(dispatch_to_deliver(d));
                 }
             }
+            // Phase 2d: stash per-home delivered ids + home
+            // descriptors for the post-`AckDrain` `QueueFetchAck`
+            // fan-out. Replace any prior pending state — the latest
+            // drain wins.
+            *ctx.pending_remote_drain.lock() = Some(RemoteDrainState {
+                user_ipk: recipient_arr,
+                per_home: result.per_home,
+                homes:    result.homes,
+            });
         } else {
             // Either we have no auth (legacy client) or DHT is
             // disabled. Log and degrade to local-only — same shape
@@ -202,27 +233,141 @@ pub(crate) async fn handle_drain_queue_with(
 }
 
 /// Atomically deletes every `cf_messages` key the most recent drain
-/// delivered. The `cf_dht_queue` cross-cf cleanup and the remote-
-/// home `QueueFetchAck` deletion path are both phase 2d — see the
-/// phase-scope note on [`handle_drain_queue_with`].
+/// delivered, and (phase 2d) fans a `QueueFetchAck` out to all K
+/// homes that contributed to the remote-fetch round so they GC
+/// their copies of the now-acknowledged dispatches.
+///
+/// **Order of operations**:
+/// 1. Local `cf_messages` deletion via WriteBatch (durable; same as
+///    pre-2d).
+/// 2. If `pending_remote_drain` is set: ask libcore to sign an ack
+///    over the union `delivered_ids` (5s timeout via
+///    `oneshot::Receiver`), then send `QueueFetchAck` to each home
+///    in parallel (3s total wall-clock budget). Best-effort;
+///    failures only mean some queues linger at homes until natural
+///    TTL expiry.
+///
+/// **Why best-effort**: the homes' `cf_dht_queue` keys lasting until
+/// TTL is the soft fallback the design plan §4.5 explicitly accepts.
+/// The user-visible drain has already succeeded at this point — the
+/// client got its messages and durably stored them. Failing the ack
+/// flow would not change that; it would just leak duplicate
+/// deliveries on the next reconnect.
 pub(super) async fn handle_ack_drain(
-    ctx: ClientCtxHandle, _tx: &mut SendStream,
+    ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
+    // 1. Local `cf_messages` GC (unchanged from pre-2d).
     let keys = std::mem::take(&mut *ctx.pending_drain.lock());
+    if !keys.is_empty() {
+        let mut batch = WriteBatch::default();
+        for key in &keys {
+            batch.delete(key.as_bytes());
+        }
+        ctx.relay.rocks.write(&batch)?;
+        trace!("DRAIN: cleared {} acked messages", keys.len());
+    }
 
-    if keys.is_empty() {
+    // 2. Phase 2d — remote `QueueFetchAck` fan-out.
+    let remote_state = ctx.pending_remote_drain.lock().take();
+    if let Some(state) = remote_state {
+        if let Err(err) = run_remote_ack_round(&ctx, tx, state).await {
+            trace!("DRAIN: remote ack-fanout fell through: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Phase 2d — orchestrate the post-`AckDrain` remote-ack round:
+/// 1. Compute the union of delivered ids across all homes (caps at
+///    [`MAX_FETCH_QUEUE_ACK_IDS`] to match the home-side verifier;
+///    overflow truncates oldest-first because per-home iteration
+///    order already chronological).
+/// 2. Park a `oneshot::Sender<AckAuthPayload>` on `ctx.ack_auth`.
+/// 3. Send `SRelayPacket::AckAuthRequest` to the client.
+/// 4. Await `CRelayPacket::AckAuth` via the oneshot (5s timeout).
+/// 5. Fan out `QueueFetchAck` to each home in parallel (3s total
+///    via `queue_drain::ack_remote_queues`).
+///
+/// Best-effort: every failure path returns `Ok(())` from this
+/// function so the user-visible `AckDrain` still succeeds. The
+/// `Result<()>` shape exists only so the function can use `?` with
+/// the QUIC stream operations.
+async fn run_remote_ack_round(
+    ctx: &ClientCtxHandle, tx: &mut SendStream, state: RemoteDrainState,
+) -> Result<()> {
+    // 1. Compute the union of delivered ids.
+    let mut union_set: std::collections::HashSet<[u8; 16]> =
+        std::collections::HashSet::new();
+    let mut union: Vec<[u8; 16]> = Vec::new();
+    for ids in state.per_home.values() {
+        for id in ids {
+            if union_set.insert(*id) {
+                union.push(*id);
+            }
+        }
+    }
+    if union.is_empty() {
+        // No homes contributed — nothing to ack. Skip the round trip.
         return Ok(());
     }
-
-    let mut batch = WriteBatch::default();
-    for key in &keys {
-        batch.delete(key.as_bytes());
+    // Defensively cap to the wire-format ceiling. The home-side
+    // verifier rejects oversize lists; truncating saves the
+    // round-trip. A drain that produces > 64 messages from remote
+    // homes is already unusual (a single page from one home returns
+    // up to 64), but bounded paging across multiple homes can reach
+    // here.
+    if union.len() > MAX_FETCH_QUEUE_ACK_IDS {
+        union.truncate(MAX_FETCH_QUEUE_ACK_IDS);
     }
 
-    ctx.relay.rocks.write(&batch)?;
+    // 2. Park the response receiver. Replace any stale pending sender
+    //    — the latest ack round wins.
+    let (sender, receiver) = oneshot::channel::<AckAuthPayload>();
+    *ctx.ack_auth.lock() = Some(sender);
 
-    trace!("DRAIN: cleared {} acked messages", keys.len());
+    // 3. Send the AckAuthRequest to the client.
+    let suggested_timestamp = systime().as_millis() as u64;
+    SRelayPacket::AckAuthRequest {
+        delivered_ids:       union.clone(),
+        suggested_timestamp,
+    }
+    .send(tx)
+    .await?;
 
+    // 4. Await the client's signed ack with a 5s timeout. On timeout
+    //    or channel close, drop the pending sender (best-effort:
+    //    homes won't get the ack, queues linger until TTL expiry).
+    let payload = match tokio::time::timeout(Duration::from_secs(5), receiver).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            // Sender dropped before we received — likely the client
+            // disconnected. Clear the pending entry.
+            *ctx.ack_auth.lock() = None;
+            warn!("DRAIN: AckAuth channel closed before signature arrived");
+            return Ok(());
+        }
+        Err(_) => {
+            // Timeout. Clear the pending entry so a future
+            // `AckAuthRequest` can install a fresh sender.
+            *ctx.ack_auth.lock() = None;
+            warn!("DRAIN: AckAuth timeout (5s); skipping QueueFetchAck fan-out");
+            return Ok(());
+        }
+    };
+
+    // 5. Fan out to all homes. Best-effort, bounded to 3s total.
+    if let Some(dht) = ctx.relay.dht.as_ref().cloned() {
+        crate::dht::queue_drain::ack_remote_queues(
+            dht,
+            &state.user_ipk,
+            union,
+            payload.timestamp,
+            payload.sig,
+            state.homes,
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -353,23 +498,49 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
 }
 
 /// Default production [`RemoteFetcher`] — calls
-/// `crate::dht::queue_drain::fetch_remote_queues` and absorbs any
-/// error into an empty result (the drain falls back to local-only
-/// rather than failing the whole drain). Per-error telemetry lives
-/// inside `fetch_remote_queues` itself.
+/// [`crate::dht::queue_drain::fetch_remote_queues_with_homes`] and
+/// absorbs any error into an empty result (the drain falls back to
+/// local-only rather than failing the whole drain). Per-error
+/// telemetry lives inside the underlying helper.
+///
+/// Phase 2d: also computes the K-closest descriptor list (filtered to
+/// non-self) and includes it in the result so the
+/// `handle_ack_drain` half can fan a `QueueFetchAck` out to those
+/// homes without re-walking the routing table.
 fn default_remote_fetcher() -> RemoteFetcher {
     Arc::new(
         |dht: Arc<Dht>, user_ipk: [u8; 32], auth: DrainAuth, self_id: NodeId| {
             Box::pin(async move {
-                match crate::dht::queue_drain::fetch_remote_queues(
+                // Snapshot the K-closest descriptors *now* — the same
+                // set the underlying fetcher uses internally. Cloning
+                // out of the routing-table read lock before any
+                // await; never held across.
+                let homes: Vec<NodeDescriptor> = {
+                    let target_id = NodeId::from_bytes(user_ipk);
+                    let routing = dht.routing.read();
+                    routing
+                        .find_closest(&target_id, K)
+                        .into_iter()
+                        .filter(|d| d.id != self_id)
+                        .collect()
+                };
+                match crate::dht::queue_drain::fetch_remote_queues_with_homes(
                     dht, &user_ipk, &auth, self_id,
                 )
                 .await
                 {
-                    Ok(v) => v,
+                    Ok((messages, per_home)) => RemoteFetchResult {
+                        messages,
+                        per_home,
+                        homes,
+                    },
                     Err(e) => {
                         trace!("DRAIN: remote fetch fell through: {e}");
-                        Vec::new()
+                        RemoteFetchResult {
+                            messages: Vec::new(),
+                            per_home: std::collections::HashMap::new(),
+                            homes,
+                        }
                     }
                 }
             })

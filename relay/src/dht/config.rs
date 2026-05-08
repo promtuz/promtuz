@@ -274,6 +274,42 @@ pub const QUEUE_FETCH_TIMEOUT_MS: u64 = 3000;
 pub const MAX_QUEUE_FETCH_PAGES: usize = 10;
 
 // ---------------------------------------------------------------------------
+// Sticky-home K-set drift migration (phase 2d)
+// ---------------------------------------------------------------------------
+
+/// Defensive cap on the number of `cf_dht_queue` entries a single
+/// `evict_expired` sweep will migrate when this relay realises it has
+/// drifted out of a recipient's K-closest set.
+///
+/// Per `STICKY_HOME_RELAY.md` §4.4 / §7.2 the migration runs lazily on
+/// every periodic `evict_expired` sweep. A sweep over a fully-loaded
+/// disk (millions of `cf_dht_queue` entries) spent on synchronous
+/// per-entry K-closest lookups + outbound `Forward` RPCs would stall
+/// the scheduler and hog network bandwidth. Capping at 256 keeps the
+/// per-sweep CPU and outbound-RPC fan-out bounded; the next sweep
+/// (after `EVICT_INTERVAL_MS = 60s`) handles the remainder.
+///
+/// The cap is intentionally per-sweep rather than per-recipient —
+/// even a single recipient with 1024 queued messages (the
+/// per-recipient cap) is well under the 256 budget *if* it's the only
+/// migration candidate. A relay that drifted out of K for many
+/// recipients simultaneously gets the spread treatment over multiple
+/// sweeps, which is the correct shape under churn.
+///
+/// 256 was chosen to balance:
+/// - sweep wall-clock budget (one outbound bi-stream per migrated
+///   message; 256 × ~5 ms = ~1 s worst case, comfortably inside
+///   the 60 s sweep interval),
+/// - storage drainage rate (a permanently-displaced relay is
+///   re-emptied within ~1 hour at the steady rate), and
+/// - the existing `FETCH_RECORD_CONCURRENCY = 8` cold-join cap
+///   pattern (this is the post-bootstrap analogue).
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.4 (drift handling),
+/// §7.2 (lazy on `evict_expired` sweep).
+pub const MAX_MIGRATE_PER_SWEEP: usize = 256;
+
+// ---------------------------------------------------------------------------
 // Per-peer inbound-RPC rate limits (§8.4 / §8.7 DoS hardening)
 // ---------------------------------------------------------------------------
 //

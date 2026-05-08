@@ -1,4 +1,5 @@
 use anyhow::Result;
+use client_handler::AckAuthPayload;
 use client_handler::ClientCtxHandle;
 use common::proto::client_rel::CRelayPacket;
 use forward::handle_forward;
@@ -33,6 +34,16 @@ pub(super) async fn handle_packet(
         // otherwise probe the verifier — see `drain_auth.rs`).
         DrainAuth { timestamp, sig } => {
             handle_drain_auth(ctx.clone(), timestamp, sig.0).await
+        },
+        // Sticky-home phase 2d. Hand-off to the parked `oneshot::Sender`
+        // installed by `handle_ack_drain` before sending the
+        // `AckAuthRequest`. If no sender is parked (out-of-order client
+        // — sent AckAuth without our request), drop silently.
+        AckAuth { sig, timestamp } => {
+            if let Some(sender) = ctx.ack_auth.lock().take() {
+                let _ = sender.send(AckAuthPayload { sig: sig.0, timestamp });
+            }
+            Ok(())
         },
 
         // Ignore Extra

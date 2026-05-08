@@ -18,6 +18,8 @@ use common::proto::client_rel::QueryResultP;
 use common::proto::client_rel::SHandshakePacket as SHSP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
+use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
+use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
@@ -260,6 +262,18 @@ impl Relay {
                 while let Ok(packet) = SRelayPacket::unpack(&mut recv).await {
                     if let Err(err) = match packet {
                         SRelayPacket::Deliver(msg) => handle_deliver(&mut send, ipk, msg).await,
+                        SRelayPacket::AckAuthRequest {
+                            delivered_ids,
+                            suggested_timestamp,
+                        } => {
+                            handle_ack_auth_request(
+                                &mut send,
+                                ipk,
+                                delivered_ids,
+                                suggested_timestamp,
+                            )
+                            .await
+                        },
                         other => {
                             debug!("unexpected packet from relay: {other:?}");
                             Ok(())
@@ -337,4 +351,119 @@ async fn handle_deliver(tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP) -
     MessageEv::Received { id: saved.inner.id, from: *msg.from, content, timestamp }.emit();
 
     Ok(())
+}
+
+/// Phase 2d — handle a relay-issued `SRelayPacket::AckAuthRequest`.
+///
+/// The relay asks us (the client) to sign a `QueueFetchAck`
+/// transcript over the union of dispatch ids it just drained from the
+/// K home relays. We sign with the long-term identity key
+/// ([`IdentitySigner::sign`]) over
+/// [`queue_fetch_ack_signing_input`] and reply with a
+/// `CRelayPacket::AckAuth { sig, timestamp }`. The relay then fans the
+/// signed pair out as `QueueFetchAck` to each home so the home-side
+/// `cf_dht_queue` entries get GC'd.
+///
+/// **Why we trust `suggested_timestamp`** rather than reading our own
+/// clock: the relay's clock is what matters for the home-side skew
+/// check (the homes verify against the timestamp embedded in the
+/// signed transcript). Using `suggested_timestamp` saves a `systime()`
+/// call and avoids a redundant clock-drift hazard.
+///
+/// **Length bound**: we silently drop the request if
+/// `delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS`. The home-side
+/// verifier would reject it anyway (`QueueFetchAck::verify` returns
+/// `TooManyIds` past the cap); failing here saves the round trip.
+async fn handle_ack_auth_request(
+    tx: &mut SendStream, ipk: VerifyingKey, delivered_ids: Vec<[u8; 16]>,
+    suggested_timestamp: u64,
+) -> Result<()> {
+    if delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS {
+        warn!(
+            "ACK_AUTH: delivered_ids overflow ({} > {}); dropping",
+            delivered_ids.len(),
+            MAX_FETCH_QUEUE_ACK_IDS
+        );
+        return Ok(());
+    }
+    let self_ipk = ipk.to_bytes();
+    let transcript =
+        queue_fetch_ack_signing_input(&self_ipk, &delivered_ids, suggested_timestamp);
+    let sig = IdentitySigner::sign(&transcript)?;
+    CRelayPacket::AckAuth {
+        sig:       Bytes::from(sig.to_bytes()),
+        timestamp: suggested_timestamp,
+    }
+    .send(tx)
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! Phase 2d — pure-function tests for `handle_ack_auth_request`'s
+    //! transcript shape. We can't drive the QUIC `SendStream` half
+    //! without a live connection, but the load-bearing piece of the
+    //! handler is the transcript construction (it must match the
+    //! relay's verifier byte-for-byte). Pin the transcript layout
+    //! against `queue_fetch_ack_signing_input` so any drift surfaces
+    //! here.
+    use common::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN;
+    use common::proto::dht_p2p::queue_fetch_ack_signing_input;
+
+    /// Pin the transcript shape: `domain || version (BE u16) || ipk
+    /// (32) || count (BE u32) || n*16 || ts (BE u64)`. Catches a
+    /// regression in either side of the helper / verifier boundary.
+    #[test]
+    fn handle_ack_auth_request_signs_correct_transcript() {
+        let user_ipk: [u8; 32] = [0x11; 32];
+        let ids: Vec<[u8; 16]> = vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]];
+        let ts: u64 = 1_700_000_000_004;
+
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
+        let expected_len = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
+            + 2  // version
+            + 32 // ipk
+            + 4  // count BE u32
+            + ids.len() * 16
+            + 8; // ts BE u64
+        assert_eq!(transcript.len(), expected_len);
+
+        // Layout invariants: domain prefix at offset 0, version next,
+        // ipk after, count after that, then ids, then ts.
+        assert!(transcript.starts_with(DHT_QUEUE_FETCH_ACK_SIG_DOMAIN));
+        let off = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len();
+        // version is BE u16 at `off..off+2`
+        assert_eq!(transcript[off..off + 2].len(), 2);
+        // ipk at `off+2..off+2+32`
+        assert_eq!(&transcript[off + 2..off + 2 + 32], &user_ipk);
+        // count at `off+2+32..off+2+32+4`
+        let count_off = off + 2 + 32;
+        let count_bytes: [u8; 4] = transcript[count_off..count_off + 4].try_into().unwrap();
+        assert_eq!(u32::from_be_bytes(count_bytes), ids.len() as u32);
+        // ts at the end as BE u64
+        let ts_bytes: [u8; 8] =
+            transcript[transcript.len() - 8..].try_into().unwrap();
+        assert_eq!(u64::from_be_bytes(ts_bytes), ts);
+    }
+
+    /// Confirm the empty-ids edge case is well-formed: the transcript
+    /// length collapses to `domain || version || ipk || count(0) ||
+    /// ts`, no body. The relay-side verifier accepts an empty-ids ack
+    /// (it's a probe-only "I'm here" signal).
+    #[test]
+    fn handle_ack_auth_request_empty_ids_transcript_is_well_formed() {
+        let user_ipk: [u8; 32] = [0x22; 32];
+        let ids: Vec<[u8; 16]> = vec![];
+        let ts: u64 = 1_700_000_000_005;
+
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
+        let expected_len =
+            DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 4 + 0 + 8;
+        assert_eq!(transcript.len(), expected_len);
+    }
 }

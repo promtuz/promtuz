@@ -8,6 +8,7 @@ use common::warn;
 use parking_lot::Mutex;
 use quinn::Connection;
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::storage::MessageKey;
@@ -20,6 +21,18 @@ use crate::relay::RelayRef;
 
 pub(crate) mod events;
 mod handshake;
+
+/// Phase 2d — buffered client `AckAuth { sig, timestamp }` payload, sent
+/// in response to a relay-issued `SRelayPacket::AckAuthRequest`. The
+/// signature covers
+/// [`common::proto::dht_p2p::queue_fetch_ack_signing_input`] over
+/// `(self_ipk, delivered_ids, timestamp)`; the relay then fans the
+/// pair out as `QueueFetchAck` to all K homes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AckAuthPayload {
+    pub sig:       [u8; 64],
+    pub timestamp: u64,
+}
 
 /// Context for client connection
 pub struct ClientContext {
@@ -47,6 +60,68 @@ pub struct ClientContext {
     /// round-trip to fail with `StaleTimestamp` at the home — letting
     /// the client refresh is cheaper.
     pub drain_auth: Mutex<Option<DrainAuth>>,
+
+    /// Sticky-home phase 2d — pending `AckAuth` request channel.
+    ///
+    /// When the recipient drain handler issues a
+    /// `SRelayPacket::AckAuthRequest` to ask libcore for a per-batch
+    /// user signature on the union of `delivered_ids`, it parks a
+    /// `oneshot::Sender<AckAuthPayload>` here. The
+    /// `CRelayPacket::AckAuth` handler in
+    /// `events::ack_auth::handle_ack_auth` takes the sender out, sends
+    /// the payload, and lets the awaiter wake up.
+    ///
+    /// **Single-pending invariant**: only one `AckAuth` round-trip is
+    /// in flight per `ClientContext` at any time. A client that
+    /// reconnects mid-flight will lose the pending channel (the
+    /// `oneshot::Sender` is dropped, the awaiter sees a `RecvError`
+    /// and falls back to skipping the home-fanout — the queues
+    /// linger until natural TTL expiry, same fallback as on timeout).
+    ///
+    /// **Lock contract**: `parking_lot::Mutex`; never held across an
+    /// `await` (project-wide rule). All callers `.take()` the sender
+    /// out of the guard before any I/O.
+    pub ack_auth: Mutex<Option<oneshot::Sender<AckAuthPayload>>>,
+
+    /// Sticky-home phase 2d — pending remote-drain bookkeeping for the
+    /// post-`AckDrain` `QueueFetchAck` fan-out.
+    ///
+    /// Set by the recipient drain handler after a successful
+    /// remote-fetch round (when this relay is *not* in the user's
+    /// K-closest set, so the queues live at remote homes). Read by
+    /// `handle_ack_drain` after the client has durably stored the
+    /// drained dispatches; `handle_ack_drain` then issues a
+    /// `SRelayPacket::AckAuthRequest`, awaits the `CRelayPacket::AckAuth`,
+    /// and fans out a `QueueFetchAck` to each home.
+    ///
+    /// **Why we buffer rather than sign-then-fan-out inline**: the
+    /// transcript signs `(user_ipk, delivered_ids, timestamp)` —
+    /// `delivered_ids` is only known after fetching, and the user's
+    /// signature on the drain-confirmation must come *after* the
+    /// client has actually durably stored the messages (the `AckDrain`
+    /// is the durability proof). Splitting the signing from the
+    /// fetching mirrors the existing `DrainAuth` / `AckDrain` split.
+    pub pending_remote_drain: Mutex<Option<RemoteDrainState>>,
+}
+
+/// Phase 2d — buffered "messages just drained from remote homes"
+/// state. Lives on `ClientContext.pending_remote_drain` between the
+/// `DrainQueue` and the `AckDrain` so the ack-handler can compute the
+/// `delivered_ids` union and fan a `QueueFetchAck` out to each home.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteDrainState {
+    /// User IPK whose queue was drained — same value as `ClientContext.ipk`,
+    /// duplicated here so the ack handler doesn't need to round-trip
+    /// through `PublicKey::as_bytes`. (Wire shape uses `[u8; 32]`.)
+    pub user_ipk: [u8; 32],
+    /// Per-home delivered-id map. Each entry's `Vec<[u8; 16]>` is the
+    /// list of dispatch ids that home actually returned during the
+    /// fetch round. Used to compute the union the ack signs over.
+    pub per_home: std::collections::HashMap<common::quic::id::NodeId, Vec<[u8; 16]>>,
+    /// The K-closest descriptors at fetch time — re-used as the fan-
+    /// out targets for `QueueFetchAck`. Cached because the routing
+    /// table may have shifted between fetch and ack.
+    pub homes: Vec<common::proto::dht_p2p::NodeDescriptor>,
 }
 
 pub type ClientCtxHandle = Arc<ClientContext>;
@@ -90,6 +165,8 @@ impl Handler {
             conn: conn.clone(),
             pending_drain: Mutex::new(Vec::new()),
             drain_auth: Mutex::new(None),
+            ack_auth: Mutex::new(None),
+            pending_remote_drain: Mutex::new(None),
         });
 
         // only 16 concurrent streams can run at once per connection

@@ -84,8 +84,16 @@ pub struct Relay {
     /// pre-DHT behaviour.
     pub dht: Option<Arc<Dht>>,
 
-    /// Connected + authenticated clients, keyed by IPK
-    pub clients: RwLock<HashMap<[u8; 32], Connection>>,
+    /// Connected + authenticated clients, keyed by IPK.
+    ///
+    /// `Arc<RwLock<...>>` (rather than a bare `RwLock`) so the inner
+    /// map can be shared with the DHT's `Dht::clients` reference for
+    /// the home-side `Forward` handler (phase 2d). The relay-side
+    /// per-client handler in `quic/handler/client/mod.rs` and the DHT
+    /// home-side handler in `dht/forward.rs::handle_forward_rpc` both
+    /// observe the same map; cloning the `Arc` is cheap and avoids a
+    /// back-pointer from `Dht` → `Relay`.
+    pub clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>,
 }
 
 impl Relay {
@@ -131,7 +139,10 @@ impl Relay {
         // queue point at the same on-disk store but live in separate
         // column families (§1.2).
         let rocks = Arc::new(graceful!(rocksdb(), "failed to setup rocksdb"));
-        let clients = RwLock::new(HashMap::new());
+        // Phase 2d: `clients` is `Arc<RwLock<...>>` (not a bare
+        // `RwLock`) so the inner map can be cloned-by-Arc into
+        // `Dht.clients` for the home-side `Forward` handler.
+        let clients = Arc::new(RwLock::new(HashMap::new()));
 
         // DHT construction is gated on `cfg.dht.enabled`. When disabled,
         // the field stays `None` and every consumer falls through to
@@ -144,6 +155,10 @@ impl Relay {
                     // module can open `peer/1` connections to other
                     // relays.
                     d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
+                    // Phase 2d: share the connected-clients map so
+                    // the home-side `Forward` handler can deliver
+                    // locally when the recipient is online here.
+                    d.attach_clients(clients.clone());
                     info!("DHT enabled (node_id = {node_id})");
                     Some(Arc::new(d))
                 },

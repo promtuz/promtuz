@@ -182,6 +182,31 @@ pub struct Dht {
     /// reference because the dispatcher in `handler.rs` checks the
     /// limiter on every inbound stream.
     pub(crate) rate_limiters: rate_limit::PerPeerLimiters,
+
+    /// Shared reference to the relay's connected-clients map (phase 2d).
+    ///
+    /// The home-side `Forward` handler in
+    /// [`crate::dht::forward::handle_forward_rpc`] uses this to short-
+    /// circuit to local-deliver when the recipient is currently
+    /// authenticated *here* — avoiding a write into `cf_dht_queue` that
+    /// would just be drained moments later when the user pulls. The
+    /// `Connection` value is exactly the one `RelayRef::clients` holds;
+    /// we share an `Arc<RwLock<...>>` clone rather than a back-pointer
+    /// to `Relay` so unit tests that build a bare `Dht` (without a full
+    /// `Relay`) can still drive the handler with a stubbed map.
+    ///
+    /// **Lock contract**: `parking_lot::RwLock`; never held across an
+    /// `await` (project-wide rule). Callers clone the `Connection` out
+    /// of the guard before any I/O — same pattern
+    /// `quic/handler/client/events/forward.rs::handle_forward` uses on
+    /// the sender path.
+    ///
+    /// `Option<...>` so the bare-`Dht` unit-test fixtures
+    /// (`store::tests::fresh_dht`, `lookup::tests::fresh_dht`) keep
+    /// compiling — a relay-level `Relay::new` populates this via
+    /// [`Self::attach_clients`].
+    pub(crate) clients:
+        Option<Arc<RwLock<HashMap<[u8; 32], Connection>>>>,
 }
 
 impl Dht {
@@ -236,6 +261,7 @@ impl Dht {
             endpoint: None,
             peer_client_cfg: None,
             rate_limiters: rate_limit::PerPeerLimiters::new(),
+            clients: None,
         })
     }
 
@@ -246,6 +272,18 @@ impl Dht {
     pub fn attach_dialer(&mut self, endpoint: Endpoint, peer_client_cfg: Arc<ClientConfig>) {
         self.endpoint = Some(endpoint);
         self.peer_client_cfg = Some(peer_client_cfg);
+    }
+
+    /// Wire a shared reference to the relay's connected-clients map
+    /// (phase 2d). Called by `Relay::new` *after* both the `Relay` and
+    /// the `Dht` are constructed, so the same `Arc<RwLock<HashMap<...>>>`
+    /// the relay-side hands to the per-client handler is also visible
+    /// to the home-side `Forward` handler.
+    ///
+    /// Idempotent and safe to skip in unit-test fixtures that don't
+    /// drive the home-side delivery path.
+    pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
+        self.clients = Some(clients);
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path
