@@ -99,7 +99,7 @@ async fn handle_lifetime(
             debug!("sending to relay({})", conn.remote_address());
 
             let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
-            hello_ack.send(&mut send).await.map_err(anyhow::Error::from)?;
+            hello_ack.send(&mut send).await?;
             send.finish().map_err(anyhow::Error::from)?;
 
             Ok(())

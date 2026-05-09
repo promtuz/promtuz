@@ -6,6 +6,7 @@ use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
 use common::proto::client_res::MAX_BOOTSTRAP_RESULTS;
 use common::proto::client_res::RelayDescriptor;
+use common::quic::xor32;
 use common::warn;
 
 use crate::resolver::Resolver;
@@ -108,7 +109,7 @@ fn handle_get_bootstrap_peers(
     let rtt_budget = (MAX_BOOTSTRAP_RESULTS as usize).saturating_sub(xor_near.len());
     let rtt_count = (count_rtt_near as usize).min(rtt_budget);
     let mut rtt_sorted: Vec<&RelayEntry> = snapshot.iter().collect();
-    rtt_sorted.sort_by(|a, b| b.last_heartbeat_at().cmp(&a.last_heartbeat_at()));
+    rtt_sorted.sort_by_key(|b| std::cmp::Reverse(b.last_heartbeat_at()));
     let rtt_near: Vec<RelayDescriptor> = rtt_sorted
         .iter()
         .take(rtt_count)
@@ -124,16 +125,12 @@ fn handle_get_bootstrap_peers(
 /// returns a `&[u8; 32]` — a direct lex compare on the per-byte XOR is
 /// equivalent to an unsigned big-endian compare on the 256-bit distance,
 /// which is what the design doc means by "XOR distance" (§3.1).
+///
+/// Delegates the per-byte XOR to the canonical [`common::quic::xor32`]
+/// so we share one implementation across resolver / relay; the array
+/// `cmp` then performs the lexicographic compare.
 fn xor_distance_cmp(pivot: &[u8; 32], a: &RelayEntry, b: &RelayEntry) -> Ordering {
-    let a_id = a.id.as_bytes();
-    let b_id = b.id.as_bytes();
-    for i in 0..32 {
-        let da = a_id[i] ^ pivot[i];
-        let db = b_id[i] ^ pivot[i];
-        match da.cmp(&db) {
-            Ordering::Equal => continue,
-            ord => return ord,
-        }
-    }
-    Ordering::Equal
+    let da = xor32(a.id.as_bytes(), pivot);
+    let db = xor32(b.id.as_bytes(), pivot);
+    da.cmp(&db)
 }
