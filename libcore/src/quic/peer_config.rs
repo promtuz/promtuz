@@ -137,6 +137,70 @@ impl ServerCertVerifier for PeerServerCertVerifier {
     }
 }
 
+/// **Phase 7 (P0-2)**: pinned-pubkey variant of [`PeerServerCertVerifier`].
+///
+/// Holds the **expected SPKI bytes** for a single dial; the TLS handshake
+/// is rejected unless the presented cert's SPKI matches `expected`. The
+/// rest of the verification (Ed25519 sig over the TLS 1.3 transcript)
+/// runs the same as the un-pinned verifier.
+///
+/// The pin is the libcore caller's defense against a network MitM:
+/// `Peer1DhtClient` knows which NodeKey pubkey it expects for each home
+/// (vended by the resolver via `RelayDescriptor.pubkey` and persisted on
+/// `data::relay::Relay::pubkey`); the verifier's job is to ensure the
+/// cert SPKI matches that value before any application bytes flow.
+///
+/// Built per-dial (not shared across the pool) so each dial pins exactly
+/// the target it intends to talk to.
+#[derive(Debug)]
+pub struct PinnedPeerServerCertVerifier {
+    pub expected: [u8; 32],
+}
+
+impl ServerCertVerifier for PinnedPeerServerCertVerifier {
+    fn verify_server_cert(
+        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>, _ocsp_response: &[u8], _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let presented = ed25519_pubkey_from_cert_der(end_entity.as_ref())
+            .ok_or_else(|| rustls::Error::General(
+                "peer cert is not a valid Ed25519 X.509".into(),
+            ))?;
+        if presented != self.expected {
+            return Err(rustls::Error::General(format!(
+                "peer cert SPKI mismatch: expected {} got {}",
+                hex_short(&self.expected),
+                hex_short(&presented)
+            )));
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 not supported".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_ed25519(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+fn hex_short(b: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(8);
+    for x in &b[..4] {
+        out.push_str(&format!("{x:02x}"));
+    }
+    out
+}
+
 /// Shared implementation for verifying a TLS 1.3 handshake signature using the
 /// Ed25519 SPKI extracted from the presented certificate.
 fn verify_tls13_ed25519(
@@ -399,6 +463,101 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
     client.transport_config(peer_transport_cfg());
 
     Ok(client)
+}
+
+/// **Phase 7 (P0-2)**: build a `peer/1` client config that pins the
+/// expected server SPKI to `expected`. Otherwise identical to
+/// [`build_peer_client_cfg`]; use this when the dialer knows which
+/// relay pubkey it should be talking to (e.g. resolver-vended via
+/// `RelayDescriptor.pubkey`). The dial fails if the relay presents a
+/// different SPKI, defeating a same-network MitM.
+pub fn build_pinned_peer_client_cfg(
+    identity: &PeerIdentity, expected: [u8; 32],
+) -> Result<ClientConfig> {
+    let certified_key = generate_identity_cert(identity)?;
+
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedPeerServerCertVerifier { expected }))
+        .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
+
+    tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+
+    let quic_config = QuicClientConfig::try_from(tls)?;
+
+    let mut client = ClientConfig::new(Arc::new(quic_config));
+    client.transport_config(peer_transport_cfg());
+
+    Ok(client)
+}
+
+/// Phase 5b: build a `peer/1` client config from an explicit Ed25519
+/// TLS sub-key, bypassing the global `Identity::tls_subkey()` lookup.
+/// Used by the e2e harness to instantiate independent libcore-flavoured
+/// clients in-process. Production callers continue to use
+/// [`build_peer_client_cfg`] which derives the sub-key from the libcore-
+/// global IPK secret.
+pub fn build_peer_client_cfg_with_subkey(subkey: ed25519_dalek::SigningKey) -> Result<ClientConfig> {
+    let certified_key = generate_identity_cert_with_subkey(subkey);
+
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PeerServerCertVerifier))
+        .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
+
+    tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+
+    let quic_config = QuicClientConfig::try_from(tls)?;
+
+    let mut client = ClientConfig::new(Arc::new(quic_config));
+    client.transport_config(peer_transport_cfg());
+
+    Ok(client)
+}
+
+/// **Phase 7 (P0-2)**: `(subkey, expected)` flavour of
+/// [`build_pinned_peer_client_cfg`]. The dialer
+/// (`Peer1DhtClient::build_pinned_cfg`) calls this on every per-dial
+/// build because it holds the TLS sub-key explicitly rather than
+/// going through the global `IdentitySigner::tls_subkey()`.
+pub fn build_pinned_peer_client_cfg_with_subkey(
+    subkey: ed25519_dalek::SigningKey, expected: [u8; 32],
+) -> Result<ClientConfig> {
+    let certified_key = generate_identity_cert_with_subkey(subkey);
+
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedPeerServerCertVerifier { expected }))
+        .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
+
+    tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+
+    let quic_config = QuicClientConfig::try_from(tls)?;
+
+    let mut client = ClientConfig::new(Arc::new(quic_config));
+    client.transport_config(peer_transport_cfg());
+
+    Ok(client)
+}
+
+/// Phase 5b: identity-cert builder that takes the TLS sub-key directly
+/// (skipping the `IdentitySigner::tls_subkey()` global lookup).
+/// Same DER-encoding path as [`generate_identity_cert`].
+fn generate_identity_cert_with_subkey(subkey: ed25519_dalek::SigningKey) -> CertifiedKey {
+    use ed25519_dalek::Signer;
+    let subkey_arc = Arc::new(subkey);
+    let public_key = subkey_arc.verifying_key();
+
+    let tbs = build_tbs_certificate(public_key.as_bytes());
+    let signature = subkey_arc.sign(&tbs);
+
+    let cert_der = build_certificate_der(&tbs, &signature.to_bytes());
+    let certs = vec![CertificateDer::from(cert_der)];
+
+    let signing_key: Arc<dyn rustls::sign::SigningKey> =
+        Arc::new(IdentitySigningKey { public_key, subkey: subkey_arc });
+
+    CertifiedKey::new(certs, signing_key)
 }
 
 /// Extracts the peer's **TLS sub-key** Ed25519 public key from their cert.
