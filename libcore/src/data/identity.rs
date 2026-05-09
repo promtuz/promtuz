@@ -130,3 +130,26 @@ impl IdentitySigner {
         Ok((key.sign(message), pub_bytes))
     }
 }
+
+/// **Phase 4 helper** for the MLS messaging path: hand the caller a
+/// `SigningKey` clone of the long-term IPK secret. The MLS layer needs
+/// to perform multiple signing operations across an async send (the
+/// outer envelope sig + welcome envelope sig + KP record sigs) and
+/// each call to `IdentitySigner::sign` re-decrypts via the Keystore
+/// — too costly. This helper decrypts once and returns the
+/// `SigningKey`; it is the *only* path outside the data layer that
+/// holds a bare `SigningKey`, and the caller is expected to drop it
+/// promptly (the workspace `zeroize` feature on `ed25519-dalek` clears
+/// the bytes on drop).
+///
+/// `expected_ipk` is checked against the verifying half so a caller
+/// that has stale identity state can't accidentally sign with a
+/// different secret.
+pub(crate) fn secret_key_signing(expected_ipk: &[u8; 32]) -> Result<SigningKey> {
+    let secret = Identity::secret_key_with_manager()?;
+    let key = SigningKey::from_bytes(&secret);
+    if &key.verifying_key().to_bytes() != expected_ipk {
+        return Err(anyhow!("identity secret does not match expected IPK"));
+    }
+    Ok(key)
+}

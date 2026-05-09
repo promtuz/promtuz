@@ -3,30 +3,41 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
-use common::crypto::StaticSecret;
-use common::crypto::get_shared_key;
+use rusqlite::params;
 
-use crate::KEY_MANAGER;
 use crate::db::peers::CONTACTS_DB;
 use crate::db::peers::ContactRow;
 
+/// Promtuz "address book" entry — the long-term identity (`ipk`) plus the
+/// nullable handle of the implicit 1:1 MLS group with this contact.
+///
+/// **Phase 4 of the MLS rollout** (`misc/specs/MLS.md` §11.3) replaced the
+/// v2-era static-shared-key fields (`epk`, `enc_esk`) with `mls_group_id`.
+/// On first send to a contact whose `mls_group_id` is `None`, the
+/// messaging layer fetches their KeyPackage, builds a fresh group, and
+/// persists the group id back via [`Self::set_mls_group_id`].
 #[derive(Debug, Clone)]
 pub struct Contact {
     pub inner: Arc<ContactRow>,
 }
 
 impl Contact {
-    /// Save a contact with their EPK and our encrypted ephemeral secret key.
-    pub fn save(ipk: [u8; 32], epk: [u8; 32], enc_esk: Vec<u8>, name: String) -> Result<Self> {
+    /// Save a new contact. The `mls_group_id` defaults to `None`; the
+    /// messaging layer flips it to the freshly-minted group id on the
+    /// first dispatch to this peer.
+    pub fn save(ipk: [u8; 32], name: String) -> Result<Self> {
         let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         let conn = CONTACTS_DB.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO contacts (ipk, epk, enc_esk, name, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (ipk, epk, enc_esk.clone(), name.clone(), added_at),
+            "INSERT OR REPLACE INTO contacts (ipk, name, added_at, mls_group_id) \
+             VALUES (?1, ?2, ?3, NULL)",
+            params![ipk, name.clone(), added_at],
         )?;
 
-        Ok(Self { inner: Arc::new(ContactRow { ipk, epk, enc_esk, name, added_at }) })
+        Ok(Self {
+            inner: Arc::new(ContactRow { ipk, name, added_at, mls_group_id: None }),
+        })
     }
 
     pub fn get(ipk: &[u8; 32]) -> Option<Self> {
@@ -57,21 +68,20 @@ impl Contact {
             .is_ok()
     }
 
-    /// Derive the shared symmetric key for this friendship.
-    /// Decrypts our stored ephemeral secret, does DH with their EPK.
-    pub fn shared_key(&self) -> Result<[u8; 32]> {
-        let km = KEY_MANAGER.get().unwrap();
-
-        let esk_bytes = km
-            .decrypt(&self.inner.enc_esk)
-            .map_err(|e| anyhow::anyhow!("failed to decrypt esk: {e:?}"))?;
-        let esk_arr: [u8; 32] =
-            esk_bytes.try_into().map_err(|_| anyhow::anyhow!("esk wrong length"))?;
-
-        let our_secret = StaticSecret::from(esk_arr);
-        let their_pk = common::crypto::xPublicKey::from(self.inner.epk);
-        let shared = our_secret.diffie_hellman(&their_pk);
-
-        Ok(get_shared_key(shared.as_bytes(), b"promtuz-msg-v1", ""))
+    /// Persist the MLS group id for this contact. Called by
+    /// `messaging::send_message_inner` after lazy-creating the implicit
+    /// 1:1 group on first send.
+    ///
+    /// Idempotent: re-binding the same group id is a no-op. Replacing an
+    /// existing non-null id is allowed (e.g. if the user re-pairs after a
+    /// session reset) — the caller is responsible for ensuring the prior
+    /// group has been left/rejoined cleanly.
+    pub fn set_mls_group_id(ipk: &[u8; 32], group_id: &[u8; 32]) -> Result<()> {
+        let conn = CONTACTS_DB.lock();
+        conn.execute(
+            "UPDATE contacts SET mls_group_id = ?1 WHERE ipk = ?2",
+            params![group_id, ipk],
+        )?;
+        Ok(())
     }
 }

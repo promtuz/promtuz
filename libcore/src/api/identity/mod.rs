@@ -26,7 +26,6 @@ mod scanner;
 use crate::ENDPOINT;
 use crate::JC;
 use crate::JVM;
-use crate::KEY_MANAGER;
 use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
@@ -212,7 +211,11 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
             match decision {
                 Ok(Ok(true)) => {
                     info!("IDENTITY: {name} accepted");
-                    let (our_esk, our_epk) = get_static_keypair();
+                    // Phase 4: `our_esk` is no longer persisted (MLS owns the
+                    // contact's keying material). We still emit `our_epk` on
+                    // the wire to keep the QR-pairing handshake byte-stable;
+                    // the secret half is dropped at scope end.
+                    let (_our_esk, our_epk) = get_static_keypair();
 
                     // Build the IPK<->TLS-subkey binding for our own response.
                     // We sign with our long-term IPK over the canonical
@@ -239,13 +242,14 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                         Ok(Ok(Identity(Confirmed))) => {
                             info!("IDENTITY: {name} confirmed");
 
-                            let enc_esk = {
-                                let km = KEY_MANAGER.get().unwrap();
-                                km.encrypt(&our_esk.to_bytes())
-                                    .expect("failed to encrypt esk")
-                            };
-
-                            match Contact::save(ipk, epk, enc_esk, name.clone()) {
+                            // Phase 4: dropped EPK / enc_esk persistence. The
+                            // contact's encryption material is now owned by MLS
+                            // (lazy-created 1:1 group on first dispatch). The
+                            // wire EPK is preserved for protocol compatibility
+                            // with the QR-pairing handshake but no longer
+                            // persisted alongside the contact.
+                            let _ = epk;
+                            match Contact::save(ipk, name.clone()) {
                                 Ok(_) => info!("IDENTITY: saved contact {name}"),
                                 Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
                             }

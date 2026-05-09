@@ -29,6 +29,11 @@ impl ResolverSeeds {
     /// ```txt
     /// A038F54EC3EBC391F423236E0091413C7275EFEDC65E89D3BFF9DF055FEFE4CC::192.168.100.2:4433
     /// ```
+    // The signature returns `Vec<ResolverSeed>` rather than `Self`,
+    // so this is genuinely a multi-line parser, not a `FromStr`
+    // implementation candidate. Renaming would ripple to the single
+    // caller (`api/connection.rs`); preserved as-is.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Result<Vec<ResolverSeed>> {
         let mut seeds = vec![];
 

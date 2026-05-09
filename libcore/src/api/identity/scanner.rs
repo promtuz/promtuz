@@ -16,7 +16,6 @@ use log::info;
 
 use crate::ENDPOINT;
 use crate::JC;
-use crate::KEY_MANAGER;
 use crate::RUNTIME;
 use crate::api::PEER_IDENTITY;
 use crate::data::contact::Contact;
@@ -79,7 +78,11 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                 let (mut send, mut recv) = conn.open_bi().await?;
 
                 // Generate a unique ephemeral keypair for this friendship
-                let (our_esk, our_epk) = get_static_keypair();
+                // Phase 4: `our_esk` is no longer persisted; only the
+                // public half (`our_epk`) is sent over the QR-pairing
+                // wire to keep that handshake byte-stable. The secret
+                // half is dropped at scope end via dalek's zeroize.
+                let (_our_esk, our_epk) = get_static_keypair();
 
                 {
                     use IdentityP::*;
@@ -137,15 +140,15 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                                 );
 
                                 // Encrypt our ephemeral secret for storage
-                                let enc_esk = {
-                                    let km = KEY_MANAGER.get().unwrap();
-                                    km.encrypt(&our_esk.to_bytes()).expect("failed to encrypt esk")
-                                };
-
+                                // Phase 4: dropped EPK / enc_esk persistence. The
+                                // contact's encryption material is now owned by
+                                // MLS (lazy-created 1:1 group on first dispatch).
+                                // We retain the in-flight EPK on the wire for
+                                // protocol compatibility with the QR-pairing
+                                // handshake; it's just no longer persisted.
+                                let _ = epk;
                                 match Contact::save(
                                     peer_identity_qr.ipk,
-                                    epk,
-                                    enc_esk,
                                     peer_identity_qr.name.clone(),
                                 ) {
                                     Ok(_) => {

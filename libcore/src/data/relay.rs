@@ -62,13 +62,43 @@ pub struct RelayInfo {
 }
 
 /// Relay instance
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Relay {
     pub id:         Arc<str>,
     pub host:       Arc<str>,
     pub port:       u16,
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
+    /// **Phase 7 (P0-4)**: production [`Peer1DhtClient`] dialer attached
+    /// to this relay's connection. Built once per `connect()` after the
+    /// `relay/1` handshake succeeds; lives for the connection's lifetime.
+    /// `None` if the dialer could not be constructed (e.g. PEER_IDENTITY
+    /// not yet initialised) — callers in `api::messaging::sendMessage`
+    /// surface a clean error in that case rather than silently no-oping
+    /// against `NotWiredDhtClient`.
+    pub dht_client: Option<Arc<crate::quic::peer1_client::Peer1DhtClient>>,
+    /// **Phase 8 (P0-2 residual)**: relay's NodeKey pubkey as vended by
+    /// the resolver in `RelayDescriptor.pubkey`. Persisted on
+    /// `Relay::refresh`. Used by `home_from_relay_with_pubkey` to enable
+    /// per-dial TLS cert SPKI pinning in `Peer1DhtClient` —
+    /// `PinnedPeerServerCertVerifier` rejects any cert whose SPKI does
+    /// not match this value. `None` for rows pre-dating the schema
+    /// migration; pinning falls back to the un-pinned verifier in that
+    /// case (legacy posture, with a `log::warn` so operators notice).
+    pub pubkey:     Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for Relay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Relay")
+            .field("id", &self.id)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("connection", &self.connection)
+            .field("dht_client", &self.dht_client.as_ref().map(|_| "<Peer1DhtClient>"))
+            .field("pubkey", &self.pubkey.as_ref().map(|pk| hex::encode(&pk[..4])))
+            .finish()
+    }
 }
 
 // // // // // // // // // // // // // // // // // //
@@ -218,12 +248,14 @@ impl Relay {
             port:         u16,
             latency:      Option<i64>,
             success_rate: f64,
+            pubkey:       Option<[u8; 32]>,
         }
 
         let mut stmt = conn.prepare(
             "SELECT id, host, port,
                     last_latency,
                     CAST(window_successes AS REAL) / MAX(window_attempts, 1) AS success_rate,
+                    pubkey,
                     MIN(last_latency) OVER () AS min_lat,
                     MAX(last_latency) OVER () AS max_lat
              FROM relays
@@ -235,6 +267,16 @@ impl Relay {
             .query_map(params![PROTOCOL_VERSION], |row| {
                 let latency: Option<i64> = row.get(3)?;
                 let success_rate: f64 = row.get(4)?;
+                let pubkey_bytes: Option<Vec<u8>> = row.get(5)?;
+                let pubkey = pubkey_bytes.and_then(|v| {
+                    if v.len() == 32 {
+                        let mut a = [0u8; 32];
+                        a.copy_from_slice(&v);
+                        Some(a)
+                    } else {
+                        None
+                    }
+                });
 
                 Ok(Candidate {
                     id: row.get(0)?,
@@ -242,6 +284,7 @@ impl Relay {
                     port: row.get::<_, i64>(2)? as u16,
                     latency,
                     success_rate,
+                    pubkey,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -299,6 +342,8 @@ impl Relay {
             host:       Arc::from(chosen.host.as_str()),
             port:       chosen.port,
             connection: None,
+            dht_client: None,
+            pubkey:     chosen.pubkey,
         })
     }
 
@@ -309,14 +354,17 @@ impl Relay {
         let conn = NETWORK_DB.lock();
         let now = systime().as_millis() as u64;
 
+        // Phase 8 (P0-2 residual): persist `RelayDescriptor.pubkey` so
+        // libcore can pin the relay's TLS-cert SPKI on peer/1 dials.
         let mut stmt = conn.prepare(
-            "INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start, pubkey)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                host             = excluded.host,
                port             = excluded.port,
                last_seen        = excluded.last_seen,
-               protocol_version = excluded.protocol_version",
+               protocol_version = excluded.protocol_version,
+               pubkey           = excluded.pubkey",
         )?;
 
         for r in relays {
@@ -327,6 +375,7 @@ impl Relay {
                 now,
                 PROTOCOL_VERSION,
                 now,
+                r.pubkey.0.as_slice(),
             ])?;
         }
 
