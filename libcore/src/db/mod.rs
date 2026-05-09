@@ -4,6 +4,7 @@ mod macros;
 
 pub mod identity;
 pub mod messages;
+pub mod mls;
 pub mod network;
 pub mod peers;
 pub mod utils;
