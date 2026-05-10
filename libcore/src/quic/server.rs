@@ -75,6 +75,30 @@ where
 // const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: usize = 16;
 
+/// Classifies a `quinn::ConnectionError` as terminal-for-this-relay
+/// (TLS / cert / auth failure that won't resolve without external
+/// intervention) versus transient (network blip, timeout, peer reset).
+///
+/// QUIC encodes TLS alerts as transport error codes `0x100..=0x1ff`
+/// (alert byte + 0x100 per RFC 9001 §4.8). The cert-related alerts:
+/// - 42 bad_certificate
+/// - 43 unsupported_certificate
+/// - 44 certificate_revoked
+/// - 45 certificate_expired
+/// - 46 certificate_unknown
+/// - 48 unknown_ca
+/// - 51 decrypt_error (often a cert-binding mismatch in TLS 1.3)
+fn is_terminal_for_relay(err: &ConnectionError) -> bool {
+    if let ConnectionError::TransportError(t) = err {
+        let code: u64 = t.code.into();
+        if (0x100..=0x1ff).contains(&code) {
+            let alert = (code & 0xff) as u8;
+            return matches!(alert, 42 | 43 | 44 | 45 | 46 | 48 | 51);
+        }
+    }
+    false
+}
+
 // Phase 8 (P1 #19): the actual `RELAY` singleton lives in
 // `crate::state` (a leaf module) so `api::messaging` doesn't have to
 // pull in `quic::server` for a global it shares with us. Re-exported
@@ -101,8 +125,16 @@ impl Relay {
                 return Err(RelayConnError::Continue);
             },
             Err(err) => {
-                error!("connection with relay({}) failed: {}", self.id, err);
-                _ = self.record_failure();
+                if is_terminal_for_relay(&err) {
+                    warn!(
+                        "relay({}) cert/auth failure ({}) — marking terminal, will not retry",
+                        self.id, err
+                    );
+                    _ = self.record_terminal_failure();
+                } else {
+                    error!("connection with relay({}) failed: {}", self.id, err);
+                    _ = self.record_failure();
+                }
                 return Err(err.into());
             },
         };

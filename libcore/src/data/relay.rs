@@ -425,6 +425,37 @@ impl Relay {
         Ok(())
     }
 
+    /// Records a TLS / cert / auth failure as **terminal** for this relay.
+    ///
+    /// Cert errors don't resolve themselves — the relay's cert is broken,
+    /// our verifier rejects it, or someone is MitM-ing. Retrying every
+    /// few seconds is wasted work. Open the circuit immediately with the
+    /// max backoff so `fetch_best` skips this relay until either the
+    /// backoff expires (30m) or the user reconnects after a fresh resolve.
+    pub fn record_terminal_failure(&self) -> Result<(), RelayError> {
+        let conn = NETWORK_DB.lock();
+        let now = systime().as_millis() as i64;
+        let backoff = BACKOFF_MAX_MS as i64;
+
+        conn.execute(
+            "UPDATE relays SET
+                   circuit_state        = 'open',
+                   backoff_until        = ?1,
+                   consecutive_failures = consecutive_failures + 1,
+                   last_failure         = ?2
+                 WHERE id = ?3",
+            params![now + backoff, now, self.id.as_ref()],
+        )?;
+
+        info!(
+            "relay({}) terminal failure (cert/auth) — circuit open until {}",
+            self.id,
+            now + backoff
+        );
+
+        Ok(())
+    }
+
     /// Records a failed connection attempt.
     ///
     /// After FAILURE_THRESHOLD consecutive failures the circuit opens with

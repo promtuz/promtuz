@@ -82,6 +82,10 @@ pub extern "system" fn connect(mut env: JNIEnv, _: JC, context: JObject) {
                         },
                         Err(err) => error!("resolver failed: {err}"),
                     }
+                    // All known relays may be circuit-open (e.g. all auth-failed).
+                    // Don't hammer the resolver — back off before re-checking.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
                 },
                 Err(err) => {
                     error!("failed to fetch relay: {err}");
