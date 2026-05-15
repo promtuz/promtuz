@@ -23,8 +23,6 @@ use crate::proto::Sender;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IdentityP {
     AddMe {
-        #[serde(with = "serde_bytes")]
-        epk:     [u8; 32],
         name:    String,
         /// Long-term IPK of the sender (NOT the cert SPKI).
         #[serde(with = "serde_bytes")]
@@ -43,9 +41,6 @@ pub enum IdentityP {
     No { reason: String },
     /// Proceeding with [`IdentityP::AddMe`]
     AddedYou {
-        /// Ephemeral key of sharer as it was not included in the IdentityQr
-        #[serde(with = "serde_bytes")]
-        epk:     [u8; 32],
         /// Long-term IPK of the sharer.
         #[serde(with = "serde_bytes")]
         ipk:     [u8; 32],

@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::anyhow;
-use common::crypto::get_static_keypair;
 use common::proto::Sender;
 use common::proto::client_peer::ClientPeerPacket;
 use common::proto::client_peer::IdentityP;
@@ -54,8 +53,6 @@ struct PendingIdentity {
     // currently read because the responder only needs `respond` and `name`.
     #[allow(dead_code)]
     ipk: [u8; 32],
-    #[allow(dead_code)]
-    epk: [u8; 32],
     name: String,
 }
 
@@ -152,7 +149,7 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
         ClientPeerPacket::unpack(&mut recv).await.map_err(|e| anyhow!("failed to unpack: {e}"))?;
 
     match ipack {
-        AddMe { epk, name, ipk, ipk_sig } => {
+        AddMe { name, ipk, ipk_sig } => {
             // The cert SPKI is the peer's TLS sub-key, not their IPK. We
             // accept the IPK from the application packet only after
             // verifying the IPK has signed the TLS sub-key it just used to
@@ -163,7 +160,7 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
             verify_ipk_binding(&ipk, &tls_pubkey, &ipk_sig)
                 .map_err(|e| anyhow!("peer IPK<->TLS binding rejected: {e}"))?;
 
-            info!("{name} says add me.\nIPK({})\nEPK({})", hex::encode(ipk), hex::encode(epk));
+            info!("{name} says add me.\nIPK({})", hex::encode(ipk));
 
             // Atomically check-and-set the pending slot. Doing this in two
             // separate `lock()` calls (check, then set) is a TOCTOU race: two
@@ -185,7 +182,6 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                     *pending = Some(PendingIdentity {
                         respond: decision_tx,
                         ipk,
-                        epk,
                         name: name.clone(),
                     });
                     false
@@ -211,11 +207,6 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
             match decision {
                 Ok(Ok(true)) => {
                     info!("IDENTITY: {name} accepted");
-                    // Phase 4: `our_esk` is no longer persisted (MLS owns the
-                    // contact's keying material). We still emit `our_epk` on
-                    // the wire to keep the QR-pairing handshake byte-stable;
-                    // the secret half is dropped at scope end.
-                    let (_our_esk, our_epk) = get_static_keypair();
 
                     // Build the IPK<->TLS-subkey binding for our own response.
                     // We sign with our long-term IPK over the canonical
@@ -230,7 +221,6 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                         .map_err(|e| anyhow!("failed to sign IPK binding: {e}"))?;
 
                     ClientPeerPacket::Identity(AddedYou {
-                        epk: our_epk.to_bytes(),
                         ipk: our_ipk,
                         ipk_sig: our_ipk_sig.to_bytes(),
                     })
@@ -242,13 +232,6 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                         Ok(Ok(Identity(Confirmed))) => {
                             info!("IDENTITY: {name} confirmed");
 
-                            // Phase 4: dropped EPK / enc_esk persistence. The
-                            // contact's encryption material is now owned by MLS
-                            // (lazy-created 1:1 group on first dispatch). The
-                            // wire EPK is preserved for protocol compatibility
-                            // with the QR-pairing handshake but no longer
-                            // persisted alongside the contact.
-                            let _ = epk;
                             match Contact::save(ipk, name.clone()) {
                                 Ok(_) => info!("IDENTITY: saved contact {name}"),
                                 Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
