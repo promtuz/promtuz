@@ -19,33 +19,51 @@ pub(super) trait HandleRelay {
 
 impl HandleRelay for Handler {
     async fn handle_relay(self, resolver: ResolverRef) {
-        let addr = self.conn.remote_address();
-        loop {
-            let mut recv = match self.conn.accept_uni().await {
-                Ok(recv) => recv,
-                Err(err) => {
-                    debug!("relay({addr}) stream accept ended: {err}");
-                    break;
-                },
-            };
+        let conn = self.conn.clone();
+        // A relay connection multiplexes TWO contracts on one session:
+        //   - uni lifecycle streams (`RelayHello` / `RelayHeartbeat`), and
+        //   - bi client-RPC streams — the DHT bootstrap path issues
+        //     `GetBootstrapPeers` over this same connection
+        //     (`relay/src/quic/resolver_link.rs`), expecting the resolver to
+        //     answer it exactly as it answers a plain client.
+        // Serve both concurrently; when the connection ends, whichever
+        // accept loop errors first lets the other fall out too.
+        tokio::join!(
+            lifecycle_loop(conn.clone(), resolver.clone()),
+            super::client::serve_rpc_streams(conn, resolver),
+        );
+    }
+}
 
-            let conn = self.conn.clone();
-            let resolver = resolver.clone();
+/// Uni-stream lifecycle loop: authenticated `RelayHello` / `RelayHeartbeat`
+/// packets that keep the relay in the registry.
+async fn lifecycle_loop(conn: Arc<Connection>, resolver: ResolverRef) {
+    let addr = conn.remote_address();
+    loop {
+        let mut recv = match conn.accept_uni().await {
+            Ok(recv) => recv,
+            Err(err) => {
+                debug!("relay({addr}) stream accept ended: {err}");
+                break;
+            },
+        };
 
-            tokio::spawn(async move {
-                while let Ok(packet) = ResolverPacket::unpack(&mut recv).await {
-                    match handle_packet(conn.clone(), resolver.clone(), packet).await {
-                        Ok(()) => {},
-                        // Policy-driven close: we already closed the connection
-                        // with a `CloseReason`. Don't re-log it as an error.
-                        Err(PacketError::PolicyClose) => return,
-                        Err(PacketError::Other(e)) => {
-                            error!("relay({addr}) packet handling error: {e}");
-                        },
-                    }
+        let conn = conn.clone();
+        let resolver = resolver.clone();
+
+        tokio::spawn(async move {
+            while let Ok(packet) = ResolverPacket::unpack(&mut recv).await {
+                match handle_packet(conn.clone(), resolver.clone(), packet).await {
+                    Ok(()) => {},
+                    // Policy-driven close: we already closed the connection
+                    // with a `CloseReason`. Don't re-log it as an error.
+                    Err(PacketError::PolicyClose) => return,
+                    Err(PacketError::Other(e)) => {
+                        error!("relay({addr}) packet handling error: {e}");
+                    },
                 }
-            });
-        }
+            }
+        });
     }
 }
 
