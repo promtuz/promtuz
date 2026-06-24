@@ -290,17 +290,30 @@ pub const WELCOME_ACK_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-ack";
 
 // ---- Phase 9: Tier-1 (libcore→home) wrapper-sig domains -----------
 //
-// Every §3.9 wrapper RPC carries a sender-IPK signature over a
-// distinct domain so a captured wrapper sig can't be replayed across
-// RPC kinds. The home cross-checks each sig against the connection's
-// authenticated IPK + ±60s skew window before translating to the
-// matching Tier-2 fan-out.
+// §3.9 wrapper RPCs split into two signature categories:
+//
+//   1. User-signed RPCs (PublishKeyPackage, FetchWelcomes, AckWelcomes)
+//      carry the *real* inner Tier-2 user signature — over
+//      `kp_publish/refill_signing_input` and
+//      `welcome_fetch/ack_signing_input` respectively. The home verifies
+//      it against the connection-authenticated IPK (its gate) AND
+//      forwards it unchanged to the K storage homes, which verify the
+//      same signature. The home is a forwarder, not a trust root: a
+//      compromised home cannot forge a KP publish or drain/delete a
+//      user's welcome queue. (FetchWelcomes/AckWelcomes bind the home's
+//      own NodeId as `requester_relay_id`, so the phone learns it from
+//      the client/0 handshake before signing.)
+//
+//   2. Gate-only RPCs (FetchKeyPackage, PublishWelcome) carry a wrapper
+//      signature over a dedicated domain that the home verifies locally
+//      and does NOT propagate — KeyPackageFetch has no inner user sig
+//      (it's DhtHello-authenticated relay-to-relay) and PublishWelcome's
+//      user authorization rides inside `envelope.sender_sig`. The wrap
+//      sig proves "this authenticated phone asked, now" for freshness +
+//      attribution.
 
-pub const KP_PUBLISH_WRAP_DOMAIN:      &[u8] = b"promtuz-mls-v1 kp-publish-wrap";
 pub const KP_FETCH_WRAP_DOMAIN:        &[u8] = b"promtuz-mls-v1 kp-fetch-wrap";
 pub const WELCOME_PUBLISH_WRAP_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-publish-wrap";
-pub const WELCOME_FETCH_WRAP_DOMAIN:   &[u8] = b"promtuz-mls-v1 welcome-fetch-wrap";
-pub const WELCOME_ACK_WRAP_DOMAIN:     &[u8] = b"promtuz-mls-v1 welcome-ack-wrap";
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //===:===:===:===:==:  ENVELOPE  :==:===:===:===:===||
@@ -1219,47 +1232,29 @@ pub fn welcome_ack_signing_input(
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //===:===:===:: TIER-1 WRAPPER (PHASE 9) :===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
+//
+// Only the two GATE-ONLY RPCs get a dedicated wrap signing-input here
+// (FetchKeyPackage, PublishWelcome). The three user-signed RPCs
+// (PublishKeyPackage, FetchWelcomes, AckWelcomes) reuse the *inner*
+// Tier-2 transcripts directly — `kp_publish_signing_input` /
+// `kp_refill_signing_input` and `welcome_fetch_signing_input` /
+// `welcome_ack_signing_input` — because the phone-produced signature is
+// forwarded verbatim to the K storage homes and must verify there too.
+// See the category note at KP_FETCH_WRAP_DOMAIN above.
 
 /// Mode flag carried on `CRelayPacket::PublishKeyPackage` (§3.9). The
 /// home translates `Publish` to a §3.4 `KeyPackagePublish` (replace
 /// stash atomically) and `Refill` to a §3.6 `KeyPackageRefill` (append
-/// to stash). The mode byte is bound into [`kp_publish_wrap_signing_input`]
-/// so a captured wrapper sig can't be re-typed between the two semantics.
+/// to stash). The phone signs the matching inner transcript
+/// ([`kp_publish_signing_input`] for `Publish`,
+/// [`kp_refill_signing_input`] for `Refill`) so the forwarded sig
+/// verifies at the K homes — distinct domains mean a captured Publish
+/// sig can't be re-typed as a Refill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum KpPublishMode {
     Publish = 0,
     Refill  = 1,
-}
-
-/// Build the canonical signing transcript for `CRelayPacket::PublishKeyPackage`.
-///
-/// Layout:
-/// ```text
-///   KP_PUBLISH_WRAP_DOMAIN || protocol_version (BE u16)
-///     || sender_ipk (32) || mode (1) || generation (BE u64)
-///     || record_count (BE u32) || records_digest (32) || timestamp (BE u64)
-/// ```
-///
-/// `records_digest` MUST be computed via [`kp_publish_records_digest`]
-/// so the wrapper sig is bound to the same record set the inner Tier-2
-/// fan-out will publish.
-pub fn kp_publish_wrap_signing_input(
-    protocol_version: u16, sender_ipk: &[u8; 32], mode: KpPublishMode,
-    generation: u64, records_digest: &[u8; 32], record_count: u32, timestamp: u64,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        KP_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 1 + 8 + 4 + 32 + 8,
-    );
-    buf.extend_from_slice(KP_PUBLISH_WRAP_DOMAIN);
-    buf.extend_from_slice(&protocol_version.to_be_bytes());
-    buf.extend_from_slice(sender_ipk);
-    buf.push(mode as u8);
-    buf.extend_from_slice(&generation.to_be_bytes());
-    buf.extend_from_slice(&record_count.to_be_bytes());
-    buf.extend_from_slice(records_digest);
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf
 }
 
 /// Build the canonical signing transcript for `CRelayPacket::FetchKeyPackage`.
@@ -1312,71 +1307,6 @@ pub fn welcome_publish_wrap_signing_input(
     buf
 }
 
-/// Build the canonical signing transcript for `CRelayPacket::FetchWelcomes`.
-///
-/// Layout:
-/// ```text
-///   WELCOME_FETCH_WRAP_DOMAIN || protocol_version (BE u16)
-///     || sender_ipk (32) || timestamp (BE u64)
-/// ```
-///
-/// Drains the *sender's own* welcome queue — `sender_ipk` is the
-/// implicit target, no separate target field needed.
-pub fn welcome_fetch_wrap_signing_input(
-    protocol_version: u16, sender_ipk: &[u8; 32], timestamp: u64,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        WELCOME_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 8,
-    );
-    buf.extend_from_slice(WELCOME_FETCH_WRAP_DOMAIN);
-    buf.extend_from_slice(&protocol_version.to_be_bytes());
-    buf.extend_from_slice(sender_ipk);
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf
-}
-
-/// Build the canonical signing transcript for `CRelayPacket::AckWelcomes`.
-///
-/// Layout:
-/// ```text
-///   WELCOME_ACK_WRAP_DOMAIN || protocol_version (BE u16)
-///     || sender_ipk (32) || ids_count (BE u32)
-///     || ids_digest (32) || timestamp (BE u64)
-/// ```
-pub fn welcome_ack_wrap_signing_input(
-    protocol_version: u16, sender_ipk: &[u8; 32],
-    welcome_ids: &[[u8; WELCOME_ID_LEN]], timestamp: u64,
-) -> Vec<u8> {
-    let ids_digest = welcome_ack_wrap_ids_digest(welcome_ids);
-    let count = welcome_ids.len() as u32;
-    let mut buf = Vec::with_capacity(
-        WELCOME_ACK_WRAP_DOMAIN.len() + 2 + 32 + 4 + 32 + 8,
-    );
-    buf.extend_from_slice(WELCOME_ACK_WRAP_DOMAIN);
-    buf.extend_from_slice(&protocol_version.to_be_bytes());
-    buf.extend_from_slice(sender_ipk);
-    buf.extend_from_slice(&count.to_be_bytes());
-    buf.extend_from_slice(&ids_digest);
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf
-}
-
-/// Sorted-id digest used by [`welcome_ack_wrap_signing_input`]. Sort
-/// before hashing so ack order is irrelevant — the same logical id-set
-/// always produces the same digest regardless of how libcore enumerates
-/// the ids.
-pub fn welcome_ack_wrap_ids_digest(
-    welcome_ids: &[[u8; WELCOME_ID_LEN]],
-) -> [u8; 32] {
-    let mut sorted: Vec<[u8; WELCOME_ID_LEN]> = welcome_ids.to_vec();
-    sorted.sort_unstable();
-    let mut hasher = blake3::Hasher::new();
-    for id in &sorted {
-        hasher.update(id);
-    }
-    *hasher.finalize().as_bytes()
-}
-
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //===:===:===:===:===:===:  TESTS  :===:===:===:===:==||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -1423,29 +1353,21 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Phase 9 — Tier-1 wrapper signing-input layout pins
+    // Phase 9 — Tier-1 gate-wrapper signing-input layout pins
     // -----------------------------------------------------------------
 
-    /// Pin the byte-length of every Tier-1 wrapper signing-input. A
-    /// drift here means a relay-side verifier reconstructed a transcript
-    /// that doesn't match what libcore signed, breaking auth silently
-    /// in the field. One assert per RPC keeps the failure precise.
+    /// Pin the byte-length of the two GATE-ONLY wrapper signing-inputs
+    /// (FetchKeyPackage, PublishWelcome). The three user-signed RPCs
+    /// reuse the inner Tier-2 transcripts (pinned in their own tests),
+    /// so they have no wrap helper to pin here. A drift means a relay
+    /// verifier reconstructed a transcript that doesn't match what the
+    /// phone signed, breaking auth silently in the field.
     #[test]
-    fn phase9_wrapper_signing_input_layouts_are_pinned() {
+    fn phase9_gate_wrapper_signing_input_layouts_are_pinned() {
         let ipk: [u8; 32] = [0x11; 32];
         let target_ipk: [u8; 32] = [0x22; 32];
         let blob_digest: [u8; 32] = [0x33; 32];
-        let records_digest: [u8; 32] = [0x44; 32];
         let ts: u64 = 1_700_000_000_000;
-
-        // KP_PUBLISH_WRAP: domain || version(2) || ipk(32) || mode(1)
-        //                 || generation(8) || record_count(4)
-        //                 || records_digest(32) || timestamp(8)
-        let kp_pub = kp_publish_wrap_signing_input(
-            MLS_WIRE_VERSION, &ipk, KpPublishMode::Publish,
-            42, &records_digest, 7, ts,
-        );
-        assert_eq!(kp_pub.len(), KP_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 1 + 8 + 4 + 32 + 8);
 
         // KP_FETCH_WRAP: domain || version(2) || ipk(32)
         //               || target_ipk(32) || timestamp(8)
@@ -1460,31 +1382,6 @@ mod tests {
             MLS_WIRE_VERSION, &ipk, &blob_digest, ts,
         );
         assert_eq!(w_pub.len(), WELCOME_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
-
-        // WELCOME_FETCH_WRAP: domain || version(2) || ipk(32) || timestamp(8)
-        let w_fetch = welcome_fetch_wrap_signing_input(MLS_WIRE_VERSION, &ipk, ts);
-        assert_eq!(w_fetch.len(), WELCOME_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 8);
-
-        // WELCOME_ACK_WRAP: domain || version(2) || ipk(32) || count(4)
-        //                  || ids_digest(32) || timestamp(8)
-        let ids = vec![[0x01; WELCOME_ID_LEN], [0x02; WELCOME_ID_LEN]];
-        let w_ack = welcome_ack_wrap_signing_input(MLS_WIRE_VERSION, &ipk, &ids, ts);
-        assert_eq!(w_ack.len(), WELCOME_ACK_WRAP_DOMAIN.len() + 2 + 32 + 4 + 32 + 8);
-    }
-
-    /// `welcome_ack_wrap_ids_digest` MUST be order-independent so the
-    /// home can reconstruct the digest regardless of how libcore listed
-    /// the ids. Verify same id-set in different orders → same digest.
-    #[test]
-    fn phase9_welcome_ack_ids_digest_is_order_independent() {
-        let a = [0xAA; WELCOME_ID_LEN];
-        let b = [0xBB; WELCOME_ID_LEN];
-        let c = [0xCC; WELCOME_ID_LEN];
-        let d_abc = welcome_ack_wrap_ids_digest(&[a, b, c]);
-        let d_cab = welcome_ack_wrap_ids_digest(&[c, a, b]);
-        let d_bca = welcome_ack_wrap_ids_digest(&[b, c, a]);
-        assert_eq!(d_abc, d_cab);
-        assert_eq!(d_abc, d_bca);
     }
 
     // -----------------------------------------------------------------

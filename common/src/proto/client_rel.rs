@@ -236,22 +236,31 @@ pub enum CRelayPacket {
 
     /// Phase 9 §3.9 — libcore wrapper around §3.4 `KeyPackagePublish`
     /// (when `mode = Publish`) or §3.6 `KeyPackageRefill` (when
-    /// `mode = Refill`). The home verifies `sig` against the
-    /// connection-authenticated IPK + ±60s skew window via
-    /// [`crate::proto::mls_wire::kp_publish_wrap_signing_input`], then
-    /// translates and fans out over `peer/1` to the K=3 DHT homes of
-    /// the calling IPK. Reply: [`SRelayPacket::KeyPackagePublished`]
-    /// or [`SRelayPacket::DhtUnavailable`].
+    /// `mode = Refill`). **User-signed RPC**: `sig` is the phone's
+    /// signature over the *inner* Tier-2 transcript
+    /// ([`crate::proto::mls_wire::kp_publish_signing_input`] /
+    /// [`crate::proto::mls_wire::kp_refill_signing_input`], selected by
+    /// `mode`), bound to `(ipk, records-digest, timestamp)`. The home
+    /// verifies it against the connection-authenticated IPK (its gate)
+    /// and forwards the *same* signature inside the
+    /// `KeyPackagePublishReq`/`RefillReq` to the K=3 DHT homes, which
+    /// re-verify it — the home is a forwarder, never a trust root.
+    /// Reply: [`SRelayPacket::KeyPackagePublished`] or
+    /// [`SRelayPacket::DhtUnavailable`].
     PublishKeyPackage {
-        records:    Vec<crate::proto::mls_wire::KeyPackageRecord>,
-        generation: u64,
-        timestamp:  u64,
-        mode:       crate::proto::mls_wire::KpPublishMode,
-        sig:        Bytes<64>,
+        records:   Vec<crate::proto::mls_wire::KeyPackageRecord>,
+        timestamp: u64,
+        mode:      crate::proto::mls_wire::KpPublishMode,
+        sig:       Bytes<64>,
     },
 
     /// Phase 9 §3.9 — libcore wrapper around §3.5 `KeyPackageFetch`.
-    /// Reply: [`SRelayPacket::KeyPackageFetched`] or
+    /// **Gate-only RPC**: the inner `KeyPackageFetchReq` carries no user
+    /// sig (it's DhtHello-authenticated relay-to-relay), so `sig` is a
+    /// wrapper-gate signature over
+    /// [`crate::proto::mls_wire::kp_fetch_wrap_signing_input`] that the
+    /// home verifies locally for freshness + attribution and does not
+    /// propagate. Reply: [`SRelayPacket::KeyPackageFetched`] or
     /// [`SRelayPacket::DhtUnavailable`].
     FetchKeyPackage {
         target_ipk: Bytes<32>,
@@ -260,7 +269,11 @@ pub enum CRelayPacket {
     },
 
     /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome publish to
-    /// the recipient's K=3 homes. Reply:
+    /// the recipient's K=3 homes. **Gate-only RPC**: the user
+    /// authorization rides inside `envelope.sender_sig` (forwarded
+    /// intact); `sig` is a wrapper-gate signature over
+    /// [`crate::proto::mls_wire::welcome_publish_wrap_signing_input`]
+    /// proving this authenticated phone asked to publish now. Reply:
     /// [`SRelayPacket::WelcomePublished`] or
     /// [`SRelayPacket::DhtUnavailable`].
     PublishWelcome {
@@ -269,18 +282,28 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome drain.
-    /// Drains the *calling IPK's own* welcome queue from its K=3
-    /// homes. Reply: [`SRelayPacket::WelcomesFetched`] or
+    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome drain of the
+    /// *calling IPK's own* queue from its K=3 homes. **User-signed
+    /// RPC**: `sig` is the phone's signature over the inner
+    /// [`crate::proto::mls_wire::welcome_fetch_signing_input`], bound to
+    /// `(user_ipk, requester_relay_id = home NodeId, timestamp)` — the
+    /// phone learns its home's NodeId from the client/0 handshake. The
+    /// home verifies, then forwards the same sig (with its own NodeId as
+    /// `requester_relay_id`) to the K homes. Reply:
+    /// [`SRelayPacket::WelcomesFetched`] or
     /// [`SRelayPacket::DhtUnavailable`].
     FetchWelcomes {
         timestamp: u64,
         sig:       Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome ack. The
-    /// home GCs the listed `welcome_ids` from the calling IPK's K=3
-    /// homes. Reply: [`SRelayPacket::WelcomesAcked`] or
+    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome ack; the K
+    /// homes GC the listed `welcome_ids`. **User-signed RPC**: `sig` is
+    /// the phone's signature over the inner
+    /// [`crate::proto::mls_wire::welcome_ack_signing_input`], bound to
+    /// `(user_ipk, requester_relay_id = home NodeId, welcome_ids,
+    /// timestamp)`, forwarded by the home to the K homes. Reply:
+    /// [`SRelayPacket::WelcomesAcked`] or
     /// [`SRelayPacket::DhtUnavailable`].
     AckWelcomes {
         welcome_ids: Vec<Bytes<8>>,
@@ -519,11 +542,10 @@ mod tests {
 
         for pkt in [
             CRelayPacket::PublishKeyPackage {
-                records:    vec![kp_record.clone()],
-                generation: 7,
-                timestamp:  1_700_000_000_001,
-                mode:       KpPublishMode::Publish,
-                sig:        Bytes([0xBB; 64]),
+                records:   vec![kp_record.clone()],
+                timestamp: 1_700_000_000_001,
+                mode:      KpPublishMode::Publish,
+                sig:       Bytes([0xBB; 64]),
             },
             CRelayPacket::FetchKeyPackage {
                 target_ipk: Bytes([0xCC; 32]),
