@@ -136,8 +136,11 @@ impl Relay {
 
         let client_cfg =
             Arc::new(graceful!(build_client_cfg(ProtoRole::Relay, &roots), "CLIENT_CFG_ERR:"));
+        // peer/1 is the key-as-identity trust domain (self-signed NodeKey
+        // certs, pinned to the dialed NodeId post-handshake), not the CA
+        // hierarchy — so it gets its own verifier, not build_client_cfg.
         let peer_client_cfg =
-            Arc::new(graceful!(build_client_cfg(ProtoRole::Peer, &roots), "PEER_CFG_ERR:"));
+            Arc::new(graceful!(crate::dht::peer_dial::build_peer_client_cfg(), "PEER_CFG_ERR:"));
 
         endpoint.set_default_client_config((*client_cfg).clone());
 

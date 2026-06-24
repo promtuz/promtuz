@@ -40,6 +40,7 @@ pub(crate) mod mls_kp;
 pub(crate) mod mls_kp_originate;
 pub(crate) mod mls_welcome;
 pub(crate) mod mls_welcome_originate;
+pub(crate) mod peer_dial;
 pub(crate) mod publish;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
