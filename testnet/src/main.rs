@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     // already-running remote relays. Default (no subcommand) = loopback sim.
     match args.get(1).map(String::as_str) {
         Some("deploy") => return deploy::run(&args[2..]),
+        Some("add-relay") => return deploy::add_relay(&args[2..]),
         Some("remote") => return run_remote(&args[2..]).await,
         _ => {},
     }

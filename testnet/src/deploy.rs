@@ -53,6 +53,11 @@ pub fn run(args: &[String]) -> Result<()> {
     fs::create_dir_all(&out).context("create out dir")?;
 
     let ca = Ca::new()?;
+    // Persist the CA at the kit root so `add-relay` can issue more relays
+    // under the same root later. `ca.key` stays local (never shipped to a
+    // node); `ca.pem` is the trust anchor each node already gets.
+    fs::write(out.join("ca.key"), ca.key_pem()).context("write ca.key")?;
+    fs::write(out.join("ca.pem"), ca.cert_pem()).context("write ca.pem")?;
 
     // Resolver binds 0.0.0.0 on the public port; relays seed `resolver_pub`.
     let resolver_bind = SocketAddr::from(([0, 0, 0, 0], resolver_pub.port()));
@@ -72,6 +77,45 @@ pub fn run(args: &[String]) -> Result<()> {
         "open these UDP ports in each box's firewall: resolver {} + the relay port(s) above",
         resolver_pub.port()
     );
+    Ok(())
+}
+
+/// `testnet add-relay <kit_dir> <name> <relay_bind_addr> <resolver_public_addr>`
+/// — issue ONE more relay under the kit's existing CA (no resolver), so it
+/// joins the same network. Writes `<kit_dir>/<name>/`.
+pub fn add_relay(args: &[String]) -> Result<()> {
+    if args.len() != 4 {
+        bail!(
+            "usage: testnet add-relay <kit_dir> <name> <relay_bind_addr> <resolver_public_addr>\n  \
+             e.g. testnet add-relay ./deploy relay-canada 151.0.0.1:40436 187.0.0.1:40433"
+        );
+    }
+    let kit = PathBuf::from(&args[0]);
+    let name = &args[1];
+    let bind: SocketAddr =
+        args[2].parse().with_context(|| format!("relay_bind_addr `{}`", args[2]))?;
+    let resolver_pub: SocketAddr =
+        args[3].parse().with_context(|| format!("resolver_public_addr `{}`", args[3]))?;
+
+    let ca_key = fs::read_to_string(kit.join("ca.key")).with_context(|| {
+        format!(
+            "read {}/ca.key — regenerate the kit with `testnet deploy` (older kits didn't persist the CA key)",
+            kit.display()
+        )
+    })?;
+    let ca_cert = fs::read_to_string(kit.join("ca.pem")).context("read ca.pem")?;
+    let ca = Ca::load(ca_cert, &ca_key)?;
+
+    // The resolver IPK seeded into the relay config — recovered from the
+    // kit's resolver key (so the caller need only pass the resolver addr).
+    let resolver_key = fs::read_to_string(kit.join("resolver/node.key"))
+        .context("read resolver/node.key (for the resolver seed IPK)")?;
+    let resolver_ipk_hex = crate::certs::pubkey_hex_from_key_pem(&resolver_key)?;
+
+    let leaf = ca.issue()?;
+    write_node(&kit, name, &ca, &leaf, &relay_config(bind, &resolver_ipk_hex, resolver_pub))?;
+    println!("{name}  bind {bind}  id={}", leaf.node_id);
+    println!("written to {}", kit.join(name).display());
     Ok(())
 }
 
