@@ -27,6 +27,14 @@ pub mod quic;
 pub mod state;
 pub mod utils;
 
+/// Headless end-to-end client driver (feature `e2e-client`). Drives the
+/// real MLS + [`crate::quic::relay_dht_client::RelayDhtClient`] pipeline
+/// over a live `client/0` connection with explicit keys — no JNI keystore,
+/// no global state — for the `testnet` sandbox harness. Compiled out of the
+/// normal cdylib build.
+#[cfg(feature = "e2e-client")]
+pub mod e2e;
+
 type JC<'local> = JClass<'local>;
 
 //////////////////////////////////////////////

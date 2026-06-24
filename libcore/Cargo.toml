@@ -65,6 +65,17 @@ sha2 = "0.10"
 # this just makes the line item explicit. No new crate added.
 blake3 = "1.8"
 
+[features]
+# Headless e2e client driver (`src/e2e`, `src/bin/e2e_client.rs`) used by the
+# `testnet` sandbox harness. Off by default — the Android cdylib build is
+# unaffected, and the explicit-signer seam in `RelayDhtClient` compiles out.
+e2e-client = []
+
+[[bin]]
+name = "e2e-client"
+path = "src/bin/e2e_client.rs"
+required-features = ["e2e-client"]
+
 # Phase 3b's `mls::group` / `mls::welcome` / `mls::epoch_catchup` test
 # fixtures use openmls's `MlsMessageOut::into_welcome()`, which is gated
 # behind `test-utils` in openmls 0.8. Production code paths do not use
