@@ -119,6 +119,12 @@ impl Sandbox {
         })
     }
 
+    /// Path to the sandbox root CA cert — clients trust this to verify
+    /// the relay/0 server certs they connect to.
+    pub fn ca_path(&self) -> PathBuf {
+        self.root.join("ca.pem")
+    }
+
     pub async fn teardown(mut self) {
         for r in &mut self.relays {
             r.node.kill().await;
@@ -154,7 +160,7 @@ fn local_addr(port: u16) -> SocketAddr {
 
 /// Resolve a sibling binary of the running `testnet` exe (same
 /// `target/<profile>/` dir).
-fn bin_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn bin_path(name: &str) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("current_exe")?;
     let dir = exe.parent().context("current_exe has no parent")?;
     let mut path = dir.join(name);
@@ -163,7 +169,9 @@ fn bin_path(name: &str) -> Result<PathBuf> {
     }
     if !path.exists() {
         bail!(
-            "binary `{name}` not found at {} — build it first:\n    cargo build -p relay -p resolver",
+            "binary `{name}` not found at {} — build the sandbox binaries first:\n    \
+             cargo build -p relay -p resolver\n    \
+             cargo build -p core --bin e2e-client --features e2e-client",
             path.display()
         );
     }
