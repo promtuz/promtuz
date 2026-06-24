@@ -2,7 +2,7 @@
 //!
 //! **Phase 8 (P1 #19)**: extracted from `quic::server` so consumers
 //! that need the global `RELAY` (e.g. `api::messaging::sendMessage`,
-//! which reads it for the per-connection `Peer1DhtClient` dialer)
+//! which reads it for the per-connection `RelayDhtClient` dialer)
 //! can do so without forming an intra-crate cycle:
 //!
 //! ```text
@@ -27,6 +27,6 @@ use crate::data::relay::Relay;
 /// Set by `quic::server::Relay::connect` after the `relay/1` handshake
 /// succeeds; cleared on disconnect/reconnect. Read by
 /// `api::messaging::sendMessage` (and the receive path) to obtain the
-/// per-connection [`crate::quic::peer1_client::Peer1DhtClient`] dialer
-/// for MLS K-fanout publishes.
+/// per-connection [`crate::quic::relay_dht_client::RelayDhtClient`]
+/// dialer for MLS DHT-RPC wrappers.
 pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);

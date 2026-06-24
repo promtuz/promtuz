@@ -67,15 +67,14 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "CREATE INDEX idx_latency_samples_relay ON relay_latency_samples(relay_id, measured_at DESC);",
     ),
-    // Phase 8 (P0-2 residual): persist `RelayDescriptor.pubkey` so
-    // libcore's `Peer1DhtClient` can pin the relay's TLS-cert SPKI on
-    // every peer/1 dial. Resolver vends this in `RelayDescriptor.pubkey`
-    // (authenticated via the resolver's signed `RelayHello` from each
-    // relay); without it, the libcore-side `PinnedPeerServerCertVerifier`
-    // can never fire because there's no expected SPKI to compare against.
+    // Persist `RelayDescriptor.pubkey` (resolver-vended, authenticated
+    // via each relay's signed `RelayHello`). Added in Phase 8 for
+    // libcore-side TLS-cert SPKI pinning on the Option-A `peer/1` dial
+    // path; that path was removed in Phase 9 (libcore no longer dials
+    // peer/1), so this column is now vestigial — retained pending a
+    // cleanup pass that drops it along with the resolver wire field.
     //
-    // Nullable: pre-existing rows pre-dating this migration carry NULL
-    // until the next resolver-refresh; pinning is gated on Some(pk).
+    // Nullable: rows pre-dating this migration carry NULL.
     M::up(
         r#"--sql
             ALTER TABLE relays ADD COLUMN pubkey BLOB

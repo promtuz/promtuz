@@ -46,7 +46,7 @@ use crate::db::mls::stash_db_handle;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::events::messaging::MessageEv;
-use crate::quic::peer1_client::Peer1DhtClient;
+use crate::quic::relay_dht_client::RelayDhtClient;
 use crate::ret_err;
 use crate::utils::systime;
 
@@ -200,17 +200,17 @@ impl Relay {
         self.record_success(latency_ms).map_err(|e| RelayConnError::Error(e.into()))?;
         self.connection = Some(conn);
 
-        // Phase 7 (P0-4): build the production peer/1 MLS dialer once
-        // the relay/1 connection is established. The dialer is stored
-        // on the `Relay` struct so the JNI surface (`sendMessage`,
-        // `handle_deliver`) can pick it up via `RELAY.read()` instead
-        // of constructing a stub `NotWiredDhtClient`. Failure to build
-        // is logged and `dht_client` stays `None`; the caller surfaces
-        // a clean error rather than silently no-oping.
-        match build_peer1_dht_client(&self, ipk) {
+        // Phase 9 §3.9: build the production DHT-RPC dialer once the
+        // relay/1 connection is established. The dialer rides this same
+        // connection (no peer/1), stored on the `Relay` struct so the
+        // JNI surface (`sendMessage`, `handle_deliver`) picks it up via
+        // `RELAY.read()`. Failure to build is logged and `dht_client`
+        // stays `None`; the caller surfaces a clean error rather than
+        // silently no-oping.
+        match build_relay_dht_client(&self, ipk) {
             Ok(c) => self.dht_client = Some(c),
             Err(e) => {
-                warn!("MLS: peer1 dialer not constructed at connect: {e}");
+                warn!("MLS: DHT dialer not constructed at connect: {e}");
             },
         }
 
@@ -306,7 +306,7 @@ impl Relay {
 
         // Phase 5a / Phase 7: re-use the production peer/1 dialer that
         // `connect()` built before storing this Relay on the global
-        // `RELAY`. The dialer is shared (`Arc<Peer1DhtClient>`) so the
+        // `RELAY`. The dialer is shared (`Arc<RelayDhtClient>`) so the
         // JNI surface (`sendMessage`, `handle_deliver`) and the
         // background tasks below all dispatch over the same pool.
         //
@@ -429,7 +429,7 @@ impl Relay {
 
 async fn handle_deliver(
     tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
-    dht_client: Option<Arc<Peer1DhtClient>>,
+    dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
     // Phase 4 receive path. The wire envelope is now `MlsEnvelopeP`
     // (postcard-encoded), so we hand off to
@@ -603,55 +603,26 @@ async fn handle_ack_auth_request(
 }
 
 // ---------------------------------------------------------------------------
-// MLS / peer1 dialer wiring (Phase 5a)
+// MLS / DHT-RPC dialer wiring (Phase 9 §3.9)
 // ---------------------------------------------------------------------------
 
-/// Build the production [`Peer1DhtClient`] from the current connection
-/// state.
+/// Build the production [`RelayDhtClient`] from the current connection
+/// state. Unlike the deleted Option-A `Peer1DhtClient`, this dials
+/// nothing — it rides the already-authenticated home `relay/1`
+/// connection. It needs only the connection, our IPK, and the home's
+/// DHT NodeId (learned from the handshake, for welcome fetch/ack
+/// signatures). Signing goes through the global `IdentitySigner`.
 ///
-/// Steps:
-/// 1. Load `PEER_IDENTITY` (set at app boot in `api/mod.rs::initApi`).
-/// 2. Build `peer/1` ALPN client config via
-///    [`crate::quic::peer_config::build_peer_client_cfg`].
-/// 3. Translate the relay's `(id, host, port)` into a
-///    [`crate::quic::peer1_client::HomeDescriptor`].
-/// 4. Decrypt the user's IPK secret to obtain the long-term signing
-///    key (held by the dialer for the connection's lifetime; dropped
-///    via dalek's zeroize on connection close).
-///
-/// Returns `Err` if any step fails. The caller logs and skips the MLS
-/// background work, leaving the connection's primary client/1 traffic
-/// undisturbed.
-fn build_peer1_dht_client(
+/// Returns `Err` if the connection isn't established yet; the caller
+/// logs and skips the MLS background work.
+fn build_relay_dht_client(
     relay: &Relay, ipk: VerifyingKey,
-) -> Result<Arc<Peer1DhtClient>> {
-    use crate::api::PEER_IDENTITY;
-    use crate::data::identity::IdentitySigner;
-    use crate::data::identity::secret_key_signing;
-    use crate::quic::peer1_client::home_from_relay;
-    use crate::quic::peer_config::build_peer_client_cfg;
-
-    let endpoint = ENDPOINT.get().ok_or_else(|| anyhow!("ENDPOINT not initialized"))?;
-    let peer_identity = PEER_IDENTITY
-        .get()
-        .ok_or_else(|| anyhow!("PEER_IDENTITY not initialized"))?;
-    let peer_cfg = Arc::new(build_peer_client_cfg(peer_identity)?);
-    let home = home_from_relay(relay)?;
-    let our_ipk_bytes = ipk.to_bytes();
-    let our_signing = secret_key_signing(&our_ipk_bytes)?;
-    // Phase 7 (P0-2): hand the dialer the TLS sub-key explicitly so it
-    // can build per-dial pinned `ClientConfig`s (cert SPKI bound to the
-    // expected relay pubkey). Falls back to the un-pinned `peer_cfg`
-    // for any dial whose target pubkey is unknown.
-    let tls_subkey = IdentitySigner::tls_subkey()?;
-    Ok(Peer1DhtClient::new_arc_with_tls_subkey(
-        endpoint.as_ref().clone(),
-        peer_cfg,
-        tls_subkey,
-        home,
-        our_ipk_bytes,
-        our_signing,
-    ))
+) -> Result<Arc<RelayDhtClient>> {
+    let conn = relay
+        .connection
+        .clone()
+        .ok_or_else(|| anyhow!("relay connection not established"))?;
+    Ok(Arc::new(RelayDhtClient::new(conn, ipk.to_bytes(), relay.home_node_id)))
 }
 
 /// One-shot Welcome poll on reconnect. Builds an `MlsContext` against
@@ -660,7 +631,7 @@ fn build_peer1_dht_client(
 ///
 /// design-doc: `misc/specs/MLS.md` §6.1 (Welcome queue on reconnect),
 /// §11.3.
-async fn poll_welcomes_once(client: Arc<Peer1DhtClient>) -> Result<()> {
+async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
@@ -685,7 +656,7 @@ async fn poll_welcomes_once(client: Arc<Peer1DhtClient>) -> Result<()> {
 /// identity exit the loop early (logged); the inner loop owns the
 /// cancellation contract.
 async fn run_scheduler_loop(
-    client: Arc<Peer1DhtClient>, cancel: CancellationToken,
+    client: Arc<RelayDhtClient>, cancel: CancellationToken,
 ) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();

@@ -69,22 +69,21 @@ pub struct Relay {
     pub port:       u16,
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
-    /// **Phase 7 (P0-4)**: production [`Peer1DhtClient`] dialer attached
-    /// to this relay's connection. Built once per `connect()` after the
-    /// `relay/1` handshake succeeds; lives for the connection's lifetime.
-    /// `None` if the dialer could not be constructed (e.g. PEER_IDENTITY
-    /// not yet initialised) — callers in `api::messaging::sendMessage`
-    /// surface a clean error in that case rather than silently no-oping
-    /// against `NotWiredDhtClient`.
-    pub dht_client: Option<Arc<crate::quic::peer1_client::Peer1DhtClient>>,
+    /// **Phase 9 §3.9**: production [`RelayDhtClient`] dialer riding this
+    /// relay's `relay/1` connection. Built once per `connect()` after the
+    /// handshake succeeds; lives for the connection's lifetime. `None` if
+    /// the connection isn't established — callers in
+    /// `api::messaging::sendMessage` surface a clean error rather than
+    /// silently no-oping.
+    ///
+    /// [`RelayDhtClient`]: crate::quic::relay_dht_client::RelayDhtClient
+    pub dht_client: Option<Arc<crate::quic::relay_dht_client::RelayDhtClient>>,
     /// **Phase 8 (P0-2 residual)**: relay's NodeKey pubkey as vended by
     /// the resolver in `RelayDescriptor.pubkey`. Persisted on
-    /// `Relay::refresh`. Used by `home_from_relay_with_pubkey` to enable
-    /// per-dial TLS cert SPKI pinning in `Peer1DhtClient` —
-    /// `PinnedPeerServerCertVerifier` rejects any cert whose SPKI does
-    /// not match this value. `None` for rows pre-dating the schema
-    /// migration; pinning falls back to the un-pinned verifier in that
-    /// case (legacy posture, with a `log::warn` so operators notice).
+    /// `Relay::refresh`. Was used for per-dial TLS-cert SPKI pinning on
+    /// the deleted Option-A `peer/1` path; now vestigial under Option B
+    /// (libcore no longer dials `peer/1`). Retained pending a cleanup
+    /// pass that also drops the DB column + resolver wire field.
     pub pubkey:     Option<[u8; 32]>,
     /// **Phase 9 §3.9**: the home relay's DHT NodeId, learned from the
     /// `ServerHandshakeResultP::Accept` reply. Connection-scoped (set in
@@ -103,7 +102,7 @@ impl std::fmt::Debug for Relay {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("connection", &self.connection)
-            .field("dht_client", &self.dht_client.as_ref().map(|_| "<Peer1DhtClient>"))
+            .field("dht_client", &self.dht_client.as_ref().map(|_| "<RelayDhtClient>"))
             .field("pubkey", &self.pubkey.as_ref().map(|pk| hex::encode(&pk[..4])))
             .field("home_node_id", &self.home_node_id.as_ref().map(|id| hex::encode(&id[..4])))
             .finish()
