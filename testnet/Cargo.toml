@@ -1,0 +1,18 @@
+[package]
+name = "testnet"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "testnet"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common", features = ["quic"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+rcgen = { version = "0.14.7", features = ["x509-parser"] }
