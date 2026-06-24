@@ -6,3 +6,6 @@
 /misc
 
 target
+
+# testnet deploy kits (contain private node keys)
+/deploy

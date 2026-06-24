@@ -16,9 +16,15 @@
 
 mod certs;
 mod client;
+mod deploy;
 mod proc;
 mod sandbox;
 
+use std::net::SocketAddr;
+use std::path::Path;
+use std::path::PathBuf;
+
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 
@@ -29,6 +35,15 @@ use crate::sandbox::bin_path;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Subcommands: generate a real-server kit, or drive the scenario against
+    // already-running remote relays. Default (no subcommand) = loopback sim.
+    match args.get(1).map(String::as_str) {
+        Some("deploy") => return deploy::run(&args[2..]),
+        Some("remote") => return run_remote(&args[2..]).await,
+        _ => {},
+    }
+
     let relays = args.iter().skip(1).find_map(|a| a.parse::<usize>().ok()).unwrap_or(2);
     let keep = args.iter().any(|a| a == "--keep");
 
@@ -73,38 +88,50 @@ async fn main() -> Result<()> {
 /// routing it through the relay `DispatchP` delivery path is a follow-up.
 async fn run_message_scenario(sb: &Sandbox) -> Result<()> {
     let client_bin = bin_path("e2e-client")?;
-    let ca = sb.ca_path();
-    let r0 = &sb.relays[0];
-    let r1 = &sb.relays[1];
+    let relays: Vec<(SocketAddr, String)> =
+        sb.relays.iter().map(|r| (r.addr, r.node_id.to_string())).collect();
+    run_scenario(&client_bin, &sb.ca_path(), &relays).await
+}
 
-    println!("\n— message scenario: client A @ relay-0  →  client B @ relay-1 —");
+/// Drive the 1:1 scenario against the given relays (local sandbox or remote
+/// servers): A homes on `relays[0]`, B on `relays[1]`. Each entry is the
+/// relay's `(client/0 address, NodeId)`; `ca` signed all of them.
+async fn run_scenario(client_bin: &Path, ca: &Path, relays: &[(SocketAddr, String)]) -> Result<()> {
+    if relays.len() < 2 {
+        bail!("the 1:1 scenario needs >=2 relays; got {}", relays.len());
+    }
+    let (a_addr, a_id) = &relays[0];
+    let (b_addr, b_id) = &relays[1];
+    let ca = ca.display().to_string();
+
+    println!("\n— message scenario: client A @ {a_addr}  →  client B @ {b_addr} —");
 
     let mut a = ClientProc::spawn(
         "A",
-        &client_bin,
+        client_bin,
         &[
             ("E2E_LABEL", "A".into()),
             ("E2E_SEED", "1".into()),
-            ("E2E_HOME_ADDR", r0.addr.to_string()),
-            ("E2E_HOME_ID", r0.node_id.to_string()),
-            ("E2E_CA", ca.display().to_string()),
+            ("E2E_HOME_ADDR", a_addr.to_string()),
+            ("E2E_HOME_ID", a_id.clone()),
+            ("E2E_CA", ca.clone()),
         ],
     )
     .await?;
     let mut b = ClientProc::spawn(
         "B",
-        &client_bin,
+        client_bin,
         &[
             ("E2E_LABEL", "B".into()),
             ("E2E_SEED", "2".into()),
-            ("E2E_HOME_ADDR", r1.addr.to_string()),
-            ("E2E_HOME_ID", r1.node_id.to_string()),
-            ("E2E_CA", ca.display().to_string()),
+            ("E2E_HOME_ADDR", b_addr.to_string()),
+            ("E2E_HOME_ID", b_id.clone()),
+            ("E2E_CA", ca),
         ],
     )
     .await?;
-    println!("✓ A connected @ relay-0  ipk={}…", short(&a.ipk));
-    println!("✓ B connected @ relay-1  ipk={}…", short(&b.ipk));
+    println!("✓ A connected  ipk={}…", short(&a.ipk));
+    println!("✓ B connected  ipk={}…", short(&b.ipk));
 
     let n = b.cmd("publish_kp").await?;
     println!("✓ B published its KeyPackage to the DHT (count={})", n.trim());
@@ -114,9 +141,9 @@ async fn run_message_scenario(sb: &Sandbox) -> Result<()> {
 
     let activated = b.cmd("poll_welcomes").await?;
     if activated.trim() == "0" {
-        bail!("B activated 0 Welcomes — the Welcome never reached relay-1");
+        bail!("B activated 0 Welcomes — the Welcome never reached B's home relay");
     }
-    println!("✓ B fetched the Welcome from relay-1 and joined (activated={})", activated.trim());
+    println!("✓ B fetched the Welcome and joined (activated={})", activated.trim());
 
     let plaintext = "hello across two relays";
     let env_hex = a.cmd(&format!("encrypt {} {}", b.ipk, hex::encode(plaintext))).await?;
@@ -132,6 +159,36 @@ async fn run_message_scenario(sb: &Sandbox) -> Result<()> {
     a.shutdown().await;
     b.shutdown().await;
     Ok(())
+}
+
+/// `testnet remote <ca.pem> <relay_addr> <relay_id> [<relay_addr> <relay_id> …]`
+/// — drive the 1:1 scenario against already-running relays (e.g. the real
+/// servers), with `e2e-client` subprocesses on this host dialing them.
+async fn run_remote(args: &[String]) -> Result<()> {
+    if args.len() < 5 || args.len() % 2 == 0 {
+        bail!("usage: testnet remote <ca.pem> <relay_addr> <relay_id> <relay_addr> <relay_id> ...");
+    }
+    let ca = PathBuf::from(&args[0]);
+    let mut relays: Vec<(SocketAddr, String)> = Vec::new();
+    let mut i = 1;
+    while i + 1 < args.len() {
+        let addr: SocketAddr = args[i].parse().with_context(|| format!("relay addr `{}`", args[i]))?;
+        relays.push((addr, args[i + 1].clone()));
+        i += 2;
+    }
+
+    let client_bin = bin_path("e2e-client")?;
+    println!("== promtuz testnet — remote scenario against {} relays ==", relays.len());
+    match run_scenario(&client_bin, &ca, &relays).await {
+        Ok(()) => {
+            println!("\n🎉 remote e2e PASS — a 1:1 message crossed the real relays.");
+            Ok(())
+        },
+        Err(e) => {
+            eprintln!("\n✗ remote e2e FAILED: {e:#}");
+            std::process::exit(1);
+        },
+    }
 }
 
 fn short(s: &str) -> &str {
