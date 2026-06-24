@@ -166,9 +166,6 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// it directly (the production caller is still
 /// `relay/src/quic/handler/peer.rs::handle_peer`, unchanged).
 pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
-    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
-    let conn_id = conn.stable_id();
-
     // Forward-compatible TLS pubkey extraction. Under the current
     // `with_no_client_auth()` server config this returns `None`
     // (clients don't present certs); preserved as defense-in-depth
@@ -246,6 +243,26 @@ pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     }
     dht.metrics.inc_dht_hello_accepted();
 
+    // Serve RPCs on this connection. Both inbound (accepted here) and
+    // outbound (dialed by `lookup::connect_to_peer`) connections serve, so a
+    // peer can reuse a single cached connection to call us in EITHER
+    // direction — hence the accept loop lives in a shared helper.
+    serve_peer_streams(dht, conn, auth).await;
+}
+
+/// Serve inbound DHT-RPC bi-streams on `conn` until it closes, attributing
+/// every request to the pre-authenticated `auth`. Shared by the inbound
+/// acceptor ([`handle_peer_connection`], where `auth` comes from the
+/// `DhtHello`) and the outbound dialer
+/// ([`crate::dht::lookup::connect_to_peer`], where `auth` comes from the
+/// dial's cert NodeId-binding) so `peer/1` connections are **bidirectional**:
+/// the `peer_conns` cache then correctly reuses one connection per pair in
+/// both directions, instead of handing back a connection that only serves
+/// the way it was opened.
+pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: AuthenticatedPeer) {
+    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
+    let conn_id = conn.stable_id();
+
     loop {
         let stream = match conn.accept_bi().await {
             Ok(s) => s,
@@ -265,16 +282,15 @@ pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
 
         let dht_clone = dht.clone();
         let conn_for_task = conn.clone();
-        let auth_clone = auth;
         tokio::spawn(async move {
             let _permit = permit;
             let mut recv = recv;
-            let send = send;
-            handle_one_stream(dht_clone, conn_for_task, send, &mut recv, auth_clone).await;
+            handle_one_stream(dht_clone, conn_for_task, send, &mut recv, auth).await;
         });
     }
 
-    // Connection closed — evict routing-table entry if still ours.
+    // Connection closed — evict the cached entry if it still points at this
+    // exact connection (race-guard against a reconnect that replaced it).
     let peer_id_to_remove: Option<NodeId> = {
         let map = dht.peer_conns.read();
         map.iter().find_map(|(id, (c, _pk))| {
@@ -304,9 +320,20 @@ pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
 /// `Copy` because every field is plain bytes; cheap to pass-by-value
 /// into the per-stream task.
 #[derive(Clone, Copy, Debug)]
-struct AuthenticatedPeer {
+pub(crate) struct AuthenticatedPeer {
     node_id: NodeId,
     pubkey:  [u8; 32],
+}
+
+impl AuthenticatedPeer {
+    /// Construct from an outbound dial's already-verified identity — the
+    /// cert SPKI's NodeId-binding established by
+    /// [`crate::dht::tls_extract::extract_and_verify_pubkey`]. No `DhtHello`
+    /// is exchanged on the dialer's serve side: the dial already
+    /// authenticated the peer.
+    pub(crate) fn new(node_id: NodeId, pubkey: [u8; 32]) -> Self {
+        Self { node_id, pubkey }
+    }
 }
 
 /// Read the dialer's first uni-stream, decode as [`DhtHello`], verify,

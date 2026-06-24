@@ -254,6 +254,18 @@ pub(crate) async fn connect_to_peer(
         conns.insert(peer.id, (conn.clone(), verified_pubkey));
     }
     dht.metrics.inc_peer_conns_opened();
+
+    // Bidirectional: serve inbound RPCs on this outbound connection too, so
+    // the peer can reuse it to call us back (the `peer_conns` cache is shared
+    // across both directions). The peer's identity is the dial's verified
+    // cert NodeId-binding — no second `DhtHello` needed. Spawned only on a
+    // fresh dial; the fast-path reuse above already has a serve loop.
+    tokio::spawn(crate::dht::handler::serve_peer_streams(
+        dht.clone(),
+        conn.clone(),
+        crate::dht::handler::AuthenticatedPeer::new(peer.id, verified_pubkey),
+    ));
+
     Ok(conn)
 }
 
