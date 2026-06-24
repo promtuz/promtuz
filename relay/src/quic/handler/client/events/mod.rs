@@ -17,6 +17,7 @@ pub mod drain;
 pub mod drain_auth;
 pub mod forward;
 pub mod misc;
+pub mod mls_relay;
 
 pub(super) async fn handle_packet(
     packet: CRelayPacket, ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -44,6 +45,30 @@ pub(super) async fn handle_packet(
                 let _ = sender.send(AckAuthPayload { sig: sig.0, timestamp });
             }
             Ok(())
+        },
+
+        // Phase 9 §3.9 — Tier-1 MLS DHT-RPC wrappers. Each handler
+        // verifies the wrapper sig + skew, originates the peer/1
+        // fan-out, and replies with the matching SRelayPacket (or
+        // DhtUnavailable when this relay has DHT disabled).
+        PublishKeyPackage { records, timestamp, mode, sig } => {
+            mls_relay::handle_publish_keypackage(
+                ctx.clone(), records, timestamp, mode, sig.0, tx,
+            )
+            .await
+        },
+        FetchKeyPackage { target_ipk, timestamp, sig } => {
+            mls_relay::handle_fetch_keypackage(ctx.clone(), target_ipk.0, timestamp, sig.0, tx)
+                .await
+        },
+        PublishWelcome { envelope, timestamp, sig } => {
+            mls_relay::handle_publish_welcome(ctx.clone(), envelope, timestamp, sig.0, tx).await
+        },
+        FetchWelcomes { timestamp, sig } => {
+            mls_relay::handle_fetch_welcomes(ctx.clone(), timestamp, sig.0, tx).await
+        },
+        AckWelcomes { welcome_ids, timestamp, sig } => {
+            mls_relay::handle_ack_welcomes(ctx.clone(), welcome_ids, timestamp, sig.0, tx).await
         },
 
         // Ignore Extra

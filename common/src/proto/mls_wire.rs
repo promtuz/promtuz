@@ -1287,22 +1287,31 @@ pub fn kp_fetch_wrap_signing_input(
 ///     || sender_ipk (32) || welcome_blob_digest (32) || timestamp (BE u64)
 /// ```
 ///
-/// `welcome_blob_digest = BLAKE3(envelope.welcome_blob)` — the same
-/// hash the envelope's own [`welcome_envelope_signing_input`] covers,
-/// so the wrapper sig is bound to the exact MLS payload being published.
-/// The envelope's `sender_sig` already covers the recipient/group/kp_ref
-/// metadata so the wrapper does not re-bind them.
+/// Hashes `welcome_blob` internally to `BLAKE3(welcome_blob)` — the
+/// same hash the envelope's own [`welcome_envelope_signing_input`]
+/// covers, so the wrapper sig is bound to the exact MLS payload being
+/// published. Hashing here (rather than taking a pre-computed digest)
+/// keeps the one blake3 call in `common` so neither the relay nor
+/// libcore needs a direct blake3 dependency. The envelope's
+/// `sender_sig` already covers the recipient/group/kp_ref metadata, so
+/// the wrapper does not re-bind them.
+///
+/// Layout:
+/// ```text
+///   WELCOME_PUBLISH_WRAP_DOMAIN || protocol_version (BE u16)
+///     || sender_ipk (32) || BLAKE3(welcome_blob) (32) || timestamp (BE u64)
+/// ```
 pub fn welcome_publish_wrap_signing_input(
-    protocol_version: u16, sender_ipk: &[u8; 32], welcome_blob_digest: &[u8; 32],
-    timestamp: u64,
+    protocol_version: u16, sender_ipk: &[u8; 32], welcome_blob: &[u8], timestamp: u64,
 ) -> Vec<u8> {
+    let blob_hash = blake3::hash(welcome_blob);
     let mut buf = Vec::with_capacity(
         WELCOME_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8,
     );
     buf.extend_from_slice(WELCOME_PUBLISH_WRAP_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(sender_ipk);
-    buf.extend_from_slice(welcome_blob_digest);
+    buf.extend_from_slice(blob_hash.as_bytes());
     buf.extend_from_slice(&timestamp.to_be_bytes());
     buf
 }
@@ -1366,7 +1375,7 @@ mod tests {
     fn phase9_gate_wrapper_signing_input_layouts_are_pinned() {
         let ipk: [u8; 32] = [0x11; 32];
         let target_ipk: [u8; 32] = [0x22; 32];
-        let blob_digest: [u8; 32] = [0x33; 32];
+        let blob: &[u8] = b"opaque-welcome-blob";
         let ts: u64 = 1_700_000_000_000;
 
         // KP_FETCH_WRAP: domain || version(2) || ipk(32)
@@ -1377,10 +1386,8 @@ mod tests {
         assert_eq!(kp_fetch.len(), KP_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
 
         // WELCOME_PUBLISH_WRAP: domain || version(2) || ipk(32)
-        //                      || welcome_blob_digest(32) || timestamp(8)
-        let w_pub = welcome_publish_wrap_signing_input(
-            MLS_WIRE_VERSION, &ipk, &blob_digest, ts,
-        );
+        //                      || BLAKE3(welcome_blob)(32) || timestamp(8)
+        let w_pub = welcome_publish_wrap_signing_input(MLS_WIRE_VERSION, &ipk, blob, ts);
         assert_eq!(w_pub.len(), WELCOME_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
     }
 
