@@ -4,12 +4,10 @@
 #
 #   curl -fsSL https://apt.promtuz.dev/install.sh | sudo sh
 #   curl -fsSL https://apt.promtuz.dev/install.sh | sudo CHANNEL=edge sh
-#
-# CHANNEL defaults to "stable" (vetted). "edge" = latest builds.
 
 set -e
 
-CHANNEL="${CHANNEL:-stable}"
+CHANNEL="${CHANNEL:-edge}"
 BASE="https://apt.promtuz.dev"
 KEYRING="/etc/apt/keyrings/promtuz.asc"
 LIST="/etc/apt/sources.list.d/promtuz.list"

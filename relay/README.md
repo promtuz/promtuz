@@ -13,12 +13,6 @@ One line — adds the apt repo and installs `pzrelay`:
 curl -fsSL https://apt.promtuz.dev/install.sh | sudo sh
 ```
 
-Latest builds instead of vetted ones:
-
-```sh
-curl -fsSL https://apt.promtuz.dev/install.sh | sudo CHANNEL=edge sh
-```
-
 ### Manual (if you'd rather not pipe a script to a shell)
 
 ```sh
@@ -26,7 +20,7 @@ sudo install -d -m 0755 /etc/apt/keyrings
 sudo curl -fsSL https://apt.promtuz.dev/promtuz-archive-keyring.asc \
      -o /etc/apt/keyrings/promtuz.asc
 
-echo "deb [signed-by=/etc/apt/keyrings/promtuz.asc] https://apt.promtuz.dev stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/promtuz.asc] https://apt.promtuz.dev edge main" \
   | sudo tee /etc/apt/sources.list.d/promtuz.list
 
 sudo apt update && sudo apt install pzrelay
@@ -61,12 +55,10 @@ journalctl -u pzrelay -f
 sudo apt update && sudo apt upgrade     # config preserved
 ```
 
-## Channels
+## Channel
 
-- **stable** — vetted builds, for production relays (default).
-- **edge** — latest builds, faster moving.
-
-Switch by editing the channel in `/etc/apt/sources.list.d/promtuz.list`.
+Single `edge` channel for now — the project is pre-production. A vetted
+`stable` channel gets added once releases settle down.
 
 ## Paths
 
