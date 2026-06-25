@@ -1,12 +1,13 @@
-//! Cold-start bootstrap: ask the resolver for seed peers, dial them,
-//! seed the routing table, run self-FindNode for forced convergence.
+//! Cold-start bootstrap: ask the resolver for seed peers, seed the
+//! routing table, then run a self-`FindNode` for forced convergence.
 //!
-//! Phase 1a stubbed the entry point; phase 1c (this commit) lands the
-//! resolver-side `GetBootstrapPeers` RPC and the first half of the §3.5
-//! state machine — phases A (resolver query) and B (insert into routing
-//! table). Phases C (self-FindNode for forced convergence) and the
-//! periodic re-ask scheduler land in later sub-phases (1e, 1g) once the
-//! lookup module exists.
+//! Three steps (design-doc §3.5): **A** query the resolver's
+//! `GetBootstrapPeers`; **B** insert the returned descriptors into the
+//! routing table; **C** run an iterative `FindNode` on our own id so every
+//! peer the walk touches learns to route back to us (the resolver's seed
+//! set only tells *us* about *them*, not the reverse). The scheduler in
+//! `dht/sync` re-runs the whole sequence on a backoff while the routing
+//! table is sparse.
 //!
 //! ## Failure semantics
 //!
@@ -30,6 +31,7 @@
 use std::sync::Arc;
 
 use common::info;
+use common::warn;
 use common::proto::client_res::RelayDescriptor;
 use common::proto::dht_p2p::NodeDescriptor;
 use thiserror::Error;
@@ -188,16 +190,24 @@ pub async fn bootstrap(
     );
 
     // ---- Phase C: self-FindNode lookup (§3.5 [Walking]) -------------
-    // TODO(phase 1e): trigger self-FindNode on `dht.node_id` after the
-    // lookup module lands. Until then we skip directly from Warming to
-    // Ready — no forced convergence has happened yet. Per the
-    // design-doc observation that "Ready is non-strict" (§3.5
-    // paragraph after the state machine), the relay can already start
-    // answering DHT RPCs with imperfect routing — α=3 hedging
-    // compensates.
+    // Force convergence with an iterative `FindNode` on our own id. Each
+    // peer the walk dials receives our signed `DhtHello` and records us in
+    // its routing table — this is the *only* way the rest of the network
+    // learns to reach us, since the resolver's near-set seeds our table
+    // but not theirs. It also pulls in any peers the resolver didn't vend.
+    //
+    // Best-effort: per §3.5 "Ready is non-strict", a relay may answer RPCs
+    // with imperfect routing (α=3 hedging compensates), so a failed walk
+    // — e.g. the very first cold call before the dialer endpoint is
+    // attached — logs and proceeds. The scheduler re-runs it on a backoff,
+    // and cached peer connections make the repeats cheap.
+    match crate::dht::lookup::lookup_node(dht.clone(), dht.node_id).await {
+        Ok(peers) => info!("DHT bootstrap: self-FindNode converged on {} peer(s)", peers.len()),
+        Err(e) => warn!("DHT bootstrap: self-FindNode walk failed: {e}; proceeding with seeded routing"),
+    }
 
     // ---- Phase D: mark ready (§3.5 [Ready]) -------------------------
-    info!("DHT bootstrap: complete (phase 1c covers A+B; C deferred to phase 1e)");
+    info!("DHT bootstrap: complete (resolver seed + self-FindNode convergence)");
     Ok(BootstrapState::Ready)
 }
 
