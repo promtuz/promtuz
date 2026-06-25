@@ -16,7 +16,6 @@ pub mod dht_p2p;
 pub mod mls_wire;
 pub mod pack;
 pub mod peer;
-pub mod relay_peer;
 #[cfg(feature = "server")]
 pub mod relay_res;
 
