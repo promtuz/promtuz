@@ -74,7 +74,6 @@ pub struct Relay {
     pub cfg: AppConfig,
 
     pub client_cfg: Arc<ClientConfig>,
-    pub peer_client_cfg: Arc<ClientConfig>,
 
     pub rocks: Arc<RocksDB>,
 
@@ -188,7 +187,6 @@ impl Relay {
             keys,
             cfg,
             client_cfg,
-            peer_client_cfg,
             rocks,
             dht,
             endpoint,
