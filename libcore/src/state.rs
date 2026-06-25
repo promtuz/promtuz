@@ -1,9 +1,9 @@
 //! Process-global state singletons.
 //!
-//! **Phase 8 (P1 #19)**: extracted from `quic::server` so consumers
-//! that need the global `RELAY` (e.g. `api::messaging::sendMessage`,
-//! which reads it for the per-connection `RelayDhtClient` dialer)
-//! can do so without forming an intra-crate cycle:
+//! Extracted from `quic::server` so consumers that need the global
+//! `RELAY` (e.g. `api::messaging::sendMessage`, which reads it for the
+//! per-connection `RelayDhtClient` dialer) can do so without forming
+//! an intra-crate cycle:
 //!
 //! ```text
 //!   api::messaging  ─┐

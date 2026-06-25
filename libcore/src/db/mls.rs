@@ -48,7 +48,7 @@ const MIGRATION_ARRAY: &[M] = &[
         CREATE INDEX idx_mls_storage_group ON mls_storage(group_id);
     "#,
     ),
-    // Phase 3b: out-of-order epoch buffer (spec §6.3, §7).
+    // Out-of-order epoch buffer (spec §6.3, §7).
     //
     // Stores buffered MLS messages received ahead of the current group
     // epoch (e.g. an Application at epoch=N+1 arriving before its
@@ -79,7 +79,7 @@ const MIGRATION_ARRAY: &[M] = &[
             ON mls_epoch_ahead(group_id, received_at_ms);
     "#,
     ),
-    // Phase 3a Component A — KeyPackage stash bookkeeping (spec §5.3).
+    // KeyPackage stash bookkeeping (spec §5.3).
     //
     // Tracks promtuz's view of which `kp_ref`s the client has minted
     // and not yet seen consumed (via a Welcome). The actual KP
@@ -97,8 +97,8 @@ const MIGRATION_ARRAY: &[M] = &[
     // - `expires_at_ms`: when the KP's lifetime extension elapses.
     //   Used to prune ageing rows independent of consumption signal.
     // - `consumed`: 0/1 flag; flips to 1 when libcore observes a
-    //   Welcome consuming this KP. Phase 3b/4 will hook this into
-    //   the welcome-receipt path; Phase 3a only writes 0.
+    //   Welcome consuming this KP. The welcome-receipt path hooks
+    //   into this; until then we only write 0.
     M::up(
         r#"--sql
         CREATE TABLE mls_keypackage_stash (
@@ -111,7 +111,7 @@ const MIGRATION_ARRAY: &[M] = &[
             ON mls_keypackage_stash(consumed, expires_at_ms);
     "#,
     ),
-    // Phase 8 (P1 #25): list-typed entities (OWN_LEAF_NODES = 0x02,
+    // List-typed entities (OWN_LEAF_NODES = 0x02,
     // PROPOSAL_QUEUE_REFS = 0x04) used to be stored as a single row
     // per `(group_id, key_tag)` carrying a CBOR-encoded
     // `Vec<Vec<u8>>` — every append decoded the full list, pushed
@@ -125,15 +125,15 @@ const MIGRATION_ARRAY: &[M] = &[
     //
     // Pre-1.0 hard cutover: nuke any pre-existing list-typed rows.
     // Users with in-progress groups must re-bootstrap (acceptable
-    // pre-1.0; documented in the Phase 8 report).
+    // pre-1.0).
     M::up(
         r#"--sql
         DELETE FROM mls_storage WHERE key_tag IN (2, 4);
     "#,
     ),
-    // Phase 8 (P1 #26): sidecar table to make `check_budget` a
-    // single-row lookup instead of `SELECT SUM(length(value))` (full
-    // per-group scan on every put). openmls performs 10+ writes per
+    // Sidecar table to make `check_budget` a single-row lookup
+    // instead of `SELECT SUM(length(value))` (full per-group scan on
+    // every put). openmls performs 10+ writes per
     // Commit; the SUM-on-every-put was the single largest CPU
     // hotspot in the storage layer.
     //
@@ -163,13 +163,12 @@ pub fn apply_mls_migrations(conn: &mut Connection) {
     PRAGMA!(conn, MIGRATIONS);
 }
 
-/// Process-global MLS SQLite connection. Phase 8 (P1 #17): all
-/// libcore call sites that previously opened a fresh handle (via the
-/// old `stash_db_handle`) now share this single `Arc<Mutex<Connection>>`
-/// — the in-process mutex is engaged for every read/write, eliminating
-/// the connection-open overhead and closing the inter-handle race
-/// window where two `sendMessage` calls could interleave their MLS
-/// state mutations through separate SQLite connections.
+/// Process-global MLS SQLite connection. All libcore call sites share
+/// this single `Arc<Mutex<Connection>>` — the in-process mutex is
+/// engaged for every read/write, eliminating the connection-open
+/// overhead and closing the inter-handle race window where two
+/// `sendMessage` calls could interleave their MLS state mutations
+/// through separate SQLite connections.
 pub static MLS_DB: Lazy<std::sync::Arc<Mutex<Connection>>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("mls")).expect("db open failed");
     info!("DB: MLS_DB CONNECTED");
@@ -179,12 +178,11 @@ pub static MLS_DB: Lazy<std::sync::Arc<Mutex<Connection>>> = Lazy::new(|| {
     std::sync::Arc::new(Mutex::new(conn))
 });
 
-/// Return the process-global MLS DB handle. Phase 8 (P1 #17): now
-/// returns a clone of the [`MLS_DB`] static's `Arc` instead of opening
-/// a fresh handle each call. Closes the prior race window where two
-/// concurrent dispatches could mutate MLS state through separate
-/// SQLite connections, and removes the per-`sendMessage`
-/// connection-open cost (deep-review perf-#14).
+/// Return the process-global MLS DB handle. Returns a clone of the
+/// [`MLS_DB`] static's `Arc` instead of opening a fresh handle each
+/// call. Closes the prior race window where two concurrent dispatches
+/// could mutate MLS state through separate SQLite connections, and
+/// removes the per-`sendMessage` connection-open cost.
 ///
 /// Used by the messaging API and the QUIC server for stash +
 /// epoch-ahead buffer construction.

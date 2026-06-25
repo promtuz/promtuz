@@ -230,21 +230,20 @@ pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn:
 fn _phase8_section_marker() {}
 
 // ===========================================================================
-// Phase 8 (P0-2 residual): NodeKey-as-SPKI cert for the peer/1 ALPN
+// NodeKey-as-SPKI cert for the peer/1 ALPN
 // ===========================================================================
 //
 // The relay's primary TLS cert is CA-issued (by the project's RootCA) so it
 // can present a chain to clients/resolvers that already trust the root. But
 // libcore's `Peer1DhtClient` pins the relay's cert SPKI against the relay's
 // NodeKey pubkey (vended by the resolver via `RelayDescriptor.pubkey`); the
-// CA-issued cert's SPKI is **unrelated** to the NodeKey, so pinning could
-// never fire even though the libcore-side code was wired in Phase 7.
+// CA-issued cert's SPKI is **unrelated** to the NodeKey, so pinning over the
+// CA-issued cert could never fire.
 //
-// Path (a) from the Phase 8 plan: serve a *separate* self-signed Ed25519
-// cert on the peer/1 ALPN where SPKI = NodeKey. We attach an
-// ALPN-discriminating `ResolvesServerCert` to the rustls server config; the
-// peer/1 ALPN gets the NodeKey-bound cert, every other ALPN keeps the
-// CA-issued cert.
+// Approach: serve a *separate* self-signed Ed25519 cert on the peer/1 ALPN
+// where SPKI = NodeKey. We attach an ALPN-discriminating
+// `ResolvesServerCert` to the rustls server config; the peer/1 ALPN gets the
+// NodeKey-bound cert, every other ALPN keeps the CA-issued cert.
 //
 // rustls 0.23's `ClientHello::alpn()` exposes the offered ALPN list during
 // the resolver callback, so this is cleanly supported by quinn 0.11 (which
@@ -373,8 +372,6 @@ impl rustls::sign::Signer for Ed25519Signer {
 /// Build a `CertifiedKey` carrying a self-signed Ed25519 cert whose SPKI
 /// is `signing.verifying_key()` — used by the relay to serve a
 /// NodeKey-bound cert on the peer/1 ALPN so libcore-side pinning can fire.
-///
-/// design-doc Phase 8 P0-2 residual.
 #[cfg(feature = "crypto")]
 pub fn build_self_signed_ed25519_cert(
     signing: ed25519_dalek::SigningKey,
@@ -438,8 +435,6 @@ impl ResolvesServerCert for AlpnAwareCertResolver {
 /// `node_signing` is the relay's long-term Ed25519 NodeKey (i.e. the same
 /// key whose pubkey is derived as `relay_id`/`node_id` and that the
 /// resolver vends in `RelayDescriptor.pubkey`).
-///
-/// design-doc: Phase 8, P0-2 residual.
 #[cfg(feature = "crypto")]
 pub fn build_server_cfg_with_alpn_split(
     cert_path: &Path,

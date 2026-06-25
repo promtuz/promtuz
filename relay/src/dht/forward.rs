@@ -1,4 +1,4 @@
-//! Sender-side K-closest dispatch fan-out (sticky-home phase 2b).
+//! Sender-side K-closest dispatch fan-out (sticky-home).
 //!
 //! When a relay receives a `Dispatch` from a connected client and the
 //! recipient is **not** online locally, the spec
@@ -176,8 +176,7 @@ pub(crate) enum ForwardError {
 /// - Verifies the embedded `dispatch.sig` *before* calling here (the
 ///   sender-relay must not forward an unsigned dispatch). The wire-level
 ///   `Forward::verify` deliberately does not re-check `dispatch.sig`
-///   (§5.1 contract); the home relay re-checks at delivery time
-///   (phase 2d).
+///   (§5.1 contract); the home relay re-checks at delivery time.
 /// - On `Err(_)` falls back to the local `cf_messages` queue safety net
 ///   (§4.2 step 7).
 ///
@@ -408,10 +407,10 @@ async fn remote_forward_one(
 }
 
 // ---------------------------------------------------------------------------
-// Home-side `Forward` handler (sticky-home phase 2d)
+// Home-side `Forward` handler (sticky-home)
 // ---------------------------------------------------------------------------
 
-/// Phase 2d — home-side handler for `DhtRequest::Forward`. Mirror of
+/// Home-side handler for `DhtRequest::Forward`. Mirror of
 /// the sender-side [`forward_to_homes`] fan-out: receives a `Forward`,
 /// verifies the outer sender-relay signature plus the embedded
 /// dispatch signature, then either delivers to the recipient locally
@@ -421,9 +420,9 @@ async fn remote_forward_one(
 ///
 /// 1. Look up the sender-relay's verifying pubkey from the routing
 ///    table entry for `fwd.sender_relay_id`. The DhtHello handshake
-///    populates that entry post-1i, so an unauthenticated dialer
-///    cannot land here. If the pubkey is missing entirely, return
-///    `BadSig` — there's nothing to verify against.
+///    populates that entry, so an unauthenticated dialer cannot land
+///    here. If the pubkey is missing entirely, return `BadSig` —
+///    there's nothing to verify against.
 /// 2. `Forward::verify(&fwd, sender_relay_pubkey, now_ms)` — outer
 ///    sig + skew check.
 /// 3. Confirm we *are* in the recipient's K-closest. The sender
@@ -442,10 +441,10 @@ async fn remote_forward_one(
 /// **Outcome semantics**: see [`ForwardOutcome`] — every rejection
 /// path returns a distinct outcome variant; the dispatcher does not
 /// close the connection (only the wire-validator's hard-protocol
-/// failures do). Phase 2a's `CloseReason::DhtForwardRejected` is
-/// reserved for outer-validator failures; this handler returns
-/// soft-rejects in the response body so the sender can attribute
-/// failures to specific homes.
+/// failures do). The `CloseReason::DhtForwardRejected` is reserved for
+/// outer-validator failures; this handler returns soft-rejects in the
+/// response body so the sender can attribute failures to specific
+/// homes.
 ///
 /// **Lock contract**: routing-table read is scoped + cloned out
 /// before any `await`; the connected-clients read is the same.
@@ -455,11 +454,10 @@ pub(crate) async fn handle_forward_rpc(
     // 1. Resolve sender_relay's verifying pubkey from the routing
     //    table. The DhtHello handshake populates the routing entry's
     //    `pubkey` field; if it's the placeholder `[0u8; 32]` (the
-    //    `with_no_client_auth()` inbound case from phase 1h), we
-    //    cannot verify and conservatively reject. The peer_conns
-    //    cache is the secondary source — it's populated for outbound
-    //    dials and may have a verified pubkey when the routing entry
-    //    doesn't.
+    //    `with_no_client_auth()` inbound case), we cannot verify and
+    //    conservatively reject. The peer_conns cache is the secondary
+    //    source — it's populated for outbound dials and may have a
+    //    verified pubkey when the routing entry doesn't.
     let sender_pubkey = match resolve_sender_pubkey(dht, &fwd.sender_relay_id) {
         Some(pk) => pk,
         None => return ForwardResp { outcome: ForwardOutcome::BadSig },
@@ -521,11 +519,11 @@ pub(crate) async fn handle_forward_rpc(
 /// cache; return the verifying pubkey if either source has one.
 ///
 /// The routing-table source is authoritative under the `DhtHello`
-/// handshake (phase 1i). The `peer_conns` source is a fallback for
-/// the case where a peer has connected and we cached the cert SPKI
-/// but the routing-table insert lost a race. Either source's
-/// `[0u8; 32]` placeholder (the inbound `with_no_client_auth()`
-/// case from phase 1h) is treated as "no pubkey known".
+/// handshake. The `peer_conns` source is a fallback for the case where
+/// a peer has connected and we cached the cert SPKI but the
+/// routing-table insert lost a race. Either source's `[0u8; 32]`
+/// placeholder (the inbound `with_no_client_auth()` case) is treated as
+/// "no pubkey known".
 fn resolve_sender_pubkey(dht: &Dht, sender_relay_id: &NodeId) -> Option<[u8; 32]> {
     // Try routing table first.
     let from_routing: Option<[u8; 32]> = {
@@ -554,7 +552,7 @@ fn resolve_sender_pubkey(dht: &Dht, sender_relay_id: &NodeId) -> Option<[u8; 32]
 /// Verify the user-layer `dispatch.sig` against `dispatch.from` and
 /// the canonical [`dispatch_sig_message`] transcript. This is the
 /// *embedded* signature `Forward::verify` deliberately does not check
-/// (phase 2a §5.1 contract).
+/// (§5.1 contract).
 fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
     let Ok(vk) = VerifyingKey::from_bytes(&dispatch.from.0) else {
         return false;

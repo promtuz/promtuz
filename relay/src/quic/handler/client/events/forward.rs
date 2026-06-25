@@ -33,7 +33,7 @@ pub(super) async fn handle_forward(
     // 1. Sender must match the authenticated session identity. Otherwise any
     //    authenticated client could spoof messages on behalf of someone else
     //    (the signature check below would still pass for a forged `from`).
-    //    Phase 2b: this binding **stays first** — DHT fan-out can only run
+    //    This binding **stays first** — DHT fan-out can only run
     //    after we've confirmed `from == authenticated session`. (Recently-
     //    landed security fix in 1326573; see commit message for context.)
     if fwd.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
@@ -75,9 +75,9 @@ pub(super) async fn handle_forward(
         sig:     fwd.sig,
     };
 
-    // 3. Recipient online locally? Deliver-or-evict path (unchanged from
-    //    pre-2b semantics). Online-locally short-circuits the K-closest
-    //    fan-out per `STICKY_HOME_RELAY.md` §4.2 step 1.
+    // 3. Recipient online locally? Deliver-or-evict path. Online-locally
+    //    short-circuits the K-closest fan-out per
+    //    `STICKY_HOME_RELAY.md` §4.2 step 1.
     let recipient_conn = { ctx.relay.clients.read().get(&*recipient).cloned() };
 
     if let Some(conn) = recipient_conn {
@@ -97,7 +97,7 @@ pub(super) async fn handle_forward(
         // Fall through into the DHT/local-queue ladder.
     }
 
-    // 4. K-closest fan-out (sticky-home phase 2b). When the DHT is
+    // 4. K-closest fan-out (sticky-home). When the DHT is
     //    enabled, route the dispatch to the K-closest "home" relays for
     //    durable queueing (or remote-online delivery). On any failure
     //    mode — DHT disabled, no homes known yet, < K_MIN successes —
@@ -154,8 +154,8 @@ fn ack_for_summary(summary: &ForwardSummary) -> DispatchAckP {
 /// wrong-packet) collapse into `Err(ConnectionError::TimedOut)` because the
 /// caller only needs to distinguish success from "give up and queue".
 ///
-/// **Phase 2d** — exposed at `pub(crate)` and accepting only `(conn,
-/// delivery)` so the home-side `Forward` RPC handler in
+/// Exposed at `pub(crate)` and accepting only `(conn, delivery)` so
+/// the home-side `Forward` RPC handler in
 /// [`crate::dht::forward::handle_forward_rpc`] can reuse the exact same
 /// deliver-then-ack protocol when the recipient is online here. Keeping
 /// one implementation across the sender-side and home-side delivery
@@ -286,9 +286,8 @@ mod tests {
         }
     }
 
-    /// All-stored homes → `Forwarded`. `Forwarded` is the new variant
-    /// added in phase 2b (distinct from `Queued`, which is the local-
-    /// only fallback path).
+    /// All-stored homes → `Forwarded`. `Forwarded` is distinct from
+    /// `Queued`, which is the local-only fallback path.
     #[test]
     fn ack_for_summary_returns_forwarded_when_only_stored() {
         let mut s = ForwardSummary::default();

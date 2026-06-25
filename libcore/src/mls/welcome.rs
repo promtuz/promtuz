@@ -35,18 +35,17 @@
 //! Per spec §5.3, openmls itself deletes the consumed KP from its
 //! storage during `into_group` (the default is *not* a "last-resort"
 //! KP, so the storage trait's `delete_key_package` is invoked).
-//! That handles the openmls-internal side. For our Phase 3a stash
-//! tracking (which lives in a separate table), the caller invokes
-//! `KeyPackageStash::on_consumed` after `process_welcome` returns
-//! — wired in Phase 4 once that stash interface is finalised.
+//! That handles the openmls-internal side. For our stash tracking
+//! (which lives in a separate table), the caller invokes
+//! `KeyPackageStash::on_consumed` after `process_welcome` returns.
 //!
 //! design-doc: `misc/specs/MLS.md` §3.3 (signing transcript), §4.2
 //! step 8 (recipient flow), §12.7 (Welcome injection defence).
 
 // Public surface here (`make_welcome_envelope` / `process_welcome`)
-// is consumed by Phase 4's `messaging.rs`; the cdylib compiler can't
-// see across the JNI boundary so flags it as dead. Mirrors
-// `provider.rs` Phase 1 pattern.
+// is consumed by `messaging.rs`; the cdylib compiler can't see across
+// the JNI boundary so flags it as dead. Mirrors the `provider.rs`
+// pattern.
 #![allow(dead_code)]
 
 use common::proto::mls_wire::welcome_envelope_signing_input;
@@ -180,10 +179,9 @@ pub fn process_welcome(
             MlsGroupError::Internal(format!("sender_ipk is not a valid Ed25519 key: {e}"))
         })?;
     let sig = Signature::from_bytes(&envelope.sender_sig.0);
-    // Phase 7 (P0-1): use `verify_strict` to reject non-canonical
-    // signatures and small-order R values. Mirrors the discipline
-    // already in place on the relay side (`relay/src/dht/mls_*`);
-    // libcore was asymmetric until this commit.
+    // Use `verify_strict` to reject non-canonical signatures and
+    // small-order R values. Mirrors the discipline already in place on
+    // the relay side (`relay/src/dht/mls_*`).
     verifying_key
         .verify_strict(&transcript, &sig)
         .map_err(|_| MlsGroupError::BadSignature)?;
@@ -227,8 +225,8 @@ pub fn process_welcome(
     let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
     let handle = MlsGroupHandle::wrap(mls_group);
 
-    // Phase 8 (P1 #12): cross-check the inner credential identities
-    // against the wire envelope.
+    // Cross-check the inner credential identities against the wire
+    // envelope.
     //
     // The inner openmls `BasicCredential::identity` of the sender's
     // and recipient's leaves in the new group MUST match the wire
@@ -371,7 +369,7 @@ mod tests {
         // Save the kp_ref before consuming the kp into add_members.
         // The provider's `crypto()` is reached via the
         // `OpenMlsProvider` trait method, not the inherent method
-        // (which is private since Phase 1).
+        // (which is private).
         use openmls_traits::OpenMlsProvider;
         let kp_ref = bob_kp
             .hash_ref(provider_b.crypto())

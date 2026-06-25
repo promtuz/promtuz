@@ -28,9 +28,8 @@ use super::storage::PromtuzStorageProvider;
 
 /// The promtuz `OpenMlsProvider`.
 ///
-/// Phase 1 contract: construction works, `OpenMlsProvider` is
-/// satisfied. Group lifecycle, KeyPackage stash, and Welcome handling
-/// arrive in later phases (3+) on top of this skeleton.
+/// Group lifecycle, KeyPackage stash, and Welcome handling are built
+/// on top of this provider.
 pub struct PromtuzMlsProvider {
     crypto: RustCrypto,
     storage: PromtuzStorageProvider,
@@ -59,7 +58,7 @@ impl PromtuzMlsProvider {
 
     /// Build a provider that points at the on-disk libcore singleton
     /// (`db("mls")` path). Convenience for production code paths.
-    #[allow(dead_code)] // Consumed by Phase 3 group lifecycle wiring.
+    #[allow(dead_code)] // Consumed by the group lifecycle wiring.
     pub fn shared() -> Self {
         // Borrow the static handle's `Arc<Mutex<_>>` via a thin wrapper:
         // we want a clone-able owning handle, and `Lazy<Mutex<…>>` gives
@@ -82,8 +81,8 @@ impl PromtuzMlsProvider {
 
     /// Cloneable handle to the storage provider — useful when callers
     /// want to bypass the `OpenMlsProvider` indirection (e.g. promtuz's
-    /// own KeyPackage stash table — though that's Phase 4 work).
-    #[allow(dead_code)] // Phase 3 group lifecycle entrypoint.
+    /// own KeyPackage stash table).
+    #[allow(dead_code)] // Group lifecycle entrypoint.
     pub fn storage(&self) -> &PromtuzStorageProvider {
         &self.storage
     }

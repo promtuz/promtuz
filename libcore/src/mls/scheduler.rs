@@ -1,4 +1,4 @@
-//! KeyPackage rotation scheduler (Phase 4).
+//! KeyPackage rotation scheduler.
 //!
 //! Spec: `misc/specs/MLS.md` §5.5 (refill cadence) + §5.6 (anti-pinning
 //! rotation).
@@ -28,9 +28,8 @@
 //!
 //! design-doc: `misc/specs/MLS.md` §5.5, §5.6, §13.4.
 
-#![allow(dead_code)] // Phase 4 surface; the production caller (a
-// tokio::spawn from `quic/server.rs`) lands as Phase 5 work because
-// it needs the production DhtClient wiring.
+#![allow(dead_code)] // The production caller is a tokio::spawn from
+// `quic/server.rs`, which needs the production DhtClient wiring.
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -286,7 +285,7 @@ mod tests {
     }
 
     /// Tight loop bound check: `run_once` returns within 2s on a
-    /// fresh stash (Phase-4 test discipline rule).
+    /// fresh stash.
     #[tokio::test(flavor = "current_thread")]
     async fn run_once_completes_within_test_budget() {
         let conn = fresh_conn();

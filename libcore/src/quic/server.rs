@@ -99,11 +99,10 @@ fn is_terminal_for_relay(err: &ConnectionError) -> bool {
     false
 }
 
-// Phase 8 (P1 #19): the actual `RELAY` singleton lives in
-// `crate::state` (a leaf module) so `api::messaging` doesn't have to
-// pull in `quic::server` for a global it shares with us. Re-exported
-// here for backwards compatibility with existing call sites in this
-// module.
+// The actual `RELAY` singleton lives in `crate::state` (a leaf module)
+// so `api::messaging` doesn't have to pull in `quic::server` for a
+// global it shares with us. Re-exported here for backwards
+// compatibility with existing call sites in this module.
 pub use crate::state::RELAY;
 
 impl Relay {
@@ -181,8 +180,8 @@ impl Relay {
             SHSRP::Accept { timestamp, relay_node_id } => {
                 let latency_ms = systime().as_millis() as u64 - connect_start;
                 _ = self.record_success(latency_ms);
-                // Phase 9 §3.9 — stash the home's advertised DHT NodeId
-                // for the RelayDhtClient to bind in welcome fetch/ack sigs.
+                // §3.9 — stash the home's advertised DHT NodeId for the
+                // RelayDhtClient to bind in welcome fetch/ack sigs.
                 self.home_node_id = relay_node_id.map(|b| b.0);
                 (timestamp, latency_ms)
             },
@@ -200,8 +199,8 @@ impl Relay {
         self.record_success(latency_ms).map_err(|e| RelayConnError::Error(e.into()))?;
         self.connection = Some(conn);
 
-        // Phase 9 §3.9: build the production DHT-RPC dialer once the
-        // relay/1 connection is established. The dialer rides this same
+        // §3.9: build the production DHT-RPC dialer once the relay/1
+        // connection is established. The dialer rides this same
         // connection (no peer/1), stored on the `Relay` struct so the
         // JNI surface (`sendMessage`, `handle_deliver`) picks it up via
         // `RELAY.read()`. Failure to build is logged and `dht_client`
@@ -229,7 +228,7 @@ impl Relay {
     ///
     /// The transcript binds (self_ipk, this_relay_id, timestamp); the same
     /// signature is reusable across all K homes (no per-home identity in the
-    /// transcript) within the ±60s skew window. Phase 2c sticky-home flow.
+    /// transcript) within the ±60s skew window. Part of the sticky-home flow.
     async fn send_drain_auth(
         &self, conn: &quinn::Connection, ipk: VerifyingKey,
     ) -> Result<()> {
@@ -304,9 +303,9 @@ impl Relay {
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
-        // Phase 5a / Phase 7: re-use the production peer/1 dialer that
-        // `connect()` built before storing this Relay on the global
-        // `RELAY`. The dialer is shared (`Arc<RelayDhtClient>`) so the
+        // Re-use the production peer/1 dialer that `connect()` built
+        // before storing this Relay on the global `RELAY`. The dialer
+        // is shared (`Arc<RelayDhtClient>`) so the
         // JNI surface (`sendMessage`, `handle_deliver`) and the
         // background tasks below all dispatch over the same pool.
         //
@@ -365,11 +364,10 @@ impl Relay {
             };
 
             let relay_id = relay_id.clone();
-            // Phase 7 (P0-4): clone the dialer Arc into the per-stream
-            // task so `handle_deliver` can drive
-            // `process_inbound_envelope` over the production wire (KP
-            // fetch on stale-group recreate, etc.) instead of the
-            // stub `NotWiredDhtClient`.
+            // Clone the dialer Arc into the per-stream task so
+            // `handle_deliver` can drive `process_inbound_envelope` over
+            // the production wire (KP fetch on stale-group recreate,
+            // etc.) instead of the stub `NotWiredDhtClient`.
             let dht_client_for_stream = self.dht_client.clone();
             tokio::spawn(async move {
                 let _permit = permit; // dropped when stream task ends
@@ -431,10 +429,9 @@ async fn handle_deliver(
     tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
     dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
-    // Phase 4 receive path. The wire envelope is now `MlsEnvelopeP`
-    // (postcard-encoded), so we hand off to
-    // `api::messaging::process_inbound_envelope` rather than the v2
-    // shared-key decrypt.
+    // The wire envelope is `MlsEnvelopeP` (postcard-encoded), so we
+    // hand off to `api::messaging::process_inbound_envelope` rather
+    // than the v2 shared-key decrypt.
     //
     // Contact-first gating: anything from an IPK we don't have on
     // file is dropped (mirrors the v2 receive path).
@@ -443,9 +440,9 @@ async fn handle_deliver(
         bail!("unknown sender");
     }
 
-    // Phase 7 (P0-4): use the production peer/1 dialer that the
-    // connection-time wiring in `Relay::connect` attached to the
-    // global `RELAY`. The receive path's MLS handling
+    // Use the production peer/1 dialer that the connection-time wiring
+    // in `Relay::connect` attached to the global `RELAY`. The receive
+    // path's MLS handling
     // (`process_inbound_envelope`) needs a `DhtClient` for completeness
     // even though today's Welcome / Application receive paths don't
     // dial back to the DHT — future stale-group recreate or KP-rotation
@@ -480,10 +477,10 @@ async fn handle_deliver(
 
     match result {
         Ok(Some(crate::api::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
-            // Surface as a UTF-8 message in the Phase 4 model. Future
-            // structured payloads (read receipts, attachments, etc.)
-            // will arrive as their own MlsEnvelopeP sub-variants;
-            // until then any non-UTF-8 application data is dropped.
+            // Surface as a UTF-8 message. Future structured payloads
+            // (read receipts, attachments, etc.) will arrive as their
+            // own MlsEnvelopeP sub-variants; until then any non-UTF-8
+            // application data is dropped.
             let Ok(content) = String::from_utf8(plaintext) else {
                 warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(&msg.from[..4]));
                 bail!("invalid UTF-8");
@@ -516,8 +513,8 @@ async fn handle_deliver(
             CRelayPacket::DeliverAck.send(tx).await?;
         },
         Ok(Some(crate::api::messaging::InboundDecoded::ApplicationStale)) => {
-            // Phase 7 (P0-7): ack stale-epoch envelopes so the relay
-            // GCs them. Previously this `bail`ed without ack which made
+            // Ack stale-epoch envelopes so the relay GCs them.
+            // Previously this `bail`ed without ack which made
             // the relay redeliver indefinitely (queue grows without
             // bound, CPU burns on every redelivery decoding the same
             // doomed envelope). The recipient cannot recover state for
@@ -542,7 +539,7 @@ async fn handle_deliver(
     Ok(())
 }
 
-/// Phase 2d — handle a relay-issued `SRelayPacket::AckAuthRequest`.
+/// Handle a relay-issued `SRelayPacket::AckAuthRequest`.
 ///
 /// The relay asks us (the client) to sign a `QueueFetchAck`
 /// transcript over the union of dispatch ids it just drained from the
@@ -553,9 +550,9 @@ async fn handle_deliver(
 /// signed pair out as `QueueFetchAck` to each home so the home-side
 /// `cf_dht_queue` entries get GC'd.
 ///
-/// **Phase 2d-fix — `requester_relay_id` binding**: the relay supplies
-/// its own NodeId via `requester_relay_id`; we sign that value
-/// verbatim into the transcript. The home cross-checks the field
+/// **`requester_relay_id` binding**: the relay supplies its own NodeId
+/// via `requester_relay_id`; we sign that value verbatim into the
+/// transcript. The home cross-checks the field
 /// against the connection's authenticated peer id when handling the
 /// resulting `QueueFetchAck`, so a captured ack can no longer be
 /// redirected to a different home via a different relay (cross-relay
@@ -603,7 +600,7 @@ async fn handle_ack_auth_request(
 }
 
 // ---------------------------------------------------------------------------
-// MLS / DHT-RPC dialer wiring (Phase 9 §3.9)
+// MLS / DHT-RPC dialer wiring (§3.9)
 // ---------------------------------------------------------------------------
 
 /// Build the production [`RelayDhtClient`] from the current connection
@@ -741,8 +738,8 @@ async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
 
 #[cfg(test)]
 mod tests {
-    //! Phase 2d — pure-function tests for `handle_ack_auth_request`'s
-    //! transcript shape. We can't drive the QUIC `SendStream` half
+    //! Pure-function tests for `handle_ack_auth_request`'s transcript
+    //! shape. We can't drive the QUIC `SendStream` half
     //! without a live connection, but the load-bearing piece of the
     //! handler is the transcript construction (it must match the
     //! relay's verifier byte-for-byte). Pin the transcript layout
@@ -754,9 +751,9 @@ mod tests {
 
     /// Pin the transcript shape: `domain || version (BE u16) || ipk
     /// (32) || requester_relay_id (32) || count (BE u32) || n*16 ||
-    /// ts (BE u64)`. The phase 2d-fix `requester_relay_id` field sits
-    /// after `ipk` and before the count prefix; catches a regression
-    /// in either side of the helper / verifier boundary.
+    /// ts (BE u64)`. The `requester_relay_id` field sits after `ipk`
+    /// and before the count prefix; catches a regression in either
+    /// side of the helper / verifier boundary.
     #[test]
     fn handle_ack_auth_request_signs_correct_transcript() {
         let user_ipk: [u8; 32] = [0x11; 32];
@@ -768,7 +765,7 @@ mod tests {
         let expected_len = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
             + 2  // version
             + 32 // ipk
-            + NodeId::LEN // requester_relay_id (phase 2d-fix)
+            + NodeId::LEN // requester_relay_id
             + 4  // count BE u32
             + ids.len() * 16
             + 8; // ts BE u64
@@ -818,7 +815,7 @@ mod tests {
         assert_eq!(transcript.len(), expected_len);
     }
 
-    // ----- KP scheduler tokio task tests (Phase 5a) ------------------
+    // ----- KP scheduler tokio task tests -----------------------------
 
     use std::sync::Arc;
     use std::time::Duration;

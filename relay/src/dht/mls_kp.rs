@@ -1,4 +1,4 @@
-//! MLS Phase 2 — KeyPackage stash storage and RPC handlers.
+//! MLS KeyPackage stash storage and RPC handlers.
 //!
 //! Owns the [`CF_DHT_KEYPACKAGE`] column family plus the three home-
 //! relay handlers wired into [`super::handler::handle_dht_request`]:
@@ -268,10 +268,10 @@ fn verify_record(rec: &KeyPackageRecord, now_ms: u64) -> Result<(), KeyPackageVe
 
     // 3. Owner sig verify.
     //
-    // Phase 8 (P1 #11): the transcript now folds in `BLAKE3(kp_bytes)`,
-    // so re-deriving and matching `rec.kp_bytes` against the signed
-    // transcript is implicit in `verify_strict` succeeding. A stolen
-    // IPK can no longer mint `(ipk, kp_ref, fake_kp_bytes)` triples.
+    // The transcript folds in `BLAKE3(kp_bytes)`, so re-deriving and
+    // matching `rec.kp_bytes` against the signed transcript is implicit
+    // in `verify_strict` succeeding. A stolen IPK can no longer mint
+    // `(ipk, kp_ref, fake_kp_bytes)` triples.
     let sig = Signature::from_bytes(&rec.owner_sig.0);
     let msg = kp_record_signing_input(
         MLS_WIRE_VERSION,
@@ -352,13 +352,12 @@ fn verify_outer_sig(
 /// record with the same `(ipk, kp_ref)` already exists with
 /// **different** value bytes (§13.3 forgery detection).
 ///
-/// Phase 8 (P1 #20): all silent no-op paths now surface as
-/// `InsertError::Storage`; the caller maps this to
-/// [`KeyPackagePublishOutcome::BadSig`] (the closest existing wire
-/// outcome that signals "this didn't take") and logs the underlying
-/// cause. Previously a missing CF, an encode failure, or a RocksDB
-/// write error all returned `Ok(())` and the publish handler
-/// reported `Stored` — silent data-loss-as-success.
+/// All silent no-op paths surface as `InsertError::Storage`; the caller
+/// maps this to [`KeyPackagePublishOutcome::BadSig`] (the closest
+/// existing wire outcome that signals "this didn't take") and logs the
+/// underlying cause. A missing CF, an encode failure, or a RocksDB
+/// write error must not return `Ok(())` and let the publish handler
+/// report `Stored` — that would be silent data-loss-as-success.
 ///
 /// Caller is expected to have already verified the record via
 /// [`verify_record`].
@@ -377,10 +376,10 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
 
     // §13.3 — if a record already exists for this `(ipk, kp_ref)`,
     // demand byte-identity. The owner-sig transcript binds
-    // `BLAKE3(kp_bytes)` (Phase 8 P1#11), so different `kp_bytes`
-    // for the same `kp_ref` would have failed `verify_record` first
-    // — but a malicious replica could still try to slip a stale
-    // record past us. The byte-identity check is defense-in-depth.
+    // `BLAKE3(kp_bytes)`, so different `kp_bytes` for the same `kp_ref`
+    // would have failed `verify_record` first — but a malicious replica
+    // could still try to slip a stale record past us. The byte-identity
+    // check is defense-in-depth.
     match dht.rocks.get_cf(&cf, key) {
         Ok(Some(existing)) => {
             if existing != bytes {
@@ -404,10 +403,10 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
     Ok(())
 }
 
-/// Phase 8 (P1 #20): typed error from `insert_record`. Allows the
-/// publish handler to distinguish a §13.3 forgery-detection failure
-/// (which has its own outcome `StaticFieldsConflict`) from a generic
-/// storage failure (which surfaces as `BadSig` plus a relay-side log).
+/// Typed error from `insert_record`. Allows the publish handler to
+/// distinguish a §13.3 forgery-detection failure (which has its own
+/// outcome `StaticFieldsConflict`) from a generic storage failure
+/// (which surfaces as `BadSig` plus a relay-side log).
 #[derive(Debug)]
 enum InsertError {
     /// Republish for an existing `(ipk, kp_ref)` carried different
@@ -417,16 +416,15 @@ enum InsertError {
     Storage(String),
 }
 
-/// Phase 8 (P1 #29): truncated-IPK formatter for log lines. Returns
-/// the first 8 hex chars (4 bytes) of the IPK so logs don't leak the
-/// full conversation graph from a captured device's log buffer.
+/// Truncated-IPK formatter for log lines. Returns the first 8 hex
+/// chars (4 bytes) of the IPK so logs don't leak the full conversation
+/// graph from a captured device's log buffer.
 fn fmt_ipk(ipk: &[u8; 32]) -> String {
     hex::encode(&ipk[..4])
 }
 
-/// Phase 8 (P1 #29): truncated-bytes formatter for log lines. Same
-/// idea as [`fmt_ipk`] but accepts a byte slice (used for kp_ref,
-/// group_id, dispatch_id).
+/// Truncated-bytes formatter for log lines. Same idea as [`fmt_ipk`]
+/// but accepts a byte slice (used for kp_ref, group_id, dispatch_id).
 fn fmt_short(bytes: &[u8]) -> String {
     let n = bytes.len().min(4);
     hex::encode(&bytes[..n])
@@ -472,12 +470,11 @@ fn iterate_stash(dht: &Dht, ipk: &[u8; 32]) -> Vec<([u8; STORAGE_KEY_LEN], KeyPa
 /// check across K replicas to detect a malicious home substituting a
 /// forged KP.
 ///
-/// **Phase 8 update (P1 #11)**: with the owner-sig transcript now
-/// folding in `BLAKE3(kp_bytes)` (Phase 8 wire change), a replica
-/// that stored a tampered `kp_bytes` for an existing `(ipk, kp_ref)`
-/// would have failed the publish-time `verify_record` check first
-/// — so the §5.4 cross-replica check becomes defense-in-depth rather
-/// than the primary forgery gate. We therefore extend the static
+/// Because the owner-sig transcript folds in `BLAKE3(kp_bytes)`, a
+/// replica that stored a tampered `kp_bytes` for an existing
+/// `(ipk, kp_ref)` would have failed the publish-time `verify_record`
+/// check first — so the §5.4 cross-replica check is defense-in-depth
+/// rather than the primary forgery gate. We therefore extend the static
 /// hash to also bind `BLAKE3(kp_bytes)` directly: any byte-different
 /// `kp_bytes` between replicas surfaces as a different `static_hash`
 /// (the requester compares across K=3 fetches; spec §5.4 hedging).
@@ -506,7 +503,7 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
 // Public API — handlers
 // ---------------------------------------------------------------------------
 
-/// Phase 2 — home-side handler for [`DhtRequest::KeyPackagePublish`].
+/// Home-side handler for [`DhtRequest::KeyPackagePublish`].
 ///
 /// Validation ladder:
 /// 1. `req.records.len() <= KP_STASH_TARGET` — bound check first.
@@ -525,7 +522,7 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
 /// is owner-authored, and the relay-to-relay `peer/1` connection's
 /// authenticated peer id is the *relay forwarding* the publish, not
 /// the owner. The owner authentication lives in `req.sig` (verified
-/// under `req.ipk`). Phase 3 may add a relay-binding check if the
+/// under `req.ipk`). A relay-binding check may be added later if the
 /// flow needs it; the parameter is reserved for that future tightening.
 pub(crate) fn handle_keypackage_publish(
     dht: &Arc<Dht>, req: KeyPackagePublishReq, _authenticated_peer_id: NodeId, now_ms: u64,
@@ -603,7 +600,7 @@ pub(crate) fn handle_keypackage_publish(
     KeyPackagePublishOutcome::Stored
 }
 
-/// Phase 2 — home-side handler for [`DhtRequest::KeyPackageRefill`].
+/// Home-side handler for [`DhtRequest::KeyPackageRefill`].
 ///
 /// Identical validation ladder to [`handle_keypackage_publish`]
 /// modulo the outer-sig domain — refill uses [`KP_REFILL_DOMAIN`] so
@@ -676,7 +673,7 @@ pub(crate) fn handle_keypackage_refill(
     KeyPackageRefillOutcome::Appended
 }
 
-/// Phase 2 — home-side handler for [`DhtRequest::KeyPackageFetch`].
+/// Home-side handler for [`DhtRequest::KeyPackageFetch`].
 ///
 /// Validation ladder:
 /// 1. `req.requester_relay_id == authenticated_peer_id` — defends
@@ -823,7 +820,7 @@ pub(crate) fn wrap_fetch_outcome(outcome: KeyPackageFetchOutcome) -> KeyPackageF
 ///
 /// Used by tests and (in future hardening passes) by the dispatcher
 /// to optionally close a misbehaving peer's connection on hard
-/// failures. Phase 2 surfaces these solely via the response body
+/// failures. These are currently surfaced solely via the response body
 /// (consistent with the existing `Forward`/`QueueFetch` conventions
 /// — soft-reject the request without dropping the connection so a
 /// briefly-misconfigured peer doesn't cascade-fail).
@@ -1607,7 +1604,7 @@ mod tests {
     fn fetch_rejects_redirected_requester() {
         // A captured `KeyPackageFetch` signed for requester_a cannot
         // be replayed by requester_b. Mirrors the QueueFetch
-        // cross-relay replay defence (phase 2d-fix).
+        // cross-relay replay defence.
         let owner = fresh_signing_key();
         let self_id = NodeId::new([0u8; 32]);
         let dht = fresh_dht(self_id);

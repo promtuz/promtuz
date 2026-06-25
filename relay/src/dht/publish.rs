@@ -365,8 +365,8 @@ mod tests {
     /// `lookup_node` has no shortlist to start from. The rest of the
     /// publish workflow (parallel STOREs, K_MIN threshold) is integration
     /// territory — exercising it requires real QUIC peers, which is
-    /// out of scope for the relay's unit-test pass (phase 2 covers it
-    /// in `misc/testing/`).
+    /// out of scope for the relay's unit-test pass (covered by the
+    /// integration suite in `misc/testing/`).
     #[tokio::test(flavor = "current_thread")]
     async fn publish_propagates_lookup_failure_when_routing_empty() {
         let mut self_seed = [0u8; 32];

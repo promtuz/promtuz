@@ -48,9 +48,9 @@
 //! design-doc: `misc/specs/MLS.md` §5.2 (leaf signing key separation),
 //! §3.2 / §3.3 (envelope signing under IPK).
 
-// Public surface here is consumed by Phase 4's `messaging.rs`; the
-// cdylib compiler can't see across the JNI boundary so flags it as
-// dead. Mirrors `provider.rs` Phase 1 pattern.
+// Public surface here is consumed by `messaging.rs`; the cdylib
+// compiler can't see across the JNI boundary so flags it as dead.
+// Mirrors the `provider.rs` pattern.
 #![allow(dead_code)]
 
 use ed25519_dalek::Signer as DalekSigner;

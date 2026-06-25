@@ -81,8 +81,8 @@ use super::config::LOOKUP_RPC_TIMEOUT_MS;
 //
 // Variant size: `Found(PresenceRecord)` is ~250 B while `NotPresent` is
 // zero-sized. Boxing `PresenceRecord` would shrink the enum but every
-// caller in the lookup path then needs an extra deref; phase 1f revisits
-// once the access pattern is concrete.
+// caller in the lookup path then needs an extra deref; revisit once the
+// access pattern is concrete.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum FindValueOutcome {
@@ -144,8 +144,8 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 /// On any cached-but-dead connection, we evict and re-dial. Drops are
 /// cheap because the inner `quinn::Connection` is `Arc`-shared internally.
 ///
-/// **Phase 1h, item 1 — TLS pubkey check:** after the handshake
-/// completes, we extract the server's leaf-cert SPKI via
+/// **TLS pubkey check:** after the handshake completes, we extract the
+/// server's leaf-cert SPKI via
 /// [`crate::dht::tls_extract::extract_and_verify_pubkey`] and
 /// **reject** the connection if `BLAKE3(spki) != peer.id`. The TLS
 /// layer already validated the cert chain against the configured root
@@ -155,7 +155,7 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 /// `CloseReason::DhtMalformedKey` and bump
 /// `metrics.cert_pubkey_extraction_failures`.
 ///
-/// **Phase 1i — application-layer signed handshake:** before returning
+/// **Application-layer signed handshake:** before returning
 /// the connection to the caller, we send a [`DhtHello`] (Ed25519-signed
 /// transcript binding our `node_id` to our `pubkey` and a fresh
 /// timestamp) on a fresh uni-stream. The receiver verifies and uses the
@@ -174,13 +174,13 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 /// proves the peer accepted the hello, and a failed RPC could equally
 /// be caused by the receiver rejecting the hello mid-flight).
 ///
-/// **TODO (phase 2 integration suite).** The full QUIC-stream-level
-/// test of "outbound dial → DhtHello uni-stream → inbound accept_uni →
-/// verify → bi-stream RPC" needs real connections; today we test the
+/// **TODO (integration suite).** The full QUIC-stream-level test of
+/// "outbound dial → DhtHello uni-stream → inbound accept_uni → verify →
+/// bi-stream RPC" needs real connections; today we test the
 /// signing/verification helper round-trip in isolation
 /// (`common::proto::dht_p2p::tests::dht_hello_two_relays_authenticate
 /// _each_other_synchronously`) and rely on the unit tests of each
-/// half. Phase 2 lights up a real two-relay harness.
+/// half. A real two-relay harness covers the rest.
 ///
 /// Visible to the rest of `dht/` (notably `publish.rs`) so the cache +
 /// dial path is shared rather than duplicated.
@@ -224,10 +224,10 @@ pub(crate) async fn connect_to_peer(
         }
     };
 
-    // Phase 1i: send our signed `DhtHello` as the first frame on the
-    // connection. Failure here is non-fatal-to-the-handshake (the peer
-    // will simply close on its end), but we surface it so the dialer
-    // sees the failure and the caller can decide whether to retry.
+    // Send our signed `DhtHello` as the first frame on the connection.
+    // Failure here is non-fatal-to-the-handshake (the peer will simply
+    // close on its end), but we surface it so the dialer sees the
+    // failure and the caller can decide whether to retry.
     if let Err(e) = send_dht_hello(dht, &conn).await {
         dht.metrics.inc_dht_hello_rejected();
         common::warn!(
@@ -422,7 +422,7 @@ pub(crate) async fn lookup_node(
 /// Same structure as `lookup_node` but each hop sends `FindValue` and
 /// honours `Found` / `NotPresent` / `Closer` per §4.2.
 ///
-/// **Quorum behaviour (phase 1h, item 3 — §4.4 sybil/eclipse mitigation):**
+/// **Quorum behaviour (§4.4 sybil/eclipse mitigation):**
 ///
 /// - Continue iterating even after a `Found` reply arrives — collect
 ///   replies from all K-closest peers (or as many as respond before
@@ -444,7 +444,7 @@ pub(crate) async fn lookup_node(
 /// relay is the canonical home and any follow-up Dispatch into it
 /// succeeds via the local-first short-circuit; lookups from other
 /// relays see `NotPresent` until anti-entropy spreads the record.
-/// Phase 2 telemetry (§11.4) will determine whether this window
+/// Future telemetry (§11.4) will determine whether this window
 /// causes user-visible delivery delays in practice.
 ///
 /// design-doc: §4.2, §4.4.
@@ -986,8 +986,8 @@ mod tests {
     /// `lookup_node` against an empty routing table must return
     /// `LookupError::NoCandidates` immediately — the rest of the
     /// iterative algorithm cannot be exercised without spinning up
-    /// real QUIC connections (out of scope for unit tests; phase 2
-    /// integration tests cover it).
+    /// real QUIC connections (out of scope for unit tests; integration
+    /// tests cover it).
     #[tokio::test(flavor = "current_thread")]
     async fn lookup_node_with_empty_routing_table_returns_no_candidates() {
         let mut self_seed = [0u8; 32];
@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // §4.4 quorum decision tests (phase 1h item 3)
+    // §4.4 quorum decision tests
     // -----------------------------------------------------------------
 
     use common::proto::dht_p2p::PresenceRecord;

@@ -131,8 +131,8 @@ impl IdentitySigner {
     }
 }
 
-/// **Phase 4 helper** for the MLS messaging path: hand the caller a
-/// `SigningKey` clone of the long-term IPK secret. The MLS layer needs
+/// Helper for the MLS messaging path: hand the caller a `SigningKey`
+/// clone of the long-term IPK secret. The MLS layer needs
 /// to perform multiple signing operations across an async send (the
 /// outer envelope sig + welcome envelope sig + KP record sigs) and
 /// each call to `IdentitySigner::sign` re-decrypts via the Keystore

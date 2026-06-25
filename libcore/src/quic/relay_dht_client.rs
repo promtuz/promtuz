@@ -1,5 +1,5 @@
 //! Production [`DhtClient`] over the home relay's `client/0` connection
-//! (Phase 9 §3.9 — the Option-B dialer that replaces `Peer1DhtClient`).
+//! (§3.9 — the Option-B dialer that replaces `Peer1DhtClient`).
 //!
 //! libcore no longer dials `peer/1` or holds an ephemeral DhtHello
 //! identity. Every DHT operation is a `CRelayPacket` wrapper sent over

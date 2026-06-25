@@ -30,13 +30,13 @@ pub(super) async fn handle_packet(
         Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue => handle_drain_queue(ctx.clone(), tx).await,
         AckDrain => handle_ack_drain(ctx.clone(), tx).await,
-        // Sticky-home phase 2c. The packet has no response; we drop
+        // Sticky-home. The packet has no response; we drop
         // verification failures silently (a malicious client could
         // otherwise probe the verifier — see `drain_auth.rs`).
         DrainAuth { timestamp, sig } => {
             handle_drain_auth(ctx.clone(), timestamp, sig.0).await
         },
-        // Sticky-home phase 2d. Hand-off to the parked `oneshot::Sender`
+        // Sticky-home. Hand-off to the parked `oneshot::Sender`
         // installed by `handle_ack_drain` before sending the
         // `AckAuthRequest`. If no sender is parked (out-of-order client
         // — sent AckAuth without our request), drop silently.
@@ -47,7 +47,7 @@ pub(super) async fn handle_packet(
             Ok(())
         },
 
-        // Phase 9 §3.9 — Tier-1 MLS DHT-RPC wrappers. Each handler
+        // §3.9 — Tier-1 MLS DHT-RPC wrappers. Each handler
         // verifies the wrapper sig + skew, originates the peer/1
         // fan-out, and replies with the matching SRelayPacket (or
         // DhtUnavailable when this relay has DHT disabled).

@@ -84,7 +84,7 @@ impl BackoffConfig {
 /// clears it at session end. Holders observe `None` while the link is
 /// reconnecting; callers handle that by erroring out (bootstrap retries
 /// are scheduled separately, design-doc §3.5 phase A re-ask after 5s
-/// jitter — implemented in phase 1g).
+/// jitter).
 ///
 /// Cheap to clone: just the `Arc<RwLock<Option<Connection>>>` inside.
 #[derive(Clone, Debug)]

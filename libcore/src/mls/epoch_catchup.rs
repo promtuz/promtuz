@@ -16,8 +16,7 @@
 //!
 //! # Storage
 //!
-//! Backed by a SQLite table `mls_epoch_ahead` (added in Phase 3b
-//! migration v2):
+//! Backed by a SQLite table `mls_epoch_ahead` (migration v2):
 //!
 //! ```sql
 //! CREATE TABLE mls_epoch_ahead (
@@ -68,16 +67,15 @@
 //! 4. Repeats until no more progress.
 //!
 //! The drain is **bounded** — at most `EPOCH_CATCHUP_LIMIT = 1024`
-//! commits per call (spec §0). Beyond that, we surface a stuck-epoch
-//! signal (Phase 8 follow-on; here we just stop draining).
+//! commits per call (spec §0). Beyond that, we just stop draining.
 //!
 //! design-doc: `misc/specs/MLS.md` §6.3 (drain order), §7
 //! (out-of-order delivery formal), §0 (`MAX_EPOCH_AHEAD_BUFFER`,
 //! `EPOCH_CATCHUP_LIMIT`).
 
-// Public surface here is consumed by Phase 4's `messaging.rs`; the
-// cdylib compiler can't see across the JNI boundary so flags it as
-// dead. Mirrors `provider.rs` Phase 1 pattern.
+// Public surface here is consumed by `messaging.rs`; the cdylib
+// compiler can't see across the JNI boundary so flags it as dead.
+// Mirrors the `provider.rs` pattern.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -97,7 +95,7 @@ use super::MAX_EPOCH_AHEAD_BUFFER;
 /// Outcome of [`EpochCatchupBuffer::push`]. Mirrors the
 /// task-prompt's contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub enum PushOutcome {
     /// Row was inserted. Buffer count for this group did not exceed
     /// the cap.
@@ -117,7 +115,7 @@ pub enum PushOutcome {
 /// Hard cap on commits processed per [`EpochCatchupBuffer::drain_when_ready`]
 /// call. Protects against pathological backlogs that would block the
 /// caller for >1s. Spec §0 (`EPOCH_CATCHUP_LIMIT`).
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub const EPOCH_CATCHUP_LIMIT: usize = 1024;
 
 /// Out-of-order epoch buffer for a single libcore.
@@ -126,7 +124,7 @@ pub const EPOCH_CATCHUP_LIMIT: usize = 1024;
 /// `(group_id, dispatch_id)`-keyed across *all* groups, so we share
 /// one instance. Cloneable via the inner `Arc<Mutex<Connection>>`.
 #[derive(Clone)]
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub struct EpochCatchupBuffer {
     conn: Arc<Mutex<Connection>>,
 }
@@ -140,10 +138,10 @@ impl std::fmt::Debug for EpochCatchupBuffer {
 /// Decrypted application message returned by
 /// [`EpochCatchupBuffer::drain_when_ready`].
 #[derive(Debug)]
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub struct ProcessedApplicationMessage {
     /// The dispatch id of the buffered envelope. Caller may use this
-    /// to ack the corresponding row in `cf_dht_queue` (Phase 4).
+    /// to ack the corresponding row in `cf_dht_queue`.
     pub dispatch_id: Vec<u8>,
     /// Plaintext bytes the application wrote at send time.
     pub plaintext: Vec<u8>,
@@ -152,11 +150,11 @@ pub struct ProcessedApplicationMessage {
     pub epoch: u64,
 }
 
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 impl EpochCatchupBuffer {
     /// Build a buffer over a caller-supplied SQLite connection.
     /// The connection must already have the MLS migrations applied
-    /// (which include the `mls_epoch_ahead` table since Phase 3b).
+    /// (which include the `mls_epoch_ahead` table).
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
@@ -190,10 +188,10 @@ impl EpochCatchupBuffer {
         let now_ms = unix_now_ms();
         let mut conn = self.conn.lock();
 
-        // Phase 8 (P1 #18): wrap the count-then-insert in a single
-        // BEGIN IMMEDIATE transaction so two concurrent pushes can't
-        // both observe `count = MAX-1` and both insert (silently
-        // bumping the buffer above the cap).
+        // Wrap the count-then-insert in a single BEGIN IMMEDIATE
+        // transaction so two concurrent pushes can't both observe
+        // `count = MAX-1` and both insert (silently bumping the buffer
+        // above the cap).
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
 
@@ -315,12 +313,12 @@ impl EpochCatchupBuffer {
                 break; // no progressable rows
             };
 
-            // Phase 8 (P1 #18): process FIRST, delete on success
-            // (or on a hard parse-error that means re-trying would
-            // never make progress — those still get deleted to
-            // keep the buffer from filling with poison messages).
-            // The previous "delete-then-process" pattern lost a
-            // message on any transient panic during processing.
+            // Process FIRST, delete on success (or on a hard
+            // parse-error that means re-trying would never make
+            // progress — those still get deleted to keep the buffer
+            // from filling with poison messages). The previous
+            // "delete-then-process" pattern lost a message on any
+            // transient panic during processing.
             //
             // Helper closure: delete the row by `(group_id, dispatch_id)`.
             let delete_row = |dispatch_id: &[u8]| -> Result<(), MlsGroupError> {

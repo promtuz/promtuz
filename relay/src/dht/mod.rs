@@ -4,29 +4,20 @@
 //! routing-table / store / lookup / sync / publish logic lives in
 //! sibling modules. Sub-lock layout follows §9.3 of the design doc.
 //!
-//! Phase 1a (this commit) ships the *shape* — module tree, struct
-//! fields, public APIs, RocksDB column-family creation. Method bodies on
-//! routing/lookup/store/etc. are stubbed so subsequent phases (1b–1h)
-//! can drop in implementations without touching the wiring again.
-//!
 //! design-doc: `misc/specs/DHT.md`. Sections most relevant to this file:
 //! §0 (constants), §1.2 (CFs), §1.3 (routing-table state), §9.1 (module
-//! tree), §9.3 (Relay-struct sub-lock layout), §10 (Phase 1 = ship
-//! feature-flagged off).
+//! tree), §9.3 (Relay-struct sub-lock layout).
 
-// Phase 1a is intentionally skeletal: the module tree, type signatures,
-// and CF wiring exist but most bodies are `unimplemented!()`. Subsequent
-// phases (1b–1h) populate them. Suppress dead-code warnings until those
-// land — they're expected, and the noise drowns out real warnings.
+// Some routing/lookup/store helpers are only reachable from code paths
+// that aren't always compiled in; suppress dead-code warnings so the
+// noise doesn't drown out real warnings.
 #![allow(dead_code)]
 
-// Original visibility was `pub(crate)`; the module-level pub-on-2-of-N
-// items is the historical pattern from earlier phases (`pub mod config`,
-// `pub mod metrics`). config + metrics stay `pub` because they're
-// referenced from public types like `DhtConfig` in `Dht::new` (already
-// re-exported below). Phase 5b bumps `handler` to `pub` so the e2e
-// harness in `libcore/tests/e2e_phase5b.rs` can drive
-// `handle_peer_connection` directly.
+// config + metrics are `pub` because they're referenced from public
+// types like `DhtConfig` in `Dht::new` (already re-exported below).
+// `handler` is `pub` so the e2e harness in
+// `libcore/tests/e2e_phase5b.rs` can drive `handle_peer_connection`
+// directly.
 pub(crate) mod bootstrap;
 pub(crate) mod cache;
 pub mod config;
@@ -88,8 +79,7 @@ use self::sync::MerkleState;
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
 /// - [`merkle`] — `RwLock<MerkleState>`, write-heavy.
 /// - [`cache`] — `Mutex<LookupCache>` (a `Mutex` because every cache
-///   touch is a write — even reads bump LRU recency once phase 1f
-///   swaps in a real LRU).
+///   touch is a write — even reads bump LRU recency).
 /// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring
 ///   the existing `Relay::clients` pattern.
 ///
@@ -129,7 +119,7 @@ pub struct Dht {
     /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
     /// reference held here; routing-table entries hold a `Weak` (§1.3).
     ///
-    /// **Phase 1h, item 1 — verified TLS pubkey caching.** The value is a
+    /// **Verified TLS pubkey caching.** The value is a
     /// `(Connection, [u8; 32])` tuple where the second element is the
     /// peer's Ed25519 cert SPKI extracted post-handshake from
     /// `connection.peer_identity()`. The relay-side TLS verifier ALSO
@@ -152,9 +142,9 @@ pub struct Dht {
     /// is out of scope for this dispatch.
     pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
 
-    /// Resolver session handle for the bootstrap-retry path (phase 1h
-    /// item 5). Wired in after `Dht::new` via [`Self::attach_resolver`]
-    /// because `ResolverLinkHandle` is a relay-side type that can't
+    /// Resolver session handle for the bootstrap-retry path. Wired in
+    /// after `Dht::new` via [`Self::attach_resolver`] because
+    /// `ResolverLinkHandle` is a relay-side type that can't
     /// be passed through the constructor without a circular import
     /// (this module is reachable from `relay/src/relay/mod.rs`).
     ///
@@ -192,7 +182,7 @@ pub struct Dht {
     /// as [`endpoint`].
     pub(crate) peer_client_cfg: Option<Arc<ClientConfig>>,
 
-    /// Per-peer inbound-RPC rate limiters (phase 1h item 2). One
+    /// Per-peer inbound-RPC rate limiters. One
     /// `governor::RateLimiter` per RPC class (cheap / expensive /
     /// bulk), keyed on the requester's `NodeId`. The default keyed
     /// state store evicts idle peers automatically so a churn-heavy
@@ -201,8 +191,8 @@ pub struct Dht {
     /// limiter on every inbound stream.
     pub(crate) rate_limiters: rate_limit::PerPeerLimiters,
 
-    /// MLS Phase 2 — per-`(target_ipk, requester_relay_id)` rate
-    /// limiter for `KeyPackageFetch` (`MAX_KP_FETCH_PER_HOUR = 60`).
+    /// Per-`(target_ipk, requester_relay_id)` rate limiter for
+    /// `KeyPackageFetch` (`MAX_KP_FETCH_PER_HOUR = 60`).
     /// Distinct from [`Self::rate_limiters`] (which is keyed on the
     /// requester alone, the coarse first-line bulkhead) because the
     /// §5.6 anti-pinning policy demands per-pair attribution: a
@@ -212,7 +202,7 @@ pub struct Dht {
     /// design-doc: `misc/specs/MLS.md` §5.6.
     pub(crate) kp_fetch_limiters: KpFetchLimiters,
 
-    /// MLS Phase 3a — per-relay rate limiter for the
+    /// Per-relay rate limiter for the
     /// `WelcomePublish` / `WelcomeFetch` / `WelcomeAck` family. The
     /// welcome RPCs are classified `Bulk` in
     /// [`Self::rate_limiters`] (the coarse first-line bulkhead);
@@ -221,10 +211,10 @@ pub struct Dht {
     /// pin a single recipient's welcome queue. Mirrors the
     /// [`Self::kp_fetch_limiters`] pattern.
     ///
-    /// design-doc: `misc/specs/MLS.md` §6.1; Phase 3a Component B.
+    /// design-doc: `misc/specs/MLS.md` §6.1.
     pub(crate) welcome_limiters: WelcomeLimiters,
 
-    /// Shared reference to the relay's connected-clients map (phase 2d).
+    /// Shared reference to the relay's connected-clients map.
     ///
     /// The home-side `Forward` handler in
     /// [`crate::dht::forward::handle_forward_rpc`] uses this to short-
@@ -249,9 +239,9 @@ pub struct Dht {
     pub(crate) clients: Option<ClientsMap>,
 }
 
-/// Shared reference to the relay's connected-clients map (phase 2d).
-/// Aliased so the field type stays readable. See `Dht::clients` for
-/// the lock contract and the `Option<...>` rationale.
+/// Shared reference to the relay's connected-clients map. Aliased so
+/// the field type stays readable. See `Dht::clients` for the lock
+/// contract and the `Option<...>` rationale.
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
 
 impl Dht {
@@ -267,10 +257,9 @@ impl Dht {
     /// `dht_presence` and `dht_merkle` CFs declared. We don't take an
     /// owned `DB` handle and reopen it because the message-queue side
     /// is already using the same handle and reopening would invalidate
-    /// outstanding iterators. See `crate::util::rocksdb::rocksdb` —
-    /// in this phase we extend that to declare the CFs up front, so
-    /// `Dht::new` only verifies the CFs are present and stashes the
-    /// shared `Arc<DB>`.
+    /// outstanding iterators. See `crate::util::rocksdb::rocksdb`,
+    /// which declares the CFs up front, so `Dht::new` only verifies the
+    /// CFs are present and stashes the shared `Arc<DB>`.
     pub fn new(
         node_id: NodeId, signing_key: SigningKey, cfg: DhtConfig, rocks: Arc<RocksDB>,
     ) -> Result<Self> {
@@ -283,19 +272,19 @@ impl Dht {
         rocks
             .cf_handle(CF_DHT_MERKLE)
             .with_context(|| format!("missing column family `{CF_DHT_MERKLE}` in DB"))?;
-        // Sticky-home queue CF (phase 2a). Idempotent on a fresh DB
-        // because `crate::util::rocksdb` opens with
+        // Sticky-home queue CF. Idempotent on a fresh DB because
+        // `crate::util::rocksdb` opens with
         // `create_missing_column_families(true)`. On an upgrade against
         // an existing DB, the CF is auto-created at first open by the
         // same flag — `Dht::new` only re-verifies the handle exists.
         rocks
             .cf_handle(CF_DHT_QUEUE)
             .with_context(|| format!("missing column family `{CF_DHT_QUEUE}` in DB"))?;
-        // MLS Phase 2 KeyPackage stash CF.
+        // MLS KeyPackage stash CF.
         rocks
             .cf_handle(CF_DHT_KEYPACKAGE)
             .with_context(|| format!("missing column family `{CF_DHT_KEYPACKAGE}` in DB"))?;
-        // MLS Phase 3a welcome queue CF.
+        // MLS welcome queue CF.
         rocks
             .cf_handle(CF_DHT_WELCOME)
             .with_context(|| format!("missing column family `{CF_DHT_WELCOME}` in DB"))?;
@@ -329,9 +318,9 @@ impl Dht {
         self.peer_client_cfg = Some(peer_client_cfg);
     }
 
-    /// Wire a shared reference to the relay's connected-clients map
-    /// (phase 2d). Called by `Relay::new` *after* both the `Relay` and
-    /// the `Dht` are constructed, so the same `Arc<RwLock<HashMap<...>>>`
+    /// Wire a shared reference to the relay's connected-clients map.
+    /// Called by `Relay::new` *after* both the `Relay` and the `Dht`
+    /// are constructed, so the same `Arc<RwLock<HashMap<...>>>`
     /// the relay-side hands to the per-client handler is also visible
     /// to the home-side `Forward` handler.
     ///
@@ -341,17 +330,17 @@ impl Dht {
         self.clients = Some(clients);
     }
 
-    /// Phase 5b: pre-seed a peer descriptor into this relay's routing
-    /// table. Used by the e2e harness (`libcore/tests/e2e_phase5b.rs`)
-    /// to wire N relays' routing tables to each other before the test
-    /// fires its first `FindNode` RPC. Production paths populate the
-    /// table organically via `handle_peer_connection` post-DhtHello.
+    /// Pre-seed a peer descriptor into this relay's routing table. Used
+    /// by the e2e harness (`libcore/tests/e2e_phase5b.rs`) to wire N
+    /// relays' routing tables to each other before the test fires its
+    /// first `FindNode` RPC. Production paths populate the table
+    /// organically via `handle_peer_connection` post-DhtHello.
     pub fn seed_routing_table(&self, descriptor: common::proto::dht_p2p::NodeDescriptor) {
         let _ = self.routing.write().insert(descriptor);
     }
 
-    /// Phase 5b: purge any routing-table entry whose `id` is not in
-    /// `allowed`. The e2e harness uses this to evict libcore-ephemeral
+    /// Purge any routing-table entry whose `id` is not in `allowed`.
+    /// The e2e harness uses this to evict libcore-ephemeral
     /// peers from the routing table after each operation that may have
     /// added them, so subsequent `FindNode`s return only the curated
     /// cross-wired set.
@@ -368,9 +357,9 @@ impl Dht {
         }
     }
 
-    /// Wire the resolver-session handle for the bootstrap-retry path
-    /// (phase 1h item 5). Called by `relay/src/main.rs` after
-    /// `ResolverLink::new` produces its `client_handle`.
+    /// Wire the resolver-session handle for the bootstrap-retry path.
+    /// Called by `relay/src/main.rs` after `ResolverLink::new` produces
+    /// its `client_handle`.
     ///
     /// Idempotent: a second call replaces the cached handle. The
     /// scheduler reads `dht.resolver.read().clone()` on each tick so

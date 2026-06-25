@@ -20,7 +20,7 @@ pub struct AppConfig {
 
     /// Optional DHT block. Absent / `enabled = false` keeps the relay on
     /// the pre-DHT code path — see `relay/src/dht/config.rs` and §10/§11.8
-    /// of `misc/specs/DHT.md`. Phase 1 default is **disabled**.
+    /// of `misc/specs/DHT.md`. The default is **disabled**.
     #[serde(default)]
     pub dht: DhtConfig,
 }

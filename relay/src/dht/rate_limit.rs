@@ -1,8 +1,8 @@
 //! Per-peer inbound DHT RPC rate limiters.
 //!
-//! Phase 1h item 2: a misbehaving peer can hammer Store/Tombstone or
+//! Without these, a misbehaving peer can hammer Store/Tombstone or
 //! FetchRecord RPCs without tripping any per-connection or per-RPC
-//! defence. We add three keyed `governor` limiters — one per RPC
+//! defence. We use three keyed `governor` limiters — one per RPC
 //! class (cheap / expensive / bulk) — each keyed on the *requester*
 //! NodeId. Tripping any of them closes the inbound connection with
 //! `CloseReason::DhtFlood` and bumps a metrics counter.
@@ -120,35 +120,35 @@ impl RpcClass {
             | DhtRequest::FindValue(_)
             | DhtRequest::MerkleSummary(_)
             | DhtRequest::MerkleDiff(_)
-            // Sticky-home phase 2a: ack is a small bookkeeping write
-            // (delete by id), no signature-heavy work beyond the
-            // bounded id-list verify. Slot it in the cheap bucket.
+            // Sticky-home: ack is a small bookkeeping write (delete by
+            // id), no signature-heavy work beyond the bounded id-list
+            // verify. Slot it in the cheap bucket.
             | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
             DhtRequest::Store(_)
             | DhtRequest::Tombstone(_)
-            // Sticky-home phase 2a: `Forward` does an outer-sig verify
-            // plus a disk write (queue) or stream open (deliver).
+            // Sticky-home: `Forward` does an outer-sig verify plus a
+            // disk write (queue) or stream open (deliver).
             // `QueueFetch` does a user-sig verify plus a per-recipient
             // prefix iterator over `cf_dht_queue`. Both belong in the
             // expensive bucket per `STICKY_HOME_RELAY.md` §6.2.
             | DhtRequest::Forward(_)
             | DhtRequest::QueueFetch(_)
-            // MLS Phase 2 (§6.1 of `MLS.md`): KeyPackage publish /
-            // fetch / refill all do Ed25519 verifies plus RocksDB
-            // I/O — same cost shape as Store / Forward. Spec
-            // explicitly says `RpcClass::Expensive`. Note: a separate
-            // *per-pair* `(target_ipk, requester_relay_id)` quota
-            // lives inside `mls_kp.rs` for the §5.6 anti-pinning
-            // policy; this per-peer bucket is the coarser first line.
+            // MLS (§6.1 of `MLS.md`): KeyPackage publish / fetch /
+            // refill all do Ed25519 verifies plus RocksDB I/O — same
+            // cost shape as Store / Forward. Spec explicitly says
+            // `RpcClass::Expensive`. Note: a separate *per-pair*
+            // `(target_ipk, requester_relay_id)` quota lives inside
+            // `mls_kp.rs` for the §5.6 anti-pinning policy; this
+            // per-peer bucket is the coarser first line.
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)
             | DhtRequest::KeyPackageRefill(_) => RpcClass::Expensive,
             DhtRequest::FetchRecord(_) => RpcClass::Bulk,
-            // MLS Phase 3a Component B: welcome publish carries up to
-            // a few KB of `welcome_blob` plus envelope metadata; fetch
-            // returns up to `MAX_WELCOMES_PER_RECIPIENT = 32` rows in
-            // a single RPC; ack is a small id-list. All three are
-            // bulk-class because `welcome_blob` can hit
+            // MLS welcome publish carries up to a few KB of
+            // `welcome_blob` plus envelope metadata; fetch returns up
+            // to `MAX_WELCOMES_PER_RECIPIENT = 32` rows in a single
+            // RPC; ack is a small id-list. All three are bulk-class
+            // because `welcome_blob` can hit
             // `MAX_WELCOME_BYTES = 256 KiB` in the worst case (large
             // groups), making them the heaviest single-RPC payload in
             // the DHT family.

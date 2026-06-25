@@ -69,8 +69,8 @@ pub struct Relay {
     pub port:       u16,
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
-    /// **Phase 9 §3.9**: production [`RelayDhtClient`] dialer riding this
-    /// relay's `relay/1` connection. Built once per `connect()` after the
+    /// Production [`RelayDhtClient`] dialer riding this relay's
+    /// `relay/1` connection. Built once per `connect()` after the
     /// handshake succeeds; lives for the connection's lifetime. `None` if
     /// the connection isn't established — callers in
     /// `api::messaging::sendMessage` surface a clean error rather than
@@ -78,14 +78,14 @@ pub struct Relay {
     ///
     /// [`RelayDhtClient`]: crate::quic::relay_dht_client::RelayDhtClient
     pub dht_client: Option<Arc<crate::quic::relay_dht_client::RelayDhtClient>>,
-    /// **Phase 8 (P0-2 residual)**: relay's NodeKey pubkey as vended by
-    /// the resolver in `RelayDescriptor.pubkey`. Persisted on
-    /// `Relay::refresh`. Was used for per-dial TLS-cert SPKI pinning on
-    /// the deleted Option-A `peer/1` path; now vestigial under Option B
-    /// (libcore no longer dials `peer/1`). Retained pending a cleanup
-    /// pass that also drops the DB column + resolver wire field.
+    /// Relay's NodeKey pubkey as vended by the resolver in
+    /// `RelayDescriptor.pubkey`. Persisted on `Relay::refresh`. Was
+    /// used for per-dial TLS-cert SPKI pinning on the deleted Option-A
+    /// `peer/1` path; now vestigial under Option B (libcore no longer
+    /// dials `peer/1`). Retained pending a cleanup pass that also drops
+    /// the DB column + resolver wire field.
     pub pubkey:     Option<[u8; 32]>,
-    /// **Phase 9 §3.9**: the home relay's DHT NodeId, learned from the
+    /// The home relay's DHT NodeId, learned from the
     /// `ServerHandshakeResultP::Accept` reply. Connection-scoped (set in
     /// `connect()` after handshake, `None` on DB-loaded rows). The
     /// `RelayDhtClient` binds it as `requester_relay_id` when signing
@@ -363,8 +363,8 @@ impl Relay {
         let conn = NETWORK_DB.lock();
         let now = systime().as_millis() as u64;
 
-        // Phase 8 (P0-2 residual): persist `RelayDescriptor.pubkey` so
-        // libcore can pin the relay's TLS-cert SPKI on peer/1 dials.
+        // Persist `RelayDescriptor.pubkey` so libcore can pin the
+        // relay's TLS-cert SPKI on peer/1 dials.
         let mut stmt = conn.prepare(
             "INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start, pubkey)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)

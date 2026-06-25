@@ -1,5 +1,5 @@
-//! Shared Tier-2 fan-out primitives for the Phase 9 MLS originate
-//! helpers (`mls_kp_originate`, `mls_welcome_originate`).
+//! Shared Tier-2 fan-out primitives for the MLS originate helpers
+//! (`mls_kp_originate`, `mls_welcome_originate`).
 //!
 //! When a phone delegates a KeyPackage / Welcome operation to its home
 //! relay over the `client/0` §3.9 wrappers, the home relay becomes the

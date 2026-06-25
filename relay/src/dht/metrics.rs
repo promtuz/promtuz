@@ -45,7 +45,7 @@ pub struct Metrics {
     pub peer_conns_opened: AtomicU64,
     pub peer_conns_closed: AtomicU64,
 
-    // --- DoS hardening (phase 1h) ---
+    // --- DoS hardening ---
     /// Per-peer rate limit was tripped on an inbound RPC. Bumped once
     /// per rejected stream — multiple denied calls within one
     /// connection still bump exactly once before the close.
@@ -55,12 +55,12 @@ pub struct Metrics {
     /// TLS-pubkey extraction failed (cert chain absent, malformed
     /// SPKI, self-sig invalid, or `BLAKE3(spki) != claimed_node_id`).
     /// Bumped on the dial-side path in `lookup::connect_to_peer` and
-    /// on the inbound path if the cert chain is parseable. See item 1
-    /// in the phase 1h dispatch report for the inbound-path gap
-    /// (peer_identity is `None` under `with_no_client_auth()`).
+    /// on the inbound path if the cert chain is parseable. The inbound
+    /// path has a gap: peer_identity is `None` under
+    /// `with_no_client_auth()`.
     pub cert_pubkey_extraction_failures: AtomicU64,
 
-    // --- DHT connection-level handshake (phase 1i) ---
+    // --- DHT connection-level handshake ---
     /// Inbound `peer/1` connection accepted a valid signed `DhtHello`
     /// from the dialer. Bumped once per successful application-layer
     /// handshake — pairs with [`Self::peer_conns_opened`] (which only
@@ -76,7 +76,7 @@ pub struct Metrics {
     /// per-failure-mode close-reason mapping.
     pub dht_hello_rejected: AtomicU64,
 
-    // --- sticky-home fan-out (phase 2b) ---
+    // --- sticky-home fan-out ---
     /// `Forward` RPCs the sender relay successfully *opened* (i.e.
     /// invocations that reached the K-fan-out stage). Bumped once per
     /// `forward_to_homes` call regardless of outcome — pair with
@@ -101,16 +101,15 @@ pub struct Metrics {
     pub forward_fallbacks_to_local_queue: AtomicU64,
 
     /// `enqueue_for_home` writes to `cf_dht_queue` that succeeded —
-    /// either the self-is-K-closest path inside `forward_to_homes`
-    /// (phase 2b) or the inbound `Forward` handler once it lands
-    /// (phase 2d).
+    /// either the self-is-K-closest path inside `forward_to_homes` or
+    /// the inbound `Forward` handler.
     pub dht_queue_writes: AtomicU64,
 
     /// `enqueue_for_home` rejections because the per-recipient
     /// `MAX_QUEUED_PER_RECIPIENT` cap was hit on `cf_dht_queue`.
     pub dht_queue_full_rejections: AtomicU64,
 
-    // --- sticky-home recipient drain (phase 2c) ---
+    // --- sticky-home recipient drain ---
 
     /// `CRelayPacket::DrainAuth` packets that verified successfully
     /// (signature + freshness window) and were buffered on
@@ -145,7 +144,7 @@ pub struct Metrics {
     /// the per-RPC success — see `queue_fetches_sent` for that.
     pub queue_fetches_succeeded: AtomicU64,
 
-    // --- sticky-home K-set drift migration (phase 2d-fix) ---
+    // --- sticky-home K-set drift migration ---
     /// `cf_dht_queue` entries the periodic scheduler attempted to
     /// migrate to a recipient's new K-closest set. One bump per
     /// candidate `(MessageKey, DispatchP)` returned by
@@ -251,7 +250,7 @@ impl Metrics {
         self.peer_conns_closed.fetch_add(1, Ordering::Relaxed);
     }
 
-    // --- DoS hardening (phase 1h) ---
+    // --- DoS hardening ---
 
     pub fn inc_rate_limit_rejections(&self) {
         self.rate_limit_rejections.fetch_add(1, Ordering::Relaxed);
@@ -261,7 +260,7 @@ impl Metrics {
         self.cert_pubkey_extraction_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    // --- DHT connection-level handshake (phase 1i) ---
+    // --- DHT connection-level handshake ---
 
     pub fn inc_dht_hello_accepted(&self) {
         self.dht_hello_accepted.fetch_add(1, Ordering::Relaxed);
@@ -271,7 +270,7 @@ impl Metrics {
         self.dht_hello_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
-    // --- sticky-home fan-out (phase 2b) ---
+    // --- sticky-home fan-out ---
 
     pub fn inc_forwards_sent(&self) {
         self.forwards_sent.fetch_add(1, Ordering::Relaxed);
@@ -297,7 +296,7 @@ impl Metrics {
         self.dht_queue_full_rejections.fetch_add(1, Ordering::Relaxed);
     }
 
-    // --- sticky-home recipient drain (phase 2c) ---
+    // --- sticky-home recipient drain ---
 
     pub fn inc_drain_auth_received(&self) {
         self.drain_auth_received.fetch_add(1, Ordering::Relaxed);
@@ -319,7 +318,7 @@ impl Metrics {
         self.queue_fetches_succeeded.fetch_add(1, Ordering::Relaxed);
     }
 
-    // --- sticky-home K-set drift migration (phase 2d-fix) ---
+    // --- sticky-home K-set drift migration ---
 
     pub fn inc_migrations_attempted(&self) {
         self.migrations_attempted.fetch_add(1, Ordering::Relaxed);

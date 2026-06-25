@@ -1,4 +1,4 @@
-//! MLS Wire Protocol (Phase 2 of MLS rollout).
+//! MLS Wire Protocol.
 //!
 //! This module is the wire-format source of truth for the MLS layer
 //! described in `misc/specs/MLS.md` §3. It carries:
@@ -26,27 +26,18 @@
 //!   may rewrite *our* envelope wire format without touching the MLS
 //!   internals, and vice-versa.
 //! - **No client logic.** Nothing in here decides who sends what; it
-//!   only fixes the wire grammar. Phase 3 owns the client-side
-//!   composition.
+//!   only fixes the wire grammar. The client-side composition lives in
+//!   libcore.
 //!
-//! ## Bump considerations
+//! ## Version field
 //!
-//! `MLS.md` §0 calls for `PROTOCOL_VERSION = 3` once MLS ships
-//! network-wide. **That bump is Phase 4's responsibility.** For Phase
-//! 2 we keep the global `PROTOCOL_VERSION = 2` constant unchanged
-//! (mixed pre-MLS and MLS code paths must keep verifying old packets)
-//! and use the [`MLS_WIRE_VERSION`] constant as the version field
-//! mixed into MLS-specific transcripts. Phase 4 will reconcile the
-//! two by either:
-//!   - bumping `PROTOCOL_VERSION` to 3 and changing every signing
-//!     helper here to read it instead of `MLS_WIRE_VERSION`, or
-//!   - keeping `MLS_WIRE_VERSION` as the dedicated MLS version field
-//!     forever.
-//!
-//! Either way the v3 marker survives in the on-wire transcripts so a
-//! future v3 endpoint refuses to verify a v2-style signature even if
-//! the byte layout happens to match (mirrors the
-//! [`crate::PROTOCOL_VERSION`] discipline elsewhere).
+//! MLS-specific transcripts mix in the dedicated [`MLS_WIRE_VERSION`]
+//! constant rather than [`crate::PROTOCOL_VERSION`] directly. The two
+//! are kept equal, but routing every signing helper here through a
+//! single MLS-owned constant means the version marker survives in the
+//! on-wire transcripts so an endpoint refuses to verify a
+//! lower-version signature even if the byte layout happens to match
+//! (mirrors the [`crate::PROTOCOL_VERSION`] discipline elsewhere).
 //!
 //! ## Signing transcript layout
 //!
@@ -76,15 +67,12 @@ use crate::types::bytes::Bytes;
 /// MLS-layer protocol version field mixed into every signing
 /// transcript here.
 ///
-/// **Phase 9**: bumped 3 → 4 alongside [`crate::PROTOCOL_VERSION`] so
-/// the §3.9 Tier-1 wrapper variants (`PublishKeyPackage`,
-/// `FetchKeyPackage`, `PublishWelcome`, `FetchWelcomes`,
-/// `AckWelcomes`) are wire-incompatible with any v3 (Option-A)
-/// endpoint that briefly shipped on `main`. The two constants are
-/// guaranteed equal by the Phase-9 cutover invariant.
+/// Held equal to [`crate::PROTOCOL_VERSION`] (= 4). Version 4 makes the
+/// §3.9 Tier-1 wrapper variants (`PublishKeyPackage`, `FetchKeyPackage`,
+/// `PublishWelcome`, `FetchWelcomes`, `AckWelcomes`) wire-incompatible
+/// with any earlier endpoint.
 ///
-/// design-doc: `misc/specs/MLS.md` §0 (`PROTOCOL_VERSION = 4`),
-/// §11.3e (Phase 9 Option-B pivot).
+/// design-doc: `misc/specs/MLS.md` §0 (`PROTOCOL_VERSION = 4`), §11.3e.
 pub const MLS_WIRE_VERSION: u16 = 4;
 
 /// Inner envelope-version byte stamped into every
@@ -99,15 +87,15 @@ pub const MLS_ENVELOPE_VERSION: u8 = 1;
 /// Hard ceiling on the TLS-encoded `MlsMessageOut` bytes carried in
 /// [`MlsApplicationEnvelopeP::mls_message`]. Mirrors
 /// `MAX_FRAMED_MLS_BYTES = 64 KiB` from §0; the cap is enforced at
-/// construction time by the producer (Phase 3 client) and at deser
+/// construction time by the producer (libcore client) and at deser
 /// time by the consumer.
 ///
 /// design-doc: `misc/specs/MLS.md` §0 (`MAX_FRAMED_MLS_BYTES`).
 pub const MAX_FRAMED_MLS_BYTES: usize = 64 * 1024;
 
-/// **Phase 7 (P0-8)**: ceiling on `(env.epoch - group.epoch())` before
-/// the recipient drops an incoming envelope as "implausibly far
-/// ahead." A malicious member could otherwise pin per-recipient
+/// Ceiling on `(env.epoch - group.epoch())` before the recipient drops
+/// an incoming envelope as "implausibly far ahead." A malicious member
+/// could otherwise pin per-recipient
 /// memory at the buffer cap × max-epoch-arithmetic by shipping
 /// envelopes with arbitrary `epoch` values up to `u64::MAX`. Once the
 /// gap exceeds this we refuse to buffer (the recipient would never
@@ -137,7 +125,7 @@ pub const KP_STASH_TARGET: usize = 100;
 
 /// One-time stash low-water mark — informational only on the wire
 /// (the home computes it locally). Listed here for cross-reference;
-/// helpers using it live in Phase 3 client code.
+/// helpers using it live in libcore client code.
 pub const KP_STASH_LOW_WATER: usize = 20;
 
 /// KeyPackages the home pops from its FIFO per
@@ -225,8 +213,8 @@ pub const WELCOME_ID_LEN: usize = 8;
 pub const MLS_DOMAIN_PREFIX: &[u8] = b"promtuz-mls-v1";
 
 /// Domain-separation tag for the application-layer envelope signature
-/// (binds `to_ipk`, `group_id`, `epoch`, MLS-message hash). Phase
-/// 13.9 hardening: `to_ipk` is part of the transcript so a malicious
+/// (binds `to_ipk`, `group_id`, `epoch`, MLS-message hash). Per the
+/// §13.9 hardening, `to_ipk` is part of the transcript so a malicious
 /// relay can't redirect a captured envelope to a different recipient.
 ///
 /// design-doc: `misc/specs/MLS.md` §3.2, §13.9.
@@ -247,8 +235,8 @@ pub const KP_PUBLISH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-publish";
 /// Domain-separation tag for [`KeyPackageFetchReq`]'s outer signature.
 /// (Fetch carries no user signature today — the relay-to-relay
 /// `DhtHello` authenticates the requester — but the helper exists so
-/// Phase 3 / future revisions can add one without re-deriving the
-/// transcript layout.)
+/// a future revision can add one without re-deriving the transcript
+/// layout.)
 ///
 /// design-doc: `misc/specs/MLS.md` §3.5.
 pub const KP_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-fetch";
@@ -277,7 +265,7 @@ pub const KP_RECORD_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-record";
 /// live in `cf_dht_welcome` — and proves authority to drain by signing
 /// under that IPK. Mirrors the `QueueFetch` user-sig pattern.
 ///
-/// design-doc: `misc/specs/MLS.md` §3.3, Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub const WELCOME_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-fetch";
 
 /// Domain-separation tag for the recipient-side
@@ -285,10 +273,10 @@ pub const WELCOME_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-fetch";
 /// [`WELCOME_FETCH_DOMAIN`] so a captured fetch sig can't be replayed
 /// as an ack (the ack deletes; fetch only reads).
 ///
-/// design-doc: Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub const WELCOME_ACK_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-ack";
 
-// ---- Phase 9: Tier-1 (libcore→home) wrapper-sig domains -----------
+// ---- Tier-1 (libcore→home) wrapper-sig domains --------------------
 //
 // §3.9 wrapper RPCs split into two signature categories:
 //
@@ -377,7 +365,7 @@ pub struct MlsApplicationEnvelopeP {
     /// [`ByteVec`].
     pub mls_message: ByteVec,
     /// Sender's Ed25519 signature over [`envelope_signing_input`].
-    /// **Phase 13.9 hardening**: the transcript binds `to_ipk` so a
+    /// **§13.9 hardening**: the transcript binds `to_ipk` so a
     /// malicious relay cannot redirect a captured envelope to a
     /// different recipient. Verified by the recipient's libcore
     /// before feeding `mls_message` to openmls.
@@ -430,7 +418,7 @@ pub struct WelcomeEnvelopeP {
 /// Build the canonical signing transcript for
 /// [`MlsApplicationEnvelopeP::sender_sig`].
 ///
-/// **Phase 13.9 hardening**: `to_ipk` is part of the transcript. With
+/// **§13.9 hardening**: `to_ipk` is part of the transcript. With
 /// the original §3.2 design (no `to_ipk` binding), a malicious relay
 /// could strip the `DispatchP` framing, re-wrap the same envelope
 /// addressed to a different `to`, and the inner envelope sig would
@@ -452,13 +440,12 @@ pub struct WelcomeEnvelopeP {
 /// [`MAX_FRAMED_MLS_BYTES`] = 64 KiB). Plain `blake3::hash` (not
 /// keyed) — this is a plain-domain hash, not a MAC.
 ///
-/// Both signer (Phase 3 client) and verifier (Phase 3 client on the
-/// recipient side) call this helper, which makes it the byte-for-byte
-/// contract — no second implementation to keep in sync.
+/// Both the sender's libcore and the recipient's libcore call this
+/// helper, which makes it the byte-for-byte contract — no second
+/// implementation to keep in sync.
 ///
-/// `protocol_version` is taken as a parameter so Phase 4 can pass the
-/// global `crate::PROTOCOL_VERSION` once the bump lands. Phase 2
-/// helpers all pass [`MLS_WIRE_VERSION`].
+/// `protocol_version` is taken as a parameter rather than read from a
+/// global; callers pass [`MLS_WIRE_VERSION`].
 ///
 /// design-doc: `misc/specs/MLS.md` §3.2, §13.9.
 pub fn envelope_signing_input(
@@ -567,22 +554,22 @@ pub struct KeyPackageRecord {
     /// Owner's Ed25519 signature over [`kp_record_signing_input`].
     /// Bound to `(ipk, kp_ref, BLAKE3(kp_bytes), expires_at_ms)`.
     ///
-    /// **Phase 8 (P1 #11)**: a `BLAKE3(kp_bytes)` digest is now
-    /// folded into the transcript. Previously the rationale was
-    /// "RFC 9420 binds `kp_ref = HashReference(kp_bytes)` so binding
-    /// `kp_ref` is enough" — but the relay does not implement RFC
-    /// 9420's `HashReference` (label-prefixed SHA-256) and therefore
-    /// cannot re-derive `kp_ref` from `kp_bytes` to enforce the
-    /// invariant. The wire change closes the gap defensively: a
-    /// malicious publisher cannot mint long-lived bogus triples
-    /// where `kp_ref` is computed correctly but `kp_bytes` is
-    /// malformed/replaced. The relay just verifies the sig.
+    /// A `BLAKE3(kp_bytes)` digest is folded into the transcript. A
+    /// `kp_ref`-only binding would rely on "RFC 9420 binds
+    /// `kp_ref = HashReference(kp_bytes)` so binding `kp_ref` is
+    /// enough" — but the relay does not implement RFC 9420's
+    /// `HashReference` (label-prefixed SHA-256) and therefore cannot
+    /// re-derive `kp_ref` from `kp_bytes` to enforce the invariant.
+    /// Folding in the digest closes the gap defensively: a malicious
+    /// publisher cannot mint long-lived bogus triples where `kp_ref`
+    /// is computed correctly but `kp_bytes` is malformed/replaced.
+    /// The relay just verifies the sig.
     pub owner_sig: Bytes<64>,
 }
 
 /// Build the canonical signing transcript for [`KeyPackageRecord::owner_sig`].
 ///
-/// Layout (Phase 8, P1 #11 — `kp_bytes_digest` added):
+/// Layout:
 /// ```text
 ///   KP_RECORD_DOMAIN || protocol_version (BE u16)
 ///     || ipk (32) || kp_ref_len (BE u32) || kp_ref (var)
@@ -598,23 +585,15 @@ pub struct KeyPackageRecord {
 /// is used by [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`]
 /// for its variable id-list.
 ///
-/// **Phase 8 (P1 #11)**: `kp_bytes_digest` is `BLAKE3(kp_bytes)`
-/// (32 bytes, fixed length). Folding the digest into the transcript
-/// binds the actual KeyPackage body to the owner sig — the relay
-/// cannot re-derive RFC 9420's `HashReference` form of `kp_ref`
-/// from `kp_bytes` (no openmls dependency on the relay), so the
-/// previous "kp_ref already binds kp_bytes" rationale was operative
-/// only at clients. The defensive bind here closes the §13.3 gap:
-/// a stolen IPK can no longer mint `(ipk, kp_ref, fake_kp_bytes)`
-/// triples and have them accepted at any home.
-///
-/// **Pre-1.0 wire change**: this is a breaking signing-transcript
-/// change. Sender and verifier must both compile against this
-/// version. No PROTOCOL_VERSION bump is strictly required (the
-/// transcript is pre-existing internal infrastructure and the
-/// outer `MLS_WIRE_VERSION` already differentiates wire shapes),
-/// but operators upgrading must roll all relays + clients in
-/// lock-step. Documented in the Phase 8 report.
+/// `kp_bytes_digest` is `BLAKE3(kp_bytes)` (32 bytes, fixed length).
+/// Folding the digest into the transcript binds the actual KeyPackage
+/// body to the owner sig — the relay cannot re-derive RFC 9420's
+/// `HashReference` form of `kp_ref` from `kp_bytes` (no openmls
+/// dependency on the relay), so a "kp_ref already binds kp_bytes"
+/// rationale would be operative only at clients. The defensive bind
+/// here closes the §13.3 gap: a stolen IPK can no longer mint
+/// `(ipk, kp_ref, fake_kp_bytes)` triples and have them accepted at
+/// any home.
 ///
 /// design-doc: `misc/specs/MLS.md` §3.4 (paragraph "MLS-verified at
 /// the home"), §5.3, §13.3.
@@ -867,9 +846,9 @@ pub struct KeyPackageFetchResp {
 /// signature (e.g. for cross-relay forwarded fetches) can drop in
 /// without re-deriving the transcript.
 ///
-/// Phase 2 callers do not invoke this function. We export it for
-/// symmetry with the publish/refill helpers and so future protocol
-/// revisions can sign the same byte layout without reverse-engineering.
+/// No caller invokes this function today. We export it for symmetry
+/// with the publish/refill helpers and so future protocol revisions
+/// can sign the same byte layout without reverse-engineering.
 ///
 /// Layout:
 /// ```text
@@ -989,12 +968,11 @@ pub fn kp_refill_signing_input(
 /// the inviter's IPK. A relay forwarding a Welcome cannot forge it
 /// without holding the inviter's IPK private key. The relay-to-relay
 /// `peer/1` `DhtHello` handshake authenticates the *forwarding*
-/// relay, not the inviter — same asymmetry as `Forward` (sticky-home
-/// phase 2a).
+/// relay, not the inviter — same asymmetry as the sticky-home
+/// `Forward` RPC.
 ///
-/// design-doc: Phase 3a Component B spec (welcome queue at relay);
-/// `misc/specs/MLS.md` §3.3 (envelope sig binding), §6.1 (welcome
-/// queue distinct from `cf_dht_queue`).
+/// design-doc: `misc/specs/MLS.md` §3.3 (envelope sig binding), §6.1
+/// (welcome queue distinct from `cf_dht_queue`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomePublishReq {
     /// The full welcome envelope being queued. The home verifies
@@ -1009,7 +987,7 @@ pub struct WelcomePublishReq {
 
 /// `WelcomePublish` outcome.
 ///
-/// design-doc: Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §6.1 (welcome queue at relay).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WelcomePublishOutcome {
     /// Envelope persisted to `cf_dht_welcome`. Idempotent on a
@@ -1054,11 +1032,11 @@ pub struct WelcomePublishResp {
 /// [`welcome_fetch_signing_input`] (which binds `requester_relay_id`
 /// per the §13.9 cross-relay-replay defence). The home additionally
 /// checks `requester_relay_id == authenticated_peer_id` from the
-/// connection's `DhtHello` — same posture as `QueueFetch` (sticky-home
-/// phase 2d-fix).
+/// connection's `DhtHello` — same posture as the sticky-home
+/// `QueueFetch` RPC.
 ///
-/// design-doc: Phase 3a Component B spec; mirrors
-/// [`crate::proto::dht_p2p::QueueFetch`].
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay);
+/// mirrors [`crate::proto::dht_p2p::QueueFetch`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeFetchReq {
     /// User IPK whose welcomes we want to drain.
@@ -1131,7 +1109,7 @@ pub struct WelcomeEntry {
 /// id. Domain-separated from `WelcomeFetch` so a captured fetch sig
 /// can't be replayed as an ack.
 ///
-/// design-doc: Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeAckReq {
     /// User IPK whose welcomes we're acking. Same as
@@ -1171,9 +1149,10 @@ pub struct WelcomeAckResp {
 ///     || user_ipk (32) || requester_relay_id (32) || timestamp (BE u64)
 /// ```
 ///
-/// Mirrors `queue_fetch_signing_input` shape (sticky-home phase 2d-fix).
+/// Mirrors the `queue_fetch_signing_input` shape (the
+/// `requester_relay_id` binding).
 ///
-/// design-doc: Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub fn welcome_fetch_signing_input(
     protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId,
     timestamp: u64,
@@ -1204,7 +1183,7 @@ pub fn welcome_fetch_signing_input(
 /// bounded regardless of how many ids the recipient acks. Same
 /// length-prefix discipline as `queue_fetch_ack_signing_input`.
 ///
-/// design-doc: Phase 3a Component B spec.
+/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub fn welcome_ack_signing_input(
     protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId,
     welcome_ids: &[[u8; WELCOME_ID_LEN]], timestamp: u64,
@@ -1230,7 +1209,7 @@ pub fn welcome_ack_signing_input(
 }
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
-//===:===:===:: TIER-1 WRAPPER (PHASE 9) :===:===:===||
+//===:===:===:===:===:  TIER-1 WRAPPER  :===:===:===:||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //
 // Only the two GATE-ONLY RPCs get a dedicated wrap signing-input here
@@ -1339,7 +1318,7 @@ mod tests {
 
     /// Build a `KeyPackageRecord` with internally-consistent fields.
     /// The `kp_bytes` field is opaque (we just stuff `payload` in;
-    /// the openmls TLS-encoded form lives in Phase 3 client code).
+    /// the openmls TLS-encoded form is produced by libcore client code).
     fn build_record(
         owner: &SigningKey, kp_ref: Vec<u8>, kp_bytes: Vec<u8>, expires_at_ms: u64,
     ) -> KeyPackageRecord {
@@ -1362,7 +1341,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Phase 9 — Tier-1 gate-wrapper signing-input layout pins
+    // Tier-1 gate-wrapper signing-input layout pins
     // -----------------------------------------------------------------
 
     /// Pin the byte-length of the two GATE-ONLY wrapper signing-inputs
@@ -1775,7 +1754,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Phase 3a Component B — Welcome queue RPC types
+    // Welcome queue RPC types
     // ---------------------------------------------------------------
 
     fn build_welcome_envelope(
@@ -1993,16 +1972,15 @@ mod tests {
         assert_ne!(a, c, "different timestamp must produce different transcripts");
     }
 
-    /// **Phase 4 PROTOCOL_VERSION bump regression.** The global
+    /// **PROTOCOL_VERSION bump regression.** The global
     /// `crate::PROTOCOL_VERSION` and the MLS-layer `MLS_WIRE_VERSION`
-    /// must converge at `3` post-Phase-4. If a future commit
-    /// accidentally diverges them (e.g. bumps one but not the other),
-    /// every signing transcript ever exchanged between two MLS-aware
-    /// endpoints would fail to verify; this test catches that regression
-    /// at compile + unit-test time.
+    /// must stay converged. If a future commit accidentally diverges
+    /// them (e.g. bumps one but not the other), every signing transcript
+    /// ever exchanged between two MLS-aware endpoints would fail to
+    /// verify; this test catches that regression at compile + unit-test
+    /// time.
     ///
-    /// Spec: `misc/specs/MLS.md` §11.2 (hard cutover at v3),
-    /// §11.4 Phase M9.
+    /// Spec: `misc/specs/MLS.md` §11.2 (hard cutover at v3), §11.4.
     #[test]
     fn protocol_version_and_mls_wire_version_converge_at_three() {
         assert_eq!(

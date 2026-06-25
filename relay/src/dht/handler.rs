@@ -6,7 +6,7 @@
 //! application-layer signed handshake, then accepts bi-streams in a
 //! loop and dispatches each to a per-RPC handler.
 //!
-//! ## Phase 1i: signed `DhtHello` first, then RPCs
+//! ## Signed `DhtHello` first, then RPCs
 //!
 //! Before any RPC is accepted, the dialer must send a [`DhtHello`]
 //! (Ed25519-signed transcript binding `node_id` to `pubkey` and a
@@ -26,10 +26,10 @@
 //!    lifetime.
 //!
 //! Authenticated identity then **replaces** the synthetic-stable_id
-//! and `[0u8; 32]` placeholders that phase 1h had to use because the
-//! TLS server config uses `with_no_client_auth()` (clients also reuse
-//! the same endpoint, so we can't enable mTLS without splitting the
-//! endpoint — see `relay/src/dht/tls_extract.rs` for that gap).
+//! and `[0u8; 32]` placeholders that would otherwise be needed because
+//! the TLS server config uses `with_no_client_auth()` (clients also
+//! reuse the same endpoint, so we can't enable mTLS without splitting
+//! the endpoint — see `relay/src/dht/tls_extract.rs` for that gap).
 //!
 //! ## Per-stream dispatch
 //!
@@ -41,28 +41,26 @@
 //!
 //! Per-peer concurrent in-flight RPC streams are capped via a
 //! `tokio::sync::Semaphore` (the same idiom as `client/mod.rs`'s
-//! 16-stream limiter). Phase 1h hardens this further with per-RPC-kind
-//! rate limits.
+//! 16-stream limiter). Per-RPC-kind rate limits harden this further.
 //!
 //! ## Routing-table feedback
 //!
 //! Every successful inbound RPC is observable as a "this peer is
 //! alive" signal — we touch the routing table by calling
 //! `RoutingTable::insert` with the dialer's authenticated NodeId,
-//! `addr`, and verified pubkey. Phase 1i closes the placeholder-pubkey
-//! gap from phase 1h: the pubkey now comes from the verified `DhtHello`
-//! (`BLAKE3(pubkey) == node_id` was checked at hello time), not the
-//! `[0u8; 32]` placeholder.
+//! `addr`, and verified pubkey. The pubkey comes from the verified
+//! `DhtHello` (`BLAKE3(pubkey) == node_id` was checked at hello time),
+//! not a `[0u8; 32]` placeholder.
 //!
 //! ## Per-peer rate limiting
 //!
-//! Phase 1h item 2: every inbound RPC is also passed through the
-//! per-peer keyed rate limiter on `Dht::rate_limiters` before being
-//! dispatched. Phase 1i: the limiter key is now the authenticated
-//! `NodeId` for *every* inbound RPC, including the ones that don't
-//! carry an in-payload `requester` field (Ping, Store, Tombstone,
-//! MerkleSummary, MerkleDiff, FetchRecord). A reconnecting attacker
-//! therefore can't reset their quota — the NodeId is identity-bound.
+//! Every inbound RPC is also passed through the per-peer keyed rate
+//! limiter on `Dht::rate_limiters` before being dispatched. The limiter
+//! key is the authenticated `NodeId` for *every* inbound RPC, including
+//! the ones that don't carry an in-payload `requester` field (Ping,
+//! Store, Tombstone, MerkleSummary, MerkleDiff, FetchRecord). A
+//! reconnecting attacker therefore can't reset their quota — the NodeId
+//! is identity-bound.
 //! Tripping the limiter closes the whole connection with
 //! `CloseReason::DhtFlood` (and bumps `metrics.rate_limit_rejections`).
 //!
@@ -138,7 +136,7 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///    cross-check that *if* a cert chain ever lands (e.g. once mTLS
 ///    is enabled on `peer/1` per the gap doc'd in `tls_extract.rs`),
 ///    the cert SPKI agrees with the application-layer hello below.
-/// 2. **Phase 1i — application-layer signed handshake:** wait up to
+/// 2. **Application-layer signed handshake:** wait up to
 ///    [`HELLO_RECV_TIMEOUT`] for the dialer's first uni-stream and
 ///    decode it as a [`DhtHello`]. Verify with `DhtHello::verify` —
 ///    on any failure close the connection with the appropriate
@@ -161,9 +159,9 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// design-doc: §2.3, §2.5, §3.4, §7.1, §8.7 (per-peer rate limiting).
 ///
-/// Phase 5b note: bumped from `pub(crate)` to `pub` so the e2e
-/// integration harness in `libcore/tests/e2e_phase5b.rs` can consume
-/// it directly (the production caller is still
+/// Bumped from `pub(crate)` to `pub` so the e2e integration harness in
+/// `libcore/tests/e2e_phase5b.rs` can consume it directly (the
+/// production caller is still
 /// `relay/src/quic/handler/peer.rs::handle_peer`, unchanged).
 pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Forward-compatible TLS pubkey extraction. Under the current
@@ -192,9 +190,9 @@ pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
         }
     };
 
-    // Phase 1i: wait for, decode, and verify the dialer's signed
-    // `DhtHello`. The bound NodeId is the connection's authenticated
-    // identity for the rest of its lifetime.
+    // Wait for, decode, and verify the dialer's signed `DhtHello`. The
+    // bound NodeId is the connection's authenticated identity for the
+    // rest of its lifetime.
     let auth = match recv_and_verify_hello(&dht, &conn).await {
         Ok(a) => a,
         Err(()) => {
@@ -220,11 +218,10 @@ pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
         }
 
     // Populate routing-table + peer_conns cache *now*, before any RPC
-    // arrives. Phase 1h had to defer this to the per-request path
-    // because there was no authenticated identity at connection time;
-    // phase 1i lets us do it once at the natural boundary, which also
-    // means RPCs that don't carry a `requester` field (Ping, Store,
-    // Tombstone, etc.) still get routing-table coverage.
+    // arrives. We do it once at this natural boundary — the
+    // authenticated identity from the `DhtHello` is already in hand —
+    // which also means RPCs that don't carry a `requester` field (Ping,
+    // Store, Tombstone, etc.) still get routing-table coverage.
     {
         let desc = NodeDescriptor {
             id:     auth.node_id,
@@ -450,13 +447,13 @@ fn verify_hello_with_close_reason(
 /// `recv_and_verify_hello` at connection accept time. **Every** stream
 /// on the connection — regardless of which RPC it carries — keys the
 /// rate limiter and refreshes the routing table against this same
-/// authenticated NodeId. This closes the phase 1h gap where RPCs
-/// without an in-payload `requester` (Ping, Store, Tombstone,
-/// MerkleSummary, MerkleDiff, FetchRecord) fell back to a per-
-/// connection synthetic id and a `[0u8; 32]` placeholder pubkey.
+/// authenticated NodeId. RPCs without an in-payload `requester` (Ping,
+/// Store, Tombstone, MerkleSummary, MerkleDiff, FetchRecord) are
+/// covered the same way, rather than falling back to a per-connection
+/// synthetic id and a `[0u8; 32]` placeholder pubkey.
 ///
-/// Phase 1h item 2 (still applies): per-peer rate-limit check happens
-/// **after** the request is fully parsed — parse-then-check is the
+/// The per-peer rate-limit check happens **after** the request is
+/// fully parsed — parse-then-check is the
 /// safer pattern because a malformed wire payload also gets caught
 /// here (parse failure → `DhtMalformedKey` close), and a misbehaving
 /// peer can't avoid the bookkeeping cost of one parse per RPC.
@@ -482,10 +479,10 @@ async fn handle_one_stream(
         }
     };
 
-    // Phase 1i: per-peer inbound rate limiting now keyed on the
-    // authenticated NodeId for *every* RPC kind. A reconnecting
-    // attacker cannot reset their quota — the NodeId is identity-
-    // bound by the signed `DhtHello` we admitted at connection time.
+    // Per-peer inbound rate limiting, keyed on the authenticated
+    // NodeId for *every* RPC kind. A reconnecting attacker cannot reset
+    // their quota — the NodeId is identity-bound by the signed
+    // `DhtHello` we admitted at connection time.
     let class = RpcClass::for_request(&req);
     if dht.rate_limiters.check(&auth.node_id, class).is_err() {
         dht.metrics.inc_rate_limit_rejections();
@@ -535,11 +532,11 @@ async fn handle_one_stream(
 /// per-RPC verify step on each request body already authenticates
 /// the *content*. The exception is
 /// [`super::queue_drain::handle_queue_fetch_ack_rpc`], which uses
-/// the authenticated peer id to enforce the phase 2d-fix
-/// `requester_relay_id` binding (a captured ack must arrive on the
-/// connection of the relay it was signed for).
+/// the authenticated peer id to enforce the `requester_relay_id`
+/// binding (a captured ack must arrive on the connection of the relay
+/// it was signed for).
 ///
-/// Phase 5b: bumped from `pub(crate)` to `pub` so the e2e harness in
+/// Bumped from `pub(crate)` to `pub` so the e2e harness in
 /// `libcore/tests/e2e_phase5b.rs` can run a custom acceptor that
 /// dispatches RPCs *without* the production routing-table-population
 /// side effect of `handle_peer_connection`. Production callers
@@ -593,7 +590,7 @@ pub async fn handle_dht_request(
             let outcome = store::store_tombstone(dht, t.record, now_ms());
             DhtResponse::Tombstone(TombstoneResp { outcome })
         }
-        // Phase 1g: real anti-entropy / sync handlers.
+        // Anti-entropy / sync handlers.
         DhtRequest::MerkleSummary(s) => {
             DhtResponse::MerkleSummary(super::sync::rpc::handle_merkle_summary(dht, s))
         }
@@ -603,15 +600,13 @@ pub async fn handle_dht_request(
         DhtRequest::FetchRecord(f) => {
             DhtResponse::FetchRecord(super::sync::rpc::handle_fetch_record(dht, f))
         }
-        // ----- Sticky-home phase 2d: real handlers ----------------------
+        // ----- Sticky-home handlers -------------------------------------
         //
-        // The wire types landed in phase 2a; the home-side handlers
-        // land here. `Forward` arms a deliver-or-queue ladder (online
-        // recipient short-circuit → cf_dht_queue), `QueueFetch` reads a
-        // bounded batch from cf_dht_queue oldest-first, and
-        // `QueueFetchAck` deletes by-id. Per-RPC metrics live inside
-        // the per-handler bodies (`forwards_*` / `dht_queue_*` /
-        // `queue_fetches_*`).
+        // `Forward` arms a deliver-or-queue ladder (online recipient
+        // short-circuit → cf_dht_queue), `QueueFetch` reads a bounded
+        // batch from cf_dht_queue oldest-first, and `QueueFetchAck`
+        // deletes by-id. Per-RPC metrics live inside the per-handler
+        // bodies (`forwards_*` / `dht_queue_*` / `queue_fetches_*`).
         DhtRequest::Forward(fwd) => {
             DhtResponse::Forward(super::forward::handle_forward_rpc(dht, fwd, now_ms()).await)
         }
@@ -633,7 +628,7 @@ pub async fn handle_dht_request(
             )
             .await,
         ),
-        // ----- MLS Phase 2: KeyPackage RPCs (`mls_kp.rs`) ---------------
+        // ----- MLS KeyPackage RPCs (`mls_kp.rs`) ------------------------
         //
         // All three are sync handlers — they touch RocksDB and the
         // governor-based per-pair limiter, no `await` inside. Wrapped
@@ -669,7 +664,7 @@ pub async fn handle_dht_request(
                 ),
             ),
         ),
-        // ----- MLS Phase 3a Component B: Welcome queue (`mls_welcome.rs`) ---
+        // ----- MLS Welcome queue (`mls_welcome.rs`) ---------------------
         //
         // Three sync handlers — RocksDB I/O + verifies, no `await`
         // inside. Wrapped in their `wrap_*_outcome` helpers; the ack
@@ -1040,18 +1035,18 @@ mod tests {
     }
 
     /// Stand-in authenticated peer id for tests that don't exercise
-    /// the phase 2d-fix `requester_relay_id` binding (i.e. every
-    /// test except the `QueueFetchAck` ones, which build their own
-    /// matching pair). The byte pattern is deliberately distinctive
+    /// the `requester_relay_id` binding (i.e. every test except the
+    /// `QueueFetchAck` ones, which build their own matching pair). The
+    /// byte pattern is deliberately distinctive
     /// so a debug log surfaces it as "fake_peer" rather than blending
     /// in with the real test fixtures.
     fn fake_peer_id() -> NodeId {
         NodeId::new([0xFAu8; 32])
     }
 
-    /// Phase 1h item 2 — rate-limit wiring: drive the per-peer
-    /// limiter through the same primitive the handler uses, against
-    /// a fresh `Dht`. This is the integration-equivalent of
+    /// Rate-limit wiring: drive the per-peer limiter through the same
+    /// primitive the handler uses, against a fresh `Dht`. This is the
+    /// integration-equivalent of
     /// `rate_limit::tests::limiter_grants_burst_then_denies` but
     /// exercises the actual `Dht::rate_limiters` field (so an
     /// accidental refactor that builds a fresh limiter per call
@@ -1087,10 +1082,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handle_merkle_summary_with_zero_bitset_returns_no_roots() {
         // Empty bitset = "I'm interested in no slices" → empty reply
-        // even on a populated relay. Mirrors the pre-phase-1g
-        // placeholder behaviour for the empty-bitset case so any
-        // existing peer that asks with a zero bitset gets the same
-        // shape of answer.
+        // even on a populated relay. Any peer that asks with a zero
+        // bitset gets the same shape of answer.
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
@@ -1107,7 +1100,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Phase 1i — DhtHello close-reason mapping
+    // DhtHello close-reason mapping
     // ---------------------------------------------------------------
 
     use common::proto::dht_p2p::DhtHello;
@@ -1185,8 +1178,8 @@ mod tests {
     #[test]
     fn dht_hello_metrics_initially_zero_then_bump_on_reject() {
         // Tests the metrics-counter wiring for the dht_hello_*
-        // counters added in phase 1i. Drive the counters via the
-        // public increment helpers (the same helpers
+        // counters. Drive the counters via the public increment
+        // helpers (the same helpers
         // `recv_and_verify_hello` calls) and confirm the observed
         // values change predictably.
         let mut self_seed = [0u8; 32];
@@ -1227,7 +1220,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Sticky-home phase 2d — home-side handler integration tests
+    // Sticky-home — home-side handler integration tests
     // -----------------------------------------------------------------
 
     use common::proto::client_rel::DispatchP;
@@ -1292,9 +1285,9 @@ mod tests {
         dht.routing.write().insert(desc);
     }
 
-    /// Phase 2d — `handle_forward_rpc` queues offline recipient.
-    /// Recipient not in `dht.clients` (None map) → enqueue in
-    /// `cf_dht_queue` and return `Stored`.
+    /// `handle_forward_rpc` queues offline recipient. Recipient not in
+    /// `dht.clients` (None map) → enqueue in `cf_dht_queue` and return
+    /// `Stored`.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_forward_rpc_queues_when_recipient_offline() {
         let mut self_seed = [0u8; 32];
@@ -1324,7 +1317,7 @@ mod tests {
         assert_eq!(queue[0].1.id.0, dispatch.id.0);
     }
 
-    /// Phase 2d — outer sender-relay sig invalid → BadSig.
+    /// Outer sender-relay sig invalid → BadSig.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_forward_rpc_rejects_bad_sender_sig() {
         let mut self_seed = [0u8; 32];
@@ -1353,7 +1346,7 @@ mod tests {
         }
     }
 
-    /// Phase 2d — embedded user-layer `dispatch.sig` invalid → BadSig.
+    /// Embedded user-layer `dispatch.sig` invalid → BadSig.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_forward_rpc_rejects_bad_dispatch_sig() {
         let mut self_seed = [0u8; 32];
@@ -1382,9 +1375,9 @@ mod tests {
         }
     }
 
-    /// Phase 2d — `handle_forward_rpc` returns `NotOwner` when self
-    /// is *not* in the recipient's K-closest set. Force the
-    /// not-in-K case by installing K peers strictly closer than self.
+    /// `handle_forward_rpc` returns `NotOwner` when self is *not* in
+    /// the recipient's K-closest set. Force the not-in-K case by
+    /// installing K peers strictly closer than self.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_forward_rpc_returns_not_owner_when_self_not_in_k_closest() {
         // Self_id deliberately far from the target IPK; install K
@@ -1427,8 +1420,8 @@ mod tests {
         }
     }
 
-    /// Phase 2d — `handle_queue_fetch_rpc` returns the queued messages
-    /// for an owned user.
+    /// `handle_queue_fetch_rpc` returns the queued messages for an
+    /// owned user.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_rpc_returns_messages_for_owned_user() {
         let mut self_seed = [0u8; 32];
@@ -1472,8 +1465,8 @@ mod tests {
         }
     }
 
-    /// Phase 2d — when self is not in the K-closest, return an
-    /// empty exhausted response.
+    /// When self is not in the K-closest, return an empty exhausted
+    /// response.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_rpc_returns_empty_when_self_not_owner() {
         let mut self_seed = [0u8; 32];
@@ -1543,8 +1536,8 @@ mod tests {
         }
     }
 
-    /// Phase 2d — cap returned batch at MAX_FETCH_QUEUE_BATCH and
-    /// return `exhausted = false`.
+    /// Cap returned batch at MAX_FETCH_QUEUE_BATCH and return
+    /// `exhausted = false`.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_rpc_caps_at_max_batch() {
         use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
@@ -1586,7 +1579,7 @@ mod tests {
         }
     }
 
-    /// Phase 2d — `exhausted = true` when the queue holds exactly
+    /// `exhausted = true` when the queue holds exactly
     /// `MAX_FETCH_QUEUE_BATCH` entries (peek of cap+1 returns cap →
     /// exhausted).
     #[tokio::test(flavor = "current_thread")]
@@ -1630,9 +1623,9 @@ mod tests {
         }
     }
 
-    /// Phase 2d — `handle_queue_fetch_ack_rpc` deletes the listed ids
-    /// when the wire `requester_relay_id` matches the connection's
-    /// authenticated peer id.
+    /// `handle_queue_fetch_ack_rpc` deletes the listed ids when the
+    /// wire `requester_relay_id` matches the connection's authenticated
+    /// peer id.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_ack_rpc_deletes_listed_ids() {
         let mut self_seed = [0u8; 32];
@@ -1655,7 +1648,7 @@ mod tests {
         // Ack the first two; the third must remain. Use a synthetic
         // requester id (the "recipient relay" that drained the user's
         // queue from this home). The test then passes the same id as
-        // the authenticated peer id so the phase 2d-fix binding check
+        // the authenticated peer id so the requester binding check
         // passes.
         let mut req_seed = [0u8; 32];
         req_seed[0] = 0x77;
@@ -1687,9 +1680,9 @@ mod tests {
         assert_eq!(remaining[0].1.id.0, ids[2], "the un-acked id survived");
     }
 
-    /// Phase 2d-fix — when `req.requester_relay_id` does NOT match the
-    /// connection's authenticated peer id (the cross-relay replay
-    /// scenario), the ack is rejected with `ok = false` and the
+    /// When `req.requester_relay_id` does NOT match the connection's
+    /// authenticated peer id (the cross-relay replay scenario), the ack
+    /// is rejected with `ok = false` and the
     /// queue is untouched. Even though the user signature is valid
     /// for the *original* requester, the home refuses to honour the
     /// ack because it arrived on a different connection.
@@ -1751,10 +1744,10 @@ mod tests {
         assert_eq!(remaining.len(), 1, "queue untouched after rejection");
     }
 
-    /// 2e cross-cutting review fix — same defense for the read path. A
-    /// malicious relay that captured a signed `QueueFetch` cannot replay
-    /// it on a different connection to leak the user's queue, because
-    /// the home enforces `req.requester_relay_id == authenticated_peer_id`.
+    /// Same defense for the read path. A malicious relay that captured
+    /// a signed `QueueFetch` cannot replay it on a different connection
+    /// to leak the user's queue, because the home enforces
+    /// `req.requester_relay_id == authenticated_peer_id`.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_rpc_rejects_redirected_requester() {
         let mut self_seed = [0u8; 32];
@@ -1797,7 +1790,7 @@ mod tests {
         }
     }
 
-    /// Phase 2d — bad ack signature → `ok = false`, queue untouched.
+    /// Bad ack signature → `ok = false`, queue untouched.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_ack_rpc_rejects_bad_sig() {
         let mut self_seed = [0u8; 32];
@@ -1848,23 +1841,22 @@ mod tests {
         out
     }
 
-    /// Phase 2d — the online-deliver path requires a live QUIC
-    /// `Connection`; the `Delivered` outcome itself can only be
-    /// reached in a real two-relay harness (deferred to phase 2e).
-    /// We *can* test that the handler routes through the
-    /// online-recipient branch when `dht.clients` is `None` (the
-    /// unit-test fixture), in which case the offline path takes
-    /// over and we get `Stored`. This is the canonical
-    /// "online recipient short-circuit absent → fall through"
-    /// regression guard. The full `Delivered` confirmation lives in
-    /// phase 2e's integration suite per the dispatch spec.
+    /// The online-deliver path requires a live QUIC `Connection`; the
+    /// `Delivered` outcome itself can only be reached in a real
+    /// two-relay harness (covered by the integration suite). We *can*
+    /// test that the handler routes through the online-recipient branch
+    /// when `dht.clients` is `None` (the unit-test fixture), in which
+    /// case the offline path takes over and we get `Stored`. This is
+    /// the canonical "online recipient short-circuit absent → fall
+    /// through" regression guard. The full `Delivered` confirmation
+    /// lives in the integration suite.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_forward_rpc_delivers_when_recipient_online() {
         // With no clients map, every path falls through to enqueue.
         // The test verifies the dispatcher reaches the enqueue path
         // (i.e. didn't return BadSig / NotOwner in error). A real
         // `Delivered` outcome requires a live recipient `Connection`
-        // and is integration-tested in phase 2e.
+        // and is integration-tested separately.
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);

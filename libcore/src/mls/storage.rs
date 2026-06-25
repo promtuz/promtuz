@@ -115,9 +115,9 @@ impl PromtuzStorageProvider {
     /// Write a single `(group_id, key_tag, sub_key) -> value` row.
     /// Enforces the per-`group_id` budget for non-empty `group_id`s.
     ///
-    /// Phase 8 (P1 #26): keeps the `mls_group_size` sidecar in sync
-    /// transactionally so subsequent `check_budget` calls are a
-    /// single-row lookup instead of `SUM(length(value))`.
+    /// Keeps the `mls_group_size` sidecar in sync transactionally so
+    /// subsequent `check_budget` calls are a single-row lookup instead
+    /// of `SUM(length(value))`.
     fn put(
         &self,
         group_id: &[u8],
@@ -157,11 +157,10 @@ impl PromtuzStorageProvider {
     /// and return `BudgetExceeded` if it would breach
     /// `MLS_GROUP_STATE_BUDGET_BYTES`.
     ///
-    /// **Phase 8 (P1 #26)**: takes a *delta* (this write's
-    /// `new_len - prev_len`) so the caller doesn't double-count
-    /// when the row is being replaced. Internally consults
-    /// `mls_group_size` (single-row lookup) instead of the prior
-    /// `SUM(length(value))` full-table scan.
+    /// Takes a *delta* (this write's `new_len - prev_len`) so the
+    /// caller doesn't double-count when the row is being replaced.
+    /// Internally consults `mls_group_size` (single-row lookup)
+    /// instead of the prior `SUM(length(value))` full-table scan.
     fn check_budget(
         conn: &Connection,
         group_id: &[u8],
@@ -206,8 +205,8 @@ impl PromtuzStorageProvider {
         Ok(())
     }
 
-    /// Phase 8 (P1 #26): apply a signed delta to the
-    /// `mls_group_size` sidecar row. Caller is inside a transaction.
+    /// Apply a signed delta to the `mls_group_size` sidecar row.
+    /// Caller is inside a transaction.
     fn add_to_group_size(
         conn: &Connection, group_id: &[u8], delta: i64,
     ) -> Result<()> {
@@ -247,7 +246,7 @@ impl PromtuzStorageProvider {
     }
 
     /// Delete a single row. No-op if the row doesn't exist.
-    /// Phase 8 (P1 #26): sidecar size update.
+    /// Updates the sidecar size.
     fn delete_one(&self, group_id: &[u8], key_tag: i64, sub_key: &[u8]) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -274,8 +273,8 @@ impl PromtuzStorageProvider {
 
     /// Delete every row with `(group_id, key_tag)`, regardless of `sub_key`.
     /// Used for proposal-queue clearing.
-    /// Phase 8 (P1 #26): sidecar size update (sums the deleted lengths
-    /// and subtracts in one go).
+    /// Updates the sidecar size (sums the deleted lengths and
+    /// subtracts in one go).
     fn delete_by_tag(&self, group_id: &[u8], key_tag: i64) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -301,7 +300,7 @@ impl PromtuzStorageProvider {
     // ---- list helpers (proposal refs, own leaf nodes) --------------
 
     // -------------------------------------------------------------
-    // Phase 8 (P1 #25): per-element list rows.
+    // Per-element list rows.
     //
     // Layout: each list element lives in its own row keyed
     // `(group_id, key_tag, sub_key = u64_be(list_index))`. Append is
@@ -315,8 +314,8 @@ impl PromtuzStorageProvider {
     // is bounded by the commit cadence; no monotonically-growing
     // unbounded process here.
     //
-    // The previous CBOR-blob layout from earlier phases is wiped by
-    // a Phase 8 migration (`db::mls`).
+    // The previous CBOR-blob layout is wiped by a migration
+    // (`db::mls`).
     // -------------------------------------------------------------
 
     /// Append `value` to the per-element list rows for `(group_id, key_tag)`.
@@ -356,7 +355,7 @@ impl PromtuzStorageProvider {
              VALUES (?1, ?2, ?3, ?4)",
             params![group_id, key_tag, &sub_key as &[u8], &value],
         )?;
-        // Phase 8 (P1 #26): sidecar size accounting.
+        // Sidecar size accounting.
         if !group_id.is_empty() {
             Self::add_to_group_size(&tx, group_id, value.len() as i64)?;
         }
@@ -707,11 +706,10 @@ impl StorageProvider<CURRENT_VERSION> for PromtuzStorageProvider {
         group_id: &GroupId,
     ) -> Result<Vec<(ProposalRef, QueuedProposal)>> {
         let gid = Self::encode_group_id(group_id)?;
-        // Phase 8 (P1 #25): the proposal-ref list is now stored as
-        // multiple per-row entries (one row per index). Read the raw
-        // CBOR bytes for each ref; use them both to decode the
-        // public ProposalRef and as the sub_key for the per-proposal
-        // payload lookup.
+        // The proposal-ref list is stored as multiple per-row entries
+        // (one row per index). Read the raw CBOR bytes for each ref;
+        // use them both to decode the public ProposalRef and as the
+        // sub_key for the per-proposal payload lookup.
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached(
             "SELECT value FROM mls_storage \
@@ -952,17 +950,16 @@ impl StorageProvider<CURRENT_VERSION> for PromtuzStorageProvider {
         self.list_remove(&gid, tags::PROPOSAL_QUEUE_REFS, &pref_bytes)
     }
 
-    // Phase 8 (P1 #25): list-typed entries now live as multiple
-    // rows under different sub_keys; use `delete_by_tag` to drop
-    // them all in one go. Same change for `clear_proposal_queue`
-    // below.
+    // List-typed entries live as multiple rows under different
+    // sub_keys; use `delete_by_tag` to drop them all in one go. Same
+    // for `clear_proposal_queue` below.
     fn delete_own_leaf_nodes<GroupId: traits::GroupId<CURRENT_VERSION>>(
         &self,
         group_id: &GroupId,
     ) -> Result<()> {
         let gid = Self::encode_group_id(group_id)?;
-        // Phase 8 (P1 #25): list elements live as multiple per-row
-        // entries; drop the whole list with `delete_by_tag`.
+        // List elements live as multiple per-row entries; drop the
+        // whole list with `delete_by_tag`.
         self.delete_by_tag(&gid, tags::OWN_LEAF_NODES)
     }
 
@@ -1053,8 +1050,8 @@ impl StorageProvider<CURRENT_VERSION> for PromtuzStorageProvider {
         let gid = Self::encode_group_id(group_id)?;
         // Drop every queued proposal payload (any sub_key) for this group.
         self.delete_by_tag(&gid, tags::QUEUED_PROPOSAL)?;
-        // Phase 8 (P1 #25): proposal-ref list elements live as
-        // multiple per-row entries; `delete_by_tag` drops them all.
+        // Proposal-ref list elements live as multiple per-row entries;
+        // `delete_by_tag` drops them all.
         self.delete_by_tag(&gid, tags::PROPOSAL_QUEUE_REFS)
     }
 

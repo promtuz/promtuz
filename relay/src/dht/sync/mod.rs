@@ -55,10 +55,10 @@ pub(crate) use self::merkle::SliceTree;
 pub(crate) use self::merkle::TREE_DEPTH;
 pub(crate) use self::merkle::record_value_hash;
 pub(crate) use self::merkle::slice_id_for;
-// `tombstone_value_hash` will be wired in once phase 2 adds the
-// `FetchTombstone` RPC; for now the tombstone-aware Merkle entry is
-// removed (rather than re-hashed under a tombstone domain) per the
-// dispatch comment in `store.rs::store_tombstone`.
+// `tombstone_value_hash` will be wired in once a future `FetchTombstone`
+// RPC is added; for now the tombstone-aware Merkle entry is removed
+// (rather than re-hashed under a tombstone domain) per the note in
+// `store.rs::store_tombstone`.
 #[allow(unused_imports)]
 pub(crate) use self::merkle::tombstone_value_hash;
 
@@ -278,8 +278,8 @@ pub(crate) fn is_slice_bit_set(bitset: &[u8; 32], slice_id: u8) -> bool {
 }
 
 /// All-ones bitset — "I'm interested in every slice." Used by the v1
-/// scheduler to learn about every slice; phase 2 will narrow this to
-/// the relay's ownership window per §6.2.
+/// scheduler to learn about every slice; a future revision will narrow
+/// this to the relay's ownership window per §6.2.
 pub(crate) fn all_slices_bitset() -> [u8; 32] {
     [0xFFu8; 32]
 }
@@ -300,7 +300,7 @@ pub(crate) fn all_slices_bitset() -> [u8; 32] {
 /// are *not* re-added here: they cease to exist on the network once
 /// their honour-window passes, so persisting them in the Merkle tree
 /// past restart would diverge replicas that GC'd theirs in the
-/// meantime. Phase 2 may revisit if tombstone-loss-on-restart proves
+/// meantime. This may be revisited if tombstone-loss-on-restart proves
 /// problematic in practice.
 ///
 /// design-doc: §6.4 (acceptable cost), §1.2 (Tombstones honour window).
@@ -372,13 +372,12 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
     sync_tick.tick().await;
     evict_tick.tick().await;
 
-    // Bootstrap-retry state (phase 1h item 5):
+    // Bootstrap-retry state:
     // - `bootstrap_backoff_ms` doubles after each failed retry, capped
     //   at `BOOTSTRAP_RETRY_MAX_BACKOFF_MS`.
     // - `last_bootstrap_attempt_ms` is the wall-clock of the last
     //   *attempt* (not just warning) — we only retry when the backoff
-    //   window has fully elapsed. Renamed from the phase-1g
-    //   `_warn_ms` because the scheduler now actually drives the
+    //   window has fully elapsed. The scheduler actually drives the
     //   bootstrap RPC, not just emits a warning.
     let mut bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
     let mut last_bootstrap_attempt_ms: u64 = 0;
@@ -447,8 +446,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                             None => {
                                 // No resolver handle attached — this
                                 // is the unit-test path, or a relay
-                                // that never wired one in. Same
-                                // behaviour as phase 1g: log once per
+                                // that never wired one in. Log once per
                                 // backoff window and double the
                                 // backoff so we don't flood logs.
                                 info!(
@@ -470,8 +468,8 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 if evicted > 0 {
                     info!("DHT scheduler: evicted {evicted} expired record(s)");
                 }
-                // Phase 2d-fix: lazy K-set drift migration. After
-                // pruning expired records, sweep `cf_dht_queue` for
+                // Lazy K-set drift migration. After pruning expired
+                // records, sweep `cf_dht_queue` for
                 // entries whose recipient is no longer in this
                 // relay's K-closest set and migrate them to the new
                 // K-closest. Bounded per-sweep by
@@ -485,10 +483,10 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
     }
 }
 
-/// Phase 2d-fix — drive one drift-migration sweep: walk
-/// `cf_dht_queue` for candidates whose recipient is no longer in
-/// this relay's K-closest set, fan out `Forward` RPCs to the new
-/// homes, and on success delete the local entry.
+/// Drive one drift-migration sweep: walk `cf_dht_queue` for candidates
+/// whose recipient is no longer in this relay's K-closest set, fan out
+/// `Forward` RPCs to the new homes, and on success delete the local
+/// entry.
 ///
 /// **Why split out from `run_scheduler`**: keeps the scheduler's
 /// `select!` block readable AND lets unit tests drive the sweep
@@ -741,7 +739,7 @@ mod tests {
     /// Smoke-test the scheduler's cancellation path: spawn it on a
     /// fresh `Dht` (with no peers) and verify that cancelling the
     /// token causes the loop to exit promptly. The full
-    /// peer-driven sync behaviour is integration territory (phase 2).
+    /// peer-driven sync behaviour is integration territory.
     ///
     /// `start_paused = true` would let us pin virtual time (and require
     /// the `tokio/test-util` feature); without it we rely on the fact
@@ -824,13 +822,13 @@ mod tests {
         assert_eq!(bs[31], 0b1000_0000);
     }
 
-    /// Phase 2d-fix — verify the `run_drift_migration_sweep` plumbing
-    /// actually feeds candidates from `plan_drift_migrations` into
-    /// the migration driver and bumps `migrations_attempted` on each
-    /// candidate. We can't test the actual outbound `Forward` RPC
-    /// outcome (that needs a live two-relay harness, deferred to
-    /// phase 2e) — only the wiring: scheduler → planner → driver →
-    /// metrics counter, with the per-candidate cap honoured.
+    /// Verify the `run_drift_migration_sweep` plumbing actually feeds
+    /// candidates from `plan_drift_migrations` into the migration driver
+    /// and bumps `migrations_attempted` on each candidate. We can't test
+    /// the actual outbound `Forward` RPC outcome (that needs a live
+    /// two-relay harness, future work) — only the wiring: scheduler →
+    /// planner → driver → metrics counter, with the per-candidate cap
+    /// honoured.
     ///
     /// **Setup**: a `Dht` whose `self_id = [0xFF; 32]` is far from a
     /// recipient at all-zero IPK; install K=3 peers strictly closer
@@ -965,8 +963,8 @@ mod tests {
         );
     }
 
-    /// Phase 2d-fix — when the planner returns no candidates (the
-    /// steady-state case), the sweep is a no-op and nothing bumps.
+    /// When the planner returns no candidates (the steady-state case),
+    /// the sweep is a no-op and nothing bumps.
     /// Catches a regression where the sweep accidentally bumps
     /// metrics on every tick regardless of work.
     #[tokio::test(flavor = "current_thread")]

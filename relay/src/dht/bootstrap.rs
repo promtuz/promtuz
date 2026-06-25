@@ -43,25 +43,25 @@ use crate::quic::resolver_link::ResolverLinkHandle;
 /// Phases of the bootstrap state machine. Mirrors §3.5 verbatim so the
 /// implementation can be a `match`-driven step machine.
 ///
-/// Stored as a state field on [`Dht`] is a phase 1g concern (the
-/// scheduler that re-runs bootstrap on a timer needs to read it); for
-/// phase 1c we just thread the variant through return values.
+/// The variant is threaded through return values rather than stored on
+/// [`Dht`]; the scheduler that re-runs bootstrap reads the outcome, not a
+/// persistent state field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BootstrapState {
     /// Initial: routing table empty, no resolver query in flight.
     Cold,
 
     /// Resolver returned descriptors; we're inserting them into the
-    /// routing table. (Phase 1c stops here; 1d will dial each and run
-    /// speculative `PING`s to populate `rtt_ema_ms`.)
+    /// routing table. (Populating `rtt_ema_ms` with speculative `PING`s to
+    /// each is future work.)
     Warming,
 
-    /// Routing table has enough peers to start answering RPCs;
-    /// self-FindNode is in flight. (Phase 1e.)
+    /// Routing table has enough peers to start answering RPCs; the
+    /// self-FindNode walk is in flight.
     Walking,
 
     /// Bootstrap complete; relay can serve `FindValue`/`Store` for
-    /// itself. (Phase 1e.)
+    /// itself.
     Ready,
 }
 
@@ -88,7 +88,7 @@ const BOOTSTRAP_COUNT_RTT_NEAR: u8 = 4;
 pub enum BootstrapError {
     /// The resolver session is not currently live. Either the resolver
     /// link hasn't connected yet (race at startup) or it's reconnecting
-    /// after a transient disconnect. Phase 1g will retry on a schedule.
+    /// after a transient disconnect. The scheduler retries on a backoff.
     #[error("bootstrap: no live resolver session for GetBootstrapPeers")]
     ResolverUnavailable,
 
@@ -111,9 +111,9 @@ pub enum BootstrapError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the §3.5 bootstrap state machine end-to-end. Phase 1c covers
-/// phases A (resolver query) and B (routing-table insert); phase 1e
-/// covers C (self-FindNode); phase 1g adds the periodic retry loop.
+/// Run the §3.5 bootstrap state machine end-to-end: phase A (resolver
+/// query), phase B (routing-table insert), and phase C (self-FindNode
+/// convergence). The scheduler in `dht/sync` adds the periodic retry loop.
 ///
 /// This function never panics. Errors are returned for the caller to
 /// log; the relay is expected to keep running either way.
@@ -248,7 +248,8 @@ fn node_descriptor_from(rd: &RelayDescriptor) -> NodeDescriptor {
     NodeDescriptor { id: rd.id, addr: rd.addr, pubkey: rd.pubkey }
 }
 
-// `BootstrapState::Cold`, `Warming`, `Walking` have no consumers in
-// phase 1c — they only become live when the phase 1g scheduler reads
-// the field off `Dht`. The crate-wide `#![allow(dead_code)]` on
-// `dht/mod.rs` covers this until then; no per-item suppression needed.
+// `BootstrapState::Cold`, `Warming`, `Walking` have no consumers yet —
+// they only become live once the scheduler reads the state off `Dht`
+// rather than the bootstrap return value. The crate-wide
+// `#![allow(dead_code)]` on `dht/mod.rs` covers this; no per-item
+// suppression needed.

@@ -1,4 +1,4 @@
-//! Phase 9 §3.9 — Tier-1 MLS wrapper handlers (libcore → home over
+//! §3.9 — Tier-1 MLS wrapper handlers (libcore → home over
 //! `client/0`). Each handler:
 //!
 //! 1. resolves the home's DHT (replies [`SRelayPacket::DhtUnavailable`]

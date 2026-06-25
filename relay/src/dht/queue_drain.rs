@@ -1,4 +1,4 @@
-//! Recipient-side K-closest queue-fetch fan-out (sticky-home phase 2c).
+//! Recipient-side K-closest queue-fetch fan-out (sticky-home).
 //!
 //! When a user reconnects to a relay R_r that is **not** in the user's
 //! K-closest set by XOR distance, R_r cannot serve the queue locally
@@ -14,22 +14,21 @@
 //! parallel-RPC loop, same deadline-bounded budget, same per-peer
 //! best-effort tally (a single home's failure is non-fatal).
 //!
-//! ## Phase scope split — deferred deletion path
+//! ## Fetch / deletion split
 //!
-//! Phase 2c implements *fetch + deliver only*. The matching
+//! [`fetch_remote_queues`] does *fetch + deliver only*. The matching
 //! `QueueFetchAck` (which proves the user received specific dispatch
-//! IDs and lets the home delete them) is deferred to phase 2d. The
-//! reason: `QueueFetchAck`'s transcript signs `delivered_ids`, but
-//! that list is only knowable *after* fetching has happened — the
-//! signing input has to be assembled on the recipient relay and then
-//! handed to libcore for a per-batch user signature, which is a new
-//! libcore RPC we deliberately deferred.
+//! IDs and lets the home delete them) is driven separately by
+//! [`ack_remote_queues`], because `QueueFetchAck`'s transcript signs
+//! `delivered_ids` — a list only knowable *after* fetching has
+//! happened. The signing input has to be assembled on the recipient
+//! relay and then handed to libcore for a per-batch user signature.
 //!
-//! **Consequence**: queued copies linger at the home until natural
-//! TTL expiry (~10 min), so duplicate delivery is possible if the
-//! user reconnects multiple times within that window. The client
-//! must dedupe by [`DispatchP::id`]; this module also dedupes
-//! cross-home replicas by `id` before returning so the
+//! **Consequence**: until the ack round runs, queued copies linger at
+//! the home until natural TTL expiry (~10 min), so duplicate delivery
+//! is possible if the user reconnects multiple times within that
+//! window. The client must dedupe by [`DispatchP::id`]; this module
+//! also dedupes cross-home replicas by `id` before returning so the
 //! down-stream drain count is honest.
 //!
 //! ## Lock contract
@@ -128,14 +127,14 @@ pub(crate) enum QueueDrainError {
 ///    dedupe is stable across reconnects.
 /// 6. Total wall-clock bound: [`QUEUE_FETCH_TIMEOUT_MS`].
 ///
-/// **Important — phase-scope deferral**: this function does **not**
-/// send `QueueFetchAck` to any home. Per the design discussion in
-/// the phase 2c dispatch, the deletion path lands in phase 2d
-/// (it requires per-batch user signing in libcore). Until then the
-/// home keeps its `cf_dht_queue` entries until natural TTL expiry
-/// — which means the same dispatch can arrive on the next
-/// reconnect. The client dedupes by `DispatchP.id` (and so does
-/// this function for the cross-home case).
+/// **Important**: this function does **not** send `QueueFetchAck` to
+/// any home — the deletion path is driven separately by
+/// [`ack_remote_queues`] (it requires per-batch user signing in
+/// libcore). Until the ack round runs, the home keeps its
+/// `cf_dht_queue` entries until natural TTL expiry — which means the
+/// same dispatch can arrive on the next reconnect. The client dedupes
+/// by `DispatchP.id` (and so does this function for the cross-home
+/// case).
 ///
 /// **Caller's contract**: the recipient drain handler in
 /// `quic/handler/client/events/drain.rs` snaps `ctx.drain_auth` out
@@ -153,9 +152,9 @@ pub(crate) async fn fetch_remote_queues(
         .map(|(messages, _)| messages)
 }
 
-/// Phase 2d — extended variant of [`fetch_remote_queues`] that *also*
-/// returns the per-home `delivered_ids` map the recipient relay needs
-/// for the `QueueFetchAck` deletion path.
+/// Extended variant of [`fetch_remote_queues`] that *also* returns the
+/// per-home `delivered_ids` map the recipient relay needs for the
+/// `QueueFetchAck` deletion path.
 ///
 /// **Map semantics**: each home contributing to the drain is keyed by
 /// its `NodeId`; the value is the list of `DispatchP.id`s that home
@@ -219,9 +218,9 @@ pub(crate) async fn fetch_remote_queues_with_homes(
     //    [`QUEUE_FETCH_TIMEOUT_MS`] total wall-clock. Each home runs
     //    its own page-loop locally — we don't centralise paging here
     //    because that would head-of-line block one slow home behind
-    //    a fast one. Phase 2d: we now track `(NodeId, Vec<DispatchP>)`
-    //    so the caller can build per-home `delivered_ids` lists for
-    //    the `QueueFetchAck` round.
+    //    a fast one. We track `(NodeId, Vec<DispatchP>)` so the caller
+    //    can build per-home `delivered_ids` lists for the
+    //    `QueueFetchAck` round.
     let per_home_with_id: Vec<(NodeId, Vec<DispatchP>)> =
         remote_fetch_parallel_with_homes(&dht, &homes, &fetch_pkt).await;
 
@@ -283,9 +282,9 @@ async fn remote_fetch_parallel(
         .collect()
 }
 
-/// Phase 2d — variant of [`remote_fetch_parallel`] that preserves the
-/// per-home origin so the caller can build a `(NodeId →
-/// delivered_ids)` map for the `QueueFetchAck` fan-out.
+/// Variant of [`remote_fetch_parallel`] that preserves the per-home
+/// origin so the caller can build a `(NodeId → delivered_ids)` map for
+/// the `QueueFetchAck` fan-out.
 ///
 /// Same fan-out shape (parallel `JoinSet` bounded by
 /// [`QUEUE_FETCH_TIMEOUT_MS`]) — only the result type changes.
@@ -379,10 +378,10 @@ async fn remote_fetch_one(
 }
 
 // ---------------------------------------------------------------------------
-// Home-side handlers (sticky-home phase 2d)
+// Home-side handlers (sticky-home)
 // ---------------------------------------------------------------------------
 
-/// Phase 2d — home-side handler for `DhtRequest::QueueFetch`.
+/// Home-side handler for `DhtRequest::QueueFetch`.
 ///
 /// Verifies the user's signature on the fetch request, confirms this
 /// relay is in the user's K-closest set, and returns up to
@@ -419,7 +418,7 @@ pub(crate) async fn handle_queue_fetch_rpc(
     // 1. Requester binding — the wire-claimed `requester_relay_id` must
     //    match the connection's authenticated peer id. Closes the
     //    cross-relay replay vector. Same shape as the ack handler's
-    //    check (phase 2d-fix).
+    //    check.
     if req.requester_relay_id != authenticated_peer_id {
         return QueueFetchResp { messages: Vec::new(), exhausted: true };
     }
@@ -452,11 +451,11 @@ pub(crate) async fn handle_queue_fetch_rpc(
     QueueFetchResp { messages, exhausted }
 }
 
-/// Phase 2d — home-side handler for `DhtRequest::QueueFetchAck`.
+/// Home-side handler for `DhtRequest::QueueFetchAck`.
 ///
 /// The ack signature proves the user authorised deletion of the
-/// listed dispatch ids *and* (phase 2d-fix) authorised the specific
-/// requesting relay to drive the deletion. It does **not** bind a
+/// listed dispatch ids *and* authorised the specific requesting relay
+/// to drive the deletion. It does **not** bind a
 /// target-home identity — the transcript is shared across all K
 /// homes by design, so one signature drains all — but the
 /// requester-binding closes the cross-relay replay vector where a
@@ -479,8 +478,8 @@ pub(crate) async fn handle_queue_fetch_rpc(
 ///
 /// On signature/skew/length/requester-mismatch failure we return
 /// `ok = false`; the per-stream dispatcher does NOT additionally
-/// close the connection because (per phase 2a contract) the per-RPC
-/// verifier returns soft rejects in the response body. Length-
+/// close the connection because the per-RPC verifier returns soft
+/// rejects in the response body. Length-
 /// overflow specifically *would* merit a hard close
 /// (`CloseReason::DhtForwardRejected`) but the dispatcher contract is
 /// "one request, one response", so the soft reject is the only path
@@ -490,9 +489,9 @@ pub(crate) async fn handle_queue_fetch_rpc(
 pub(crate) async fn handle_queue_fetch_ack_rpc(
     dht: &Arc<Dht>, req: QueueFetchAck, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> QueueFetchAckResp {
-    // 1. Phase 2d-fix — requester binding. If the wire-claimed
-    //    `requester_relay_id` doesn't match the connection's
-    //    authenticated peer id, the ack was either captured on a
+    // 1. Requester binding. If the wire-claimed `requester_relay_id`
+    //    doesn't match the connection's authenticated peer id, the ack
+    //    was either captured on a
     //    different connection (the cross-relay replay path) or the
     //    requesting relay is misconfigured. Either way, reject.
     if req.requester_relay_id != authenticated_peer_id {
@@ -525,10 +524,10 @@ fn self_is_in_k_closest_qd(dht: &Dht, target: &[u8; 32]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Recipient-side ack fan-out (sticky-home phase 2d)
+// Recipient-side ack fan-out (sticky-home)
 // ---------------------------------------------------------------------------
 
-/// Phase 2d — recipient-relay → home-relays `QueueFetchAck` fan-out.
+/// Recipient-relay → home-relays `QueueFetchAck` fan-out.
 ///
 /// Called from the post-`AckDrain` flow after the recipient client
 /// has durably stored the drained dispatches *and* libcore has
@@ -542,8 +541,8 @@ fn self_is_in_k_closest_qd(dht: &Dht, target: &[u8; 32]) -> bool {
 /// a queue-not-deleted at one home means duplicate delivery on the
 /// next reconnect, which the client already dedupes by id.
 ///
-/// **Phase 2d-fix — `requester_relay_id`**: the wire ack binds this
-/// relay's NodeId into the user-signed transcript. Each home rejects
+/// **`requester_relay_id`**: the wire ack binds this relay's NodeId
+/// into the user-signed transcript. Each home rejects
 /// the ack at the handler if its connection's authenticated peer id
 /// doesn't equal `dht.node_id` (i.e. each home only honours acks
 /// arriving on its connection from *this* relay). One signature
@@ -641,9 +640,9 @@ async fn remote_ack_one(dht: &Arc<Dht>, peer: &NodeDescriptor, ack: &QueueFetchA
 mod tests {
     //! Tests focus on the *coordinator* logic — K-closest filtering,
     //! cross-home dedupe, and lone-relay edge case. Real RPC paths
-    //! need a live two-relay harness (deferred to the phase 2e
-    //! integration suite per the dispatch spec); we cover the
-    //! routing-table interaction here with deterministic fixtures.
+    //! need a live two-relay harness (covered by the integration
+    //! suite); we cover the routing-table interaction here with
+    //! deterministic fixtures.
 
     use std::collections::HashSet;
     use std::sync::Arc;

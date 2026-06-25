@@ -68,11 +68,11 @@ const MIGRATION_ARRAY: &[M] = &[
         "CREATE INDEX idx_latency_samples_relay ON relay_latency_samples(relay_id, measured_at DESC);",
     ),
     // Persist `RelayDescriptor.pubkey` (resolver-vended, authenticated
-    // via each relay's signed `RelayHello`). Added in Phase 8 for
-    // libcore-side TLS-cert SPKI pinning on the Option-A `peer/1` dial
-    // path; that path was removed in Phase 9 (libcore no longer dials
-    // peer/1), so this column is now vestigial — retained pending a
-    // cleanup pass that drops it along with the resolver wire field.
+    // via each relay's signed `RelayHello`). Added for libcore-side
+    // TLS-cert SPKI pinning on the Option-A `peer/1` dial path; that
+    // path has since been removed (libcore no longer dials peer/1), so
+    // this column is now vestigial — retained pending a cleanup pass
+    // that drops it along with the resolver wire field.
     //
     // Nullable: rows pre-dating this migration carry NULL.
     M::up(

@@ -11,8 +11,8 @@ use crate::db::peers::ContactRow;
 /// Promtuz "address book" entry — the long-term identity (`ipk`) plus the
 /// nullable handle of the implicit 1:1 MLS group with this contact.
 ///
-/// **Phase 4 of the MLS rollout** (`misc/specs/MLS.md` §11.3) replaced the
-/// v2-era static-shared-key fields (`epk`, `enc_esk`) with `mls_group_id`.
+/// The MLS rollout (`misc/specs/MLS.md` §11.3) replaced the v2-era
+/// static-shared-key fields (`epk`, `enc_esk`) with `mls_group_id`.
 /// On first send to a contact whose `mls_group_id` is `None`, the
 /// messaging layer fetches their KeyPackage, builds a fresh group, and
 /// persists the group id back via [`Self::set_mls_group_id`].

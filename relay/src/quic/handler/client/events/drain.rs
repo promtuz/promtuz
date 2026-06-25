@@ -1,5 +1,5 @@
 //! Recipient-side drain protocol — both the legacy local-queue path
-//! and the sticky-home phase 2c remote-fetch path live here.
+//! and the sticky-home remote-fetch path live here.
 //!
 //! ## Two queue sources
 //!
@@ -8,16 +8,16 @@
 //!   a sender's local relay also fails to fan out to the K-closest
 //!   homes. Values are postcard-encoded `DeliverP` (no `to` field —
 //!   the recipient is encoded in the key prefix).
-//! - **`cf_dht_queue`** (DHT phase 2). Per-recipient K-closest queue
-//!   populated by `forward.rs::forward_to_homes` (sender side) and,
-//!   in phase 2d, the home-side `Forward` handler. Values are
-//!   postcard-encoded `DispatchP` (the full sender-signed envelope).
+//! - **`cf_dht_queue`** (the DHT queue CF). Per-recipient K-closest
+//!   queue populated by `forward.rs::forward_to_homes` (sender side)
+//!   and the home-side `Forward` handler. Values are postcard-encoded
+//!   `DispatchP` (the full sender-signed envelope).
 //!
 //! The drain unifies both into a stream of `DeliverP` going out to
 //! the client. `DispatchP → DeliverP` strips the `to` field; `id`,
 //! `from`, `payload`, `sig` carry over verbatim.
 //!
-//! ## Sticky-home phase 2c integration
+//! ## Sticky-home remote-fetch integration
 //!
 //! Per `STICKY_HOME_RELAY.md` §4.3, when this relay R_r is **not**
 //! in the user's K-closest set, R_r dials the K homes and pulls
@@ -25,13 +25,13 @@
 //! authorisation, see `events::drain_auth`) authenticates the fetch.
 //! Without `DrainAuth`, the remote-fetch path is skipped and only
 //! the local CFs are drained — graceful degradation for clients that
-//! predate phase 2c.
+//! don't supply one.
 //!
-//! ## Phase split — deferred ack-to-home path
+//! ## Ack-to-home path
 //!
-//! Phase 2c implements *fetch + deliver only*. The matching
+//! The remote-fetch path delivers messages, and the matching
 //! `QueueFetchAck` (which deletes the dispatched messages from the
-//! homes' `cf_dht_queue`) is deferred to phase 2d. Until then,
+//! homes' `cf_dht_queue`) runs afterwards. Should the ack not land,
 //! homes keep their copies until natural TTL expiry, and a user who
 //! reconnects again within the TTL window may receive the same
 //! dispatch a second time. The client dedupes by `DispatchP.id`;
@@ -67,9 +67,9 @@ use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::storage::MessageKey;
 use crate::util::systime;
 
-/// Phase 2d — extended fetch result that carries the per-home
-/// `delivered_ids` map and the home descriptors so the post-`AckDrain`
-/// flow can issue `QueueFetchAck` to each home.
+/// Extended fetch result that carries the per-home `delivered_ids`
+/// map and the home descriptors so the post-`AckDrain` flow can issue
+/// `QueueFetchAck` to each home.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RemoteFetchResult {
     pub messages: Vec<DispatchP>,
@@ -82,10 +82,10 @@ pub(crate) struct RemoteFetchResult {
 /// tests override this to inject deterministic homes-returned-x stubs
 /// without standing up real two-relay QUIC.
 ///
-/// **Phase 2d**: result type is now [`RemoteFetchResult`] (carries
-/// per-home metadata for the `QueueFetchAck` round). Tests that don't
-/// care about the ack-fanout half can return a `RemoteFetchResult`
-/// with empty `per_home`/`homes`.
+/// The result type is [`RemoteFetchResult`] (carries per-home
+/// metadata for the `QueueFetchAck` round). Tests that don't care
+/// about the ack-fanout half can return a `RemoteFetchResult` with
+/// empty `per_home`/`homes`.
 ///
 /// `Send + Sync` because the closure stores in
 /// `static`-equivalent state in a relay's `Arc<Dht>`-powered fan-out
@@ -139,9 +139,10 @@ pub(crate) async fn handle_drain_queue_with(
     // 2. Drain local cf_messages (per the legacy contract). We must
     //    keep the existing `MessageKey`-tracking semantics so the
     //    follow-up `AckDrain` can clean up. We *do not* track keys
-    //    for the cross-cf or remote sources here — those are
-    //    deferred to phase 2d (cross-CF: the `cf_dht_queue` drain,
-    //    once self-as-home is stable; remote: needs `QueueFetchAck`).
+    //    for the cross-cf source here — the `cf_dht_queue` drain is
+    //    deferred (it needs its own in-place `MessageKey` tracking
+    //    once self-as-home is stable). The remote source is cleaned
+    //    up via `QueueFetchAck` after the ack lands.
     let mut delivered_keys: Vec<MessageKey> = Vec::new();
     let mut seen_ids: std::collections::HashSet<[u8; 16]> =
         std::collections::HashSet::new();
@@ -153,8 +154,8 @@ pub(crate) async fn handle_drain_queue_with(
     //    prefix. The two CFs share the same `MessageKey` shape and
     //    the prefix-extractor is identical (`store::dht_cf_descriptors`).
     //    A self-as-home relay's `cf_dht_queue` can hold dispatches
-    //    that arrived via either the §4.2 sender fan-out or, in
-    //    phase 2d, the inbound `Forward` handler.
+    //    that arrived via either the §4.2 sender fan-out or the
+    //    inbound `Forward` handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
         iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue);
     }
@@ -190,10 +191,9 @@ pub(crate) async fn handle_drain_queue_with(
                     deduped.push(dispatch_to_deliver(d));
                 }
             }
-            // Phase 2d: stash per-home delivered ids + home
-            // descriptors for the post-`AckDrain` `QueueFetchAck`
-            // fan-out. Replace any prior pending state — the latest
-            // drain wins.
+            // Stash per-home delivered ids + home descriptors for the
+            // post-`AckDrain` `QueueFetchAck` fan-out. Replace any
+            // prior pending state — the latest drain wins.
             *ctx.pending_remote_drain.lock() = Some(RemoteDrainState {
                 user_ipk: recipient_arr,
                 per_home: result.per_home,
@@ -202,7 +202,7 @@ pub(crate) async fn handle_drain_queue_with(
         } else {
             // Either we have no auth (legacy client) or DHT is
             // disabled. Log and degrade to local-only — same shape
-            // as the pre-2c behaviour.
+            // as the local-only drain.
             trace!(
                 "DRAIN: !i_am_home but drain_auth/dht missing — serving local only"
             );
@@ -220,27 +220,25 @@ pub(crate) async fn handle_drain_queue_with(
     //    subset of what's still on disk (we haven't deleted yet),
     //    so we'd otherwise grow the pending list with duplicates.
     //
-    //    Phase-scope note: `pending_drain` only tracks `cf_messages`
-    //    keys. The `cf_dht_queue` cross-cf and remote-home sources
-    //    have no on-this-relay deletion semantics yet — phase 2d
-    //    introduces `QueueFetchAck` for the remote case and the
-    //    self-as-home cf_dht_queue cleanup needs its own in-place
-    //    `MessageKey` tracking. For now those messages are still
-    //    re-delivered on the next reconnect; the client dedupes by
-    //    `DispatchP.id`.
+    //    Scope note: `pending_drain` only tracks `cf_messages` keys.
+    //    The remote-home source is GC'd via `QueueFetchAck`, but the
+    //    `cf_dht_queue` cross-cf source has no on-this-relay deletion
+    //    semantics yet — the self-as-home cf_dht_queue cleanup needs
+    //    its own in-place `MessageKey` tracking (not yet built). For
+    //    now those messages are still re-delivered on the next
+    //    reconnect; the client dedupes by `DispatchP.id`.
     *ctx.pending_drain.lock() = delivered_keys;
 
     Ok(())
 }
 
 /// Atomically deletes every `cf_messages` key the most recent drain
-/// delivered, and (phase 2d) fans a `QueueFetchAck` out to all K
-/// homes that contributed to the remote-fetch round so they GC
-/// their copies of the now-acknowledged dispatches.
+/// delivered, and fans a `QueueFetchAck` out to all K homes that
+/// contributed to the remote-fetch round so they GC their copies of
+/// the now-acknowledged dispatches.
 ///
 /// **Order of operations**:
-/// 1. Local `cf_messages` deletion via WriteBatch (durable; same as
-///    pre-2d).
+/// 1. Local `cf_messages` deletion via WriteBatch (durable).
 /// 2. If `pending_remote_drain` is set: ask libcore to sign an ack
 ///    over the union `delivered_ids` (5s timeout via
 ///    `oneshot::Receiver`), then send `QueueFetchAck` to each home
@@ -257,7 +255,7 @@ pub(crate) async fn handle_drain_queue_with(
 pub(super) async fn handle_ack_drain(
     ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
-    // 1. Local `cf_messages` GC (unchanged from pre-2d).
+    // 1. Local `cf_messages` GC.
     let keys = std::mem::take(&mut *ctx.pending_drain.lock());
     if !keys.is_empty() {
         let mut batch = WriteBatch::default();
@@ -268,7 +266,7 @@ pub(super) async fn handle_ack_drain(
         trace!("DRAIN: cleared {} acked messages", keys.len());
     }
 
-    // 2. Phase 2d — remote `QueueFetchAck` fan-out.
+    // 2. Remote `QueueFetchAck` fan-out.
     let remote_state = ctx.pending_remote_drain.lock().take();
     if let Some(state) = remote_state
         && let Err(err) = run_remote_ack_round(&ctx, tx, state).await {
@@ -278,7 +276,7 @@ pub(super) async fn handle_ack_drain(
     Ok(())
 }
 
-/// Phase 2d — orchestrate the post-`AckDrain` remote-ack round:
+/// Orchestrate the post-`AckDrain` remote-ack round:
 /// 1. Compute the union of delivered ids across all homes (caps at
 ///    [`MAX_FETCH_QUEUE_ACK_IDS`] to match the home-side verifier;
 ///    overflow truncates oldest-first because per-home iteration
@@ -326,7 +324,7 @@ async fn run_remote_ack_round(
     let (sender, receiver) = oneshot::channel::<AckAuthPayload>();
     *ctx.ack_auth.lock() = Some(sender);
 
-    // 3. Send the AckAuthRequest to the client. Phase 2d-fix: include
+    // 3. Send the AckAuthRequest to the client. Include
     //    `requester_relay_id` so libcore signs the per-K-home ack
     //    transcript binding to *this* relay's identity. The home
     //    cross-checks `requester_relay_id == authenticated_peer_id`
@@ -458,9 +456,9 @@ fn iterate_cf_messages(
 /// [`dispatch_to_deliver`]) onto `out`.
 ///
 /// The keys here are **not** tracked in `pending_drain` because the
-/// cross-CF cleanup contract is deferred to phase 2d. A re-drain
-/// before phase 2d ships will re-deliver these messages — the
-/// client's `DispatchP.id` dedupe handles the redundancy.
+/// cross-CF cleanup contract is not yet built. A re-drain will
+/// re-deliver these messages — the client's `DispatchP.id` dedupe
+/// handles the redundancy.
 fn iterate_cf_dht_queue(dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<DeliverP>) {
     let cf = match dht.rocks.cf_handle(crate::dht::store::CF_DHT_QUEUE) {
         Some(cf) => cf,
@@ -510,10 +508,10 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
 /// local-only rather than failing the whole drain). Per-error
 /// telemetry lives inside the underlying helper.
 ///
-/// Phase 2d: also computes the K-closest descriptor list (filtered to
-/// non-self) and includes it in the result so the
-/// `handle_ack_drain` half can fan a `QueueFetchAck` out to those
-/// homes without re-walking the routing table.
+/// Also computes the K-closest descriptor list (filtered to non-self)
+/// and includes it in the result so the `handle_ack_drain` half can
+/// fan a `QueueFetchAck` out to those homes without re-walking the
+/// routing table.
 fn default_remote_fetcher() -> RemoteFetcher {
     Arc::new(
         |dht: Arc<Dht>, user_ipk: [u8; 32], auth: DrainAuth, self_id: NodeId| {
@@ -573,8 +571,8 @@ mod tests {
     //! These two are exercised against fixtures the function-level
     //! helpers expose without needing the full handler. The handler
     //! itself is one straight-line pipeline that delegates to those
-    //! helpers; the integration test of the full pipeline lands in
-    //! the phase 2e cluster smoke test.
+    //! helpers; the integration test of the full pipeline is left to
+    //! a future cluster smoke test.
 
     use common::proto::client_rel::DispatchP;
 

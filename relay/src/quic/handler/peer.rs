@@ -10,11 +10,11 @@ use crate::relay::RelayRef;
 ///
 /// When the DHT is enabled, hand the connection off to the DHT's per-
 /// connection driver (`dht::handler::handle_peer_connection`). When it
-/// is disabled (Phase 1 default per §11.8), close the connection with
+/// is disabled (the default per §11.8), close the connection with
 /// `UnsupportedRole` so the dialer can stop retrying.
 ///
-/// design-doc: §2.3 (ALPN reuse), §10 (Phase 1 keeps `peer/1` advertised
-/// but the underlying handler is the DHT dispatcher).
+/// design-doc: §2.3 (ALPN reuse), §10 (`peer/1` stays advertised but
+/// the underlying handler is the DHT dispatcher).
 impl Handler {
     pub async fn handle_peer(self, relay: RelayRef) {
         let conn = self.conn.clone();

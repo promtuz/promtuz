@@ -1,4 +1,4 @@
-//! Phase 3a Component A — Client-side KeyPackage stash management.
+//! Client-side KeyPackage stash management.
 //!
 //! Mints, persists, and tracks the client's pool of one-time
 //! KeyPackages (RFC 9420 §5; promtuz spec `MLS.md` §5).
@@ -45,7 +45,7 @@
 //!    - Anti-pinning rotation
 //!      ([`KP_SCHEDULED_ROTATION_MS`] cadence).
 //!    - Consumption signal ([`KeyPackageStash::on_consumed`] —
-//!      Phase 3b will hook this when a Welcome arrives).
+//!      hooked when a Welcome arrives).
 //!
 //! Splitting these two layers means the openmls storage can persist a
 //! KP we've never tracked (e.g. test fixtures bypassing
@@ -65,8 +65,8 @@
 //! `IdentitySigner` and pass it in) and tests (which mint a fresh
 //! signing key) use the same code path.
 //!
-//! Phase 3b/4 will provide a thin convenience wrapper that pulls the
-//! IPK secret through `IdentitySigner` and forwards to this module.
+//! A thin convenience wrapper that pulls the IPK secret through
+//! `IdentitySigner` and forwards to this module is planned.
 //!
 //! design-doc: `misc/specs/MLS.md` §5 (KeyPackage distribution),
 //! §13.1 (SHA-256 vs BLAKE3 for KP_ref).
@@ -269,9 +269,9 @@ impl KeyPackageStash {
             .tls_serialize_detached()
             .map_err(|e| KeyPackageStashError::Codec(e.to_string()))?;
 
-        // 6. Owner sig (under the IPK). Phase 8 (P1 #11): transcript
-        // now binds `BLAKE3(kp_bytes)` so a stolen IPK cannot mint
-        // bogus `(ipk, kp_ref, fake_kp_bytes)` triples.
+        // 6. Owner sig (under the IPK). The transcript binds
+        // `BLAKE3(kp_bytes)` so a stolen IPK cannot mint bogus
+        // `(ipk, kp_ref, fake_kp_bytes)` triples.
         let signing_input = kp_record_signing_input(
             MLS_WIRE_VERSION,
             &ipk,
@@ -303,8 +303,7 @@ impl KeyPackageStash {
 
     /// Fill the stash up to [`KP_STASH_TARGET`] unconsumed in-lifetime
     /// KPs. Returns the freshly-generated records (so the caller can
-    /// publish them via [`Self::publish_to_homes`] once those become
-    /// wired up Phase 4).
+    /// publish them via [`Self::publish_to_homes`]).
     ///
     /// Idempotent: if the stash is already at target, returns an empty
     /// vec without minting anything.
@@ -325,9 +324,9 @@ impl KeyPackageStash {
     // Bookkeeping
     // -----------------------------------------------------------------
 
-    /// Mark a `kp_ref` as consumed. Phase 3b's Welcome-receipt path
-    /// will call this when a Welcome arrives that consumed one of our
-    /// stashed KPs (the recipient's libcore looks up the leaf-key
+    /// Mark a `kp_ref` as consumed. The Welcome-receipt path calls
+    /// this when a Welcome arrives that consumed one of our stashed
+    /// KPs (the recipient's libcore looks up the leaf-key
     /// bundle by `kp_ref` and then ratchets the bookkeeping table to
     /// drop the unconsumed counter).
     ///
@@ -346,9 +345,9 @@ impl KeyPackageStash {
     /// True iff the unconsumed-in-lifetime count has dropped below
     /// [`KP_STASH_LOW_WATER`].
     ///
-    /// Called by the Phase 4 background scheduler to decide whether a
-    /// refill round is due. A `now_ms` parameter rather than reading
-    /// the wall clock so tests can pin a deterministic value.
+    /// Called by the background scheduler to decide whether a refill
+    /// round is due. A `now_ms` parameter rather than reading the wall
+    /// clock so tests can pin a deterministic value.
     pub fn should_refill(&self, now_ms: u64) -> bool {
         self.count_unconsumed_in_lifetime(now_ms) < KP_STASH_LOW_WATER
     }
@@ -409,9 +408,9 @@ impl KeyPackageStash {
 
     /// Count of unconsumed records whose `expires_at_ms > now_ms`.
     ///
-    /// Public for use by the Phase 4 scheduler to surface a UI-level
-    /// "your stash is healthy" indicator. Bounded query (`COUNT(*)`),
-    /// no full table scan.
+    /// Public for use by the scheduler to surface a UI-level "your
+    /// stash is healthy" indicator. Bounded query (`COUNT(*)`), no full
+    /// table scan.
     pub fn count_unconsumed_in_lifetime(&self, now_ms: u64) -> usize {
         let conn = self.db.lock();
         conn.query_row(
@@ -425,19 +424,17 @@ impl KeyPackageStash {
     }
 
     // -----------------------------------------------------------------
-    // Publish (Phase 4 wires this — surface lives here for Phase 3b
-    // to depend on)
+    // Publish
     // -----------------------------------------------------------------
 
-    /// Phase 4 stub — the wire-side fan-out to `K=3` homes via the
+    /// Stub — the wire-side fan-out to `K=3` homes via the
     /// `KeyPackagePublish` RPC (`MLS.md` §3.4).
     ///
-    /// This Phase 3a release ships **only the surface and contract**:
-    /// the actual relay-dial path is owned by libcore's QUIC client
-    /// (`libcore/src/quic/server.rs` and friends), which is Phase 4's
-    /// rewire scope. The function signature is fixed here so Phase 4's
-    /// implementation can drop in without changing the call sites the
-    /// rotation/refill paths will use.
+    /// This ships **only the surface and contract**: the actual
+    /// relay-dial path is owned by libcore's QUIC client
+    /// (`libcore/src/quic/server.rs` and friends). The function
+    /// signature is fixed here so the implementation can drop in
+    /// without changing the call sites the rotation/refill paths use.
     ///
     /// Contract:
     /// - `records` is the batch produced by [`Self::ensure_stash_full`]
@@ -446,15 +443,14 @@ impl KeyPackageStash {
     ///   `BLAKE3("kp:" || ipk)` (computed by the QUIC layer from its
     ///   routing table).
     /// - Returns `Ok(())` on K_MIN=2 successful stores, otherwise an
-    ///   error documenting the partial state. Phase 4 will define the
-    ///   error variant.
+    ///   error documenting the partial state. The error variant is
+    ///   still to be defined.
     ///
     /// Today this returns `Err(KeyPackageStashError::OpenMlsBuild(...))`
-    /// with a clear "not yet wired" message — Phase 3b code that
-    /// invokes the Welcome flow does not depend on publish; only Phase
-    /// 4 will need it. We deliberately do not fake-publish to avoid
+    /// with a clear "not yet wired" message — the Welcome flow does not
+    /// depend on publish. We deliberately do not fake-publish to avoid
     /// silently shipping unverified KPs.
-    #[allow(dead_code, unused_variables)] // Phase 4 wiring entrypoint.
+    #[allow(dead_code, unused_variables)] // Wiring entrypoint.
     pub async fn publish_to_homes(
         records: &[KeyPackageRecord],
         homes: &[common::quic::id::NodeId],
@@ -641,8 +637,8 @@ mod tests {
         );
         assert!(vk.verify(&bad_msg2, &sig).is_err());
 
-        // Phase 8 (P1 #11): tampered kp_bytes → verify fails (the
-        // new `BLAKE3(kp_bytes)` binding closes the §13.3 gap).
+        // Tampered kp_bytes → verify fails (the `BLAKE3(kp_bytes)`
+        // binding closes the §13.3 gap).
         let mut tampered_bytes = rec.kp_bytes.0.clone();
         tampered_bytes[0] ^= 0xFF;
         let bad_msg3 = kp_record_signing_input(
@@ -672,7 +668,7 @@ mod tests {
         let provider = PromtuzMlsProvider::new(conn.clone());
         let signer = fresh_ipk_signer();
 
-        // Phase 1: mint 5 KPs.
+        // Step 1: mint 5 KPs.
         let stash_a = KeyPackageStash::new(conn.clone());
         for _ in 0..5 {
             stash_a.generate_one(&provider, &signer).expect("gen");
@@ -680,7 +676,7 @@ mod tests {
         assert_eq!(stash_a.count_unconsumed_in_lifetime(now_ms()), 5);
         drop(stash_a);
 
-        // Phase 2: open a fresh stash over the same DB; counter is
+        // Step 2: open a fresh stash over the same DB; counter is
         // recovered from the table.
         let stash_b = KeyPackageStash::new(conn);
         assert_eq!(stash_b.count_unconsumed_in_lifetime(now_ms()), 5);
@@ -845,9 +841,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 11. publish_to_homes is the Phase 4 surface — for now it
-    // declares its own non-readiness loudly so a caller wiring it up
-    // pre-Phase 4 sees a clear error.
+    // 11. publish_to_homes is an unwired surface — for now it declares
+    // its own non-readiness loudly so a caller wiring it up sees a
+    // clear error.
     // -----------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,4 +1,4 @@
-//! MLS Phase 3a — Welcome envelope queue at the home relay.
+//! MLS Welcome envelope queue at the home relay.
 //!
 //! Owns the [`CF_DHT_WELCOME`] column family plus the three RPC
 //! handlers wired into [`super::handler::handle_dht_request`]:
@@ -58,7 +58,7 @@
 //!   requester_relay_id, timestamp)`; the home additionally verifies
 //!   `requester_relay_id == authenticated_peer_id` from `DhtHello`.
 //!   This is the §13.9 cross-relay-replay defence pattern (mirror of
-//!   `QueueFetch`'s phase 2d-fix).
+//!   `QueueFetch`'s requester-binding check).
 //! - **Ack**: same shape as Fetch, distinct domain string so a
 //!   captured fetch sig can't be replayed as an ack.
 //!
@@ -69,8 +69,7 @@
 //! limiter is `governor`-backed (lock-free DashMap state).
 //!
 //! design-doc: `misc/specs/MLS.md` §2.5 / §6.1 (welcome queue),
-//! §3.3 (envelope signing), §13.9 (binding `to_ipk`); Phase 3a
-//! Component B prompt.
+//! §3.3 (envelope signing), §13.9 (binding `to_ipk`).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -135,7 +134,7 @@ const MAX_WELCOME_RPC_PER_HOUR: u32 = 240;
 
 /// Compute the 32-byte stash prefix for a recipient `ipk`.
 ///
-/// Per the Phase 3a Component B spec: `BLAKE3("welcome:" || ipk)`.
+/// Per `MLS.md` §6.1: `BLAKE3("welcome:" || ipk)`.
 /// The literal eight-byte `"welcome:"` prefix differentiates welcome
 /// routing from KP-stash routing (`"kp:"`) and presence routing
 /// (bare `ipk`). All three live in the same DHT keyspace; the prefix
@@ -231,10 +230,10 @@ enum WelcomeVerifyError {
 /// We do *not* re-verify the inner `recipient_ipk` field against any
 /// external reference here — the publish-handler already cross-checks
 /// it against the `WelcomePublishReq`'s top-level recipient if the
-/// caller wants to enforce match. (Phase 3a's prompt says "publish
-/// stores welcome at K=3 homes of recipient" — recipient_ipk is the
-/// *only* recipient-identity in this RPC; there's no separate top-
-/// level recipient field.)
+/// caller wants to enforce match. The publish stores the welcome at the
+/// K=3 homes of the recipient; `recipient_ipk` is the *only*
+/// recipient-identity in this RPC, with no separate top-level recipient
+/// field.
 fn verify_welcome_envelope(env: &WelcomeEnvelopeP) -> Result<(), WelcomeVerifyError> {
     if env.welcome_blob.0.is_empty() {
         return Err(WelcomeVerifyError::Malformed);
@@ -337,7 +336,7 @@ fn welcome_count_bounded(dht: &Dht, ipk: &[u8; 32]) -> (usize, bool) {
 // Public API — handlers
 // ---------------------------------------------------------------------------
 
-/// Phase 3a — home-side handler for [`super::DhtRequest::WelcomePublish`].
+/// Home-side handler for [`super::DhtRequest::WelcomePublish`].
 ///
 /// Validation ladder:
 /// 1. Skew check on `req.timestamp`.
@@ -356,9 +355,9 @@ fn welcome_count_bounded(dht: &Dht, ipk: &[u8; 32]) -> (usize, bool) {
 /// `sender_sig` is the binding authority. The connection-level
 /// `DhtHello` peer id authenticates the *forwarding* relay, not the
 /// inviter; we accept publishes from any reachable peer relay. This
-/// matches the `Forward` flow's posture (sticky-home phase 2d) where
-/// the outer wire `Forward::sig` is the relay's countersig but the
-/// inner dispatch sig is what binds the user.
+/// matches the `Forward` flow's posture, where the outer wire
+/// `Forward::sig` is the relay's countersig but the inner dispatch sig
+/// is what binds the user.
 pub(crate) fn handle_welcome_publish(
     dht: &Arc<Dht>, req: WelcomePublishReq, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> WelcomePublishOutcome {
@@ -461,11 +460,11 @@ pub(crate) fn handle_welcome_publish(
     WelcomePublishOutcome::Stored
 }
 
-/// Phase 3a — home-side handler for [`super::DhtRequest::WelcomeFetch`].
+/// Home-side handler for [`super::DhtRequest::WelcomeFetch`].
 ///
 /// Validation ladder:
 /// 1. `req.requester_relay_id == authenticated_peer_id` — the §13.9
-///    cross-relay-replay defence (mirrors `QueueFetch` phase 2d-fix).
+///    cross-relay-replay defence (mirrors `QueueFetch`).
 /// 2. Skew check on `req.timestamp`.
 /// 3. Per-relay welcome-RPC rate limit.
 /// 4. Self is in K-closest for `stash_prefix(user_ipk)`.
@@ -557,7 +556,7 @@ pub(crate) fn handle_welcome_fetch(
     WelcomeFetchOutcome::Found(WelcomeFetchFound { welcomes })
 }
 
-/// Phase 3a — home-side handler for [`super::DhtRequest::WelcomeAck`].
+/// Home-side handler for [`super::DhtRequest::WelcomeAck`].
 ///
 /// Validation ladder:
 /// 1. `welcome_ids.len() <= MAX_WELCOME_ACK_IDS`.
@@ -620,11 +619,11 @@ pub(crate) fn handle_welcome_ack(
 
     // 7. Delete by id.
     //
-    // Phase 8 (P1 #21): a missing CF or any per-row delete failure
-    // surfaces as `ok: false` so the recipient knows their acks
-    // weren't honoured (and re-tries on next reconnect). Previously
-    // both classes silently returned `ok: true`, which made the
-    // queue grow forever from the recipient's perspective.
+    // A missing CF or any per-row delete failure surfaces as
+    // `ok: false` so the recipient knows their acks weren't honoured
+    // (and re-tries on next reconnect). These must not silently return
+    // `ok: true`, which would make the queue grow forever from the
+    // recipient's perspective.
     let Some(cf) = dht.rocks.cf_handle(CF_DHT_WELCOME) else {
         common::warn!(
             "MLS welcome_ack: CF_DHT_WELCOME not found; rejecting ack from ipk={}",

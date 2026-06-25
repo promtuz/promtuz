@@ -69,7 +69,7 @@ pub enum CloseReason {
     /// are returned in the response body and do **not** close the
     /// connection. Per `misc/specs/STICKY_HOME_RELAY.md` §5.3.
     DhtForwardRejected,
-    /// MLS Phase 2 — `KeyPackagePublish` / `KeyPackageRefill` /
+    /// MLS — `KeyPackagePublish` / `KeyPackageRefill` /
     /// `KeyPackageFetch` RPC failed because some piece of the
     /// payload was structurally malformed: the publisher's outer
     /// `sig` did not verify, a per-record `owner_sig` did not verify,
@@ -80,14 +80,14 @@ pub enum CloseReason {
     /// `TooMany` / `StaticFieldsConflict` and the analogous Refill
     /// variants. Per `misc/specs/MLS.md` §3.4 / §3.6 / §13.3.
     KeyPackageMalformed,
-    /// MLS Phase 2 — record's `expires_at_ms` had already elapsed at
+    /// MLS — record's `expires_at_ms` had already elapsed at
     /// store time, or the publisher's `timestamp` is outside the
     /// ±`MAX_KP_SKEW_MS` skew window. Distinct from
     /// [`Self::KeyPackageMalformed`] so operators can attribute
     /// clock-drift problems separately from forged-signature problems.
     /// Per `misc/specs/MLS.md` §3.4 (Expired outcome).
     KeyPackageExpired,
-    /// MLS Phase 2 — per-`(target_ipk, requester_relay_id)` rate
+    /// MLS — per-`(target_ipk, requester_relay_id)` rate
     /// limit on KeyPackage fetches tripped (`MAX_KP_FETCH_PER_HOUR
     /// = 60`, §0). Distinct from [`Self::DhtFlood`] (which is the
     /// general per-peer per-RPC-class limiter) because the KP fetch
@@ -96,16 +96,16 @@ pub enum CloseReason {
     /// trips this code, while a peer hammering many targets at the
     /// per-peer rate trips `DhtFlood`. Per `misc/specs/MLS.md` §5.6.
     KeyPackageRateLimited,
-    /// MLS Phase 3a — `WelcomePublish` / `WelcomeFetch` / `WelcomeAck`
+    /// MLS — `WelcomePublish` / `WelcomeFetch` / `WelcomeAck`
     /// rejected for a hard protocol violation: bad envelope sig, bad
     /// user-fetch sig, requester binding mismatch, oversize blob,
     /// recipient_ipk mismatch in the embedded welcome envelope, or
     /// any other structural malformation. Distinct from
     /// [`Self::KeyPackageMalformed`] so operators can attribute
     /// welcome-flow failures separately from KP-flow failures.
-    /// Per Phase 3a Component B spec.
+    /// Per the welcome-queue spec.
     WelcomeMalformed,
-    /// MLS Phase 3a — `WelcomePublish` was rejected because the
+    /// MLS — `WelcomePublish` was rejected because the
     /// recipient's welcome queue is at
     /// [`crate::proto::mls_wire::MAX_WELCOMES_PER_RECIPIENT`]. Soft
     /// outcome; surfaces in the response body, not on the close
@@ -113,7 +113,7 @@ pub enum CloseReason {
     /// optionally treat repeated `QueueFull`s as a "stop trying this
     /// home" signal in a future hardening pass.
     WelcomeQueueFull,
-    /// MLS Phase 3a — per-relay rate limit on welcome RPCs tripped.
+    /// MLS — per-relay rate limit on welcome RPCs tripped.
     /// Distinct from [`Self::DhtFlood`] for the same reason
     /// [`Self::KeyPackageRateLimited`] is.
     WelcomeRateLimited,

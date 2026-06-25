@@ -3,27 +3,23 @@
 //! Cipher suite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`
 //! (suite ID `0x0003`).
 //!
-//! # Phase progression
+//! # Module layout
 //!
-//! - **Phase 1** (`provider.rs`, `storage.rs`, `types.rs`):
-//!   `PromtuzMlsProvider` (the openmls `OpenMlsProvider`), the
-//!   rusqlite-backed `PromtuzStorageProvider`, and the storage error
-//!   enum.
-//! - **Phase 2** (`common/src/proto/mls_wire.rs`): wire types
+//! - `provider.rs`, `storage.rs`, `types.rs`: `PromtuzMlsProvider`
+//!   (the openmls `OpenMlsProvider`), the rusqlite-backed
+//!   `PromtuzStorageProvider`, and the storage error enum.
+//! - `common/src/proto/mls_wire.rs`: wire types
 //!   (`MlsApplicationEnvelopeP`, `WelcomeEnvelopeP`,
 //!   `KeyPackagePublishReq` etc.) and signing-input helpers.
-//! - **Phase 3a** (`signer.rs`, future `keypackage.rs`,
-//!   `relay/src/dht/mls_kp.rs`, `relay/src/dht/mls_welcome.rs`):
-//!   leaf-signer adapter, KeyPackage stash + Welcome queue handlers
-//!   (parallel phase).
-//! - **Phase 3b** (this phase, `group.rs`, `welcome.rs`,
-//!   `epoch_catchup.rs`): the high-level group runtime
-//!   (`MlsGroupHandle`), Welcome envelope handling
+//! - `signer.rs`, `keypackage.rs`, `relay/src/dht/mls_kp.rs`,
+//!   `relay/src/dht/mls_welcome.rs`: leaf-signer adapter, KeyPackage
+//!   stash + Welcome queue handlers.
+//! - `group.rs`, `welcome.rs`, `epoch_catchup.rs`: the high-level
+//!   group runtime (`MlsGroupHandle`), Welcome envelope handling
 //!   (`process_welcome`, `make_welcome_envelope`), and the
 //!   out-of-order epoch buffer (`EpochCatchupBuffer`).
-//! - **Phase 4** (planned, not in this phase): wire MLS into
-//!   `libcore/src/api/messaging.rs`, replace `Contact::shared_key()`
-//!   callers, bump `PROTOCOL_VERSION` to 3.
+//! - `libcore/src/api/messaging.rs`: wires MLS into the messaging
+//!   path.
 
 pub mod epoch_catchup;
 pub mod group;
@@ -60,11 +56,11 @@ pub use welcome::{make_welcome_envelope, process_welcome};
 /// [`PromtuzMlsStorageError::BudgetExceeded`]. Spec §0, §9.3.
 ///
 /// The cap protects against a malformed or runaway group (e.g. an
-/// Add chain crossing `MAX_GROUP_SIZE = 256`, which we cap there
-/// explicitly in later phases).
+/// Add chain crossing `MAX_GROUP_SIZE = 256`, which is capped
+/// explicitly elsewhere).
 pub const MLS_GROUP_STATE_BUDGET_BYTES: u64 = 1024 * 1024;
 
 /// Per-group cap on application messages held for future epochs.
 /// Spec §0 (`MAX_EPOCH_AHEAD_BUFFER`), §7.3.
-#[allow(dead_code)] // Phase 4 caller wires this in messaging.rs.
+#[allow(dead_code)] // messaging.rs caller.
 pub const MAX_EPOCH_AHEAD_BUFFER: usize = 512;

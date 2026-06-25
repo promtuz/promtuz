@@ -191,7 +191,7 @@ pub const MERKLE_DIFF_PATH_MAX: usize = 4;
 pub const FETCH_RECORD_CONCURRENCY: usize = 8;
 
 // ---------------------------------------------------------------------------
-// Sticky-home Forward fan-out (phase 2b)
+// Sticky-home Forward fan-out
 // ---------------------------------------------------------------------------
 
 /// Total wall-clock budget for the K parallel `Forward` RPCs the sender
@@ -228,7 +228,7 @@ pub const FORWARD_TIMEOUT_MS: u64 = 1500;
 pub const FORWARD_K_MIN: usize = 2;
 
 // ---------------------------------------------------------------------------
-// Sticky-home QueueFetch fan-out (phase 2c)
+// Sticky-home QueueFetch fan-out
 // ---------------------------------------------------------------------------
 
 /// Total wall-clock budget for the K-1 (or K) parallel `QueueFetch`
@@ -246,7 +246,7 @@ pub const FORWARD_K_MIN: usize = 2;
 /// On timeout, the recipient relay treats in-flight homes as "no
 /// response" (best-effort) and still delivers whatever pages
 /// completed. The user can retry the drain — the homes won't have
-/// deleted anything until a `QueueFetchAck` lands (phase 2d).
+/// deleted anything until a `QueueFetchAck` lands.
 ///
 /// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.3 step 3 (the K
 /// home-fetch fan-out window).
@@ -269,12 +269,12 @@ pub const QUEUE_FETCH_TIMEOUT_MS: u64 = 3000;
 /// becomes ineligible at next reconnect.
 ///
 /// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.3 — paging
-/// implied by `QueueFetchResp::exhausted`. The bound is a
-/// phase-2c-introduced safety rail and is not on the wire.
+/// implied by `QueueFetchResp::exhausted`. The bound is a local safety
+/// rail and is not on the wire.
 pub const MAX_QUEUE_FETCH_PAGES: usize = 10;
 
 // ---------------------------------------------------------------------------
-// Sticky-home K-set drift migration (phase 2d)
+// Sticky-home K-set drift migration
 // ---------------------------------------------------------------------------
 
 /// Defensive cap on the number of `cf_dht_queue` entries a single
@@ -355,7 +355,7 @@ pub const MAX_CONCURRENT_MIGRATIONS: usize = 8;
 //     quota of 20/s is below this; in steady-state high load the
 //     quota would trip. Tradeoff is acceptable for v1: a publishing
 //     relay sees `RateLimited` from a single overloaded replica and
-//     re-tries via the §5.2 escalation path. Phase 2 telemetry
+//     re-tries via the §5.2 escalation path. Future telemetry
 //     (§11.4) will revisit.
 
 /// Cheap RPCs (Ping, FindNode, FindValue, MerkleSummary, MerkleDiff):
@@ -392,7 +392,7 @@ pub const RATE_LIMIT_BULK_BURST: u32 = 25;
 /// for keeping protocol parameters out of operator config is "all relays in
 /// the network must agree" — TOML drift would silently break routing.
 ///
-/// design-doc: §10 (Phase 1 feature-flag), §11.8 (default `enabled = false`)
+/// design-doc: §10 (feature-flag), §11.8 (default `enabled = false`)
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DhtConfig {
@@ -400,8 +400,8 @@ pub struct DhtConfig {
     /// every code path that would touch one falls through to the
     /// pre-DHT behaviour.
     ///
-    /// design-doc: §11.8 — Phase 1 default is `false`; flip to `true` only
-    /// inside test deployments until Phase 3 cutover.
+    /// design-doc: §11.8 — default is `false`; flip to `true` only
+    /// inside test deployments until the network cutover.
     ///
     /// [`Dht`]: crate::dht::Dht
     #[serde(default)]

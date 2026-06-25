@@ -105,10 +105,9 @@ pub(crate) fn handle_merkle_diff(dht: &Arc<Dht>, req: MerkleDiff) -> MerkleDiffR
     dht.merkle.read().diff(req.slice_id, &req.path)
 }
 
-/// Handle an inbound `FetchRecord` RPC. Per §2.4.8 plus the phase 1h
-/// widening: returns *both* live records and tombstones for each
-/// requested IPK that we currently hold, up to [`FETCH_RECORD_MAX`]
-/// entries combined.
+/// Handle an inbound `FetchRecord` RPC. Per §2.4.8: returns *both* live
+/// records and tombstones for each requested IPK that we currently
+/// hold, up to [`FETCH_RECORD_MAX`] entries combined.
 ///
 /// **Tombstone preference:** when both a record and a tombstone exist
 /// for the same IPK (which should not normally happen — `store_tombstone`
@@ -185,7 +184,7 @@ pub(crate) async fn sync_round(dht: Arc<Dht>) -> Result<(), &'static str> {
         }
     };
 
-    // Phase 1: MerkleSummary — what slices does the peer also have?
+    // Step 1: MerkleSummary — what slices does the peer also have?
     let bitset = all_slices_bitset();
     let req = DhtRequest::MerkleSummary(MerkleSummary { slices: bitset.into() });
     dht.metrics.inc_merkle_summaries_sent();
@@ -204,7 +203,7 @@ pub(crate) async fn sync_round(dht: Arc<Dht>) -> Result<(), &'static str> {
         }
     };
 
-    // Phase 2: bisect each slice whose root differs from ours.
+    // Step 2: bisect each slice whose root differs from ours.
     //
     // Snapshot our local roots once per slice — never under the merkle
     // lock during an `await`. The HashMap clone is small (one entry per
@@ -443,12 +442,12 @@ fn seed_now() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Compatibility shim so phase 1a callers still compile (deprecated)
+// Compatibility shim for the original sync-stub callers (deprecated)
 // ---------------------------------------------------------------------------
 
-/// Deprecated entry point retained for the phase 1a stub. Kept under a
-/// `#[deprecated]` so any caller that hasn't migrated to [`sync_round`]
-/// surfaces a warning rather than a hard breakage.
+/// Deprecated entry point retained for the original sync stub. Kept
+/// under a `#[deprecated]` so any caller that hasn't migrated to
+/// [`sync_round`] surfaces a warning rather than a hard breakage.
 #[deprecated(note = "use sync_round instead")]
 #[allow(dead_code)]
 pub(crate) async fn sync_with(
@@ -461,10 +460,10 @@ pub(crate) async fn sync_with(
 // Tests — server-side handlers (sync; client-side requires real QUIC peers)
 // ---------------------------------------------------------------------------
 //
-// Integration test for the client-side `sync_round` is deferred to
-// phase 2 — it requires real relay-to-relay QUIC peers. The handler
-// tests live in `dht/handler.rs::tests` to share the `fresh_dht`
-// fixture.
+// Integration test for the client-side `sync_round` is deferred
+// (future work) — it requires real relay-to-relay QUIC peers. The
+// handler tests live in `dht/handler.rs::tests` to share the
+// `fresh_dht` fixture.
 
 #[cfg(test)]
 mod tests {
@@ -738,9 +737,9 @@ mod tests {
 
     #[test]
     fn handle_fetch_record_returns_tombstones_for_known_ipks() {
-        // Phase 1h, item 6: `FetchRecord` reply now carries both
-        // records and tombstones. A peer that holds a tombstone for
-        // `ipk` returns it under `tombstones`, not `records`.
+        // `FetchRecord` reply carries both records and tombstones. A
+        // peer that holds a tombstone for `ipk` returns it under
+        // `tombstones`, not `records`.
         let user = fresh_signing_key();
         let relay = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -787,8 +786,8 @@ mod tests {
 
     #[test]
     fn fetch_record_carries_tombstone_to_peer_with_record() {
-        // Phase 1h, item 6 — anti-entropy convergence test.
-        // Simulate the §6.3 sequence directly:
+        // Anti-entropy convergence test. Simulate the §6.3 sequence
+        // directly:
         // - dht_a holds a tombstone for `(user, gen 1)`.
         // - dht_b holds the live record for same `(user, gen 1)`.
         // - dht_b would (in the real flow) call `handle_fetch_record`
@@ -875,8 +874,7 @@ mod tests {
     fn handle_fetch_record_caps_response_length() {
         // Build FETCH_RECORD_MAX + 5 records and request all of them in
         // one call — handler must cap the *combined* (records +
-        // tombstones) response at FETCH_RECORD_MAX (phase 1h item 6
-        // widening).
+        // tombstones) response at FETCH_RECORD_MAX.
         let relay = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
         let dht = fresh_dht(self_id);

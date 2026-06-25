@@ -7,9 +7,8 @@
 //!   §4).
 //! - **Application messaging**: encrypt-out, decrypt-in (spec §3.1
 //!   inner MLS message wrapping; outer envelope is in `welcome.rs`
-//!   and the future Phase 4 `messaging.rs` wiring).
-//! - **Export secret** for SFrame integration (spec §10.2). Surface
-//!   only — Phase 3b doesn't wire any caller.
+//!   and the `messaging.rs` wiring).
+//! - **Export secret** for SFrame integration (spec §10.2).
 //!
 //! # Cipher suite pin
 //!
@@ -42,10 +41,9 @@
 //! design-doc: `misc/specs/MLS.md` §0 (cipher suite), §3.1 (envelope
 //! shape), §4 (lifecycle), §10 (calls / export_secret).
 
-// All public items here are consumed by Phase 4's `messaging.rs`; the
-// cdylib compiler can't see across the JNI boundary so it flags them
-// as dead. Module-wide allow-lint matches the pattern in
-// `provider.rs` (Phase 1).
+// All public items here are consumed by `messaging.rs`; the cdylib
+// compiler can't see across the JNI boundary so it flags them as
+// dead. Module-wide allow-lint matches the pattern in `provider.rs`.
 #![allow(dead_code)]
 
 use openmls::prelude::tls_codec::Serialize as _;
@@ -227,7 +225,7 @@ impl MlsGroupHandle {
     /// - For `StagedCommitMessage`: call
     ///   [`Self::merge_staged_commit`] to advance the local epoch.
     /// - For `ProposalMessage`: queue via openmls's
-    ///   `store_pending_proposal` (Phase 4 responsibility).
+    ///   `store_pending_proposal`.
     pub fn process_incoming(
         &mut self, provider: &PromtuzMlsProvider, message: ProtocolMessage,
     ) -> Result<ProcessedMessageContent> {
@@ -300,7 +298,7 @@ impl MlsGroupHandle {
     }
 
     /// Export an MLS exporter secret for SFrame / call key derivation
-    /// (spec §10.2). Phase 3b ships the surface only.
+    /// (spec §10.2).
     pub fn export_secret(
         &self, provider: &PromtuzMlsProvider, label: &str, context: &[u8], length: usize,
     ) -> Result<Vec<u8>> {
@@ -309,9 +307,9 @@ impl MlsGroupHandle {
             .map_err(MlsGroupError::from_openmls)
     }
 
-    /// **Phase 7 (P0-3)**: drop the persisted state of this group from
-    /// the openmls storage provider. Used by `lazy_create_group` to
-    /// roll back the group when the Welcome publish fails quorum —
+    /// Drop the persisted state of this group from the openmls storage
+    /// provider. Used by `lazy_create_group` to roll back the group
+    /// when the Welcome publish fails quorum —
     /// otherwise the contact's `mls_group_id` would dangle against an
     /// orphan local group that the recipient never joined, and the
     /// sender's stash would slowly accumulate dead group state.
@@ -344,7 +342,7 @@ impl MlsGroupHandle {
 /// `MlsApplicationEnvelopeP::mls_message`. Mirrors the spec §3.1
 /// transcript discipline: we never invent our own framing for the
 /// inner MLS bytes — openmls owns it.
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub fn mls_message_to_bytes(msg: &MlsMessageOut) -> Result<Vec<u8>> {
     msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)
 }
@@ -353,7 +351,7 @@ pub fn mls_message_to_bytes(msg: &MlsMessageOut) -> Result<Vec<u8>> {
 /// type carries the wire-format tag and gives the caller access to
 /// `extract()` / `try_into_protocol_message()` to dispatch into
 /// `process_incoming`.
-#[allow(dead_code)] // Phase 4 messaging.rs caller.
+#[allow(dead_code)] // messaging.rs caller.
 pub fn mls_message_from_bytes(bytes: &[u8]) -> Result<MlsMessageIn> {
     use openmls::prelude::tls_codec::Deserialize as _;
     MlsMessageIn::tls_deserialize_exact(bytes).map_err(MlsGroupError::from_codec)

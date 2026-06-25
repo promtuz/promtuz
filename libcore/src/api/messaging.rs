@@ -1,16 +1,16 @@
-//! End-to-end encrypted application messaging via MLS (Phase 4).
+//! End-to-end encrypted application messaging via MLS.
 //!
-//! # What changed in Phase 4
+//! # Migration from the v2 shared-key scheme
 //!
-//! Pre-Phase-4 (`PROTOCOL_VERSION = 2`): every contact carried a
+//! Under the old scheme (`PROTOCOL_VERSION = 2`): every contact carried a
 //! `(epk, enc_esk)` pair; outgoing messages were encrypted with the
 //! deterministic `Contact::shared_key()` and decrypted by the recipient
 //! the same way. The relay's view of `DispatchP::payload` was
 //! `nonce(12) || ChaCha20Poly1305(content, shared_key, AD=to)`.
 //!
-//! Post-Phase-4 (`PROTOCOL_VERSION = 3`): every contact carries a
-//! nullable `mls_group_id`; on first dispatch we lazy-create the
-//! implicit 1:1 MLS group via the X3DH-equivalent flow:
+//! Under the current MLS scheme (`PROTOCOL_VERSION = 3`): every contact
+//! carries a nullable `mls_group_id`; on first dispatch we lazy-create
+//! the implicit 1:1 MLS group via the X3DH-equivalent flow:
 //!
 //! 1. Fetch the recipient's KeyPackage via [`DhtClient::fetch_keypackage_for`].
 //! 2. Build a fresh group with [`MlsGroupHandle::create`].
@@ -133,12 +133,12 @@ use crate::mls::make_welcome_envelope;
 use crate::mls::process_welcome;
 use crate::mls::types::MlsGroupError;
 use crate::quic::dht_client::DhtClient;
-// Phase 8 (P1 #19): RELAY now lives in `crate::state`; the
-// `quic::server` re-export is kept for backwards compatibility but
-// the cycle-breaking import points at the leaf module directly.
+// RELAY lives in `crate::state`; the `quic::server` re-export is kept
+// for backwards compatibility but the cycle-breaking import points at
+// the leaf module directly.
 use crate::state::RELAY;
 
-/// **Phase 7 (P0-5)**: per-recipient guard around `lazy_create_group`.
+/// Per-recipient guard around `lazy_create_group`.
 ///
 /// Two simultaneous first-sends to the same contact would otherwise
 /// each (a) fetch + burn a recipient KP, (b) create a duplicate
@@ -202,8 +202,8 @@ fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError>
         .map_err(MlsGroupError::from_codec)?;
     let kp = kp_in
         .validate(
-            // We use openmls's `RustCrypto` (Phase 1 provider) — provided
-            // here via the workspace dep so we don't have to reach into
+            // We use openmls's `RustCrypto` provider — provided here via
+            // the workspace dep so we don't have to reach into
             // `PromtuzMlsProvider`'s `crypto()` and risk circular
             // dependency in tests.
             &openmls_rust_crypto::RustCrypto::default(),
@@ -251,12 +251,11 @@ pub extern "system" fn sendMessage(mut env: JNIEnv, _: JC, to_ipk: JByteArray, c
     let content: String = env.get_string(&content).unwrap().into();
 
     RUNTIME.spawn(async move {
-        // Phase 7 (P0-4): pull the production peer/1 dialer from the
-        // global `RELAY` (attached at connect-time by `Relay::connect`).
-        // If no relay connection is live, surface a clean error rather
-        // than silently no-op against `NotWiredDhtClient` — the
-        // previous behaviour was the headline P0 of the deep review:
-        // every send claimed success while no Welcome reached the wire.
+        // Pull the production peer/1 dialer from the global `RELAY`
+        // (attached at connect-time by `Relay::connect`). If no relay
+        // connection is live, surface a clean error rather than silently
+        // no-op against `NotWiredDhtClient` — otherwise every send would
+        // claim success while no Welcome reached the wire.
         let dht_client = {
             let guard = RELAY.read();
             guard.as_ref().and_then(|r| r.dht_client.clone())
@@ -310,13 +309,12 @@ pub struct MlsContext<'a, C: DhtClient> {
 /// 6. Wrap welcome in `WelcomeEnvelopeP`; publish via `DhtClient`.
 /// 7. Merge our pending commit; persist the group_id on the contact.
 ///
-/// **Phase 5b** exposes this as `pub` (was previously private) so the
-/// e2e integration harness in `relay/tests/e2e_phase5b.rs` can drive
-/// the production lazy-create flow without going through
-/// `send_message_inner` (which depends on global `Identity::get()` /
-/// `RELAY` / `Contact` state). Production callers continue to invoke
-/// it via `send_message_inner`; the visibility change has no behavioural
-/// impact.
+/// Exposed as `pub` so the e2e integration harness in
+/// `relay/tests/e2e_phase5b.rs` can drive the production lazy-create
+/// flow without going through `send_message_inner` (which depends on
+/// global `Identity::get()` / `RELAY` / `Contact` state). Production
+/// callers continue to invoke it via `send_message_inner`; the
+/// visibility has no behavioural impact.
 pub async fn lazy_create_group<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
 ) -> Result<MlsGroupHandle> {
@@ -339,8 +337,8 @@ pub async fn lazy_create_group<C: DhtClient>(
             bail!("fetched KP's owner ipk does not match `to`");
         }
         let sig = Signature::from_bytes(&fetched.record.owner_sig.0);
-        // Phase 8 (P1 #11): transcript folds `BLAKE3(kp_bytes)` so the
-        // full record (incl. body) is bound by `owner_sig`.
+        // The transcript folds `BLAKE3(kp_bytes)` so the full record
+        // (incl. body) is bound by `owner_sig`.
         let msg = kp_record_signing_input(
             MLS_WIRE_VERSION,
             &fetched.record.ipk.0,
@@ -348,8 +346,8 @@ pub async fn lazy_create_group<C: DhtClient>(
             &fetched.record.kp_bytes.0,
             fetched.record.expires_at_ms,
         );
-        // Phase 7 (P0-1): `verify_strict` rejects non-canonical sigs
-        // and small-order R values; mirrors the relay-side discipline.
+        // `verify_strict` rejects non-canonical sigs and small-order R
+        // values; mirrors the relay-side discipline.
         vk.verify_strict(&msg, &sig).map_err(|e| anyhow!("owner_sig invalid: {e}"))?;
     }
 
@@ -412,9 +410,9 @@ pub async fn lazy_create_group<C: DhtClient>(
         );
     }
 
-    // Phase 7 (P0-3): publish failure must roll back the founder's
-    // group state. Otherwise `send_message_inner` would persist
-    // `mls_group_id` on the contact row pointing at a group the
+    // Publish failure must roll back the founder's group state.
+    // Otherwise `send_message_inner` would persist `mls_group_id` on
+    // the contact row pointing at a group the
     // recipient never received the Welcome for; subsequent sends would
     // succeed encrypting against a one-member group and the recipient
     // would never decrypt anything. The K-fan-out RPC now returns
@@ -446,9 +444,9 @@ pub async fn lazy_create_group<C: DhtClient>(
 /// Returns the postcard-encoded envelope bytes ready to drop into
 /// `DispatchP::payload`. Caller signs the outer DispatchP separately.
 ///
-/// **Phase 5b**: exposed as `pub` so the e2e harness can build outgoing
-/// envelopes without going through `send_message_inner` (which fetches
-/// IPK via the global `Identity` table).
+/// Exposed as `pub` so the e2e harness can build outgoing envelopes
+/// without going through `send_message_inner` (which fetches IPK via
+/// the global `Identity` table).
 pub fn build_application_envelope_bytes<C: DhtClient>(
     ctx: &MlsContext<'_, C>, group: &mut MlsGroupHandle, leaf_signer: &openmls_basic_credential::SignatureKeyPair,
     our_ipk: &[u8; 32], to: &[u8; 32], plaintext: &[u8], ipk_signer: &SigningKey,
@@ -493,12 +491,11 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
     Ok(bytes)
 }
 
-/// **Phase 4 send path.** The replacement for the v2-era
-/// shared-key encryption.
+/// The MLS send path — the replacement for the v2-era shared-key
+/// encryption.
 ///
 /// Generic over the [`DhtClient`] backend so unit tests inject a
-/// fake. Production calls use the global stub until Phase 5 wires a
-/// real dialer.
+/// fake; production wires the real dialer.
 pub async fn send_message_inner<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], content: String,
 ) -> Result<()> {
@@ -537,8 +534,8 @@ pub async fn send_message_inner<C: DhtClient>(
 
     // 3. Resolve or lazy-create the implicit 1:1 group.
     //
-    // Phase 7 (P0-5): hold a per-recipient `tokio::sync::Mutex` for
-    // the entire "check existing group → fetch KP → build group →
+    // Hold a per-recipient `tokio::sync::Mutex` for the entire "check
+    // existing group → fetch KP → build group →
     // publish Welcome → persist group_id" critical section so two
     // concurrent first-sends to the same contact do not both
     // lazy-create. The acquire is cheap when uncontested; the lock
@@ -673,8 +670,8 @@ pub async fn send_message_inner<C: DhtClient>(
 /// out of openmls's storage. Used after `MlsGroupHandle::load` to
 /// rebuild a usable `Signer` for outgoing application messages.
 ///
-/// **Phase 5b**: exposed as `pub` so the e2e harness can re-derive the
-/// leaf signer for a loaded group without touching `Identity::get()`.
+/// Exposed as `pub` so the e2e harness can re-derive the leaf signer
+/// for a loaded group without touching `Identity::get()`.
 pub fn leaf_signer_for_group(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, our_ipk: &[u8; 32],
 ) -> Result<openmls_basic_credential::SignatureKeyPair> {
@@ -710,10 +707,10 @@ pub async fn process_inbound_envelope<C: DhtClient>(
     let envelope = MlsEnvelopeP::deser(payload)
         .map_err(|e| anyhow!("postcard deser MlsEnvelopeP: {e}"))?;
 
-    // Phase 7 (P0-8): enforce inner-byte size caps at decode boundary.
-    // Bigger blobs are dropped before openmls touches them — defends
-    // against a malicious peer crafting an oversize Welcome/Application
-    // to amplify recipient CPU on TLS deserialise.
+    // Enforce inner-byte size caps at the decode boundary. Bigger
+    // blobs are dropped before openmls touches them — defends against
+    // a malicious peer crafting an oversize Welcome/Application to
+    // amplify recipient CPU on TLS deserialise.
     match &envelope {
         MlsEnvelopeP::Welcome(env) => {
             if env.welcome_blob.0.len() > MAX_WELCOME_BYTES {
@@ -746,17 +743,17 @@ pub async fn process_inbound_envelope<C: DhtClient>(
 
 /// Result of [`process_inbound_envelope`] — what kind of payload was
 /// processed (UI / metrics consumer).
-#[allow(dead_code)] // Phase 4: ApplicationStale is reachable only when
-// the receive path passes a stale message through. The current
-// dispatcher folds it into ApplicationBuffered until Phase 5 wires
-// the explicit stale-drop path.
+#[allow(dead_code)] // ApplicationStale is reachable only when the
+// receive path passes a stale message through. The current dispatcher
+// folds it into ApplicationBuffered; the explicit stale-drop path is
+// future work.
 #[derive(Debug)]
 pub enum InboundDecoded {
     /// Welcome processed; group activated. The caller probably wants
-    /// to emit an "added to group" UI event (Phase 5 work).
+    /// to emit an "added to group" UI event (future work).
     Welcome,
     /// Application message decrypted. `group_id` is surfaced for
-    /// future UI threading work (Phase 5).
+    /// future UI threading work.
     Application {
         plaintext: Vec<u8>,
         #[allow(dead_code)]
@@ -775,9 +772,9 @@ fn process_welcome_inbound<C: DhtClient>(
         bail!("welcome envelope sender_ipk mismatch with DispatchP.from");
     }
 
-    // Phase 8 (P1 #13): defensive check that the envelope is addressed
-    // to *us*. The outer `sender_sig` transcript already binds
-    // `recipient_ipk` per §13.9, so a malicious sender cannot
+    // Defensive check that the envelope is addressed to *us*. The
+    // outer `sender_sig` transcript already binds `recipient_ipk` per
+    // §13.9, so a malicious sender cannot
     // address-spoof another recipient. But a delivery-layer bug
     // could deliver an envelope intended for a different device to
     // this one; surface that as a typed error instead of silently
@@ -794,11 +791,11 @@ fn process_welcome_inbound<C: DhtClient>(
         bail!("welcome envelope recipient_ipk does not match self");
     }
 
-    // Phase 4 contact-first gating: only accept Welcomes from known
-    // contacts. The anti-abuse spec (HANDOFF priority 2) will refine
-    // this with explicit "you've been invited to group X" UI prompts;
-    // until then, stranger-sent Welcomes are silently dropped to
-    // mirror the v2 receive path's "unknown sender" behaviour.
+    // Contact-first gating: only accept Welcomes from known contacts.
+    // The anti-abuse spec (HANDOFF priority 2) will refine this with
+    // explicit "you've been invited to group X" UI prompts; until then,
+    // stranger-sent Welcomes are silently dropped to mirror the v2
+    // receive path's "unknown sender" behaviour.
     if !Contact::exists(&sender_ipk) {
         warn!(
             "MLS: dropped Welcome from unknown sender {}",
@@ -823,7 +820,7 @@ fn process_welcome_inbound<C: DhtClient>(
     Ok(())
 }
 
-/// Phase 5b: globals-free variant of [`process_welcome_inbound`].
+/// Globals-free variant of [`process_welcome_inbound`].
 /// Performs the outer-sig verify, openmls processing, and stash
 /// `on_consumed` bookkeeping but bypasses the
 /// [`Contact::exists`]/[`Contact::set_mls_group_id`] writes that
@@ -857,7 +854,7 @@ fn process_application_inbound<C: DhtClient>(
     process_application_inbound_for(ctx, sender_ipk, &our_ipk, env)
 }
 
-/// Phase 5b: explicit-recipient variant of [`process_application_inbound`].
+/// Explicit-recipient variant of [`process_application_inbound`].
 /// Identical pipeline but takes `our_ipk` as an argument instead of
 /// reading the global `Identity::get()`. Production
 /// `process_application_inbound` delegates here. The e2e harness uses
@@ -878,7 +875,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
     let vk = VerifyingKey::from_bytes(&sender_ipk)
         .map_err(|e| anyhow!("sender_ipk not Ed25519: {e}"))?;
     let sig = Signature::from_bytes(&env.sender_sig.0);
-    // Phase 7 (P0-1): `verify_strict` for non-canonical-sig rejection.
+    // `verify_strict` for non-canonical-sig rejection.
     vk.verify_strict(&transcript, &sig)
         .map_err(|_| anyhow!("application envelope sig invalid"))?;
 
@@ -890,8 +887,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
     // 3. Compare epoch.
     let current = group.epoch();
     if env.epoch > current {
-        // Phase 7 (P0-8): refuse to buffer envelopes more than
-        // `MAX_EPOCH_AHEAD` epochs in the future. The recipient
+        // Refuse to buffer envelopes more than `MAX_EPOCH_AHEAD`
+        // epochs in the future. The recipient
         // realistically cannot catch up that far without seeing every
         // intermediate commit (the buffer would just hold dead bytes
         // until eviction); a malicious member otherwise pins memory
@@ -920,8 +917,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
         return Ok(InboundDecoded::ApplicationBuffered);
     }
     if env.epoch < current {
-        // Phase 7 (P0-7): explicitly drop stale-epoch envelopes rather
-        // than falling through to `process_incoming` (which errors on
+        // Explicitly drop stale-epoch envelopes rather than falling
+        // through to `process_incoming` (which errors on
         // stale, which makes `handle_deliver` refuse to ack, which
         // makes the relay redeliver forever — unbounded queue + CPU).
         // The caller in `handle_deliver` ack's on `ApplicationStale`
@@ -979,8 +976,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
 /// verification or comes from an unknown contact. After this many
 /// reconnect-cycles, the welcome is acked anyway (and dropped) to
 /// prevent the queue from growing forever on a persistently-bad
-/// sender. Phase 8 (P1 #14): preserves evidence the future anti-abuse
-/// spec needs while still bounding queue size.
+/// sender. Preserves evidence the future anti-abuse spec needs while
+/// still bounding queue size.
 const POLL_WELCOMES_MAX_RETRY: u8 = 5;
 
 /// In-process retry-count tracker for [`poll_welcomes`]. Maps
@@ -989,21 +986,20 @@ const POLL_WELCOMES_MAX_RETRY: u8 = 5;
 /// the home queue's natural TTL still bounds growth, and the user's
 /// reconnect cadence resets the counter).
 ///
-/// Phase 8 (P1 #14): minimal in-memory map (vs. a SQLite table) keeps
-/// the design surface small; the trade-off is that the retry count
-/// resets on libcore restart. Acceptable: a malicious sender would have
+/// A minimal in-memory map (vs. a SQLite table) keeps the design
+/// surface small; the trade-off is that the retry count resets on
+/// libcore restart. Acceptable: a malicious sender would have
 /// to keep re-publishing across the user's full reconnect cycle to
 /// keep their slot, while the home's TTL caps the queue regardless.
 static WELCOME_RETRY_COUNTS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<[u8; 8], u8>>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 /// Drain pending Welcomes from the K=3 homes of our IPK. Run once on
-/// every reconnect (Phase 5 wires the call site).
+/// every reconnect.
 ///
 /// Returns the count of welcomes successfully processed.
 ///
-/// **Phase 8 (P1 #14)**: distinguishes three outcome classes per
-/// welcome:
+/// Distinguishes three outcome classes per welcome:
 ///   - **Success**: ack immediately (the welcome did its job).
 ///   - **Known sender, bad processing**: ack (a known contact sending
 ///     us malformed welcomes is a contact-flow bug, not abuse).
@@ -1012,7 +1008,7 @@ static WELCOME_RETRY_COUNTS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<[u
 ///     `POLL_WELCOMES_MAX_RETRY` failed attempts. This preserves the
 ///     evidence the future anti-abuse spec (HANDOFF priority 2) wants
 ///     while still bounding queue growth.
-#[allow(dead_code)] // Phase 5 wires the production call site.
+#[allow(dead_code)] // The production call site is wired in quic/server.
 pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usize> {
     let entries = ctx
         .dht
@@ -1099,9 +1095,8 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
 // `process_inbound_envelope` directly.
 // -----------------------------------------------------------
 
-// Phase 4: dropped `decode_encrypted` — the caller in
-// `quic/server.rs::handle_deliver` is rewritten to use
-// `process_inbound_envelope`.
+// `decode_encrypted` was dropped — the caller in
+// `quic/server.rs::handle_deliver` now uses `process_inbound_envelope`.
 
 /// Get paginated message history for a conversation.
 /// Returns CBOR-encoded Vec<MessageRow>.
@@ -1170,9 +1165,9 @@ pub extern "system" fn getContacts(env: JNIEnv, _: JC) -> jobject {
 
 #[cfg(test)]
 mod tests {
-    //! In-process Phase 4 send/receive tests. These do **not** drive
-    //! the global `RELAY` connection — that path is owned by Phase 5's
-    //! e2e harness. We exercise the MLS-layer pipeline directly:
+    //! In-process send/receive tests. These do **not** drive the
+    //! global `RELAY` connection — that path is owned by the e2e
+    //! harness. We exercise the MLS-layer pipeline directly:
     //! lazy-create, application encrypt, envelope sign, then a
     //! co-resident receiver decodes the envelope and decrypts.
 
@@ -1456,7 +1451,7 @@ mod tests {
         assert_eq!(env.group_id.0, g.group_id());
     }
 
-    /// **Phase 7 (P0-5)**: two concurrent acquisitions of
+    /// Two concurrent acquisitions of
     /// `group_create_lock(&recipient_ipk)` must serialise. The lock is
     /// the load-bearing primitive `send_message_inner` uses to defeat
     /// the duplicate-group race; here we exercise it directly.
@@ -1534,8 +1529,8 @@ mod tests {
         );
     }
 
-    /// **Phase 7 (P0-7)**: an Application envelope with `epoch <
-    /// current` is dropped explicitly with `ApplicationStale`, NOT
+    /// An Application envelope with `epoch < current` is dropped
+    /// explicitly with `ApplicationStale`, NOT
     /// passed through to openmls (which would error and force the
     /// relay to redeliver indefinitely). The buffer must not grow.
     #[tokio::test(flavor = "current_thread")]
@@ -1620,8 +1615,8 @@ mod tests {
         );
     }
 
-    /// **Phase 7 (P0-8)**: an Application envelope claiming an epoch
-    /// > current + MAX_EPOCH_AHEAD is dropped (Err, not buffered) so
+    /// An Application envelope claiming an epoch > current +
+    /// MAX_EPOCH_AHEAD is dropped (Err, not buffered) so
     /// a malicious sender can't pin per-recipient memory by shipping
     /// far-future epochs.
     #[tokio::test(flavor = "current_thread")]
@@ -1698,8 +1693,8 @@ mod tests {
         );
     }
 
-    /// **Phase 7 (P0-8)**: oversize Welcome blob is rejected at the
-    /// envelope decode boundary, before openmls sees it.
+    /// Oversize Welcome blob is rejected at the envelope decode
+    /// boundary, before openmls sees it.
     #[tokio::test(flavor = "current_thread")]
     async fn oversize_welcome_blob_rejected_at_decode() {
         use common::proto::mls_wire::MAX_WELCOME_BYTES;

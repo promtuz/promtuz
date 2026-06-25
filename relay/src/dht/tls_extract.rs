@@ -2,8 +2,8 @@
 //!
 //! ## Purpose
 //!
-//! Phase 1h item 1: every relay-to-relay connection MUST be bound to a
-//! verified Ed25519 pubkey before any DHT RPC is honoured against it.
+//! Every relay-to-relay connection MUST be bound to a verified Ed25519
+//! pubkey before any DHT RPC is honoured against it.
 //! The relay's TLS certs are CA-signed (per `common/src/bin/certgen.rs`),
 //! and the leaf cert SPKI is the relay's identity Ed25519 pubkey, with
 //! `BLAKE3(spki) == NodeId` (per design-doc §0).
@@ -274,8 +274,9 @@ mod tests {
     /// *different* pubkey. The verify step (which is what the dialer
     /// uses post-handshake) must reject.
     ///
-    /// This is the unit-test for item 1: a peer presenting a cert
-    /// whose SPKI doesn't match its claimed NodeId is rejected. We
+    /// This is the unit-test for the binding check: a peer presenting
+    /// a cert whose SPKI doesn't match its claimed NodeId is rejected.
+    /// We
     /// don't go through `quinn::Connection` because that requires a
     /// running endpoint; the pure-DER variant exercises the same
     /// extraction + comparison logic.

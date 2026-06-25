@@ -1,8 +1,8 @@
 //! Promtuz MLS shared types and error definitions.
 //!
-//! Phase 1 contributed [`PromtuzMlsStorageError`] (the storage-side
-//! error). Phase 3b adds [`MlsGroupError`] — the error type surfaced by
-//! the `MlsGroupHandle`, Welcome processing, and epoch-catchup paths.
+//! [`PromtuzMlsStorageError`] is the storage-side error.
+//! [`MlsGroupError`] is the error type surfaced by the
+//! `MlsGroupHandle`, Welcome processing, and epoch-catchup paths.
 //!
 //! See `misc/specs/MLS.md` §9.3 for the storage contract and §4 / §6
 //! / §7 / §8 for group lifecycle / queue integration / epoch catchup /
@@ -67,16 +67,13 @@ impl PromtuzMlsStorageError {
 /// strings).
 ///
 /// `BadCipherSuite`, `EpochAhead`, and `EpochStale` are present in the
-/// enum so Phase 4's `messaging.rs` can match on them (spec §0 cipher-
-/// suite pin, spec §6.3 / §7.5 epoch ordering); Phase 3b doesn't yet
-/// surface them from any call site — `EpochCatchupBuffer::push`
-/// accepts any epoch and stashes it. Allowed-dead until Phase 4 wires
-/// the call sites.
+/// enum so `messaging.rs` can match on them (spec §0 cipher-suite pin,
+/// spec §6.3 / §7.5 epoch ordering).
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum MlsGroupError {
-    /// Underlying storage error (rusqlite, CBOR codec, budget). Phase
-    /// 3b openmls calls funnel storage failures through here.
+    /// Underlying storage error (rusqlite, CBOR codec, budget).
+    /// openmls calls funnel storage failures through here.
     #[error("storage: {0}")]
     Storage(#[from] PromtuzMlsStorageError),
 
@@ -85,9 +82,9 @@ pub enum MlsGroupError {
     #[error("openmls: {0}")]
     OpenMls(String),
 
-    /// Outer envelope signature failed verification (Phase 3b
-    /// `process_welcome` rejects before openmls touches the welcome
-    /// blob). Spec §3.3 / §12.7.
+    /// Outer envelope signature failed verification (`process_welcome`
+    /// rejects before openmls touches the welcome blob). Spec §3.3 /
+    /// §12.7.
     #[error("envelope signature failed verification")]
     BadSignature,
 
@@ -135,19 +132,19 @@ impl MlsGroupError {
     /// Use the *Debug* rendering rather than Display because
     /// openmls's Display is sometimes terser than the underlying
     /// detail we want for diagnostics.
-    #[allow(dead_code)] // Phase 4 caller.
+    #[allow(dead_code)] // messaging.rs caller.
     pub(crate) fn from_openmls<E: std::fmt::Debug>(e: E) -> Self {
         Self::OpenMls(format!("{e:?}"))
     }
 
     /// Bridge a `tls_codec::Error`.
-    #[allow(dead_code)] // Phase 4 caller.
+    #[allow(dead_code)] // messaging.rs caller.
     pub(crate) fn from_codec<E: std::fmt::Display>(e: E) -> Self {
         Self::Codec(e.to_string())
     }
 
     /// Bridge a `postcard::Error`.
-    #[allow(dead_code)] // Reserved for Phase 4 wiring.
+    #[allow(dead_code)] // messaging.rs caller.
     pub(crate) fn from_postcard<E: std::fmt::Display>(e: E) -> Self {
         Self::Postcard(e.to_string())
     }

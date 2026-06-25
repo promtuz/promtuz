@@ -1,5 +1,5 @@
-//! Tier-2 OUTBOUND fan-out for Welcome publish / fetch / ack (Phase 9,
-//! §3.9). The relay-side analogue of `forward.rs::forward_to_homes`,
+//! Tier-2 OUTBOUND fan-out for Welcome publish / fetch / ack (§3.9).
+//! The relay-side analogue of `forward.rs::forward_to_homes`,
 //! specialised to the MLS Welcome queue RPCs.
 //!
 //! A phone delegates a Welcome operation to its home relay over the
@@ -154,7 +154,7 @@ pub(crate) async fn originate_welcome_ack(
 
 // ---------------------------------------------------------------------------
 // Tests — self-only fan-out (single relay, empty routing table). The
-// remote multi-relay path is exercised by the Phase 9 e2e harness.
+// remote multi-relay path is exercised by the e2e harness.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

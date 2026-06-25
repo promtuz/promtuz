@@ -40,7 +40,7 @@ pub fn dispatch_sig_message(
 pub enum ServerHandshakeResultP {
     Accept {
         timestamp: u64,
-        /// Phase 9 §3.9 — this relay's DHT NodeId (`BLAKE3(NodeKey)`),
+        /// §3.9 — this relay's DHT NodeId (`BLAKE3(NodeKey)`),
         /// or `None` when the relay has DHT disabled. The phone binds it
         /// as `requester_relay_id` when signing the
         /// `FetchWelcomes` / `AckWelcomes` wrappers (the inner Tier-2
@@ -186,7 +186,7 @@ pub enum CRelayPacket {
     /// User confirms storing messages hence queue can be cleared from server
     AckDrain,
 
-    /// Sticky-home phase 2c — user-signed authorisation for the relay
+    /// Sticky-home — user-signed authorisation for the relay
     /// to drain the user's queues from K-closest "home" relays on the
     /// user's behalf.
     ///
@@ -206,20 +206,16 @@ pub enum CRelayPacket {
     /// `(timestamp, sig)` on its `ClientContext` and presents them as
     /// `QueueFetch.user_sig` when fanning out to homes.
     ///
-    /// **Phase split (§4.3 + design discussion)**: this packet is sent
-    /// at the *fetch* end of the recipient flow. The
-    /// `QueueFetchAck` deletion path (which would prove the user
-    /// received specific dispatch ids) is deferred to phase 2d — a
-    /// transcript over `delivered_ids` requires the relay to know the
-    /// id list before it can ask libcore to sign, which is impossible
-    /// before fetching has happened. Until 2d lands, homes never
-    /// receive an ack and their queued copies linger until natural TTL
-    /// expiry; this means duplicate delivery is possible if the user
-    /// reconnects multiple times within the TTL window. The client
-    /// dedupes by [`DispatchP::id`].
+    /// **Flow placement (§4.3)**: this packet is sent at the *fetch*
+    /// end of the recipient flow. The companion `QueueFetchAck`
+    /// deletion path (proving the user received specific dispatch ids)
+    /// is handled separately by [`Self::AckAuth`] — a transcript over
+    /// `delivered_ids` requires the relay to know the id list before it
+    /// can ask libcore to sign, which is impossible before fetching has
+    /// happened.
     DrainAuth { timestamp: u64, sig: Bytes<64> },
 
-    /// Sticky-home phase 2d — user-signed authorisation for the K
+    /// Sticky-home — user-signed authorisation for the K
     /// home relays to GC the listed dispatch ids from their
     /// `cf_dht_queue` after the relay successfully delivered them to
     /// this client.
@@ -234,9 +230,9 @@ pub enum CRelayPacket {
     /// hold from the union list), but each home additionally rejects
     /// the RPC at the handler layer if `requester_relay_id` does not
     /// match the connection's authenticated `DhtHello` peer id. This
-    /// is the phase 2d-fix cross-relay replay defense (an ack the
-    /// user signed for relay R_a is no longer redirectable to a
-    /// different home via a different relay R_b).
+    /// is the cross-relay replay defense (an ack the user signed for
+    /// relay R_a is no longer redirectable to a different home via a
+    /// different relay R_b).
     ///
     /// **Why the user signs (not the relay)**: a malicious relay could
     /// otherwise forge an ack and force every home to drop a user's
@@ -245,7 +241,7 @@ pub enum CRelayPacket {
     /// for the fetch direction.
     AckAuth { sig: Bytes<64>, timestamp: u64 },
 
-    /// Phase 9 §3.9 — libcore wrapper around §3.4 `KeyPackagePublish`
+    /// §3.9 — libcore wrapper around §3.4 `KeyPackagePublish`
     /// (when `mode = Publish`) or §3.6 `KeyPackageRefill` (when
     /// `mode = Refill`). **User-signed RPC**: `sig` is the phone's
     /// signature over the *inner* Tier-2 transcript
@@ -265,7 +261,7 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §3.5 `KeyPackageFetch`.
+    /// §3.9 — libcore wrapper around §3.5 `KeyPackageFetch`.
     /// **Gate-only RPC**: the inner `KeyPackageFetchReq` carries no user
     /// sig (it's DhtHello-authenticated relay-to-relay), so `sig` is a
     /// wrapper-gate signature over
@@ -279,7 +275,7 @@ pub enum CRelayPacket {
         sig:        Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome publish to
+    /// §3.9 — libcore wrapper around §6.1 Welcome publish to
     /// the recipient's K=3 homes. **Gate-only RPC**: the user
     /// authorization rides inside `envelope.sender_sig` (forwarded
     /// intact); `sig` is a wrapper-gate signature over
@@ -293,7 +289,7 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome drain of the
+    /// §3.9 — libcore wrapper around §6.1 Welcome drain of the
     /// *calling IPK's own* queue from its K=3 homes. **User-signed
     /// RPC**: `sig` is the phone's signature over the inner
     /// [`crate::proto::mls_wire::welcome_fetch_signing_input`], bound to
@@ -308,7 +304,7 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome ack; the K
+    /// §3.9 — libcore wrapper around §6.1 Welcome ack; the K
     /// homes GC the listed `welcome_ids`. **User-signed RPC**: `sig` is
     /// the phone's signature over the inner
     /// [`crate::proto::mls_wire::welcome_ack_signing_input`], bound to
@@ -336,7 +332,7 @@ pub enum SRelayPacket {
     // /// All the pending deliveries for user in chronological order
     // /// TODO: might need debouncing in future if TOO MANY messages were queued at once
     // QueueDrain(Vec<DeliverP>),
-    /// Sticky-home phase 2d — relay-side request for the user to sign a
+    /// Sticky-home — relay-side request for the user to sign a
     /// `QueueFetchAck` transcript over the union of dispatch ids the
     /// recipient relay just drained from the K home relays.
     ///
@@ -349,7 +345,7 @@ pub enum SRelayPacket {
     /// out a `QueueFetchAck` to each of the K homes with the same
     /// signed `(timestamp, sig)` pair — the transcript binds the
     /// requesting relay so a captured ack can't be redirected to a
-    /// different home via a different relay (phase 2d-fix replay
+    /// different home via a different relay (cross-relay replay
     /// defense), but it does NOT bind a target-home identity, so one
     /// signature still works across the K homes within R_r's set.
     ///
@@ -374,7 +370,7 @@ pub enum SRelayPacket {
         suggested_timestamp: u64,
     },
 
-    /// Phase 9 §3.9 — reply to [`CRelayPacket::PublishKeyPackage`].
+    /// §3.9 — reply to [`CRelayPacket::PublishKeyPackage`].
     /// `homes_succeeded` is the count of K=3 DHT homes that returned a
     /// success outcome (Stored for Publish, Appended for Refill).
     /// `quorum_met` ⇔ `homes_succeeded ≥ K_MIN` (= 2).
@@ -383,7 +379,7 @@ pub enum SRelayPacket {
         quorum_met:      bool,
     },
 
-    /// Phase 9 §3.9 — reply to [`CRelayPacket::FetchKeyPackage`].
+    /// §3.9 — reply to [`CRelayPacket::FetchKeyPackage`].
     /// `record = None` collapses the Tier-2 `NoStash` and `NotOwner`
     /// outcomes (libcore can't act on the distinction). `static_hash`
     /// is the cross-replica hash from §3.5's `KeyPackageFetchFound`
@@ -394,24 +390,24 @@ pub enum SRelayPacket {
         static_hash: Bytes<32>,
     },
 
-    /// Phase 9 §3.9 — reply to [`CRelayPacket::PublishWelcome`].
+    /// §3.9 — reply to [`CRelayPacket::PublishWelcome`].
     /// `quorum_met = true` ⇔ ≥ K_MIN of the recipient's K=3 homes
     /// stored the envelope.
     WelcomePublished {
         quorum_met: bool,
     },
 
-    /// Phase 9 §3.9 — reply to [`CRelayPacket::FetchWelcomes`]. The
+    /// §3.9 — reply to [`CRelayPacket::FetchWelcomes`]. The
     /// home merges welcomes from the K=3 home replicas, deduplicates
     /// by `(group_id, kp_ref_used)`, and returns the union.
     WelcomesFetched {
         entries: Vec<crate::proto::mls_wire::WelcomeEntry>,
     },
 
-    /// Phase 9 §3.9 — reply to [`CRelayPacket::AckWelcomes`].
+    /// §3.9 — reply to [`CRelayPacket::AckWelcomes`].
     WelcomesAcked,
 
-    /// Phase 9 §3.9 — generic "your home's DHT is disabled" reply,
+    /// §3.9 — generic "your home's DHT is disabled" reply,
     /// returned for any of the five wrapper RPCs when
     /// `relay.dht.is_none()`. Libcore surfaces this as a clean per-RPC
     /// error rather than retrying — operator must enable DHT on the
@@ -431,14 +427,12 @@ impl Sender for SRelayPacket {}
 #[cfg(test)]
 mod tests {
     //! Wire-format round-trip + transcript-stability tests for the
-    //! sticky-home phase 2c [`CRelayPacket::DrainAuth`] variant.
+    //! sticky-home [`CRelayPacket::DrainAuth`] variant.
     //!
-    //! Per the phase 2c dispatch: "no new tests at the wire level
-    //! beyond a postcard round-trip — the transcript is already tested
-    //! by phase 2a." We add the round-trip plus a byte-stability check
-    //! that the transcript libcore signs is exactly what
-    //! `queue_fetch_signing_input` produces, so any drift between the
-    //! signing-input helper and the relay's verifier surfaces here.
+    //! At the wire level this is just a postcard round-trip plus a
+    //! byte-stability check that the transcript libcore signs is exactly
+    //! what `queue_fetch_signing_input` produces, so any drift between
+    //! the signing-input helper and the relay's verifier surfaces here.
     use super::CRelayPacket;
     use super::Bytes;
     use crate::proto::pack::Packer;
@@ -462,9 +456,9 @@ mod tests {
 
     /// Pin the transcript layout libcore will sign so the relay-side
     /// verifier (which reconstructs the same bytes) cannot drift. The
-    /// transcript is the existing `queue_fetch_signing_input` from
-    /// phase 2a — we just make sure the signing surface used by
-    /// `DrainAuth` is exactly that helper.
+    /// transcript is the existing `queue_fetch_signing_input` — we just
+    /// make sure the signing surface used by `DrainAuth` is exactly that
+    /// helper.
     #[cfg(feature = "crypto")]
     #[test]
     fn drain_auth_transcript_matches_queue_fetch_signing_input() {
@@ -491,8 +485,8 @@ mod tests {
         );
     }
 
-    /// Phase 2d — postcard round-trip for `CRelayPacket::AckAuth`.
-    /// Catches a missing `serde` derive on the new variant the same
+    /// Postcard round-trip for `CRelayPacket::AckAuth`.
+    /// Catches a missing `serde` derive on the variant the same
     /// way `drain_auth_round_trip` does for `DrainAuth`.
     #[test]
     fn ack_auth_round_trip() {
@@ -505,10 +499,9 @@ mod tests {
         assert_eq!(decoded, pkt);
     }
 
-    /// Phase 2d — postcard round-trip for
-    /// `SRelayPacket::AckAuthRequest`. Mirrors `ack_auth_round_trip`
-    /// for the request side; both variants must serialize stably so
-    /// libcore and the relay agree byte-for-byte.
+    /// Postcard round-trip for `SRelayPacket::AckAuthRequest`. Mirrors
+    /// `ack_auth_round_trip` for the request side; both variants must
+    /// serialize stably so libcore and the relay agree byte-for-byte.
     #[test]
     fn ack_auth_request_round_trip() {
         use super::SRelayPacket;
@@ -523,9 +516,9 @@ mod tests {
         assert_eq!(decoded, pkt);
     }
 
-    /// Phase 9 — postcard round-trip every new Tier-1 wrapper request
-    /// variant. One catch-all test per `chip the clay`: a missing
-    /// serde derive on any of the 5 variants surfaces here.
+    /// Postcard round-trip every Tier-1 wrapper request variant. One
+    /// catch-all test: a missing serde derive on any of the 5 variants
+    /// surfaces here.
     #[test]
     fn phase9_wrapper_request_variants_round_trip() {
         use super::CRelayPacket;
@@ -584,8 +577,8 @@ mod tests {
         }
     }
 
-    /// Phase 9 — postcard round-trip every new Tier-1 wrapper reply
-    /// variant + the shared `DhtUnavailable` error reply.
+    /// Postcard round-trip every Tier-1 wrapper reply variant + the
+    /// shared `DhtUnavailable` error reply.
     #[test]
     fn phase9_wrapper_reply_variants_round_trip() {
         use super::SRelayPacket;
@@ -637,7 +630,7 @@ mod tests {
         }
     }
 
-    /// Phase 2d — pin the transcript libcore signs in response to an
+    /// Pin the transcript libcore signs in response to an
     /// `AckAuthRequest`. Same byte-stability discipline as
     /// `drain_auth_transcript_matches_queue_fetch_signing_input`: if
     /// the helper's layout drifts, this test surfaces it.
@@ -653,7 +646,7 @@ mod tests {
         let ts: u64 = 1_700_000_000_004;
 
         let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
-        // Phase 2d-fix layout: domain || version(BE u16) || ipk(32)
+        // Layout: domain || version(BE u16) || ipk(32)
         //   || requester_relay_id(32) || count(BE u32) || n*16
         //   || ts(BE u64).
         let expected_len = crate::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()

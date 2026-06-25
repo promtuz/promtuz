@@ -385,18 +385,18 @@ pub(crate) fn store_tombstone(
         return TombstoneOutcome::BadSig;
     }
 
-    // 6. Advertise the tombstone via Merkle (phase 1h, item 6 of the
-    //    DoS-hardening dispatch). Insert the tombstone's value-hash
-    //    *under the same IPK key* as the live record would have been —
+    // 6. Advertise the tombstone via Merkle. Insert the tombstone's
+    //    value-hash *under the same IPK key* as the live record would
+    //    have been —
     //    the leaf hash is order-sensitive on its `(ipk, value_hash)`
     //    entries, and `tombstone_value_hash` carries a distinct
     //    domain tag (`MERKLE_TOMBSTONE_DOMAIN`) so the tombstone-leaf
     //    hash for `(ipk, gen)` cannot collide with the record-leaf
     //    hash for the same `(ipk, gen)`. A peer still holding the live
     //    record sees a root divergence on this slice → bisect →
-    //    FetchRecord → we return the tombstone in the new
-    //    `FetchRecordResp::tombstones` field (also phase 1h) → peer
-    //    applies it via `store_tombstone` and converges.
+    //    FetchRecord → we return the tombstone in the
+    //    `FetchRecordResp::tombstones` field → peer applies it via
+    //    `store_tombstone` and converges.
     //
     //    We `insert` rather than `remove` so anti-entropy converges on
     //    deletions. The eventual GC of tombstones at `2 ×
@@ -459,8 +459,8 @@ pub(crate) fn lookup_record(
 /// long before. Dropping the tombstone after that is safe.
 ///
 /// When a tombstone is deleted, its leaf is also removed from the
-/// in-memory Merkle tree (phase 1h, item 6). The leaf was advertised
-/// during the honour window so anti-entropy could carry the deletion;
+/// in-memory Merkle tree. The leaf was advertised during the honour
+/// window so anti-entropy could carry the deletion;
 /// once the window expires, the leaf disappears from the slice's bitset
 /// and a new live record for the same IPK can re-occupy the leaf
 /// without diverging from a peer that GC'd theirs first.
@@ -468,7 +468,7 @@ pub(crate) fn lookup_record(
 /// Returns the number of entries evicted (records + tombstones).
 ///
 /// **Caller responsibility:** this is meant to be called from a periodic
-/// scheduler (phase 1g's anti-entropy task), not on a hot RPC path. A
+/// scheduler (the anti-entropy task), not on a hot RPC path. A
 /// full CF scan is `O(records held)` which is small per relay (~300
 /// records at design-doc §6.4 scale) but still costs an iterator open.
 ///
@@ -540,8 +540,8 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     evicted
 }
 
-/// Phase 2d — sync planning half of the K-set drift migration in
-/// `evict_expired` (`STICKY_HOME_RELAY.md` §4.4 / §7.2).
+/// Sync planning half of the K-set drift migration in `evict_expired`
+/// (`STICKY_HOME_RELAY.md` §4.4 / §7.2).
 ///
 /// Walks `cf_dht_queue` once and identifies up to `max` queue entries
 /// whose recipient `user_ipk` is no longer in this relay's K-closest
@@ -647,9 +647,9 @@ pub(crate) fn plan_drift_migrations(
     out
 }
 
-/// Phase 2d — delete a single migrated `cf_dht_queue` entry by its
-/// composite `MessageKey`. Used by the migration driver after an
-/// outbound `Forward` to the new K-closest succeeded. Returns
+/// Delete a single migrated `cf_dht_queue` entry by its composite
+/// `MessageKey`. Used by the migration driver after an outbound
+/// `Forward` to the new K-closest succeeded. Returns
 /// `true` on a successful delete.
 ///
 /// Public-to-the-crate so the `evict_expired` driver in the scheduler
@@ -666,12 +666,12 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 /// Persist a queued [`DispatchP`] into [`CF_DHT_QUEUE`] for the recipient's
 /// home-relay queue. Used by:
 ///
-/// - `forward_to_homes` (phase 2b) when the sender relay discovers it is
-///   itself in the recipient's K-closest set — the self-store short-circuit
-///   that mirrors the publish-path's "self in K" optimisation in
+/// - `forward_to_homes` when the sender relay discovers it is itself in
+///   the recipient's K-closest set — the self-store short-circuit that
+///   mirrors the publish-path's "self in K" optimisation in
 ///   [`super::publish::publish`].
-/// - The home-side `DhtRequest::Forward` handler (phase 2d, not yet wired)
-///   to durably enqueue an inbound dispatch for an offline recipient.
+/// - The home-side `DhtRequest::Forward` handler, to durably enqueue an
+///   inbound dispatch for an offline recipient.
 ///
 /// **Cap enforcement.** Mirrors the [`crate::storage::MAX_QUEUED_PER_RECIPIENT`]
 /// check in `relay/src/quic/handler/client/events/forward.rs::store_in_rocks`,
@@ -759,9 +759,9 @@ pub(crate) fn enqueue_for_home(
 }
 
 /// Look up a tombstone by IPK. Returns `None` if no tombstone is stored.
-/// Used by anti-entropy (phase 1g) to decide whether a peer's apparent
-/// "missing record" is genuinely gone or just stale.
-#[allow(dead_code)] // Consumed by phase 1g's sync RPC handlers.
+/// Used by anti-entropy to decide whether a peer's apparent "missing
+/// record" is genuinely gone or just stale.
+#[allow(dead_code)] // Consumed by the anti-entropy sync RPC handlers.
 pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<TombstoneRecord> {
     let cf = dht.rocks.cf_handle(CF_DHT_PRESENCE)?;
     let key = tombstone_key(user_ipk);
@@ -769,8 +769,8 @@ pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<Tombsto
     TombstoneRecord::deser(&bytes).ok()
 }
 
-/// Phase 2d — read up to `max` queued [`DispatchP`]s for `user_ipk`
-/// from `cf_dht_queue`, oldest first.
+/// Read up to `max` queued [`DispatchP`]s for `user_ipk` from
+/// `cf_dht_queue`, oldest first.
 ///
 /// **Ordering** is naturally chronological: the on-disk `MessageKey`
 /// shape `recipient(32) || ts_be(8) || dispatch_id(16)` makes the
@@ -838,7 +838,7 @@ pub(crate) fn lookup_queue_for_user(
     out
 }
 
-/// Phase 2d — delete every `cf_dht_queue` entry for `user_ipk` whose
+/// Delete every `cf_dht_queue` entry for `user_ipk` whose
 /// `dispatch_id` appears in `dispatch_ids`. Returns the count of
 /// successful deletions.
 ///
@@ -1209,9 +1209,8 @@ mod tests {
 
     #[test]
     fn evict_expired_keeps_tombstones_inside_honour_window() {
-        // Phase 1h, item 4: tombstones are honoured for 2 × TTL after
-        // their `deleted_at`. Inside that window `evict_expired` must
-        // leave them alone.
+        // Tombstones are honoured for 2 × TTL after their `deleted_at`.
+        // Inside that window `evict_expired` must leave them alone.
         let relay = fresh_signing_key();
         let user = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -1234,10 +1233,9 @@ mod tests {
 
     #[test]
     fn evict_expired_drops_tombstones_past_honour_window() {
-        // Phase 1h, item 4: once `deleted_at + 2 × PRESENCE_TTL_MS` has
-        // elapsed, the tombstone should be GC'd — both the on-disk
-        // entry and its Merkle leaf (so the slice bitset stops
-        // advertising it).
+        // Once `deleted_at + 2 × PRESENCE_TTL_MS` has elapsed, the
+        // tombstone should be GC'd — both the on-disk entry and its
+        // Merkle leaf (so the slice bitset stops advertising it).
         let relay = fresh_signing_key();
         let user = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -1246,8 +1244,8 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let tomb = build_tombstone(&user, &relay, 1, now);
         assert_eq!(store_tombstone(&dht, tomb.clone(), now), TombstoneOutcome::Stored);
-        // Confirm the Merkle tree now advertises this tombstone (item
-        // 6 — store_tombstone inserts the value-hash into the slice).
+        // Confirm the Merkle tree now advertises this tombstone
+        // (store_tombstone inserts the value-hash into the slice).
         let slice_id = tomb.user_ipk.0[0];
         assert_ne!(dht.merkle.read().root(slice_id), [0u8; 32]);
 
@@ -1263,9 +1261,9 @@ mod tests {
 
     #[test]
     fn store_tombstone_advertises_via_merkle() {
-        // Phase 1h, item 6: storing a tombstone must update the Merkle
-        // tree (insert with tombstone domain), not remove the leaf
-        // entry — so anti-entropy carries deletions.
+        // Storing a tombstone must update the Merkle tree (insert with
+        // tombstone domain), not remove the leaf entry — so
+        // anti-entropy carries deletions.
         let relay = fresh_signing_key();
         let user = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -1311,7 +1309,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Sticky-home phase 2b — `enqueue_for_home` (cf_dht_queue writes)
+    // Sticky-home — `enqueue_for_home` (cf_dht_queue writes)
     // -----------------------------------------------------------------
 
     use common::proto::client_rel::DispatchP;
@@ -1354,7 +1352,7 @@ mod tests {
         assert_eq!(outcome, ForwardOutcome::Stored);
 
         // Read back via the prefix iterator the way the home-side
-        // QueueFetch handler will (phase 2c). The key shape is
+        // QueueFetch handler does. The key shape is
         // `MessageKey { recipient: to_ipk, ts_be: now, id }` per
         // `enqueue_for_home`.
         let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
@@ -1494,7 +1492,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Sticky-home phase 2d — `lookup_queue_for_user` + `delete_queue_entries`
+    // Sticky-home — `lookup_queue_for_user` + `delete_queue_entries`
     // + `plan_drift_migrations` (the K-set migration planner)
     // -----------------------------------------------------------------
 
@@ -1605,10 +1603,9 @@ mod tests {
         assert!(remaining.is_empty());
     }
 
-    /// Phase 2d — `plan_drift_migrations` returns entries whose
-    /// recipient is no longer K-closest to self. Set self_id far
-    /// from the recipient and install K peers strictly closer; the
-    /// planner returns the entry.
+    /// `plan_drift_migrations` returns entries whose recipient is no
+    /// longer K-closest to self. Set self_id far from the recipient and
+    /// install K peers strictly closer; the planner returns the entry.
     #[test]
     fn evict_expired_migrates_queue_when_drifted_out_of_k_closest() {
         // Build a relay whose self_id is `[0xFF; 32]` (far from
@@ -1642,8 +1639,8 @@ mod tests {
         assert_eq!(migrations[0].1.id.0, [9u8; 16]);
     }
 
-    /// Phase 2d — when self is *still* in K-closest, the planner
-    /// returns nothing (no migration needed). The default fixture
+    /// When self is *still* in K-closest, the planner returns nothing
+    /// (no migration needed). The default fixture
     /// has an empty routing table → permissive sparse policy → self
     /// counts as K-closest → no entries returned.
     #[test]
@@ -1663,7 +1660,7 @@ mod tests {
         assert!(migrations.is_empty());
     }
 
-    /// Phase 2d — cap respected.
+    /// Cap respected.
     #[test]
     fn evict_expired_caps_migration_at_max_per_sweep() {
         // Force drift for many users, then verify the planner stops

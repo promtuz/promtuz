@@ -2,8 +2,8 @@
 //!
 //! # What this is
 //!
-//! Phase 4 of the MLS rollout introduces three RPC families that run
-//! over the relay-to-relay `peer/1` ALPN: [`KeyPackagePublish`],
+//! The MLS rollout introduces three RPC families that run over the
+//! relay-to-relay `peer/1` ALPN: [`KeyPackagePublish`],
 //! [`KeyPackageFetch`], [`KeyPackageRefill`], plus the Welcome queue
 //! triplet [`WelcomePublish`], [`WelcomeFetch`], [`WelcomeAck`].
 //! These are *not* part of the existing `relay/1` client surface — the
@@ -15,21 +15,21 @@
 //! surface — fresh NodeId, DhtHello signing, peer cert pinning) we
 //! ship the **trait** for the dialer here so:
 //!
-//! 1. Phase 4's send/receive logic in `api/messaging.rs` and the
+//! 1. The send/receive logic in `api/messaging.rs` and the
 //!    `KeyPackageStash` rotation scheduler can be **fully implemented**
 //!    against this trait — testable in-process via a stub.
-//! 2. Phase 5 owns landing a concrete production impl (either a
+//! 2. A concrete production impl can be landed separately (either a
 //!    libcore→peer/1 dialer with an ephemeral NodeKey, or a pivot to
 //!    routing through the existing `relay/1` connection via new
 //!    CRelayPacket variants — the trait shape is agnostic).
 //!
 //! # Why a trait, not a concrete dialer
 //!
-//! The Phase-4 minimum-bar tests demand "lazy-create group on first
-//! send" round-trips in-process (no real network). A concrete dialer
-//! that opens `peer/1` cannot satisfy that. The trait lets a fake
+//! The minimum-bar tests demand "lazy-create group on first send"
+//! round-trips in-process (no real network). A concrete dialer that
+//! opens `peer/1` cannot satisfy that. The trait lets a fake
 //! implementation drive the in-process test fixture while production
-//! callers wire a real one Phase 5.
+//! callers wire a real one.
 //!
 //! # Async-trait shape
 //!
@@ -37,14 +37,13 @@
 //! `impl Future<Output = ...>` implicitly. That ties dyn-dispatch to
 //! `Box<dyn Future>` through manual desugaring, so we side-step
 //! dynamic dispatch by parameterising callers on a generic
-//! `<C: DhtClient>` bound. All Phase-4 callers are
-//! generic-monomorphised, so the cost is zero compared with `Box<dyn>`.
+//! `<C: DhtClient>` bound. All callers are generic-monomorphised, so
+//! the cost is zero compared with `Box<dyn>`.
 //!
 //! design-doc: `misc/specs/MLS.md` §3.4-3.6 (KP RPCs), §6.1 (Welcome
-//! queue), §11.4 Phase M9 (migration scripts).
+//! queue), §11.4 (migration scripts).
 
-#![allow(dead_code)] // Phase 4 surface; full wiring lands across §A in
-// later phases.
+#![allow(dead_code)] // Trait surface; full wiring lands across §A.
 
 use std::future::Future;
 
@@ -63,8 +62,8 @@ use thiserror::Error;
 /// behind the dialer's chosen transport.
 #[derive(Debug, Error)]
 pub enum DhtClientError {
-    /// The caller did not configure a backend; production Phase 4
-    /// returns this until Phase 5 lands the real dialer.
+    /// The caller did not configure a backend; production returns this
+    /// until the real dialer is wired.
     #[error("dht_client: no backend wired (Phase 5 owns the production dialer)")]
     NotConfigured,
 
@@ -90,8 +89,8 @@ pub type DhtClientResult<T> = std::result::Result<T, DhtClientError>;
 
 /// A KeyPackage fetched on the wire plus the per-home auxiliary fields
 /// the spec exposes ([`KP_FETCH §3.5`]). We surface them so a future
-/// Phase 5 cross-replica static-fields check (§5.4) can compare across
-/// hedged responses.
+/// cross-replica static-fields check (§5.4) can compare across hedged
+/// responses.
 ///
 /// design-doc: `misc/specs/MLS.md` §3.5.
 #[derive(Debug, Clone)]
@@ -113,9 +112,9 @@ pub enum PublishOutcome {
 
 /// Optional caller-supplied filter on per-home outcomes (e.g. accept
 /// `Appended` and `Stored` as success, treat `RateLimited` as a soft
-/// failure to retry later). Phase 4 ships only the [`KpOutcomeFilter::Default`]
-/// variant; concrete dialer impls in Phase 5 may add finer-grained
-/// behaviour without changing the trait shape.
+/// failure to retry later). Only the [`KpOutcomeFilter::Default`]
+/// variant ships today; concrete dialer impls may later add
+/// finer-grained behaviour without changing the trait shape.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum KpOutcomeFilter {
     /// Treat any `Stored` / `Appended` reply as success; everything
@@ -124,11 +123,11 @@ pub enum KpOutcomeFilter {
     Default,
 }
 
-/// The DHT-RPC surface libcore needs from Phase 4 forward. Rust 2024
-/// native `async fn in trait`. Callers are generic-bounded
+/// The DHT-RPC surface libcore needs. Rust 2024 native
+/// `async fn in trait`. Callers are generic-bounded
 /// (`fn foo<C: DhtClient>(c: &C, ...)`) to side-step `dyn Future`
-/// boxing; the global libcore wiring (Phase 5) will pick a single
-/// concrete impl and store it as `Arc<C>`.
+/// boxing; the global libcore wiring picks a single concrete impl and
+/// stores it as `Arc<C>`.
 pub trait DhtClient: Send + Sync + 'static {
     /// Publish a fresh batch of KeyPackages to **the K=3 homes of the
     /// publisher's IPK**. Concrete impls fan out and accept on
@@ -184,10 +183,10 @@ pub trait DhtClient: Send + Sync + 'static {
     ) -> impl Future<Output = DhtClientResult<()>> + Send;
 }
 
-/// "Phase 4 not-wired" stub. Returns
-/// [`DhtClientError::NotConfigured`] from every method. Suitable for
-/// production startup until Phase 5 wires a real dialer; tests that
-/// need success/failure outcomes use [`tests::FakeDhtClient`] instead.
+/// "Not-wired" stub. Returns [`DhtClientError::NotConfigured`] from
+/// every method. Suitable for production startup until a real dialer
+/// is wired; tests that need success/failure outcomes use
+/// [`tests::FakeDhtClient`] instead.
 #[derive(Debug, Default, Clone)]
 pub struct NotWiredDhtClient;
 
@@ -248,7 +247,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// In-process [`DhtClient`] used by Phase 4 tests. Holds:
+    /// In-process [`DhtClient`] used by tests. Holds:
     /// - a `published_kps` map from `target_ipk → Vec<KeyPackageRecord>`
     ///   so a test can prime a peer's stash before the unit-under-test
     ///   issues a fetch.

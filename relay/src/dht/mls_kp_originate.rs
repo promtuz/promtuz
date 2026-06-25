@@ -1,5 +1,5 @@
 //! Tier-2 OUTBOUND fan-out for KeyPackage publish / refill / fetch
-//! (Phase 9, §3.9). The relay-side analogue of
+//! (§3.9). The relay-side analogue of
 //! `forward.rs::forward_to_homes`, specialised to the MLS KeyPackage
 //! RPCs.
 //!
@@ -180,7 +180,7 @@ fn build_refill_req(
 
 // ---------------------------------------------------------------------------
 // Tests — self-only fan-out (single relay, empty routing table). The
-// remote multi-relay path is exercised by the Phase 9 e2e harness.
+// remote multi-relay path is exercised by the e2e harness.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

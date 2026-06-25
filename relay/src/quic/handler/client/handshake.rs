@@ -58,7 +58,7 @@ pub(super) async fn handle_handshake(
     let msg = [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &*nonce].concat();
     let packet = match Signature::from_slice(&*sig) {
         Ok(sig) if ipk.verify_strict(&msg, &sig).is_ok() => {
-            // Phase 9 §3.9 — advertise our DHT NodeId so the phone can
+            // §3.9 — advertise our DHT NodeId so the phone can
             // sign welcome fetch/ack wrappers bound to this home. `None`
             // when DHT is disabled (those RPCs reply DhtUnavailable).
             let relay_node_id =

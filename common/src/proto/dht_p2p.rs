@@ -701,10 +701,10 @@ mod verify_impl {
         /// **Contract:** this method does **not** verify the embedded
         /// [`crate::proto::client_rel::DispatchP::sig`]. That signature
         /// is the user-layer end-to-end authenticator and is checked by
-        /// the home relay at delivery / queue time (phase 2d) — running
-        /// it here would conflate wire-format validation with delivery-
-        /// time delivery decisions, and the wire validator has no
-        /// access to the recipient's session state for the latter.
+        /// the home relay at delivery / queue time — running it here
+        /// would conflate wire-format validation with delivery-time
+        /// delivery decisions, and the wire validator has no access to
+        /// the recipient's session state for the latter.
         ///
         /// **Why an external `sender_relay_pubkey` argument** rather
         /// than embedding the pubkey in [`Forward`]: the home relay
@@ -714,7 +714,7 @@ mod verify_impl {
         /// keyed by `sender_relay_id`. Pulling it from there saves 32
         /// bytes per `Forward` on the wire and prevents a per-`Forward`
         /// id-binding check (the [`DhtHello`] already proved
-        /// `BLAKE3(sender_relay_pubkey) == sender_relay_id`). Phase 2d's
+        /// `BLAKE3(sender_relay_pubkey) == sender_relay_id`). The
         /// home-relay handler is the call-site that supplies this
         /// argument from `Dht::peer_conns`.
         ///
@@ -728,7 +728,7 @@ mod verify_impl {
         /// 3. **Timestamp window**: `|now_ms − timestamp| ≤
         ///    MAX_DHT_HELLO_SKEW_MS`. Stale and future skew surface as
         ///    distinct `StaleTimestamp` / `FutureTimestamp` error
-        ///    variants so phase 2d can log them separately.
+        ///    variants so the home relay can log them separately.
         pub fn verify(
             &self, sender_relay_pubkey: &[u8; 32], now_ms: u64,
         ) -> Result<(), ForwardVerifyError> {
@@ -746,8 +746,8 @@ mod verify_impl {
             vk.verify_strict(&msg, &sig)
                 .map_err(|_| ForwardVerifyError::BadForwardSig)?;
 
-            // 3. Timestamp freshness — split stale-vs-future so phase 2d
-            //    can log them distinctly. `MAX_DHT_HELLO_SKEW_MS` is the
+            // 3. Timestamp freshness — split stale-vs-future so the home
+            //    relay can log them distinctly. `MAX_DHT_HELLO_SKEW_MS` is the
             //    same window used for `DhtHello` and resolver-side
             //    `RelayHello` so a relay's clock-drift behaviour is
             //    consistent across packet kinds.
@@ -821,7 +821,7 @@ mod verify_impl {
         ///    [`queue_fetch_ack_signing_input`] — the transcript binds
         ///    `(user_ipk, requester_relay_id, delivered_ids,
         ///    timestamp)`, so a captured signature is non-replayable
-        ///    against a different requester (phase 2d-fix replay
+        ///    against a different requester (cross-relay replay
         ///    defense; see [`QueueFetchAck`]'s doc-comment for the
         ///    threat model).
         /// 4. **Timestamp window**: split stale / future.
@@ -1104,15 +1104,14 @@ pub struct FetchRecordResp {
 }
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
-//===:===:===:==:  STICKY-HOME RELAY (phase 2a) :==:===||
+//===:===:===:===:==:  STICKY-HOME RELAY  :==:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //
 // The next three RPC pairs implement the wire-format contract for the
-// sticky-home-relay model defined in `misc/specs/STICKY_HOME_RELAY.md`.
-// Phase 2a (this commit) adds **only** the wire types, signing-input
-// helpers, and per-packet `verify` methods. Sender, recipient, and home
-// flow logic land in phases 2b/2c/2d — those phases will read these
-// types and call these `verify` methods without re-implementing them.
+// sticky-home-relay model defined in `misc/specs/STICKY_HOME_RELAY.md`:
+// the wire types, signing-input helpers, and per-packet `verify` methods.
+// Sender, recipient, and home flow logic read these types and call these
+// `verify` methods without re-implementing them.
 //
 // Skew window: every transcript here is bound to wall-clock time the same
 // way as `DhtHello` (±[`MAX_DHT_HELLO_SKEW_MS`]). Reusing the constant
@@ -1328,12 +1327,12 @@ pub struct QueueFetchResp {
 /// because a forged ack would force the home relay to drop queued
 /// messages.
 ///
-/// The `-v1` suffix is preserved across the phase 2d-fix transcript
-/// extension (which added `requester_relay_id` after `user_ipk`) because
-/// the addition is a refinement of the existing protocol rather than a
-/// distinct ack-protocol revision; bumping to `-v2` would conflate
-/// "transcript-shape changed" with "ack semantics changed" and force a
-/// double protocol-version bump on every replica simultaneously.
+/// The `-v1` suffix is preserved across the transcript extension that
+/// added `requester_relay_id` after `user_ipk`, because that addition is a
+/// refinement of the existing protocol rather than a distinct ack-protocol
+/// revision; bumping to `-v2` would conflate "transcript-shape changed"
+/// with "ack semantics changed" and force a double protocol-version bump
+/// on every replica simultaneously.
 pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-v1";
 
 /// Recipient-relay → home-relay request: I successfully delivered these
@@ -1347,18 +1346,17 @@ pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-
 /// `CRelayPacket::AckDrain` semantics — only the user authorises
 /// deletion of their own queue.
 ///
-/// **Phase 2d-fix — cross-relay replay defense via `requester_relay_id`**:
-/// the original phase 2a transcript bound only `(user_ipk, delivered_ids,
-/// timestamp)`, which let a malicious relay R_evil that the user
-/// authenticated to once forward the same signed ack to OTHER K-closest
-/// homes (which it learned via DHT lookup) and force them to delete the
-/// listed dispatch IDs even though those dispatches may not have been
-/// delivered to the user. The fix mirrors the existing
-/// [`QueueFetch::requester_relay_id`] binding (§5.1): the requester relay
-/// id is now part of the signed transcript, and the home additionally
-/// checks `req.requester_relay_id == authenticated_peer_id` in its
-/// handler. A captured ack can no longer be redirected to a different
-/// home outside the user's chosen drainer.
+/// **Cross-relay replay defense via `requester_relay_id`**: binding only
+/// `(user_ipk, delivered_ids, timestamp)` would let a malicious relay
+/// R_evil that the user authenticated to once forward the same signed ack
+/// to OTHER K-closest homes (which it learned via DHT lookup) and force
+/// them to delete the listed dispatch IDs even though those dispatches may
+/// not have been delivered to the user. To close this, the binding mirrors
+/// [`QueueFetch::requester_relay_id`] (§5.1): the requester relay id is
+/// part of the signed transcript, and the home additionally checks
+/// `req.requester_relay_id == authenticated_peer_id` in its handler. A
+/// captured ack can no longer be redirected to a different home outside
+/// the user's chosen drainer.
 ///
 /// **Empty ack is legal**: a `delivered_ids = []` ack is a no-op and the
 /// home relay's verifier accepts it. The flow doesn't currently produce
@@ -1411,12 +1409,11 @@ pub struct QueueFetchAck {
 /// byte-stable across protocol revisions and not piggyback on postcard's
 /// internal length encoding.
 ///
-/// **Phase 2d-fix**: `requester_relay_id` is positioned immediately after
-/// `user_ipk`, mirroring [`queue_fetch_signing_input`]'s layout. This is
-/// a wire-format break vs. the original phase 2a layout (no
-/// `requester_relay_id` in the transcript) but pre-1.0 the project
-/// accepts these breaks; `PROTOCOL_VERSION` already advanced past 2a's
-/// release.
+/// `requester_relay_id` is positioned immediately after `user_ipk`,
+/// mirroring [`queue_fetch_signing_input`]'s layout. This was a
+/// wire-format break vs. an earlier layout (no `requester_relay_id` in the
+/// transcript) but pre-1.0 the project accepts these breaks;
+/// `PROTOCOL_VERSION` already advanced past that earlier release.
 pub fn queue_fetch_ack_signing_input(
     user_ipk: &[u8; 32], requester_relay_id: &crate::quic::id::NodeId,
     delivered_ids: &[[u8; 16]], timestamp: u64,
@@ -1480,15 +1477,15 @@ pub struct QueueFetchAckResp {
 /// home relay's responsibility at delivery time (it has access to the
 /// recipient's session and any user-side bookkeeping), so layering the
 /// dispatch verification into the wire-validator would conflate two
-/// concerns. Phase 2d implements the dispatch-level check inline with
-/// the deliver / queue branches in `forward.rs`.
+/// concerns. The home relay implements the dispatch-level check inline
+/// with the deliver / queue branches in `forward.rs`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ForwardVerifyError {
     /// Convenience variant exposed for symmetry with the home-relay's
     /// `forward.rs` flow even though [`Forward::verify`] never returns it
     /// (the embedded `DispatchP::sig` check happens at delivery, not
-    /// here). Reserved so phase 2d can return it from a unified
-    /// validator without us shipping a wire-format change.
+    /// here). Reserved so a unified validator can return it without
+    /// shipping a wire-format change.
     #[error("forward: bad embedded dispatch signature")]
     BadDispatchSig,
     /// Outer sender-relay signature did not validate. Maps to
@@ -1566,28 +1563,28 @@ pub enum DhtRequest {
     MerkleSummary(MerkleSummary),
     MerkleDiff(MerkleDiff),
     FetchRecord(FetchRecord),
-    /// Sticky-home phase 2a (§5.1 of `STICKY_HOME_RELAY.md`):
-    /// sender-relay → home-relay deliver-or-queue. Handler in
-    /// `relay/src/dht/handler.rs` lands in phase 2d.
+    /// Sticky-home (§5.1 of `STICKY_HOME_RELAY.md`):
+    /// sender-relay → home-relay deliver-or-queue. Handled in
+    /// `relay/src/dht/handler.rs`.
     Forward(Forward),
-    /// Sticky-home phase 2a (§5.2): recipient-relay → home-relay drain
-    /// request. Handler in phase 2d.
+    /// Sticky-home (§5.2): recipient-relay → home-relay drain
+    /// request.
     QueueFetch(QueueFetch),
-    /// Sticky-home phase 2a (§5.2): recipient-relay → home-relay
-    /// post-delivery GC of dispatch ids. Handler in phase 2d.
+    /// Sticky-home (§5.2): recipient-relay → home-relay
+    /// post-delivery GC of dispatch ids.
     QueueFetchAck(QueueFetchAck),
 
-    /// MLS Phase 2 (§3.4 of `MLS.md`): owner → home-relay full-batch
+    /// MLS (§3.4 of `MLS.md`): owner → home-relay full-batch
     /// KeyPackage publish. Adds new records to the recipient's stash;
     /// pre-existing records survive the publish (additive semantics
-    /// per §5.6 anti-pinning rotation). Handler in
+    /// per §5.6 anti-pinning rotation). Handled in
     /// `relay/src/dht/mls_kp.rs`.
     KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishReq),
-    /// MLS Phase 2 (§3.5 of `MLS.md`): sender-relay → home-relay
+    /// MLS (§3.5 of `MLS.md`): sender-relay → home-relay
     /// pop-one KeyPackage from the target's stash. Strict one-shot
     /// per fetch (`KP_PER_FETCH = 1`).
     KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchReq),
-    /// MLS Phase 2 (§3.6 of `MLS.md`): owner → home-relay incremental
+    /// MLS (§3.6 of `MLS.md`): owner → home-relay incremental
     /// stash top-up. Distinct from `KeyPackagePublish` only via
     /// signing-input domain (so a captured Refill sig cannot be
     /// replayed as a Publish — the two have different replacement
@@ -1595,15 +1592,15 @@ pub enum DhtRequest {
     /// relay side per §5.6).
     KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillReq),
 
-    /// MLS Phase 3a (Component B): sender-relay → home-relay
+    /// MLS (Component B): sender-relay → home-relay
     /// deliver-or-queue for a Welcome envelope. The home stores it in
     /// `cf_dht_welcome` until the recipient drains via [`Self::WelcomeFetch`].
     WelcomePublish(crate::proto::mls_wire::WelcomePublishReq),
-    /// MLS Phase 3a: recipient-relay → home-relay drain request for
+    /// MLS: recipient-relay → home-relay drain request for
     /// the recipient's queued welcomes. Authentication mirrors
     /// `QueueFetch` (user-sig + `requester_relay_id` binding).
     WelcomeFetch(crate::proto::mls_wire::WelcomeFetchReq),
-    /// MLS Phase 3a: recipient-relay → home-relay deletion of
+    /// MLS: recipient-relay → home-relay deletion of
     /// processed welcomes. Domain-separated from `WelcomeFetch` so a
     /// captured fetch sig can't be replayed as an ack.
     WelcomeAck(crate::proto::mls_wire::WelcomeAckReq),
@@ -1622,11 +1619,11 @@ pub enum DhtResponse {
     MerkleSummary(MerkleSummaryResp),
     MerkleDiff(MerkleDiffResp),
     FetchRecord(FetchRecordResp),
-    /// Sticky-home phase 2a — reply to [`DhtRequest::Forward`].
+    /// Sticky-home — reply to [`DhtRequest::Forward`].
     Forward(ForwardResp),
-    /// Sticky-home phase 2a — reply to [`DhtRequest::QueueFetch`].
+    /// Sticky-home — reply to [`DhtRequest::QueueFetch`].
     QueueFetch(QueueFetchResp),
-    /// Sticky-home phase 2a — reply to [`DhtRequest::QueueFetchAck`].
+    /// Sticky-home — reply to [`DhtRequest::QueueFetchAck`].
     /// `QueueFetchAck` itself has no semantically meaningful return
     /// payload (it's a fire-and-forget GC nudge), but the per-stream
     /// dispatcher contract in `relay/src/dht/handler.rs` requires a
@@ -1634,21 +1631,21 @@ pub enum DhtResponse {
     /// [`QueueFetchAckResp`] doc-comment for the full rationale.
     QueueFetchAck(QueueFetchAckResp),
 
-    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackagePublish`].
+    /// MLS — reply to [`DhtRequest::KeyPackagePublish`].
     KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishResp),
-    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackageFetch`].
+    /// MLS — reply to [`DhtRequest::KeyPackageFetch`].
     /// Wraps `Found(record, remaining, static_hash) | NoStash |
     /// NotOwner | RateLimited` as a single response (mirrors
     /// `FindValueResp::result` pattern).
     KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchResp),
-    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackageRefill`].
+    /// MLS — reply to [`DhtRequest::KeyPackageRefill`].
     KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillResp),
 
-    /// MLS Phase 3a — reply to [`DhtRequest::WelcomePublish`].
+    /// MLS — reply to [`DhtRequest::WelcomePublish`].
     WelcomePublish(crate::proto::mls_wire::WelcomePublishResp),
-    /// MLS Phase 3a — reply to [`DhtRequest::WelcomeFetch`].
+    /// MLS — reply to [`DhtRequest::WelcomeFetch`].
     WelcomeFetch(crate::proto::mls_wire::WelcomeFetchResp),
-    /// MLS Phase 3a — reply to [`DhtRequest::WelcomeAck`].
+    /// MLS — reply to [`DhtRequest::WelcomeAck`].
     WelcomeAck(crate::proto::mls_wire::WelcomeAckResp),
 }
 
@@ -1998,7 +1995,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // DhtHello — phase 1i (relay-to-relay connection-level handshake)
+    // DhtHello (relay-to-relay connection-level handshake)
     // -----------------------------------------------------------------
 
     /// Sign a fresh, internally-consistent [`DhtHello`] with `key` at
@@ -2136,8 +2133,8 @@ mod tests {
         // Integration-style smoke test: two `Dht`-equivalent identity
         // keys; one constructs a hello, the other verifies it. The
         // resulting authenticated NodeId matches the claimed (and
-        // signed) identity. Phase 2 will exercise the actual QUIC
-        // round-trip (deferred per dispatch).
+        // signed) identity. The actual QUIC round-trip is exercised
+        // elsewhere.
         let dialer_key = fresh_signing_key();
         let receiver_key = fresh_signing_key();
         // dialer != receiver — receiver verifies dialer's hello.
@@ -2164,12 +2161,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Sticky-home relay — phase 2a (Forward / QueueFetch / QueueFetchAck)
-    // Mirrors the test discipline established in phase 1b/1i: every wire
-    // type gets a postcard round-trip, every signing-input helper gets a
-    // byte-layout pin, and every `verify` impl gets a happy-path test
-    // plus negative tests covering bad-sig, stale-ts, future-ts, and
-    // (for ack) too-many-ids.
+    // Sticky-home relay (Forward / QueueFetch / QueueFetchAck)
+    // Every wire type gets a postcard round-trip, every signing-input
+    // helper gets a byte-layout pin, and every `verify` impl gets a
+    // happy-path test plus negative tests covering bad-sig, stale-ts,
+    // future-ts, and (for ack) too-many-ids.
     // -----------------------------------------------------------------
 
     use crate::proto::client_rel::DispatchP;
@@ -2195,9 +2191,9 @@ mod tests {
     }
 
     /// Construct a fully-signed [`Forward`] from `(sender_relay, dispatch,
-    /// timestamp)`. The signing flow mirrors what phase 2b's sender-side
-    /// helper will look like — keeping the test fixture in this file so
-    /// any drift between fixture and production blows up on either side.
+    /// timestamp)`. The signing flow mirrors the production sender-side
+    /// helper — keeping the test fixture in this file so any drift between
+    /// fixture and production blows up on either side.
     fn build_forward(
         sender_relay: &SigningKey, dispatch: DispatchP, timestamp: u64,
     ) -> Forward {
@@ -2348,11 +2344,10 @@ mod tests {
 
     #[test]
     fn dht_packet_round_trip_for_sticky_home_variants() {
-        // Verify the new `DhtRequest` / `DhtResponse` variants slot
-        // into the outer `DhtPacket` codec without confusing the
+        // Verify the sticky-home `DhtRequest` / `DhtResponse` variants
+        // slot into the outer `DhtPacket` codec without confusing the
         // discriminator. Mirrors
-        // `dht_packet_round_trip_for_every_request_variant` in the
-        // phase 1b tests.
+        // `dht_packet_round_trip_for_every_request_variant`.
         let from_user = fresh_signing_key();
         let to_user = fresh_signing_key();
         let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
@@ -2475,9 +2470,9 @@ mod tests {
         let off = off + 2;
         assert_eq!(&buf[off..off + 32], &ipk);
         let off = off + 32;
-        // Phase 2d-fix: requester_relay_id binds the transcript to the
-        // requesting relay so a captured ack can't be redirected to a
-        // different home (mirrors `queue_fetch_signing_input` §5.1).
+        // requester_relay_id binds the transcript to the requesting
+        // relay so a captured ack can't be redirected to a different
+        // home (mirrors `queue_fetch_signing_input` §5.1).
         assert_eq!(&buf[off..off + 32], node_id.as_bytes());
         let off = off + 32;
         assert_eq!(&buf[off..off + 4], &(ids.len() as u32).to_be_bytes());
@@ -2709,13 +2704,13 @@ mod tests {
         }
     }
 
-    /// Phase 2d-fix — capture an ack the user signed for requester R_a,
-    /// then mutate `requester_relay_id` to a different R_b (as a
-    /// malicious relay would when attempting to redirect the captured
-    /// ack to a different home). The signature was bound to R_a in the
-    /// transcript, so verifying under the mutated R_b must fail with
-    /// `BadUserSig`. This is the wire-level part of the cross-relay
-    /// replay defense; the handler-side check that
+    /// Capture an ack the user signed for requester R_a, then mutate
+    /// `requester_relay_id` to a different R_b (as a malicious relay
+    /// would when attempting to redirect the captured ack to a different
+    /// home). The signature was bound to R_a in the transcript, so
+    /// verifying under the mutated R_b must fail with `BadUserSig`. This
+    /// is the wire-level part of the cross-relay replay defense; the
+    /// handler-side check that
     /// `requester_relay_id == authenticated_peer_id` lives in
     /// `relay::dht::queue_drain::handle_queue_fetch_ack_rpc`.
     #[test]

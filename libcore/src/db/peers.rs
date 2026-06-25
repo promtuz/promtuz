@@ -17,16 +17,15 @@ pub struct ContactRow {
     /// 32-byte MLS GroupId of the implicit 1:1 group with this contact, or
     /// `None` if no group has been created yet (lazy-created on first send).
     ///
-    /// Phase 4 of the MLS migration: replaces the v2-era `(epk, enc_esk)`
-    /// columns and `Contact::shared_key()` derivation. See
-    /// `misc/specs/MLS.md` §11.3.
+    /// Replaces the v2-era `(epk, enc_esk)` columns and
+    /// `Contact::shared_key()` derivation. See `misc/specs/MLS.md` §11.3.
     pub mls_group_id:  Option<[u8; 32]>,
 }
 
 from_row!(ContactRow { ipk, name, added_at, mls_group_id });
 
-/// Phase 4 hard cutover (`misc/specs/MLS.md` §11.3): drop the v2
-/// shared-key columns (`epk`, `enc_esk`) and add `mls_group_id`.
+/// Hard cutover (`misc/specs/MLS.md` §11.3): drop the v2 shared-key
+/// columns (`epk`, `enc_esk`) and add `mls_group_id`.
 ///
 /// **Pre-1.0 hard cutover note**: any pre-existing rows survive the
 /// migration because we wipe and recreate the `contacts` table. Pre-1.0
@@ -43,9 +42,9 @@ const MIGRATION_ARRAY: &[M] = &[
             added_at INTEGER NOT NULL
         );",
     ),
-    // Phase 4 schema cutover. Drop v2 shared-key columns; add
-    // `mls_group_id`. Pre-1.0 hard cutover: no in-place column rewrite,
-    // we drop and recreate. See `misc/specs/MLS.md` §11.3.
+    // Schema cutover. Drop v2 shared-key columns; add `mls_group_id`.
+    // Pre-1.0 hard cutover: no in-place column rewrite, we drop and
+    // recreate. See `misc/specs/MLS.md` §11.3.
     M::up(
         r#"
         DROP TABLE contacts;
@@ -80,7 +79,7 @@ pub(crate) fn open_in_memory() -> Connection {
 mod tests {
     use super::*;
 
-    /// The Phase 4 schema migration applies cleanly to a fresh DB.
+    /// The schema migration applies cleanly to a fresh DB.
     /// Old `(epk, enc_esk)` columns must be gone; new `mls_group_id`
     /// column must be present.
     #[test]

@@ -22,8 +22,8 @@ use crate::relay::RelayRef;
 pub(crate) mod events;
 mod handshake;
 
-/// Phase 2d — buffered client `AckAuth { sig, timestamp }` payload, sent
-/// in response to a relay-issued `SRelayPacket::AckAuthRequest`. The
+/// Buffered client `AckAuth { sig, timestamp }` payload, sent in
+/// response to a relay-issued `SRelayPacket::AckAuthRequest`. The
 /// signature covers
 /// [`common::proto::dht_p2p::queue_fetch_ack_signing_input`] over
 /// `(self_ipk, delivered_ids, timestamp)`; the relay then fans the
@@ -44,9 +44,9 @@ pub struct ClientContext {
     /// before the ack lands re-sends the same set rather than dropping it.
     pub pending_drain: Mutex<Vec<MessageKey>>,
 
-    /// Sticky-home phase 2c — the most recent user-signed `DrainAuth` the
+    /// Sticky-home — the most recent user-signed `DrainAuth` the
     /// client supplied, or `None` if the client never sent one (legacy
-    /// libcore, or the client predates phase 2c).
+    /// libcore that doesn't supply one).
     ///
     /// Set by `events::drain_auth::handle_drain_auth` after verifying the
     /// transcript signature plus the ±60s freshness window. Read by
@@ -61,7 +61,7 @@ pub struct ClientContext {
     /// the client refresh is cheaper.
     pub drain_auth: Mutex<Option<DrainAuth>>,
 
-    /// Sticky-home phase 2d — pending `AckAuth` request channel.
+    /// Sticky-home — pending `AckAuth` request channel.
     ///
     /// When the recipient drain handler issues a
     /// `SRelayPacket::AckAuthRequest` to ask libcore for a per-batch
@@ -83,7 +83,7 @@ pub struct ClientContext {
     /// out of the guard before any I/O.
     pub ack_auth: Mutex<Option<oneshot::Sender<AckAuthPayload>>>,
 
-    /// Sticky-home phase 2d — pending remote-drain bookkeeping for the
+    /// Sticky-home — pending remote-drain bookkeeping for the
     /// post-`AckDrain` `QueueFetchAck` fan-out.
     ///
     /// Set by the recipient drain handler after a successful
@@ -104,10 +104,10 @@ pub struct ClientContext {
     pub pending_remote_drain: Mutex<Option<RemoteDrainState>>,
 }
 
-/// Phase 2d — buffered "messages just drained from remote homes"
-/// state. Lives on `ClientContext.pending_remote_drain` between the
-/// `DrainQueue` and the `AckDrain` so the ack-handler can compute the
-/// `delivered_ids` union and fan a `QueueFetchAck` out to each home.
+/// Buffered "messages just drained from remote homes" state. Lives on
+/// `ClientContext.pending_remote_drain` between the `DrainQueue` and
+/// the `AckDrain` so the ack-handler can compute the `delivered_ids`
+/// union and fan a `QueueFetchAck` out to each home.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteDrainState {
     /// User IPK whose queue was drained — same value as `ClientContext.ipk`,

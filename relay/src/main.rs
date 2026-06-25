@@ -55,16 +55,14 @@ async fn main() -> Result<()> {
     // task so a slow/unavailable resolver does not delay QUIC accept.
     // Failures are logged and swallowed; the relay keeps serving
     // client traffic with an empty routing table until a future
-    // bootstrap attempt succeeds (phase 1h: periodic retry from the
-    // scheduler).
+    // bootstrap attempt succeeds (the scheduler retries periodically).
     if let Some(dht) = relay.dht.clone()
         && dht.cfg.enabled {
-            // Phase 1h item 5: stash the resolver handle on `Dht` so
-            // the scheduler's bootstrap-retry branch can re-call
-            // `bootstrap()` when the routing table is sparse. The
-            // initial cold-start bootstrap below uses the same
-            // handle — passed by clone so both code paths see the
-            // same live session.
+            // Stash the resolver handle on `Dht` so the scheduler's
+            // bootstrap-retry branch can re-call `bootstrap()` when the
+            // routing table is sparse. The initial cold-start bootstrap
+            // below uses the same handle — passed by clone so both code
+            // paths see the same live session.
             dht.attach_resolver(resolver_handle.clone());
 
             let resolver_handle_for_bootstrap = resolver_handle.clone();
@@ -87,8 +85,7 @@ async fn main() -> Result<()> {
             // one cadence-tick. Spawned regardless of whether
             // bootstrap succeeds — the scheduler degrades gracefully
             // under empty routing tables (the bootstrap-retry branch
-            // wired in phase 1h takes over once a resolver session
-            // becomes live).
+            // takes over once a resolver session becomes live).
             let dht_for_sched = dht.clone();
             let cancel_for_sched = cancel.clone();
             tokio::spawn(async move {

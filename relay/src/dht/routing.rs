@@ -18,7 +18,7 @@
 //! ## Metrics
 //!
 //! Eviction-relevant methods return rich outcome enums rather than
-//! reaching into [`super::metrics::Metrics`]. The caller (phase 1d's
+//! reaching into [`super::metrics::Metrics`]. The caller (the
 //! handler-side ping path) inspects the outcome and bumps the relevant
 //! counter — keeps the routing table free of side-channel dependencies
 //! and trivially unit-testable.
@@ -80,7 +80,7 @@ const RTT_EMA_DENOM: u32 = 8;
 /// design-doc: §1.3 (`RoutingEntry`), §3.4 (peer learning).
 #[derive(Debug, Clone)]
 pub struct RoutingEntry {
-    /// Peer NodeId — full 32 bytes after the pre-phase widening.
+    /// Peer NodeId — full 32 bytes.
     pub id: NodeId,
 
     /// Last-known socket address. Updated when an inbound RPC arrives from
@@ -254,8 +254,8 @@ pub enum InsertOutcome {
 ///
 /// Returned rather than calling into `Metrics` directly so the routing
 /// table stays self-contained (and unit-testable). The caller —
-/// the per-peer PING task in phase 1d's handler — inspects this and
-/// bumps `Metrics::bucket_evictions` on the [`Evicted`] /
+/// the per-peer PING task in the handler — inspects this and bumps
+/// `Metrics::bucket_evictions` on the [`Evicted`] /
 /// [`EvictedAndPromoted`] arms.
 ///
 /// design-doc: §3.3.
@@ -467,7 +467,7 @@ impl RoutingTable {
     ///
     /// Returns wire-shaped [`NodeDescriptor`]s rather than full
     /// [`RoutingEntry`]s because the only public consumer (FIND_NODE
-    /// response construction in phase 1d) needs the wire form. Use
+    /// response construction) needs the wire form. Use
     /// [`Self::closest`] for the routing-internal full-entry variant.
     ///
     /// design-doc: §4.1 (FIND_NODE — top-k closest by XOR distance).
@@ -510,9 +510,9 @@ impl RoutingTable {
 
     /// Indices of buckets whose `refresh_at` is older than
     /// `now - BUCKET_REFRESH_MS`, in ascending order. The caller (the
-    /// periodic refresh scheduler in phase 1g) issues a self-FindNode
-    /// against a random target whose `bucket_for(self, target)` matches
-    /// each, then calls [`Self::mark_refreshed`] on each successful walk.
+    /// periodic refresh scheduler) issues a self-FindNode against a
+    /// random target whose `bucket_for(self, target)` matches each, then
+    /// calls [`Self::mark_refreshed`] on each successful walk.
     ///
     /// We deliberately don't update `refresh_at` here — an aborted
     /// refresh would otherwise loop forever, since the scheduler would
@@ -610,9 +610,9 @@ pub(crate) fn distance_cmp(a: &NodeId, target: &NodeId) -> [u8; 32] {
     xor_bytes(a.as_bytes(), target.as_bytes())
 }
 
-// Suppress the dead-code warning until phase 1e wires `distance_cmp`
-// into the lookup sort. Keeping it here so the routing module is the
-// single source of truth for the XOR-distance helpers.
+// Suppress the dead-code warning until `distance_cmp` is wired into the
+// lookup sort. Keeping it here so the routing module is the single
+// source of truth for the XOR-distance helpers.
 #[allow(dead_code)]
 fn _distance_cmp_keep_alive() {
     let _ = Ordering::Equal;

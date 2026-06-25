@@ -12,11 +12,11 @@ use tokio::runtime::Runtime;
 
 use crate::ndk::key_manager::KeyManager;
 
-// Phase 5b: expose the modules the e2e harness in `relay/tests/`
-// drives. Each was `pub(crate)` before and contained no extra-crate
-// callers under cdylib (Android only goes through `#[jni]` exports).
-// Bumping to `pub` is benign for the JNI build — the crate-type set
-// stays `["cdylib", "rlib"]`. Tests link via the rlib.
+// Expose the modules the e2e harness in `relay/tests/` drives. Each
+// was `pub(crate)` before and contained no extra-crate callers under
+// cdylib (Android only goes through `#[jni]` exports). Bumping to
+// `pub` is benign for the JNI build — the crate-type set stays
+// `["cdylib", "rlib"]`. Tests link via the rlib.
 pub mod api;
 pub mod data;
 pub mod db;
