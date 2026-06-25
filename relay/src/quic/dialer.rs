@@ -1,11 +1,23 @@
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use anyhow::anyhow;
+use common::debug;
 use common::info;
 use common::node::config::NodeSeed;
 use quinn::ClientConfig;
 use quinn::Connection;
+use tokio::task::JoinSet;
 
-/// Try all seed resolvers concurrently and return the first successful connection.
+/// Try all seed resolvers concurrently and return the first successful
+/// connection.
+///
+/// The dials run inside a [`JoinSet`], so dropping this future aborts every
+/// in-flight dial *at its await point*. Two payoffs: once a winner is found
+/// the losing dials are cancelled, and — the case that matters on shutdown —
+/// when the resolver link races a shutdown signal and drops us mid-connect,
+/// no detached dial survives to fail against the closing endpoint and log a
+/// spurious error.
 pub async fn connect_to_any_seed(
     endpoint: &quinn::Endpoint, seeds: &[NodeSeed], cfg: Option<ClientConfig>,
 ) -> Result<Connection> {
@@ -13,62 +25,44 @@ pub async fn connect_to_any_seed(
         return Err(anyhow!("no resolver seeds provided"));
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Connection, anyhow::Error>>(seeds.len());
-
-    let mut handles = Vec::with_capacity(seeds.len());
-
+    let mut dials: JoinSet<(SocketAddr, Result<Connection>)> = JoinSet::new();
     for seed in seeds {
-        let tx = tx.clone();
         let endpoint = endpoint.clone();
         let addr = seed.addr;
         let key = seed.key.to_string();
         let cfg = cfg.clone();
 
-        handles.push(tokio::spawn(async move {
+        dials.spawn(async move {
             info!("connecting to resolver: {}", addr);
-
-            let result = match cfg.as_ref() {
-                Some(cfg) => match endpoint.connect_with(cfg.clone(), addr, &key) {
-                    Ok(connecting) => connecting.await.map_err(anyhow::Error::from),
+            let result = match cfg {
+                Some(cfg) => match endpoint.connect_with(cfg, addr, &key) {
+                    Ok(c) => c.await.map_err(anyhow::Error::from),
                     Err(e) => Err(e.into()),
                 },
                 None => match endpoint.connect(addr, &key) {
-                    Ok(connecting) => connecting.await.map_err(anyhow::Error::from),
+                    Ok(c) => c.await.map_err(anyhow::Error::from),
                     Err(e) => Err(e.into()),
                 },
             };
-
-            if let Err(ref err) = result {
-                common::error!("resolver {} connection failed: {}", addr, err);
-            } else {
-                info!("connected to resolver: {}", addr);
-            }
-
-            let _ = tx.send(result).await;
-        }));
+            (addr, result)
+        });
     }
 
-    // Drop the original sender so the channel closes when all tasks finish.
-    drop(tx);
-
     let mut last_err: Option<anyhow::Error> = None;
-    let mut remaining = seeds.len();
-
-    while let Some(result) = rx.recv().await {
-        remaining -= 1;
+    while let Some(joined) = dials.join_next().await {
+        // A panicked/aborted dial yields a JoinError — skip it, keep waiting.
+        let Ok((addr, result)) = joined else { continue };
         match result {
+            // Dropping `dials` here aborts the still-racing dials.
             Ok(conn) => {
-                // Abort remaining tasks — we have what we need.
-                for h in handles {
-                    h.abort();
-                }
+                info!("connected to resolver: {}", addr);
                 return Ok(conn);
             },
+            // Per-seed detail at debug; the resolver-link loop surfaces the
+            // final failure at warn ("resolver session ended … retrying").
             Err(e) => {
+                debug!("resolver {} dial failed: {}", addr, e);
                 last_err = Some(e);
-                if remaining == 0 {
-                    break;
-                }
             },
         }
     }
