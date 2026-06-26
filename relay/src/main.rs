@@ -14,6 +14,7 @@ use crate::quic::resolver_link::ResolverLink;
 use crate::relay::Relay;
 use crate::util::config::AppConfig;
 
+mod cli;
 mod dht;
 mod quic;
 mod relay;
@@ -22,13 +23,9 @@ mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // `--version` / `-V`: report and exit before touching config or the runtime.
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
-        return Ok(());
-    }
+    let cli = cli::Cli::get();
 
-    let cfg = AppConfig::load(true);
+    let cfg = AppConfig::load(&cli.config, true);
     common::server::log::init(cfg.log.level.as_deref());
     info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 // mod proto;
+mod cli;
 mod quic;
 mod resolver;
 mod util;
@@ -19,13 +20,9 @@ use crate::util::config::AppConfig;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // `--version` / `-V`: report and exit before touching config or the runtime.
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
-        return Ok(());
-    }
+    let cli = cli::Cli::get();
 
-    let cfg = AppConfig::load(true);
+    let cfg = AppConfig::load(&cli.config, true);
     common::server::log::init(cfg.log.level.as_deref());
     common::info!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 

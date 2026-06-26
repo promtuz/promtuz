@@ -37,6 +37,7 @@ rustls.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 crossterm.workspace = true
+clap.workspace = true
 serde_bytes.workspace = true
 ed25519-dalek.workspace = true
 rustls-pemfile.workspace = true
