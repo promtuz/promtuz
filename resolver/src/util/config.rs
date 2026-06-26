@@ -11,6 +11,14 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub network: NetworkConfig,
     // pub resolver: ResolverConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct LogConfig {
+    /// trace|debug|info|warn|error. `PZ_LOG` env overrides. Default: info.
+    pub level: Option<String>,
 }
 
 impl AppConfig {

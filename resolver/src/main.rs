@@ -26,6 +26,7 @@ async fn main() -> Result<()> {
     }
 
     let cfg = AppConfig::load(true);
+    common::server::log::init(cfg.log.level.as_deref());
     common::info!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
     let resolver = Arc::new(Resolver::new(cfg));

@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     }
 
     let cfg = AppConfig::load(true);
+    common::server::log::init(cfg.log.level.as_deref());
     info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
     // `shutdown` is the legacy `watch` channel still consumed by

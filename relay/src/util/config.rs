@@ -22,6 +22,16 @@ pub struct AppConfig {
     /// the pre-DHT code path. The default is **disabled**.
     #[serde(default)]
     pub dht: DhtConfig,
+
+    /// Optional logging block. Absent → info. `PZ_LOG` env overrides.
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct LogConfig {
+    /// trace|debug|info|warn|error. `PZ_LOG` env overrides. Default: info.
+    pub level: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
