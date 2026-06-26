@@ -59,7 +59,7 @@ impl Sandbox {
             resolver_config(resolver_addr, &resolver_dir, &ca_path),
         )?;
         let resolver =
-            NodeProc::spawn("resolver", &resolver_bin, &["config.toml"], &resolver_dir, true)?;
+            NodeProc::spawn("resolver", &resolver_bin, &["--config", "config.toml"], &resolver_dir, true)?;
         resolver
             .wait_for_log("listening at QUIC", Duration::from_secs(10))
             .await
@@ -79,7 +79,7 @@ impl Sandbox {
                 relay_config(addr, &dir, &ca_path, &resolver_leaf.pubkey_hex, resolver_addr),
             )?;
             let node =
-                NodeProc::spawn(format!("relay-{i}"), &relay_bin, &["config.toml"], &dir, true)?;
+                NodeProc::spawn(format!("relay-{i}"), &relay_bin, &["--config", "config.toml"], &dir, true)?;
             node.wait_for_log("listening at QUIC", Duration::from_secs(10))
                 .await
                 .with_context(|| format!("relay-{i} did not bind"))?;
@@ -211,7 +211,6 @@ fn relay_config(
          address = \"{addr}\"\n\
          cert_path = \"{crt}\"\n\
          key_path = \"{key}\"\n\
-         identity_key_path = \"{key}\"\n\
          root_ca_path = \"{ca}\"\n\
          \n\
          [[resolver.seed]]\n\
