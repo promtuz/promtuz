@@ -24,16 +24,12 @@ use crate::dht::Dht;
 use crate::util::config::AppConfig;
 use crate::util::rocksdb::rocksdb;
 
-/// Long-term Ed25519 *identity* keypair for this relay.
+/// The relay's single Ed25519 keypair: identity **and** TLS.
 ///
-/// This is **not** the TLS server key. The TLS key (loaded directly by
-/// `build_server_cfg` from `cfg.network.key_path`) lives only inside
-/// rustls/aws-lc-rs and never touches the application layer. The identity
-/// key here is what signs application-layer messages on this relay's
-/// behalf — currently `RelayHello` to the resolver — and is what derives
-/// the public-facing `relay_id`. Splitting the two trust roots means a
-/// TLS-layer key disclosure does not turn into a permanent identity
-/// compromise.
+/// One key signs application-layer messages (`RelayHello` to the resolver),
+/// derives the public-facing `relay_id`, backs the in-memory `peer/1`
+/// self-signed cert, and is the key the CA-issued cert certifies. Loaded
+/// from `key_path`; auto-created `0o600` on first boot if absent.
 #[derive(Debug)]
 pub struct RelayKeys {
     pub signing: SigningKey,
@@ -42,9 +38,7 @@ pub struct RelayKeys {
 
 impl RelayKeys {
     fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
-        // Loaded from `identity_key_path`, distinct from `key_path` (which
-        // is the TLS server key). The file is auto-created on first run.
-        let secret = secret_from_key_or_create(&cfg.network.identity_key_path)?;
+        let secret = secret_from_key_or_create(&cfg.network.key_path)?;
         let public = secret.verifying_key();
 
         Ok(Self { signing: secret, public })

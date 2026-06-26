@@ -1,0 +1,31 @@
+# Dev config for running the relay from the repo: `cargo run -p relay`.
+# Copy to `config.toml` (gitignored / kept local) and adjust paths.
+# Production uses /etc/promtuz — see pkg/relay.toml.
+
+[network]
+# Local bind. Use 0.0.0.0:<port>; the canonical relay port is 40432.
+address = "0.0.0.0:40432"
+
+# One Ed25519 key = identity (signs RelayHello, derives relay_id) + TLS server
+# key. Auto-generated 0o600 on first boot if missing.
+key_path = "cert/relay.key"
+
+# CA-issued cert certifying key_path (CN/SAN = relay_id). Provisioned by
+# enrollment: first boot writes relay.csr; sign it (`certgen sign`) and drop
+# the cert here.
+cert_path = "cert/relay.crt"
+
+root_ca_path = "cert/root_ca.pem"
+
+[log]
+# trace|debug|info|warn|error ; the PZ_LOG env var overrides this.
+level = "info"
+
+[[resolver.seed]]
+# Resolver identity pubkey (hex) + reachable address (host[:port], port
+# defaults to 40433). Replace with your resolver's IPK.
+key = "55eca4054c27ff7e8d613f876cbed9c9ac72f7737af520511663eba4f6ce1d1b"
+addr = "resolver.promtuz.dev"
+
+[dht]
+enabled = true
