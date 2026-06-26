@@ -2,3 +2,4 @@
 cert/*
 db
 config.toml
+release.sh
