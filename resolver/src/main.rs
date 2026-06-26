@@ -26,6 +26,11 @@ async fn main() -> Result<()> {
     common::server::log::init(cfg.log.level.as_deref());
     common::info!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
+    // Hold here until we have a valid cert for our key (writes a CSR + waits
+    // if not enrolled), so the endpoint is only built with usable TLS material.
+    let csr_path = cli.config.with_extension("csr");
+    common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "resolver").await?;
+
     let resolver = Arc::new(Resolver::new(cfg));
     let acceptor = Acceptor::new(resolver.endpoint.clone());
 

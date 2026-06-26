@@ -217,3 +217,80 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Async enrollment orchestration (daemon-side: needs tokio + notify).
+// Kept in a gated submodule so `certgen` (quic+crypto, no tokio) can still
+// use the sync helpers above.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "server", feature = "tokio"))]
+pub use orchestrate::ensure_enrolled;
+
+#[cfg(all(feature = "server", feature = "tokio"))]
+mod orchestrate {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use notify::RecursiveMode;
+    use notify::Watcher as _;
+
+    use super::cert_is_valid;
+    use super::emit_csr;
+    use crate::node::config::NetworkConfig;
+    use crate::quic::config::setup_crypto_provider;
+    use crate::quic::id::NodeId;
+    use crate::quic::p256::secret_from_key_or_create;
+
+    /// Ensure the node holds a valid cert for its key, or write a CSR and wait.
+    /// Returns once `cert_path` validates; otherwise blocks (never crash-loops).
+    pub async fn ensure_enrolled(
+        net: &NetworkConfig, csr_path: &Path, role: &str,
+    ) -> anyhow::Result<()> {
+        setup_crypto_provider()?;
+
+        let signing = secret_from_key_or_create(&net.key_path).map_err(|_| {
+            anyhow::anyhow!("loading/creating the node key at {}", net.key_path.display())
+        })?;
+        let key_pub = signing.verifying_key().to_bytes();
+        let node_id = NodeId::new(&key_pub);
+
+        if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
+            let _ = std::fs::remove_file(csr_path);
+            return Ok(());
+        }
+
+        emit_csr(csr_path, &signing, &node_id)?;
+        crate::warn!(
+            "{role} not enrolled. Wrote CSR to {}. Sign it on the CA box \
+             (`certgen sign {}`), drop the signed cert at {}, and I start automatically.",
+            csr_path.display(),
+            csr_path.display(),
+            net.cert_path.display(),
+        );
+
+        // Watch the cert dir; a 5s poll backstops any missed inotify event.
+        let watch_dir = net
+            .cert_path
+            .parent()
+            .unwrap_or_else(|| Path::new("/etc/promtuz"))
+            .to_path_buf();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
+        let mut watcher = notify::recommended_watcher(move |_evt| {
+            let _ = tx.blocking_send(());
+        })?;
+        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+
+        loop {
+            tokio::select! {
+                _ = rx.recv() => {}
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
+            if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
+                let _ = std::fs::remove_file(csr_path);
+                crate::info!("{role} enrolled; cert accepted at {}", net.cert_path.display());
+                return Ok(());
+            }
+        }
+    }
+}

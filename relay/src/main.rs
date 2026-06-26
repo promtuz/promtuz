@@ -29,6 +29,11 @@ async fn main() -> Result<()> {
     common::server::log::init(cfg.log.level.as_deref());
     info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
+    // Hold here until we have a valid cert for our key (writes a CSR + waits
+    // if not enrolled), so the endpoint is only built with usable TLS material.
+    let csr_path = cli.config.with_extension("csr");
+    common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "relay").await?;
+
     // `shutdown` is the legacy `watch` channel still consumed by
     // `ResolverLink`; `cancel` is the unified token observed by every
     // per-connection task spawned via `Acceptor`. Both fire together on

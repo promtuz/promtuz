@@ -25,6 +25,7 @@ hex = "0.4.3"
 zeroize = "1.8"
 clap = { version = "4.5", features = ["derive"] }
 base64 = "0.22"
+notify = "6"
 
 [profile.release]
 opt-level = 3
