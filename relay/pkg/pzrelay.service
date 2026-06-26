@@ -8,13 +8,14 @@ Wants=network-online.target
 Type=simple
 User=pzrelay
 Group=pzrelay
-ExecStart=/usr/bin/pzrelay /etc/pzrelay/relay.toml
+ExecStart=/usr/bin/pzrelay --config /etc/promtuz/relay.toml
 WorkingDirectory=/var/lib/pzrelay
 Restart=on-failure
 RestartSec=2
 
-# Least-privilege hardening. /etc + /usr are read-only; the only writable
-# path is the state dir (RocksDB + runtime-provisioned keys).
+# Least-privilege hardening. /usr stays read-only; the writable paths are the
+# RocksDB state dir and /etc/promtuz (the relay generates its key, writes a
+# CSR, and reads the enrolled cert there).
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -23,8 +24,8 @@ ProtectControlGroups=true
 ProtectKernelTunables=true
 RestrictAddressFamilies=AF_INET AF_INET6
 StateDirectory=pzrelay
-ConfigurationDirectory=pzrelay
-ReadWritePaths=/var/lib/pzrelay
+ConfigurationDirectory=promtuz
+ReadWritePaths=/var/lib/pzrelay /etc/promtuz
 
 [Install]
 WantedBy=multi-user.target
