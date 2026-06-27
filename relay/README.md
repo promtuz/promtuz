@@ -31,15 +31,24 @@ packages on your system.
 
 ## Configure
 
-Edit `/etc/pzrelay/relay.toml` — set the resolver seed key and your box's
-public address. Edits survive `apt upgrade` (it's a dpkg conffile).
+Edit `/etc/promtuz/relay.toml` — set the resolver seed key and your box's
+public address. Edits survive `apt upgrade` (it's a dpkg conffile). Log
+verbosity is `[log] level` (or the `PZ_LOG` env): `trace|debug|info|warn|error`.
 
-## Provision identity (enrollment)
+## Enroll (mint the cert)
 
 A relay is permissioned: it needs a cert signed by the Promtuz RootCA before it
-can serve. Today that material is obtained out-of-band and placed in
-`/var/lib/pzrelay/` as `node.crt` + `node.key` (automated enrollment is in
-progress). The Ed25519 identity key auto-generates on first start if absent.
+can serve. The flow is self-service and the private key never leaves the box:
+
+1. Start the relay (below). On first boot it generates its single Ed25519 key
+   (`/etc/promtuz/keys/relay.key` — identity **and** TLS), writes a CSR to
+   `/etc/promtuz/relay.csr`, logs what to do, and **waits** (no crash-loop).
+2. Copy `relay.csr` to your CA box and sign it: `certgen sign relay.csr` →
+   `relay.crt`.
+3. Drop the signed cert at `/etc/promtuz/certs/relay.crt`. The relay is watching
+   — it picks the cert up, deletes the CSR, and starts serving.
+
+The cert certifies the relay's identity key, so `CN = relay_id`.
 
 ## Run
 
@@ -65,9 +74,11 @@ Single `edge` channel for now — the project is pre-production. A vetted
 | What | Where |
 |------|-------|
 | binary | `/usr/bin/pzrelay` |
-| config | `/etc/pzrelay/relay.toml` (conffile) |
-| RootCA | `/etc/pzrelay/ca.pem` |
-| data + keys | `/var/lib/pzrelay/` (RocksDB, identity/TLS keys) |
+| config | `/etc/promtuz/relay.toml` (conffile) |
+| RootCA | `/etc/promtuz/ca.pem` |
+| key | `/etc/promtuz/keys/relay.key` (identity + TLS, 0600) |
+| cert | `/etc/promtuz/certs/relay.crt` |
+| database | `/var/lib/pzrelay/` (RocksDB) |
 | logs | `journalctl -u pzrelay` |
 | version | `pzrelay --version` |
 

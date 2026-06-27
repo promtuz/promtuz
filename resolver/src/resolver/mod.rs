@@ -86,17 +86,17 @@ impl Resolver {
         // a placeholder string for `graceful!`'s log line.
         let secret = graceful!(
             secret_from_key(&cfg.network.key_path).map_err(|_| "see prior error"),
-            "failed to load resolver secret key:"
+            "loading the resolver key"
         );
 
-        graceful!(NodeKey::new(secret.verifying_key()), "unexpected key length mismatch")
+        graceful!(NodeKey::new(secret.verifying_key()), "deriving the resolver node id")
     }
 
     fn endpoint(cfg: &AppConfig) -> Endpoint {
-        let server_config = graceful!(Self::get_server_cfg(cfg), "failed to setup server config:");
+        let server_config = graceful!(Self::get_server_cfg(cfg), "building the TLS server config");
         let endpoint = graceful!(
             Endpoint::server(server_config, cfg.network.address),
-            "failed to start quic server:"
+            "starting the QUIC endpoint"
         );
 
         if let Ok(addr) = endpoint.local_addr() {

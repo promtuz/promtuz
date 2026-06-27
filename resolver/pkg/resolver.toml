@@ -1,15 +1,21 @@
-# pzresolver configuration. This file is a dpkg conffile: your edits survive
-# `apt upgrade`. Provision node.crt / node.key into /etc/pzresolver before
-# starting, then `systemctl enable --now pzresolver`.
+# pzresolver config. dpkg conffile: your edits survive `apt upgrade`. Same
+# enrollment flow as the relay: the key auto-generates, a CSR is written to
+# /etc/promtuz/resolver.csr — sign it and drop the cert to start.
 
 [network]
-# Bind address — the port relays dial. 0.0.0.0 listens on all interfaces.
+# Bind — the port relays dial. 0.0.0.0 listens on all interfaces.
 address = "0.0.0.0:40433"
 
-# TLS + identity material. The resolver's node.key doubles as its identity key;
-# its pubkey is the resolver IPK that relays seed in their configs.
-cert_path = "/etc/pzresolver/node.crt"
-key_path = "/etc/pzresolver/node.key"
+# One Ed25519 key = the resolver's identity (its pubkey is the IPK relays seed)
+# + TLS server key. Auto-generated 0600 on first boot if absent.
+key_path = "/etc/promtuz/keys/resolver.key"
+
+# CA-issued cert certifying key_path, via enrollment.
+cert_path = "/etc/promtuz/certs/resolver.crt"
 
 # Production RootCA public cert, shipped with the package.
-root_ca_path = "/etc/pzresolver/ca.pem"
+root_ca_path = "/etc/promtuz/ca.pem"
+
+[log]
+# trace|debug|info|warn|error ; the PZ_LOG env var overrides this.
+level = "info"

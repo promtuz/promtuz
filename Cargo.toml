@@ -3,7 +3,7 @@ members = ["resolver", "relay", "common", "libcore", "jni_macro", "testnet"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/promtuz/promtuz"
 
@@ -23,6 +23,9 @@ toml = "0.9.8"
 log = "0.4.29"
 hex = "0.4.3"
 zeroize = "1.8"
+clap = { version = "4.5", features = ["derive"] }
+base64 = "0.22"
+notify = "6"
 
 [profile.release]
 opt-level = 3

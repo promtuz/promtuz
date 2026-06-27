@@ -6,7 +6,7 @@ macro_rules! graceful {
         match $expr {
             Ok(v) => v,
             Err(e) => {
-                $crate::error!("{} {}", $msg, e);
+                $crate::error!("{}: {}", $msg, e);
                 std::process::exit(1);
             },
         }

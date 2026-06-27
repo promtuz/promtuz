@@ -1,25 +1,31 @@
-# Promtuz relay configuration. This file is a dpkg conffile: your edits survive
-# `apt upgrade`. Provision node.crt / node.key into /var/lib/pzrelay before
-# starting (see enrollment), then `systemctl enable --now pzrelay`.
+# Promtuz relay config. dpkg conffile: your edits survive `apt upgrade`.
+# On first start the relay generates /etc/promtuz/keys/relay.key, writes a CSR
+# to /etc/promtuz/relay.csr, and waits. Sign it (`certgen sign`) and drop the
+# cert at /etc/promtuz/certs/relay.crt — it then starts automatically.
 
 [network]
-# Bind address. 0.0.0.0:<port> is fine on a single-public-IP box. If the box is
-# multi-homed, bind your PUBLIC ip:port so the source address the resolver vends
-# to other relays is deterministically dialable. Default relay port is 40432.
+# Bind. 0.0.0.0:<port> is fine on a single-public-IP box. Default port 40432.
 address = "0.0.0.0:40432"
 
-# TLS + identity material. The cert/key are issued at enrollment; the
-# identity key auto-generates (0600) on first boot if absent.
-cert_path = "/var/lib/pzrelay/node.crt"
-key_path = "/var/lib/pzrelay/node.key"
-identity_key_path = "/var/lib/pzrelay/identity.key"
+# One Ed25519 key = identity (signs RelayHello, derives relay_id) + TLS server
+# key. Auto-generated 0600 on first boot if absent.
+key_path = "/etc/promtuz/keys/relay.key"
+
+# CA-issued cert certifying key_path (CN/SAN = relay_id), via enrollment.
+cert_path = "/etc/promtuz/certs/relay.crt"
 
 # Production RootCA public cert, shipped with the package.
-root_ca_path = "/etc/pzrelay/ca.pem"
+root_ca_path = "/etc/promtuz/ca.pem"
+
+# Restart in place when this file changes (default off).
+# watch_reload = true
+
+[log]
+# trace|debug|info|warn|error ; the PZ_LOG env var overrides this.
+level = "info"
 
 [[resolver.seed]]
-# Resolver identity pubkey (hex) + reachable address (hostname or IP; the port
-# is optional and defaults to 40433). Replace the key with your resolver's IPK.
+# Resolver identity pubkey (hex) + address (host[:port]; port defaults 40433).
 key = "55ECA4054C27FF7E8D613F876CBED9C9AC72F7737AF520511663EBA4F6CE1D1B"
 addr = "resolver.promtuz.dev"
 

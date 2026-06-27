@@ -8,12 +8,12 @@ Wants=network-online.target
 Type=simple
 User=pzresolver
 Group=pzresolver
-ExecStart=/usr/bin/pzresolver /etc/pzresolver/resolver.toml
+ExecStart=/usr/bin/pzresolver --config /etc/promtuz/resolver.toml
 Restart=on-failure
 RestartSec=2
 
-# Least-privilege hardening. The resolver is stateless (in-memory) and writes
-# nothing, so the whole filesystem can stay read-only.
+# Least-privilege hardening. /usr stays read-only; /etc/promtuz is writable so
+# the resolver can generate its key, write a CSR, and read the enrolled cert.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -21,7 +21,8 @@ PrivateTmp=true
 ProtectControlGroups=true
 ProtectKernelTunables=true
 RestrictAddressFamilies=AF_INET AF_INET6
-ConfigurationDirectory=pzresolver
+ConfigurationDirectory=promtuz
+ReadWritePaths=/etc/promtuz
 
 [Install]
 WantedBy=multi-user.target

@@ -18,6 +18,11 @@ pub struct NetworkConfig {
     pub key_path: PathBuf,
     /// root ca to verify outgoing/incoming quic connections
     pub root_ca_path: PathBuf,
+
+    /// Restart the daemon in place when this config file changes. Default off
+    /// — a bad edit otherwise risks an unwanted restart.
+    #[serde(default)]
+    pub watch_reload: bool,
 }
 
 /// Default QUIC ports, applied when a [`HostAddr`] in config omits one.

@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::proto::RelayId;
 use crate::proto::pack::Packer;
+use crate::debug;
 use crate::sysutils::SystemLoad;
 use crate::trace;
 use crate::types::bytes::Bytes;
@@ -140,6 +141,7 @@ impl ResolverPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
         let packet = self.pack()?;
 
+        debug!("sent packet ({}B)", packet.len());
         trace!("sent packet {}", hex::encode(&packet));
 
         tx.write_all(&packet).await?;

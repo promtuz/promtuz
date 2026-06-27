@@ -186,7 +186,6 @@ fn relay_config(bind: SocketAddr, resolver_ipk_hex: &str, resolver_pub: SocketAd
          address = \"{bind}\"\n\
          cert_path = \"node.crt\"\n\
          key_path = \"node.key\"\n\
-         identity_key_path = \"node.key\"\n\
          root_ca_path = \"ca.pem\"\n\
          \n\
          [[resolver.seed]]\n\

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::quic::protorole::ProtoRole;
+use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::anyhow;
 use quinn::IdleTimeout;
@@ -58,8 +59,10 @@ fn default_client_transport() -> TransportConfig {
 }
 
 pub fn setup_crypto_provider() -> Result<()> {
-    CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
-        .map_err(|_| anyhow!("ERROR: failed to install default crypto provider"))?;
+    if CryptoProvider::get_default().is_none() {
+        CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
+            .map_err(|_| anyhow!("installing the default crypto provider"))?;
+    }
     Ok(())
 }
 
@@ -141,10 +144,14 @@ pub fn build_server_cfg(
     key_path: &Path,
     alpn_protocols: &'static [ProtoRole],
 ) -> Result<QuinnServerConfig> {
-    let mut cert_reader: BufReader<File> = BufReader::new(File::open(cert_path)?);
+    let mut cert_reader: BufReader<File> = BufReader::new(
+        File::open(cert_path).with_context(|| format!("reading TLS cert at {}", cert_path.display()))?,
+    );
     let certs = rustls_pemfile::certs(&mut cert_reader).flatten().collect();
 
-    let mut key_reader = BufReader::new(File::open(key_path)?);
+    let mut key_reader = BufReader::new(
+        File::open(key_path).with_context(|| format!("reading TLS key at {}", key_path.display()))?,
+    );
 
     let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or(anyhow!("No Private Key"))?;
 
@@ -442,11 +449,15 @@ pub fn build_server_cfg_with_alpn_split(
     node_signing: ed25519_dalek::SigningKey,
     alpn_protocols: &'static [ProtoRole],
 ) -> Result<QuinnServerConfig> {
-    let mut cert_reader = BufReader::new(File::open(cert_path)?);
+    let mut cert_reader = BufReader::new(
+        File::open(cert_path).with_context(|| format!("reading TLS cert at {}", cert_path.display()))?,
+    );
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls_pemfile::certs(&mut cert_reader).flatten().collect();
 
-    let mut key_reader = BufReader::new(File::open(key_path)?);
+    let mut key_reader = BufReader::new(
+        File::open(key_path).with_context(|| format!("reading TLS key at {}", key_path.display()))?,
+    );
     let key = rustls_pemfile::private_key(&mut key_reader)?
         .ok_or(anyhow!("No Private Key"))?;
 

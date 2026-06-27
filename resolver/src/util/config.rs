@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -11,20 +10,25 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub network: NetworkConfig,
     // pub resolver: ResolverConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct LogConfig {
+    /// trace|debug|info|warn|error. `PZ_LOG` env overrides. Default: info.
+    pub level: Option<String>,
 }
 
 impl AppConfig {
-    pub fn load(cls: bool) -> Self {
+    pub fn load(path: &Path, cls: bool) -> Self {
         if cls {
             print!("\x1B[2J\x1B[1;1H");
             std::io::stdout().flush().ok();
         }
 
-        let path = env::args().nth(1).unwrap_or_else(|| "config.toml".into());
-        let path = Path::new(&path);
-
         if !path.exists() {
-            common::error!("config.toml not found: {}", path.display());
+            common::error!("config not found: {}", path.display());
             std::process::exit(1);
         }
 

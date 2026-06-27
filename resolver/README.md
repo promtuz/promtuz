@@ -22,19 +22,23 @@ echo "deb [signed-by=/etc/apt/keyrings/promtuz.asc] https://apt.promtuz.dev edge
 sudo apt update && sudo apt install pzresolver
 ```
 
-## Configure + run
+## Enroll + run
+
+Same self-service flow as the relay, and the private key never leaves the box.
+On first boot the resolver generates its single Ed25519 key
+(`/etc/promtuz/keys/resolver.key` — its pubkey is the resolver IPK relays seed),
+writes `/etc/promtuz/resolver.csr`, and waits.
 
 ```sh
-# Place the resolver's cert/key (its node.key pubkey is the resolver IPK that
-# relays seed in their configs):
-sudo cp node.crt node.key /etc/pzresolver/
-
-# Check the bind address:
-sudoedit /etc/pzresolver/resolver.toml
-
-sudo systemctl enable --now pzresolver
+sudo systemctl enable --now pzresolver                  # generates key, writes CSR, waits
+# on your CA box:
+certgen sign resolver.csr
+# back on the resolver box:
+sudo cp resolver.crt /etc/promtuz/certs/resolver.crt    # it starts automatically
 journalctl -u pzresolver -f
 ```
+
+Check the bind address in `/etc/promtuz/resolver.toml` (a dpkg conffile).
 
 ## Update
 
@@ -47,8 +51,10 @@ sudo apt update && sudo apt upgrade     # config preserved
 | What | Where |
 |------|-------|
 | binary | `/usr/bin/pzresolver` |
-| config | `/etc/pzresolver/resolver.toml` (conffile) |
-| certs + CA | `/etc/pzresolver/` (`node.crt`, `node.key`, `ca.pem`) |
+| config | `/etc/promtuz/resolver.toml` (conffile) |
+| RootCA | `/etc/promtuz/ca.pem` |
+| key | `/etc/promtuz/keys/resolver.key` (identity + TLS, 0600) |
+| cert | `/etc/promtuz/certs/resolver.crt` |
 | logs | `journalctl -u pzresolver` |
 | version | `pzresolver --version` |
 
