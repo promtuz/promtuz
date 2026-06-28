@@ -1,23 +1,22 @@
 #!/bin/sh
 set -e
 
-# Dedicated unprivileged service user. The resolver is stateless, so no home
-# or data dir is needed.
 if ! getent passwd pzresolver >/dev/null 2>&1; then
     adduser --system --group --no-create-home --home /nonexistent pzresolver
 fi
 
-# Writable homes for the generated key + the enrolled cert.
-install -d -o pzresolver -g pzresolver -m 0700 /etc/promtuz/keys
-install -d -o pzresolver -g pzresolver -m 0755 /etc/promtuz/certs
+install -d -o root       -g root       -m 0755 /etc/promtuz
+install -d -o root       -g root       -m 0711 /etc/promtuz/keys
+install -d -o root       -g root       -m 0755 /etc/promtuz/certs
+install -d -o pzresolver -g pzresolver -m 0700 /etc/promtuz/keys/resolver
 
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 cat <<'EOF'
 pzresolver installed. Next:
   1. systemctl enable --now pzresolver     # generates the key, writes the CSR, waits
-  2. certgen sign /etc/promtuz/resolver.csr     (on your CA box)
-  3. copy the signed cert to /etc/promtuz/certs/resolver.crt   # starts automatically
+  2. certgen sign /etc/promtuz/keys/resolver/resolver.csr  (on your CA box)
+  3. copy the signed cert to /etc/promtuz/certs/resolver.crt  # starts automatically
 EOF
 
 exit 0

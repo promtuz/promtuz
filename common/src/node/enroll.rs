@@ -4,15 +4,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
+use anyhow::anyhow;
+use anyhow::bail;
+use base64::Engine as _;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
 use rustls::pki_types::UnixTime;
-
-use base64::Engine as _;
-use ed25519_dalek::Signer;
-use ed25519_dalek::SigningKey;
 
 use crate::quic::config::load_root_ca;
 use crate::quic::id::NodeId;
@@ -26,10 +28,13 @@ pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
     cert_der.get(pos..pos + 32)?.try_into().ok()
 }
 
-fn first_cert_der(cert_path: &Path) -> Option<CertificateDer<'static>> {
-    let pem = std::fs::read(cert_path).ok()?;
+fn first_cert_der(cert_path: &Path) -> anyhow::Result<CertificateDer<'static>> {
+    let pem =
+        std::fs::read(cert_path).with_context(|| format!("failed to read file '{cert_path:?}'"))?;
     let mut rd = std::io::BufReader::new(&pem[..]);
-    rustls_pemfile::certs(&mut rd).flatten().next()
+    rustls_pemfile::certs(&mut rd).flatten().next().with_context(|| {
+        format!("failed to extract any valid certificate from file '{cert_path:?}'")
+    })
 }
 
 /// True iff `cert_path` exists, chains to `ca_path`, is unexpired, names
@@ -39,29 +44,31 @@ fn first_cert_der(cert_path: &Path) -> Option<CertificateDer<'static>> {
 /// ([`ensure_enrolled`]) does this via `setup_crypto_provider`.
 pub fn cert_is_valid(
     cert_path: &Path, ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
-) -> bool {
-    let Some(leaf) = first_cert_der(cert_path) else {
-        return false;
-    };
+) -> anyhow::Result<bool> {
+    if !cert_path.try_exists().with_context(|| format!("failed to check file '{cert_path:?}'"))? {
+        bail!("certificate missing")
+    }
+
+    let leaf = first_cert_der(cert_path)?;
 
     // It must certify *our* key, not just any CA-signed key.
     if spki_ed25519(leaf.as_ref()).as_ref() != Some(key_pub) {
-        return false;
+        bail!("provided certificate does not certify own key");
     }
 
-    let Ok(roots) = load_root_ca(&ca_path.to_path_buf()) else {
-        return false;
-    };
-    let Ok(verifier) = WebPkiServerVerifier::builder(Arc::new(roots)).build() else {
-        return false;
-    };
-    let Ok(server_name) = ServerName::try_from(node_id.to_string()) else {
-        return false;
-    };
+    let roots = load_root_ca(&ca_path.to_path_buf()).context("failed to load root ca")?;
+
+    let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .with_context(|| "failed to forge verified with root ca")?;
+
+    let server_name = ServerName::try_from(node_id.to_string())
+        .with_context(|| "failed to forge server name from node id")?;
 
     verifier
         .verify_server_cert(&leaf, &[], &server_name, &[], UnixTime::now())
-        .is_ok()
+        .map(|_| true)
+        .map_err(|e| anyhow!(e).context("webpki server verifier failed"))
 }
 
 // ---------------------------------------------------------------------------
@@ -86,14 +93,7 @@ fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
 }
 
 fn spki_der(pubkey: &[u8; 32]) -> Vec<u8> {
-    [
-        &[0x30, 0x2a][..],
-        &[0x30, 0x05][..],
-        ED25519_AID,
-        &[0x03, 0x21, 0x00][..],
-        pubkey,
-    ]
-    .concat()
+    [&[0x30, 0x2a][..], &[0x30, 0x05][..], ED25519_AID, &[0x03, 0x21, 0x00][..], pubkey].concat()
 }
 
 /// CertificationRequestInfo: version(0) + subject(CN) + SPKI + empty attrs.
@@ -127,9 +127,7 @@ fn pem_wrap(label: &str, der: &[u8]) -> String {
 }
 
 /// Write a PKCS#10 CSR (PEM) for `signing`'s key, `CN = base32(node_id)`.
-pub fn emit_csr(
-    csr_path: &Path, signing: &SigningKey, node_id: &NodeId,
-) -> std::io::Result<()> {
+pub fn emit_csr(csr_path: &Path, signing: &SigningKey, node_id: &NodeId) -> std::io::Result<()> {
     let pubkey = signing.verifying_key().to_bytes();
     let info = csr_info(&pubkey, &node_id.to_string());
     let sig = signing.sign(&info).to_bytes();
@@ -143,20 +141,23 @@ mod tests {
 
     #[test]
     fn rejects_missing_cert() {
-        let id = NodeId::new(&[7u8; 32]);
-        assert!(!cert_is_valid(
-            Path::new("/nonexistent.crt"),
-            Path::new("/nonexistent_ca.pem"),
-            &id,
-            &[7u8; 32],
-        ));
+        let id = NodeId::new([7u8; 32]);
+        assert!(
+            cert_is_valid(
+                Path::new("/nonexistent.crt"),
+                Path::new("/nonexistent_ca.pem"),
+                &id,
+                &[7u8; 32],
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "certgen")]
     #[test]
     fn csr_parses_with_rcgen() {
         let key = SigningKey::from_bytes(&[3u8; 32]);
-        let id = NodeId::new(&key.verifying_key().to_bytes());
+        let id = NodeId::new(key.verifying_key().to_bytes());
         let path = std::env::temp_dir().join("pz_csr_roundtrip.csr");
         emit_csr(&path, &key, &id).unwrap();
         let pem = std::fs::read_to_string(&path).unwrap();
@@ -191,7 +192,7 @@ mod tests {
 
         // Node key + CSR.
         let node = SigningKey::from_bytes(&[9u8; 32]);
-        let id = NodeId::new(&node.verifying_key().to_bytes());
+        let id = NodeId::new(node.verifying_key().to_bytes());
         let dir = std::env::temp_dir();
         let csr_path = dir.join("pz_pos.csr");
         emit_csr(&csr_path, &node, &id).unwrap();
@@ -210,7 +211,7 @@ mod tests {
         std::fs::write(&cert_path, cert.pem()).unwrap();
         std::fs::write(&ca_path, &ca_pem).unwrap();
 
-        assert!(cert_is_valid(&cert_path, &ca_path, &id, &node.verifying_key().to_bytes()));
+        assert!(cert_is_valid(&cert_path, &ca_path, &id, &node.verifying_key().to_bytes()).is_ok());
 
         for p in [csr_path, cert_path, ca_path] {
             let _ = std::fs::remove_file(p);
@@ -258,7 +259,9 @@ mod orchestrate {
         let key_pub = signing.verifying_key().to_bytes();
         let node_id = NodeId::new(key_pub);
 
-        if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
+        if let Err(err) = cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
+            crate::warn!("invalid certificate: {err}");
+        } else {
             let _ = std::fs::remove_file(csr_path);
             return Ok(());
         }
@@ -273,11 +276,8 @@ mod orchestrate {
         );
 
         // Watch the cert dir; a 5s poll backstops any missed inotify event.
-        let watch_dir = net
-            .cert_path
-            .parent()
-            .unwrap_or_else(|| Path::new("/etc/promtuz"))
-            .to_path_buf();
+        let watch_dir =
+            net.cert_path.parent().unwrap_or_else(|| Path::new("/etc/promtuz")).to_path_buf();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
         let mut watcher = notify::recommended_watcher(move |_evt| {
             let _ = tx.blocking_send(());
@@ -289,7 +289,7 @@ mod orchestrate {
                 _ = rx.recv() => {}
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
-            if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
+            if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub).is_ok() {
                 let _ = std::fs::remove_file(csr_path);
                 crate::info!("{role} enrolled; cert accepted at {}", net.cert_path.display());
                 return Ok(());
@@ -303,10 +303,8 @@ mod orchestrate {
     /// so a bad edit never crash-loops the node. Opt-in via `watch_reload`.
     pub fn spawn_config_reload(config_path: PathBuf) {
         tokio::spawn(async move {
-            let dir = config_path
-                .parent()
-                .unwrap_or_else(|| Path::new("/etc/promtuz"))
-                .to_path_buf();
+            let dir =
+                config_path.parent().unwrap_or_else(|| Path::new("/etc/promtuz")).to_path_buf();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
             let Ok(mut watcher) = notify::recommended_watcher(move |_e| {
                 let _ = tx.blocking_send(());
@@ -330,16 +328,15 @@ mod orchestrate {
                     Some(_) => {
                         crate::info!("config changed and parses; restarting in place");
                         use std::os::unix::process::CommandExt as _;
-                        let err = std::process::Command::new(
-                            std::env::current_exe().unwrap_or_default(),
-                        )
-                        .args(std::env::args_os().skip(1))
-                        .exec();
+                        let err =
+                            std::process::Command::new(std::env::current_exe().unwrap_or_default())
+                                .args(std::env::args_os().skip(1))
+                                .exec();
                         crate::warn!("re-exec failed: {err}; staying on the old config");
                     },
-                    None => crate::warn!(
-                        "config changed but failed to parse; keeping current config"
-                    ),
+                    None => {
+                        crate::warn!("config changed but failed to parse; keeping current config")
+                    },
                 }
             }
         });

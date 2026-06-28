@@ -1,23 +1,22 @@
 #!/bin/sh
 set -e
 
-# Dedicated unprivileged service user. systemd's StateDirectory= owns the
-# data dir; this just guarantees the account exists for User= to resolve.
 if ! getent passwd pzrelay >/dev/null 2>&1; then
     adduser --system --group --no-create-home --home /var/lib/pzrelay pzrelay
 fi
 
-# Writable homes for the generated key + the enrolled cert.
-install -d -o pzrelay -g pzrelay -m 0700 /etc/promtuz/keys
-install -d -o pzrelay -g pzrelay -m 0755 /etc/promtuz/certs
+install -d -o root    -g root    -m 0755 /etc/promtuz
+install -d -o root    -g root    -m 0711 /etc/promtuz/keys
+install -d -o root    -g root    -m 0755 /etc/promtuz/certs
+install -d -o pzrelay -g pzrelay -m 0700 /etc/promtuz/keys/relay
 
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 cat <<'EOF'
 pzrelay installed. Next:
   1. systemctl enable --now pzrelay        # generates the key, writes the CSR, waits
-  2. certgen sign /etc/promtuz/relay.csr        (on your CA box)
-  3. copy the signed cert to /etc/promtuz/certs/relay.crt   # starts automatically
+  2. certgen sign /etc/promtuz/keys/relay/relay.csr        (on your CA box)
+  3. copy the signed cert to /etc/promtuz/certs/relay.crt  # starts automatically
 Edit /etc/promtuz/relay.toml for the resolver seed + bind address.
 EOF
 

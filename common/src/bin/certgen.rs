@@ -8,12 +8,15 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process;
-use clap::{Parser, Subcommand};
+
+use clap::Parser;
+use clap::Subcommand;
 use common::quic::id::NodeId;
-use rcgen::{CertificateParams, SanType};
+use rcgen::CertificateParams;
 use rcgen::DnType;
 use rcgen::Issuer;
 use rcgen::KeyPair;
+use rcgen::SanType;
 
 static OUT_DIR: &str = "out";
 
@@ -49,7 +52,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ca_certificate = format!("{}.pem", CA);
 
     if !fs::exists(&ca_secret_key)? || !fs::exists(&ca_certificate)? {
-        eprintln!("Move to directory with '{}.{{key,pem}}'", CA);
+        eprintln!(
+            "Move to directory with '{CA}.{{key,pem}}', current : {:?}",
+            std::env::current_dir()?
+        );
         process::exit(1);
     }
 
@@ -69,6 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(path) => fs::read_to_string(path)?,
                 None => {
                     eprintln!("Paste CSR (Ctrl+D when done):");
+                    eprintln!("- - - - - - - - - - - - - - - - - -");
                     let mut buf = String::new();
                     std::io::stdin().read_to_string(&mut buf)?;
                     buf
@@ -93,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .der_bytes()
                 .try_into()
                 .map_err(|_| "CSR public key is not a 32-byte Ed25519 key")?;
-            let id = NodeId::new(&pubkey);
+            let id = NodeId::new(pubkey);
 
             csr.params.distinguished_name = rcgen::DistinguishedName::new();
             csr.params.distinguished_name.push(DnType::CommonName, id.to_string());
@@ -102,6 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let cert = csr.signed_by(&issuer)?;
 
             if to_stdout {
+                eprintln!("\n- - - - - - - - - - - - - - - - - -");
+                eprintln!("Signed certificate:");
+                eprintln!("- - - - - - - - - - - - - - - - - -");
                 print!("{}", cert.pem());
             } else {
                 fs::create_dir_all(OUT_DIR)?;

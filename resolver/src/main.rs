@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     // Hold here until we have a valid cert for our key (writes a CSR + waits
     // if not enrolled), so the endpoint is only built with usable TLS material.
-    let csr_path = cli.config.with_extension("csr");
+    let csr_path = cfg.network.key_path.with_extension("csr");
     common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "resolver").await?;
     if cfg.network.watch_reload {
         common::node::enroll::spawn_config_reload(cli.config.clone());

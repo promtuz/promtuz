@@ -41,7 +41,8 @@ extended-description = "Promtuz resolver: stateless relay discovery service."
 assets = [
     ["target/release/resolver", "usr/bin/pzresolver", "755"],
     ["pkg/resolver.toml", "etc/promtuz/resolver.toml", "644"],
-    ["../certs/root_ca.pem", "etc/promtuz/ca.pem", "644"],
+    # conflics with relay's root ca, despite being same
+    # ["../certs/root_ca.pem", "etc/promtuz/ca.pem", "644"],
     ["pkg/pzresolver.service", "lib/systemd/system/pzresolver.service", "644"],
 ]
 conf-files = ["/etc/promtuz/resolver.toml"]

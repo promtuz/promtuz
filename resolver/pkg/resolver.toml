@@ -1,6 +1,6 @@
 # pzresolver config. dpkg conffile: your edits survive `apt upgrade`. Same
 # enrollment flow as the relay: the key auto-generates, a CSR is written to
-# /etc/promtuz/resolver.csr — sign it and drop the cert to start.
+# /etc/promtuz/keys/resolver/resolver.csr — sign it and drop the cert to start.
 
 [network]
 # Bind — the port relays dial. 0.0.0.0 listens on all interfaces.
@@ -8,7 +8,7 @@ address = "0.0.0.0:40433"
 
 # One Ed25519 key = the resolver's identity (its pubkey is the IPK relays seed)
 # + TLS server key. Auto-generated 0600 on first boot if absent.
-key_path = "/etc/promtuz/keys/resolver.key"
+key_path = "/etc/promtuz/keys/resolver/resolver.key"
 
 # CA-issued cert certifying key_path, via enrollment.
 cert_path = "/etc/promtuz/certs/resolver.crt"

@@ -1,6 +1,6 @@
 # Promtuz relay config. dpkg conffile: your edits survive `apt upgrade`.
 # On first start the relay generates /etc/promtuz/keys/relay.key, writes a CSR
-# to /etc/promtuz/relay.csr, and waits. Sign it (`certgen sign`) and drop the
+# to /etc/promtuz/keys/relay/relay.csr, and waits. Sign it (`certgen sign`) and drop the
 # cert at /etc/promtuz/certs/relay.crt — it then starts automatically.
 
 [network]
@@ -9,7 +9,7 @@ address = "0.0.0.0:40432"
 
 # One Ed25519 key = identity (signs RelayHello, derives relay_id) + TLS server
 # key. Auto-generated 0600 on first boot if absent.
-key_path = "/etc/promtuz/keys/relay.key"
+key_path = "/etc/promtuz/keys/relay/relay.key"
 
 # CA-issued cert certifying key_path (CN/SAN = relay_id), via enrollment.
 cert_path = "/etc/promtuz/certs/relay.crt"
