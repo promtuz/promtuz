@@ -102,8 +102,8 @@ use governor::Quota;
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::state::keyed::DefaultKeyedStateStore;
-use rand::TryRngCore;
-use rand::rngs::OsRng;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use rust_rocksdb::WriteOptions;
 
 use super::Dht;
@@ -416,7 +416,7 @@ pub(crate) fn handle_welcome_publish(
     };
 
     let mut welcome_id = [0u8; WELCOME_ID_LEN];
-    if let Err(e) = OsRng.try_fill_bytes(&mut welcome_id) {
+    if let Err(e) = SysRng.try_fill_bytes(&mut welcome_id) {
         common::error!("MLS welcome_publish: OsRng failed: {e}");
         // OS RNG genuinely failing is a fatal-class error; surface as
         // `BadSig` (the catch-all hard-fail outcome on this RPC) so we

@@ -22,7 +22,7 @@ clap.workspace = true
 parking_lot = "0.12.5"
 # Per-source-IP accept-side rate limiter. Token bucket with automatic state
 # expiry (no per-IP entry kept forever).
-governor = "0.7"
+governor = "0.10.4"
 
 # ---------------------------------------------------------------------------
 # Debian packaging (`cargo deb`) → `pzresolver_<version>_<arch>.deb`.

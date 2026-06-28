@@ -62,9 +62,9 @@ pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
     // Avoid the version mismatch by sampling 32 bytes directly from the
     // OS and feeding them into `SigningKey::from_bytes` (which is the
     // documented constructor for Ed25519 seed material).
-    use rand::TryRngCore;
+    use rand::TryRng;
     let mut seed = [0u8; 32];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut seed)
         .map_err(|err| error!("OS RNG failed: {err}"))?;
     let signing = SigningKey::from_bytes(&seed);

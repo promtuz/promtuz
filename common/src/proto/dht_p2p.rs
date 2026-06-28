@@ -1642,11 +1642,11 @@ mod tests {
 
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
-    use rand_core::OsRng;
 
     use super::*;
     use crate::PROTOCOL_VERSION;
-    use crate::proto::pack::Packer;
+    use crate::crypto::get_signing_key;
+use crate::proto::pack::Packer;
     use crate::proto::pack::Unpacker;
     use crate::quic::id::NodeId;
 
@@ -1655,7 +1655,7 @@ mod tests {
     /// — `rand_core::OsRng` is the rand_core-0.6 CSPRNG that
     /// `ed25519-dalek 2.x::SigningKey::generate` expects.
     fn fresh_signing_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        get_signing_key()
     }
 
     /// Build a fresh, internally-consistent presence record signed by

@@ -41,16 +41,16 @@ clap.workspace = true
 serde_bytes.workspace = true
 ed25519-dalek.workspace = true
 rustls-pemfile.workspace = true
-rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
+rust-rocksdb = { version = "0.51.0", features = ["multi-threaded-cf"] }
 parking_lot = "0.12.5"
-zerocopy = "0.8.40"
+zerocopy = "0.8.52"
 tokio-util = "0.7.18"
 # Per-peer DHT inbound-RPC rate limiter. Same crate/version as the resolver
 # side; keyed on `NodeId` instead of `IpAddr`.
-governor = "0.7"
+governor = "0.10.4"
 # Post-handshake TLS pubkey extraction in `dht::handler`. Same parser
 # libcore uses for peer certs.
-x509-parser = "0.18"
+x509-parser = "0.18.1"
 
 # ---------------------------------------------------------------------------
 # Debian packaging (`cargo deb`) → `pzrelay_<version>_<arch>.deb`.
