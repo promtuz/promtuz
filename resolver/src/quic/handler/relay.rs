@@ -4,6 +4,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use common::debug;
 use common::error;
+use common::info;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
@@ -94,6 +95,8 @@ async fn handle_packet(
 async fn handle_lifetime(
     conn: Arc<Connection>, resolver: ResolverRef, packet: LifetimeP,
 ) -> Result<(), PacketError> {
+    let addr = conn.remote_address();
+
     use LifetimeP::*;
     match packet {
         RelayHello { relay_id, pubkey, timestamp, sig } => {
@@ -114,11 +117,11 @@ async fn handle_lifetime(
             // Now that registration is committed, attach the eviction watcher.
             resolver.watch_relay(relay_id, conn.clone());
 
-            debug!("sending to relay({})", conn.remote_address());
-
             let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
             hello_ack.send(&mut send).await?;
             send.finish().map_err(anyhow::Error::from)?;
+
+            info!("relay({addr}) connected with ID({relay_id})");
 
             Ok(())
         },

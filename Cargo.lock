@@ -3092,7 +3092,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "relay"
-version = "0.1.2-test6"
+version = "0.1.2-test7"
 dependencies = [
  "anyhow",
  "clap",
@@ -3119,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "resolver"
-version = "0.1.2-test6"
+version = "0.1.2-test7"
 dependencies = [
  "anyhow",
  "clap",

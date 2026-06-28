@@ -141,8 +141,7 @@ impl ResolverPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
         let packet = self.pack()?;
 
-        debug!("sent packet ({}B)", packet.len());
-        trace!("sent packet {}", hex::encode(&packet));
+        trace!("sent packet ({}B) {}", packet.len(), hex::encode(&packet));
 
         tx.write_all(&packet).await?;
         Ok(tx.flush().await?)
