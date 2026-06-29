@@ -132,6 +132,7 @@ pub fn make_welcome_envelope(
         welcome_blob: welcome_blob.into(),
         kp_ref_used: kp_ref_used.into(),
         sender_sig: sig.to_bytes().into(),
+        pairing: None,
     })
 }
 

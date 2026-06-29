@@ -77,6 +77,7 @@ use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MlsApplicationEnvelopeP;
 use common::proto::mls_wire::MlsEnvelopeP;
+use common::proto::mls_wire::PairingP;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
 use common::proto::pack::Packer;
@@ -293,6 +294,17 @@ pub struct MlsContext<'a, C: DhtClient> {
 pub async fn lazy_create_group<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
 ) -> Result<MlsGroupHandle> {
+    lazy_create_group_paired(ctx, our_ipk, ipk_signer, to, None).await
+}
+
+/// Like [`lazy_create_group`] but attaches `pairing` (an invite + sender
+/// name) to the published Welcome, so a not-yet-contact recipient can
+/// gate-accept it. The pairing flow (`api::identity::pair_from_qr`) uses
+/// this; ordinary first-sends go through the no-pairing wrapper above.
+pub async fn lazy_create_group_paired<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
+    pairing: Option<PairingP>,
+) -> Result<MlsGroupHandle> {
     // 1. Fetch peer's KP.
     let fetched = ctx
         .dht
@@ -365,10 +377,11 @@ pub async fn lazy_create_group<C: DhtClient>(
         .map_err(|e| anyhow!("add_members: {e}"))?;
 
     // 6. Wrap + publish welcome.
-    let env = make_welcome_envelope(
+    let mut env = make_welcome_envelope(
         welcome, group_id, *our_ipk, *to, kp_ref_used, ipk_signer,
     )
     .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
+    env.pairing = pairing;
 
     if env.welcome_blob.0.len() > MAX_WELCOME_BYTES {
         // Roll back the half-built group state before surfacing — the

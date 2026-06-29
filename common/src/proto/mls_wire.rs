@@ -185,6 +185,11 @@ pub const MLS_ENVELOPE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 envelope";
 /// envelope sig cannot be replayed as a Welcome (and vice-versa).
 pub const WELCOME_ENVELOPE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-envelope";
 
+/// Domain for the pairing-invite signature ([`invite_signing_input`]).
+/// Distinct from the envelope domains so an invite sig can't be replayed
+/// as an envelope sig.
+pub const INVITE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 invite";
+
 /// Domain-separation tag for [`KeyPackagePublishReq`]'s outer signature.
 pub const KP_PUBLISH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-publish";
 
@@ -349,6 +354,36 @@ pub struct WelcomeEnvelopeP {
     /// Verified by the recipient under `sender_ipk` before openmls
     /// touches `welcome_blob`.
     pub sender_sig: Bytes<64>,
+    /// Present only on a *pairing* Welcome (recipient not yet a contact):
+    /// the inviter-signed [`Invite`] that authorizes the add, plus the
+    /// sender's self-asserted display name so the recipient can save the
+    /// contact. `None` for ordinary Welcomes between existing contacts.
+    /// Deliberately *outside* the `sender_sig` transcript — the invite
+    /// self-verifies under the recipient's own IPK, and the name is
+    /// self-asserted (same trust as a scanned QR).
+    pub pairing: Option<PairingP>,
+}
+
+/// A bearer pairing capability minted by a user and shown in their QR.
+/// Whoever holds it may add the issuer until `expiry_ms`. Verified on the
+/// issuer's own device under their own IPK — no server trust.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invite {
+    /// Random 16-byte id (enables future single-use / revoke).
+    pub id: Bytes<16>,
+    /// Unix-ms expiry; the issuer's device rejects the invite past this.
+    pub expiry_ms: u64,
+    /// Issuer's Ed25519 signature over [`invite_signing_input`].
+    pub sig: Bytes<64>,
+}
+
+/// Pairing payload carried by a [`WelcomeEnvelopeP`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingP {
+    pub invite: Invite,
+    /// Sender's self-asserted display name; the recipient length-bounds it
+    /// on accept.
+    pub sender_name: String,
 }
 
 /// Build the canonical signing transcript for
@@ -393,6 +428,20 @@ pub fn envelope_signing_input(
     buf.extend_from_slice(group_id);
     buf.extend_from_slice(&epoch.to_be_bytes());
     buf.extend_from_slice(msg_hash.as_bytes());
+    buf
+}
+
+/// Canonical signing transcript for [`Invite::sig`].
+///
+/// Layout: `INVITE_SIG_DOMAIN || protocol_version (BE u16) || id (16)
+///   || expiry_ms (BE u64)`. Signed by — and verified under — the
+/// issuer's IPK. Inputs are tiny, so they're inlined (no blob hash).
+pub fn invite_signing_input(protocol_version: u16, id: &[u8; 16], expiry_ms: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(INVITE_SIG_DOMAIN.len() + 2 + 16 + 8);
+    buf.extend_from_slice(INVITE_SIG_DOMAIN);
+    buf.extend_from_slice(&protocol_version.to_be_bytes());
+    buf.extend_from_slice(id);
+    buf.extend_from_slice(&expiry_ms.to_be_bytes());
     buf
 }
 

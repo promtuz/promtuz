@@ -721,6 +721,7 @@ mod tests {
             welcome_blob: blob.into(),
             kp_ref_used: kp_ref_used.into(),
             sender_sig: sig.to_bytes().into(),
+            pairing: None,
         }
     }
 
