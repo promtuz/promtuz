@@ -6,7 +6,7 @@ use crate::state::CONNECTION_STATE;
 use crate::events::Emittable;
 use crate::events::InternalEvent;
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 #[allow(unused)]
 #[repr(i32)]
 pub enum ConnectionState {

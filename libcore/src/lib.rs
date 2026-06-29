@@ -24,6 +24,7 @@ pub mod events;
 pub mod messaging;
 pub mod mls;
 mod ndk;
+pub mod platform;
 pub mod quic;
 pub mod state;
 pub mod utils;
