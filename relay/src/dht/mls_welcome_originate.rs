@@ -199,8 +199,12 @@ mod tests {
 
     fn build_envelope(sender: &SigningKey, recipient_ipk: [u8; 32], blob: Vec<u8>) -> WelcomeEnvelopeP {
         let sender_ipk: [u8; 32] = sender.verifying_key().to_bytes();
-        let group_id = [0xAA; 32];
-        let kp_ref_used = [0xBB; 32];
+        // Derive (group_id, kp_ref_used) from the blob so callers can mint
+        // genuinely *distinct* welcomes — `absorb` dedupes on this pair, so a
+        // fixed value would collapse two welcomes into one.
+        let tag = blob.first().copied().unwrap_or(0);
+        let group_id = [0xAA ^ tag; 32];
+        let kp_ref_used = [0xBB ^ tag; 32];
         let msg = welcome_envelope_signing_input(
             MLS_WIRE_VERSION, &group_id, &sender_ipk, &recipient_ipk, &kp_ref_used, &blob,
         );
