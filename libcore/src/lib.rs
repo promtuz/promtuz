@@ -36,6 +36,8 @@ pub mod utils;
 #[cfg(feature = "e2e-client")]
 pub mod e2e;
 
+uniffi::setup_scaffolding!();
+
 type JC<'local> = JClass<'local>;
 
 //////////////////////////////////////////////

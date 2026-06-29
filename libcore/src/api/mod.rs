@@ -7,3 +7,12 @@
 //! Rebuilt from scratch in the manual-JNI → uniffi migration (#3). The
 //! old hand-rolled JNI surface is archived at
 //! `../.archive/libcore-jni-api/` for reference while this is filled in.
+
+use crate::data::identity::Identity;
+
+/// Whether the client should launch straight into the app (an identity
+/// exists) or show enrollment first.
+#[uniffi::export]
+pub fn should_launch_app() -> bool {
+    Identity::public_key().is_ok()
+}

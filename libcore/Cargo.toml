@@ -65,6 +65,7 @@ sha2 = "0.11.0"
 # `common::crypto`. Already in the dep tree transitively via `common`;
 # this just makes the line item explicit. No new crate added.
 blake3 = "1.8.5"
+uniffi = { version = "0.31.2", default-features = false, features = ["tokio"] }
 
 [features]
 # Headless e2e client driver (`src/e2e`, `src/bin/e2e_client.rs`) used by the
