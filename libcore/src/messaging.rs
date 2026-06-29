@@ -777,17 +777,28 @@ fn process_welcome_inbound<C: DhtClient>(
         bail!("welcome envelope recipient_ipk does not match self");
     }
 
-    // Contact-first gating: only accept Welcomes from known contacts.
-    // The anti-abuse spec (HANDOFF priority 2) will refine this with
-    // explicit "you've been invited to group X" UI prompts; until then,
-    // stranger-sent Welcomes are silently dropped to mirror the v2
-    // receive path's "unknown sender" behaviour.
+    // Contact-or-invite gate: accept a Welcome from a stranger only if it
+    // carries a valid pairing invite we minted (verified under our own IPK,
+    // unexpired). On first pair we save them as a contact using the
+    // self-asserted display name (length-bounded). Welcomes from existing
+    // contacts skip the invite check.
     if !Contact::exists(&sender_ipk) {
-        warn!(
-            "MLS: dropped Welcome from unknown sender {}",
-            hex::encode(&sender_ipk[..4])
-        );
-        bail!("unknown sender");
+        let invited =
+            env.pairing.as_ref().is_some_and(|p| Identity::verify_invite(&p.invite));
+        if !invited {
+            warn!(
+                "MLS: dropped Welcome from unknown sender {} (no valid invite)",
+                hex::encode(&sender_ipk[..4])
+            );
+            bail!("unknown sender and no valid invite");
+        }
+        if let Some(p) = env.pairing.as_ref() {
+            let name: String = p.sender_name.chars().take(32).collect();
+            match Contact::save(sender_ipk, name) {
+                Ok(_) => info!("IDENTITY: paired with {}", hex::encode(&sender_ipk[..4])),
+                Err(e) => warn!("IDENTITY: failed to save paired contact: {e}"),
+            }
+        }
     }
 
     let group = process_welcome_inbound_no_contacts(ctx, sender_ipk, env)?;
