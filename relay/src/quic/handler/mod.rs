@@ -16,7 +16,7 @@ pub struct Handler {
 impl Handler {
     /// Handles **incoming** connection. The `cancel` token is observed by
     /// long-running per-role loops so a Ctrl-C in `main.rs` can wind them
-    /// down cooperatively rather than killing them mid-RocksDB-batch.
+    /// down cooperatively rather than killing them mid-fjall-batch.
     pub async fn handle(conn: Connection, relay: RelayRef, cancel: CancellationToken) {
         let role = ret!(ProtoRole::from_conn(&conn));
 

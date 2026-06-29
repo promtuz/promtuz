@@ -1,6 +1,6 @@
 //! MLS KeyPackage stash storage and RPC handlers.
 //!
-//! Owns the [`CF_DHT_KEYPACKAGE`] column family plus the three home-
+//! Owns the `dht_keypackage` keyspace plus the three home-
 //! relay handlers wired into [`super::handler::handle_dht_request`]:
 //!
 //! - [`handle_keypackage_publish`] — owner pushes a fresh batch of
@@ -14,7 +14,7 @@
 //!
 //! The DHT key for a stash is `BLAKE3("kp:" || ipk)` (32 bytes). To
 //! keep a *single* stash representable as multiple KP
-//! rows in RocksDB while still benefiting from RocksDB's prefix-
+//! rows in fjall while still benefiting from fjall's prefix-
 //! iterator API, the on-disk key is:
 //!
 //! ```text
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The 32-byte fixed prefix lets us walk all KPs for a single user
-//! via `prefix_iterator_cf` (same idiom as the queue CF). This also
+//! via fjall's exact `prefix()` (same idiom as the queue keyspace). This also
 //! makes the "consume one in FIFO order" path natural: scan, pop the
 //! first matching record, delete it, return it.
 //!
@@ -43,7 +43,7 @@
 //! [`KeyPackagePublishOutcome::StaticFieldsConflict`].
 //!
 //! Idempotent re-publish (byte-identical record) is allowed and is
-//! a no-op (no rewrite to RocksDB).
+//! a no-op (no rewrite to fjall).
 //!
 //! ## Anti-pinning rate limit
 //!
@@ -58,7 +58,7 @@
 //!
 //! ## Lock contract
 //!
-//! All RocksDB I/O is sync; no `await` lives in this module's hot
+//! All fjall I/O is sync; no `await` lives in this module's hot
 //! paths. `parking_lot` discipline does not apply (we hold no
 //! `parking_lot` guards here). The rate limiter is internally
 //! lock-free (`governor`'s default keyed state store is DashMap-
@@ -95,12 +95,8 @@ use governor::Quota;
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::state::keyed::DefaultKeyedStateStore;
-use rust_rocksdb::WriteOptions;
 
 use super::Dht;
-
-/// Column-family name for the stash CF.
-pub const CF_DHT_KEYPACKAGE: &str = "dht_keypackage";
 
 /// Length of the per-record SHA-256 KeyPackageRef, in bytes. Per
 /// RFC 9420 §5.2 (cipher suite `0x0003`).
@@ -109,8 +105,8 @@ const KP_REF_LEN: usize = 32;
 /// Length of the BLAKE3 stash-prefix, in bytes.
 const STASH_PREFIX_LEN: usize = 32;
 
-/// Fixed on-disk key length: stash_prefix(32) || kp_ref(32). The CF's
-/// prefix-extractor is configured for `STASH_PREFIX_LEN`.
+/// Fixed on-disk key length: stash_prefix(32) || kp_ref(32). Lookups scan
+/// the `STASH_PREFIX_LEN`-byte prefix via fjall's exact `prefix()`.
 const STORAGE_KEY_LEN: usize = STASH_PREFIX_LEN + KP_REF_LEN;
 
 // ---------------------------------------------------------------------------
@@ -346,18 +342,13 @@ fn verify_outer_sig(
 /// All silent no-op paths surface as `InsertError::Storage`; the caller
 /// maps this to [`KeyPackagePublishOutcome::BadSig`] (the closest
 /// existing wire outcome that signals "this didn't take") and logs the
-/// underlying cause. A missing CF, an encode failure, or a RocksDB
+/// underlying cause. An encode failure or a fjall
 /// write error must not return `Ok(())` and let the publish handler
 /// report `Stored` — that would be silent data-loss-as-success.
 ///
 /// Caller is expected to have already verified the record via
 /// [`verify_record`].
 fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
-    let cf = dht
-        .rocks
-        .cf_handle(CF_DHT_KEYPACKAGE)
-        .ok_or_else(|| InsertError::Storage("CF_DHT_KEYPACKAGE not found".into()))?;
-
     let key = storage_key(&rec.ipk.0, &rec.kp_ref.0)
         .ok_or_else(|| InsertError::Storage("malformed kp_ref length".into()))?;
 
@@ -371,9 +362,9 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
     // `verify_record` first — but a malicious replica could still try
     // to slip a stale record past us. The byte-identity check is
     // defense-in-depth.
-    match dht.rocks.get_cf(&cf, key) {
+    match dht.store.keypackage.get(key) {
         Ok(Some(existing)) => {
-            if existing != bytes {
+            if existing[..] != bytes[..] {
                 return Err(InsertError::StaticFieldsConflict);
             }
             // Byte-identical: idempotent no-op (we still re-write below
@@ -382,15 +373,13 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
         }
         Ok(None) => {}
         Err(e) => {
-            return Err(InsertError::Storage(format!("get_cf: {e}")));
+            return Err(InsertError::Storage(format!("get: {e}")));
         }
     }
 
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-    dht.rocks
-        .put_cf_opt(&cf, key, &bytes, &wopts)
-        .map_err(|e| InsertError::Storage(format!("put_cf: {e}")))?;
+    dht.store
+        .put_sync(&dht.store.keypackage, key, &bytes)
+        .map_err(|e| InsertError::Storage(format!("put: {e}")))?;
     Ok(())
 }
 
@@ -403,7 +392,7 @@ enum InsertError {
     /// Republish for an existing `(ipk, kp_ref)` carried different
     /// `kp_bytes`.
     StaticFieldsConflict,
-    /// Underlying storage failure (missing CF, RocksDB I/O, etc.).
+    /// Underlying storage failure (fjall I/O, encode error, etc.).
     Storage(String),
 }
 
@@ -426,18 +415,12 @@ fn fmt_short(bytes: &[u8]) -> String {
 /// callers, sufficient for "pick the first non-expired" semantics).
 fn iterate_stash(dht: &Dht, ipk: &[u8; 32]) -> Vec<([u8; STORAGE_KEY_LEN], KeyPackageRecord)> {
     let mut out = Vec::new();
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_KEYPACKAGE) else {
-        return out;
-    };
     let prefix = stash_prefix(ipk);
-    for entry in dht.rocks.prefix_iterator_cf(&cf, prefix) {
-        let (key_bytes, value) = match entry {
+    for guard in dht.store.keypackage.prefix(prefix) {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => break,
         };
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
         if key_bytes.len() != STORAGE_KEY_LEN {
             continue;
         }
@@ -504,7 +487,7 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
 ///      [`kp_record_signing_input`].
 ///    - `expires_at_ms > now_ms`.
 ///    - record's `ipk` field equals `req.ipk` (no smuggling).
-/// 5. Insert into RocksDB. A static-fields conflict surfaces as
+/// 5. Insert into fjall. A static-fields conflict surfaces as
 ///    `StaticFieldsConflict` outcome.
 ///
 /// `_authenticated_peer_id` is currently unused — KeyPackagePublish
@@ -673,10 +656,10 @@ pub(crate) fn handle_keypackage_refill(
 ///    via [`KpFetchLimiters`].
 /// 5. Pop the first non-expired record from the stash (FIFO over
 ///    iterator order, which is opaque-deterministic by `kp_ref` byte
-///    order). Delete it from RocksDB. Return `Found(record,
+///    order). Delete it from fjall. Return `Found(record,
 ///    remaining, static_hash)`.
 ///
-/// Empty stash → `NoStash`. All paths are sync; we touch RocksDB
+/// Empty stash → `NoStash`. All paths are sync; we touch fjall
 /// directly without any `await`.
 pub(crate) fn handle_keypackage_fetch(
     dht: &Arc<Dht>, req: KeyPackageFetchReq, authenticated_peer_id: NodeId, now_ms: u64,
@@ -745,10 +728,8 @@ pub(crate) fn handle_keypackage_fetch(
     }
 
     // Best-effort opportunistic eviction of expired records.
-    if let Some(cf) = dht.rocks.cf_handle(CF_DHT_KEYPACKAGE) {
-        for k in &to_evict {
-            let _ = dht.rocks.delete_cf(&cf, k);
-        }
+    for k in &to_evict {
+        let _ = dht.store.keypackage.remove(k);
     }
 
     let Some((popped_idx, popped_record)) = popped else {
@@ -758,9 +739,7 @@ pub(crate) fn handle_keypackage_fetch(
     // Strict one-shot: delete the popped record before returning so
     // a duplicate fetch can't re-vend it.
     let popped_key = stash[popped_idx].0;
-    if let Some(cf) = dht.rocks.cf_handle(CF_DHT_KEYPACKAGE) {
-        let _ = dht.rocks.delete_cf(&cf, popped_key);
-    }
+    let _ = dht.store.keypackage.remove(popped_key);
 
     // Rebuild "remaining" without re-iterating: count non-expired
     // records still on disk after the pop. We've already evicted
@@ -875,7 +854,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     /// Deterministic-distinct seed counter — same idiom as
     /// `store::tests::fresh_signing_key` so test fixtures don't
@@ -900,21 +878,10 @@ mod tests {
             std::env::temp_dir().join(format!("promtuz-mls-kp-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db =
-            rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     /// Build a self-consistent `KeyPackageRecord`. `kp_ref` is a

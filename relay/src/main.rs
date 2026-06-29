@@ -113,8 +113,8 @@ async fn main() -> Result<()> {
             println!();
 
             // Signal cooperative shutdown FIRST so per-connection tasks
-            // stop reading new packets and can finish in-flight RocksDB
-            // batches before the endpoint goes away.
+            // stop reading new packets and can finish in-flight fjall
+            // writes before the endpoint goes away.
             cancel.cancel();
             shutdown.send(()).ok();
 

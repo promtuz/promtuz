@@ -1,7 +1,7 @@
 //! Relay library surface — re-exports of the crate's modules so other
 //! crates' integration tests (notably the libcore e2e harness) can
-//! drive `Dht::new`, the `peer/1` handler, and the column-family
-//! descriptors directly.
+//! drive `Dht::new`, the `peer/1` handler, and the fjall `Store`
+//! directly.
 //!
 //! # Why this exists
 //!

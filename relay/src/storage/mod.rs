@@ -1,3 +1,5 @@
+pub mod db;
+
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
@@ -16,11 +18,11 @@ use zerocopy::KnownLayout;
 #[allow(dead_code)]
 pub const MAX_QUEUED_PER_RECIPIENT: usize = 1024;
 
-/// On-disk RocksDB key for a queued message.
+/// On-disk fjall key for a queued message.
 ///
 /// Layout (`#[repr(C, packed)]`):
-/// - `recipient: [u8; 32]` — recipient IPK; must remain at offset 0 so the
-///   `prefix_extractor` (32 bytes) can group all messages for a single user.
+/// - `recipient: [u8; 32]` — recipient IPK; must remain at offset 0 so a
+///   32-byte `prefix()` scan groups all messages for a single user.
 /// - `ts_be: [u8; 8]`      — millisecond timestamp, big-endian (sortable).
 /// - `id:    [u8; 16]`     — message id (UUIDv7) supplied by the *client*.
 ///   This replaces the old random suffix to deduplicate the key without

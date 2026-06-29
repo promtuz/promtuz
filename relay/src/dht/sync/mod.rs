@@ -40,14 +40,12 @@ use std::time::UNIX_EPOCH;
 
 use common::info;
 use common::warn;
-use rust_rocksdb::IteratorMode;
 use tokio_util::sync::CancellationToken;
 
 use super::Dht;
 use super::bootstrap::BootstrapError;
 use super::bootstrap::bootstrap;
 use super::config;
-use super::store::CF_DHT_PRESENCE;
 
 pub(crate) use self::merkle::SliceTree;
 pub(crate) use self::merkle::TREE_DEPTH;
@@ -295,16 +293,12 @@ pub(crate) fn all_slices_bitset() -> [u8; 32] {
 /// meantime. This may be revisited if tombstone-loss-on-restart proves
 /// problematic in practice.
 pub(crate) fn rebuild_from_records(dht: &Dht) -> usize {
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_PRESENCE) else {
-        return 0;
-    };
-
     let mut count = 0usize;
     let mut merkle = dht.merkle.write();
     *merkle = MerkleState::empty();
 
-    for entry in dht.rocks.iterator_cf(&cf, IteratorMode::Start) {
-        let (key, value) = match entry {
+    for guard in dht.store.presence.iter() {
+        let (key, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => continue,
         };
@@ -340,7 +334,7 @@ fn now_ms() -> u64 {
 /// On `cancel.cancelled().await` the loop exits cleanly within one
 /// cadence-tick. The function never returns an error: every individual
 /// task arm logs and continues so a transient failure (peer down,
-/// network blip, RocksDB error) doesn't kill the entire scheduler.
+/// network blip, fjall error) doesn't kill the entire scheduler.
 pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
     use tokio::time::interval;
 
@@ -463,7 +457,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
 ///
 /// **Bounded fan-out**:
 /// - `MAX_MIGRATE_PER_SWEEP` (256) candidates per sweep — bounds
-///   the routing-table-read + RocksDB-scan cost.
+///   the routing-table-read + fjall-scan cost.
 /// - [`config::MAX_CONCURRENT_MIGRATIONS`] (8) in-flight migration
 ///   tasks — bounds the outbound `Forward` RPC fan-out so a single
 ///   sweep doesn't open hundreds of QUIC bi-streams at once.
@@ -541,7 +535,7 @@ async fn migrate_one(
     match super::forward::forward_to_homes(dht.clone(), dispatch, now_ms).await {
         Ok(_summary) => {
             // Success → delete the local entry. The deletion is
-            // best-effort; a RocksDB write error gets the entry
+            // best-effort; a fjall write error gets the entry
             // re-tried next sweep, but the message has already been
             // durably stored at the new K-closest, so duplicate
             // delivery (the only failure mode) is benign.
@@ -722,7 +716,6 @@ mod tests {
 
         use crate::dht::Dht;
         use crate::dht::DhtConfig;
-        use crate::dht::dht_cf_descriptors;
         use common::quic::id::NodeId;
 
         // Minimal fixture inline — we don't share `fresh_dht` across
@@ -734,23 +727,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-sched-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let cfg = DhtConfig::default();
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"));
+        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
 
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -823,7 +806,6 @@ mod tests {
 
         use crate::dht::Dht;
         use crate::dht::DhtConfig;
-        use crate::dht::dht_cf_descriptors;
 
         // Inline `fresh_dht` analogue (sync/* tests don't share with
         // store.rs's helper to avoid path-counter cross-talk).
@@ -833,24 +815,14 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-mig-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let cfg = DhtConfig::default();
         // self far from a 0-prefix target
         let mut self_seed = [0u8; 32];
         self_seed[0] = 0xFF;
         let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"));
+        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
 
         // Install K=3 peers strictly closer to a 0-prefix target.
         for i in 0..3u8 {
@@ -944,7 +916,6 @@ mod tests {
 
         use crate::dht::Dht;
         use crate::dht::DhtConfig;
-        use crate::dht::dht_cf_descriptors;
 
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
@@ -953,23 +924,13 @@ mod tests {
             std::env::temp_dir().join(format!("promtuz-mig-noop-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let cfg = DhtConfig::default();
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"));
+        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
 
         super::run_drift_migration_sweep(dht.clone()).await;
         let attempted = dht

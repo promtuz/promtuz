@@ -294,7 +294,7 @@ pub const RATE_LIMIT_CHEAP_PER_SEC: u32 = 100;
 pub const RATE_LIMIT_CHEAP_BURST: u32 = 50;
 
 /// Expensive verify RPCs (Store, Tombstone). Each triggers Ed25519
-/// signature verification and a synced RocksDB write. Tighter quota
+/// signature verification and a synced fjall write. Tighter quota
 /// than CHEAP because the per-op cost is ~100 µs of crypto + an fsync;
 /// at 20/s sustained the verify load is 0.2% of one CPU.
 pub const RATE_LIMIT_EXPENSIVE_PER_SEC: u32 = 20;
@@ -302,7 +302,7 @@ pub const RATE_LIMIT_EXPENSIVE_BURST: u32 = 10;
 
 /// Bulk RPCs (FetchRecord). Each request is bounded by
 /// [`FETCH_RECORD_MAX = 64`] entries; sustained 50 req/s × 64 ipks/req
-/// = 3200 record reads/s, which is well within RocksDB's hot-path
+/// = 3200 record reads/s, which is well within fjall's hot-path
 /// ceiling and matches the cold-join concurrency budget.
 pub const RATE_LIMIT_BULK_PER_SEC: u32 = 50;
 pub const RATE_LIMIT_BULK_BURST: u32 = 25;

@@ -3,7 +3,7 @@
 //!
 //! ## Two queue sources
 //!
-//! - **`cf_messages`** (the default RocksDB CF). Per-client local
+//! - **`cf_messages`** (the default fjall CF). Per-client local
 //!   safety-net queue populated by `forward.rs::store_in_rocks` when
 //!   a sender's local relay also fails to fan out to the K-closest
 //!   homes. Values are postcard-encoded `DeliverP` (no `to` field —
@@ -55,7 +55,6 @@ use common::quic::xor32;
 use common::trace;
 use common::warn;
 use quinn::SendStream;
-use rust_rocksdb::WriteBatch;
 use tokio::sync::oneshot;
 
 use crate::dht::Dht;
@@ -149,12 +148,11 @@ pub(crate) async fn handle_drain_queue_with(
 
     iterate_cf_messages(&ctx, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
 
-    // 3. If `i_am_home`, also iterate `cf_dht_queue` for the user's
-    //    prefix. The two CFs share the same `MessageKey` shape and
-    //    the prefix-extractor is identical (`store::dht_cf_descriptors`).
-    //    A self-as-home relay's `cf_dht_queue` can hold dispatches
-    //    that arrived via either the sender fan-out or the inbound
-    //    `Forward` handler.
+    // 3. If `i_am_home`, also iterate the `dht_queue` keyspace for the
+    //    user's prefix. Both keyspaces share the same `MessageKey` shape.
+    //    A self-as-home relay's `dht_queue` can hold dispatches that
+    //    arrived via either the sender fan-out or the inbound `Forward`
+    //    handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
         iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue);
     }
@@ -257,11 +255,11 @@ pub(super) async fn handle_ack_drain(
     // 1. Local `cf_messages` GC.
     let keys = std::mem::take(&mut *ctx.pending_drain.lock());
     if !keys.is_empty() {
-        let mut batch = WriteBatch::default();
+        let mut batch = ctx.relay.store.batch();
         for key in &keys {
-            batch.delete(key.as_bytes());
+            batch.remove(&ctx.relay.store.messages, key.as_bytes());
         }
-        ctx.relay.rocks.write(&batch)?;
+        batch.commit()?;
         trace!("DRAIN: cleared {} acked messages", keys.len());
     }
 
@@ -409,34 +407,24 @@ fn self_is_in_k_closest(dht: &Dht, user_ipk: &[u8; 32]) -> bool {
     self_dist < kth_dist
 }
 
-/// Walk the default CF for `recipient_prefix`, push every parsed
+/// Walk the `messages` keyspace for `recipient`, push every parsed
 /// `DeliverP` onto `out`, and record the corresponding `MessageKey`
 /// onto `keys` (the latter feeds the eventual `AckDrain` cleanup).
-///
-/// Filters re-applied on every entry because `prefix_iterator` is a
-/// *seek hint* — RocksDB will happily walk past our recipient prefix
-/// into the next user's queue otherwise.
 fn iterate_cf_messages(
     ctx: &ClientCtxHandle, recipient: &[u8; 32], out: &mut Vec<DeliverP>,
     keys: &mut Vec<MessageKey>,
 ) {
-    let queue = ctx.relay.rocks.prefix_iterator(recipient);
-
-    for entry in queue {
-        let (key_bytes, value) = match entry {
+    for guard in ctx.relay.store.messages.prefix(recipient) {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(e) => {
-                warn!("DRAIN: cf_messages iterator error: {e}");
+                warn!("DRAIN: messages iterator error: {e}");
                 break;
             }
         };
 
-        if !key_bytes.starts_with(recipient) {
-            break;
-        }
-
         let Some(key) = MessageKey::parse(&key_bytes) else {
-            warn!("DRAIN: malformed cf_messages key (len={}); skipping", key_bytes.len());
+            warn!("DRAIN: malformed messages key (len={}); skipping", key_bytes.len());
             continue;
         };
 
@@ -459,29 +447,17 @@ fn iterate_cf_messages(
 /// re-deliver these messages — the client's `DispatchP.id` dedupe
 /// handles the redundancy.
 fn iterate_cf_dht_queue(dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<DeliverP>) {
-    let cf = match dht.rocks.cf_handle(crate::dht::store::CF_DHT_QUEUE) {
-        Some(cf) => cf,
-        None => {
-            warn!("DRAIN: cf_dht_queue handle missing; skipping");
-            return;
-        }
-    };
-
-    for entry in dht.rocks.prefix_iterator_cf(&cf, recipient) {
-        let (key_bytes, value) = match entry {
+    for guard in dht.store.queue.prefix(recipient) {
+        let (_key, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(e) => {
-                warn!("DRAIN: cf_dht_queue iterator error: {e}");
+                warn!("DRAIN: dht_queue iterator error: {e}");
                 break;
             }
         };
 
-        if !key_bytes.starts_with(recipient) {
-            break;
-        }
-
         let Ok(dispatch) = DispatchP::deser(&value) else {
-            warn!("DRAIN: malformed DispatchP value in cf_dht_queue; skipping");
+            warn!("DRAIN: malformed DispatchP value in dht_queue; skipping");
             continue;
         };
 

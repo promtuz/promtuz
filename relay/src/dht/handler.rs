@@ -619,7 +619,7 @@ pub async fn handle_dht_request(
         ),
         // ----- MLS KeyPackage RPCs (`mls_kp.rs`) ------------------------
         //
-        // All three are sync handlers — they touch RocksDB and the
+        // All three are sync handlers — they touch fjall and the
         // governor-based per-pair limiter, no `await` inside. Wrapped
         // in their `wrap_*_outcome` helpers so the dispatch returns
         // the structured `*Resp` shape.
@@ -655,7 +655,7 @@ pub async fn handle_dht_request(
         ),
         // ----- MLS Welcome queue (`mls_welcome.rs`) ---------------------
         //
-        // Three sync handlers — RocksDB I/O + verifies, no `await`
+        // Three sync handlers — fjall I/O + verifies, no `await`
         // inside. Wrapped in their `wrap_*_outcome` helpers; the ack
         // returns its own concrete `WelcomeAckResp` so no wrapper is
         // needed.
@@ -753,7 +753,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     fn fresh_signing_key() -> SigningKey {
         static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -771,20 +770,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-handler-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     fn build_record(

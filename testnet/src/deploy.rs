@@ -6,7 +6,7 @@
 //!
 //! Output: `<out_dir>/{resolver,relay-0,relay-1,…}/`, each containing
 //! `node.crt`, `node.key`, `ca.pem`, `config.toml` with **relative** cert
-//! paths — so a node runs from its own dir (its RocksDB `./db` lands there
+//! paths — so a node runs from its own dir (its fjall `./db` lands there
 //! too). `scp` each dir to its box alongside the `relay`/`resolver` binary.
 //!
 //! Usage:

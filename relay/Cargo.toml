@@ -41,7 +41,7 @@ clap.workspace = true
 serde_bytes.workspace = true
 ed25519-dalek.workspace = true
 rustls-pemfile.workspace = true
-rust-rocksdb = { version = "0.51.0", features = ["multi-threaded-cf"] }
+fjall = "3.1.5"
 parking_lot = "0.12.5"
 zerocopy = "0.8.52"
 tokio-util = "0.7.18"

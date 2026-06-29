@@ -18,11 +18,10 @@ use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
-use rust_rocksdb::DB as RocksDB;
 
 use crate::dht::Dht;
+use crate::storage::db::Store;
 use crate::util::config::AppConfig;
-use crate::util::rocksdb::rocksdb;
 
 /// The relay's single Ed25519 keypair: identity **and** TLS.
 ///
@@ -69,7 +68,7 @@ pub struct Relay {
 
     pub client_cfg: Arc<ClientConfig>,
 
-    pub rocks: Arc<RocksDB>,
+    pub store: Arc<Store>,
 
     /// Shared DHT runtime state. `None` when `cfg.dht.enabled = false`;
     /// every code path that would touch the DHT checks the option first
@@ -136,10 +135,10 @@ impl Relay {
 
         endpoint.set_default_client_config((*client_cfg).clone());
 
-        // Single shared `Arc<DB>` so the DHT replica and the message
+        // Single shared `Arc<Store>` so the DHT replica and the message
         // queue point at the same on-disk store but live in separate
-        // column families.
-        let rocks = Arc::new(graceful!(rocksdb(), "opening the RocksDB store"));
+        // keyspaces.
+        let store = Arc::new(graceful!(Store::open("db"), "opening the fjall store"));
         // `clients` is `Arc<RwLock<...>>` (not a bare `RwLock`) so the
         // inner map can be cloned-by-Arc into `Dht.clients` for the
         // home-side `Forward` handler.
@@ -150,7 +149,7 @@ impl Relay {
         // the legacy code path.
         let dht = if cfg.dht.enabled {
             let node_id = key.id();
-            match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), rocks.clone()) {
+            match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), store.clone()) {
                 Ok(mut d) => {
                     // Wire the outbound-dial machinery so the lookup
                     // module can open `peer/1` connections to other
@@ -180,7 +179,7 @@ impl Relay {
             keys,
             cfg,
             client_cfg,
-            rocks,
+            store,
             dht,
             endpoint,
             clients,

@@ -595,7 +595,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     /// Counter-derived signing key. Matches the discipline established
     /// in `publish.rs::tests::fresh_signing_key` — distinct keys per
@@ -617,20 +616,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-fwd-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     /// Build a fresh, internally-consistent `DispatchP` from `from_user`
@@ -774,8 +763,6 @@ mod tests {
     /// replaced by an unimplemented stub).
     #[tokio::test(flavor = "current_thread")]
     async fn forward_to_homes_self_store_actually_writes_cf_dht_queue() {
-        use crate::dht::store::CF_DHT_QUEUE;
-
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
@@ -793,15 +780,7 @@ mod tests {
         // `cf_dht_queue`. The exact key shape is `MessageKey { recipient
         // = to_ipk, ts_ms = now, dispatch_id = [42; 16] }` per
         // `enqueue_for_home`.
-        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
-        let mut found = false;
-        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
-            let (k, _) = entry.expect("iter");
-            if k.starts_with(&to_ipk) {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "self-store must have written to cf_dht_queue");
+        let found = dht.store.queue.prefix(to_ipk).next().is_some();
+        assert!(found, "self-store must have written to dht_queue");
     }
 }

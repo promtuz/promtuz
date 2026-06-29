@@ -1,6 +1,6 @@
 //! MLS Welcome envelope queue at the home relay.
 //!
-//! Owns the [`CF_DHT_WELCOME`] column family plus the three RPC
+//! Owns the `dht_welcome` keyspace plus the three RPC
 //! handlers wired into [`super::handler::handle_dht_request`]:
 //!
 //! - [`handle_welcome_publish`] — sender-relay deposits a fresh
@@ -11,7 +11,7 @@
 //! - [`handle_welcome_ack`]     — recipient-relay deletes processed
 //!   welcomes by id.
 //!
-//! ## Why a separate CF (vs. piggybacking on `cf_dht_queue`)?
+//! ## Why a separate keyspace (vs. piggybacking on `dht_queue`)?
 //!
 //! Welcome envelopes have:
 //! - a longer retention window ([`WELCOME_LIFETIME_MS = 30 d`]) than
@@ -22,8 +22,8 @@
 //!   ([`MAX_WELCOMES_PER_RECIPIENT = 32`]); group invites are rare,
 //!   so we can afford to keep more pending without blowing the queue.
 //!
-//! Splitting CFs lets the per-CF eviction policies diverge cleanly
-//! and preserves the "Welcomes-first on drain" ordering without
+//! Splitting keyspaces lets the per-keyspace eviction policies diverge
+//! cleanly and preserves the "Welcomes-first on drain" ordering without
 //! interleaving them with application traffic.
 //!
 //! ## Storage layout
@@ -34,10 +34,8 @@
 //!   welcome_id      = 8 random bytes minted by the home at store time
 //! ```
 //!
-//! The 32-byte prefix matches the CF's prefix-extractor configured in
-//! [`super::dht_cf_descriptors`], so we can walk all welcomes for a
-//! single recipient via `prefix_iterator_cf` (same idiom as
-//! `cf_dht_keypackage`).
+//! fjall's exact `prefix()` walks all welcomes for a single recipient by
+//! the 32-byte `stash_prefix` (same idiom as `dht_keypackage`).
 //!
 //! Random `welcome_id` is the home's responsibility — the publishing
 //! sender does *not* mint it. Two senders publishing the same envelope
@@ -64,7 +62,7 @@
 //!
 //! ## Lock contract
 //!
-//! All RocksDB I/O is synchronous; no `await` in this module. We
+//! All fjall I/O is synchronous; no `await` in this module. We
 //! hold no `parking_lot` guards in the hot path. The per-relay rate
 //! limiter is `governor`-backed (lock-free DashMap state).
 //!
@@ -104,15 +102,11 @@ use governor::clock::DefaultClock;
 use governor::state::keyed::DefaultKeyedStateStore;
 use rand::TryRng;
 use rand::rngs::SysRng;
-use rust_rocksdb::WriteOptions;
 
 use super::Dht;
 
-/// Column-family name for the welcome queue CF.
-pub const CF_DHT_WELCOME: &str = "dht_welcome";
-
-/// Length of the BLAKE3 stash-prefix, in bytes (matches the CF's
-/// prefix-extractor configured in [`super::dht_cf_descriptors`]).
+/// Length of the BLAKE3 stash-prefix, in bytes (the `prefix()` seek length
+/// for per-recipient welcome scans).
 const STASH_PREFIX_LEN: usize = 32;
 
 /// Fixed on-disk key length: `stash_prefix(32) || welcome_id(8)`.
@@ -267,18 +261,12 @@ fn iterate_welcomes(
     dht: &Dht, ipk: &[u8; 32],
 ) -> Vec<([u8; STORAGE_KEY_LEN], WelcomeEnvelopeP, u64)> {
     let mut out = Vec::new();
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_WELCOME) else {
-        return out;
-    };
     let prefix = stash_prefix(ipk);
-    for entry in dht.rocks.prefix_iterator_cf(&cf, prefix) {
-        let (key_bytes, value) = match entry {
+    for guard in dht.store.welcome.prefix(prefix) {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => break,
         };
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
         if key_bytes.len() != STORAGE_KEY_LEN {
             continue;
         }
@@ -305,19 +293,12 @@ fn iterate_welcomes(
 /// `(count_under_cap, count_at_or_over_cap)` — a binary signal,
 /// matching the `enqueue_for_home` cap-check pattern.
 fn welcome_count_bounded(dht: &Dht, ipk: &[u8; 32]) -> (usize, bool) {
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_WELCOME) else {
-        return (0, false);
-    };
     let prefix = stash_prefix(ipk);
     let mut count: usize = 0;
     let stop_at = MAX_WELCOMES_PER_RECIPIENT.saturating_add(1);
-    for entry in dht.rocks.prefix_iterator_cf(&cf, prefix) {
-        let (key_bytes, _) = match entry {
-            Ok(kv) => kv,
-            Err(_) => return (count, true),
-        };
-        if !key_bytes.starts_with(&prefix) {
-            break;
+    for guard in dht.store.welcome.prefix(prefix) {
+        if guard.key().is_err() {
+            return (count, true);
         }
         count += 1;
         if count >= stop_at {
@@ -407,14 +388,6 @@ pub(crate) fn handle_welcome_publish(
     }
 
     // 6. Persist.
-    let cf = match dht.rocks.cf_handle(CF_DHT_WELCOME) {
-        Some(cf) => cf,
-        None => {
-            common::warn!("MLS welcome_publish: CF_DHT_WELCOME not found");
-            return WelcomePublishOutcome::BadSig; // missing CF surfaces as hard fail
-        }
-    };
-
     let mut welcome_id = [0u8; WELCOME_ID_LEN];
     if let Err(e) = SysRng.try_fill_bytes(&mut welcome_id) {
         common::error!("MLS welcome_publish: OsRng failed: {e}");
@@ -438,11 +411,9 @@ pub(crate) fn handle_welcome_publish(
     value.extend_from_slice(&expires_at_ms.to_be_bytes());
     value.extend_from_slice(&envelope_bytes);
 
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-    if let Err(e) = dht.rocks.put_cf_opt(&cf, key, &value, &wopts) {
+    if let Err(e) = dht.store.put_sync(&dht.store.welcome, key, &value) {
         common::warn!(
-            "MLS welcome_publish: rocksdb put_cf failed for recipient={}: {e}",
+            "MLS welcome_publish: fjall put failed for recipient={}: {e}",
             recipient_short
         );
         return WelcomePublishOutcome::BadSig;
@@ -540,12 +511,8 @@ pub(crate) fn handle_welcome_fetch(
         }
     }
 
-    if !to_evict.is_empty()
-        && let Some(cf) = dht.rocks.cf_handle(CF_DHT_WELCOME)
-    {
-        for k in &to_evict {
-            let _ = dht.rocks.delete_cf(&cf, k);
-        }
+    for k in &to_evict {
+        let _ = dht.store.welcome.remove(k);
     }
 
     WelcomeFetchOutcome::Found(WelcomeFetchFound { welcomes })
@@ -614,24 +581,16 @@ pub(crate) fn handle_welcome_ack(
 
     // 7. Delete by id.
     //
-    // A missing CF or any per-row delete failure surfaces as
-    // `ok: false` so the recipient knows their acks weren't honoured
-    // (and re-tries on next reconnect). These must not silently return
-    // `ok: true`, which would make the queue grow forever from the
-    // recipient's perspective.
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_WELCOME) else {
-        common::warn!(
-            "MLS welcome_ack: CF_DHT_WELCOME not found; rejecting ack from ipk={}",
-            hex::encode(&req.user_ipk.0[..4])
-        );
-        return WelcomeAckResp { ok: false };
-    };
+    // Any per-row delete failure surfaces as `ok: false` so the recipient
+    // knows their acks weren't honoured (and re-tries on next reconnect).
+    // These must not silently return `ok: true`, which would make the queue
+    // grow forever from the recipient's perspective.
     let mut all_ok = true;
     for id in &ids {
         let key = storage_key(&req.user_ipk.0, id);
-        if let Err(e) = dht.rocks.delete_cf(&cf, key) {
+        if let Err(e) = dht.store.welcome.remove(key) {
             common::warn!(
-                "MLS welcome_ack: delete_cf failed for ipk={} welcome_id={}: {e}",
+                "MLS welcome_ack: delete failed for ipk={} welcome_id={}: {e}",
                 hex::encode(&req.user_ipk.0[..4]),
                 hex::encode(id)
             );
@@ -709,7 +668,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     /// Deterministic-distinct seed counter — same idiom as
     /// `mls_kp::tests::fresh_signing_key`.
@@ -732,21 +690,10 @@ mod tests {
             std::env::temp_dir().join(format!("promtuz-mls-welcome-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db =
-            rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     /// Build a self-consistent welcome envelope signed by `sender`

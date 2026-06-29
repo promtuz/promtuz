@@ -44,8 +44,6 @@ use common::quic::xor32;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
-use rust_rocksdb::IteratorMode;
-use rust_rocksdb::WriteOptions;
 
 use super::Dht;
 use super::config::K;
@@ -53,43 +51,8 @@ use super::config::PRESENCE_TTL_MS;
 use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
 
-/// Column-family name for the `(user_ipk → PresenceRecord)` map this relay
-/// holds as a replica. Also holds tombstones under a `TOMB_PREFIX`-prefixed
-/// key. Keyed by `[u8; 32]` user IPK; values are postcard-encoded
-/// `PresenceRecord`. No prefix extractor (point lookups only).
-pub const CF_DHT_PRESENCE: &str = "dht_presence";
-
-/// Column-family name for cached internal Merkle-tree node hashes.
-/// Keys are `merkle_key = slice_id(1) || level(1) || index_within_level(1)`;
-/// values are 32-byte BLAKE3 hashes.
-pub const CF_DHT_MERKLE: &str = "dht_merkle";
-
-/// Column-family name for the per-recipient offline-message queue this
-/// relay holds when it is in a user's k-closest set.
-///
-/// **Key shape** mirrors the existing `cf_messages` (default CF) layout:
-/// `MessageKey { recipient: user_ipk, ts_ms, dispatch_id }` (56 bytes,
-/// see [`crate::storage::MessageKey`]). Reusing the same type lets the
-/// existing prefix-iterator / range-iterator helpers work unchanged for
-/// per-recipient drains and per-recipient cap enforcement
-/// ([`crate::storage::MAX_QUEUED_PER_RECIPIENT`]).
-///
-/// **Value**: postcard-encoded
-/// [`common::proto::client_rel::DispatchP`]. The dispatch is stored
-/// verbatim — its `sig` is the user's end-to-end signature and is
-/// preserved unchanged so the recipient can verify the chain on drain.
-///
-/// **Prefix extractor**: 32-byte fixed prefix (matches the recipient
-/// field at offset 0 in [`crate::storage::MessageKey`]). Same options
-/// the default CF uses for its message queue — the two key spaces are
-/// identical 56-byte tuples differing only in *which* relay holds them
-/// (this CF: home-relay's k-closest queue; default CF: sender-relay's
-/// fallback safety net).
-///
-pub const CF_DHT_QUEUE: &str = "dht_queue";
-
 /// Single-byte prefix that distinguishes tombstone entries from presence
-/// records inside [`CF_DHT_PRESENCE`]. Records use a bare 32-byte IPK key;
+/// records inside the `dht_presence` keyspace. Records use a bare 32-byte IPK key;
 /// tombstones use `TOMB_PREFIX || ipk` (33 bytes).
 ///
 /// `0xFF` is chosen because no record IPK byte ever equals it as a *prefix*
@@ -234,18 +197,8 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
 
     // 3. Conflict resolution.
     let key = record.user_ipk.0;
-    let cf = match dht.rocks.cf_handle(CF_DHT_PRESENCE) {
-        Some(cf) => cf,
-        None => {
-            // Should be impossible — Dht::new verifies the CF exists at
-            // construction. Guard anyway so a partial-init bug surfaces
-            // as a soft error rather than a process panic.
-            dht.metrics.inc_stores_rejected();
-            return StoreOutcome::BadSig;
-        }
-    };
 
-    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, key)
+    if let Ok(Some(existing_bytes)) = dht.store.presence.get(key)
         && let Ok(existing) = PresenceRecord::deser(&existing_bytes) {
             match record.compare(&existing) {
                 std::cmp::Ordering::Greater => {
@@ -277,16 +230,14 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
         }
     };
 
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-    if dht.rocks.put_cf_opt(&cf, key, &bytes, &wopts).is_err() {
+    if dht.store.put_sync(&dht.store.presence, key, &bytes).is_err() {
         dht.metrics.inc_stores_rejected();
         return StoreOutcome::BadSig;
     }
 
     // 5. Update the Merkle anti-entropy state. In-process only — the
-    //    Merkle CF is a cache of the record CF, rebuilt on restart from
-    //    `cf_dht_presence`. Hold the write lock briefly; never across
+    //    Merkle tree is a cache of the presence keyspace, rebuilt on restart
+    //    from `dht_presence`. Hold the write lock briefly; never across
     //    an await (this whole function is sync).
     //    Reuse the bytes we just serialised — saves a second postcard pass.
     let vh = super::sync::record_value_hash(&bytes);
@@ -319,15 +270,10 @@ pub(crate) fn store_tombstone(
         return TombstoneOutcome::NotOwner;
     }
 
-    let cf = match dht.rocks.cf_handle(CF_DHT_PRESENCE) {
-        Some(cf) => cf,
-        None => return TombstoneOutcome::BadSig,
-    };
-
     // 3. Compare against any existing record — only delete if the
     //    tombstone's generation is `>=`.
     let record_key = tomb.user_ipk.0;
-    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, record_key)
+    if let Ok(Some(existing_bytes)) = dht.store.presence.get(record_key)
         && let Ok(existing) = PresenceRecord::deser(&existing_bytes)
             && tomb.generation < existing.generation {
                 return TombstoneOutcome::Stale;
@@ -335,7 +281,7 @@ pub(crate) fn store_tombstone(
 
     // 4. Compare against any existing tombstone — keep higher generation.
     let tk = tombstone_key(&tomb.user_ipk.0);
-    if let Ok(Some(existing_tomb_bytes)) = dht.rocks.get_cf(&cf, tk)
+    if let Ok(Some(existing_tomb_bytes)) = dht.store.presence.get(tk)
         && let Ok(existing_tomb) = TombstoneRecord::deser(&existing_tomb_bytes)
             && tomb.generation < existing_tomb.generation {
                 return TombstoneOutcome::Stale;
@@ -346,17 +292,12 @@ pub(crate) fn store_tombstone(
         Err(_) => return TombstoneOutcome::BadSig,
     };
 
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-
-    // 5. Atomic-ish: delete the record then write the tombstone. RocksDB
-    //    doesn't expose a transaction handle on the bare `DB`, but in
-    //    the non-transactional case we accept that a crash between the
-    //    two operations leaves us with the (resurrected) record. The
-    //    next anti-entropy round re-converges by replaying the same
-    //    tombstone from a peer.
-    let _ = dht.rocks.delete_cf(&cf, record_key);
-    if dht.rocks.put_cf_opt(&cf, tk, &bytes, &wopts).is_err() {
+    // 5. Atomic-ish: delete the record then write the tombstone. We don't
+    //    wrap the pair in a fjall batch — a crash between the two ops leaves
+    //    the (resurrected) record, and the next anti-entropy round
+    //    re-converges by replaying the same tombstone from a peer.
+    let _ = dht.store.presence.remove(record_key);
+    if dht.store.put_sync(&dht.store.presence, tk, &bytes).is_err() {
         return TombstoneOutcome::BadSig;
     }
 
@@ -401,8 +342,7 @@ pub(crate) fn store_tombstone(
 pub(crate) fn lookup_record(
     dht: &Dht, user_ipk: &[u8; 32], now_ms: u64,
 ) -> Option<PresenceRecord> {
-    let cf = dht.rocks.cf_handle(CF_DHT_PRESENCE)?;
-    let bytes = dht.rocks.get_cf(&cf, user_ipk).ok().flatten()?;
+    let bytes = dht.store.presence.get(user_ipk).ok().flatten()?;
     let record = PresenceRecord::deser(&bytes).ok()?;
 
     // Verify TTL (don't bother re-running signature checks — those were
@@ -413,7 +353,7 @@ pub(crate) fn lookup_record(
         Ok(()) => Some(record),
         Err(_) => {
             // Best-effort cleanup; ignore any error.
-            let _ = dht.rocks.delete_cf(&cf, user_ipk);
+            let _ = dht.store.presence.remove(user_ipk);
             None
         }
     }
@@ -444,16 +384,12 @@ pub(crate) fn lookup_record(
 /// full CF scan is `O(records held)` which is small per relay (~300
 /// records) but still costs an iterator open.
 pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_PRESENCE) else {
-        return 0;
-    };
-
     let tomb_horizon = 2 * PRESENCE_TTL_MS;
 
     let mut victims: Vec<Vec<u8>> = Vec::new();
     let mut tomb_victim_ipks: Vec<[u8; 32]> = Vec::new();
-    for entry in dht.rocks.iterator_cf(&cf, IteratorMode::Start) {
-        let (key, value) = match entry {
+    for guard in dht.store.presence.iter() {
+        let (key, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => continue,
         };
@@ -492,7 +428,7 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
 
     let mut evicted = 0;
     for k in victims {
-        if dht.rocks.delete_cf(&cf, k).is_ok() {
+        if dht.store.presence.remove(&k).is_ok() {
             evicted += 1;
         }
     }
@@ -531,7 +467,7 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
 /// bounded by `MAX_MIGRATE_PER_SWEEP` (256) so a pathologically full
 /// disk can't stall the sweep.
 ///
-/// **Out of scope**: `cf_messages` (default CF) entries are *not*
+/// **Out of scope**: `messages` keyspace entries are *not*
 /// migrated — that CF is the local-fallback safety net owned by the
 /// sender's relay. Only `cf_dht_queue` (the home-replica queue) is
 /// subject to drift.
@@ -542,9 +478,6 @@ pub(crate) fn plan_drift_migrations(
     if max == 0 {
         return out;
     }
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
-        return out;
-    };
 
     let self_id = dht.node_id;
 
@@ -558,8 +491,8 @@ pub(crate) fn plan_drift_migrations(
     let mut drifted: std::collections::HashMap<[u8; 32], bool> =
         std::collections::HashMap::new();
 
-    for entry in dht.rocks.iterator_cf(&cf, IteratorMode::Start) {
-        let (key_bytes, value) = match entry {
+    for guard in dht.store.queue.iter() {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => continue,
         };
@@ -615,14 +548,10 @@ pub(crate) fn plan_drift_migrations(
 /// `true` on a successful delete.
 ///
 /// Public-to-the-crate so the `evict_expired` driver in the scheduler
-/// can call it from its async migration loop. Lock-free; the RocksDB
-/// `multi-threaded-cf` feature already permits concurrent writes from
-/// multiple tasks.
+/// can call it from its async migration loop. Lock-free; fjall keyspace
+/// handles are internally concurrency-safe for writes from multiple tasks.
 pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
-        return false;
-    };
-    dht.rocks.delete_cf(&cf, key.as_bytes()).is_ok()
+    dht.store.queue.remove(key.as_bytes()).is_ok()
 }
 
 /// Persist a queued [`DispatchP`] into [`CF_DHT_QUEUE`] for the recipient's
@@ -637,9 +566,7 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 ///
 /// **Cap enforcement.** Mirrors the [`crate::storage::MAX_QUEUED_PER_RECIPIENT`]
 /// check in `relay/src/quic/handler/client/events/forward.rs::store_in_rocks`,
-/// using a bounded prefix-iterator scan over `cf_dht_queue` and the same
-/// `starts_with` filter (the prefix-extractor is a *seek hint*; the iterator
-/// can walk past the recipient's keyspace without it).
+/// using a bounded exact `prefix()` scan over the `dht_queue` keyspace.
 ///
 /// Returns:
 /// - [`ForwardOutcome::Stored`] on a successful queue write.
@@ -647,8 +574,8 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 ///   `MAX_QUEUED_PER_RECIPIENT` entries on disk; the dispatch is *not*
 ///   stored.
 /// - [`ForwardOutcome::BadSig`] as a defensive surface for an internal
-///   error (CF handle missing, postcard serialisation failure, RocksDB
-///   write failure). The on-the-wire semantics of `BadSig` is "we will
+///   error (postcard serialisation failure, fjall write failure). The
+///   on-the-wire semantics of `BadSig` is "we will
 ///   not accept this dispatch" — surfacing infrastructure failures the
 ///   same way avoids a silent message-loss path.
 ///
@@ -660,31 +587,16 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
-    let cf = match dht.rocks.cf_handle(CF_DHT_QUEUE) {
-        Some(cf) => cf,
-        None => return ForwardOutcome::BadSig,
-    };
-
-    // Per-recipient cap. Bounded scan: stop as soon as we've confirmed
-    // the user is at-or-over the cap so we don't walk a million-entry
-    // queue on every Forward. The `prefix_iterator` is seeded by the
-    // 32-byte prefix-extractor configured on `cf_dht_queue`
-    // (`crate::dht::dht_cf_descriptors`); we re-apply the `starts_with`
-    // filter because the iterator is allowed to walk into the next
-    // user's keyspace.
+    // Per-recipient cap. Bounded scan over fjall's exact prefix range: stop
+    // as soon as we've confirmed the user is at-or-over the cap so we don't
+    // walk a million-entry queue on every Forward.
     let mut count: usize = 0;
     let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
-        let (key_bytes, _) = match entry {
-            Ok(kv) => kv,
-            // Treat a corrupted iterator as "we can't be sure we're under
-            // the cap" — better to reject than silently overrun. Same
-            // policy as the legacy local-queue store.
-            Err(_) => return ForwardOutcome::BadSig,
-        };
-        if !key_bytes.starts_with(user_ipk) {
-            // Walked past our prefix; we're done.
-            break;
+    for guard in dht.store.queue.prefix(user_ipk) {
+        // Treat a corrupted iterator as "we can't be sure we're under the
+        // cap" — better to reject than silently overrun.
+        if guard.key().is_err() {
+            return ForwardOutcome::BadSig;
         }
         count += 1;
         if count >= stop_at {
@@ -702,15 +614,9 @@ pub(crate) fn enqueue_for_home(
         Err(_) => return ForwardOutcome::BadSig,
     };
 
-    // fsync WAL before returning so the home relay's "Stored" reply is
-    // a durable promise.
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-    if dht
-        .rocks
-        .put_cf_opt(&cf, key.as_bytes(), &value, &wopts)
-        .is_err()
-    {
+    // fsync before returning so the home relay's "Stored" reply is a durable
+    // promise.
+    if dht.store.put_sync(&dht.store.queue, key.as_bytes(), &value).is_err() {
         return ForwardOutcome::BadSig;
     }
 
@@ -723,9 +629,8 @@ pub(crate) fn enqueue_for_home(
 /// record" is genuinely gone or just stale.
 #[allow(dead_code)] // Consumed by the anti-entropy sync RPC handlers.
 pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<TombstoneRecord> {
-    let cf = dht.rocks.cf_handle(CF_DHT_PRESENCE)?;
     let key = tombstone_key(user_ipk);
-    let bytes = dht.rocks.get_cf(&cf, key).ok().flatten()?;
+    let bytes = dht.store.presence.get(key).ok().flatten()?;
     TombstoneRecord::deser(&bytes).ok()
 }
 
@@ -747,10 +652,8 @@ pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<Tombsto
 ///   build a one-shot drain instead of a fetch-then-ack cycle (the
 ///   sticky-home flow does the latter, but the former is a useful
 ///   primitive for the migration pass).
-/// - Empty Vec when there's no queue for `user_ipk` (or the CF handle
-///   is missing — surfaced as a soft "nothing to drain" instead of an
-///   error because the home-side handler also accepts an empty
-///   response shape).
+/// - Empty Vec when there's no queue for `user_ipk` — a soft "nothing to
+///   drain" the home-side handler also accepts.
 ///
 /// **Caller's contract**: `parking_lot` lock-discipline applies (no
 /// guards held across `await`); this function is sync and takes none.
@@ -762,24 +665,17 @@ pub(crate) fn lookup_queue_for_user(
     if max == 0 {
         return out;
     }
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
-        return out;
-    };
 
-    // The `prefix_iterator` is seeded by the 32-byte prefix-extractor;
-    // we re-apply `starts_with` because the iterator may walk past the
-    // recipient's keyspace into the next user's.
-    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
-        let (key_bytes, value) = match entry {
+    // fjall's exact prefix scan + the MessageKey layout (recipient || ts_be
+    // || dispatch_id) yields this recipient's queue oldest-first.
+    for guard in dht.store.queue.prefix(user_ipk) {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             // Soft-fail on iterator corruption: return what we collected
             // so the caller still drains *something*. The next sweep
             // re-attempts.
             Err(_) => break,
         };
-        if !key_bytes.starts_with(user_ipk) {
-            break;
-        }
         let Some(key) = MessageKey::parse(&key_bytes) else {
             // Malformed key (length mismatch, etc.) — skip and continue;
             // this is the same defensive policy the legacy local-queue
@@ -816,36 +712,28 @@ pub(crate) fn lookup_queue_for_user(
 /// `QueueFetchAck` handler retries on transient failures, so a partial
 /// delete on the first attempt converges over a few rounds.
 ///
-/// Durability: deletions use the default `WriteOptions` (no fsync).
-/// This is intentional — losing a delete on crash means the dispatch
-/// is re-delivered next reconnect (the client dedupes by id), which
-/// is strictly better than the alternative cost of fsyncing every
-/// per-id delete.
+/// Durability: deletions are journal-buffered (no fsync). This is
+/// intentional — losing a delete on crash means the dispatch is
+/// re-delivered next reconnect (the client dedupes by id), which is
+/// strictly better than the alternative cost of fsyncing every per-id
+/// delete.
 pub(crate) fn delete_queue_entries(
     dht: &Dht, user_ipk: &[u8; 32], dispatch_ids: &[[u8; 16]],
 ) -> usize {
     if dispatch_ids.is_empty() {
         return 0;
     }
-    let Some(cf) = dht.rocks.cf_handle(CF_DHT_QUEUE) else {
-        return 0;
-    };
 
-    // Collect target keys via a prefix-bounded scan. We cannot delete
-    // mid-iteration (RocksDB iterator semantics under the C++ binding
-    // can surface stale data), so build the victim list first and
-    // delete in a second pass.
+    // Collect target keys first, delete in a second pass (don't mutate the
+    // keyspace mid-iteration).
     let target: std::collections::HashSet<[u8; 16]> = dispatch_ids.iter().copied().collect();
     let mut victims: Vec<Vec<u8>> = Vec::new();
 
-    for entry in dht.rocks.prefix_iterator_cf(&cf, user_ipk) {
-        let (key_bytes, _) = match entry {
-            Ok(kv) => kv,
+    for guard in dht.store.queue.prefix(user_ipk) {
+        let key_bytes = match guard.key() {
+            Ok(k) => k,
             Err(_) => break,
         };
-        if !key_bytes.starts_with(user_ipk) {
-            break;
-        }
         // Last 16 bytes of the 56-byte key are the dispatch_id.
         if key_bytes.len() != MessageKey::SIZE {
             continue;
@@ -859,7 +747,7 @@ pub(crate) fn delete_queue_entries(
 
     let mut count = 0usize;
     for k in victims {
-        if dht.rocks.delete_cf(&cf, k).is_ok() {
+        if dht.store.queue.remove(&k).is_ok() {
             count += 1;
         }
     }
@@ -890,7 +778,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     /// Deterministic-distinct seed counter so `fresh_signing_key()` calls
     /// return distinct ids without an RNG dep.
@@ -910,7 +797,7 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    /// Build a `Dht` instance backed by a fresh tempdir RocksDB. The
+    /// Build a `Dht` instance backed by a fresh tempdir fjall. The
     /// DB lives in `/tmp` so the test doesn't pollute the workspace
     /// (each test gets its own subdir keyed off a counter).
     fn fresh_dht(self_id: NodeId) -> Arc<Dht> {
@@ -920,20 +807,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-dht-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     fn build_record(
@@ -1119,8 +996,7 @@ mod tests {
 
         // After expiry, lookup_record returns None *and* deletes.
         assert!(lookup_record(&dht, &rec.user_ipk.0, now + 5_000).is_none());
-        let cf = dht.rocks.cf_handle(CF_DHT_PRESENCE).unwrap();
-        let bytes = dht.rocks.get_cf(&cf, rec.user_ipk.0).unwrap();
+        let bytes = dht.store.presence.get(rec.user_ipk.0).unwrap();
         assert!(bytes.is_none(), "expired record should have been deleted");
     }
 
@@ -1314,14 +1190,10 @@ mod tests {
         // QueueFetch handler does. The key shape is
         // `MessageKey { recipient: to_ipk, ts_be: now, id }` per
         // `enqueue_for_home`.
-        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
         let mut keys: Vec<Vec<u8>> = Vec::new();
         let mut values: Vec<Vec<u8>> = Vec::new();
-        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
-            let (k, v) = entry.expect("iter");
-            if !k.starts_with(&to_ipk) {
-                break;
-            }
+        for guard in dht.store.queue.prefix(to_ipk) {
+            let (k, v) = guard.into_inner().expect("iter");
             keys.push(k.to_vec());
             values.push(v.to_vec());
         }
@@ -1361,7 +1233,6 @@ mod tests {
         // Direct CF write to bypass the cap (so we can fill quickly).
         // Each entry needs a distinct `(ts, id)` so the keys don't
         // collide. Fill exactly to the cap.
-        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
         for i in 0..MAX_QUEUED_PER_RECIPIENT {
             let mut id = [0u8; 16];
             id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -1369,7 +1240,7 @@ mod tests {
             // Tiny dummy value — only the count matters for the cap
             // check; the actual deserializability of the value is
             // unrelated to the cap-enforcement path under test.
-            dht.rocks.put_cf(&cf, key.as_bytes(), b"x").expect("put");
+            dht.store.queue.insert(key.as_bytes(), b"x").expect("put");
         }
 
         // One more should be rejected with QueueFull.
@@ -1381,11 +1252,8 @@ mod tests {
         // remains exactly at the cap (the `[0xFF; 16]` id we'd have
         // used absent the cap is not in the queue).
         let mut found_overflow = false;
-        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
-            let (k, _) = entry.expect("iter");
-            if !k.starts_with(&to_ipk) {
-                break;
-            }
+        for guard in dht.store.queue.prefix(to_ipk) {
+            let k = guard.key().expect("iter");
             if k.ends_with(&[0xFF; 16]) {
                 found_overflow = true;
                 break;
@@ -1436,12 +1304,11 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
 
         // Fill user A's queue to the cap.
-        let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
         for i in 0..MAX_QUEUED_PER_RECIPIENT {
             let mut id = [0u8; 16];
             id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
             let key = MessageKey::new(&ipk_a, now + (i as u64), &id);
-            dht.rocks.put_cf(&cf, key.as_bytes(), b"x").expect("put");
+            dht.store.queue.insert(key.as_bytes(), b"x").expect("put");
         }
 
         // User B's first write must succeed.

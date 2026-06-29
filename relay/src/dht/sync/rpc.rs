@@ -5,7 +5,7 @@
 //!
 //! Pure functions used by [`super::super::handler::handle_dht_request`]:
 //! they take an `Arc<Dht>` plus a request payload, return a response
-//! payload, and have zero non-RocksDB side effects.
+//! payload, and have zero non-fjall side effects.
 //!
 //! ## Client side ([`sync_round`])
 //!
@@ -478,7 +478,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
     use crate::dht::sync::merkle::nibble_path_for;
     use crate::dht::sync::set_slice_bit;
 
@@ -499,20 +498,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-syncrpc-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
         let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
     }
 
     fn build_record(

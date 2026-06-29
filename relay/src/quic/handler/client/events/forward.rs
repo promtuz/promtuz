@@ -17,7 +17,6 @@ use ed25519_dalek::VerifyingKey;
 use quinn::Connection;
 use quinn::ConnectionError;
 use quinn::SendStream;
-use rust_rocksdb::WriteOptions;
 
 use crate::dht::forward::ForwardSummary;
 use crate::dht::forward::forward_to_homes;
@@ -207,25 +206,16 @@ fn store_in_rocks(
 ) -> Result<DispatchAckP> {
     trace!("FORWARD: recipient {} not connected locally, queuing", hex::encode(recipient));
 
-    // Per-recipient cap (Part B3). We must count keys with this exact
-    // recipient prefix; `prefix_iterator` is just a seek hint and may walk
-    // into the next user's keyspace, so the same `starts_with` filter the
-    // drain path uses applies here too.
-    //
-    // Bounded count: stop as soon as we hit `MAX + 1` so we don't walk a
-    // million-entry queue on every dispatch.
+    // Per-recipient cap (Part B3). fjall's `prefix()` is an exact scan, so
+    // we just count the recipient's keys. Bounded: stop as soon as we hit
+    // `MAX + 1` so we don't walk a million-entry queue on every dispatch.
     let mut count: usize = 0;
     let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for entry in ctx.relay.rocks.prefix_iterator(recipient.0) {
-        let (key_bytes, _) = match entry {
-            Ok(kv) => kv,
-            // Treat a corrupted iterator as "we can't be sure we're under
-            // the cap" — better to reject than silently overrun.
-            Err(_) => return Ok(DispatchAckP::Error { reason: "queue scan failed".into() }),
-        };
-        if !key_bytes.starts_with(&recipient.0) {
-            // Walked past our prefix; we're done.
-            break;
+    for guard in ctx.relay.store.messages.prefix(recipient.0) {
+        // Treat a corrupted iterator as "we can't be sure we're under the
+        // cap" — better to reject than silently overrun.
+        if guard.key().is_err() {
+            return Ok(DispatchAckP::Error { reason: "queue scan failed".into() });
         }
         count += 1;
         if count >= stop_at {
@@ -246,12 +236,10 @@ fn store_in_rocks(
     let key = MessageKey::new(&recipient.0, ts_ms, &delivery.id.0);
 
     // Durable write: we acknowledge `Queued` to the sender as soon as this
-    // returns, so a crash before the WAL hits disk would silently lose the
-    // message. `set_sync(true)` guarantees fsync of the WAL before ack.
-    let mut wopts = WriteOptions::default();
-    wopts.set_sync(true);
-
-    ctx.relay.rocks.put_opt(key.as_bytes(), delivery.ser()?, &wopts)?;
+    // returns, so a crash before the write hits disk would silently lose the
+    // message. `put_sync` fsyncs the journal before we ack.
+    let payload = delivery.ser()?;
+    ctx.relay.store.put_sync(&ctx.relay.store.messages, key.as_bytes(), &payload)?;
 
     Ok(DispatchAckP::Queued)
 }

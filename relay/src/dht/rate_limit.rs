@@ -15,7 +15,7 @@
 //!   `MerkleDiff`): zero crypto verification, only routing-table
 //!   reads. 100/s sustained, burst 50.
 //! - **Expensive verify** (`Store`, `Tombstone`): each does an
-//!   Ed25519 verify (~100 µs) + a sync RocksDB write. 20/s sustained,
+//!   Ed25519 verify (~100 µs) + a sync fjall write. 20/s sustained,
 //!   burst 10.
 //! - **Bulk** (`FetchRecord`): bounded by `MAX_FETCH_RECORD_BATCH`
 //!   per request, so each RPC is itself an O(64) read amplification.
@@ -132,7 +132,7 @@ impl RpcClass {
             | DhtRequest::Forward(_)
             | DhtRequest::QueueFetch(_)
             // MLS KeyPackage publish / fetch / refill all do Ed25519
-            // verifies plus RocksDB I/O — same cost shape as Store /
+            // verifies plus fjall I/O — same cost shape as Store /
             // Forward; expensive class. A separate per-pair
             // `(target_ipk, requester_relay_id)` quota lives inside
             // `mls_kp.rs` for the anti-pinning policy; this per-peer

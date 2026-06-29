@@ -199,7 +199,6 @@ mod tests {
     use super::*;
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
-    use crate::dht::dht_cf_descriptors;
 
     fn fresh_signing_key() -> SigningKey {
         static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -218,19 +217,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("promtuz-mls-kp-orig-test-{pid}-{id}"));
         let _ = std::fs::remove_dir_all(&path);
 
-        let mut opts = rust_rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
-            "default",
-            rust_rocksdb::Options::default(),
-        )];
-        cfs.extend(dht_cf_descriptors());
-
-        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
         let signing = fresh_signing_key();
-        Arc::new(Dht::new(self_id, signing, DhtConfig::default(), Arc::new(db)).expect("dht"))
+        Arc::new(Dht::new(self_id, signing, DhtConfig::default(), store).expect("dht"))
     }
 
     fn build_record(owner: &SigningKey, kp_ref: [u8; 32], now_ms: u64) -> KeyPackageRecord {

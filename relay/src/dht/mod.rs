@@ -39,7 +39,6 @@ pub(crate) mod tls_extract;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Context as _;
 use anyhow::Result;
 use common::quic::id::NodeId;
 use ed25519_dalek::SigningKey;
@@ -48,25 +47,17 @@ use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
-use rust_rocksdb::ColumnFamilyDescriptor;
-use rust_rocksdb::DB as RocksDB;
-use rust_rocksdb::Options;
-use rust_rocksdb::SliceTransform;
 
 use crate::quic::resolver_link::ResolverLinkHandle;
+use crate::storage::db::Store;
 
 pub use config::DhtConfig;
 
 use self::cache::LookupCache;
 use self::metrics::Metrics;
-use self::mls_kp::CF_DHT_KEYPACKAGE;
 use self::mls_kp::KpFetchLimiters;
-use self::mls_welcome::CF_DHT_WELCOME;
 use self::mls_welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
-use self::store::CF_DHT_MERKLE;
-use self::store::CF_DHT_PRESENCE;
-use self::store::CF_DHT_QUEUE;
 use self::sync::MerkleState;
 
 /// Top-level DHT runtime state.
@@ -93,16 +84,11 @@ pub struct Dht {
     /// 256-bucket routing table.
     pub(crate) routing: RwLock<RoutingTable>,
 
-    /// Shared `RocksDB` handle (the *same* DB the relay's message queue
-    /// uses — column families, not databases, separate the two domains).
-    /// `rust-rocksdb` is internally concurrency-safe with the
-    /// `multi-threaded-cf` feature already declared in `relay/Cargo.toml`.
-    ///
-    /// CF handles are looked up via [`RocksDB::cf_handle`] at use-time
-    /// rather than cached on the struct because the returned
-    /// `Arc<BoundColumnFamily<'_>>` is lifetime-tied to the DB and
-    /// can't be stored back as a struct field without painful self-refs.
-    pub(crate) rocks: Arc<RocksDB>,
+    /// Shared fjall store (the *same* store the relay's message queue uses —
+    /// keyspaces, not databases, separate the two domains). Keyspace handles
+    /// are cheap `Clone`s held on [`Store`], so DHT code reaches them as
+    /// `dht.store.presence` / `.queue` / `.keypackage` / `.welcome` directly.
+    pub(crate) store: Arc<Store>,
 
     /// Per-slice Merkle anti-entropy state.
     pub(crate) merkle: RwLock<MerkleState>,
@@ -233,53 +219,19 @@ pub struct Dht {
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
 
 impl Dht {
-    /// Construct the runtime DHT state.
+    /// Construct the runtime DHT state over the shared fjall [`Store`].
     ///
-    /// Idempotently opens the `dht_presence` and `dht_merkle` column
-    /// families on the supplied `RocksDB` path. The same DB instance the
-    /// caller already opened for the message queue is reused; CFs
-    /// separate the two key-spaces. "Already exists" is **not**
-    /// an error — the relay-restart case is exactly that.
-    ///
-    /// **Important:** `rocks` must already have been opened with the
-    /// `dht_presence` and `dht_merkle` CFs declared. We don't take an
-    /// owned `DB` handle and reopen it because the message-queue side
-    /// is already using the same handle and reopening would invalidate
-    /// outstanding iterators. See `crate::util::rocksdb::rocksdb`,
-    /// which declares the CFs up front, so `Dht::new` only verifies the
-    /// CFs are present and stashes the shared `Arc<DB>`.
+    /// The same store the relay opened for its message queue is reused;
+    /// keyspaces (`dht_presence` / `dht_queue` / `dht_keypackage` /
+    /// `dht_welcome`) separate the two domains and are all opened up front in
+    /// [`Store::open`], so there is nothing to verify here. Returns `Result`
+    /// only to keep the call sites stable.
     pub fn new(
-        node_id: NodeId, signing_key: SigningKey, cfg: DhtConfig, rocks: Arc<RocksDB>,
+        node_id: NodeId, signing_key: SigningKey, cfg: DhtConfig, store: Arc<Store>,
     ) -> Result<Self> {
-        // Verify the required CFs were declared at DB-open time. If the
-        // relay was started against an old DB without the CFs, surface
-        // a clear error rather than panicking deep inside a put.
-        rocks
-            .cf_handle(CF_DHT_PRESENCE)
-            .with_context(|| format!("missing column family `{CF_DHT_PRESENCE}` in DB"))?;
-        rocks
-            .cf_handle(CF_DHT_MERKLE)
-            .with_context(|| format!("missing column family `{CF_DHT_MERKLE}` in DB"))?;
-        // Sticky-home queue CF. Idempotent on a fresh DB because
-        // `crate::util::rocksdb` opens with
-        // `create_missing_column_families(true)`. On an upgrade against
-        // an existing DB, the CF is auto-created at first open by the
-        // same flag — `Dht::new` only re-verifies the handle exists.
-        rocks
-            .cf_handle(CF_DHT_QUEUE)
-            .with_context(|| format!("missing column family `{CF_DHT_QUEUE}` in DB"))?;
-        // MLS KeyPackage stash CF.
-        rocks
-            .cf_handle(CF_DHT_KEYPACKAGE)
-            .with_context(|| format!("missing column family `{CF_DHT_KEYPACKAGE}` in DB"))?;
-        // MLS welcome queue CF.
-        rocks
-            .cf_handle(CF_DHT_WELCOME)
-            .with_context(|| format!("missing column family `{CF_DHT_WELCOME}` in DB"))?;
-
         Ok(Self {
             routing: RwLock::new(RoutingTable::empty(node_id)),
-            rocks,
+            store,
             merkle: RwLock::new(MerkleState::empty()),
             cache: Mutex::new(LookupCache::empty()),
             peer_conns: RwLock::new(HashMap::new()),
@@ -379,40 +331,4 @@ impl Dht {
             self.metrics.inc_peer_conns_closed();
         }
     }
-}
-
-/// Helper: the DHT-specific column family descriptors to pass into
-/// `RocksDB::open_cf_descriptors` at relay-startup time.
-///
-/// Used by `crate::util::rocksdb` so DB-open and DHT-init aren't two
-/// places that have to stay in sync about which CFs exist.
-pub fn dht_cf_descriptors() -> Vec<ColumnFamilyDescriptor> {
-    // - `dht_presence`: no prefix extractor — point lookups only on
-    //   32-byte keys.
-    // - `dht_merkle`: no prefix extractor — keys are 3 bytes
-    //   (slice/level/index) which would be malformed under any
-    //   non-trivial extractor.
-    // - `dht_queue`: 32-byte fixed prefix extractor matching the
-    //   `recipient` field at offset 0 in `crate::storage::MessageKey`.
-    //   Same shape as the relay's existing message-queue (default CF)
-    //   so the per-recipient drain iterator works the same way.
-    // - `dht_keypackage`: 32-byte fixed prefix extractor matching the
-    //   `stash_prefix(ipk) = BLAKE3("kp:" || ipk)` field at offset 0
-    //   in the `(stash_prefix(32) || kp_ref(32))` storage key.
-    //   Layout per `mls_kp::stash_prefix`.
-    let presence_opts = Options::default();
-    let merkle_opts = Options::default();
-    let mut queue_opts = Options::default();
-    queue_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-    let mut keypackage_opts = Options::default();
-    keypackage_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-    let mut welcome_opts = Options::default();
-    welcome_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-    vec![
-        ColumnFamilyDescriptor::new(CF_DHT_PRESENCE, presence_opts),
-        ColumnFamilyDescriptor::new(CF_DHT_MERKLE, merkle_opts),
-        ColumnFamilyDescriptor::new(CF_DHT_QUEUE, queue_opts),
-        ColumnFamilyDescriptor::new(CF_DHT_KEYPACKAGE, keypackage_opts),
-        ColumnFamilyDescriptor::new(CF_DHT_WELCOME, welcome_opts),
-    ]
 }
