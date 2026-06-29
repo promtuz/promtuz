@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 
-use crate::api::conn_stats::CONNECTION_STATE;
+use crate::state::CONNECTION_STATE;
 use crate::events::Emittable;
 use crate::events::InternalEvent;
 

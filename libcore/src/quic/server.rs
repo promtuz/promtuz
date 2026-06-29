@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::ENDPOINT;
-use crate::api::conn_stats::CONNECTION_START_TIME;
+use crate::state::CONNECTION_START_TIME;
 use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
