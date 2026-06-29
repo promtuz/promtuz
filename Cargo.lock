@@ -724,8 +724,6 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "if-addrs",
- "jni",
- "jni_macro",
  "log",
  "once_cell",
  "openmls",

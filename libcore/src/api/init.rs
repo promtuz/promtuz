@@ -61,6 +61,7 @@ fn init_inner(
     events: Arc<dyn CoreEvents>,
     resolver_seeds: String,
 ) -> Result<()> {
+    init_logging();
     setup_crypto_provider()?;
 
     SECURE_STORE.set(secure_store).map_err(|_| anyhow::anyhow!("init called twice"))?;
@@ -88,6 +89,23 @@ fn init_inner(
 
     start_relay_loop(seeds);
     Ok(())
+}
+
+/// Initialize logging. ponytail: android_logger writes to logcat on
+/// Android and no-ops elsewhere; per-platform logging (oslog on iOS,
+/// env_logger on desktop) is future work when those clients land.
+fn init_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("core")
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .filter(None, log::LevelFilter::Off)
+                    .filter_module("core", log::LevelFilter::Debug)
+                    .build(),
+            ),
+    );
 }
 
 /// Core-owned relay connection. Reconnects forever; waits for an identity
