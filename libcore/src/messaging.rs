@@ -86,11 +86,6 @@ use common::types::bytes::Bytes;
 use ed25519_dalek::Signature;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
-use jni::JNIEnv;
-use jni::objects::JByteArray;
-use jni::objects::JString;
-use jni::sys::jobject;
-use jni_macro::jni;
 use log::error;
 use log::info;
 use log::warn;
@@ -103,7 +98,6 @@ use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::SignatureScheme;
-use serde::Serialize;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,8 +106,6 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex as PlMutex;
 use tokio::sync::Mutex as TokMutex;
 
-use crate::JC;
-use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::identity::IdentitySigner;
@@ -236,51 +228,38 @@ fn build_self_credential(
     Ok((leaf_kp, cwk))
 }
 
-/// JNI entry — called from the Android side. Hands off to
-/// [`send_message_inner`] on the global tokio runtime.
-#[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn sendMessage(mut env: JNIEnv, _: JC, to_ipk: JByteArray, content: JString) {
-    let to: [u8; 32] = {
-        let bytes = env.convert_byte_array(to_ipk).unwrap();
-        bytes.try_into().unwrap()
+/// Send `content` to `to`. Builds the production MLS context from the
+/// live relay's peer/1 dialer and hands off to [`send_message_inner`].
+/// Errors (rather than silently no-op'ing against a non-wired dialer) if
+/// no relay connection is up. Entry point for `api::messaging::send_message`.
+pub async fn send(to: [u8; 32], content: String) -> Result<()> {
+    // Pull the production peer/1 dialer from the global `RELAY` (attached
+    // at connect-time by `Relay::connect`). If no relay connection is
+    // live, surface a clean error rather than silently no-op against
+    // `NotWiredDhtClient` — otherwise every send would claim success while
+    // no Welcome reached the wire.
+    let dht_client = {
+        let guard = RELAY.read();
+        guard.as_ref().and_then(|r| r.dht_client.clone())
     };
-
-    let content: String = env.get_string(&content).unwrap().into();
-
-    RUNTIME.spawn(async move {
-        // Pull the production peer/1 dialer from the global `RELAY`
-        // (attached at connect-time by `Relay::connect`). If no relay
-        // connection is live, surface a clean error rather than silently
-        // no-op against `NotWiredDhtClient` — otherwise every send would
-        // claim success while no Welcome reached the wire.
-        let dht_client = {
-            let guard = RELAY.read();
-            guard.as_ref().and_then(|r| r.dht_client.clone())
-        };
-        let provider = PromtuzMlsProvider::shared();
-        let stash = KeyPackageStash::new(stash_db_handle());
-        let buffer = EpochCatchupBuffer::new(stash_db_handle());
-        let result = match dht_client {
-            Some(client) => {
-                let ctx = MlsContext {
-                    provider: &provider,
-                    stash:    &stash,
-                    buffer:   &buffer,
-                    dht:      client.as_ref(),
-                };
-                send_message_inner(&ctx, to, content).await
-            },
-            None => {
-                error!("MESSAGE: no relay connection / dialer; send aborted");
-                Err(anyhow!(
-                    "not connected to a relay (peer/1 dialer not wired); reconnect first"
-                ))
-            },
-        };
-        if let Err(e) = result {
-            error!("MESSAGE: send failed: {e}");
-        }
-    });
+    let provider = PromtuzMlsProvider::shared();
+    let stash = KeyPackageStash::new(stash_db_handle());
+    let buffer = EpochCatchupBuffer::new(stash_db_handle());
+    match dht_client {
+        Some(client) => {
+            let ctx = MlsContext {
+                provider: &provider,
+                stash:    &stash,
+                buffer:   &buffer,
+                dht:      client.as_ref(),
+            };
+            send_message_inner(&ctx, to, content).await
+        },
+        None => {
+            error!("MESSAGE: no relay connection / dialer; send aborted");
+            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
+        },
+    }
 }
 
 /// Bundle of references threaded through the MLS-aware send/receive
@@ -1092,66 +1071,9 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
 // `decode_encrypted` was dropped — the caller in
 // `quic/server.rs::handle_deliver` now uses `process_inbound_envelope`.
 
-/// Get paginated message history for a conversation.
-/// Returns CBOR-encoded Vec<MessageRow>.
-#[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn getMessages(
-    mut env: JNIEnv, _: JC, peer_ipk: JByteArray, limit: i32, before_id: JString,
-) -> jobject {
-    let peer: [u8; 32] = {
-        let bytes = env.convert_byte_array(peer_ipk).unwrap();
-        bytes.try_into().unwrap()
-    };
-
-    let before = if before_id.is_null() {
-        String::new()
-    } else {
-        env.get_string(&before_id).map(|s| s.into()).unwrap_or_default()
-    };
-
-    let messages = Message::get_messages(&peer, limit.max(0) as u32, &before);
-
-    let mut buf = vec![];
-    ciborium::into_writer(&messages, &mut buf).unwrap();
-
-    env.byte_array_from_slice(&buf).unwrap().into_raw()
-}
-
-/// Get all conversations (one entry per peer, latest message).
-/// Returns CBOR-encoded Vec<MessageRow>.
-#[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn getConversations(env: JNIEnv, _: JC) -> jobject {
-    let conversations = Message::get_conversations();
-
-    let mut buf = vec![];
-    ciborium::into_writer(&conversations, &mut buf).unwrap();
-
-    env.byte_array_from_slice(&buf).unwrap().into_raw()
-}
-
-/// Public-safe contact info for Kotlin side.
-#[derive(Serialize)]
-struct ContactInfo {
-    #[serde(with = "serde_bytes")]
-    ipk:      [u8; 32],
-    name:     String,
-    added_at: u64,
-}
-
-/// Get all contacts.
-/// Returns CBOR-encoded Vec<ContactInfo>.
-#[jni(base = "com.promtuz.core", class = "API")]
-pub extern "system" fn getContacts(env: JNIEnv, _: JC) -> jobject {
-    let contacts: Vec<ContactInfo> = Contact::list()
-        .into_iter()
-        .map(|c| ContactInfo { ipk: c.ipk, name: c.name, added_at: c.added_at })
-        .collect();
-
-    let mut buf = vec![];
-    ciborium::into_writer(&contacts, &mut buf).unwrap();
-
-    env.byte_array_from_slice(&buf).unwrap().into_raw()
-}
+// Read paths (get_messages / get_conversations / get_contacts) live in the
+// uniffi translation layer `api::messaging`, calling the engine's
+// `Message::get_*` / `Contact::list` directly — no CBOR round-trip.
 
 // ---------------------------------------------------------------------
 // Tests

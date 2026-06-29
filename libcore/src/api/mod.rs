@@ -10,6 +10,7 @@
 
 pub mod identity;
 pub mod init;
+pub mod messaging;
 
 use crate::data::identity::Identity;
 
