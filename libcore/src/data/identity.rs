@@ -2,15 +2,18 @@ use anyhow::Result;
 use anyhow::anyhow;
 use common::crypto::PublicKey;
 use common::crypto::SecretKey;
+use common::crypto::get_signing_key;
 use common::crypto::sign::derive_p2p_tls_key;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 use crate::platform::SECURE_STORE;
 use crate::db::identity::IDENTITY_DB;
 use crate::db::identity::IdentityRow;
+use crate::utils::systime;
 
 pub struct Identity {
     inner: IdentityRow,
@@ -49,6 +52,28 @@ impl Identity {
         )?;
 
         Ok(Identity { inner: identity })
+    }
+
+    /// Create + persist a fresh identity: validate the nickname, generate
+    /// the long-term Ed25519 secret, seal it via the platform key store,
+    /// and store the row. Entry point for `api::identity::enroll`.
+    pub fn create(name: &str) -> Result<()> {
+        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
+        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
+
+        let isk = get_signing_key();
+        let ipk = isk.verifying_key();
+        let enc_isk =
+            store.seal(isk.as_bytes().to_vec()).map_err(|e| anyhow!("seal failed: {e}"))?;
+
+        Identity::save(IdentityRow {
+            id: 0,
+            ipk: ipk.to_bytes(),
+            enc_isk,
+            created_at: systime().as_millis() as u64,
+            name,
+        })?;
+        Ok(())
     }
 
     /// Fetches identity public key
@@ -152,4 +177,24 @@ pub(crate) fn secret_key_signing(expected_ipk: &[u8; 32]) -> Result<SigningKey> 
         return Err(anyhow!("identity secret does not match expected IPK"));
     }
     Ok(key)
+}
+
+/// Normalize + validate a user-chosen nickname (NFC, trimmed, ≤32 chars,
+/// no control/zero-width characters). Returns the cleaned name or a
+/// user-facing error message.
+fn validate_nickname(name: &str) -> std::result::Result<String, String> {
+    let normalized: String = name.nfc().collect();
+    let trimmed = normalized.trim();
+
+    if trimmed.is_empty() {
+        return Err("Nickname cannot be empty".into());
+    }
+    if trimmed.chars().count() > 32 {
+        return Err("Nickname too long (max 32 characters)".into());
+    }
+    if trimmed.chars().any(|c| c.is_control() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{FEFF}')) {
+        return Err("Nickname contains invalid characters".into());
+    }
+
+    Ok(trimmed.to_string())
 }

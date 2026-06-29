@@ -8,6 +8,7 @@
 //! old hand-rolled JNI surface is archived at
 //! `../.archive/libcore-jni-api/` for reference while this is filled in.
 
+pub mod identity;
 pub mod init;
 
 use crate::data::identity::Identity;
