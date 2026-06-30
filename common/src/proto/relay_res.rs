@@ -8,7 +8,6 @@ use tokio::io::AsyncWriteExt;
 
 use crate::proto::RelayId;
 use crate::proto::pack::Packer;
-use crate::debug;
 use crate::sysutils::SystemLoad;
 use crate::trace;
 use crate::types::bytes::Bytes;
