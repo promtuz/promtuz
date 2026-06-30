@@ -1,7 +1,6 @@
 use serde::Serialize;
 use crate::db::utils::ulid::ULID;
 use crate::events::Emittable;
-use crate::events::InternalEvent;
 
 #[derive(Serialize, Debug, Clone)]
 pub enum MessageEv {
@@ -32,6 +31,8 @@ pub enum MessageEv {
 
 impl Emittable for MessageEv {
     fn emit(self) {
-        InternalEvent::emit("MESSAGE", &self);
+        if let Some(events) = crate::platform::EVENTS.get() {
+            events.on_message(self.into());
+        }
     }
 }

@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::ENDPOINT;
-use crate::api::conn_stats::CONNECTION_START_TIME;
+use crate::state::CONNECTION_START_TIME;
 use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
@@ -452,28 +452,28 @@ async fn handle_deliver(
     let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
     let result = match dht_client {
         Some(client) => {
-            let ctx = crate::api::messaging::MlsContext {
+            let ctx = crate::messaging::MlsContext {
                 provider: &provider,
                 stash:    &stash,
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            crate::api::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
         },
         None => {
             let dht = crate::quic::dht_client::NotWiredDhtClient;
-            let ctx = crate::api::messaging::MlsContext {
+            let ctx = crate::messaging::MlsContext {
                 provider: &provider,
                 stash:    &stash,
                 buffer:   &buffer,
                 dht:      &dht,
             };
-            crate::api::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
         },
     };
 
     match result {
-        Ok(Some(crate::api::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
+        Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
             // Surface as a UTF-8 message. Future structured payloads
             // (read receipts, attachments, etc.) will arrive as their
             // own MlsEnvelopeP sub-variants; until then any non-UTF-8
@@ -500,16 +500,16 @@ async fn handle_deliver(
             }
             .emit();
         },
-        Ok(Some(crate::api::messaging::InboundDecoded::Welcome)) => {
+        Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
             CRelayPacket::DeliverAck.send(tx).await?;
         },
-        Ok(Some(crate::api::messaging::InboundDecoded::ApplicationBuffered)) => {
+        Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {
             // Buffered for a future epoch / staged commit merged.
             // Ack so the relay GCs the queue entry.
             CRelayPacket::DeliverAck.send(tx).await?;
         },
-        Ok(Some(crate::api::messaging::InboundDecoded::ApplicationStale)) => {
+        Ok(Some(crate::messaging::InboundDecoded::ApplicationStale)) => {
             // Ack stale-epoch envelopes so the relay GCs them.
             // Previously this `bail`ed without ack which made
             // the relay redeliver indefinitely (queue grows without
@@ -621,19 +621,19 @@ fn build_relay_dht_client(
 
 /// One-shot Welcome poll on reconnect. Builds an `MlsContext` against
 /// fresh DB handles and the supplied dialer; runs
-/// [`crate::api::messaging::poll_welcomes`] once.
+/// [`crate::messaging::poll_welcomes`] once.
 async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
     let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
-    let ctx = crate::api::messaging::MlsContext {
+    let ctx = crate::messaging::MlsContext {
         provider: &provider,
         stash:    &stash,
         buffer:   &buffer,
         dht:      client.as_ref(),
     };
-    let count = crate::api::messaging::poll_welcomes(&ctx).await?;
+    let count = crate::messaging::poll_welcomes(&ctx).await?;
     if count > 0 {
         info!("MLS: poll_welcomes processed {count} welcome(s)");
     }
