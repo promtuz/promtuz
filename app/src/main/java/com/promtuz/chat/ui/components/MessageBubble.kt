@@ -53,8 +53,7 @@ fun MessageBubble(
                     Modifier
                         .widthIn(max = (this@BoxWithConstraints.maxWidth * 0.65f))
                         .drawBehind {
-                            composeBubble(
-                                containerColor,
+                            composeBubble(                                containerColor,
                                 14.dp to 6.dp,
                                 message.isSent,
                                 message.position
