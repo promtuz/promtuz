@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CompilerConfiguration">
+    <bytecodeTargetLevel target="21">
+      <module name="kwik.kwik" target="11" />
+      <module name="kwik.kwik-cli" target="11" />
+      <module name="kwik.kwik-cli.main" target="11" />
+      <module name="kwik.kwik-cli.test" target="11" />
+      <module name="kwik.kwik-h09" target="11" />
+      <module name="kwik.kwik-h09.main" target="11" />
+      <module name="kwik.kwik-h09.test" target="11" />
+      <module name="kwik.kwik-interop" target="11" />
+      <module name="kwik.kwik-interop.main" target="11" />
+      <module name="kwik.kwik-interop.test" target="11" />
+      <module name="kwik.kwik-qlog" target="11" />
+      <module name="kwik.kwik-qlog.main" target="11" />
+      <module name="kwik.kwik-qlog.test" target="11" />
+      <module name="kwik.kwik-samples" target="11" />
+      <module name="kwik.kwik-samples.main" target="11" />
+      <module name="kwik.kwik-samples.test" target="11" />
+      <module name="kwik.kwik.main" target="11" />
+      <module name="kwik.kwik.test" target="11" />
+    </bytecodeTargetLevel>
+  </component>
+</project>

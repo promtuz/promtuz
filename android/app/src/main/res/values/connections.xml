@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="state_disconnected">Disconnected</string>
+    <string name="state_nointernet">No Internet</string>
+    <string name="state_idle">Idle</string>
+    <string name="state_resolving">Resolving…</string>
+    <string name="state_connecting">Connecting…</string>
+    <string name="state_handshaking">Authenticating…</string>
+    <string name="state_connected">Connected</string>
+    <string name="state_failed">Connection failed</string>
+    <string name="state_reconnecting">Reconnecting…</string>
+</resources>

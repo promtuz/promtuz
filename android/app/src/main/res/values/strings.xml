@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">Promtuz</string>
+
+    <string name="status_continue">Continue</string>
+    <string name="status_trying">Please Wait…</string>
+    <string name="status_success">Success</string>
+
+    <!--  Welcome Screen  -->
+    <string name="welcome_screen_title">Welcome!</string>
+    <string name="welcome_screen_name_label">What should we call you?</string>
+    <string name="welcome_screen_example_name">eg. John Doe</string>
+
+    <string name="welcome_status_normal">Continue</string>
+    <string name="welcome_status_generating">Generating</string>
+    <string name="welcome_status_connecting">Connecting</string>
+    <string name="welcome_status_success">Success</string>
+
+    <string name="welcome_screen_continue_existing_label">Want to use existing account?</string>
+    <string name="welcome_screen_continue_existing_button">Import Account</string>
+
+
+    <string name="e2ee">End to End Encrypted</string>
+    <string name="title_activity_manage_space">Manage Space</string>
+</resources>
