@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Promtuz invite</title>
+</head>
+<body>
+  <p id="msg">Opening Promtuz&hellip;</p>
+  <script>
+    // Invite rides the URL fragment (never sent to the server); ?i= is a fallback.
+    var code = (location.hash ? location.hash.slice(1) : "") ||
+               (new URLSearchParams(location.search).get("i") || "");
+    var msg = document.getElementById("msg");
+
+    if (!code) {
+      msg.textContent = "This invite link is missing its code — ask your contact for a fresh one.";
+    } else if (/android/i.test(navigator.userAgent)) {
+      // Auto-launch the app (intent: also breaks out of in-app browsers). No
+      // package/fallback, so a missing app just fails and leaves this text.
+      location.replace(
+        "intent://pair?i=" + encodeURIComponent(code) + "#Intent;scheme=promtuz;end"
+      );
+      setTimeout(function () {
+        msg.textContent = "Open this link on the device where Promtuz is installed.";
+      }, 1500);
+    } else {
+      msg.textContent = "Open this invite on Android to connect.";
+    }
+  </script>
+</body>
+</html>
