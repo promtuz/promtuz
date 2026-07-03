@@ -1,5 +1,7 @@
 use std::io;
+use std::time::Duration;
 
+use common::node::config::DEFAULT_RESOLVER_PORT;
 use quinn::Connection;
 use thiserror::Error;
 
@@ -27,18 +29,33 @@ pub async fn connect_to_any_seed(seeds: &[ResolverSeed]) -> Result<Connection, D
     let mut last_err: Option<io::Error> = None;
 
     for seed in seeds {
-        let addr = seed.addr;
+        // Resolve host[:port] -> SocketAddr at dial time (DNS + default port),
+        // so a DNS repoint is picked up on reconnect. A resolve failure just
+        // moves to the next seed rather than aborting the whole attempt.
+        let addr = match seed.addr.resolve(DEFAULT_RESOLVER_PORT).await {
+            Ok(a) => a,
+            Err(err) => {
+                log::error!("ERROR: resolver {} resolve failed: {}", seed.addr, err);
+                last_err = Some(err);
+                continue;
+            },
+        };
 
-        log::info!("INFO: connecting to resolver: {}", addr);
+        log::info!("INFO: connecting to resolver: {} ({})", seed.addr, addr);
 
-        match endpoint.connect(addr, &seed.key.to_string()).map_err(quinn_err)?.await {
-            Ok(conn) => {
+        let connecting = endpoint.connect(addr, &seed.key.to_string()).map_err(quinn_err)?;
+        match tokio::time::timeout(Duration::from_secs(10), connecting).await {
+            Ok(Ok(conn)) => {
                 log::info!("INFO: connected to resolver: {}", addr);
                 return Ok(conn);
             },
-            Err(err) => {
+            Ok(Err(err)) => {
                 log::error!("ERROR: resolver {} connection failed: {}", addr, err);
                 last_err = Some(err.into());
+            },
+            Err(_) => {
+                log::warn!("WARN: resolver {} timed out after 10s", addr);
+                last_err = Some(io::Error::new(io::ErrorKind::TimedOut, "resolver connect timed out"));
             },
         }
     }

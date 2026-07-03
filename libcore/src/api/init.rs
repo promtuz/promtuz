@@ -85,6 +85,10 @@ fn init_inner(
 
     let mut transport_cfg = TransportConfig::default();
     transport_cfg.keep_alive_interval(Some(Duration::from_secs(15)));
+    // Bound dead connections/handshakes (keepalive 15s < idle 30s) so a link
+    // that goes silent is torn down and the relay loop reconnects.
+    transport_cfg
+        .max_idle_timeout(Some(Duration::from_secs(30).try_into().expect("valid idle timeout")));
     client_cfg.transport_config(Arc::new(transport_cfg));
 
     endpoint.set_default_client_config(client_cfg);

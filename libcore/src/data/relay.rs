@@ -535,6 +535,7 @@ impl Relay {
                     break Err(ResolveError::EmptyResponse);
                 }
 
+                info!("resolver returned {} relay(s)", relays.len());
                 Relay::refresh(&relays)?;
                 conn.close(quinn::VarInt::from_u32(1), &[]);
 

@@ -70,7 +70,9 @@ where
     }
 }
 
-// const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound the QUIC connect so an unreachable relay fails fast and the loop
+/// rolls to the next one, instead of hanging on quinn's default idle timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: usize = 16;
 
 /// Classifies a `quinn::ConnectionError` as terminal-for-this-relay
@@ -109,30 +111,30 @@ impl Relay {
     ) -> Result<JoinHandle<ConnectionError>, RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host)?, self.port);
 
-        debug!("connecting to relay at {}", addr);
+        info!("connecting to relay({}) at {}", self.id, addr);
         ConnectionState::Connecting.emit();
 
         let connect_start = systime().as_millis() as u64;
 
-        let conn = match ENDPOINT.get().unwrap().connect(addr, &self.id)?.await {
-            Ok(conn) => conn,
-            Err(ConnectionError::TimedOut) => {
+        let connecting = ENDPOINT.get().unwrap().connect(addr, &self.id)?;
+        let conn = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(err)) => {
+                ConnectionState::Failed.emit();
+                if is_terminal_for_relay(&err) {
+                    warn!("relay({}) at {addr} cert/auth failure ({err}) — terminal, will not retry", self.id);
+                    _ = self.record_terminal_failure();
+                } else {
+                    error!("relay({}) at {addr} connect failed: {err}", self.id);
+                    _ = self.record_failure();
+                }
+                return Err(RelayConnError::Continue);
+            },
+            Err(_) => {
+                warn!("relay({}) at {addr} unreachable — timed out after {}s", self.id, CONNECT_TIMEOUT.as_secs());
                 ConnectionState::Failed.emit();
                 _ = self.record_failure();
                 return Err(RelayConnError::Continue);
-            },
-            Err(err) => {
-                if is_terminal_for_relay(&err) {
-                    warn!(
-                        "relay({}) cert/auth failure ({}) — marking terminal, will not retry",
-                        self.id, err
-                    );
-                    _ = self.record_terminal_failure();
-                } else {
-                    error!("connection with relay({}) failed: {}", self.id, err);
-                    _ = self.record_failure();
-                }
-                return Err(err.into());
             },
         };
 
