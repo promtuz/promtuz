@@ -11,6 +11,7 @@ import com.promtuz.chat.domain.model.Chat
 import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,6 +40,10 @@ class AppVM(
 
     private val _chatsLoading = MutableStateFlow(false)
     val chatsLoading: StateFlow<Boolean> = _chatsLoading.asStateFlow()
+
+    /** Invite-link confirmation sheet; null when hidden. Driven by deeplinks. */
+    private val _invite = MutableStateFlow<InviteSheet?>(null)
+    val invite: StateFlow<InviteSheet?> = _invite.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -84,6 +89,38 @@ class AppVM(
     fun openChat(identityKey: Chat) {
         activeChatUser = identityKey
         navigator.push(Routes.Chat)
+    }
+
+    /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
+    fun showInvite(bytes: ByteArray) {
+        _invite.value = InviteSheet.Decoding
+        viewModelScope.launch {
+            _invite.value = try {
+                val p = bridge.previewInvite(bytes)
+                InviteSheet.Confirm(bytes, p.ipk, p.name, p.alreadyContact, p.expired)
+            } catch (e: Exception) {
+                Timber.tag(TAG).w(e, "previewInvite failed")
+                InviteSheet.Invalid
+            }
+        }
+    }
+
+    /** User tapped [Add]: queue the pairing (Ok != paired) and show brief success. */
+    fun acceptInvite(bytes: ByteArray, name: String) {
+        viewModelScope.launch {
+            try {
+                bridge.pairFromQr(bytes)
+                _invite.value = InviteSheet.Added(name)
+                refreshChats()
+            } catch (e: Exception) {
+                Timber.tag(TAG).w(e, "pairFromQr failed")
+                _invite.value = InviteSheet.Invalid
+            }
+        }
+    }
+
+    fun dismissInvite() {
+        _invite.value = null
     }
 
     fun refreshChats() {

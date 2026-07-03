@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import uniffi.core.ContactInfo
+import uniffi.core.InvitePreview
 import uniffi.core.MessageEvent
 import uniffi.core.MessageRecord
 import uniffi.core.computeQrMask as ffiComputeQrMask
@@ -16,6 +17,7 @@ import uniffi.core.getConversations as ffiGetConversations
 import uniffi.core.getMessages as ffiGetMessages
 import uniffi.core.makeInviteQr as ffiMakeInviteQr
 import uniffi.core.pairFromQr as ffiPairFromQr
+import uniffi.core.previewInvite as ffiPreviewInvite
 import uniffi.core.sendMessage as ffiSendMessage
 import uniffi.core.shouldLaunchApp as ffiShouldLaunchApp
 
@@ -37,6 +39,10 @@ object CoreBridge {
     suspend fun makeInviteQr(): ByteArray = withContext(Dispatchers.IO) { ffiMakeInviteQr() }
 
     suspend fun pairFromQr(qrBytes: ByteArray) = withContext(Dispatchers.IO) { ffiPairFromQr(qrBytes) }
+
+    /** Decode-only preview of an invite (QR or link) for the confirm sheet; no pairing. */
+    suspend fun previewInvite(bytes: ByteArray): InvitePreview =
+        withContext(Dispatchers.IO) { ffiPreviewInvite(bytes) }
 
     suspend fun contacts(): List<ContactInfo> = withContext(Dispatchers.IO) { ffiGetContacts() }
 

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +31,7 @@ import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
 import com.promtuz.chat.ui.activities.QrScanner
 import com.promtuz.chat.ui.components.BackTopBar
 import com.promtuz.chat.ui.components.IdentityQrCode
+import com.promtuz.chat.utils.InviteLink
 
 @Composable
 fun ShareIdentityScreen(
@@ -63,9 +65,48 @@ fun ShareIdentityScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    ShareLinkButton(viewModel.qrData.collectAsState().value)
                     ScanQRButton()
                 }
             }
+        }
+    }
+}
+
+
+@Composable
+private fun ColumnScope.ShareLinkButton(inviteBytes: ByteArray?, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+
+    OutlinedButton(
+        onClick = {
+            val bytes = inviteBytes ?: return@OutlinedButton
+            val link = InviteLink.build(bytes)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, link)
+            }
+            context.startActivity(Intent.createChooser(send, "Share invite link"))
+        },
+        enabled = inviteBytes != null,
+        modifier = modifier
+            .fillMaxWidth(0.8f)
+            .align(Alignment.CenterHorizontally),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.i_send),
+                contentDescription = "Share Link Icon"
+            )
+
+            Text(
+                "Share link",
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.labelLargeEmphasized
+            )
         }
     }
 }

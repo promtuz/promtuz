@@ -54,6 +54,31 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Remote pairing: https://promtuz.dev/pair#<code> App Link. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="promtuz.dev"
+                    android:pathPrefix="/pair"
+                    android:scheme="https" />
+            </intent-filter>
+
+            <!-- Fallback for web pages / in-app browsers: promtuz://pair#<code>. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="pair"
+                    android:scheme="promtuz" />
+            </intent-filter>
         </activity>
         <activity
             android:name=".ui.activities.ManageSpace"
