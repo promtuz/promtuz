@@ -482,7 +482,7 @@ impl Relay {
                    window_start         = CASE WHEN window_start < ?3 THEN ?1 ELSE window_start END
                  WHERE id = ?2
                  RETURNING consecutive_failures",
-            params![now, self.id.as_ref(), now as i64, window_threshold],
+            params![now, self.id.as_ref(), now, window_threshold],
             |r| r.get::<_, i64>(0).map(|v| v as u32),
         )?;
 
