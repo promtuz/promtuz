@@ -1,0 +1,18 @@
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# ponytail: the bindgen CLI lives here, NOT in libcore. libcore keeps
+# uniffi default-features=false so the shipped cdylib carries no CLI deps.
+# Generates both Kotlin (Android) and Swift (iOS) from the built .so via
+# `generate --library`. See tools/scripts/gen-bindings.sh.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "0.31.2", features = ["cli"] }
