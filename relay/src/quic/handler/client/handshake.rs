@@ -72,33 +72,28 @@ pub(super) async fn handle_handshake(
 
     //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
 
-    // 3. Register this client as connected.
+    // 3. Register this client as connected — last-connection-wins.
     //
-    // Race-safety: a second valid handshake from the same identity must NOT
-    // silently displace the live entry — that would orphan the previous
-    // connection in the map and, worse, the eventual disconnect cleanup of
-    // *either* connection would unconditionally `remove(ipk)` and leave the
-    // user unreachable on this relay (see `handle_client`'s cleanup, which
-    // is now ptr-equality-guarded).
+    // The peer just proved ownership of this IPK, so a pre-existing entry is a
+    // superseded session: almost always the same user reconnecting (app
+    // restart, network flap) while the previous QUIC connection still lingers
+    // in the map — QUIC gets no FIN when an app dies, so the old conn's
+    // `close_reason()` stays `None` until its own idle timeout elapses. The old
+    // "reject the new connection while an entry looks live" policy therefore
+    // locked the user out of reconnecting for that whole window.
     //
-    // Policy: if a live entry already exists for this IPK, reject the new
-    // connection with `AlreadyConnected`. Only sweep entries whose
-    // connection has already been torn down.
+    // Instead we close the stale connection and let the new one take over.
+    // Safe because the disconnect cleanup (`remove_client_if_same`) is
+    // stable_id-guarded: the displaced connection's cleanup finds a different
+    // entry under this IPK and no-ops, so it cannot evict the freshly
+    // registered connection.
     {
-        let relay = relay.clone();
         let new_conn = conn.clone();
         let mut clients = relay.clients.write();
-        if let Some(existing) = clients.get(&ipk_bytes) {
-            if existing.close_reason().is_none() {
-                CloseReason::AlreadyConnected.close(&new_conn);
-                bail!(
-                    "client({:?}) rejected: ipk already has a live connection",
-                    hex::encode(ipk_bytes)
-                );
-            }
-            // Stale entry — drop it, the dead task's cleanup will be a no-op
-            // because the stable_id no longer matches.
-            clients.remove(&ipk_bytes);
+        if let Some(existing) = clients.get(&ipk_bytes)
+            && existing.close_reason().is_none()
+        {
+            CloseReason::Reconnecting.close(existing);
         }
         clients.insert(ipk_bytes, new_conn);
     }
