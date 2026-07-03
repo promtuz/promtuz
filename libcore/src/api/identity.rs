@@ -56,3 +56,34 @@ pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     });
     Ok(())
 }
+
+/// What a scanned/opened invite contains, for the confirmation UI.
+#[derive(uniffi::Record)]
+pub struct InvitePreview {
+    /// The sharer's 32-byte identity key.
+    pub ipk: Vec<u8>,
+    /// The sharer's display name (length-capped).
+    pub name: String,
+    /// We already have this person as a contact.
+    pub already_contact: bool,
+    /// The invite's ~10-min window has elapsed.
+    pub expired: bool,
+}
+
+/// Decode-only preview of a scanned/opened invite so the client can show an
+/// "Add <name>?" confirmation before committing. Does NOT pair — that's
+/// [`pair_from_qr`]. A malformed payload is an `Err`; `already_contact` /
+/// `expired` let the sheet tailor the prompt (open chat / ask for a fresh
+/// link) instead of blindly attempting to pair.
+#[uniffi::export]
+pub fn preview_invite(qr_bytes: Vec<u8>) -> Result<InvitePreview, CoreError> {
+    let qr = IdentityQr::deser(&qr_bytes)
+        .map_err(|e| CoreError::Internal { msg: format!("bad invite: {e}") })?;
+    let now_ms = crate::utils::systime().as_millis() as u64;
+    Ok(InvitePreview {
+        ipk: qr.ipk.to_vec(),
+        name: qr.name.chars().take(32).collect(),
+        already_contact: Contact::exists(&qr.ipk),
+        expired: qr.invite.expiry_ms < now_ms,
+    })
+}
