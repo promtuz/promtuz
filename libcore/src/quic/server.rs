@@ -248,6 +248,57 @@ impl Relay {
         Ok(())
     }
 
+    /// Batch-acknowledge a completed drain. The relay deletes the queue
+    /// entries it streamed and — when some came from remote homes —
+    /// replies with an `AckAuthRequest` on this stream's response half,
+    /// asking us to sign the home-side GC. The signed `AckAuth` reply
+    /// must go on a FRESH stream: the relay's dispatcher for this
+    /// stream is parked inside `handle_ack_drain` awaiting the parked
+    /// oneshot, so it can't read a reply from the same stream.
+    async fn ack_drain(&self, conn: &quinn::Connection, ipk: VerifyingKey) {
+        let (mut tx, mut rx) = match conn.open_bi().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("relay({}) ack_drain: open_bi failed: {e}", self.id);
+                return;
+            },
+        };
+        if CRelayPacket::AckDrain.send(&mut tx).await.is_err() {
+            return;
+        }
+        _ = tx.finish();
+
+        // Optional follow-up: absent when the drain was local-only (the
+        // relay's stream task just ends → read errors out).
+        match tokio::time::timeout(Duration::from_secs(10), SRelayPacket::unpack(&mut rx)).await
+        {
+            Ok(Ok(SRelayPacket::AckAuthRequest {
+                requester_relay_id,
+                delivered_ids,
+                suggested_timestamp,
+            })) => match conn.open_bi().await {
+                Ok((mut ack_tx, _ack_rx)) => {
+                    if let Err(e) = handle_ack_auth_request(
+                        &mut ack_tx,
+                        ipk,
+                        requester_relay_id,
+                        delivered_ids,
+                        suggested_timestamp,
+                    )
+                    .await
+                    {
+                        warn!("relay({}) ack_drain: AckAuth reply failed: {e}", self.id);
+                    }
+                    _ = ack_tx.finish();
+                },
+                Err(e) => {
+                    warn!("relay({}) ack_drain: open_bi for AckAuth failed: {e}", self.id)
+                },
+            },
+            _ => {},
+        }
+    }
+
     // TODO: make custom error type for relay handling and handle it, supporting io errors from
     // send, unpack etc utils
     fn handle_err(&self, err: &ConnectionError) {
@@ -283,30 +334,11 @@ impl Relay {
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
-        // Draining Queue
-
-        {
-            let (mut tx, _rx) =
-                ret_err!(conn.open_bi().await.inspect_err(|e| self.handle_err(e)));
-
-            if CRelayPacket::DrainQueue.send(&mut tx).await.is_err() {
-                return ConnectionError::LocallyClosed;
-            }
-
-            // let Ok(SRelayPacket::QueueDrain(messages)) = SRelayPacket::unpack(&mut rx).await else
-            // {     return ConnectionError::LocallyClosed;
-            // };
-
-            _ = tx.finish();
-        }
-
-        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
         // Re-use the production peer/1 dialer that `connect()` built
         // before storing this Relay on the global `RELAY`. The dialer
-        // is shared (`Arc<RelayDhtClient>`) so the
-        // JNI surface (`sendMessage`, `handle_deliver`) and the
-        // background tasks below all dispatch over the same pool.
+        // is shared (`Arc<RelayDhtClient>`) so the uniffi surface
+        // (`send_message`) and the background tasks below all dispatch
+        // over the same pool.
         //
         // The cancellation token is fired when the function returns
         // (on connection loss) so the scheduler task exits cleanly.
@@ -316,27 +348,74 @@ impl Relay {
         let dht_client = self.dht_client.clone();
 
         if let Some(client) = dht_client.as_ref() {
-            // 1. One-shot Welcome poll on reconnect.
-            //
-            // Best-effort — if the K-set FindNode times out or the
-            // recipient relay is down we just log; Welcomes can be
-            // re-fetched on the next reconnect, and the home's
-            // 30-day retention covers multi-week offline windows.
-            let client_for_poll = client.clone();
-            tokio::spawn(async move {
-                if let Err(e) = poll_welcomes_once(client_for_poll).await {
-                    warn!("MLS: poll_welcomes failed: {e}");
-                }
-            });
+            // Welcome poll — awaited BEFORE the queue drain so a pairing
+            // Welcome is processed before the first application message
+            // that references its group is drained (a drained message
+            // from a not-yet-known sender would be dropped). Bounded so
+            // a dead DHT can't stall the drain.
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                poll_welcomes_once(client.clone()),
+            )
+            .await
+            {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
+                Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
+            }
 
-            // 2. KP rotation scheduler — long-lived task, ticks every
-            //    KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
-            //    `mls_cancel`.
+            // KP rotation scheduler — long-lived task, ticks every
+            // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
+            // `mls_cancel`.
             let client_for_sched = client.clone();
             let cancel_for_sched = mls_cancel.clone();
             tokio::spawn(async move {
                 run_scheduler_loop(client_for_sched, cancel_for_sched).await;
             });
+        }
+
+        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
+
+        // Drain the offline queue. The relay streams every queued
+        // message back as individual `Deliver` frames on this stream's
+        // response half; processing is store-only. Per-message
+        // `DeliverAck` is the live-delivery contract — the drain is
+        // acknowledged as one batch via `AckDrain` once everything is
+        // durably stored.
+        {
+            let (mut tx, mut rx) =
+                ret_err!(conn.open_bi().await.inspect_err(|e| self.handle_err(e)));
+
+            if CRelayPacket::DrainQueue.send(&mut tx).await.is_err() {
+                return ConnectionError::LocallyClosed;
+            }
+            _ = tx.finish();
+
+            let mut received = 0usize;
+            while let Ok(packet) = SRelayPacket::unpack(&mut rx).await {
+                match packet {
+                    SRelayPacket::Deliver(msg) => {
+                        received += 1;
+                        // A failure here is terminal for the message
+                        // (bad sig / no group state / undecryptable) —
+                        // we still ack the batch below; redelivering
+                        // bytes we already failed on cannot go better.
+                        // ponytail: batch-level ack; per-id acks when
+                        // the wire grows them (architecture round).
+                        if let Err(e) =
+                            process_deliver(msg, self.dht_client.clone()).await
+                        {
+                            warn!("relay({}) drain: dropping message: {e}", self.id);
+                        }
+                    },
+                    other => debug!("unexpected packet in drain response: {other:?}"),
+                }
+            }
+
+            if received > 0 {
+                info!("relay({}): drained {received} queued message(s)", self.id);
+                self.ack_drain(conn, ipk).await;
+            }
         }
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
@@ -424,9 +503,26 @@ impl Relay {
     }
 }
 
+/// Live-delivery entry point: process one relay-initiated `Deliver`,
+/// then ack on the stream — the relay's `try_deliver` waits on this
+/// ack (3s) before treating the message as delivered.
 async fn handle_deliver(
     tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
     dht_client: Option<Arc<RelayDhtClient>>,
+) -> Result<()> {
+    process_deliver(msg, dht_client).await?;
+    CRelayPacket::DeliverAck.send(tx).await?;
+    Ok(())
+}
+
+/// Decode, decrypt, persist, and surface one delivered message.
+/// Stream-free so both delivery channels share it: the live path
+/// (`handle_deliver`, per-message ack) and the DrainQueue response
+/// stream (batch-acked via `AckDrain`). `Ok(())` means the message
+/// reached a terminal state (stored / buffered / correctly dropped);
+/// `Err` means it was dropped without effect.
+async fn process_deliver(
+    msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
     // The wire envelope is `MlsEnvelopeP` (postcard-encoded), so we
     // hand off to `api::messaging::process_inbound_envelope` rather
@@ -492,7 +588,6 @@ async fn handle_deliver(
                     bail!("save failed: {e}");
                 },
             };
-            CRelayPacket::DeliverAck.send(tx).await?;
             info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
             MessageEv::Received {
                 id: saved.inner.id,
@@ -504,12 +599,10 @@ async fn handle_deliver(
         },
         Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
-            CRelayPacket::DeliverAck.send(tx).await?;
         },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {
             // Buffered for a future epoch / staged commit merged.
-            // Ack so the relay GCs the queue entry.
-            CRelayPacket::DeliverAck.send(tx).await?;
+            // Terminal-good: the caller acks so the relay GCs the entry.
         },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationStale)) => {
             // Ack stale-epoch envelopes so the relay GCs them.
@@ -520,8 +613,10 @@ async fn handle_deliver(
             // a stale epoch — openmls only retains a small past-epoch
             // key window — so re-delivery is hopeless, and an explicit
             // ack is the correct response.
-            warn!("MESSAGE: stale-epoch envelope from {}; acking and dropping", hex::encode(&msg.from[..4]));
-            CRelayPacket::DeliverAck.send(tx).await?;
+            warn!(
+                "MESSAGE: stale-epoch envelope from {}; dropping",
+                hex::encode(&msg.from[..4])
+            );
         },
         Ok(None) => {
             // Currently unreachable — process_inbound_envelope only
