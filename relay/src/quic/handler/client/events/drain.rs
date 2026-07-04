@@ -134,13 +134,10 @@ pub(crate) async fn handle_drain_queue_with(
         None => true,
     };
 
-    // 2. Drain local cf_messages (per the legacy contract). We must
-    //    keep the existing `MessageKey`-tracking semantics so the
-    //    follow-up `AckDrain` can clean up. We *do not* track keys
-    //    for the cross-cf source here — the `cf_dht_queue` drain is
-    //    deferred (it needs its own in-place `MessageKey` tracking
-    //    once self-as-home is stable). The remote source is cleaned
-    //    up via `QueueFetchAck` after the ack lands.
+    // 2. Drain local cf_messages. `MessageKey`s of everything streamed
+    //    (from BOTH local keyspaces) are tracked in `delivered_keys` so
+    //    the follow-up `AckDrain` deletes them. The remote-home source
+    //    is GC'd separately via `QueueFetchAck` after the ack lands.
     let mut delivered_keys: Vec<MessageKey> = Vec::new();
     let mut deliver_queue: Vec<DeliverP> = Vec::new();
 
@@ -152,7 +149,7 @@ pub(crate) async fn handle_drain_queue_with(
     //    arrived via either the sender fan-out or the inbound `Forward`
     //    handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
-        iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue);
+        iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
     }
 
     // 4. If !i_am_home AND drain_auth set AND DHT is enabled, fetch
@@ -207,14 +204,8 @@ pub(crate) async fn handle_drain_queue_with(
     //    captures the live set. The previous batch is naturally a
     //    subset of what's still on disk (we haven't deleted yet),
     //    so we'd otherwise grow the pending list with duplicates.
-    //
-    //    Scope note: `pending_drain` only tracks `cf_messages` keys.
-    //    The remote-home source is GC'd via `QueueFetchAck`, but the
-    //    `cf_dht_queue` cross-cf source has no on-this-relay deletion
-    //    semantics yet — the self-as-home cf_dht_queue cleanup needs
-    //    its own in-place `MessageKey` tracking (not yet built). For
-    //    now those messages are still re-delivered on the next
-    //    reconnect; the client dedupes by `DispatchP.id`.
+    //    Holds keys from both local keyspaces; `handle_ack_drain`
+    //    removes each key from both (wrong-keyspace remove = no-op).
     *ctx.pending_drain.lock() = delivered_keys;
 
     Ok(())
@@ -243,12 +234,17 @@ pub(crate) async fn handle_drain_queue_with(
 pub(super) async fn handle_ack_drain(
     ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
-    // 1. Local `cf_messages` GC.
+    // 1. Local GC — `pending_drain` holds keys from both cf_messages
+    //    and (self-as-home) cf_dht_queue. Same 56-byte `MessageKey`
+    //    shape in both; removing a key from the keyspace it isn't in
+    //    is a no-op, and a dispatch double-stored during a routing
+    //    transition is correctly purged from both.
     let keys = std::mem::take(&mut *ctx.pending_drain.lock());
     if !keys.is_empty() {
         let mut batch = ctx.relay.store.batch();
         for key in &keys {
             batch.remove(&ctx.relay.store.messages, key.as_bytes());
+            batch.remove(&ctx.relay.store.queue, key.as_bytes());
         }
         batch.commit()?;
         trace!("DRAIN: cleared {} acked messages", keys.len());
@@ -429,22 +425,27 @@ fn iterate_cf_messages(
     }
 }
 
-/// Walk the `cf_dht_queue` for `recipient_prefix` and push every
-/// parsed `DispatchP` (converted to `DeliverP` via
-/// [`dispatch_to_deliver`]) onto `out`.
-///
-/// The keys here are **not** tracked in `pending_drain` because the
-/// cross-CF cleanup contract is not yet built. A re-drain will
-/// re-deliver these messages — the client's `DispatchP.id` dedupe
-/// handles the redundancy.
-fn iterate_cf_dht_queue(dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<DeliverP>) {
+/// Walk the `cf_dht_queue` for `recipient_prefix`, push every parsed
+/// `DispatchP` (converted to `DeliverP` via [`dispatch_to_deliver`])
+/// onto `out`, and record its `MessageKey` onto `keys` so the
+/// follow-up `AckDrain` GCs the entry (same contract as
+/// [`iterate_cf_messages`]).
+fn iterate_cf_dht_queue(
+    dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<DeliverP>,
+    keys: &mut Vec<MessageKey>,
+) {
     for guard in dht.store.queue.prefix(recipient) {
-        let (_key, value) = match guard.into_inner() {
+        let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(e) => {
                 warn!("DRAIN: dht_queue iterator error: {e}");
                 break;
             }
+        };
+
+        let Some(key) = MessageKey::parse(&key_bytes) else {
+            warn!("DRAIN: malformed dht_queue key (len={}); skipping", key_bytes.len());
+            continue;
         };
 
         let Ok(dispatch) = DispatchP::deser(&value) else {
@@ -453,6 +454,7 @@ fn iterate_cf_dht_queue(dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<Deli
         };
 
         out.push(dispatch_to_deliver(dispatch));
+        keys.push(key);
     }
 }
 
