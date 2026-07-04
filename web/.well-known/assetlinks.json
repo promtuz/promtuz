@@ -5,8 +5,7 @@
       "namespace": "android_app",
       "package_name": "com.promtuz.chat",
       "sha256_cert_fingerprints": [
-        "REPLACE_WITH_DEBUG_KEYSTORE_SHA256",
-        "REPLACE_WITH_RELEASE_KEYSTORE_SHA256"
+        "95:C2:3C:F7:A7:2F:DB:C1:9B:CE:D3:DD:6D:DC:E5:93:C8:C3:45:51:D7:77:72:0D:E5:B1:DA:FB:BB:F0:0F:EF"
       ]
     }
   }
