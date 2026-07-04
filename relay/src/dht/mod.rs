@@ -11,13 +11,10 @@
 
 // config + metrics are `pub` because they're referenced from public
 // types like `DhtConfig` in `Dht::new` (already re-exported below).
-// `handler` is `pub` so the e2e harness in
-// `libcore/tests/e2e_phase5b.rs` can drive `handle_peer_connection`
-// directly.
 pub(crate) mod bootstrap;
 pub mod config;
 pub(crate) mod forward;
-pub mod handler;
+pub(crate) mod handler;
 pub(crate) mod key_helpers;
 pub(crate) mod lookup;
 pub mod metrics;
@@ -258,33 +255,6 @@ impl Dht {
     /// drive the home-side delivery path.
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
-    }
-
-    /// Pre-seed a peer descriptor into this relay's routing table. Used
-    /// by the e2e harness (`libcore/tests/e2e_phase5b.rs`) to wire N
-    /// relays' routing tables to each other before the test fires its
-    /// first `FindNode` RPC. Production paths populate the table
-    /// organically via `handle_peer_connection` post-DhtHello.
-    pub fn seed_routing_table(&self, descriptor: common::proto::dht_p2p::NodeDescriptor) {
-        let _ = self.routing.write().insert(descriptor);
-    }
-
-    /// Purge any routing-table entry whose `id` is not in `allowed`.
-    /// The e2e harness uses this to evict libcore-ephemeral
-    /// peers from the routing table after each operation that may have
-    /// added them, so subsequent `FindNode`s return only the curated
-    /// cross-wired set.
-    ///
-    /// Production code never calls this — it'd undermine the
-    /// learn-from-traffic policy.
-    pub fn purge_routing_to(&self, allowed: &[common::quic::id::NodeId]) {
-        let allowed: std::collections::HashSet<common::quic::id::NodeId> =
-            allowed.iter().copied().collect();
-        let mut rt = self.routing.write();
-        for bucket in rt.buckets.iter_mut() {
-            bucket.entries.retain(|e| allowed.contains(&e.id));
-            bucket.candidates.retain(|e| allowed.contains(&e.id));
-        }
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path.

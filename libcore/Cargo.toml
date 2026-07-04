@@ -7,11 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# Phase 5b: add `rlib` alongside `cdylib` so libcore can be linked as a
-# regular Rust library in integration tests (the relay's
-# `tests/e2e_phase5b.rs` consumes libcore directly to drive
-# `MlsContext`-based clients against real `Dht` instances). The Android
-# JNI cdylib build is unaffected — `cargo build` emits both artifacts.
+# `rlib` alongside `cdylib` so libcore is linkable as a regular Rust
+# library (in-tree tests, future iOS static build). The Android cdylib
+# build is unaffected — `cargo build` emits both artifacts.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -64,18 +62,7 @@ sha2 = "0.11.0"
 blake3 = "1.8.5"
 uniffi = { version = "0.31.2", default-features = false, features = ["tokio"] }
 
-[features]
-# Headless e2e client driver (`src/e2e`, `src/bin/e2e_client.rs`) used by the
-# `testnet` sandbox harness. Off by default — the Android cdylib build is
-# unaffected, and the explicit-signer seam in `RelayDhtClient` compiles out.
-e2e-client = []
-
-[[bin]]
-name = "e2e-client"
-path = "src/bin/e2e_client.rs"
-required-features = ["e2e-client"]
-
-# Phase 3b's `mls::group` / `mls::welcome` / `mls::epoch_catchup` test
+# The `mls::group` / `mls::welcome` / `mls::epoch_catchup` test
 # fixtures use openmls's `MlsMessageOut::into_welcome()`, which is gated
 # behind `test-utils` in openmls 0.8. Production code paths do not use
 # this method (it's only for fixture wiring). We enable it as a
@@ -83,7 +70,7 @@ required-features = ["e2e-client"]
 # `test-utils` into release builds.
 [dev-dependencies]
 openmls = { version = "0.8.1", features = ["test-utils"] }
-# Phase 5a tokio scheduler tests need `start_paused` + `tokio::time::advance`
+# Tokio scheduler tests need `start_paused` + `tokio::time::advance`
 # (deterministic clock simulation). The `test-util` feature is dev-only;
 # production builds rely on the wall clock.
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -92,9 +79,3 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Keep the dev-dep declaration so the test path doesn't depend on the
 # runtime version drift.
 x509-parser = "0.18.1"
-# Phase 5b: e2e integration tests in `tests/e2e_phase5b.rs` consume the
-# relay crate as a library so they can drive real `Dht` instances over
-# loopback `peer/1` QUIC connections. No cycle — relay does NOT depend
-# on libcore (libcore is the cdylib client; relay is the server).
-relay = { path = "../relay" }
-rust-rocksdb = { version = "0.51.0", features = ["multi-threaded-cf"] }

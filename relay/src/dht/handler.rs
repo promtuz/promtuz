@@ -149,12 +149,7 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///    the routing-table entry only if it still points at this exact
 ///    `Connection` — same race-guard as `remove_client_if_same` at
 ///    `relay/src/quic/handler/client/mod.rs:43-52`.
-///
-/// Bumped from `pub(crate)` to `pub` so the e2e integration harness in
-/// `libcore/tests/e2e_phase5b.rs` can consume it directly (the
-/// production caller is still
-/// `relay/src/quic/handler/peer.rs::handle_peer`, unchanged).
-pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
+pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Forward-compatible TLS pubkey extraction. Under the current
     // `with_no_client_auth()` server config this returns `None`
     // (clients don't present certs); preserved as defense-in-depth
@@ -525,13 +520,7 @@ async fn handle_one_stream(
 /// the authenticated peer id to enforce the `requester_relay_id`
 /// binding (a captured ack must arrive on the connection of the relay
 /// it was signed for).
-///
-/// Bumped from `pub(crate)` to `pub` so the e2e harness in
-/// `libcore/tests/e2e_phase5b.rs` can run a custom acceptor that
-/// dispatches RPCs *without* the production routing-table-population
-/// side effect of `handle_peer_connection`. Production callers
-/// (`handle_one_stream`) are unchanged.
-pub async fn handle_dht_request(
+pub(crate) async fn handle_dht_request(
     dht: &Arc<Dht>, req: DhtRequest, authenticated_peer_id: NodeId,
 ) -> DhtResponse {
     match req {

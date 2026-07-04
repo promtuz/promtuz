@@ -58,13 +58,6 @@ pub struct RelayDhtClient {
     /// a `DhtUnavailable`-flavoured error (matching the reply the home
     /// would send anyway).
     home_node_id: Option<[u8; 32]>,
-    /// Test seam (feature `e2e-client`): when `Some`, DHT-RPC transcripts
-    /// are signed with this explicit key instead of the global, JNI-backed
-    /// [`IdentitySigner`], so the headless e2e harness can run off-device
-    /// (the Android `KeyManager` is unavailable there). Production never
-    /// sets it; the key MUST correspond to `user_ipk`.
-    #[cfg(feature = "e2e-client")]
-    explicit_signer: Option<ed25519_dalek::SigningKey>,
 }
 
 impl RelayDhtClient {
@@ -73,33 +66,11 @@ impl RelayDhtClient {
             conn,
             user_ipk,
             home_node_id,
-            #[cfg(feature = "e2e-client")]
-            explicit_signer: None,
         }
-    }
-
-    /// Headless/e2e constructor (feature `e2e-client`): sign DHT-RPC with
-    /// `signer` — whose verifying key MUST equal `user_ipk` — instead of
-    /// the global keystore, so the harness runs without the Android
-    /// `KeyManager`. Restores the explicit-signer capability the deleted
-    /// `Peer1DhtClient` had.
-    #[cfg(feature = "e2e-client")]
-    pub(crate) fn new_with_signer(
-        conn: Connection,
-        user_ipk: [u8; 32],
-        home_node_id: Option<[u8; 32]>,
-        signer: ed25519_dalek::SigningKey,
-    ) -> Self {
-        Self { conn, user_ipk, home_node_id, explicit_signer: Some(signer) }
     }
 
     /// Sign `msg` under our long-term IPK.
     fn sign(&self, msg: &[u8]) -> DhtClientResult<[u8; 64]> {
-        #[cfg(feature = "e2e-client")]
-        if let Some(sk) = &self.explicit_signer {
-            use ed25519_dalek::Signer as _;
-            return Ok(sk.sign(msg).to_bytes());
-        }
         IdentitySigner::sign(msg)
             .map(|s| s.to_bytes())
             .map_err(|e| DhtClientError::Protocol(format!("sign: {e}")))

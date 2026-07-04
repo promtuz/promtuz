@@ -1,5 +1,5 @@
 [workspace]
-members = ["resolver", "relay", "common", "libcore", "tools/testnet", "tools/uniffi-bindgen"]
+members = ["resolver", "relay", "common", "libcore", "tools/uniffi-bindgen"]
 resolver = "2"
 
 [workspace.package]

@@ -12,3 +12,5 @@ target
 release.sh
 
 docs
+# rustc internal-compiler-error dumps
+rustc-ice-*.txt
