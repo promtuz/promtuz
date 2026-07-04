@@ -23,7 +23,6 @@
 //! counter — keeps the routing table free of side-channel dependencies
 //! and trivially unit-testable.
 
-use std::cmp::Ordering;
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -570,22 +569,6 @@ fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         out[i] = a[i] ^ b[i];
     }
     out
-}
-
-/// XOR distance comparator usable as an `Ord`-like key. Exposed for
-/// future call sites (e.g. iterative-lookup shortlist sort) so they
-/// don't reach into the byte-XOR helper directly.
-#[inline]
-pub(crate) fn distance_cmp(a: &NodeId, target: &NodeId) -> [u8; 32] {
-    xor_bytes(a.as_bytes(), target.as_bytes())
-}
-
-// Suppress the dead-code warning until `distance_cmp` is wired into the
-// lookup sort. Keeping it here so the routing module is the single
-// source of truth for the XOR-distance helpers.
-#[allow(dead_code)]
-fn _distance_cmp_keep_alive() {
-    let _ = Ordering::Equal;
 }
 
 // ---------------------------------------------------------------------------

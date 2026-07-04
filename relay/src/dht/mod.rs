@@ -15,7 +15,6 @@
 // `libcore/tests/e2e_phase5b.rs` can drive `handle_peer_connection`
 // directly.
 pub(crate) mod bootstrap;
-pub(crate) mod cache;
 pub mod config;
 pub(crate) mod forward;
 pub mod handler;
@@ -28,7 +27,6 @@ pub(crate) mod mls_kp_originate;
 pub(crate) mod mls_welcome;
 pub(crate) mod mls_welcome_originate;
 pub(crate) mod peer_dial;
-pub(crate) mod publish;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
@@ -42,7 +40,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use common::quic::id::NodeId;
 use ed25519_dalek::SigningKey;
-use parking_lot::Mutex;
 use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
@@ -53,7 +50,6 @@ use crate::storage::db::Store;
 
 pub use config::DhtConfig;
 
-use self::cache::LookupCache;
 use self::metrics::Metrics;
 use self::mls_kp::KpFetchLimiters;
 use self::mls_welcome::WelcomeLimiters;
@@ -65,8 +61,6 @@ use self::sync::MerkleState;
 /// Lock granularity:
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
 /// - [`merkle`] — `RwLock<MerkleState>`, write-heavy.
-/// - [`cache`] — `Mutex<LookupCache>` (a `Mutex` because every cache
-///   touch is a write — even reads bump LRU recency).
 /// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring
 ///   the existing `Relay::clients` pattern.
 ///
@@ -75,7 +69,7 @@ use self::sync::MerkleState;
 /// project-wide rule documented at
 /// `relay/src/quic/handler/client/events/forward.rs:59`).
 ///
-/// `routing`/`merkle`/`cache`/`peer_conns` are `pub(crate)` because only
+/// `routing`/`merkle`/`peer_conns` are `pub(crate)` because only
 /// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
 /// `metrics` are `pub` so admin tools (`bin/ldb.rs` and friends) can read
 /// without going through accessor stubs.
@@ -92,9 +86,6 @@ pub struct Dht {
 
     /// Per-slice Merkle anti-entropy state.
     pub(crate) merkle: RwLock<MerkleState>,
-
-    /// `(target_ipk → relay_descriptor)` cache for repeat lookups.
-    pub(crate) cache: Mutex<LookupCache>,
 
     /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
     /// reference held here; routing-table entries hold a `Weak`.
@@ -233,7 +224,6 @@ impl Dht {
             routing: RwLock::new(RoutingTable::empty(node_id)),
             store,
             merkle: RwLock::new(MerkleState::empty()),
-            cache: Mutex::new(LookupCache::empty()),
             peer_conns: RwLock::new(HashMap::new()),
             resolver: parking_lot::RwLock::new(None),
             node_id,

@@ -434,21 +434,6 @@ fn seed_now() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Compatibility shim for the original sync-stub callers (deprecated)
-// ---------------------------------------------------------------------------
-
-/// Deprecated entry point retained for the original sync stub. Kept
-/// under a `#[deprecated]` so any caller that hasn't migrated to
-/// [`sync_round`] surfaces a warning rather than a hard breakage.
-#[deprecated(note = "use sync_round instead")]
-#[allow(dead_code)]
-pub(crate) async fn sync_with(
-    dht: &Arc<Dht>, _peer: crate::dht::routing::RoutingEntry,
-) {
-    let _ = sync_round(dht.clone()).await;
-}
-
-// ---------------------------------------------------------------------------
 // Tests — server-side handlers (sync; client-side requires real QUIC peers)
 // ---------------------------------------------------------------------------
 //

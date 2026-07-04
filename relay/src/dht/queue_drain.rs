@@ -15,7 +15,7 @@
 //!
 //! ## Fetch / deletion split
 //!
-//! [`fetch_remote_queues`] does *fetch + deliver only*. The matching
+//! [`fetch_remote_queues_with_homes`] does *fetch + deliver only*. The matching
 //! `QueueFetchAck` (which proves the user received specific dispatch
 //! IDs and lets the home delete them) is driven separately by
 //! [`ack_remote_queues`], because `QueueFetchAck`'s transcript signs
@@ -138,18 +138,9 @@ pub(crate) enum QueueDrainError {
 /// falls through to a local-only drain so a transient DHT/network
 /// hiccup doesn't lose visibility on whatever messages exist on this
 /// relay's own `cf_dht_queue` (e.g. recently-arrived stale-K queue).
-pub(crate) async fn fetch_remote_queues(
-    dht: Arc<Dht>, user_ipk: &[u8; 32], drain_auth: &DrainAuth,
-    self_relay_id: NodeId,
-) -> Result<Vec<DispatchP>, QueueDrainError> {
-    fetch_remote_queues_with_homes(dht, user_ipk, drain_auth, self_relay_id)
-        .await
-        .map(|(messages, _)| messages)
-}
-
-/// Extended variant of [`fetch_remote_queues`] that *also* returns the
-/// per-home `delivered_ids` map the recipient relay needs for the
-/// `QueueFetchAck` deletion path.
+///
+/// Also returns the per-home `delivered_ids` map the recipient relay
+/// needs for the `QueueFetchAck` deletion path.
 ///
 /// **Map semantics**: each home contributing to the drain is keyed by
 /// its `NodeId`; the value is the list of `DispatchP.id`s that home
@@ -261,27 +252,12 @@ pub(crate) async fn fetch_remote_queues_with_homes(
 /// Each home opens its own bi-stream so head-of-line blocking is
 /// isolated; a wedged home never stalls the others.
 ///
-/// Returns one `Vec<DispatchP>` per home that *successfully*
-/// responded (possibly empty). Homes whose RPC chain failed at any
+/// Returns one `(NodeId, Vec<DispatchP>)` per home that *successfully*
+/// responded (possibly empty) — the per-home origin feeds the
+/// `QueueFetchAck` deletion map. Homes whose RPC chain failed at any
 /// point are *omitted* from the result — the caller's tally treats a
 /// missing entry as "this home contributed nothing", same convention
 /// as `forward.rs::remote_forward_parallel`.
-async fn remote_fetch_parallel(
-    dht: &Arc<Dht>, homes: &[NodeDescriptor], fetch: &QueueFetch,
-) -> Vec<Vec<DispatchP>> {
-    remote_fetch_parallel_with_homes(dht, homes, fetch)
-        .await
-        .into_iter()
-        .map(|(_, v)| v)
-        .collect()
-}
-
-/// Variant of [`remote_fetch_parallel`] that preserves the per-home
-/// origin so the caller can build a `(NodeId → delivered_ids)` map for
-/// the `QueueFetchAck` fan-out.
-///
-/// Same fan-out shape (parallel `JoinSet` bounded by
-/// [`QUEUE_FETCH_TIMEOUT_MS`]) — only the result type changes.
 async fn remote_fetch_parallel_with_homes(
     dht: &Arc<Dht>, homes: &[NodeDescriptor], fetch: &QueueFetch,
 ) -> Vec<(NodeId, Vec<DispatchP>)> {
@@ -636,12 +612,10 @@ mod tests {
     //! suite); we cover the routing-table interaction here with
     //! deterministic fixtures.
 
-    use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering as AtomicOrdering;
 
-    use common::proto::client_rel::DispatchP;
     use common::quic::id::NodeId;
     use ed25519_dalek::SigningKey;
 
@@ -677,8 +651,8 @@ mod tests {
     }
 
     /// Lone-relay edge case: routing table empty AND self isn't in
-    /// any peer's K-closest list. `fetch_remote_queues` returns
-    /// `Err(NoHomes)` — caller falls back to local-only.
+    /// any peer's K-closest list. `fetch_remote_queues_with_homes`
+    /// returns `Err(NoHomes)` — caller falls back to local-only.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_remote_queues_returns_no_homes_when_routing_table_empty() {
         let mut self_seed = [0u8; 32];
@@ -689,55 +663,10 @@ mod tests {
         let user_ipk = [7u8; 32];
         let auth = fake_drain_auth();
 
-        let res = fetch_remote_queues(dht, &user_ipk, &auth, self_id).await;
+        let res = fetch_remote_queues_with_homes(dht, &user_ipk, &auth, self_id).await;
         match res {
             Err(QueueDrainError::NoHomes) => {}
             other => panic!("expected NoHomes, got {other:?}"),
-        }
-    }
-
-    /// Dedupe preserves first-occurrence ordering. Catches a
-    /// regression where switching `Vec<DispatchP>` for an unordered
-    /// `HashMap`-based dedupe would shuffle delivery order on the
-    /// client.
-    #[test]
-    fn fetch_remote_queues_dedupe_preserves_first_occurrence_order() {
-        let id_first: [u8; 16] = [0xAA; 16];
-        let id_second: [u8; 16] = [0xBB; 16];
-        let id_third: [u8; 16] = [0xCC; 16];
-
-        // Home 1 returns first, third. Home 2 returns first, second.
-        // Expected output (first-wins): first, third, second.
-        let per_home: Vec<Vec<DispatchP>> = vec![
-            vec![mock_dispatch(id_first, b"1"), mock_dispatch(id_third, b"3")],
-            vec![mock_dispatch(id_first, b"1"), mock_dispatch(id_second, b"2")],
-        ];
-
-        let mut seen: HashSet<[u8; 16]> = HashSet::new();
-        let mut out: Vec<DispatchP> = Vec::new();
-        for batch in per_home {
-            for d in batch {
-                if seen.insert(d.id.0) {
-                    out.push(d);
-                }
-            }
-        }
-
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].id.0, id_first);
-        assert_eq!(out[1].id.0, id_third);
-        assert_eq!(out[2].id.0, id_second);
-    }
-
-    fn mock_dispatch(id: [u8; 16], payload: &[u8]) -> DispatchP {
-        // Sig + sender are dummy here — this fixture only exercises
-        // the dedupe loop, which only reads `id`.
-        DispatchP {
-            to:      [1u8; 32].into(),
-            from:    [2u8; 32].into(),
-            id:      id.into(),
-            payload: payload.to_vec().into(),
-            sig:     [0u8; 64].into(),
         }
     }
 }

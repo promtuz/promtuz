@@ -47,13 +47,6 @@ pub const LOOKUP_MAX_HOPS: u32 = 8;
 /// `not_after` (10 minutes).
 pub const PRESENCE_TTL_MS: u64 = 600_000;
 
-/// Republish cadence — owning relay refreshes every record this often
-/// (4 minutes). Must be `<<` `PRESENCE_TTL_MS`.
-pub const PRESENCE_REPUBLISH_MS: u64 = 240_000;
-
-/// Future-clock tolerance on signed `not_before` (1 minute).
-pub const PRESENCE_MAX_FUTURE_SKEW_MS: u64 = 60_000;
-
 // ---------------------------------------------------------------------------
 // Merkle / anti-entropy
 // ---------------------------------------------------------------------------
@@ -69,12 +62,6 @@ pub const MERKLE_LEAF_BITS: u32 = 16;
 /// Branching factor of the per-slice trie (4 bits per level).
 pub const MERKLE_FANOUT: usize = 16;
 
-/// Optional per-slice bloom filter bit width (operator visibility only).
-pub const BLOOM_BITS: u32 = 65_536;
-
-/// Optional per-slice bloom filter hash count.
-pub const BLOOM_HASHES: u32 = 6;
-
 /// Anti-entropy pull cadence — how often we pull a `MerkleSummary` from a
 /// random peer in our routing table.
 pub const ANTI_ENTROPY_INTERVAL_MS: u64 = 30_000;
@@ -83,21 +70,8 @@ pub const ANTI_ENTROPY_INTERVAL_MS: u64 = 30_000;
 pub const BUCKET_REFRESH_MS: u64 = 3_600_000;
 
 // ---------------------------------------------------------------------------
-// Wire-signature domain
+// Quorum parameters
 // ---------------------------------------------------------------------------
-
-/// Base domain prefix used to construct every DHT wire-signature transcript.
-/// Sub-domains (`-roam-v1`, `-presence-v1`, …) are appended at signing time
-/// so a captured signature for one packet kind cannot be replayed as another.
-pub const DHT_DOMAIN_PREFIX: &[u8] = b"promtuz-dht-v1";
-
-// ---------------------------------------------------------------------------
-// Quorum and lookup-cache parameters
-// ---------------------------------------------------------------------------
-
-/// Minimum number of agreeing `FindValue` replies required to accept a
-/// first-time lookup answer.
-pub const MIN_QUORUM: usize = 2;
 
 /// Strict-quorum threshold for the iterative `lookup_value` walk. A
 /// `Found` reply is only honoured if at least `LOOKUP_QUORUM` peers
@@ -116,9 +90,6 @@ pub const MIN_QUORUM: usize = 2;
 /// One-line tunable so the quorum threshold can be loosened in test
 /// clusters without a code edit ripple.
 pub const LOOKUP_QUORUM: usize = 2;
-
-/// Cap on the number of entries the lookup-result cache holds.
-pub const LOOKUP_CACHE_CAP: usize = 4_096;
 
 // ---------------------------------------------------------------------------
 // RPC bounds
@@ -160,11 +131,10 @@ pub const FORWARD_TIMEOUT_MS: u64 = 1500;
 /// required for the sender relay to ack the originating client with
 /// [`common::proto::client_rel::DispatchAckP::Forwarded`].
 ///
-/// Set to 2 (= 2-of-3 with `K = 3`), mirroring [`publish::K_MIN`] and
-/// [`LOOKUP_QUORUM`]: the same threshold ensures cross-checked reads on
-/// the recipient side have at least the same redundancy as cross-checked
-/// writes on the sender side. Below this threshold the sender falls back
-/// to local queueing.
+/// Set to 2 (= 2-of-3 with `K = 3`), mirroring [`LOOKUP_QUORUM`]: the
+/// same threshold ensures cross-checked reads on the recipient side have
+/// at least the same redundancy as cross-checked writes on the sender
+/// side. Below this threshold the sender falls back to local queueing.
 pub const FORWARD_K_MIN: usize = 2;
 
 // ---------------------------------------------------------------------------
