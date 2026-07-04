@@ -550,15 +550,15 @@ pub(crate) async fn handle_dht_request(
             )
             .await,
         ),
-        // ----- MLS KeyPackage RPCs (`mls_kp.rs`) ------------------------
+        // ----- MLS KeyPackage RPCs (`mls/kp.rs`) ------------------------
         //
         // All three are sync handlers — they touch fjall and the
         // governor-based per-pair limiter, no `await` inside. Wrapped
         // in their `wrap_*_outcome` helpers so the dispatch returns
         // the structured `*Resp` shape.
         DhtRequest::KeyPackagePublish(req) => DhtResponse::KeyPackagePublish(
-            super::mls_kp::wrap_publish_outcome(
-                super::mls_kp::handle_keypackage_publish(
+            super::mls::kp::wrap_publish_outcome(
+                super::mls::kp::handle_keypackage_publish(
                     dht,
                     req,
                     authenticated_peer_id,
@@ -567,8 +567,8 @@ pub(crate) async fn handle_dht_request(
             ),
         ),
         DhtRequest::KeyPackageFetch(req) => DhtResponse::KeyPackageFetch(
-            super::mls_kp::wrap_fetch_outcome(
-                super::mls_kp::handle_keypackage_fetch(
+            super::mls::kp::wrap_fetch_outcome(
+                super::mls::kp::handle_keypackage_fetch(
                     dht,
                     req,
                     authenticated_peer_id,
@@ -577,8 +577,8 @@ pub(crate) async fn handle_dht_request(
             ),
         ),
         DhtRequest::KeyPackageRefill(req) => DhtResponse::KeyPackageRefill(
-            super::mls_kp::wrap_refill_outcome(
-                super::mls_kp::handle_keypackage_refill(
+            super::mls::kp::wrap_refill_outcome(
+                super::mls::kp::handle_keypackage_refill(
                     dht,
                     req,
                     authenticated_peer_id,
@@ -586,15 +586,15 @@ pub(crate) async fn handle_dht_request(
                 ),
             ),
         ),
-        // ----- MLS Welcome queue (`mls_welcome.rs`) ---------------------
+        // ----- MLS Welcome queue (`mls/welcome.rs`) ---------------------
         //
         // Three sync handlers — fjall I/O + verifies, no `await`
         // inside. Wrapped in their `wrap_*_outcome` helpers; the ack
         // returns its own concrete `WelcomeAckResp` so no wrapper is
         // needed.
         DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(
-            super::mls_welcome::wrap_publish_outcome(
-                super::mls_welcome::handle_welcome_publish(
+            super::mls::welcome::wrap_publish_outcome(
+                super::mls::welcome::handle_welcome_publish(
                     dht,
                     req,
                     authenticated_peer_id,
@@ -603,8 +603,8 @@ pub(crate) async fn handle_dht_request(
             ),
         ),
         DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(
-            super::mls_welcome::wrap_fetch_outcome(
-                super::mls_welcome::handle_welcome_fetch(
+            super::mls::welcome::wrap_fetch_outcome(
+                super::mls::welcome::handle_welcome_fetch(
                     dht,
                     req,
                     authenticated_peer_id,
@@ -613,7 +613,7 @@ pub(crate) async fn handle_dht_request(
             ),
         ),
         DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(
-            super::mls_welcome::handle_welcome_ack(
+            super::mls::welcome::handle_welcome_ack(
                 dht,
                 req,
                 authenticated_peer_id,
@@ -653,8 +653,8 @@ fn closest_excluding(
 
 // `self_in_top_k` lives in `super::routing` — see
 // `routing::self_in_top_k` for the canonical impl shared with
-// `store::store_record`, `mls_kp::self_is_owner_for_stash`, and
-// `mls_welcome::self_is_owner_for_recipient`.
+// `store::store_record`, `mls::kp::self_is_owner_for_stash`, and
+// `mls::welcome::self_is_owner_for_recipient`.
 
 // ---------------------------------------------------------------------------
 // Tests

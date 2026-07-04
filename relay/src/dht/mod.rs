@@ -1,8 +1,9 @@
-//! Relay-side user-presence DHT.
+//! Relay-side peer mesh: Kademlia routing over `peer/1`, hosting the
+//! sticky-home offline queue ([`forward`]/[`queue_drain`]/[`store`])
+//! and the MLS stash relay ([`mls`]).
 //!
-//! Top-level [`Dht`] struct wires the sub-systems together; the actual
-//! routing-table / store / lookup / sync / publish logic lives in
-//! sibling modules.
+//! Top-level [`Dht`] struct wires the sub-systems together; the logic
+//! lives in sibling modules.
 
 // Some routing/lookup/store helpers are only reachable from code paths
 // that aren't always compiled in; suppress dead-code warnings so the
@@ -15,14 +16,10 @@ pub(crate) mod bootstrap;
 pub mod config;
 pub(crate) mod forward;
 pub(crate) mod handler;
-pub(crate) mod key_helpers;
+
 pub(crate) mod lookup;
 pub mod metrics;
-pub(crate) mod mls_fanout;
-pub(crate) mod mls_kp;
-pub(crate) mod mls_kp_originate;
-pub(crate) mod mls_welcome;
-pub(crate) mod mls_welcome_originate;
+pub(crate) mod mls;
 pub(crate) mod peer_dial;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
@@ -48,9 +45,10 @@ use crate::storage::db::Store;
 pub use config::DhtConfig;
 
 use self::metrics::Metrics;
-use self::mls_kp::KpFetchLimiters;
-use self::mls_welcome::WelcomeLimiters;
+use self::mls::kp::KpFetchLimiters;
+use self::mls::welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
+
 /// Top-level DHT runtime state.
 ///
 /// Lock granularity:

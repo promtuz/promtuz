@@ -123,7 +123,7 @@ impl RpcClass {
             // publish / fetch / refill do Ed25519 verifies plus fjall
             // I/O — same cost shape. A separate per-pair
             // `(target_ipk, requester_relay_id)` quota lives inside
-            // `mls_kp.rs` for the anti-pinning policy; this per-peer
+            // `mls/kp.rs` for the anti-pinning policy; this per-peer
             // bucket is the coarser first line.
             DhtRequest::Forward(_)
             | DhtRequest::QueueFetch(_)

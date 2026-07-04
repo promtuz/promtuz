@@ -30,14 +30,14 @@ use common::proto::mls_wire::WelcomePublishOutcome;
 use common::proto::mls_wire::WelcomePublishReq;
 use common::quic::id::NodeId;
 
-use super::Dht;
-use super::config::FORWARD_K_MIN;
-use super::mls_fanout::closest_homes_with_self;
-use super::mls_fanout::fan_out_collect;
-use super::mls_welcome::handle_welcome_ack;
-use super::mls_welcome::handle_welcome_fetch;
-use super::mls_welcome::handle_welcome_publish;
-use super::mls_welcome::stash_prefix;
+use crate::dht::Dht;
+use crate::dht::config::FORWARD_K_MIN;
+use super::fanout::closest_homes_with_self;
+use super::fanout::fan_out_collect;
+use super::welcome::handle_welcome_ack;
+use super::welcome::handle_welcome_fetch;
+use super::welcome::handle_welcome_publish;
+use super::welcome::stash_prefix;
 
 /// Originate a Welcome publish to the recipient's K-closest homes.
 /// Authorization rides inside `envelope.sender_sig`; `timestamp` is the

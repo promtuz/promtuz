@@ -1,7 +1,7 @@
 //! MLS Welcome envelope queue at the home relay.
 //!
 //! Owns the `dht_welcome` keyspace plus the three RPC
-//! handlers wired into [`super::handler::handle_dht_request`]:
+//! handlers wired into [`crate::dht::handler::handle_dht_request`]:
 //!
 //! - [`handle_welcome_publish`] — sender-relay deposits a fresh
 //!   `WelcomeEnvelopeP` for an offline recipient.
@@ -103,7 +103,7 @@ use governor::state::keyed::DefaultKeyedStateStore;
 use rand::TryRng;
 use rand::rngs::SysRng;
 
-use super::Dht;
+use crate::dht::Dht;
 
 /// Length of the BLAKE3 stash-prefix, in bytes (the `prefix()` seek length
 /// for per-recipient welcome scans).
@@ -114,7 +114,7 @@ const STORAGE_KEY_LEN: usize = STASH_PREFIX_LEN + WELCOME_ID_LEN;
 
 /// Per-relay quota for welcome publishes/fetches/acks. Same magnitude
 /// as the KP fetch quota (60/h) — group invites and drains are rare.
-/// Distinct from [`super::rate_limit::PerPeerLimiters`] (the bulk
+/// Distinct from [`crate::dht::rate_limit::PerPeerLimiters`] (the bulk
 /// bucket is generous; this is the welcome-specific bulkhead).
 const MAX_WELCOME_RPC_PER_HOUR: u32 = 240;
 
@@ -130,9 +130,9 @@ const MAX_WELCOME_RPC_PER_HOUR: u32 = 240;
 /// same DHT keyspace; the prefix ensures stash CFs don't share a hash.
 ///
 /// One-line wrapper that defers to the canonical
-/// [`super::key_helpers::stash_prefix`] helper.
+/// [`super::stash_prefix`] helper.
 pub fn stash_prefix(ipk: &[u8; 32]) -> [u8; STASH_PREFIX_LEN] {
-    super::key_helpers::stash_prefix(b"welcome:", ipk)
+    super::stash_prefix(b"welcome:", ipk)
 }
 
 /// Compose the `(stash_prefix || welcome_id)` storage key.
@@ -152,11 +152,11 @@ type WelcomeLimiter =
     RateLimiter<WelcomeRateKey, DefaultKeyedStateStore<WelcomeRateKey>, DefaultClock>;
 
 /// Per-relay welcome RPC limiter. Distinct from
-/// [`super::rate_limit::PerPeerLimiters`] (which classifies the welcome
+/// [`crate::dht::rate_limit::PerPeerLimiters`] (which classifies the welcome
 /// RPCs as Bulk for the coarse first-line bulkhead) — this limiter
 /// adds a per-relay welcome-specific quota so a peer that's well under
 /// the bulk per-relay quota cannot still pin a single recipient's
-/// welcome queue. Mirrors the [`super::mls_kp::KpFetchLimiters`]
+/// welcome queue. Mirrors the [`super::kp::KpFetchLimiters`]
 /// pattern.
 #[derive(Debug)]
 pub(crate) struct WelcomeLimiters {
@@ -189,9 +189,9 @@ impl WelcomeLimiters {
 /// (`stash_prefix(recipient_ipk)`) by current routing-table view.
 ///
 /// One-line wrapper that defers to the canonical
-/// [`super::routing::self_in_top_k`] helper.
+/// [`crate::dht::routing::self_in_top_k`] helper.
 fn self_is_owner_for_recipient(dht: &Dht, recipient_ipk: &[u8; 32]) -> bool {
-    super::routing::self_in_top_k(
+    crate::dht::routing::self_in_top_k(
         dht,
         &NodeId::from_bytes(stash_prefix(recipient_ipk)),
     )
@@ -312,7 +312,7 @@ fn welcome_count_bounded(dht: &Dht, ipk: &[u8; 32]) -> (usize, bool) {
 // Public API — handlers
 // ---------------------------------------------------------------------------
 
-/// Home-side handler for [`super::DhtRequest::WelcomePublish`].
+/// Home-side handler for [`common::proto::dht_p2p::DhtRequest::WelcomePublish`].
 ///
 /// Validation ladder:
 /// 1. Skew check on `req.timestamp`.
@@ -426,7 +426,7 @@ pub(crate) fn handle_welcome_publish(
     WelcomePublishOutcome::Stored
 }
 
-/// Home-side handler for [`super::DhtRequest::WelcomeFetch`].
+/// Home-side handler for [`common::proto::dht_p2p::DhtRequest::WelcomeFetch`].
 ///
 /// Validation ladder:
 /// 1. `req.requester_relay_id == authenticated_peer_id` — cross-relay
@@ -518,7 +518,7 @@ pub(crate) fn handle_welcome_fetch(
     WelcomeFetchOutcome::Found(WelcomeFetchFound { welcomes })
 }
 
-/// Home-side handler for [`super::DhtRequest::WelcomeAck`].
+/// Home-side handler for [`common::proto::dht_p2p::DhtRequest::WelcomeAck`].
 ///
 /// Validation ladder:
 /// 1. `welcome_ids.len() <= MAX_WELCOME_ACK_IDS`.
@@ -642,7 +642,7 @@ pub(crate) fn close_reason_for_fetch(
     }
 }
 
-/// Wrap an outcome into the response shape (mirrors mls_kp).
+/// Wrap an outcome into the response shape (mirrors mls::kp).
 pub(crate) fn wrap_publish_outcome(outcome: WelcomePublishOutcome) -> WelcomePublishResp {
     WelcomePublishResp { outcome }
 }
@@ -670,7 +670,7 @@ mod tests {
     use crate::dht::DhtConfig;
 
     /// Deterministic-distinct seed counter — same idiom as
-    /// `mls_kp::tests::fresh_signing_key`.
+    /// `kp::tests::fresh_signing_key`.
     fn fresh_signing_key() -> SigningKey {
         static SEQ: AtomicU64 = AtomicU64::new(1);
         let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
@@ -886,7 +886,7 @@ mod tests {
     fn fetch_rejects_redirected_requester() {
         // A captured `WelcomeFetch` signed for requester_a cannot be
         // replayed against the home from requester_b. Mirrors
-        // mls_kp::fetch_rejects_redirected_requester.
+        // kp::fetch_rejects_redirected_requester.
         let user = fresh_signing_key();
         let self_id = NodeId::new([0u8; 32]);
         let dht = fresh_dht(self_id);

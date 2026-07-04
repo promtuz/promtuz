@@ -1,7 +1,7 @@
 //! MLS KeyPackage stash storage and RPC handlers.
 //!
 //! Owns the `dht_keypackage` keyspace plus the three home-
-//! relay handlers wired into [`super::handler::handle_dht_request`]:
+//! relay handlers wired into [`crate::dht::handler::handle_dht_request`]:
 //!
 //! - [`handle_keypackage_publish`] — owner pushes a fresh batch of
 //!   one-time KeyPackages.
@@ -50,7 +50,7 @@
 //! `MAX_KP_FETCH_PER_HOUR = 60` is enforced per
 //! `(target_ipk, requester_relay_id)` pair via a dedicated
 //! `governor::RateLimiter` (separate from
-//! [`super::rate_limit::PerPeerLimiters`], which is keyed only on
+//! [`crate::dht::rate_limit::PerPeerLimiters`], which is keyed only on
 //! the requester). A misbehaving relay can drain Bob's stash 60×/hour
 //! at *one* home; spreading across K=3 relays gives 180×/hour
 //! aggregate, which is bounded by the relay PKI tier costs (Sybil
@@ -96,7 +96,7 @@ use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::state::keyed::DefaultKeyedStateStore;
 
-use super::Dht;
+use crate::dht::Dht;
 
 /// Length of the per-record SHA-256 KeyPackageRef, in bytes. Per
 /// RFC 9420 §5.2 (cipher suite `0x0003`).
@@ -120,9 +120,9 @@ const STORAGE_KEY_LEN: usize = STASH_PREFIX_LEN + KP_REF_LEN;
 /// bare `ipk`) so the two namespaces don't share the same DHT key.
 ///
 /// One-line wrapper that defers to the canonical
-/// [`super::key_helpers::stash_prefix`] helper.
+/// [`super::stash_prefix`] helper.
 pub fn stash_prefix(ipk: &[u8; 32]) -> [u8; STASH_PREFIX_LEN] {
-    super::key_helpers::stash_prefix(b"kp:", ipk)
+    super::stash_prefix(b"kp:", ipk)
 }
 
 /// Compute the on-disk `(stash_prefix || kp_ref)` storage key. Returns
@@ -143,7 +143,7 @@ fn storage_key(ipk: &[u8; 32], kp_ref: &[u8]) -> Option<[u8; STORAGE_KEY_LEN]> {
 
 /// Per-`(target_ipk, requester_relay_id)` quota for `KeyPackageFetch`.
 ///
-/// Distinct from [`super::rate_limit::PerPeerLimiters`] (which is
+/// Distinct from [`crate::dht::rate_limit::PerPeerLimiters`] (which is
 /// keyed on requester alone): a misbehaving relay can drain Bob's
 /// stash 60×/hour but is still allowed to legitimately fetch from
 /// Alice's stash at the full quota in parallel.
@@ -159,7 +159,7 @@ type KpFetchLimiter =
     RateLimiter<KpFetchKey, DefaultKeyedStateStore<KpFetchKey>, DefaultClock>;
 
 /// Per-pair fetch limiter wrapper. One global instance lives on
-/// [`Dht::mls_kp`].
+/// [`Dht::kp_fetch_limiters`].
 ///
 /// Quota is `MAX_KP_FETCH_PER_HOUR` per pair; `governor` requires a
 /// "per second" rate — we synthesise one by dividing per-hour by
@@ -210,9 +210,9 @@ impl KpFetchLimiters {
 /// uniform; operationally the two paths are independent.
 ///
 /// One-line wrapper that defers to the canonical
-/// [`super::routing::self_in_top_k`] helper.
+/// [`crate::dht::routing::self_in_top_k`] helper.
 fn self_is_owner_for_stash(dht: &Dht, ipk: &[u8; 32]) -> bool {
-    super::routing::self_in_top_k(dht, &NodeId::from_bytes(stash_prefix(ipk)))
+    crate::dht::routing::self_in_top_k(dht, &NodeId::from_bytes(stash_prefix(ipk)))
 }
 
 // ---------------------------------------------------------------------------

@@ -572,7 +572,7 @@ fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 }
 
 // ---------------------------------------------------------------------------
-// Self-in-top-K helper (shared by store / handler / mls_kp / mls_welcome)
+// Self-in-top-K helper (shared by store / handler / mls::kp / mls::welcome)
 // ---------------------------------------------------------------------------
 
 /// True iff `dht.node_id` is among the K closest to `target` under the
@@ -581,8 +581,8 @@ fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// This is the single canonical implementation of the "is this relay
 /// one of the K-set owners?" check used by the four sticky-home /
 /// MLS-stash handlers (`store::self_is_owner`,
-/// `handler::self_in_top_k`, `mls_kp::self_is_owner_for_stash`,
-/// `mls_welcome::self_is_owner_for_recipient`).
+/// `handler::self_in_top_k`, `mls::kp::self_is_owner_for_stash`,
+/// `mls::welcome::self_is_owner_for_recipient`).
 ///
 /// **Permissive sparse-table policy**: if the routing table holds
 /// fewer than `K` candidates we return `true` rather than `false`.

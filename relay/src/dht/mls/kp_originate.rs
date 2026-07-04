@@ -29,15 +29,15 @@ use common::proto::mls_wire::KeyPackageRefillReq;
 use common::proto::mls_wire::KpPublishMode;
 use common::quic::id::NodeId;
 
-use super::Dht;
-use super::config::FORWARD_K_MIN;
-use super::mls_fanout::closest_homes_with_self;
-use super::mls_fanout::fan_out_collect;
-use super::mls_fanout::remote_rpc_one;
-use super::mls_kp::handle_keypackage_fetch;
-use super::mls_kp::handle_keypackage_publish;
-use super::mls_kp::handle_keypackage_refill;
-use super::mls_kp::stash_prefix;
+use crate::dht::Dht;
+use crate::dht::config::FORWARD_K_MIN;
+use super::fanout::closest_homes_with_self;
+use super::fanout::fan_out_collect;
+use super::fanout::remote_rpc_one;
+use super::kp::handle_keypackage_fetch;
+use super::kp::handle_keypackage_publish;
+use super::kp::handle_keypackage_refill;
+use super::kp::stash_prefix;
 
 /// Outcome of a publish / refill fan-out.
 pub(crate) struct KpPublishQuorum {

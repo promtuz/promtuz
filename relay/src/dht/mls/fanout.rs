@@ -1,5 +1,5 @@
 //! Shared Tier-2 fan-out primitives for the MLS originate helpers
-//! (`mls_kp_originate`, `mls_welcome_originate`).
+//! (`kp_originate`, `welcome_originate`).
 //!
 //! When a phone delegates a KeyPackage / Welcome operation to its home
 //! relay over the `client/0` wrappers, the home relay becomes the
@@ -29,9 +29,9 @@ use common::quic::id::NodeId;
 use common::quic::xor32;
 use tokio::time::timeout;
 
-use super::Dht;
-use super::config::FORWARD_TIMEOUT_MS;
-use super::config::K;
+use crate::dht::Dht;
+use crate::dht::config::FORWARD_TIMEOUT_MS;
+use crate::dht::config::K;
 
 /// Compute the K-closest homes for `target_id` plus whether *self* is
 /// among them. Mirrors the self-in-K decision in
@@ -73,7 +73,7 @@ pub(crate) fn closest_homes_with_self(
 pub(crate) async fn remote_rpc_one(
     dht: &Arc<Dht>, peer: &NodeDescriptor, req: &DhtRequest,
 ) -> Option<DhtResponse> {
-    let conn = super::lookup::connect_to_peer(dht, peer).await.ok()?;
+    let conn = crate::dht::lookup::connect_to_peer(dht, peer).await.ok()?;
 
     let bytes = DhtPacket::Request(req.clone()).pack().ok()?;
     let (mut send, mut recv) = conn.open_bi().await.ok()?;
@@ -101,7 +101,7 @@ pub(crate) async fn remote_rpc_one(
 /// welcome-publish / welcome-fetch / welcome-ack). Do **not** use for
 /// KeyPackage *fetch* — a fetch consumes a one-shot KP slot at every
 /// home it reaches, so the fetch path dials sequentially and stops at
-/// the first `Found` (see `mls_kp_originate::originate_fetch`).
+/// the first `Found` (see `kp_originate::originate_fetch`).
 pub(crate) async fn fan_out_collect(
     dht: &Arc<Dht>, peers: &[NodeDescriptor], req: &DhtRequest,
 ) -> Vec<DhtResponse> {

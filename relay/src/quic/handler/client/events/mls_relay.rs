@@ -40,8 +40,8 @@ use common::types::bytes::Bytes;
 use ed25519_dalek::Signature;
 use quinn::SendStream;
 
-use crate::dht::mls_kp_originate;
-use crate::dht::mls_welcome_originate;
+use crate::dht::mls::kp_originate;
+use crate::dht::mls::welcome_originate;
 use crate::quic::handler::client::ClientCtxHandle;
 use crate::util::systime;
 
@@ -88,7 +88,7 @@ pub(crate) async fn handle_publish_keypackage(
         trace!("MLS publish-kp: wrapper sig/skew rejected");
         return Ok(());
     }
-    let q = mls_kp_originate::originate_publish(
+    let q = kp_originate::originate_publish(
         &dht, ctx.ipk.to_bytes(), records, mode, timestamp, sig, now_ms,
     )
     .await;
@@ -125,7 +125,7 @@ pub(crate) async fn handle_fetch_keypackage(
         trace!("MLS fetch-kp: wrapper sig/skew rejected");
         return Ok(());
     }
-    let r = mls_kp_originate::originate_fetch(&dht, target_ipk, now_ms).await;
+    let r = kp_originate::originate_fetch(&dht, target_ipk, now_ms).await;
     SRelayPacket::KeyPackageFetched {
         record: r.record,
         remaining: r.remaining,
@@ -163,7 +163,7 @@ pub(crate) async fn handle_publish_welcome(
         return Ok(());
     }
     let quorum_met =
-        mls_welcome_originate::originate_welcome_publish(&dht, envelope, timestamp, now_ms).await;
+        welcome_originate::originate_welcome_publish(&dht, envelope, timestamp, now_ms).await;
     SRelayPacket::WelcomePublished { quorum_met }.send(tx).await?;
     Ok(())
 }
@@ -192,7 +192,7 @@ pub(crate) async fn handle_fetch_welcomes(
         return Ok(());
     }
     let entries =
-        mls_welcome_originate::originate_welcome_fetch(&dht, ctx.ipk.to_bytes(), timestamp, sig, now_ms)
+        welcome_originate::originate_welcome_fetch(&dht, ctx.ipk.to_bytes(), timestamp, sig, now_ms)
             .await;
     SRelayPacket::WelcomesFetched { entries }.send(tx).await?;
     Ok(())
@@ -224,7 +224,7 @@ pub(crate) async fn handle_ack_welcomes(
         trace!("MLS ack-welcomes: wrapper sig/skew rejected");
         return Ok(());
     }
-    mls_welcome_originate::originate_welcome_ack(&dht, ctx.ipk.to_bytes(), ids, timestamp, sig, now_ms)
+    welcome_originate::originate_welcome_ack(&dht, ctx.ipk.to_bytes(), ids, timestamp, sig, now_ms)
         .await;
     SRelayPacket::WelcomesAcked.send(tx).await?;
     Ok(())
