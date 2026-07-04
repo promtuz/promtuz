@@ -171,6 +171,11 @@ pub enum DispatchAckP {
 /// Packets sent from Client to Server
 ///
 /// CLIENT --> SERVER
+// ponytail: wire enum — always heap-packed into a Vec before send and
+// dropped right after dispatch, so the inline size gap doesn't matter.
+// Boxing the large `PublishWelcome` field would thread `.into()`/deref
+// through every construct/match site for no wire-format change.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum CRelayPacket {
     Query(QueryP),

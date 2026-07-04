@@ -270,13 +270,13 @@ impl Relay {
 
         // Optional follow-up: absent when the drain was local-only (the
         // relay's stream task just ends → read errors out).
-        match tokio::time::timeout(Duration::from_secs(10), SRelayPacket::unpack(&mut rx)).await
+        if let Ok(Ok(SRelayPacket::AckAuthRequest {
+            requester_relay_id,
+            delivered_ids,
+            suggested_timestamp,
+        })) = tokio::time::timeout(Duration::from_secs(10), SRelayPacket::unpack(&mut rx)).await
         {
-            Ok(Ok(SRelayPacket::AckAuthRequest {
-                requester_relay_id,
-                delivered_ids,
-                suggested_timestamp,
-            })) => match conn.open_bi().await {
+            match conn.open_bi().await {
                 Ok((mut ack_tx, _ack_rx)) => {
                     if let Err(e) = handle_ack_auth_request(
                         &mut ack_tx,
@@ -294,8 +294,7 @@ impl Relay {
                 Err(e) => {
                     warn!("relay({}) ack_drain: open_bi for AckAuth failed: {e}", self.id)
                 },
-            },
-            _ => {},
+            }
         }
     }
 

@@ -19,8 +19,8 @@ impl SystemLoad {
 impl Debug for SystemLoad {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SystemLoad")
-            .field("CPU", &format!("{}%", &self.cpu()))
-            .field("RAM", &format!("{}%", &self.ram()))
+            .field("CPU", &format!("{}%", self.cpu()))
+            .field("RAM", &format!("{}%", self.ram()))
             .finish()
     }
 }
