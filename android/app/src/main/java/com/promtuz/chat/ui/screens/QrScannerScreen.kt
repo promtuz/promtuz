@@ -51,7 +51,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
+import com.promtuz.chat.ui.activities.App
 import com.promtuz.chat.ui.activities.QrScanner
+import com.promtuz.chat.utils.InviteLink
 import com.promtuz.chat.ui.components.GoBackButton
 import com.promtuz.chat.ui.text.avgSizeInStyle
 import com.promtuz.chat.ui.views.QrScannerOverlayView
@@ -67,7 +69,7 @@ fun QrScannerScreen(
     ) {
         val cameraProvider by viewModel.cameraProviderState.collectAsState()
         val scanError by viewModel.scanError.collectAsState()
-        val paired by viewModel.paired.collectAsState()
+        val scanned by viewModel.scanned.collectAsState()
 
         PermissionRequester(activity, viewModel)
 
@@ -85,9 +87,16 @@ fun QrScannerScreen(
             }
         }
 
-        LaunchedEffect(paired) {
-            if (paired) {
-                Toast.makeText(activity, "Contact added", Toast.LENGTH_SHORT).show()
+        LaunchedEffect(scanned) {
+            scanned?.let { bytes ->
+                // Hand the invite to the same confirm sheet the link flow uses:
+                // App consumes EXTRA_INVITE and raises InviteBottomSheet.
+                activity.startActivity(
+                    Intent(activity, App::class.java).apply {
+                        putExtra(InviteLink.EXTRA_INVITE, bytes)
+                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                )
                 activity.finish()
             }
         }

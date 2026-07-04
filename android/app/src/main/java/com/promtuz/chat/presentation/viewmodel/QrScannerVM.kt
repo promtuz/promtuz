@@ -37,11 +37,11 @@ class QrScannerVM(
     private val _scanError = MutableStateFlow<String?>(null)
     val scanError = _scanError.asStateFlow()
 
-    /** Flips true once a valid invite is accepted; the screen closes on it. */
-    private val _paired = MutableStateFlow(false)
-    val paired = _paired.asStateFlow()
+    /** Validated invite bytes to hand to the shared confirm sheet; set once. */
+    private val _scanned = MutableStateFlow<ByteArray?>(null)
+    val scanned = _scanned.asStateFlow()
 
-    // Guards against the analyzer re-firing pairFromQr while one is in flight.
+    // Guards against the analyzer re-firing while a validation is in flight.
     // The ML Kit analyzer delivers frames serially, so a plain flag suffices.
     @Volatile
     private var processing = false
@@ -67,20 +67,21 @@ class QrScannerVM(
     }
 
     fun handleScannedBarcodes(barcodes: List<Barcode>) {
-        // One accepted invite per scan session: ignore re-detections of the
-        // same QR held in frame (analyzer ticks ~2x/s) and anything after a
-        // successful pair. A bad QR re-arms so the user can try another.
-        if (processing || _paired.value) return
+        // One capture per scan session: ignore re-detections of the same QR
+        // held in frame (analyzer ticks ~2x/s). We only VALIDATE here (decode
+        // as a promtuz invite); the confirm-and-pair happens in the shared
+        // invite sheet, exactly like an opened link. A non-invite QR re-arms.
+        if (processing || _scanned.value != null) return
         val bytes = barcodes.firstNotNullOfOrNull { it.rawBytes } ?: return
         processing = true
         viewModelScope.launch {
             try {
-                CoreBridge.pairFromQr(bytes)
-                imageAnalysis.clearAnalyzer() // valid invite accepted — stop scanning
-                _paired.value = true
+                CoreBridge.previewInvite(bytes) // throws if it isn't an invite
+                imageAnalysis.clearAnalyzer()
+                _scanned.value = bytes          // screen hands this to the sheet
             } catch (e: CoreException) {
-                log.e(e, "pairFromQr failed")
-                _scanError.value = e.message ?: "Invalid QR code"
+                log.e(e, "not a promtuz invite")
+                _scanError.value = "Not a Promtuz invite"
             } finally {
                 processing = false
             }
