@@ -15,7 +15,7 @@
     var msg = document.getElementById("msg");
 
     if (!code) {
-      msg.textContent = "This invite link is missing its code — ask your contact for a fresh one.";
+      msg.textContent = "This invite link is missing its code - ask your contact for a fresh one.";
     } else if (/android/i.test(navigator.userAgent)) {
       // Auto-launch the app (intent: also breaks out of in-app browsers). No
       // package/fallback, so a missing app just fails and leaves this text.

@@ -3,7 +3,7 @@ members = ["resolver", "relay", "common", "libcore", "tools/testnet", "tools/uni
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2-test7"
+version = "0.1.2-test9"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/promtuz/promtuz"
 
