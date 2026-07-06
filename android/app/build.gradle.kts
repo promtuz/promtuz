@@ -38,6 +38,16 @@ val sdkDir = Properties().apply {
     ?: System.getenv("ANDROID_HOME")
     ?: System.getenv("ANDROID_SDK_ROOT")
 
+// GUI-launched Android Studio inherits launchd's bare PATH — no ~/.cargo/bin,
+// no Homebrew (cmake, which aws-lc-sys builds with). Exec resolves the command
+// via the JVM PATH not the task env, so pass cargo absolutely + augment PATH so
+// cargo-ndk's re-spawned toolchain (rustc, cmake) resolves.
+val cargoBin = "${System.getProperty("user.home")}/.cargo/bin"
+val cargo = file("$cargoBin/cargo").takeIf { it.exists() }?.absolutePath ?: "cargo"
+val cargoAugmentedPath =
+    listOf(cargoBin, "/opt/homebrew/bin", "/usr/local/bin", System.getenv("PATH") ?: "")
+        .filter { it.isNotEmpty() }.joinToString(":")
+
 // Generated uniffi Kotlin bindings land here (see generateUniffiBindings).
 // mkdirs at config time so the Variant API can register it as a source dir.
 val uniffiOutDir = layout.buildDirectory.dir("generated/source/uniffi/kotlin").get().asFile.apply { mkdirs() }
@@ -140,17 +150,18 @@ tasks.register<Exec>("buildRustCore") {
     val ndkDir = "$sdkDir/ndk/${android.ndkVersion}"
     environment("ANDROID_NDK_HOME", ndkDir)
     environment("ANDROID_NDK_ROOT", ndkDir)
+    environment("PATH", cargoAugmentedPath)
 
     // @formatter:off
     if (isRelease) commandLine(
-        "cargo", "ndk",
+        cargo, "ndk",
         "-t", "arm64-v8a",
         "-t", "x86_64",
         "-o", "../android/app/src/main/jniLibs",
         "--platform", (android.defaultConfig.minSdk ?: 21).toString(),
         "build", "--release"
     ) else commandLine(
-        "cargo", "ndk",
+        cargo, "ndk",
         "-t", "arm64-v8a",
         "-t", "x86_64",
         "-o", "../android/app/src/main/jniLibs",
@@ -165,10 +176,11 @@ tasks.register<Exec>("buildRustCore") {
 tasks.register<Exec>("generateUniffiBindings") {
     dependsOn("buildRustCore")
     workingDir = file("../..") // cargo workspace root
+    environment("PATH", cargoAugmentedPath)
     val outDir = uniffiOutDir
     doFirst { outDir.mkdirs() }
     commandLine(
-        "cargo", "run", "--quiet", "-p", "uniffi-bindgen", "--",
+        cargo, "run", "--quiet", "-p", "uniffi-bindgen", "--",
         "generate",
         "--library", "android/app/src/main/jniLibs/arm64-v8a/libcore.so",
         "--language", "kotlin",

@@ -21,5 +21,6 @@ secrets.properties
 *.keystore
 
 app/release
+app/debug
 
 jniLibs/
