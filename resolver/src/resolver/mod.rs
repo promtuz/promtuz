@@ -95,7 +95,7 @@ impl Resolver {
     fn endpoint(cfg: &AppConfig) -> Endpoint {
         let server_config = graceful!(Self::get_server_cfg(cfg), "building the TLS server config");
         let endpoint = graceful!(
-            Endpoint::server(server_config, cfg.network.address),
+            Endpoint::server(server_config, cfg.network.bind_addr()),
             "starting the QUIC endpoint"
         );
 

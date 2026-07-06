@@ -108,7 +108,7 @@ impl Relay {
             "building the TLS server config"
         );
 
-        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "starting the QUIC endpoint");
+        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.bind_addr()), "starting the QUIC endpoint");
         if let Ok(addr) = endpoint.local_addr() {
             info!("relay listening at QUIC({:?})", addr);
         }

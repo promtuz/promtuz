@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -23,6 +24,27 @@ pub struct NetworkConfig {
     /// — a bad edit otherwise risks an unwanted restart.
     #[serde(default)]
     pub watch_reload: bool,
+}
+
+impl NetworkConfig {
+    /// Address to hand `Endpoint::server`. The IPv4 wildcard (`0.0.0.0`)
+    /// upgrades to the IPv6 wildcard (`::`) so quinn opens a *dual-stack*
+    /// socket — one endpoint that accepts and dials both IPv4 and IPv6.
+    /// Without this a `0.0.0.0` endpoint can't reach a peer whose name
+    /// resolves to IPv6 (quinn rejects an IPv6 destination from a v4 socket).
+    /// A specific IP is left untouched — the operator asked for that family.
+    ///
+    // ponytail: on a host with IPv6 fully disabled, binding `::` fails at
+    // startup (loud, immediate) rather than silently — set a concrete v4
+    // `address` there if that ever happens.
+    pub fn bind_addr(&self) -> SocketAddr {
+        match self.address {
+            SocketAddr::V4(a) if a.ip().is_unspecified() => {
+                (Ipv6Addr::UNSPECIFIED, a.port()).into()
+            },
+            other => other,
+        }
+    }
 }
 
 /// Default QUIC ports, applied when a [`HostAddr`] in config omits one.
@@ -120,4 +142,31 @@ pub struct NodeSeed {
 #[derive(Deserialize, Debug)]
 pub struct NodeConfig {
     pub seed: Vec<NodeSeed>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn net(addr: &str) -> NetworkConfig {
+        NetworkConfig {
+            address: addr.parse().unwrap(),
+            cert_path: PathBuf::new(),
+            key_path: PathBuf::new(),
+            root_ca_path: PathBuf::new(),
+            watch_reload: false,
+        }
+    }
+
+    #[test]
+    fn wildcard_v4_upgrades_to_dual_stack() {
+        // 0.0.0.0 → [::] (same port) so the socket is dual-stack.
+        assert_eq!(net("0.0.0.0:40432").bind_addr(), "[::]:40432".parse().unwrap());
+        // A specific v4 address is left alone.
+        assert_eq!(net("127.0.0.1:40432").bind_addr(), "127.0.0.1:40432".parse().unwrap());
+        // An explicit v6 bind is left alone.
+        assert_eq!(net("[::1]:40432").bind_addr(), "[::1]:40432".parse().unwrap());
+    }
 }
