@@ -32,9 +32,9 @@
 //! MLS-specific transcripts mix in the dedicated [`MLS_WIRE_VERSION`]
 //! constant rather than [`crate::PROTOCOL_VERSION`] directly. The two
 //! now diverge (see [`MLS_WIRE_VERSION`]); routing every signing helper
-//! here through a single MLS-owned constant means the version marker survives in the
-//! on-wire transcripts so an endpoint refuses to verify a
-//! lower-version signature even if the byte layout happens to match
+//! here through a single MLS-owned constant means the version marker
+//! survives in the on-wire transcripts, so an endpoint refuses to verify
+//! a lower-version signature even if the byte layout happens to match
 //! (mirrors the [`crate::PROTOCOL_VERSION`] discipline elsewhere).
 //!
 //! ## Signing transcript layout

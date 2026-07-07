@@ -120,7 +120,9 @@ pub enum QueryResultP {
 pub struct DispatchP {
     pub to:      Bytes<32>,
     pub from:    Bytes<32>,
-    /// UUIDv7 picked by the sender; promoted to `DeliverP::id` unchanged.
+    /// Sender-authoritative dispatch_id (monotonic 16B, from the sender's
+    /// `messages.dispatch_id`); promoted to `DeliverP::id` unchanged. The
+    /// recipient dedups on it, so a retry re-sends the same id.
     pub id:      Bytes<16>,
     pub payload: ByteVec,
     pub sig:     Bytes<64>,
@@ -129,7 +131,8 @@ pub struct DispatchP {
 /// Relay → Client (relay-verified delivery)
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DeliverP {
-    /// UUIDv7
+    /// Sender's dispatch_id, copied verbatim from `DispatchP::id`. The
+    /// recipient dedups on `(from, id)`.
     pub id:      Bytes<16>,
     pub from:    Bytes<32>,
     pub payload: ByteVec,

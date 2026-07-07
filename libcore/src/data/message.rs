@@ -112,13 +112,16 @@ impl Message {
     /// delivered/failed outcome back onto the message the UI reads.
     pub fn mark_by_dispatch_id(dispatch_id: &[u8], status: u8) -> Option<MessageRow> {
         let conn = MESSAGES_DB.lock();
+        // Scope to outgoing rows: dispatch_id is globally monotonic among OUR
+        // sends (unique), but an incoming message carries a *peer's* dispatch_id
+        // and could in principle collide — never touch those.
         conn.execute(
-            "UPDATE messages SET status = ?1 WHERE dispatch_id = ?2",
+            "UPDATE messages SET status = ?1 WHERE dispatch_id = ?2 AND outgoing = 1",
             (status, dispatch_id),
         )
         .ok()?;
         conn.query_row(
-            "SELECT * FROM messages WHERE dispatch_id = ?1",
+            "SELECT * FROM messages WHERE dispatch_id = ?1 AND outgoing = 1",
             [dispatch_id],
             MessageRow::from_row,
         )

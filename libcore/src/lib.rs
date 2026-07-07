@@ -7,8 +7,8 @@ use tokio::runtime::Runtime;
 
 pub mod api;
 pub mod data;
-pub mod delivery;
 pub mod db;
+pub mod delivery;
 pub mod events;
 pub mod messaging;
 pub mod mls;

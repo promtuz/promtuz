@@ -43,8 +43,10 @@ use common::proto::pack::Packer;
 pub enum SchedulerOutcome {
     /// The stash is healthy; no minting or publishing was done.
     NoOp,
-    /// We minted fresh KPs and successfully published. Useful for a
-    /// metrics counter ("KP refills sent").
+    /// We minted fresh KPs and enqueued them for durable publish. A
+    /// best-effort publish is attempted immediately, but the batch may
+    /// still be pending in the outbox until a home Stored quorum. Useful
+    /// for a metrics counter ("KP refills minted").
     Refilled { count: usize },
     /// We rotated the entire stash (anti-pinning trigger). Distinct
     /// from [`Self::Refilled`] so a UI can surface the cadence event.
