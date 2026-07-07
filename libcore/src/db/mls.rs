@@ -148,6 +148,22 @@ const MIGRATION_ARRAY: &[M] = &[
         );
     "#,
     ),
+    // Carry the full serialized `KeyPackageRecord` alongside the
+    // bookkeeping so the client can republish its stash to a relay that
+    // lost our KP without re-minting (see `keypackage::unconsumed_records`).
+    //
+    // The DELETE wipes only stash BOOKKEEPING rows (legacy rows have no
+    // `record_blob`); the openmls KP *bundles* stay in `mls_storage`, so
+    // any already-published KP a peer still holds stays usable until it
+    // expires. The client re-mints a fresh full stash (now with
+    // `record_blob`) on its next connect — this is what unsticks an
+    // already-stuck client.
+    M::up(
+        r#"--sql
+        ALTER TABLE mls_keypackage_stash ADD COLUMN record_blob BLOB;
+        DELETE FROM mls_keypackage_stash;
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

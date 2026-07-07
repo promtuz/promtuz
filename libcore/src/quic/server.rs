@@ -803,6 +803,9 @@ async fn run_scheduler_loop(
             return;
         },
     };
+    // Republish our KP to this relay on connect (idempotent) — fixes the case where
+    // the relay lost our KP but our local stash is still full so `should_refill` never fires.
+    crate::mls::scheduler::ensure_kp_published(&provider, &stash, &signing, client.as_ref()).await;
     run_scheduler_inner(
         &provider,
         &stash,

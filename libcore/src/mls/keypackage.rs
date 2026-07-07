@@ -80,6 +80,8 @@ use common::proto::mls_wire::KP_STASH_TARGET;
 use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::kp_record_signing_input;
+use common::proto::pack::Packer;
+use common::proto::pack::Unpacker;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use openmls::prelude::BasicCredential;
@@ -278,24 +280,51 @@ impl KeyPackageStash {
         );
         let owner_sig = ipk_signer.sign(&signing_input);
 
-        // 7. Persist bookkeeping row.
+        let record = KeyPackageRecord {
+            ipk: ipk.into(),
+            kp_ref: kp_ref_bytes.clone().into(),
+            kp_bytes: kp_bytes.into(),
+            expires_at_ms,
+            owner_sig: owner_sig.to_bytes().into(),
+        };
+        let record_blob = record
+            .ser()
+            .map_err(|e| KeyPackageStashError::Codec(format!("ser kp record: {e}")))?;
+
+        // 7. Persist bookkeeping row + the full serialized record so we
+        // can republish this KP on reconnect without re-minting.
         {
             let conn = self.db.lock();
             conn.execute(
                 "INSERT OR REPLACE INTO mls_keypackage_stash \
-                    (kp_ref, generated_at_ms, expires_at_ms, consumed) \
-                 VALUES (?1, ?2, ?3, 0)",
-                params![&kp_ref_bytes, now as i64, expires_at_ms as i64],
+                    (kp_ref, generated_at_ms, expires_at_ms, consumed, record_blob) \
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                params![&kp_ref_bytes, now as i64, expires_at_ms as i64, &record_blob],
             )?;
         }
 
-        Ok(KeyPackageRecord {
-            ipk: ipk.into(),
-            kp_ref: kp_ref_bytes.into(),
-            kp_bytes: kp_bytes.into(),
-            expires_at_ms,
-            owner_sig: owner_sig.to_bytes().into(),
-        })
+        Ok(record)
+    }
+
+    /// Unconsumed, in-lifetime records with a stored `record_blob`,
+    /// ready to (re)publish to a relay. Legacy rows minted before the
+    /// `record_blob` column are skipped (they carry no republishable
+    /// record); such clients re-mint a full stash on their next connect.
+    pub fn unconsumed_records(&self, now_ms: u64) -> Result<Vec<KeyPackageRecord>> {
+        let conn = self.db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT record_blob FROM mls_keypackage_stash \
+             WHERE consumed = 0 AND expires_at_ms > ?1 AND record_blob IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![now_ms as i64], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for blob in rows {
+            out.push(
+                KeyPackageRecord::deser(&blob?)
+                    .map_err(|e| KeyPackageStashError::Codec(format!("deser kp record: {e}")))?,
+            );
+        }
+        Ok(out)
     }
 
     /// Fill the stash up to [`KP_STASH_TARGET`] unconsumed in-lifetime
@@ -792,4 +821,34 @@ mod tests {
         assert_eq!(stash.count_unconsumed_in_lifetime(past_expiry), 0);
     }
 
+    // -----------------------------------------------------------------
+    // 11. unconsumed_records returns the persisted, republishable records
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unconsumed_records_returns_persisted_records() {
+        let (stash, provider) = build_pair();
+        let signer = fresh_ipk_signer();
+
+        let minted: Vec<_> = (0..3)
+            .map(|_| stash.generate_one(&provider, &signer).expect("gen"))
+            .collect();
+
+        let recs = stash.unconsumed_records(now_ms()).expect("records");
+        assert_eq!(recs.len(), 3);
+
+        // Every minted kp_ref is present and each record round-trips.
+        let got: HashSet<Vec<u8>> = recs.iter().map(|r| r.kp_ref.0.clone()).collect();
+        for m in &minted {
+            assert!(got.contains(&m.kp_ref.0), "minted kp_ref missing");
+        }
+        for r in &recs {
+            let round = KeyPackageRecord::deser(&r.ser().expect("ser")).expect("deser");
+            assert_eq!(&round, r, "record must round-trip via ser/deser");
+        }
+
+        // Consumed records drop out.
+        stash.on_consumed(&minted[0].kp_ref.0).expect("consume");
+        assert_eq!(stash.unconsumed_records(now_ms()).expect("records").len(), 2);
+    }
 }

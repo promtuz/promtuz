@@ -35,6 +35,7 @@ use super::provider::PromtuzMlsProvider;
 use crate::db::outbox::OpType;
 use crate::quic::dht_client::DhtClient;
 use crate::quic::dht_client::KpOutcomeFilter;
+use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Packer;
 
 /// Outcome of one scheduler tick. Surfaced to the caller (a UI metric
@@ -86,16 +87,7 @@ pub async fn run_once<C: DhtClient>(
             return Ok(SchedulerOutcome::NoOp);
         }
         let count = recs.len();
-        let payload = recs.ser().map_err(|e| anyhow!("ser kp records: {e}"))?;
-        let kp_id = blake3::hash(&payload).as_bytes()[..16].to_vec(); // deterministic per-batch dedup key
-        crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
-        // Best-effort immediate publish; on ANY error leave the op in the outbox
-        // for the reconciler to retry on reconnect. NEVER propagate — a failed
-        // publish used to be lost forever because should_refill then went false.
-        match dht.publish_keypackages(&recs, KpOutcomeFilter::Default).await {
-            Ok(()) => crate::delivery::retire(&kp_id),
-            Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),
-        }
+        publish_kp_batch(dht, &recs).await;
         return Ok(SchedulerOutcome::Refilled { count });
     }
 
@@ -118,6 +110,40 @@ pub async fn run_once<C: DhtClient>(
     }
 
     Ok(SchedulerOutcome::NoOp)
+}
+
+/// Enqueue a KP batch to the durable outbox, then best-effort publish it.
+/// On ANY publish error the op is left in the outbox for the reconciler to
+/// retry on reconnect — NEVER propagated (a failed publish used to be lost
+/// forever once `should_refill` went false).
+async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let Ok(payload) = records.ser() else { return };
+    let kp_id = blake3::hash(&payload).as_bytes()[..16].to_vec();
+    crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
+    match dht.publish_keypackages(records, KpOutcomeFilter::Default).await {
+        Ok(()) => crate::delivery::retire(&kp_id),
+        Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),
+    }
+}
+
+/// Republish the client's current KP stash to the relay on connect. Publish is
+/// otherwise gated on local stash low-water (`should_refill`), so a relay that
+/// lost our KP (restart/wipe/eviction) would never get it back. Idempotent.
+pub async fn ensure_kp_published<C: DhtClient>(
+    provider: &PromtuzMlsProvider, stash: &KeyPackageStash, ipk_signer: &SigningKey, dht: &C,
+) {
+    // Guarantee a full stash first (mints if low — covers a fresh or migration-wiped stash).
+    if let Err(e) = stash.ensure_stash_full(provider, ipk_signer) {
+        log::warn!("ensure_kp_published: ensure_stash_full failed: {e}");
+    }
+    let now = crate::utils::systime().as_millis() as u64;
+    match stash.unconsumed_records(now) {
+        Ok(recs) => publish_kp_batch(dht, &recs).await,
+        Err(e) => log::warn!("ensure_kp_published: unconsumed_records failed: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------
