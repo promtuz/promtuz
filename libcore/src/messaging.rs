@@ -72,6 +72,7 @@ use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
+use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
@@ -893,6 +894,31 @@ fn process_application_inbound<C: DhtClient>(
     process_application_inbound_for(ctx, sender_ipk, &our_ipk, env)
 }
 
+/// Persist messages drained from the epoch-ahead buffer. These were
+/// `let _ =`-discarded before — every catch-up message silently lost
+/// once its epoch became current (spec §7).
+///
+/// ponytail: attributes all drained messages to `sender_ipk`, the current
+/// envelope's authenticated sender — correct for 1:1 (one possible peer),
+/// wrong for groups. And `m.dispatch_id` is the buffer's blake3(mls) key
+/// (push site below), not the sender's authoritative DispatchP.id: it
+/// dedups fine but won't sort by send-time, so Part 2 delivery watermarks
+/// must thread the real id to the push before relying on ordering.
+fn persist_drained(
+    drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>,
+    sender_ipk: [u8; 32],
+) {
+    for m in drained {
+        let Ok(AppPayload::Text(content)) = AppPayload::deser(&m.plaintext) else { continue };
+        let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
+        let ts = crate::utils::systime().as_secs();
+        if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts) {
+            MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
+                .emit();
+        }
+    }
+}
+
 /// Explicit-recipient variant of [`process_application_inbound`].
 /// Identical pipeline but takes `our_ipk` as an argument instead of
 /// reading the global `Identity::get()`. Production
@@ -986,8 +1012,11 @@ pub fn process_application_inbound_for<C: DhtClient>(
         ProcessedMessageContent::ApplicationMessage(app) => {
             let plaintext = app.into_bytes();
             // After every successful processing, drain any buffered
-            // ahead-of-epoch messages.
-            let _ = ctx.buffer.drain_when_ready(&mut group, ctx.provider);
+            // ahead-of-epoch messages and persist them (not discard).
+            persist_drained(
+                ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
+                sender_ipk,
+            );
             Ok(InboundDecoded::Application {
                 plaintext,
                 group_id: env.group_id.0,
@@ -998,8 +1027,11 @@ pub fn process_application_inbound_for<C: DhtClient>(
                 .merge_staged_commit(ctx.provider, *staged)
                 .map_err(|e| anyhow!("merge_staged_commit: {e}"))?;
             // After commit-merge, drain any newly-processable buffered
-            // messages.
-            let _ = ctx.buffer.drain_when_ready(&mut group, ctx.provider);
+            // messages and persist them (not discard).
+            persist_drained(
+                ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
+                sender_ipk,
+            );
             Ok(InboundDecoded::ApplicationBuffered)
         },
         ProcessedMessageContent::ProposalMessage(_)
