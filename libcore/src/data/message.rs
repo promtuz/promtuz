@@ -193,6 +193,19 @@ impl Message {
         }
     }
 
+    /// Outgoing rows still pending (status = 0) — the durable-first-send
+    /// retry set. Oldest-first by ULID so a reconnect re-sends in send order.
+    pub fn pending_outgoing() -> Vec<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let mut stmt = conn
+            .prepare("SELECT * FROM messages WHERE outgoing = 1 AND status = 0 ORDER BY id ASC")
+            .expect("failed to prepare");
+        stmt.query_map([], MessageRow::from_row)
+            .expect("failed to query")
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
     /// Get a summary of all conversations (one entry per peer, with the latest message).
     pub fn get_conversations() -> Vec<MessageRow> {
         let conn = MESSAGES_DB.lock();

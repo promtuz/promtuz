@@ -125,6 +125,7 @@ use crate::mls::make_welcome_envelope;
 use crate::mls::process_welcome;
 use crate::mls::types::MlsGroupError;
 use crate::quic::dht_client::DhtClient;
+use crate::quic::dht_client::DhtClientError;
 // RELAY lives in `crate::state`; the `quic::server` re-export is kept
 // for backwards compatibility but the cycle-breaking import points at
 // the leaf module directly.
@@ -340,11 +341,14 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     pairing: Option<PairingP>,
 ) -> Result<MlsGroupHandle> {
     // 1. Fetch peer's KP.
+    // Keep the concrete `DhtClientError` downcastable through the anyhow
+    // chain (do NOT stringify): `attempt_send` inspects it to detect a
+    // `NoStash` KP-miss and defer the send instead of hard-failing.
     let fetched = ctx
         .dht
         .fetch_keypackage_for(to)
         .await
-        .map_err(|e| anyhow!("fetch_keypackage_for failed: {e}"))?;
+        .map_err(|e| anyhow::Error::new(e).context("fetch_keypackage_for"))?;
 
     // Verify the per-record `owner_sig` re-validates under the peer's
     // IPK (defence-in-depth — the home should have already done this,
@@ -520,10 +524,24 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
 pub async fn send_message_inner<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], content: String,
 ) -> Result<()> {
-    // 0. Save to local DB first (status = pending).
+    // 0. Save to local DB first (status = pending), then drive one attempt.
     let msg = Message::save_outgoing(to, &content)?;
+    attempt_send(ctx, to, msg).await
+}
+
+/// Drive one send attempt for an already-persisted outgoing `msg` row:
+/// contact lookup → group resolve/lazy-create → envelope → outbox enqueue
+/// → wire send → ack. Split out of [`send_message_inner`] so
+/// [`retry_pending_sends`] can re-run a still-`pending` row on reconnect
+/// without re-inserting it. Reads everything it needs off the row
+/// (`content`, `dispatch_id`, `timestamp`) so a retry reuses the same
+/// dispatch id and the recipient dedups it.
+pub async fn attempt_send<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
+) -> Result<()> {
     let msg_id = msg.inner.id;
     let msg_timestamp = msg.inner.timestamp;
+    let content = &msg.inner.content;
 
     // 1. Look up the contact.
     let contact = match Contact::get(&to) {
@@ -598,6 +616,22 @@ pub async fn send_message_inner<C: DhtClient>(
                     g
                 },
                 Err(e) => {
+                    // A missing peer KeyPackage is transient (the peer
+                    // republishes on its own reconnect). Leave the message
+                    // PENDING and let retry_pending_sends re-run on the next
+                    // reconnect — a permanent failure here is the "can't
+                    // pair" bug. Safe: the fetch fails BEFORE any group
+                    // state is built, so no duplicate group. Every OTHER
+                    // lazy-create failure stays a hard fail.
+                    if e.chain().any(|c| {
+                        matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash))
+                    }) {
+                        info!(
+                            "MESSAGE: {} has no published KP yet — left pending, will retry on reconnect",
+                            hex::encode(&to[..4])
+                        );
+                        return Ok(());
+                    }
                     Message::mark_failed(&msg_id);
                     MessageEv::Failed { id: msg_id, to, reason: e.to_string() }.emit();
                     return Err(e);
@@ -681,7 +715,7 @@ pub async fn send_message_inner<C: DhtClient>(
             LastOutcome::Durable => {
                 delivery::retire(&id);
                 Message::mark_sent(&msg_id);
-                MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
+                MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp: msg_timestamp }.emit();
                 info!("MESSAGE: sent to {}", hex::encode(&to[..4]));
             },
             LastOutcome::Terminal => {
@@ -699,6 +733,30 @@ pub async fn send_message_inner<C: DhtClient>(
     }
 
     Ok(())
+}
+
+/// Re-drive every still-`pending` first-send whose contact has no MLS
+/// group yet — the messages [`attempt_send`] deferred because the peer
+/// had not published a KeyPackage. Run once per reconnect (after the
+/// welcome poll, which may itself have just paired us and unstuck one).
+///
+/// A pending row that already HAS a group is in the durable outbox;
+/// `delivery::reconcile` owns it, so we skip it here to avoid a double
+/// send. Per-message errors are logged and swallowed — one peer still
+/// missing its KP must not block retrying the rest.
+pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
+    for row in Message::pending_outgoing() {
+        let has_group = Contact::get(&row.peer_ipk)
+            .and_then(|c| c.inner.mls_group_id)
+            .is_some();
+        if has_group {
+            continue;
+        }
+        let to = row.peer_ipk;
+        if let Err(e) = attempt_send(ctx, to, Message { inner: row }).await {
+            warn!("MESSAGE: retry_pending_sends: {} still failing: {e}", hex::encode(&to[..4]));
+        }
+    }
 }
 
 /// Pull the leaf signing keypair for *our* member seat in `group`
@@ -1292,6 +1350,44 @@ mod tests {
         assert_eq!(bob_group.epoch(), g.epoch());
         assert_eq!(bob_group.member_count(), g.member_count());
         assert_eq!(bob_group.group_id(), g.group_id());
+    }
+
+    /// The defer predicate `attempt_send` relies on: a lazy-create that
+    /// fails because the peer never published a KeyPackage must surface a
+    /// `DhtClientError::NoStash` reachable through the anyhow chain
+    /// (Change 1 — we must NOT stringify it). This is the exact condition
+    /// that leaves a first-send PENDING instead of hard-failing, and the
+    /// negative case guards against blanket-defer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lazy_create_preserves_nostash_for_defer_detection() {
+        let alice = Node::new(0xB1);
+        let bob = Node::new(0xB2);
+        let dht = FakeDhtClient::new_arc();
+        // NB: bob never publishes a KP → fetch_keypackage_for → NoStash.
+
+        let err = lazy_create_group(
+            &alice.ctx(dht.as_ref()),
+            &alice.ipk,
+            &alice.ipk_signer,
+            &bob.ipk,
+        )
+        .await
+        .expect_err("no published KP must fail lazy_create");
+
+        let is_nostash = err.chain().any(|c| {
+            matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash))
+        });
+        assert!(is_nostash, "NoStash must be downcastable for the defer path; got: {err:?}");
+
+        // Blanket-defer guard: an unrelated error must NOT match.
+        let other = anyhow!("some unrelated failure");
+        assert!(
+            !other.chain().any(|c| matches!(
+                c.downcast_ref::<DhtClientError>(),
+                Some(DhtClientError::NoStash)
+            )),
+            "non-NoStash errors must stay a hard fail"
+        );
     }
 
     /// Application message round-trip: alice sends, bob receives.

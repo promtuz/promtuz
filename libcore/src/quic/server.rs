@@ -395,6 +395,22 @@ impl Relay {
                 Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
             }
 
+            // Durable first-send retry: re-drive first-sends that deferred
+            // (peer had no published KP). Run AFTER the welcome poll so a
+            // Welcome that just paired us is applied first. Bounded like the
+            // poll so a dead DHT can't stall the queue drain below.
+            // ponytail: 15s cap matches poll_welcomes; raise if a user
+            // accumulates many deferred first-sends across a long offline gap.
+            if tokio::time::timeout(
+                Duration::from_secs(15),
+                retry_pending_sends_once(client.clone()),
+            )
+            .await
+            .is_err()
+            {
+                warn!("MLS: retry_pending_sends timed out; draining anyway");
+            }
+
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
             // `mls_cancel`.
@@ -775,6 +791,25 @@ async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
         info!("MLS: poll_welcomes processed {count} welcome(s)");
     }
     Ok(())
+}
+
+/// Reconnect hook for durable first-send: builds a production
+/// [`crate::messaging::MlsContext`] (fresh DB handles + the connection's
+/// dialer, mirroring `poll_welcomes_once`) and re-drives every still-
+/// pending first-send whose contact has no group yet — the ones deferred
+/// earlier because the peer had no published KeyPackage.
+async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let stash_db = stash_db_handle();
+    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
+    let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
+    let ctx = crate::messaging::MlsContext {
+        provider: &provider,
+        stash:    &stash,
+        buffer:   &buffer,
+        dht:      client.as_ref(),
+    };
+    crate::messaging::retry_pending_sends(&ctx).await;
 }
 
 /// KP-rotation scheduler loop — production wiring.
