@@ -396,6 +396,17 @@ impl EpochCatchupBuffer {
         Ok(output)
     }
 
+    /// Drop every buffered row for a group (forget-contact cascade).
+    pub fn purge_group(&self, group_id: &[u8; 32]) -> Result<(), MlsGroupError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM mls_epoch_ahead WHERE group_id = ?1",
+            params![&group_id[..]],
+        )
+        .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
+        Ok(())
+    }
+
     /// Number of rows currently buffered for a group. Test helper +
     /// future UI metric.
     pub fn buffered_count(&self, group_id: &[u8; 32]) -> Result<usize, MlsGroupError> {

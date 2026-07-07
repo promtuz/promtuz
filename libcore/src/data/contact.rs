@@ -109,4 +109,39 @@ impl Contact {
         )?;
         Ok(())
     }
+
+    /// Drop the address-book row. Last step of the `forget_contact`
+    /// cascade — run only after its `mls_group_id` has been consumed.
+    pub fn delete(ipk: &[u8; 32]) -> Result<()> {
+        let conn = CONTACTS_DB.lock();
+        conn.execute("DELETE FROM contacts WHERE ipk = ?1", params![ipk])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `Contact::delete` runs against the process-global `CONTACTS_DB`, so
+    /// exercise its exact DELETE SQL against an in-memory connection (the
+    /// `message.rs` pattern) to prove the forget cascade removes the row.
+    #[test]
+    fn delete_removes_the_contact_row() {
+        let conn = crate::db::peers::open_in_memory();
+        let ipk = [0x42u8; 32];
+        conn.execute(
+            "INSERT INTO contacts (ipk, name, added_at, mls_group_id) VALUES (?1, ?2, ?3, NULL)",
+            (ipk.as_slice(), "alice", 1u64),
+        )
+        .unwrap();
+
+        let removed = conn
+            .execute("DELETE FROM contacts WHERE ipk = ?1", [ipk.as_slice()])
+            .unwrap();
+
+        assert_eq!(removed, 1, "the matching row must be deleted");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no contact row remains after delete");
+    }
 }

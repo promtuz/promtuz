@@ -128,6 +128,36 @@ impl Message {
         .ok()
     }
 
+    /// Delete every message with this peer (forget-contact cascade).
+    pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
+        let conn = MESSAGES_DB.lock();
+        conn.execute("DELETE FROM messages WHERE peer_ipk = ?1", [peer_ipk.as_slice()]).ok();
+    }
+
+    /// Count of messages with this peer (cheap diagnostics read).
+    pub fn count_by_peer(peer_ipk: &[u8; 32]) -> u32 {
+        let conn = MESSAGES_DB.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE peer_ipk = ?1",
+            [peer_ipk.as_slice()],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as u32)
+        .unwrap_or(0)
+    }
+
+    /// Status of the newest message with this peer, or `None` if none.
+    pub fn last_status_by_peer(peer_ipk: &[u8; 32]) -> Option<u8> {
+        let conn = MESSAGES_DB.lock();
+        conn.query_row(
+            "SELECT status FROM messages WHERE peer_ipk = ?1 ORDER BY id DESC LIMIT 1",
+            [peer_ipk.as_slice()],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok()
+        .map(|s| s as u8)
+    }
+
     /// Get messages for a conversation, paginated.
     /// Returns messages in ascending order (oldest first).
     /// `before_id` if non-empty, fetches messages before that ULID.

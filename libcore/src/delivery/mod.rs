@@ -70,6 +70,27 @@ pub fn retire(id: &[u8]) {
     OUTBOX_DB.lock().execute("DELETE FROM outbox WHERE id = ?1", params![id]).ok();
 }
 
+/// Drop every queued op targeting this peer (forget-contact cascade).
+pub fn forget_target(ipk: &[u8; 32]) {
+    OUTBOX_DB
+        .lock()
+        .execute("DELETE FROM outbox WHERE target_ipk = ?1", params![ipk.as_slice()])
+        .ok();
+}
+
+/// Count of pending (state = 0) ops queued for this peer (diagnostics read).
+pub fn pending_ops_for(ipk: &[u8; 32]) -> u32 {
+    OUTBOX_DB
+        .lock()
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE target_ipk = ?1 AND state = 0",
+            params![ipk.as_slice()],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as u32)
+        .unwrap_or(0)
+}
+
 pub fn due(now_ms: u64) -> Vec<OutboxRow> {
     let conn = OUTBOX_DB.lock();
     let mut stmt = conn

@@ -65,6 +65,80 @@ pub fn get_contacts() -> Vec<ContactInfo> {
         .collect()
 }
 
+/// A contact enriched with per-store diagnostics for a debug UI.
+#[derive(uniffi::Record)]
+pub struct ContactDiag {
+    pub ipk: Vec<u8>,
+    pub name: String,
+    /// True once an MLS group id is bound (first send has happened).
+    pub paired: bool,
+    /// Current MLS epoch, `None` if unpaired or the group can't load.
+    pub epoch: Option<u64>,
+    pub message_count: u32,
+    /// Newest message status (0 pending / 1 sent / 2 failed), `None` if none.
+    pub last_status: Option<u8>,
+    /// Pending (undelivered) outbox ops for this peer.
+    pub pending_ops: u32,
+}
+
+/// Cascade-delete ALL per-contact state so re-scanning this peer's QR is a
+/// clean first-time add: MLS group storage, epoch-ahead buffer, messages,
+/// queued outbox ops, then the address-book row (last, after its group id
+/// is consumed). Best-effort — a failing store is logged and the cascade
+/// continues; partial cleanup beats aborting on stale state. Idempotent:
+/// forgetting an absent contact is success.
+#[uniffi::export]
+pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
+    let ipk = to_ipk32(&ipk)?;
+    let Some(contact) = Contact::get(&ipk) else { return Ok(()) };
+
+    if let Some(gid) = contact.inner.mls_group_id {
+        let provider = crate::mls::PromtuzMlsProvider::shared();
+        match crate::mls::MlsGroupHandle::load(&provider, &gid) {
+            Ok(Some(mut g)) =>
+                if let Err(e) = g.delete(&provider) {
+                    log::error!("FORGET: mls group delete failed: {e}");
+                },
+            Ok(None) => {},
+            Err(e) => log::error!("FORGET: mls group load failed: {e}"),
+        }
+        let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
+        if let Err(e) = buffer.purge_group(&gid) {
+            log::error!("FORGET: epoch buffer purge failed: {e}");
+        }
+    }
+
+    Message::delete_by_peer(&ipk);
+    crate::delivery::forget_target(&ipk);
+    if let Err(e) = Contact::delete(&ipk) {
+        log::error!("FORGET: contact delete failed: {e}");
+    }
+    Ok(())
+}
+
+/// Contacts list enriched with per-contact diagnostics for a debug UI.
+#[uniffi::export]
+pub fn list_contacts_diag() -> Vec<ContactDiag> {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    Contact::list()
+        .into_iter()
+        .map(|c| {
+            let epoch = c.mls_group_id.and_then(|gid| {
+                crate::mls::MlsGroupHandle::load(&provider, &gid).ok().flatten().map(|g| g.epoch())
+            });
+            ContactDiag {
+                paired: c.mls_group_id.is_some(),
+                epoch,
+                message_count: Message::count_by_peer(&c.ipk),
+                last_status: Message::last_status_by_peer(&c.ipk),
+                pending_ops: crate::delivery::pending_ops_for(&c.ipk),
+                ipk: c.ipk.to_vec(),
+                name: c.name,
+            }
+        })
+        .collect()
+}
+
 impl From<MessageRow> for MessageRecord {
     fn from(r: MessageRow) -> Self {
         MessageRecord {
