@@ -66,9 +66,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use common::PROTOCOL_VERSION;
-use common::proto::Sender;
 use common::proto::client_rel::CRelayPacket;
-use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
@@ -113,6 +111,9 @@ use crate::data::identity::Identity;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
 use crate::db::mls::stash_db_handle;
+use crate::db::outbox::OpType;
+use crate::delivery;
+use crate::delivery::LastOutcome;
 use crate::events::Emittable;
 use crate::events::messaging::MessageEv;
 use crate::mls::EpochCatchupBuffer;
@@ -648,49 +649,53 @@ pub async fn send_message_inner<C: DhtClient>(
         sig:     Bytes(sig),
     };
 
-    // 7. Send via the existing relay channel.
+    // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the
+    //    length-prefixed bytes `send()` writes; the relay's read side is
+    //    length-prefixed, so storing raw postcard would desync every frame. Store
+    //    framed, send framed, reconciler re-sends framed — all byte-identical.
+    let dispatch_bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
+    delivery::enqueue(&id, OpType::Message, Some(to), &dispatch_bytes);
+
+    // 8. Send via the existing relay channel. Offline / mid-send drops leave the
+    //    row `pending` and return Ok — the reconciler (Task 7) re-sends. Only a
+    //    durable or terminal ack retires the row.
     let conn = {
         let relay = RELAY.read();
-        relay.as_ref().and_then(|r| r.connection.clone()).ok_or_else(|| {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: "not connected to relay".into() }.emit();
-            anyhow!("not connected to relay")
-        })?
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else {
+        info!("MESSAGE: offline — {} queued in outbox", hex::encode(&to[..4]));
+        return Ok(());
     };
 
-    let (mut send, mut recv) = conn.open_bi().await?;
-    CRelayPacket::Dispatch(fwd).send(&mut send).await?;
-    send.finish()?;
+    let Ok((mut send, mut recv)) = conn.open_bi().await else { return Ok(()) };
+    if send.write_all(&dispatch_bytes).await.is_err() {
+        return Ok(());
+    }
+    if send.finish().is_err() {
+        return Ok(());
+    }
 
-    // 8. Wait for the relay's ack.
-    match SRelayPacket::unpack(&mut recv).await? {
-        SRelayPacket::DispatchAck(DispatchAckP::Queued)
-        | SRelayPacket::DispatchAck(DispatchAckP::Forwarded)
-        | SRelayPacket::DispatchAck(DispatchAckP::Delivered) => {
-            info!("MESSAGE: sent to {}", hex::encode(&to[..4]));
-            Message::mark_sent(&msg_id);
-            MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
+    match SRelayPacket::unpack(&mut recv).await {
+        Ok(SRelayPacket::DispatchAck(ack)) => match delivery::outcome_for_ack(&ack) {
+            LastOutcome::Durable => {
+                delivery::retire(&id);
+                Message::mark_sent(&msg_id);
+                MessageEv::Sent { id: msg_id, to, content, timestamp: msg_timestamp }.emit();
+                info!("MESSAGE: sent to {}", hex::encode(&to[..4]));
+            },
+            LastOutcome::Terminal => {
+                delivery::retire(&id);
+                Message::mark_failed(&msg_id);
+                MessageEv::Failed { id: msg_id, to, reason: format!("relay rejected: {ack:?}") }.emit();
+            },
+            LastOutcome::Queued | LastOutcome::Reachable => {
+                info!("MESSAGE: {} accepted non-durably ({ack:?}); left in outbox", hex::encode(&to[..4]));
+            },
+            LastOutcome::Silence => {},
         },
-        SRelayPacket::DispatchAck(DispatchAckP::NotFound) => {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: "recipient not found".into() }.emit();
-        },
-        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig) => {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: "invalid signature".into() }.emit();
-        },
-        SRelayPacket::DispatchAck(DispatchAckP::Error { reason }) => {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason }.emit();
-        },
-        SRelayPacket::DispatchAck(DispatchAckP::QueueFull) => {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: "queue full".into() }.emit();
-        },
-        other => {
-            Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: format!("unexpected: {other:?}") }.emit();
-        },
+        Ok(_other) => {},
+        Err(_) => {},
     }
 
     Ok(())

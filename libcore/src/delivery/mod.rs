@@ -1,8 +1,35 @@
+use common::proto::client_rel::DispatchAckP;
 use rusqlite::params;
 
 use crate::db::outbox::OUTBOX_DB;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
+
+/// Durability verdict for a dispatch attempt. `outcome_for_ack` is the single
+/// ack→durability mapping shared by the live send path (Task 6) and the
+/// reconciler (Task 7) so the "which ack retires the row" decision can't drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastOutcome {
+    Durable,
+    Queued,
+    Reachable,
+    Terminal,
+    /// Reconciler-only: no ack came back within TTL. Never returned by
+    /// `outcome_for_ack`.
+    Silence,
+}
+
+/// Map a relay `DispatchAckP` to its durability verdict. Exhaustive on purpose:
+/// a new ack variant must be a compile error here, not a silent miscategory.
+pub fn outcome_for_ack(ack: &DispatchAckP) -> LastOutcome {
+    use LastOutcome::*;
+    match ack {
+        DispatchAckP::Forwarded | DispatchAckP::Delivered => Durable,
+        DispatchAckP::Queued => Queued,
+        DispatchAckP::QueueFull | DispatchAckP::Error { .. } => Reachable,
+        DispatchAckP::NotFound | DispatchAckP::InvalidSig => Terminal,
+    }
+}
 
 // SQLite integers are i64; rusqlite's u64 binder rejects anything past
 // i64::MAX. Real ms timestamps fit, but the u64::MAX "never/always due"
@@ -61,6 +88,18 @@ pub fn mark_dead(id: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outcome_for_ack_maps_all_variants() {
+        use LastOutcome::*;
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Delivered), Durable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Forwarded), Durable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued), Queued));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::QueueFull), Reachable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Error { reason: String::new() }), Reachable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::NotFound), Terminal));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::InvalidSig), Terminal));
+    }
 
     #[test]
     fn outbox_enqueue_due_retire() {
