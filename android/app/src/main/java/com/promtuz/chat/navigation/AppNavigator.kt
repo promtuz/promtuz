@@ -18,6 +18,12 @@ class AppNavigator(val backStack: MutableList<NavKey>) {
         }
         return false
     }
+
+    /** Replace the whole stack with a single destination — no back path to what was there. */
+    fun reset(key: NavKey) {
+        backStack.clear()
+        backStack.add(key)
+    }
 }
 
 

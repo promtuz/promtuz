@@ -54,8 +54,6 @@ import com.promtuz.chat.R
 import com.promtuz.chat.presentation.state.WelcomeField
 import com.promtuz.chat.presentation.state.WelcomeStatus
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
-import com.promtuz.chat.ui.activities.App
-import com.promtuz.chat.utils.InviteLink
 import com.promtuz.chat.ui.components.OutlinedFormElements
 import com.promtuz.chat.ui.constants.Buttonimations
 import com.promtuz.chat.ui.constants.Tweens
@@ -63,7 +61,8 @@ import com.promtuz.chat.utils.extensions.then
 
 @Composable
 fun WelcomeScreen(
-    welcomeViewModel: WelcomeVM
+    welcomeViewModel: WelcomeVM,
+    onEnrolled: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
@@ -147,16 +146,7 @@ fun WelcomeScreen(
             Button(
                 onClick = {
                     isNormal.then {
-                        welcomeViewModel.`continue` {
-                            // Carry a deferred invite (opened /pair before enrolling)
-                            // through to App so it pairs once we're set up.
-                            val invite = (context as? Activity)?.intent
-                                ?.getByteArrayExtra(InviteLink.EXTRA_INVITE)
-                            context.startActivity(Intent(context, App::class.java).apply {
-                                invite?.let { putExtra(InviteLink.EXTRA_INVITE, it) }
-                            })
-                            (context as? Activity)?.finish()
-                        }
+                        welcomeViewModel.`continue` { onEnrolled() }
                     }
                 },
                 Modifier.fillMaxWidth(),

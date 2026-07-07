@@ -47,8 +47,10 @@
 
         <activity
             android:name=".LauncherActivity"
+            android:configChanges="orientation|screenSize|screenLayout"
             android:exported="true"
-            android:theme="@style/Theme.App.Starting">
+            android:theme="@style/Theme.App.Starting"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
@@ -84,15 +86,6 @@
             android:name=".ui.activities.ManageSpace"
             android:exported="false"
             android:label="@string/title_activity_manage_space" />
-        <activity
-            android:name=".ui.activities.App"
-            android:configChanges="orientation|screenSize|screenLayout"
-            android:exported="false"
-            android:windowSoftInputMode="adjustResize" />
-        <activity
-            android:name=".ui.activities.Welcome"
-            android:configChanges="orientation|screenSize|screenLayout"
-            android:exported="false" />
         <activity
             android:name=".ui.activities.QrScanner"
             android:configChanges="orientation|screenSize|screenLayout"

@@ -2,6 +2,7 @@ package com.promtuz.chat.navigation
 
 import androidx.compose.animation.SizeTransform
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -10,6 +11,7 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.ui.constants.Naviganimation
 import com.promtuz.chat.ui.screens.AboutScreen
 import com.promtuz.chat.ui.screens.HomeScreen
@@ -17,6 +19,8 @@ import com.promtuz.chat.ui.screens.LogsScreen
 import com.promtuz.chat.ui.screens.RelaysScreen
 import com.promtuz.chat.ui.screens.SavedUsersScreen
 import com.promtuz.chat.ui.screens.SettingsScreen
+import com.promtuz.chat.ui.screens.WelcomeScreen
+import org.koin.androidx.compose.koinViewModel
 
 
 @Composable
@@ -25,27 +29,34 @@ fun AppNavigation(
 ) {
     val backStack = appViewModel.backStack
 
-    NavDisplay(
-        backStack,
-        onBack = { backStack.removeLastOrNull() },
-        modifier = Modifier
-            .background(MaterialTheme.colorScheme.background),
-        entryDecorators = listOf(
-            rememberSaveableStateHolderNavEntryDecorator(),
-            rememberViewModelStoreNavEntryDecorator()
-        ),
-        entryProvider = entryProvider {
-            entry<Routes.App> { HomeScreen(appViewModel) }
-            //entry<Routes.Chat> { key -> ChatScreen(appViewModel) }
-            entry<Routes.SavedUsers> { SavedUsersScreen() }
-            entry<Routes.Settings> { SettingsScreen(appViewModel) }
-            entry<Routes.About> { AboutScreen() }
-            entry<Routes.Logs> { LogsScreen() }
-            entry<Routes.Relays> { RelaysScreen() }
-        },
-        sizeTransform = SizeTransform(clip = false),
-        transitionSpec = { Naviganimation.transitionSpec() },
-        popTransitionSpec = { Naviganimation.popTransitionSpec() }
-    )
-
+    SwipeBackContainer(
+        enabled = backStack.size > 1,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        NavDisplay(
+            backStack,
+            onBack = { backStack.removeLastOrNull() },
+            modifier = Modifier.background(MaterialTheme.colorScheme.background),
+            entryDecorators = listOf(
+                rememberSaveableStateHolderNavEntryDecorator(),
+                rememberViewModelStoreNavEntryDecorator()
+            ),
+            entryProvider = entryProvider {
+                entry<Routes.App> { HomeScreen(appViewModel) }
+                entry<Routes.Welcome> {
+                    WelcomeScreen(koinViewModel<WelcomeVM>(), onEnrolled = { appViewModel.completeOnboarding() })
+                }
+                //entry<Routes.Chat> { key -> ChatScreen(appViewModel) }
+                entry<Routes.SavedUsers> { SavedUsersScreen() }
+                entry<Routes.Settings> { SettingsScreen(appViewModel) }
+                entry<Routes.About> { AboutScreen() }
+                entry<Routes.Logs> { LogsScreen() }
+                entry<Routes.Relays> { RelaysScreen() }
+            },
+            sizeTransform = SizeTransform(clip = false),
+            transitionSpec = { Naviganimation.transitionSpec() },
+            popTransitionSpec = { Naviganimation.popTransitionSpec() },
+            predictivePopTransitionSpec = { Naviganimation.predictivePopSpec() },
+        )
+    }
 }

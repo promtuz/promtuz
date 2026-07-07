@@ -29,8 +29,11 @@ class AppVM(
 
     var activeChatUser: Chat? = null
 
-    var backStack = NavBackStack<NavKey>(Routes.App)
+    var backStack = NavBackStack<NavKey>(if (CoreBridge.shouldLaunchApp()) Routes.App else Routes.Welcome)
     val navigator = AppNavigator(backStack)
+
+    /** Invite that arrived before onboarding finished; raised once enroll completes. */
+    var pendingInvite: ByteArray? = null
 
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
@@ -121,6 +124,12 @@ class AppVM(
 
     fun dismissInvite() {
         _invite.value = null
+    }
+
+    /** Enroll finished: drop Welcome from the stack (no going back) and raise any deferred invite. */
+    fun completeOnboarding() {
+        navigator.reset(Routes.App)
+        pendingInvite?.let { showInvite(it); pendingInvite = null }
     }
 
     fun refreshChats() {

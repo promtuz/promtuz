@@ -3,44 +3,54 @@ package com.promtuz.chat
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.core.splashscreen.SplashScreen
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.lifecycle.lifecycleScope
-import com.promtuz.chat.ui.activities.App
-import com.promtuz.chat.ui.activities.Welcome
+import com.promtuz.chat.navigation.AppNavigation
+import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.ui.components.InviteBottomSheet
+import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
-import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
 
+/**
+ * The one app activity: hosts the whole nav stack. The start route (Welcome vs Home) is gated in
+ * [AppVM] by [CoreBridge.shouldLaunchApp]. OS-boundary screens (manage-space) stay separate.
+ */
 class LauncherActivity : ComponentActivity() {
+    private val viewModel: AppVM by inject()
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        val splashScreen: SplashScreen = installSplashScreen()
+        installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        var keepSplashOnScreen = true
+        enableEdgeToEdge()
+        consumeInvite(intent)
 
-        splashScreen.setKeepOnScreenCondition {
-            keepSplashOnScreen
-        }
-
-        // A /pair deeplink (App Link or promtuz://pair) carries invite bytes in
-        // its fragment. Decode here and forward them to whichever screen we gate
-        // to; Welcome pairs after enroll completes (deferred deeplink).
-        val invite = intent?.data?.let(InviteLink::decode)
-
-        lifecycleScope.launch {
-            try {
-                val target = if (CoreBridge.shouldLaunchApp()) App::class.java else Welcome::class.java
-                startActivity(
-                    Intent(this@LauncherActivity, target).apply {
-                        invite?.let { putExtra(InviteLink.EXTRA_INVITE, it) }
-                    }
-                )
-
-                finish()
-            } finally {
-                keepSplashOnScreen = false
+        setContent {
+            PromtuzTheme {
+                AppNavigation(viewModel)
+                InviteBottomSheet(viewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeInvite(intent)
+    }
+
+    /**
+     * Pull an invite from a `/pair` App Link ([Intent.getData]) or an internal EXTRA_INVITE hand-off
+     * (QR scan). Raise the confirm sheet now if we're set up, else defer until enroll finishes.
+     */
+    private fun consumeInvite(intent: Intent) {
+        val invite = intent.getByteArrayExtra(InviteLink.EXTRA_INVITE)
+            ?: intent.data?.let(InviteLink::decode)
+            ?: return
+        intent.removeExtra(InviteLink.EXTRA_INVITE) // one-shot; survive recreation
+        if (CoreBridge.shouldLaunchApp()) viewModel.showInvite(invite) else viewModel.pendingInvite = invite
     }
 }

@@ -8,6 +8,9 @@ object Routes : NavKey {
     data object App : NavKey
 
     @Serializable
+    data object Welcome : NavKey
+
+    @Serializable
     data object Chat : NavKey
 
     @Serializable
