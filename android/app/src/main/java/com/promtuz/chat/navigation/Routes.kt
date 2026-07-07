@@ -14,7 +14,7 @@ object Routes : NavKey {
     data object Chat : NavKey
 
     @Serializable
-    data object SavedUsers : NavKey
+    data object Contacts : NavKey
 
     @Serializable
     data object Settings : NavKey

@@ -44,7 +44,7 @@ fun HomeDrawerContent(
                 listOf(
                     DrawerButton("My Profile", R.drawable.i_profile)
                 ), listOf(
-                    DrawerButton("Saved Users", R.drawable.i_contacts) { open(Routes.SavedUsers) },
+                    DrawerButton("Contacts", R.drawable.i_contacts) { open(Routes.Contacts) },
                     DrawerButton("Blocked Users", R.drawable.i_user_blocked),
                 ), listOf(
                     DrawerButton("Settings", R.drawable.oi_settings) { open(Routes.Settings) },

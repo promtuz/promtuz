@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
 import uniffi.core.MessageEvent
@@ -14,11 +15,13 @@ import uniffi.core.RelayStat
 import uniffi.core.computeQrMask as ffiComputeQrMask
 import uniffi.core.connectRelay as ffiConnectRelay
 import uniffi.core.enroll as ffiEnroll
+import uniffi.core.forgetContact as ffiForgetContact
 import uniffi.core.forgetRelay as ffiForgetRelay
 import uniffi.core.getContacts as ffiGetContacts
 import uniffi.core.getConversations as ffiGetConversations
 import uniffi.core.getMessages as ffiGetMessages
 import uniffi.core.getRelays as ffiGetRelays
+import uniffi.core.listContactsDiag as ffiListContactsDiag
 import uniffi.core.makeInviteQr as ffiMakeInviteQr
 import uniffi.core.pairFromQr as ffiPairFromQr
 import uniffi.core.previewInvite as ffiPreviewInvite
@@ -50,6 +53,16 @@ object CoreBridge {
         withContext(Dispatchers.IO) { ffiPreviewInvite(bytes) }
 
     suspend fun contacts(): List<ContactInfo> = withContext(Dispatchers.IO) { ffiGetContacts() }
+
+    /** Contacts + per-contact diagnostics (paired, MLS epoch, msg count/status, pending ops). */
+    suspend fun contactsDiag(): List<ContactDiag> = withContext(Dispatchers.IO) { ffiListContactsDiag() }
+
+    /**
+     * Delete a contact and ALL its local state — MLS group, message history,
+     * epoch buffer, outbox rows — so re-scanning their QR is a clean first-time
+     * add. Irreversible; the peer isn't notified.
+     */
+    suspend fun forgetContact(ipk: ByteArray) = withContext(Dispatchers.IO) { ffiForgetContact(ipk) }
 
     suspend fun conversations(): List<MessageRecord> = withContext(Dispatchers.IO) { ffiGetConversations() }
 

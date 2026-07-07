@@ -36,7 +36,7 @@ fun HomeFab(appViewModel: AppVM) {
             )
         }
         FloatingActionButton({
-            appViewModel.navigator.push(Routes.SavedUsers)
+            appViewModel.navigator.push(Routes.Contacts)
         }) {
             DrawableIcon(
                 R.drawable.i_contacts,
