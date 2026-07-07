@@ -3,7 +3,6 @@ package com.promtuz.chat.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,22 +11,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,7 +31,6 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,6 +38,9 @@ import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.RelayStatus
 import com.promtuz.chat.presentation.viewmodel.RelaysVM
 import com.promtuz.chat.presentation.viewmodel.UiRelay
+import com.promtuz.chat.ui.components.AppDropMenu
+import com.promtuz.chat.ui.components.DrawableIcon
+import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.SimpleScreen
 import org.koin.androidx.compose.koinViewModel
 
@@ -178,32 +173,29 @@ private fun StatusBadge(status: RelayStatus, accent: Color) {
 private fun RelayMenu(
     relay: UiRelay, onConnect: () -> Unit, onReset: () -> Unit, onForget: () -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        IconButton(onClick = { expanded = true }, Modifier.size(32.dp)) {
-            Icon(
-                painterResource(R.drawable.i_ellipsis_vertical),
-                contentDescription = "Actions",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(if (relay.isConnected) "Reconnect" else "Connect") },
-                onClick = { expanded = false; onConnect() }
-            )
-            if (relay.canReset) {
-                DropdownMenuItem(
-                    text = { Text("Reset circuit") },
-                    onClick = { expanded = false; onReset() }
-                )
-            }
-            DropdownMenuItem(
-                text = { Text("Forget relay") },
-                onClick = { expanded = false; onForget() }
-            )
-        }
+    val connect by rememberUpdatedState(onConnect)
+    val reset by rememberUpdatedState(onReset)
+    val forget by rememberUpdatedState(onForget)
+    val groups = remember(relay.isConnected, relay.canReset) {
+        listOf(
+            buildList {
+                add(MenuAction(if (relay.isConnected) "Reconnect" else "Connect") { connect() })
+                if (relay.canReset) add(MenuAction("Reset circuit") { reset() })
+            },
+            listOf(MenuAction("Forget relay", destructive = true) { forget() }),
+        )
     }
+    AppDropMenu(
+        anchor = {
+            DrawableIcon(
+                R.drawable.i_ellipsis_vertical,
+                Modifier.padding(4.dp),
+                desc = "Actions",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        groups = groups,
+    )
 }
 
 @Composable

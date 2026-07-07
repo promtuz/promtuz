@@ -3,15 +3,11 @@ package com.promtuz.chat.ui.components
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
@@ -26,8 +22,6 @@ import com.promtuz.chat.ui.theme.gradientScrim
 fun HomeTopBar(
     appViewModel: AppVM,
 ) {
-    val menuExpanded = remember { mutableStateOf(false) }
-
     TopAppBar(
         modifier = Modifier.background(gradientScrim()),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
@@ -62,11 +56,6 @@ fun HomeTopBar(
             )
         },
         actions = {
-            Box {
-                IconButton({ menuExpanded.value = !menuExpanded.value }) {
-                    DrawableIcon(R.drawable.i_ellipsis_vertical)
-                }
-                HomeMoreMenu(appViewModel, menuExpanded)
-            }
+            HomeMoreMenu(appViewModel)
         })
 }
