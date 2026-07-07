@@ -606,21 +606,27 @@ async fn process_deliver(
                 bail!("invalid UTF-8");
             };
             let timestamp = systime().as_secs();
-            let saved = match Message::save_incoming(*msg.from, &content, timestamp) {
-                Ok(m) => m,
+            match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp) {
+                Ok(Some(saved)) => {
+                    info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
+                    MessageEv::Received {
+                        id: saved.inner.id,
+                        from: *msg.from,
+                        content,
+                        timestamp,
+                    }
+                    .emit();
+                },
+                // Relay redelivered a dispatch_id we already stored: no
+                // re-emit, but still Ok so the caller acks and the relay GCs.
+                Ok(None) => {
+                    debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&msg.from[..4]));
+                },
                 Err(e) => {
                     warn!("MESSAGE: failed to save incoming: {e}");
                     bail!("save failed: {e}");
                 },
-            };
-            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
-            MessageEv::Received {
-                id: saved.inner.id,
-                from: *msg.from,
-                content,
-                timestamp,
             }
-            .emit();
         },
         Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
