@@ -108,7 +108,6 @@ use tokio::sync::Mutex as TokMutex;
 
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
-use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
 use crate::db::mls::stash_db_handle;
 use crate::db::outbox::OpType;
@@ -556,20 +555,12 @@ pub async fn attempt_send<C: DhtClient>(
     // 2. Identity material we need for both sign + group lazy-create.
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
 
-    // The MLS layer needs the IPK *secret half* for envelope signing.
-    // We never let it leak — `IdentitySigner::sign` decrypts and signs
-    // in one shot, but for the multi-step send path we hold a
-    // `SigningKey` for the duration of the call (zeroized on drop).
-    let ipk_signer: SigningKey = {
-        // Keystore decrypt happens behind IdentitySigner; for the MLS
-        // path we open the data layer one extra time. The Zeroizing
-        // wrapper is dropped at the end of this block.
-        IdentitySigner::sign(b"phase4 ipk lookup").map_err(|e| anyhow!("ipk lookup: {e}"))?;
-        // The `data::identity::Identity::secret_key_with_manager` is
-        // module-private. We expose the secret via the small helper
-        // below.
-        crate::data::identity::secret_key_signing(&our_ipk)?
-    };
+    // Decrypt the IPK secret ONCE and reuse the signer for every
+    // signature in this send (application envelope + outer DispatchP).
+    // Each decrypt is a StrongBox op (~1s); doing it once per send
+    // instead of once per signature is the difference between a snappy
+    // send and a ~3s one. Zeroized on drop.
+    let ipk_signer: SigningKey = crate::data::identity::secret_key_signing(&our_ipk)?;
 
     // 3. Resolve or lazy-create the implicit 1:1 group.
     //
@@ -674,7 +665,7 @@ pub async fn attempt_send<C: DhtClient>(
         .try_into()
         .expect("dispatch_id is 16 bytes");
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
-    let sig = IdentitySigner::sign(&sig_message)?.to_bytes();
+    let sig = { use ed25519_dalek::Signer; ipk_signer.sign(&sig_message).to_bytes() };
     let fwd = DispatchP {
         to:      Bytes(to),
         from:    Bytes(our_ipk),

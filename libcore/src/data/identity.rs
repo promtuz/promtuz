@@ -12,6 +12,8 @@ use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
@@ -23,6 +25,50 @@ use crate::utils::systime;
 /// Pairing invites live ~10 minutes — long enough to cover async Welcome
 /// delivery + a reconnect, short enough to bound a shoulder-surfed QR.
 const INVITE_TTL_MS: u64 = 10 * 60 * 1000;
+
+/// Opened identity secret, cached for the process lifetime so a StrongBox
+/// `open()` (~1s on real hardware) runs once per launch instead of once per
+/// signature. Keyed by the current IPK: an identity switch (recovery/restore)
+/// changes the IPK, the key stops matching, and the next call re-opens — the
+/// cache is self-busting, no explicit invalidation needed.
+///
+/// Holds one long-lived copy of the raw secret. Accepted exposure:
+/// `IDENTITY_RECOVERY.md` §8 already treats the isk as a bearer secret held
+/// raw in platform escrow and as a BIP39 phrase; a process-lifetime RAM copy
+/// is strictly less exposed. `Zeroizing` clears it on eviction/replacement.
+struct CachedIsk {
+    ipk:    [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
+}
+
+static ISK_CACHE: Lazy<RwLock<Option<CachedIsk>>> = Lazy::new(|| RwLock::new(None));
+
+/// Cache lookup + double-checked open. Pure w.r.t. its inputs so the
+/// hit / miss / identity-switch logic is unit-testable without StrongBox or
+/// the identity DB: `current_ipk` is read cheaply by the caller, `open`
+/// performs the StrongBox decrypt only on a miss.
+fn cached_or_open(
+    cache: &RwLock<Option<CachedIsk>>,
+    current_ipk: [u8; 32],
+    open: impl FnOnce() -> Result<[u8; 32]>,
+) -> Result<Zeroizing<SecretKey>> {
+    if let Some(c) = cache.read().as_ref()
+        && c.ipk == current_ipk
+    {
+        return Ok(Zeroizing::new(SecretKey::from(*c.secret)));
+    }
+    // Miss, or the identity changed. Take the write lock and re-check —
+    // another thread may have opened while we waited on the lock.
+    let mut guard = cache.write();
+    if let Some(c) = guard.as_ref()
+        && c.ipk == current_ipk
+    {
+        return Ok(Zeroizing::new(SecretKey::from(*c.secret)));
+    }
+    let secret = open()?;
+    *guard = Some(CachedIsk { ipk: current_ipk, secret: Zeroizing::new(secret) });
+    Ok(Zeroizing::new(SecretKey::from(secret)))
+}
 
 pub struct Identity {
     inner: IdentityRow,
@@ -144,17 +190,21 @@ impl Identity {
     /// `[u8; 32]` (the previous `secret_key_bytes`) defeated the
     /// `Zeroizing` wrapper and let the secret persist on caller stacks.
     pub(super) fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
-        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
-        let conn = IDENTITY_DB.lock();
-
-        Ok(conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {
-            let eisk: Vec<u8> = row.get("enc_isk")?;
-            let secret = store.open(eisk).map_err(|_| rusqlite::Error::UnwindingPanic)?;
-            let secret: [u8; 32] =
-                secret.try_into().map_err(|_| rusqlite::Error::UnwindingPanic)?;
-
-            Ok(Zeroizing::new(SecretKey::from(secret)))
-        })?)
+        // Cheap sqlite read (no StrongBox) — the cache key. A recovery/restore
+        // that swaps the identity changes this and self-busts the cache.
+        let current_ipk = Identity::public_key()?.to_bytes();
+        cached_or_open(&ISK_CACHE, current_ipk, || {
+            let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
+            let conn = IDENTITY_DB.lock();
+            conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {
+                let eisk: Vec<u8> = row.get("enc_isk")?;
+                let secret = store.open(eisk).map_err(|_| rusqlite::Error::UnwindingPanic)?;
+                let secret: [u8; 32] =
+                    secret.try_into().map_err(|_| rusqlite::Error::UnwindingPanic)?;
+                Ok(secret)
+            })
+            .map_err(Into::into)
+        })
     }
 }
 
@@ -248,4 +298,52 @@ fn validate_nickname(name: &str) -> std::result::Result<String, String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{CachedIsk, cached_or_open};
+    use parking_lot::RwLock;
+    use std::cell::Cell;
+
+    #[test]
+    fn opens_once_then_serves_from_cache() {
+        let cache: RwLock<Option<CachedIsk>> = RwLock::new(None);
+        let ipk = [1u8; 32];
+        let opens = Cell::new(0);
+
+        let a = cached_or_open(&cache, ipk, || {
+            opens.set(opens.get() + 1);
+            Ok([9u8; 32])
+        })
+        .unwrap();
+        let b = cached_or_open(&cache, ipk, || {
+            opens.set(opens.get() + 1);
+            Ok([9u8; 32])
+        })
+        .unwrap();
+
+        assert_eq!(opens.get(), 1, "second call must hit the cache, not re-open");
+        assert_eq!(&a[..], &b[..]);
+    }
+
+    #[test]
+    fn ipk_switch_busts_cache() {
+        let cache: RwLock<Option<CachedIsk>> = RwLock::new(None);
+        let opens = Cell::new(0);
+
+        let _a = cached_or_open(&cache, [1u8; 32], || {
+            opens.set(opens.get() + 1);
+            Ok([9u8; 32])
+        })
+        .unwrap();
+        let b = cached_or_open(&cache, [2u8; 32], || {
+            opens.set(opens.get() + 1);
+            Ok([7u8; 32])
+        })
+        .unwrap();
+
+        assert_eq!(opens.get(), 2, "identity switch must re-open");
+        assert_eq!(&b[..], &[7u8; 32][..], "must serve the new identity's secret");
+    }
 }
