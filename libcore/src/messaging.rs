@@ -745,13 +745,21 @@ pub async fn attempt_send<C: DhtClient>(
 /// send. Per-message errors are logged and swallowed — one peer still
 /// missing its KP must not block retrying the rest.
 pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
-    for row in Message::pending_outgoing() {
-        let has_group = Contact::get(&row.peer_ipk)
-            .and_then(|c| c.inner.mls_group_id)
-            .is_some();
-        if has_group {
-            continue;
-        }
+    // Snapshot the no-group rows BEFORE attempting any. The first send to a
+    // peer persists its `mls_group_id`, so a live per-row check would skip
+    // every *later* deferred message to that same peer — orphaning it (pending,
+    // but never enqueued to the outbox, so `reconcile` can't send it either).
+    // `attempt_send` handles a now-existing group fine, so attempting all of
+    // this snapshot is safe.
+    let deferred: Vec<_> = Message::pending_outgoing()
+        .into_iter()
+        .filter(|row| {
+            Contact::get(&row.peer_ipk)
+                .and_then(|c| c.inner.mls_group_id)
+                .is_none()
+        })
+        .collect();
+    for row in deferred {
         let to = row.peer_ipk;
         if let Err(e) = attempt_send(ctx, to, Message { inner: row }).await {
             warn!("MESSAGE: retry_pending_sends: {} still failing: {e}", hex::encode(&to[..4]));
