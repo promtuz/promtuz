@@ -28,8 +28,6 @@ class AppVM(
 ) : ViewModel() {
     private val context: Context get() = application.applicationContext
 
-    var activeChatUser: Chat? = null
-
     var backStack = NavBackStack<NavKey>(if (CoreBridge.shouldLaunchApp()) Routes.App else Routes.Welcome)
     val navigator = AppNavigator(backStack)
 
@@ -91,7 +89,6 @@ class AppVM(
     }
 
     fun openChat(identityKey: Chat) {
-        activeChatUser = identityKey
         navigator.push(Routes.Chat(identityKey.identity.toHex(), identityKey.nickname))
     }
 
