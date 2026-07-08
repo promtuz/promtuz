@@ -656,7 +656,8 @@ async fn process_deliver(
                     info!("MESSAGE: receipt received (handler lands in Task 10)");
                 },
                 Ok(AppPayload::Edit { target, content }) => {
-                    match Message::apply_edit(&msg.from, &target, &content) {
+                    // own=false: a peer may only edit messages IT sent us (outgoing=0).
+                    match Message::apply_edit(&msg.from, &target, &content, false) {
                         Some(row) => {
                             info!("MESSAGE: edit from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Edited { id: row.id, peer: *msg.from, content }.emit();
@@ -670,7 +671,8 @@ async fn process_deliver(
                     }
                 },
                 Ok(AppPayload::Delete { target }) => {
-                    match Message::apply_delete(&msg.from, &target) {
+                    // own=false: a peer may only delete messages IT sent us (outgoing=0).
+                    match Message::apply_delete(&msg.from, &target, false) {
                         Some(row) => {
                             info!("MESSAGE: delete from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Deleted { id: row.id, peer: *msg.from }.emit();

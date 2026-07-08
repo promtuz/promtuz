@@ -269,7 +269,8 @@ pub async fn send(to: [u8; 32], content: String) -> Result<()> {
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
 pub async fn edit(to: [u8; 32], target: [u8; 16], content: String) -> Result<()> {
-    if let Some(row) = Message::apply_edit(&to, &target, &content) {
+    // own=true: we only edit our own sent messages (outgoing=1).
+    if let Some(row) = Message::apply_edit(&to, &target, &content, true) {
         MessageEv::Edited { id: row.id, peer: to, content: content.clone() }.emit();
     }
     send_control(to, AppPayload::Edit { target, content }).await
@@ -279,8 +280,10 @@ pub async fn edit(to: [u8; 32], target: [u8; 16], content: String) -> Result<()>
 /// Delete); otherwise it's a local-only removal, no wire signal.
 pub async fn delete(to: [u8; 32], target: [u8; 16], for_everyone: bool) -> Result<()> {
     let row = if for_everyone {
-        Message::apply_delete(&to, &target)
+        // own=true: delete-for-everyone only tombstones our own sent messages.
+        Message::apply_delete(&to, &target, true)
     } else {
+        // Delete-for-me is a local-only hide; any message in our view is fair game.
         Message::hard_delete(&to, &target)
     };
     if let Some(row) = row {

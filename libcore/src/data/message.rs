@@ -133,17 +133,22 @@ impl Message {
     }
 
     /// Apply an edit — our own (optimistic) or an inbound peer `Edit`: replace
-    /// the target's text and flag it edited. Keyed on the shared
-    /// `(peer_ipk, dispatch_id)` so it hits the one row regardless of direction.
-    /// A no-op on an already-deleted target. Returns the updated row (for the UI
-    /// event), or `None` if the target isn't present.
-    pub fn apply_edit(peer_ipk: &[u8; 32], dispatch_id: &[u8], content: &str) -> Option<MessageRow> {
+    /// the target's text and flag it edited. `own` is the authorship guard:
+    /// only the author may edit a message, so a local edit passes `true`
+    /// (touches our `outgoing = 1` rows) and an inbound peer edit passes
+    /// `false` (touches only rows the peer sent us, `outgoing = 0`). Without
+    /// it a peer could rewrite a message WE authored — it knows our
+    /// dispatch_ids from the wire. No-op on an already-deleted target. Returns
+    /// the updated row (for the UI event), or `None` if unauthorized/absent.
+    pub fn apply_edit(
+        peer_ipk: &[u8; 32], dispatch_id: &[u8], content: &str, own: bool,
+    ) -> Option<MessageRow> {
         let conn = MESSAGES_DB.lock();
         let n = conn
             .execute(
                 "UPDATE messages SET content = ?1, edited = 1 \
-                 WHERE peer_ipk = ?2 AND dispatch_id = ?3 AND deleted = 0",
-                (content, peer_ipk.as_slice(), dispatch_id),
+                 WHERE peer_ipk = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0",
+                (content, peer_ipk.as_slice(), dispatch_id, own),
             )
             .ok()?;
         if n == 0 {
@@ -158,14 +163,16 @@ impl Message {
     }
 
     /// Tombstone a message (delete-for-everyone): clear its text, flag deleted.
-    /// Keyed on `(peer_ipk, dispatch_id)`. Returns the updated row.
-    pub fn apply_delete(peer_ipk: &[u8; 32], dispatch_id: &[u8]) -> Option<MessageRow> {
+    /// Same authorship guard as [`Self::apply_edit`] — `own = true` for our own
+    /// delete, `false` for an inbound peer delete — so neither side can
+    /// tombstone the other's authored messages. Returns the updated row.
+    pub fn apply_delete(peer_ipk: &[u8; 32], dispatch_id: &[u8], own: bool) -> Option<MessageRow> {
         let conn = MESSAGES_DB.lock();
         let n = conn
             .execute(
                 "UPDATE messages SET content = '', deleted = 1, edited = 0 \
-                 WHERE peer_ipk = ?1 AND dispatch_id = ?2",
-                (peer_ipk.as_slice(), dispatch_id),
+                 WHERE peer_ipk = ?1 AND dispatch_id = ?2 AND outgoing = ?3",
+                (peer_ipk.as_slice(), dispatch_id, own),
             )
             .ok()?;
         if n == 0 {
