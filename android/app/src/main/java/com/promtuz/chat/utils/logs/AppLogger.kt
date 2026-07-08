@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import timber.log.Timber
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicLong
 
 data class AppLog(
     val time: Long,
@@ -13,7 +14,13 @@ data class AppLog(
     val message: String,
     val t: Throwable?,
 ) {
+    // Stable, unique per entry — content+time can repeat within a millisecond, so hashCode is not a
+    // safe LazyColumn key (duplicate-key crash). Body val, so it stays out of equals/hashCode.
+    val id: Long = nextId.getAndIncrement()
+
     companion object {
+        private val nextId = AtomicLong(0)
+
         /**
          * Returns logcat priority based on given character
          */

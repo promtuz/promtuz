@@ -90,7 +90,7 @@ fun LogsContainer(
         verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.Bottom),
         reverseLayout = true
     ) {
-        itemsIndexed(logs, key = { _, it -> it.hashCode() }) { i, log ->
+        itemsIndexed(logs, key = { _, it -> it.id }) { i, log ->
             SelectionContainer(Modifier.fillMaxWidth()) {
                 LogEntry(log, i == 0)
             }
