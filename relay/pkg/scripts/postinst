@@ -12,17 +12,21 @@ install -d -o pzrelay -g pzrelay -m 0700 /etc/promtuz/keys/relay
 
 systemctl daemon-reload >/dev/null 2>&1 || true
 
-# On upgrade, pick up the new binary immediately. try-restart only acts if the
-# service is already running, so it's a no-op on a fresh (not-yet-enabled)
-# install — the operator still runs `enable --now` per the steps below.
-systemctl try-restart pzrelay >/dev/null 2>&1 || true
+# Fresh install ($2 empty): enable + start now. The relay generates its key,
+# writes a CSR, and waits for the signed cert (ensure_enrolled never
+# crash-loops), so starting before enrollment is safe and gets the CSR written
+# immediately. Upgrade: try-restart to pick up the new binary if running.
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    systemctl enable --now pzrelay >/dev/null 2>&1 || true
+else
+    systemctl try-restart pzrelay >/dev/null 2>&1 || true
+fi
 
 cat <<'EOF'
-pzrelay installed. Next:
-  1. systemctl enable --now pzrelay        # generates the key, writes the CSR, waits
-  2. certgen sign /etc/promtuz/keys/relay/relay.csr        (on your CA box)
-  3. copy the signed cert to /etc/promtuz/certs/relay.crt  # starts automatically
-Edit /etc/promtuz/relay.toml for the resolver seed + bind address.
+pzrelay installed, started, and waiting for its cert. One step left, on your CA box:
+  1. certgen sign /etc/promtuz/keys/relay/relay.csr
+  2. drop the signed cert at /etc/promtuz/certs/relay.crt   # starts serving automatically
+Edit /etc/promtuz/relay.toml for a non-default resolver seed or bind address.
 EOF
 
 exit 0

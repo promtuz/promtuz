@@ -12,16 +12,20 @@ install -d -o pzresolver -g pzresolver -m 0700 /etc/promtuz/keys/resolver
 
 systemctl daemon-reload >/dev/null 2>&1 || true
 
-# On upgrade, pick up the new binary immediately. try-restart only acts if the
-# service is already running, so it's a no-op on a fresh (not-yet-enabled)
-# install — the operator still runs `enable --now` per the steps below.
-systemctl try-restart pzresolver >/dev/null 2>&1 || true
+# Fresh install ($2 empty): enable + start now. The resolver generates its key,
+# writes a CSR, and waits for the signed cert (ensure_enrolled never
+# crash-loops), so starting before enrollment is safe and gets the CSR written
+# immediately. Upgrade: try-restart to pick up the new binary if running.
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    systemctl enable --now pzresolver >/dev/null 2>&1 || true
+else
+    systemctl try-restart pzresolver >/dev/null 2>&1 || true
+fi
 
 cat <<'EOF'
-pzresolver installed. Next:
-  1. systemctl enable --now pzresolver     # generates the key, writes the CSR, waits
-  2. certgen sign /etc/promtuz/keys/resolver/resolver.csr  (on your CA box)
-  3. copy the signed cert to /etc/promtuz/certs/resolver.crt  # starts automatically
+pzresolver installed, started, and waiting for its cert. One step left, on your CA box:
+  1. certgen sign /etc/promtuz/keys/resolver/resolver.csr
+  2. drop the signed cert at /etc/promtuz/certs/resolver.crt   # starts serving automatically
 EOF
 
 exit 0

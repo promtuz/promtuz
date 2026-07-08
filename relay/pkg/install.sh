@@ -43,8 +43,9 @@ apt-get install -y pzrelay unattended-upgrades
 
 cat <<EOF
 
-pzrelay installed from the '$CHANNEL' channel.
-Next: edit /etc/pzrelay/relay.toml, provision certs, then
-      systemctl enable --now pzrelay
+pzrelay installed from the '$CHANNEL' channel — service started, waiting for its cert.
+One step left, on your CA box:
+  1. certgen sign /etc/promtuz/keys/relay/relay.csr
+  2. drop the signed cert at /etc/promtuz/certs/relay.crt   # starts serving automatically
 Updates apply automatically (unattended-upgrades, daily); config is preserved.
 EOF
