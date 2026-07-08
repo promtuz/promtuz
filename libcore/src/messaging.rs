@@ -443,11 +443,14 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     // would never decrypt anything. The K-fan-out RPC now returns
     // `Err(QuorumNotMet { … })` rather than `Ok(Failed)`, so any
     // error here is load-bearing.
-    if let Err(e) = ctx.dht.publish_welcome_to_homes(&env).await {
+    // Live-push the Welcome (same Dispatch path as messages). On failure roll
+    // back the group: else we persist an mls_group_id the peer never got a
+    // Welcome for, and every later send encrypts to a group of one.
+    if let Err(e) = ctx.dht.deliver_welcome(&env).await {
         if let Err(de) = group.delete(ctx.provider) {
-            warn!("MLS: publish-failure rollback of group state failed: {de}");
+            warn!("MLS: welcome-delivery rollback of group state failed: {de}");
         }
-        return Err(anyhow!("publish_welcome_to_homes: {e}"));
+        return Err(anyhow!("deliver_welcome: {e}"));
     }
 
     // 7. Merge our own commit.

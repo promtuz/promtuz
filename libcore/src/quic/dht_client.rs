@@ -155,6 +155,12 @@ pub trait DhtClient: Send + Sync + 'static {
         &self, envelope: &WelcomeEnvelopeP,
     ) -> impl Future<Output = DhtClientResult<PublishOutcome>> + Send;
 
+    /// Live-push a Welcome to its recipient via the Dispatch path (replaces
+    /// the publish-to-stash model). Online → live; offline → queued.
+    fn deliver_welcome(
+        &self, envelope: &WelcomeEnvelopeP,
+    ) -> impl Future<Output = DhtClientResult<()>> + Send;
+
     /// Drain own welcomes from the K=3 homes of the user's IPK.
     /// Concrete impls fan out a `WelcomeFetch` and merge unique
     /// `(welcome_id, envelope)` pairs (the home dedupes by
@@ -202,6 +208,12 @@ impl DhtClient for NotWiredDhtClient {
     async fn publish_welcome_to_homes(
         &self, _envelope: &WelcomeEnvelopeP,
     ) -> DhtClientResult<PublishOutcome> {
+        Err(DhtClientError::NotConfigured)
+    }
+
+    async fn deliver_welcome(
+        &self, _envelope: &WelcomeEnvelopeP,
+    ) -> DhtClientResult<()> {
         Err(DhtClientError::NotConfigured)
     }
 
@@ -335,6 +347,21 @@ pub(crate) mod tests {
             Ok(PublishOutcome::Stored)
         }
 
+        async fn deliver_welcome(
+            &self, envelope: &WelcomeEnvelopeP,
+        ) -> DhtClientResult<()> {
+            // Mirror publish's side effects so fetch_welcomes round-trips work.
+            self.welcomes_published.lock().push(envelope.clone());
+            let id_src = blake3::hash(&envelope.welcome_blob.0);
+            let mut id = [0u8; 8];
+            id.copy_from_slice(&id_src.as_bytes()[..8]);
+            self.welcomes_pending.lock().push(WelcomeEntry {
+                welcome_id: id.into(),
+                envelope:   envelope.clone(),
+            });
+            Ok(())
+        }
+
         async fn fetch_welcomes(&self) -> DhtClientResult<Vec<WelcomeEntry>> {
             // Fake returns a snapshot but doesn't auto-clear; tests ack
             // explicitly via `ack_welcomes`.
@@ -352,6 +379,23 @@ pub(crate) mod tests {
             self.welcome_acks.lock().push(welcome_ids.to_vec());
             Ok(())
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deliver_welcome_records_pushed_envelope() {
+        let c = FakeDhtClient::default();
+        let env = WelcomeEnvelopeP {
+            version:       0,
+            group_id:      [0u8; 32].into(),
+            sender_ipk:    [0u8; 32].into(),
+            recipient_ipk: [0u8; 32].into(),
+            welcome_blob:  common::types::bytes::ByteVec(vec![1, 2, 3]),
+            kp_ref_used:   [0u8; 32].into(),
+            sender_sig:    [0u8; 64].into(),
+            pairing:       None,
+        };
+        c.deliver_welcome(&env).await.expect("deliver");
+        assert_eq!(c.welcomes_published.lock().len(), 1, "must record the pushed welcome");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -568,6 +568,14 @@ async fn handle_deliver(
 /// stream (batch-acked via `AckDrain`). `Ok(())` means the message
 /// reached a terminal state (stored / buffered / correctly dropped);
 /// `Err` means it was dropped without effect.
+/// True if `payload` is an `MlsEnvelopeP::Welcome`. Pure → gate is testable.
+fn is_welcome_envelope(payload: &[u8]) -> bool {
+    matches!(
+        common::proto::mls_wire::MlsEnvelopeP::deser(payload),
+        Ok(common::proto::mls_wire::MlsEnvelopeP::Welcome(_))
+    )
+}
+
 async fn process_deliver(
     msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
@@ -575,9 +583,9 @@ async fn process_deliver(
     // hand off to `api::messaging::process_inbound_envelope` rather
     // than the v2 shared-key decrypt.
     //
-    // Contact-first gating: anything from an IPK we don't have on
-    // file is dropped (mirrors the v2 receive path).
-    if !Contact::exists(&msg.from) {
+    // Drop Application envelopes from unknown senders. A Welcome from a
+    // stranger is a legit first-pair — let it reach the invite gate downstream.
+    if !is_welcome_envelope(&msg.payload) && !Contact::exists(&msg.from) {
         info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
         bail!("unknown sender");
     }
@@ -984,5 +992,33 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), join).await
             .expect("scheduler exits within 1s of cancel");
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use common::proto::mls_wire::MlsEnvelopeP;
+    use common::proto::mls_wire::WelcomeEnvelopeP;
+    use common::proto::pack::Packer;
+
+    use super::is_welcome_envelope;
+
+    #[test]
+    fn welcome_envelope_bypasses_contact_gate() {
+        // A garbage / non-Welcome payload must stay gated (returns false).
+        assert!(!is_welcome_envelope(b"not an envelope"), "garbage must stay gated");
+        // A real Welcome envelope must be recognized so it bypasses the gate.
+        let env = WelcomeEnvelopeP {
+            version:       0,
+            group_id:      [0u8; 32].into(),
+            sender_ipk:    [0u8; 32].into(),
+            recipient_ipk: [0u8; 32].into(),
+            welcome_blob:  common::types::bytes::ByteVec(vec![9, 9, 9]),
+            kp_ref_used:   [0u8; 32].into(),
+            sender_sig:    [0u8; 64].into(),
+            pairing:       None,
+        };
+        let bytes = MlsEnvelopeP::Welcome(env).ser().expect("ser");
+        assert!(is_welcome_envelope(&bytes), "a Welcome envelope must bypass the contact gate");
     }
 }

@@ -17,10 +17,15 @@
 
 use common::proto::Sender;
 use common::proto::client_rel::CRelayPacket;
+use common::proto::client_rel::DispatchAckP;
+use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::mls_wire::KpPublishMode;
+use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
+use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::WelcomeEntry;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::kp_fetch_wrap_signing_input;
@@ -30,8 +35,10 @@ use common::proto::mls_wire::kp_refill_signing_input;
 use common::proto::mls_wire::welcome_ack_signing_input;
 use common::proto::mls_wire::welcome_fetch_signing_input;
 use common::proto::mls_wire::welcome_publish_wrap_signing_input;
+use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::types::bytes::ByteVec;
 use common::types::bytes::Bytes;
 use quinn::Connection;
 
@@ -190,6 +197,45 @@ impl DhtClient for RelayDhtClient {
         }
     }
 
+    async fn deliver_welcome(&self, envelope: &WelcomeEnvelopeP) -> DhtClientResult<()> {
+        let payload = MlsEnvelopeP::Welcome(envelope.clone())
+            .ser()
+            .map_err(|e| DhtClientError::Protocol(format!("ser welcome envelope: {e}")))?;
+
+        // DispatchP rides a u16 frame; a 1:1 welcome fits, a group one wouldn't.
+        if payload.len() > MAX_FRAMED_MLS_BYTES {
+            return Err(DhtClientError::Protocol(format!(
+                "welcome payload {} exceeds MAX_FRAMED_MLS_BYTES {MAX_FRAMED_MLS_BYTES}",
+                payload.len(),
+            )));
+        }
+
+        let to = envelope.recipient_ipk.0;
+        let id = random_dispatch_id();
+        let sig_message = dispatch_sig_message(&to, &self.user_ipk, &id, &payload);
+        let sig = self.sign(&sig_message)?;
+        let fwd = DispatchP {
+            to:      Bytes(to),
+            from:    Bytes(self.user_ipk),
+            id:      Bytes(id),
+            payload: ByteVec(payload),
+            sig:     Bytes(sig),
+        };
+
+        match self.rpc(CRelayPacket::Dispatch(fwd)).await? {
+            // Delivered (live) / Forwarded / Queued (offline) = relay owns it.
+            SRelayPacket::DispatchAck(
+                DispatchAckP::Delivered | DispatchAckP::Forwarded | DispatchAckP::Queued,
+            ) => Ok(()),
+            // Not stored → caller rolls back the group.
+            SRelayPacket::DispatchAck(other) => Err(DhtClientError::Protocol(format!(
+                "relay rejected welcome dispatch: {other:?}"
+            ))),
+            SRelayPacket::DhtUnavailable => Err(dht_unavailable()),
+            other => Err(unexpected(&other)),
+        }
+    }
+
     async fn fetch_welcomes(&self) -> DhtClientResult<Vec<WelcomeEntry>> {
         let node_id = self.require_home_node_id()?;
         let timestamp = now_ms();
@@ -232,6 +278,15 @@ impl RelayDhtClient {
 
 fn now_ms() -> u64 {
     crate::utils::systime().as_millis() as u64
+}
+
+/// Fresh 16-byte dispatch id — welcomes have no persisted one; recipient dedups on it.
+fn random_dispatch_id() -> [u8; 16] {
+    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+    use ed25519_dalek::ed25519::signature::rand_core::RngCore;
+    let mut id = [0u8; 16];
+    OsRng.fill_bytes(&mut id);
+    id
 }
 
 fn dht_unavailable() -> DhtClientError {
