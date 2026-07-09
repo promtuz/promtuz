@@ -1,146 +1,118 @@
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.promtuz.chat.domain.model.Activity
+import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.ReactionGroup
+import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
-import com.promtuz.chat.domain.model.UiMessagePosition
-import com.promtuz.chat.domain.model.UiMessageStatus
+import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
+import com.promtuz.core.observeQuery
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
-import timber.log.Timber
-import uniffi.core.MessageEvent
 import uniffi.core.MessageRecord
+import uniffi.core.ReactionRecord
 
-class ChatVM(
-    private val application: Application
-) : ViewModel() {
-    private val context: Context get() = application.applicationContext
+/**
+ * Reactive chat. [messages] observes the DB — re-read on every commit touching
+ * messages/reactions — so send / receive / edit / delete / reaction / receipt all
+ * surface as row updates with no hand-patching. [input] is the draft, cleared the
+ * instant [send] fires (so the editor empties immediately). Newest message sits at
+ * index 0 and the list draws reversed, so new messages land at the bottom. Typing
+ * is an ephemeral signal, timed out client-side.
+ */
+class ChatVM(private val application: Application) : ViewModel() {
+    private var peer: ByteArray = ByteArray(32)
+    private var started = false
 
-    private val _messages = MutableStateFlow(emptyList<UiMessage>())
+    private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
     val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
 
-    /** Set by the Chat activity before the screen renders */
-    var peerIpk: ByteArray = ByteArray(32)
-        private set
+    /** Composer draft; two-way bound to the input field, cleared on [send]. */
+    val input = MutableStateFlow("")
 
-    private var initialized = false
+    private val _typing = MutableStateFlow(false)
+    val typing: StateFlow<Boolean> = _typing.asStateFlow()
 
     fun init(peerIpk: ByteArray) {
-        // Guard re-entry: the activity re-calls this on recreation (rotation),
-        // but the ViewModel + its viewModelScope survive — without this we'd
-        // stack a second messageEvents collector each time.
-        if (initialized) return
-        initialized = true
-        this.peerIpk = peerIpk
-        loadMessages()
-        listenForIncoming()
-    }
+        if (started) return
+        started = true
+        peer = peerIpk
 
-    private fun loadMessages() {
         viewModelScope.launch {
-            try {
-                val rows = CoreBridge.messages(peerIpk, 50, "")
-                _messages.value = rows.toUi()
-            } catch (e: Exception) {
-                Timber.tag("ChatVM").e(e, "Failed to load messages")
-            }
+            observeQuery(setOf("messages", "reactions")) { load() }.collect { _messages.value = it }
         }
-    }
 
-    private fun listenForIncoming() {
+        var expiry: Job? = null
         viewModelScope.launch {
-            CoreBridge.messageEvents.collect { event ->
-                when (event) {
-                    is MessageEvent.Received -> {
-                        if (event.from.contentEquals(peerIpk)) {
-                            appendMessage(UiMessage(
-                                event.id,
-                                event.content,
-                                false,
-                                UiMessagePosition.Single,
-                                event.timestamp.toLong() * 1000,
-                                null
-                            ))
-                        }
-                    }
-                    is MessageEvent.Sent -> {
-                        if (event.to.contentEquals(peerIpk)) {
-                            appendMessage(UiMessage(
-                                event.id,
-                                event.content,
-                                true,
-                                UiMessagePosition.Single,
-                                event.timestamp.toLong() * 1000,
-                                UiMessageStatus.Sent
-                            ))
-                        }
-                    }
-                    is MessageEvent.Failed -> {
-                        Timber.tag("ChatVM").w("Message failed: ${event.reason}")
-                    }
+            CoreBridge.activity.filter { it.peer.contentEquals(peer) }.collect { sig ->
+                if (Activity.Typing in Activity.fromBits(sig.bits)) {
+                    _typing.value = true
+                    expiry?.cancel()
+                    expiry = launch { delay(TYPING_TTL_MS); _typing.value = false }
+                } else {
+                    expiry?.cancel()
+                    _typing.value = false
                 }
             }
         }
     }
 
-    private fun appendMessage(msg: UiMessage) {
-        _messages.update { current ->
-            // Don't add duplicates (if it was already loaded from DB)
-            if (current.any { it.id == msg.id }) return@update current
-            recomputePositions(current + msg)
-        }
+    private suspend fun load(): List<UiMessage> {
+        val rows = CoreBridge.messages(peer, 200)                    // oldest-first
+        val byMsg = CoreBridge.reactions(peer).groupBy { it.dispatchId.toHex() }
+        // reversed → newest at index 0 → drawn at the bottom under reverseLayout
+        return rows.asReversed().map { it.toUi(byMsg) }
     }
 
-    fun dispatchMessage(content: String) {
-        viewModelScope.launch {
-            try {
-                CoreBridge.sendMessage(peerIpk, content)
-            } catch (e: Exception) {
-                Timber.tag("ChatVM").e(e, "Failed to send message")
-            }
-        }
+    fun send() {
+        val text = input.value.trim()
+        if (text.isEmpty()) return
+        input.value = ""
+        fire { CoreBridge.sendMessage(peer, text) }
     }
 
-    private fun List<MessageRecord>.toUi(): List<UiMessage> = mapIndexed { i, m ->
-        val prev = getOrNull(i - 1)
-        val next = getOrNull(i + 1)
+    fun edit(dispatchIdHex: String, text: String) =
+        fire { CoreBridge.editMessage(peer, dispatchIdHex.fromHex(), text) }
 
-        val samePrev = prev?.outgoing == m.outgoing
-        val sameNext = next?.outgoing == m.outgoing
+    fun delete(dispatchIdHex: String, forEveryone: Boolean) =
+        fire { CoreBridge.deleteMessage(peer, dispatchIdHex.fromHex(), forEveryone) }
 
-        val position = when {
-            samePrev && sameNext -> UiMessagePosition.Middle
-            samePrev && !sameNext -> UiMessagePosition.Start
-            !samePrev && sameNext -> UiMessagePosition.End
-            else -> UiMessagePosition.Single
-        }
+    fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
+        fire { CoreBridge.react(peer, dispatchIdHex.fromHex(), emoji, add) }
 
-        UiMessage(
-            m.id, m.content, m.outgoing, position, m.timestamp.toLong() * 1000, UiMessageStatus.entries[m.status.toInt()]
-        )
+    private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
+
+    private companion object {
+        const val TYPING_TTL_MS = 6_000L
     }
+}
 
-    private fun recomputePositions(list: List<UiMessage>): List<UiMessage> =
-        list.mapIndexed { i, m ->
-            val prev = list.getOrNull(i - 1)
-            val next = list.getOrNull(i + 1)
-
-            val samePrev = prev?.isSent == m.isSent
-            val sameNext = next?.isSent == m.isSent
-
-            val position = when {
-                samePrev && sameNext -> UiMessagePosition.Middle
-                samePrev && !sameNext -> UiMessagePosition.Start
-                !samePrev && sameNext -> UiMessagePosition.End
-                else -> UiMessagePosition.Single
-            }
-
-            UiMessage(m.id, m.content, m.isSent, position, m.timestamp, m.status)
-        }
+private fun MessageRecord.toUi(reactionsByMsg: Map<String, List<ReactionRecord>>): UiMessage {
+    val didHex = dispatchId?.toHex()
+    val reactions = didHex?.let { reactionsByMsg[it] }
+        ?.groupBy { it.emoji }
+        ?.map { (emoji, rs) -> ReactionGroup(emoji, rs.size, rs.any { it.mine }) }
+        ?: emptyList()
+    return UiMessage(
+        key = didHex ?: id,
+        localId = id,
+        dispatchIdHex = didHex,
+        content = MessageContent.Text(content),
+        outgoing = outgoing,
+        status = SendStatus.from(status.toInt()),
+        edited = edited,
+        deleted = deleted,
+        timestampMs = timestamp.toLong() * 1000,
+        reactions = reactions,
+    )
 }

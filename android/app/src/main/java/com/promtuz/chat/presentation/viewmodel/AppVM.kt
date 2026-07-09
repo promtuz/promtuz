@@ -7,18 +7,20 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
-import com.promtuz.chat.domain.model.Chat
-import com.promtuz.chat.domain.model.LastMessage
+import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
+import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import com.promtuz.chat.presentation.state.ConnectionState as CS
@@ -37,11 +39,10 @@ class AppVM(
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
 
-    private val _chats = MutableStateFlow(emptyList<Chat>())
-    val chats: StateFlow<List<Chat>> = _chats.asStateFlow()
-
-    private val _chatsLoading = MutableStateFlow(false)
-    val chatsLoading: StateFlow<Boolean> = _chatsLoading.asStateFlow()
+    /** Home chat list — reactive: re-reads whenever contacts or messages change. */
+    val chats: StateFlow<List<ChatSummary>> =
+        observeQuery(setOf("contacts", "messages")) { loadSummaries() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Invite-link confirmation sheet; null when hidden. Driven by deeplinks. */
     private val _invite = MutableStateFlow<InviteSheet?>(null)
@@ -73,14 +74,6 @@ class AppVM(
                 }
         }
 
-        // Listen for incoming messages to update chat list
-        viewModelScope.launch {
-            bridge.messageEvents.collect {
-                refreshChats()
-            }
-        }
-
-        refreshChats()
     }
 
     companion object {
@@ -88,8 +81,8 @@ class AppVM(
         private val log = { Timber.tag(TAG) }
     }
 
-    fun openChat(identityKey: Chat) {
-        navigator.push(Routes.Chat(identityKey.identity.toHex(), identityKey.nickname))
+    fun openChat(peerHex: String, name: String) {
+        navigator.push(Routes.Chat(peerHex, name))
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
@@ -112,7 +105,6 @@ class AppVM(
             try {
                 bridge.pairFromQr(bytes)
                 _invite.value = InviteSheet.Added(name)
-                refreshChats()
             } catch (e: Exception) {
                 Timber.tag(TAG).w(e, "pairFromQr failed")
                 _invite.value = InviteSheet.Invalid
@@ -130,32 +122,20 @@ class AppVM(
         pendingInvite?.let { showInvite(it); pendingInvite = null }
     }
 
-    fun refreshChats() {
-        viewModelScope.launch {
-            _chatsLoading.value = true
-            try {
-                val contacts = bridge.contacts()
-                val conversations = bridge.conversations()
-
-                // Build a map of peer_ipk -> latest message
-                val convMap = conversations.associateBy { it.peerIpk.toList() }
-
-                _chats.value = contacts.map { contact ->
-                    val lastMsg = convMap[contact.ipk.toList()]
-                    Chat(
-                        identity = contact.ipk,
-                        nickname = contact.name,
-                        lastMessage = if (lastMsg != null) {
-                            LastMessage(lastMsg.content, lastMsg.timestamp.toLong() * 1000)
-                        } else {
-                            LastMessage(null, contact.addedAt.toLong() * 1000)
-                        }
-                    )
-                }.sortedByDescending { it.lastMessage.timestamp }
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to load chats")
-            }
-            _chatsLoading.value = false
-        }
+    private suspend fun loadSummaries(): List<ChatSummary> = try {
+        val contacts = bridge.contacts()
+        val convByPeer = bridge.conversations().associateBy { it.peerIpk.toList() }
+        contacts.map { c ->
+            val last = convByPeer[c.ipk.toList()]
+            ChatSummary(
+                peerHex = c.ipk.toHex(),
+                name = c.name,
+                lastPreview = last?.content,
+                timestampMs = (last?.timestamp ?: c.addedAt).toLong() * 1000,
+            )
+        }.sortedByDescending { it.timestampMs }
+    } catch (e: Exception) {
+        Timber.tag(TAG).e(e, "Failed to load chats")
+        emptyList()
     }
 }

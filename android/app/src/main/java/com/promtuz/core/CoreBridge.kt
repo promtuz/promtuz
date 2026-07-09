@@ -42,8 +42,8 @@ import com.promtuz.core.adapter.PresenceSignal
  * Idiomatic Kotlin facade over the uniffi-generated bindings — the single
  * seam the app talks to. Blocking DB/setup calls run on [Dispatchers.IO];
  * fallible calls throw `uniffi.core.CoreException`. Fire-and-forget calls
- * (sendMessage, pairFromQr) return once queued — their real outcome arrives
- * via [messageEvents] / the contact list, so Ok is NOT "delivered/paired".
+ * (sendMessage, pairFromQr) return once queued — their real outcome surfaces
+ * by observing the DB (the [dbChanged] doorbell), so Ok is NOT "delivered/paired".
  *
  * IPKs are always 32 bytes; callers pass them straight through as ByteArray.
  */

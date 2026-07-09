@@ -4,11 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.entryProvider
-import com.promtuz.chat.domain.model.Chat
-import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
@@ -42,9 +39,8 @@ fun AppNavigation(
             }
             entry<Routes.Chat> { key ->
                 val chatVM = koinViewModel<ChatVM>()
-                val identity = remember(key.user) { key.user.fromHex() }
-                LaunchedEffect(identity) { chatVM.init(identity) }
-                ChatScreen(Chat(identity = identity, nickname = key.name, lastMessage = LastMessage(null, 0)), chatVM)
+                LaunchedEffect(key.user) { chatVM.init(key.user.fromHex()) }
+                ChatScreen(key.name, chatVM)
             }
             entry<Routes.ShareIdentity> {
                 ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
