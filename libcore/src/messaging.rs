@@ -68,10 +68,10 @@ use anyhow::bail;
 use common::PROTOCOL_VERSION;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchP;
-use common::proto::client_rel::EphemeralP;
+use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
-use common::proto::client_rel::ephemeral_sig_message;
+use common::proto::client_rel::activity_sig_message;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
@@ -364,19 +364,19 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
 pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ts = crate::utils::systime().as_millis() as u64;
-    let sig = crate::data::identity::IdentitySigner::sign(&ephemeral_sig_message(
+    let sig = crate::data::identity::IdentitySigner::sign(&activity_sig_message(
         &peer, &our_ipk, activity, ts,
     ))
     .map_err(|e| anyhow!("sign ephemeral: {e}"))?
     .to_bytes();
-    let eph = EphemeralP {
+    let eph = ActivityP {
         to:        Bytes(peer),
         from:      Bytes(our_ipk),
         activity,
         timestamp: ts,
         sig:       Bytes(sig),
     };
-    let bytes = CRelayPacket::Ephemeral(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
+    let bytes = CRelayPacket::Activity(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
 
     let conn = {
         let relay = RELAY.read();

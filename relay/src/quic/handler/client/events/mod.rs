@@ -71,7 +71,7 @@ pub(super) async fn handle_packet(
             mls_relay::handle_ack_welcomes(ctx.clone(), welcome_ids, timestamp, sig.0, tx).await
         },
 
-        Ephemeral(eph) => forward::handle_ephemeral(eph, ctx.clone()).await,
+        Activity(eph) => forward::handle_activity(eph, ctx.clone()).await,
 
         // Ignore Extra
         _ => Ok(()),

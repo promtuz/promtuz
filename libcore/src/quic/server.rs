@@ -507,8 +507,8 @@ impl Relay {
                             )
                             .await
                         },
-                        SRelayPacket::Ephemeral(eph) => {
-                            handle_ephemeral(ipk, eph);
+                        SRelayPacket::Activity(eph) => {
+                            handle_activity(ipk, eph);
                             Ok(())
                         },
                         SRelayPacket::AckAuthRequest {
@@ -569,12 +569,12 @@ async fn handle_deliver(
 /// Process an inbound ephemeral signal (presence/typing): verify it's addressed
 /// to us and authentically signed by a known contact, then surface it. Never
 /// stored — a forged or stranger signal is dropped silently.
-fn handle_ephemeral(our_ipk: VerifyingKey, eph: common::proto::client_rel::EphemeralP) {
+fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::ActivityP) {
     if eph.to.as_slice() != our_ipk.as_bytes().as_slice() {
         return;
     }
     let Ok(vk) = VerifyingKey::from_bytes(&eph.from.0) else { return };
-    let transcript = common::proto::client_rel::ephemeral_sig_message(
+    let transcript = common::proto::client_rel::activity_sig_message(
         &eph.to.0, &eph.from.0, eph.activity, eph.timestamp,
     );
     if vk.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&eph.sig.0)).is_err() {

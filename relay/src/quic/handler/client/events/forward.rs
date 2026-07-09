@@ -6,7 +6,7 @@ use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
-use common::proto::client_rel::EphemeralP;
+use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Packer;
@@ -139,7 +139,7 @@ pub(super) async fn handle_forward(
 ///
 /// MVP: same-relay only. Cross-relay (fan to the recipient's online home) is a
 /// follow-up — an offline-or-remote recipient simply doesn't see the signal.
-pub(super) async fn handle_ephemeral(eph: EphemeralP, ctx: ClientCtxHandle) -> Result<()> {
+pub(super) async fn handle_activity(eph: ActivityP, ctx: ClientCtxHandle) -> Result<()> {
     if eph.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
         return Ok(());
     }
@@ -148,7 +148,7 @@ pub(super) async fn handle_ephemeral(eph: EphemeralP, ctx: ClientCtxHandle) -> R
         return Ok(());
     };
     if let Ok((mut tx, _rx)) = conn.open_bi().await {
-        let _ = SRelayPacket::Ephemeral(eph).send(&mut tx).await;
+        let _ = SRelayPacket::Activity(eph).send(&mut tx).await;
         let _ = tx.finish();
     }
     Ok(())
