@@ -68,8 +68,10 @@ use anyhow::bail;
 use common::PROTOCOL_VERSION;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::EphemeralP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
+use common::proto::client_rel::ephemeral_sig_message;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
@@ -352,6 +354,38 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
         let _ = tx.write_all(&bytes).await;
         let _ = tx.finish();
         let _ = SRelayPacket::unpack(&mut rx).await; // drain ack, ignore
+    }
+    Ok(())
+}
+
+/// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
+/// (`0` = present-idle). Fire-and-forget over the relay, cleartext (not MLS);
+/// dropped if we're offline or the peer isn't online. The relay never queues it.
+pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    let ts = crate::utils::systime().as_millis() as u64;
+    let sig = crate::data::identity::IdentitySigner::sign(&ephemeral_sig_message(
+        &peer, &our_ipk, activity, ts,
+    ))
+    .map_err(|e| anyhow!("sign ephemeral: {e}"))?
+    .to_bytes();
+    let eph = EphemeralP {
+        to:        Bytes(peer),
+        from:      Bytes(our_ipk),
+        activity,
+        timestamp: ts,
+        sig:       Bytes(sig),
+    };
+    let bytes = CRelayPacket::Ephemeral(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
+
+    let conn = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else { return Ok(()) };
+    if let Ok((mut tx, _rx)) = conn.open_bi().await {
+        let _ = tx.write_all(&bytes).await;
+        let _ = tx.finish();
     }
     Ok(())
 }

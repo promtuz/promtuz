@@ -31,6 +31,9 @@ pub trait SecureStore: Send + Sync {
 pub trait CoreEvents: Send + Sync {
     fn on_connection(&self, state: ConnectionState);
     fn on_message(&self, event: MessageEvent);
+    /// A contact's live activity (typing/recording/… bitset; 0 = idle/online).
+    /// Ephemeral — never stored; drop if the peer isn't in the current view.
+    fn on_activity(&self, peer: Vec<u8>, activity: u16);
 }
 
 /// The single error type crossing the FFI boundary.

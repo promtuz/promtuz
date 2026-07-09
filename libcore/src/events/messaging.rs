@@ -49,3 +49,20 @@ impl Emittable for MessageEv {
         }
     }
 }
+
+/// A contact's live activity changed — an ephemeral, unstored signal.
+/// `activity` is an OR of `common::proto::client_rel::ACTIVITY_*` bits;
+/// `0` = present-but-idle. The UI decides how to render (typing dots, etc.).
+#[derive(Debug, Clone)]
+pub struct ActivityEv {
+    pub peer: [u8; 32],
+    pub activity: u16,
+}
+
+impl Emittable for ActivityEv {
+    fn emit(self) {
+        if let Some(events) = crate::platform::EVENTS.get() {
+            events.on_activity(self.peer.to_vec(), self.activity);
+        }
+    }
+}

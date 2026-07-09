@@ -6,6 +6,7 @@ use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::EphemeralP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Packer;
@@ -128,6 +129,28 @@ pub(super) async fn handle_forward(
     let dispatch = store_in_rocks(&ctx, recipient, delivery)?;
     SRelayPacket::DispatchAck(dispatch).send(tx).await?;
 
+    Ok(())
+}
+
+/// Route an ephemeral signal (presence/typing): deliver to the recipient if
+/// online on THIS relay, else drop — never queue. Fire-and-forget (no reply to
+/// the sender). Sender must be the authenticated session (no from-spoofing);
+/// the recipient's libcore re-verifies `sig` for authenticity.
+///
+/// MVP: same-relay only. Cross-relay (fan to the recipient's online home) is a
+/// follow-up — an offline-or-remote recipient simply doesn't see the signal.
+pub(super) async fn handle_ephemeral(eph: EphemeralP, ctx: ClientCtxHandle) -> Result<()> {
+    if eph.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
+        return Ok(());
+    }
+    let recipient_conn = { ctx.relay.clients.read().get(&*eph.to).cloned() };
+    let Some(conn) = recipient_conn else {
+        return Ok(());
+    };
+    if let Ok((mut tx, _rx)) = conn.open_bi().await {
+        let _ = SRelayPacket::Ephemeral(eph).send(&mut tx).await;
+        let _ = tx.finish();
+    }
     Ok(())
 }
 

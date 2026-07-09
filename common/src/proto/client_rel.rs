@@ -139,6 +139,46 @@ pub struct DeliverP {
     pub sig:     Bytes<64>,
 }
 
+/// Activity bits for [`EphemeralP::activity`]. OR them for "several at once".
+/// `0` = present-but-idle (a bare presence heartbeat).
+pub const ACTIVITY_TYPING: u16 = 1 << 0;
+pub const ACTIVITY_RECORDING: u16 = 1 << 1;
+pub const ACTIVITY_CHOOSING_STICKER: u16 = 1 << 2;
+pub const ACTIVITY_CHOOSING_EMOJI: u16 = 1 << 3;
+pub const ACTIVITY_UPLOADING: u16 = 1 << 4;
+
+/// Domain separator for the ephemeral-signal signature.
+pub const EPHEMERAL_SIG_DOMAIN: &[u8] = b"promtuz-ephemeral-v1";
+
+/// Ephemeral peer signal (presence heartbeat / typing / recording / …).
+/// Cleartext and relay-routed (NOT MLS): the relay delivers it only if the
+/// recipient is online and DROPS it otherwise — never queued. Authenticated by
+/// `sig` under `from`, so the recipient (and relay) can reject a forged signal.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct EphemeralP {
+    pub to:        Bytes<32>,
+    pub from:      Bytes<32>,
+    /// OR of `ACTIVITY_*` bits; `0` = present-but-idle.
+    pub activity:  u16,
+    pub timestamp: u64,
+    pub sig:       Bytes<64>,
+}
+
+/// Canonical bytes signed/verified for an [`EphemeralP`].
+/// Layout: `EPHEMERAL_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || activity_be || timestamp_be`
+pub fn ephemeral_sig_message(
+    to: &[u8; 32], from: &[u8; 32], activity: u16, timestamp: u64,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(EPHEMERAL_SIG_DOMAIN.len() + 2 + 32 + 32 + 2 + 8);
+    buf.extend_from_slice(EPHEMERAL_SIG_DOMAIN);
+    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    buf.extend_from_slice(to);
+    buf.extend_from_slice(from);
+    buf.extend_from_slice(&activity.to_be_bytes());
+    buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum DispatchAckP {
     Queued,
@@ -183,6 +223,10 @@ pub enum DispatchAckP {
 pub enum CRelayPacket {
     Query(QueryP),
     Dispatch(DispatchP),
+
+    /// Fire-and-forget ephemeral signal (presence/typing). The relay routes it
+    /// to the recipient if online and drops it otherwise; no reply.
+    Ephemeral(EphemeralP),
 
     /// User acknowledges receiving valid delivery of messages
     DeliverAck,
@@ -332,6 +376,9 @@ pub enum SRelayPacket {
     QueryResult(QueryResultP),
     DispatchAck(DispatchAckP),
     Deliver(DeliverP),
+
+    /// Relay → recipient: an ephemeral signal from a contact (presence/typing).
+    Ephemeral(EphemeralP),
     // /// All the pending deliveries for user in chronological order
     // /// TODO: might need debouncing in future if TOO MANY messages were queued at once
     // QueueDrain(Vec<DeliverP>),

@@ -60,6 +60,20 @@ pub fn edit_message(peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, content: String) ->
     Ok(())
 }
 
+/// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
+/// (0 = present-idle). Fire-and-forget; dropped if we or the peer are offline.
+/// The peer sees it via `on_activity`. Call on typing start/stop (throttled).
+#[uniffi::export]
+pub fn set_activity(peer_ipk: Vec<u8>, activity: u16) -> Result<(), CoreError> {
+    let to = to_ipk32(&peer_ipk)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::set_activity(to, activity).await {
+            log::debug!("MESSAGE: set_activity failed: {e}");
+        }
+    });
+    Ok(())
+}
+
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]
