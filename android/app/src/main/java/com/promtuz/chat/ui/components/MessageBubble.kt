@@ -52,7 +52,7 @@ fun MessageBubble(
                 .widthIn(max = maxBubble)
                 .clip(shape)
                 .background(bubbleColor)
-                .padding(horizontal = 12.dp, vertical = 7.dp),
+                .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
             Text(
                 text = if (msg.deleted) "This message was deleted"
@@ -76,13 +76,19 @@ fun MessageBubble(
             }
 
             Row(
-                Modifier.align(Alignment.End).padding(top = 2.dp),
+                Modifier.align(Alignment.End).padding(top = 3.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (msg.edited && !msg.deleted) Text(
                     "edited",
                     style = MaterialTheme.typography.labelSmall,
-                    color = textColor.copy(alpha = 0.6f),
+                    color = textColor.copy(alpha = 0.55f),
+                )
+                Text(
+                    clock(msg.timestampMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor.copy(alpha = 0.55f),
                 )
                 if (outgoing) Text(
                     tick(msg.status),
@@ -100,3 +106,7 @@ private fun tick(status: SendStatus): String = when (status) {
     SendStatus.Delivered, SendStatus.Read -> "✓✓"
     SendStatus.Failed -> "!"
 }
+
+private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+
+private fun clock(ms: Long): String = clockFormat.format(java.util.Date(ms))

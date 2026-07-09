@@ -15,36 +15,72 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.BubbleStyle
 
 /**
- * Chat-bubble outline: four independent corner radii, GPU-drawn per frame (no
- * cached bitmaps). Merged edges collapse the sender-side corner to the near
- * radius so a run of same-author messages nests; the tail is the sender's bottom
- * corner squared off, only on the last bubble in a group. (A real curved tail
- * nub is a later refinement — this squared corner is the honest first cut.)
+ * Chat-bubble outline — a rounded rect with four independent corner radii, plus
+ * an optional tail curling off the sender's bottom corner (right = outgoing).
+ * Merged edges collapse the sender-side corner so a run of same-author messages
+ * nests; the tail draws only on the last bubble in a group. GPU-drawn per frame.
  */
 class BubbleShape(
     private val topLeft: Dp,
     private val topRight: Dp,
     private val bottomLeft: Dp,
     private val bottomRight: Dp,
+    private val tail: Tail? = null,
+    private val tailSize: Dp = 8.dp,
 ) : Shape {
+    enum class Tail { Left, Right }
+
     override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline {
+        val w = size.width
+        val h = size.height
         fun px(v: Dp) = with(density) { v.toPx() }
+        val tl = px(topLeft); val tr = px(topRight); val bl = px(bottomLeft); val br = px(bottomRight)
+        val ts = px(tailSize)
+
         val path = Path().apply {
-            addRoundRect(
-                RoundRect(
-                    left = 0f, top = 0f, right = size.width, bottom = size.height,
-                    topLeftCornerRadius = CornerRadius(px(topLeft)),
-                    topRightCornerRadius = CornerRadius(px(topRight)),
-                    bottomRightCornerRadius = CornerRadius(px(bottomRight)),
-                    bottomLeftCornerRadius = CornerRadius(px(bottomLeft)),
+            when (tail) {
+                null -> addRoundRect(
+                    RoundRect(
+                        0f, 0f, w, h,
+                        topLeftCornerRadius = CornerRadius(tl),
+                        topRightCornerRadius = CornerRadius(tr),
+                        bottomRightCornerRadius = CornerRadius(br),
+                        bottomLeftCornerRadius = CornerRadius(bl),
+                    )
                 )
-            )
+                // Outgoing: straight right edge down to a point at the bottom-right, then a small
+                // concave scoop back onto the bottom edge — the tail flick.
+                Tail.Right -> {
+                    moveTo(tl, 0f)
+                    lineTo(w - tr, 0f)
+                    quadraticTo(w, 0f, w, tr)
+                    lineTo(w, h)
+                    quadraticTo(w - ts * 0.5f, h - ts * 0.5f, w - ts, h)
+                    lineTo(bl, h)
+                    quadraticTo(0f, h, 0f, h - bl)
+                    lineTo(0f, tl)
+                    quadraticTo(0f, 0f, tl, 0f)
+                    close()
+                }
+                // Incoming: mirror — tail off the bottom-left.
+                Tail.Left -> {
+                    moveTo(tl, 0f)
+                    lineTo(w - tr, 0f)
+                    quadraticTo(w, 0f, w, tr)
+                    lineTo(w, h - br)
+                    quadraticTo(w, h, w - br, h)
+                    lineTo(ts, h)
+                    quadraticTo(ts * 0.5f, h - ts * 0.5f, 0f, h)
+                    lineTo(0f, tl)
+                    quadraticTo(0f, 0f, tl, 0f)
+                    close()
+                }
+            }
         }
         return Outline.Generic(path)
     }
 }
 
-/** The bubble shape for a message from its group position + [style]. Tail on the right for outgoing. */
 @Composable
 fun rememberBubbleShape(
     outgoing: Boolean,
@@ -56,9 +92,10 @@ fun rememberBubbleShape(
     val near = style.nearCornerRadius.dp
     val hasTail = style.tail && !mergedBottom
     val senderTop = if (mergedTop) near else free
-    val senderBottom = if (hasTail) 0.dp else if (mergedBottom) near else free
+    val senderBottom = if (mergedBottom) near else free // only used when there's no tail
+    val tail = if (hasTail) (if (outgoing) BubbleShape.Tail.Right else BubbleShape.Tail.Left) else null
     if (outgoing)
-        BubbleShape(topLeft = free, topRight = senderTop, bottomLeft = free, bottomRight = senderBottom)
+        BubbleShape(free, senderTop, free, senderBottom, tail, style.tailSize.dp)
     else
-        BubbleShape(topLeft = senderTop, topRight = free, bottomLeft = senderBottom, bottomRight = free)
+        BubbleShape(senderTop, free, senderBottom, free, tail, style.tailSize.dp)
 }

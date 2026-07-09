@@ -33,6 +33,7 @@ data class BubbleStyle(
     val cornerRadius: Float = 18f,
     val nearCornerRadius: Float = 6f,
     val tail: Boolean = true,
+    val tailSize: Float = 8f,
 )
 
 /** List layout + grouping. */
