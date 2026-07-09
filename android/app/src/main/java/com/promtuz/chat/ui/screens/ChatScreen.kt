@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,32 +17,37 @@ import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.MessageBubble
+import com.promtuz.chat.ui.components.rememberChatWallpaper
 import kotlin.math.abs
 
 @Composable
 fun ChatScreen(name: String, viewModel: ChatVM) {
     val messages by viewModel.messages.collectAsState()
-    val layout = LocalChatAppearance.current.layout
+    val appearance = LocalChatAppearance.current
+    val layout = appearance.layout
     val mergeWindowMs = layout.mergeWindowSecs * 1000L
+    val wallpaper = rememberChatWallpaper(appearance.wallpaper)
 
     Scaffold(
         topBar = { ChatTopBar(name, viewModel) },
         bottomBar = { ChatBottomBar(viewModel) },
     ) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize().padding(padding),
-            reverseLayout = true,
-        ) {
-            // Newest at index 0, drawn at the bottom (reverseLayout). "Above" a bubble is the
-            // older neighbour (i+1); "below" is the newer (i-1). Same author within the merge
-            // window groups; the gap above each bubble is small inside a group, larger between.
-            itemsIndexed(messages, key = { _, m -> m.key }) { i, m ->
-                val older = messages.getOrNull(i + 1)
-                val newer = messages.getOrNull(i - 1)
-                val mergedTop = older != null && sameGroup(m, older, mergeWindowMs)
-                val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs)
-                val gapAbove = if (mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                MessageBubble(m, mergedTop, mergedBottom, Modifier.padding(top = gapAbove))
+        Box(Modifier.fillMaxSize().then(wallpaper)) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(padding),
+                reverseLayout = true,
+            ) {
+                // Newest at index 0, drawn at the bottom (reverseLayout). "Above" a bubble is the
+                // older neighbour (i+1); "below" is the newer (i-1). Same author within the merge
+                // window groups; the gap above each bubble is small inside a group, larger between.
+                itemsIndexed(messages, key = { _, m -> m.key }) { i, m ->
+                    val older = messages.getOrNull(i + 1)
+                    val newer = messages.getOrNull(i - 1)
+                    val mergedTop = older != null && sameGroup(m, older, mergeWindowMs)
+                    val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs)
+                    val gapAbove = if (mergedTop) layout.messageGap.dp else layout.groupGap.dp
+                    MessageBubble(m, mergedTop, mergedBottom, Modifier.padding(top = gapAbove))
+                }
             }
         }
     }
