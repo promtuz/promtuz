@@ -23,6 +23,17 @@ pub struct MessageRecord {
     pub deleted: bool,
 }
 
+/// One emoji reaction, projected for the client. `mine` is `reactor == self`
+/// (precomputed so the UI needn't hold its own IPK to render).
+#[derive(uniffi::Record)]
+pub struct ReactionRecord {
+    pub dispatch_id: Vec<u8>,
+    pub reactor: Vec<u8>,
+    pub emoji: String,
+    pub timestamp: u64,
+    pub mine: bool,
+}
+
 /// An address-book entry, projected for the client.
 #[derive(uniffi::Record)]
 pub struct ContactInfo {
@@ -72,6 +83,41 @@ pub fn set_activity(peer_ipk: Vec<u8>, activity: u16) -> Result<(), CoreError> {
         }
     });
     Ok(())
+}
+
+/// Add (`add = true`) or remove our own `emoji` reaction on a message
+/// (targeted by 16-byte `dispatch_id`). Fire-and-forget; surfaces via
+/// `on_reaction`. A person may stack several distinct emoji on one message.
+#[uniffi::export]
+pub fn react_message(
+    peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, emoji: String, add: bool,
+) -> Result<(), CoreError> {
+    let to = to_ipk32(&peer_ipk)?;
+    let target = to_did16(&dispatch_id)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::react(to, target, emoji, add).await {
+            log::error!("MESSAGE: react failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// All reactions in a conversation, oldest first. The UI groups by
+/// `dispatch_id`; `mine` marks the caller's own.
+#[uniffi::export]
+pub fn reactions_for(peer_ipk: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError> {
+    let peer = to_ipk32(&peer_ipk)?;
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    Ok(crate::data::reaction::Reaction::for_peer(&peer)
+        .into_iter()
+        .map(|r| ReactionRecord {
+            mine: me.as_ref().is_some_and(|m| m == &r.reactor),
+            dispatch_id: r.dispatch_id,
+            reactor: r.reactor.to_vec(),
+            emoji: r.emoji,
+            timestamp: r.timestamp,
+        })
+        .collect())
 }
 
 /// Subscribe to presence for `contacts` (replaces the prior interest set).
@@ -173,6 +219,7 @@ pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
     }
 
     Message::delete_by_peer(&ipk);
+    crate::data::reaction::Reaction::delete_by_peer(&ipk);
     crate::delivery::forget_target(&ipk);
     if let Err(e) = Contact::delete(&ipk) {
         log::error!("FORGET: contact delete failed: {e}");

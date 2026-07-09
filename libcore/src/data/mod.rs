@@ -2,6 +2,7 @@ pub mod contact;
 pub mod identity;
 pub mod idqr;
 pub mod message;
+pub mod reaction;
 pub mod relay;
 
 use std::str::FromStr;

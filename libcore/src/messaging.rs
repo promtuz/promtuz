@@ -112,12 +112,14 @@ use tokio::sync::Mutex as TokMutex;
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::message::Message;
+use crate::data::reaction::Reaction;
 use crate::db::mls::stash_db_handle;
 use crate::db::outbox::OpType;
 use crate::delivery;
 use crate::delivery::LastOutcome;
 use crate::events::Emittable;
 use crate::events::messaging::MessageEv;
+use crate::events::messaging::ReactionEv;
 use crate::mls::EpochCatchupBuffer;
 use crate::mls::KeyPackageStash;
 use crate::mls::MlsGroupHandle;
@@ -299,7 +301,20 @@ pub async fn delete(to: [u8; 32], target: [u8; 16], for_everyone: bool) -> Resul
     }
 }
 
-/// Send a control `AppPayload` (Edit/Delete) into the existing 1:1 group as an
+/// Add or remove our own emoji reaction on a prior message, then propagate it.
+/// Applied locally first (reactor = us) so the UI reflects it instantly;
+/// best-effort on the wire like edit/delete.
+pub async fn react(to: [u8; 32], target: [u8; 16], emoji: String, add: bool) -> Result<()> {
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    let ts = crate::utils::systime().as_secs();
+    if Reaction::apply(&to, &target, &our_ipk, &emoji, add, ts) {
+        ReactionEv { peer: to, dispatch_id: target, reactor: our_ipk, emoji: emoji.clone(), add }
+            .emit();
+    }
+    send_control(to, AppPayload::React { target, emoji, add }).await
+}
+
+/// Send a control `AppPayload` (Edit/Delete/React) into the existing 1:1 group as an
 /// MLS application message. The group must already exist — you're mutating a
 /// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
 /// the relay queues it for an offline peer; if WE are offline it's dropped.

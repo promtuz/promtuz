@@ -36,6 +36,24 @@ pub struct MessageRow {
 
 from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted });
 
+/// One emoji reaction on a message. Keyed by `reactor` (an IPK, not a
+/// me/them bool) so a multi-member group attributes each reaction to its
+/// author. `peer_ipk` is the conversation scope (the 1:1 peer today; a
+/// group id once group chats exist). `dispatch_id` names the reacted message.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReactionRow {
+    #[serde(with = "serde_bytes")]
+    pub peer_ipk: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pub dispatch_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub reactor: [u8; 32],
+    pub emoji: String,
+    pub timestamp: u64,
+}
+
+from_row!(ReactionRow { peer_ipk, dispatch_id, reactor, emoji, timestamp });
+
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "CREATE TABLE messages (
@@ -55,6 +73,17 @@ const MIGRATION_ARRAY: &[M] = &[
     ),
     M::up("ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;"),
     M::up("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;"),
+    M::up(
+        "CREATE TABLE reactions (
+            peer_ipk BLOB NOT NULL CHECK(length(peer_ipk) = 32),
+            dispatch_id BLOB NOT NULL,
+            reactor BLOB NOT NULL CHECK(length(reactor) = 32),
+            emoji TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            PRIMARY KEY (peer_ipk, dispatch_id, reactor, emoji)
+        ) WITHOUT ROWID;
+    CREATE INDEX idx_reactions_msg ON reactions(peer_ipk, dispatch_id);",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

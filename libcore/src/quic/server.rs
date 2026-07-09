@@ -723,6 +723,21 @@ async fn process_deliver(
                         ),
                     }
                 },
+                Ok(AppPayload::React { target, emoji, add }) => {
+                    // Reactor is the MLS sender (`msg.from`) — attributed to its
+                    // own IPK, so this is already group-correct.
+                    let ts = systime().as_secs();
+                    if crate::data::reaction::Reaction::apply(&msg.from, &target, &msg.from, &emoji, add, ts) {
+                        crate::events::messaging::ReactionEv {
+                            peer: *msg.from,
+                            dispatch_id: target,
+                            reactor: *msg.from,
+                            emoji,
+                            add,
+                        }
+                        .emit();
+                    }
+                },
                 Err(e) => {
                     warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&msg.from[..4]));
                     bail!("bad AppPayload");

@@ -82,3 +82,23 @@ impl Emittable for PresenceEv {
         }
     }
 }
+
+/// A reaction was added or removed. `reactor` is the author's IPK (compare to
+/// self for "mine"); `add` distinguishes add from remove. Group-ready — each
+/// member's reaction carries its own `reactor`.
+#[derive(Debug, Clone)]
+pub struct ReactionEv {
+    pub peer: [u8; 32],
+    pub dispatch_id: [u8; 16],
+    pub reactor: [u8; 32],
+    pub emoji: String,
+    pub add: bool,
+}
+
+impl Emittable for ReactionEv {
+    fn emit(self) {
+        if let Some(events) = crate::platform::EVENTS.get() {
+            events.on_reaction(self.peer.to_vec(), self.dispatch_id.to_vec(), self.reactor.to_vec(), self.emoji, self.add);
+        }
+    }
+}

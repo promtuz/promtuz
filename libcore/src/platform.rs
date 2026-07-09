@@ -37,6 +37,10 @@ pub trait CoreEvents: Send + Sync {
     /// A contact's presence changed. `last_seen`: `None` = online now,
     /// `Some(0)` = offline/unknown, `Some(ms)` = offline since that unix-ms.
     fn on_presence(&self, peer: Vec<u8>, last_seen: Option<u64>);
+    /// A reaction was added (`add = true`) or removed on a message. `reactor`
+    /// is the author's IPK — compare to self for "mine". `peer` is the
+    /// conversation, `dispatch_id` the reacted message.
+    fn on_reaction(&self, peer: Vec<u8>, dispatch_id: Vec<u8>, reactor: Vec<u8>, emoji: String, add: bool);
 }
 
 /// The single error type crossing the FFI boundary.
