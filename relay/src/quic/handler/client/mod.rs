@@ -215,5 +215,9 @@ impl Handler {
         // raced past our `accept_bi` failure would have already replaced
         // the entry; in that case we must leave it alone.
         remove_client_if_same(&relay, ipk.as_bytes(), &self.conn);
+
+        // Presence: record last-seen and notify mutual online contacts. Runs
+        // after the eviction above so this IPK no longer reads as online.
+        events::presence::on_disconnect(&relay, &ipk.to_bytes()).await;
     }
 }

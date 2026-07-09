@@ -34,6 +34,9 @@ pub trait CoreEvents: Send + Sync {
     /// A contact's live activity (typing/recording/… bitset; 0 = idle/online).
     /// Ephemeral — never stored; drop if the peer isn't in the current view.
     fn on_activity(&self, peer: Vec<u8>, activity: u16);
+    /// A contact's presence changed. `last_seen`: `None` = online now,
+    /// `Some(0)` = offline/unknown, `Some(ms)` = offline since that unix-ms.
+    fn on_presence(&self, peer: Vec<u8>, last_seen: Option<u64>);
 }
 
 /// The single error type crossing the FFI boundary.

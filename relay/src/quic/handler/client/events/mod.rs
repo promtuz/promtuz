@@ -18,6 +18,7 @@ pub mod drain_auth;
 pub mod forward;
 pub mod misc;
 pub mod mls_relay;
+pub mod presence;
 
 pub(super) async fn handle_packet(
     packet: CRelayPacket, ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -72,6 +73,8 @@ pub(super) async fn handle_packet(
         },
 
         Activity(eph) => forward::handle_activity(eph, ctx.clone()).await,
+
+        SubscribePresence(sub) => presence::handle_subscribe(sub, ctx.clone()).await,
 
         // Ignore Extra
         _ => Ok(()),

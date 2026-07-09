@@ -69,6 +69,7 @@ use common::PROTOCOL_VERSION;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::ActivityP;
+use common::proto::client_rel::SubscribePresenceP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::client_rel::activity_sig_message;
@@ -378,6 +379,26 @@ pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
     };
     let bytes = CRelayPacket::Activity(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
 
+    let conn = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else { return Ok(()) };
+    if let Ok((mut tx, _rx)) = conn.open_bi().await {
+        let _ = tx.write_all(&bytes).await;
+        let _ = tx.finish();
+    }
+    Ok(())
+}
+
+/// Subscribe to presence for `contacts` (replaces the prior interest set).
+/// Fire-and-forget: the relay pushes a snapshot then deltas via `on_presence`.
+/// The UI re-calls this on connect and whenever the contact list changes.
+pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
+    let sub = SubscribePresenceP { contacts: contacts.into_iter().map(Bytes).collect() };
+    let bytes = CRelayPacket::SubscribePresence(sub)
+        .pack()
+        .map_err(|e| anyhow!("pack subscribe: {e}"))?;
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())

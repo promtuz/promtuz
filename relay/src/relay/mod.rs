@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -85,6 +86,13 @@ pub struct Relay {
     /// observe the same map; cloning the `Arc` is cheap and avoids a
     /// back-pointer from `Dht` → `Relay`.
     pub clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>,
+
+    /// Presence subscriptions of currently-connected clients: subscriber IPK ->
+    /// the set of contact IPKs it wants presence for. Populated by
+    /// `SubscribePresence`, dropped on disconnect. Authorization is mutual —
+    /// A sees B's presence only when `subs[A] ∋ B` and `subs[B] ∋ A` — so this
+    /// one map is both the interest list and the consent list.
+    pub presence_subs: RwLock<HashMap<[u8; 32], HashSet<[u8; 32]>>>,
 }
 
 impl Relay {
@@ -183,6 +191,7 @@ impl Relay {
             dht,
             endpoint,
             clients,
+            presence_subs: RwLock::new(HashMap::new()),
         }
     }
 }

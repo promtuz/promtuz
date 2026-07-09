@@ -74,6 +74,20 @@ pub fn set_activity(peer_ipk: Vec<u8>, activity: u16) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Subscribe to presence for `contacts` (replaces the prior interest set).
+/// Fire-and-forget; a contact's presence surfaces via `on_presence` only when
+/// they've also subscribed to us. Call on connect and when contacts change.
+#[uniffi::export]
+pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
+    let list = contacts.iter().map(|c| to_ipk32(c)).collect::<Result<Vec<_>, _>>()?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::subscribe_presence(list).await {
+            log::debug!("PRESENCE: subscribe failed: {e}");
+        }
+    });
+    Ok(())
+}
+
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]

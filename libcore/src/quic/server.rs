@@ -511,6 +511,10 @@ impl Relay {
                             handle_activity(ipk, eph);
                             Ok(())
                         },
+                        SRelayPacket::Presence(list) => {
+                            handle_presence(list);
+                            Ok(())
+                        },
                         SRelayPacket::AckAuthRequest {
                             requester_relay_id,
                             delivered_ids,
@@ -584,6 +588,18 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
         return;
     }
     crate::events::messaging::ActivityEv { peer: eph.from.0, activity: eph.activity }.emit();
+}
+
+/// Surface a relay-asserted presence push (snapshot or delta). Relay-trusted
+/// (no sig — the relay is the presence authority), but we still drop entries
+/// for non-contacts as defense-in-depth. `last_seen`: `None` = online.
+fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
+    for e in list {
+        if !Contact::exists(&e.who.0) {
+            continue;
+        }
+        crate::events::messaging::PresenceEv { peer: e.who.0, last_seen: e.last_seen }.emit();
+    }
 }
 
 /// Decode, decrypt, persist, and surface one delivered message.

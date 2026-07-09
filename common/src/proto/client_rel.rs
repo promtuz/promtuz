@@ -147,7 +147,7 @@ pub const ACTIVITY_CHOOSING_STICKER: u16 = 1 << 2;
 pub const ACTIVITY_CHOOSING_EMOJI: u16 = 1 << 3;
 pub const ACTIVITY_UPLOADING: u16 = 1 << 4;
 
-/// Domain separator for the ephemeral-signal signature.
+/// Domain separator for the activity-signal signature.
 pub const ACTIVITY_SIG_DOMAIN: &[u8] = b"promtuz-activity-v1";
 
 /// Activity peer signal (presence heartbeat / typing / recording / …).
@@ -177,6 +177,33 @@ pub fn activity_sig_message(
     buf.extend_from_slice(&activity.to_be_bytes());
     buf.extend_from_slice(&timestamp.to_be_bytes());
     buf
+}
+
+/// Client → relay: "push me presence for these contacts." Replaces the
+/// caller's whole interest set each time (idempotent). Unsigned — the relay
+/// acts on the connection-authenticated IPK, exactly like `DrainQueue`.
+///
+/// Authorization is **mutual**: the relay reveals A's presence to B only when
+/// A subscribed to B *and* B subscribed to A. Interest is consent.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct SubscribePresenceP {
+    pub contacts: Vec<Bytes<32>>,
+}
+
+/// Relay → client: one contact's presence, as a single "when last seen" field
+/// (online is just its absence — no redundant bool that could contradict it):
+/// - `None`      → online now
+/// - `Some(0)`   → offline, last-seen unknown (e.g. relay restarted)
+/// - `Some(ms)`  → offline since this unix-ms stamp
+///
+/// Relay-asserted, not peer-signed: the relay inherently knows who is
+/// connected, so it is the authority here (unlike `ActivityP`, peer content the
+/// relay merely forwards). The semi-trusted relay already sees connection
+/// metadata; presence exposes nothing new to it.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct PresenceP {
+    pub who:       Bytes<32>,
+    pub last_seen: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -364,6 +391,15 @@ pub enum CRelayPacket {
         timestamp:   u64,
         sig:         Bytes<64>,
     },
+
+    /// Subscribe (or re-subscribe) to presence for a set of contacts. No reply
+    /// on this stream — the relay pushes a snapshot + later deltas as
+    /// [`SRelayPacket::Presence`] on its own streams.
+    ///
+    /// Appended last on purpose: postcard keys enum variants by declaration
+    /// order, so new variants must go at the end to stay wire-compatible with
+    /// an already-deployed relay (which drops this via its `_` catch-all).
+    SubscribePresence(SubscribePresenceP),
 }
 
 /// Server Relay Packet
@@ -463,6 +499,12 @@ pub enum SRelayPacket {
     /// enable DHT on the home (`relay/config.toml [dht] enabled = true`)
     /// for MLS to function.
     DhtUnavailable,
+
+    /// Relay → subscriber: presence for one or more contacts. A snapshot
+    /// (several entries) right after `SubscribePresence`, then single-entry
+    /// deltas as contacts connect/disconnect. Appended last for postcard
+    /// wire-compat (see [`CRelayPacket::SubscribePresence`]).
+    Presence(Vec<PresenceP>),
 }
 
 #[cfg(feature = "client")]

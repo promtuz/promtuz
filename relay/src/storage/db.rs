@@ -25,6 +25,7 @@ pub const KS_MESSAGES: &str = "messages";
 pub const KS_DHT_QUEUE: &str = "dht_queue";
 pub const KS_DHT_KEYPACKAGE: &str = "dht_keypackage";
 pub const KS_DHT_WELCOME: &str = "dht_welcome";
+pub const KS_LAST_SEEN: &str = "last_seen";
 
 /// Owns the relay's fjall `Database` and its keyspace handles. Shared as
 /// `Arc<Store>` between the `Relay` (message queue) and the `Dht` (home
@@ -35,6 +36,8 @@ pub struct Store {
     pub queue:      Keyspace,
     pub keypackage: Keyspace,
     pub welcome:    Keyspace,
+    /// IPK (32B) -> last-disconnect unix-ms (u64 BE). Powers presence last-seen.
+    pub last_seen:  Keyspace,
 }
 
 impl std::fmt::Debug for Store {
@@ -59,7 +62,22 @@ impl Store {
         let welcome = db
             .keyspace(KS_DHT_WELCOME, KeyspaceCreateOptions::default)
             .context("open `dht_welcome`")?;
-        Ok(Self { db, messages, queue, keypackage, welcome })
+        let last_seen = db
+            .keyspace(KS_LAST_SEEN, KeyspaceCreateOptions::default)
+            .context("open `last_seen`")?;
+        Ok(Self { db, messages, queue, keypackage, welcome, last_seen })
+    }
+
+    /// Record a peer's last-disconnect time (unix-ms). Buffered, not fsynced —
+    /// a lost stamp on crash just degrades to "last-seen unknown".
+    pub fn put_last_seen(&self, ipk: &[u8; 32], ts_ms: u64) -> fjall::Result<()> {
+        self.last_seen.insert(ipk, ts_ms.to_be_bytes())
+    }
+
+    /// Read a peer's last-disconnect time, `None` if never recorded.
+    pub fn get_last_seen(&self, ipk: &[u8; 32]) -> Option<u64> {
+        let v = self.last_seen.get(ipk).ok().flatten()?;
+        Some(u64::from_be_bytes(v.as_ref().try_into().ok()?))
     }
 
     /// Insert then fsync the journal — the durability contract the old
@@ -82,7 +100,7 @@ impl Store {
     /// Leaves the daemon's in-memory routing/connections intact.
     pub fn clear_all(&self) -> Result<usize> {
         let mut n = 0usize;
-        for ks in [&self.messages, &self.queue, &self.keypackage, &self.welcome] {
+        for ks in [&self.messages, &self.queue, &self.keypackage, &self.welcome, &self.last_seen] {
             let keys: Vec<UserKey> = ks
                 .iter()
                 .map(|g| g.into_inner().map(|(k, _)| k))
@@ -120,11 +138,21 @@ mod tests {
         store.queue.insert("b".as_bytes(), "2".as_bytes()).unwrap();
         store.keypackage.insert("c".as_bytes(), "3".as_bytes()).unwrap();
         store.welcome.insert("d".as_bytes(), "4".as_bytes()).unwrap();
+        store.last_seen.insert("e".as_bytes(), "5".as_bytes()).unwrap();
 
         let n = store.clear_all().expect("clear");
-        assert_eq!(n, 4, "must report every deleted entry");
-        for ks in [&store.messages, &store.queue, &store.keypackage, &store.welcome] {
+        assert_eq!(n, 5, "must report every deleted entry");
+        for ks in [&store.messages, &store.queue, &store.keypackage, &store.welcome, &store.last_seen] {
             assert_eq!(ks.iter().count(), 0, "keyspace must be empty after clear");
         }
+    }
+
+    #[test]
+    fn last_seen_roundtrips_and_defaults_to_none() {
+        let store = fresh_store();
+        let ipk = [7u8; 32];
+        assert_eq!(store.get_last_seen(&ipk), None, "unrecorded IPK is None");
+        store.put_last_seen(&ipk, 1_700_000_000_000).unwrap();
+        assert_eq!(store.get_last_seen(&ipk), Some(1_700_000_000_000));
     }
 }
