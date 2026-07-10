@@ -35,12 +35,12 @@ import dev.chrisbanes.haze.hazeEffect
 fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     val colors = MaterialTheme.colorScheme
     val input by viewModel.input.collectAsState()
-    val hazeStyle = HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
+    val hazeStyle =
+        HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
 
     Row(
         Modifier
             .fillMaxWidth()
-            .hazeEffect(haze, hazeStyle)
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -51,7 +51,8 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
             Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(24.dp))
-                .background(colors.surfaceContainerHigh.copy(alpha = 0.85f))
+                .hazeEffect(haze, hazeStyle)
+//                .background(colors.surfaceContainerHigh.copy(alpha = 0.85f))
                 .padding(horizontal = 16.dp, vertical = 13.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
@@ -75,7 +76,9 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
         FilledIconButton(
             onClick = viewModel::send,
             enabled = input.isNotBlank(),
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier
+                .size(48.dp)
+                .hazeEffect(haze, hazeStyle),
             colors = IconButtonDefaults.filledIconButtonColors(containerColor = colors.primary),
         ) {
             DrawableIcon(R.drawable.i_send, Modifier.size(20.dp))

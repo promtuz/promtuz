@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -26,6 +28,7 @@ import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
+import com.promtuz.chat.ui.components.DashedHorizontalDivider
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import dev.chrisbanes.haze.hazeSource
@@ -64,7 +67,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                     when (row) {
                         is ChatRow.Msg -> {
                             val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                            MessageBubble(row.msg, row.mergedTop, row.mergedBottom, Modifier.padding(top = gapAbove))
+                            MessageBubble(Modifier.padding(top = gapAbove), row.msg, row.mergedTop, row.mergedBottom)
                         }
                         is ChatRow.Frontier -> FrontierMarker(row.label)
                     }
@@ -87,7 +90,7 @@ private fun FrontierMarker(label: String) {
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HorizontalDivider(Modifier.width(22.dp), color = colors.onSurfaceVariant.copy(alpha = 0.25f))
+        DashedHorizontalDivider(Modifier.weight(1f), color = colors.onSurfaceVariant.copy(alpha = 0.25f))
         Text(
             label.uppercase(),
             style = MaterialTheme.typography.labelSmall,
