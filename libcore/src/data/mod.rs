@@ -1,6 +1,7 @@
 pub mod contact;
 pub mod identity;
 pub mod idqr;
+pub mod backup;
 pub mod message;
 pub mod reaction;
 pub mod recovery;

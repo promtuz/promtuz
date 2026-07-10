@@ -226,6 +226,46 @@ impl Message {
         .unwrap_or(false)
     }
 
+    /// Every message, oldest first — the backup dump (IDENTITY_RECOVERY.md §4).
+    pub fn dump_all() -> Vec<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT * FROM messages ORDER BY id ASC") else {
+            return Vec::new();
+        };
+        stmt.query_map([], MessageRow::from_row)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Restore dumped rows in one transaction. `INSERT OR IGNORE` — the ULID
+    /// PK plus the `(peer_ipk, dispatch_id)` partial index make re-imports
+    /// idempotent. Returns rows actually inserted.
+    pub fn import_rows(rows: &[MessageRow]) -> Result<usize> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for r in rows {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO messages \
+                 (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (
+                    &r.id,
+                    r.peer_ipk.as_slice(),
+                    &r.content,
+                    r.outgoing,
+                    r.timestamp,
+                    r.status,
+                    &r.dispatch_id,
+                    r.edited,
+                    r.deleted,
+                ),
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Delete every message with this peer (forget-contact cascade).
     pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
         let conn = MESSAGES_DB.lock();

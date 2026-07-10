@@ -87,6 +87,25 @@ impl Contact {
             .collect()
     }
 
+    /// Restore dumped rows in one transaction (backup import). `INSERT OR
+    /// REPLACE` — the dump is the source of truth on a fresh install, and
+    /// `mls_group_id` comes back as dumped: a dead id is exactly what the
+    /// send-path lazy-recreate and the inbound self-heal expect to find.
+    pub fn import_rows(rows: &[ContactRow]) -> Result<usize> {
+        let mut conn = CONTACTS_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for r in rows {
+            n += tx.execute(
+                "INSERT OR REPLACE INTO contacts (ipk, name, added_at, mls_group_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![r.ipk, r.name, r.added_at, r.mls_group_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn exists(ipk: &[u8; 32]) -> bool {
         let conn = CONTACTS_DB.lock();
         conn.query_row("SELECT 1 FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |_| Ok(()))

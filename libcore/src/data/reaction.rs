@@ -49,6 +49,35 @@ impl Reaction {
             .unwrap_or_default()
     }
 
+    /// Every reaction — the backup dump (IDENTITY_RECOVERY.md §4).
+    pub fn dump_all() -> Vec<ReactionRow> {
+        let conn = MESSAGES_DB.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT peer_ipk, dispatch_id, reactor, emoji, timestamp FROM reactions",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], ReactionRow::from_row)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Restore dumped rows in one transaction (idempotent via the PK upsert).
+    pub fn import_rows(rows: &[ReactionRow]) -> anyhow::Result<usize> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for r in rows {
+            n += tx.execute(
+                "INSERT OR REPLACE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (r.peer_ipk.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Drop every reaction in a conversation (forget-contact cascade).
     pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
         let conn = MESSAGES_DB.lock();

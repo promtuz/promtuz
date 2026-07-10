@@ -768,18 +768,22 @@ dependencies = [
  "anyhow",
  "bip39",
  "blake3",
+ "chacha20poly1305",
  "ciborium",
  "common",
  "ed25519-dalek",
  "hex",
+ "hkdf 0.13.0",
  "if-addrs",
  "log",
+ "lz4_flex 0.11.6",
  "once_cell",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto 0.5.1",
  "openmls_traits 0.5.0",
  "parking_lot",
+ "postcard",
  "quinn",
  "rand 0.10.1",
  "rusqlite",
@@ -1352,7 +1356,7 @@ dependencies = [
  "flume",
  "log",
  "lsm-tree",
- "lz4_flex",
+ "lz4_flex 0.13.1",
  "tempfile",
  "xxhash-rust",
 ]
@@ -2323,7 +2327,7 @@ dependencies = [
  "enum_dispatch",
  "interval-heap",
  "log",
- "lz4_flex",
+ "lz4_flex 0.13.1",
  "quick_cache",
  "rustc-hash",
  "self_cell",
@@ -2331,6 +2335,15 @@ dependencies = [
  "tempfile",
  "varint-rs",
  "xxhash-rust",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]

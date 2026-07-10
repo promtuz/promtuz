@@ -8,7 +8,7 @@ use rusqlite_migration::Migrations;
 use super::macros::PRAGMA;
 use super::macros::from_row;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContactRow {
     /// Their Ed25519 identity public key
     pub ipk:           [u8; 32],

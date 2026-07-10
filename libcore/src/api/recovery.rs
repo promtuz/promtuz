@@ -35,3 +35,19 @@ pub fn escrow_secret() -> Result<Vec<u8>, CoreError> {
 pub fn adopt_escrowed_secret(isk: Vec<u8>, name: String) -> Result<(), CoreError> {
     Ok(recovery::adopt_escrowed(&isk, &name)?)
 }
+
+/// Snapshot history + contacts + name into one encrypted blob. The platform
+/// owns cadence (daily, dirty-flag off `on_db_changed`) and placement (Drive
+/// app-folder / iCloud). Ciphertext-only to the cloud; the key derives from
+/// the isk, so no separate backup password exists.
+#[uniffi::export]
+pub fn backup_export() -> Result<Vec<u8>, CoreError> {
+    Ok(crate::data::backup::export()?)
+}
+
+/// Restore a backup blob into the local DBs (after identity restore — the
+/// key derives from the isk). Idempotent; also restores the display name.
+#[uniffi::export]
+pub fn backup_import(blob: Vec<u8>) -> Result<(), CoreError> {
+    Ok(crate::data::backup::import(&blob)?)
+}

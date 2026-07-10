@@ -131,6 +131,15 @@ impl Identity {
         Ok(())
     }
 
+    /// Replace the display name (backup import restores the backed-up one
+    /// over the restore-flow placeholder).
+    pub fn set_name(name: &str) -> Result<()> {
+        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
+        let conn = IDENTITY_DB.lock();
+        conn.execute("UPDATE identity SET name = ?1 WHERE id = 0", [name])?;
+        Ok(())
+    }
+
     /// Restore a previously-created identity from its raw secret — the shared
     /// tail of both recovery channels (escrow bytes or decoded BIP39 phrase).
     /// Refuses when an identity already exists: restore is a fresh-install

@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
+use serde::Deserialize;
 use serde::Serialize;
 
 use crate::db::utils::ulid::ULID;
@@ -11,7 +12,7 @@ use crate::db::utils::ulid::ULID;
 use super::macros::PRAGMA;
 use super::macros::from_row;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRow {
     /// ULID string (26 chars, time-sortable)
     pub id: ULID,
@@ -40,7 +41,7 @@ from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispa
 /// me/them bool) so a multi-member group attributes each reaction to its
 /// author. `peer_ipk` is the conversation scope (the 1:1 peer today; a
 /// group id once group chats exist). `dispatch_id` names the reacted message.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionRow {
     #[serde(with = "serde_bytes")]
     pub peer_ipk: [u8; 32],
