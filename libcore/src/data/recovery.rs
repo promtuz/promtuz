@@ -28,8 +28,21 @@ pub fn escrow_isk() -> Result<Vec<u8>> {
 /// Decode a 24-word phrase back to the isk. BIP39's checksum makes a typo an
 /// error here rather than a silently different identity.
 fn isk_from_phrase(words: &[String]) -> Result<Zeroizing<[u8; 32]>> {
-    let joined = words.iter().map(|w| w.trim().to_lowercase()).collect::<Vec<_>>().join(" ");
-    let m = Mnemonic::parse_normalized(&joined).map_err(|e| anyhow!("invalid phrase: {e}"))?;
+    let normalized: Vec<String> = words.iter().map(|w| w.trim().to_lowercase()).collect();
+    let joined = normalized.join(" ");
+    // bip39's UnknownWord index is 0-based; humans count from 1. Re-map and
+    // name the offender so the user isn't sent to the wrong word.
+    let m = Mnemonic::parse_normalized(&joined).map_err(|e| match e {
+        bip39::Error::UnknownWord(i) => anyhow!(
+            "word {} (\"{}\") is not a recovery word",
+            i + 1,
+            normalized.get(i).map(String::as_str).unwrap_or("?")
+        ),
+        bip39::Error::InvalidChecksum => {
+            anyhow!("a word is mistyped or out of order (checksum failed)")
+        },
+        other => anyhow!("invalid phrase: {other}"),
+    })?;
     let entropy = Zeroizing::new(m.to_entropy());
     let isk: [u8; 32] =
         entropy.as_slice().try_into().map_err(|_| anyhow!("phrase must be 24 words"))?;
@@ -82,6 +95,15 @@ mod tests {
         assert_ne!(words[0], words[1], "fixture must have distinct words");
         words.swap(0, 1);
         assert!(isk_from_phrase(&words).is_err(), "tampered phrase must not decode");
+    }
+
+    #[test]
+    fn unknown_word_error_is_one_based_and_names_the_word() {
+        let mut words = words_of([7u8; 32]);
+        words[16] = "guage".into(); // typo at human-word 17 (0-based 16)
+        let err = isk_from_phrase(&words).unwrap_err().to_string();
+        assert!(err.contains("word 17"), "must report the 1-based position: {err}");
+        assert!(err.contains("guage"), "must name the offending word: {err}");
     }
 
     #[test]
