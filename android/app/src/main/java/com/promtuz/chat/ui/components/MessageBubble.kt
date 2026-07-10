@@ -1,6 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -11,14 +14,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
@@ -29,6 +43,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
@@ -41,13 +56,19 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
  * for a not-yet-sent message — tucks into the last text line's trailing space and
  * only wraps below when there's genuinely no room (via a measured inline
  * placeholder). No per-message ticks: delivery state rides the frontier markers.
+ *
+ * [onLongPress] (fired with the row's root bounds, for the context-menu lift) and
+ * [onReactionTap] are optional so the bubble stays a pure renderer elsewhere.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubble(
     modifier: Modifier = Modifier,
     msg: UiMessage,
     mergedTop: Boolean = false,
     mergedBottom: Boolean = false,
+    onLongPress: ((Rect) -> Unit)? = null,
+    onReactionTap: ((String) -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -55,8 +76,15 @@ fun MessageBubble(
     val shape = rememberBubbleShape(outgoing, mergedTop, mergedBottom, appearance.bubble)
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
+    val haptic = LocalHapticFeedback.current
+    var rowBounds by remember { mutableStateOf(Rect.Zero) }
 
-    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+    BoxWithConstraints(
+        modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { rowBounds = it.boundsInRoot() }
+            .padding(horizontal = 12.dp),
+    ) {
         val maxBubble = maxWidth * appearance.layout.maxWidthFraction
         Column(
             Modifier
@@ -64,6 +92,16 @@ fun MessageBubble(
                 .widthIn(max = maxBubble)
                 .clip(shape)
                 .background(bubbleColor)
+                .then(
+                    if (onLongPress == null) Modifier
+                    else Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onLongPress(rowBounds)
+                        },
+                    )
+                )
                 .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
             BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
@@ -71,14 +109,33 @@ fun MessageBubble(
             if (msg.reactions.isNotEmpty()) {
                 Row(
                     Modifier.padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    msg.reactions.forEach {
-                        Text("${it.emoji} ${it.count}", style = MaterialTheme.typography.labelSmall, color = textColor)
+                    msg.reactions.forEach { rg ->
+                        ReactionChip(rg, textColor, chat.accent, onReactionTap)
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ReactionChip(rg: ReactionGroup, textColor: Color, accent: Color, onTap: ((String) -> Unit)?) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (rg.mine) accent.copy(alpha = 0.35f) else textColor.copy(alpha = 0.10f))
+            .then(onTap?.let { Modifier.clickable { it(rg.emoji) } } ?: Modifier)
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(rg.emoji, style = MaterialTheme.typography.labelMedium)
+        if (rg.count > 1) Text(
+            " ${rg.count}",
+            style = MaterialTheme.typography.labelSmall,
+            color = textColor.copy(alpha = 0.85f),
+        )
     }
 }
 

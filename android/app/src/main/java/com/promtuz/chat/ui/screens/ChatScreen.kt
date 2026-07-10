@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,18 +11,28 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.R
+import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.presentation.viewmodel.ChatVM
@@ -30,12 +41,16 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.DashedHorizontalDivider
+import com.promtuz.chat.ui.components.MenuAction
+import com.promtuz.chat.ui.components.MenuAnchor
 import com.promtuz.chat.ui.components.MessageBubble
+import com.promtuz.chat.ui.components.MessageContextMenu
 import com.promtuz.chat.ui.components.SwipeToReply
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlin.math.abs
+import kotlinx.coroutines.launch
 
 private sealed interface ChatRow {
     data class Msg(val msg: UiMessage, val mergedTop: Boolean, val mergedBottom: Boolean) : ChatRow
@@ -53,36 +68,124 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
 
     val rows = remember(messages, mergeWindowMs) { buildChatRows(messages, mergeWindowMs) }
 
-    Scaffold(
-        topBar = { ChatTopBar(name, viewModel, hazeState) },
-        bottomBar = { ChatBottomBar(viewModel, hazeState) },
-    ) { padding ->
-        // Wallpaper + list are the haze source; the translucent bars sample them. contentPadding
-        // (not Modifier.padding) so messages scroll *under* the bars for the blur to have something.
-        Box(Modifier.fillMaxSize().then(wallpaper).hazeSource(hazeState)) {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = padding,
-                reverseLayout = true,
-            ) {
-                items(rows, key = ::rowKey) { row ->
-                    when (row) {
-                        is ChatRow.Msg -> {
-                            val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                            SwipeToReply(
-                                enabled = row.msg.dispatchIdHex != null && !row.msg.deleted,
-                                onReply = { viewModel.beginReply(row.msg) },
-                                Modifier.padding(top = gapAbove),
-                            ) {
-                                MessageBubble(msg = row.msg, mergedTop = row.mergedTop, mergedBottom = row.mergedBottom)
+    var menu by remember { mutableStateOf<MenuAnchor?>(null) }
+    var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
+
+    Box {
+        Scaffold(
+            topBar = { ChatTopBar(name, viewModel, hazeState) },
+            bottomBar = { ChatBottomBar(viewModel, hazeState) },
+        ) { padding ->
+            // Wallpaper + list are the haze source; the translucent bars sample them. contentPadding
+            // (not Modifier.padding) so messages scroll *under* the bars for the blur to have something.
+            Box(Modifier.fillMaxSize().then(wallpaper).hazeSource(hazeState)) {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = padding,
+                    reverseLayout = true,
+                ) {
+                    items(rows, key = ::rowKey) { row ->
+                        when (row) {
+                            is ChatRow.Msg -> {
+                                val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
+                                SwipeToReply(
+                                    enabled = row.msg.dispatchIdHex != null && !row.msg.deleted,
+                                    onReply = { viewModel.beginReply(row.msg) },
+                                    Modifier
+                                        .padding(top = gapAbove)
+                                        // the context menu re-draws this row lifted; hide the original
+                                        .graphicsLayer { alpha = if (menu?.msg?.key == row.msg.key) 0f else 1f },
+                                ) {
+                                    MessageBubble(
+                                        msg = row.msg,
+                                        mergedTop = row.mergedTop,
+                                        mergedBottom = row.mergedBottom,
+                                        onLongPress = { bounds ->
+                                            menu = MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom)
+                                        },
+                                        onReactionTap = { viewModel.toggleReaction(row.msg, it) },
+                                    )
+                                }
                             }
+                            is ChatRow.Frontier -> FrontierMarker(row.label)
                         }
-                        is ChatRow.Frontier -> FrontierMarker(row.label)
                     }
                 }
             }
         }
+
+        menu?.let { anchor ->
+            MessageContextMenu(
+                anchor = anchor,
+                quickReactions = QuickReactions,
+                actions = menuActionsFor(anchor.msg, viewModel, onDelete = { confirmDelete = it }) { menu = null },
+                onReact = { viewModel.toggleReaction(anchor.msg, it); menu = null },
+                onDismiss = { menu = null },
+            )
+        }
+
+        confirmDelete?.let { msg ->
+            DeleteConfirmDialog(
+                msg = msg,
+                onConfirm = {
+                    msg.dispatchIdHex?.let { viewModel.delete(it, forEveryone = msg.outgoing) }
+                    confirmDelete = null
+                },
+                onDismiss = { confirmDelete = null },
+            )
+        }
     }
+}
+
+private val QuickReactions = listOf("❤️", "👍", "👎", "😂", "🔥", "😢")
+
+/** Menu items gated by ownership/state; every action closes the menu via [close]. */
+@Composable
+private fun menuActionsFor(
+    msg: UiMessage,
+    viewModel: ChatVM,
+    onDelete: (UiMessage) -> Unit,
+    close: () -> Unit,
+): List<MenuAction> {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    return buildList {
+        val actionable = msg.dispatchIdHex != null && !msg.deleted
+        if (actionable) add(MenuAction("Reply", R.drawable.i_reply) {
+            viewModel.beginReply(msg); close()
+        })
+        if (!msg.deleted) add(MenuAction("Copy", R.drawable.i_copy) {
+            val text = (msg.content as? MessageContent.Text)?.text.orEmpty()
+            scope.launch {
+                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
+            }
+            close()
+        })
+        if (actionable && msg.outgoing) add(MenuAction("Edit", R.drawable.i_edit) {
+            viewModel.beginEdit(msg); close()
+        })
+        if (msg.dispatchIdHex != null) add(MenuAction("Delete", R.drawable.i_delete, destructive = true) {
+            onDelete(msg); close()
+        })
+    }
+}
+
+@Composable
+private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete message?") },
+        text = {
+            Text(
+                if (msg.outgoing) "It will be deleted for everyone in this chat."
+                else "It will be removed from this device."
+            )
+        },
+        confirmButton = {
+            TextButton(onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**
