@@ -25,18 +25,18 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.appearance.chatBarHaze
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 
 /** Composer: a rounded input pill (grows to 6 lines) + accent send, over a blurred bar. */
 @Composable
 fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     val colors = MaterialTheme.colorScheme
+    val chat = LocalChatColors.current
     val input by viewModel.input.collectAsState()
-    val hazeStyle =
-        HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
+    val hazeStyle = chatBarHaze()
 
     Row(
         Modifier
@@ -60,7 +60,7 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
                 value = input,
                 onValueChange = { viewModel.input.value = it },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
-                cursorBrush = SolidColor(colors.primary),
+                cursorBrush = SolidColor(chat.accent),
                 maxLines = 6,
                 modifier = Modifier.fillMaxWidth(),
                 decorationBox = { inner ->
@@ -79,7 +79,7 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
             modifier = Modifier
                 .size(48.dp)
                 .hazeEffect(haze, hazeStyle),
-            colors = IconButtonDefaults.filledIconButtonColors(containerColor = colors.primary),
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = chat.accent),
         ) {
             DrawableIcon(R.drawable.i_send, Modifier.size(20.dp))
         }

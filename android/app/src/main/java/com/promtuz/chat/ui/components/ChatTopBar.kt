@@ -19,18 +19,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.appearance.chatBarHaze
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
     val back = LocalOnBackPressedDispatcherOwner.current
-    val colors = MaterialTheme.colorScheme
+    val chat = LocalChatColors.current
     val typing by viewModel.typing.collectAsState()
-    val hazeStyle = HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
 
     TopAppBar(
         title = {
@@ -44,7 +43,7 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
                     if (typing) Text(
                         "typing…",
                         style = MaterialTheme.typography.labelMedium,
-                        color = colors.primary,
+                        color = chat.accent,
                     )
                 }
             }
@@ -54,7 +53,7 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
                 DrawableIcon(R.drawable.i_back_chevron)
             }
         },
-        modifier = Modifier.hazeEffect(haze, hazeStyle),
+        modifier = Modifier.hazeEffect(haze, chatBarHaze()),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 }

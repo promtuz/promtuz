@@ -16,7 +16,7 @@ import kotlinx.serialization.Serializable
 data class ChatAppearance(
     val bubble: BubbleStyle = BubbleStyle(),
     val layout: LayoutStyle = LayoutStyle(),
-    val colors: BubbleColors = BubbleColors(),
+    val colors: ChatColors = ChatColors(),
     val wallpaper: Wallpaper = Wallpaper.Default,
     val type: TypeStyle = TypeStyle(),
     val themeMode: ThemeMode = ThemeMode.System,
@@ -48,13 +48,17 @@ data class LayoutStyle(
     val maxWidthFraction: Float = 0.75f,
 )
 
-/** Bubble fills + text. `null` = derive from the M3 color scheme (so light/dark just works). */
+/**
+ * User color tokens (ARGB). `null` = the designed default from the scheme role — see
+ * [resolve], which turns these into the full [ChatColorScheme] vocabulary.
+ */
 @Serializable
-data class BubbleColors(
+data class ChatColors(
     val outgoing: Long? = null,
     val incoming: Long? = null,
     val outgoingText: Long? = null,
     val incomingText: Long? = null,
+    val accent: Long? = null,
 )
 
 /** Typography scaling. */

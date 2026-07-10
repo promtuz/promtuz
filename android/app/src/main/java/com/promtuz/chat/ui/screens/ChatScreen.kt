@@ -26,6 +26,7 @@ import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
+import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.DashedHorizontalDivider
@@ -84,17 +85,17 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
  */
 @Composable
 private fun FrontierMarker(label: String) {
-    val colors = MaterialTheme.colorScheme
+    val marker = LocalChatColors.current.marker
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DashedHorizontalDivider(Modifier.weight(1f), color = colors.onSurfaceVariant.copy(alpha = 0.25f))
+        DashedHorizontalDivider(Modifier.weight(1f), color = marker.copy(alpha = 0.25f))
         Text(
             label.uppercase(),
             style = MaterialTheme.typography.labelSmall,
-            color = colors.onSurfaceVariant.copy(alpha = 0.5f),
+            color = marker.copy(alpha = 0.5f),
             modifier = Modifier.padding(start = 6.dp),
         )
     }

@@ -32,10 +32,7 @@ import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
-import com.promtuz.chat.ui.appearance.incomingBubble
-import com.promtuz.chat.ui.appearance.incomingContent
-import com.promtuz.chat.ui.appearance.outgoingBubble
-import com.promtuz.chat.ui.appearance.outgoingContent
+import com.promtuz.chat.ui.appearance.LocalChatColors
 
 /**
  * A message bubble as an ordered column of content blocks (text today; media /
@@ -53,10 +50,11 @@ fun MessageBubble(
     mergedBottom: Boolean = false,
 ) {
     val appearance = LocalChatAppearance.current
+    val chat = LocalChatColors.current
     val outgoing = msg.outgoing
     val shape = rememberBubbleShape(outgoing, mergedTop, mergedBottom, appearance.bubble)
-    val bubbleColor = if (outgoing) appearance.colors.outgoingBubble() else appearance.colors.incomingBubble()
-    val textColor = if (outgoing) appearance.colors.outgoingContent() else appearance.colors.incomingContent()
+    val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
+    val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
 
     BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
         val maxBubble = maxWidth * appearance.layout.maxWidthFraction
