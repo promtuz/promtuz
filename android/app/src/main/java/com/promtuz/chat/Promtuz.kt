@@ -2,6 +2,7 @@ package com.promtuz.chat
 
 import android.app.Application
 import android.content.pm.ApplicationInfo
+import com.promtuz.chat.backup.BackupWorker
 import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.utils.logs.AppLog
@@ -50,6 +51,7 @@ class Promtuz : Application() {
         }
 
         CoreInitializer.start()
+        BackupWorker.start(this)
 
         startKoin {
             androidLogger()

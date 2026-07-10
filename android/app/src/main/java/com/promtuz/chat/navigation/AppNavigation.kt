@@ -14,7 +14,9 @@ import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
 import com.promtuz.chat.ui.screens.HomeScreen
 import com.promtuz.chat.ui.screens.LogsScreen
+import com.promtuz.chat.ui.screens.RecoveryPhraseScreen
 import com.promtuz.chat.ui.screens.RelaysScreen
+import com.promtuz.chat.ui.screens.RestorePhraseScreen
 import com.promtuz.chat.ui.screens.SettingsScreen
 import com.promtuz.chat.ui.screens.ShareIdentityScreen
 import com.promtuz.chat.ui.screens.WelcomeScreen
@@ -35,8 +37,16 @@ fun AppNavigation(
         entryProvider = entryProvider {
             entry<Routes.App> { HomeScreen(appViewModel) }
             entry<Routes.Welcome> {
-                WelcomeScreen(koinViewModel<WelcomeVM>(), onEnrolled = { appViewModel.completeOnboarding() })
+                WelcomeScreen(
+                    koinViewModel<WelcomeVM>(),
+                    onEnrolled = { appViewModel.completeOnboarding() },
+                    onImport = { appViewModel.navigator.push(Routes.RestorePhrase) },
+                )
             }
+            entry<Routes.RestorePhrase> {
+                RestorePhraseScreen(onRestored = { appViewModel.completeOnboarding() })
+            }
+            entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
                 val chatVM = koinViewModel<ChatVM>()
                 LaunchedEffect(key.user) { chatVM.init(key.user.fromHex()) }

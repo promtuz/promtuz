@@ -23,7 +23,7 @@
 
     <application
         android:name=".Promtuz"
-        android:allowBackup="false"
+        android:allowBackup="true"
         android:allowClearUserData="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"

@@ -11,6 +11,7 @@ import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
+import com.promtuz.chat.security.RecoveryStore
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -49,6 +50,13 @@ class AppVM(
     val invite: StateFlow<InviteSheet?> = _invite.asStateFlow()
 
     init {
+        // Channel A silent restore (IDENTITY_RECOVERY.md §5.1): fresh install
+        // with a Block Store hit re-adopts the identity + imports the
+        // Auto-Backup blob, then skips onboarding entirely.
+        if (!CoreBridge.shouldLaunchApp()) viewModelScope.launch {
+            if (RecoveryStore.tryAutoRestore(context)) completeOnboarding()
+        }
+
         viewModelScope.launch {
             var titleResetJob: Job? = null
 

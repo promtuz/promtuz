@@ -1,13 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   Pre-API-31 twin of data_extraction_rules.xml. minSdk = 31, so this file
+   is dead weight the manifest still references — kept consistent anyway.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <include domain="file" path="recovery/backup.pzbk" />
 </full-backup-content>

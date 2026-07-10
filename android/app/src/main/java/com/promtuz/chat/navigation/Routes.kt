@@ -22,6 +22,14 @@ object Routes : NavKey {
     @Serializable
     data object Settings : NavKey
 
+    /** Onboarding: restore identity from a typed 24-word phrase. */
+    @Serializable
+    data object RestorePhrase : NavKey
+
+    /** Settings: device-auth-gated reveal of the 24-word recovery phrase. */
+    @Serializable
+    data object RecoveryPhrase : NavKey
+
     @Serializable
     data object About : NavKey
 

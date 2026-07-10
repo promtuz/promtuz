@@ -37,6 +37,11 @@ uiGraphics = "1.11.4"
 # devices (Android 15+/Play); declared with @aar in app/build.gradle.kts.
 jna = "5.19.0"
 
+# Identity recovery (IDENTITY_RECOVERY.md): Block Store = Channel A escrow;
+# WorkManager writes the backup blob Auto Backup ships to the cloud.
+blockstore = "16.4.0"
+workRuntime = "2.10.5"
+
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraCore" }
 androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "cameraCore" }
@@ -50,6 +55,9 @@ barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref =
 capturable = { module = "dev.shreyaspatil:capturable", version.ref = "capturable" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
+kotlinx-coroutines-play-services = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutinesCore" }
+play-services-blockstore = { module = "com.google.android.gms:play-services-auth-blockstore", version.ref = "blockstore" }
+androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workRuntime" }
 timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "core" }
 haze-materials = { module = "dev.chrisbanes.haze:haze-materials", version.ref = "hazeMaterials" }

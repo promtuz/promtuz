@@ -35,6 +35,12 @@ import uniffi.core.reactMessage as ffiReactMessage
 import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
+import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
+import uniffi.core.backupExport as ffiBackupExport
+import uniffi.core.backupImport as ffiBackupImport
+import uniffi.core.escrowSecret as ffiEscrowSecret
+import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
+import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
 import com.promtuz.core.adapter.ActivitySignal
 import com.promtuz.core.adapter.PresenceSignal
 
@@ -52,6 +58,31 @@ object CoreBridge {
     fun shouldLaunchApp(): Boolean = ffiShouldLaunchApp()
 
     suspend fun enroll(name: String) = withContext(Dispatchers.IO) { ffiEnroll(name) }
+
+    // — Identity recovery (IDENTITY_RECOVERY.md). The two exports below are
+    //   the identity in raw/word form: EVERY call site must sit behind a
+    //   device-auth gate (see RecoveryStore / RecoveryPhraseScreen).
+
+    /** The identity as a 24-word BIP39 phrase. AUTH-GATE MANDATORY. */
+    suspend fun exportRecoveryPhrase(): List<String> =
+        withContext(Dispatchers.IO) { ffiExportRecoveryPhrase() }
+
+    /** Raw isk for Block Store escrow. AUTH-GATE MANDATORY. */
+    suspend fun escrowSecret(): ByteArray = withContext(Dispatchers.IO) { ffiEscrowSecret() }
+
+    /** Restore identity from a typed phrase; throws on bad checksum or if an identity exists. */
+    suspend fun restoreFromPhrase(words: List<String>, name: String) =
+        withContext(Dispatchers.IO) { ffiRestoreFromPhrase(words, name) }
+
+    /** Restore identity from escrowed bytes (Block Store hit on fresh install). */
+    suspend fun adoptEscrowedSecret(isk: ByteArray, name: String) =
+        withContext(Dispatchers.IO) { ffiAdoptEscrowedSecret(isk, name) }
+
+    /** Snapshot history+contacts+name into one encrypted blob (ciphertext-only to cloud). */
+    suspend fun backupExport(): ByteArray = withContext(Dispatchers.IO) { ffiBackupExport() }
+
+    /** Restore a backup blob (after identity restore); idempotent. */
+    suspend fun backupImport(blob: ByteArray) = withContext(Dispatchers.IO) { ffiBackupImport(blob) }
 
     suspend fun makeInviteQr(): ByteArray = withContext(Dispatchers.IO) { ffiMakeInviteQr() }
 

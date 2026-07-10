@@ -2,7 +2,6 @@ package com.promtuz.chat.ui.screens
 
 import android.app.Activity
 import android.content.Intent
-import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -63,6 +62,7 @@ import com.promtuz.chat.utils.extensions.then
 fun WelcomeScreen(
     welcomeViewModel: WelcomeVM,
     onEnrolled: () -> Unit,
+    onImport: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
@@ -180,11 +180,7 @@ fun WelcomeScreen(
             )
 
             OutlinedButton(
-                {
-                    Toast.makeText(
-                        context, "Importing is not supported yet.", Toast.LENGTH_SHORT
-                    ).show()
-                }, Modifier.fillMaxWidth()
+                { onImport() }, Modifier.fillMaxWidth()
             ) {
                 Text(
                     stringResource(R.string.welcome_screen_continue_existing_button),

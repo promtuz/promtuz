@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.presentation.state.WelcomeField
 import com.promtuz.chat.presentation.state.WelcomeStatus
 import com.promtuz.chat.presentation.state.WelcomeUiState
+import com.promtuz.chat.security.RecoveryStore
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
@@ -42,6 +43,8 @@ class WelcomeVM(
         viewModelScope.launch {
             try {
                 CoreBridge.enroll(name)
+                // Channel A escrow — best-effort; Channel B (phrase) always exists.
+                RecoveryStore.escrow(application)
                 onSuccess()
             } catch (e: CoreException) {
                 onChange(WelcomeField.Status, WelcomeStatus.Normal)

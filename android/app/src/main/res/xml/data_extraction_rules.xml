@@ -1,19 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   Identity recovery (IDENTITY_RECOVERY.md §4): Auto Backup carries EXACTLY
+   ONE file — the encrypted blob BackupWorker writes. Include-only semantics:
+   everything else (sqlite DBs, prefs, MLS state) is implicitly excluded.
+   Restoring those wholesale would resurrect an identity row whose enc_isk is
+   sealed under a DEAD StrongBox key, plus stale MLS state — the blob +
+   Block Store are the only sanctioned carriers. The blob is ciphertext
+   under HKDF(isk), so the cloud copy is useless without the identity.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!--
-        <include .../>
-        <exclude .../>
-        -->
+        <include domain="file" path="recovery/backup.pzbk" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <include domain="file" path="recovery/backup.pzbk" />
     </device-transfer>
-    -->
 </data-extraction-rules>
