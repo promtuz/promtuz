@@ -2,20 +2,32 @@ package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.InlineTextContent
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.appendInlineContent
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -27,9 +39,11 @@ import com.promtuz.chat.ui.appearance.outgoingContent
 
 /**
  * A message bubble as an ordered column of content blocks (text today; media /
- * reply / reactions become sibling blocks as the polymorphic content lands).
- * Shape, colors, width and type all come from [LocalChatAppearance] — the bubble
- * is a pure function of (message, group position, appearance).
+ * reply become sibling blocks with the polymorphic content). Shape/colors/width
+ * come from [LocalChatAppearance]. The trailing meta — a sent-time, or a spinner
+ * for a not-yet-sent message — tucks into the last text line's trailing space and
+ * only wraps below when there's genuinely no room (via a measured inline
+ * placeholder). No per-message ticks: delivery state rides the frontier markers.
  */
 @Composable
 fun MessageBubble(
@@ -54,15 +68,7 @@ fun MessageBubble(
                 .background(bubbleColor)
                 .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
-            Text(
-                text = if (msg.deleted) "This message was deleted"
-                else (msg.content as? MessageContent.Text)?.text.orEmpty(),
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = MaterialTheme.typography.bodyLarge.fontSize * appearance.type.fontScale,
-                ),
-                color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor,
-                fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
-            )
+            BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
 
             if (msg.reactions.isNotEmpty()) {
                 Row(
@@ -74,37 +80,73 @@ fun MessageBubble(
                     }
                 }
             }
-
-            Row(
-                Modifier.align(Alignment.End).padding(top = 3.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (msg.edited && !msg.deleted) Text(
-                    "edited",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = textColor.copy(alpha = 0.55f),
-                )
-                Text(
-                    clock(msg.timestampMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = textColor.copy(alpha = 0.55f),
-                )
-                if (outgoing) Text(
-                    tick(msg.status),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = textColor.copy(alpha = 0.7f),
-                )
-            }
         }
     }
 }
 
-private fun tick(status: SendStatus): String = when (status) {
-    SendStatus.Pending -> "🕓"
-    SendStatus.Sent -> "✓"
-    SendStatus.Delivered, SendStatus.Read -> "✓✓"
-    SendStatus.Failed -> "!"
+@Composable
+private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.graphics.Color, fontScale: Float) {
+    val base = MaterialTheme.typography.bodyLarge
+    val textStyle = base.copy(fontSize = base.fontSize * fontScale, color = textColor)
+    val metaStyle = MaterialTheme.typography.labelSmall
+    val metaColor = textColor.copy(alpha = 0.55f)
+
+    val text = if (msg.deleted) "This message was deleted"
+    else (msg.content as? MessageContent.Text)?.text.orEmpty()
+
+    val pending = msg.outgoing && msg.status == SendStatus.Pending
+    val failed = msg.outgoing && msg.status == SendStatus.Failed
+    val timeStr = if (pending || failed) null else clock(msg.timestampMs)
+    val edited = msg.edited && !msg.deleted
+
+    // Reserve exactly the meta's width at the end of the text so it tucks into the last line's
+    // trailing gap, wrapping to its own (short) line only when the line is genuinely full.
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val label = buildString {
+        if (edited) append("edited ")
+        if (timeStr != null) append(timeStr)
+    }
+    val labelPx = if (label.isNotEmpty()) measurer.measure(label, metaStyle).size.width else 0
+    val iconPx = if (pending || failed) with(density) { 14.dp.roundToPx() } else 0
+    val gapPx = with(density) { 8.dp.roundToPx() }
+    val metaWidth = with(density) { (labelPx + iconPx + gapPx).toSp() }
+
+    val annotated = buildAnnotatedString {
+        append(text)
+        appendInlineContent("meta")
+    }
+    val inline = mapOf(
+        "meta" to InlineTextContent(
+            Placeholder(metaWidth, 1.2.em, PlaceholderVerticalAlign.TextBottom)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                if (edited) Text(
+                    "edited",
+                    style = metaStyle,
+                    color = metaColor,
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+                when {
+                    pending -> CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
+                    failed -> Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                    timeStr != null -> Text(timeStr, style = metaStyle, color = metaColor)
+                }
+            }
+        }
+    )
+
+    Text(
+        annotated,
+        style = textStyle,
+        fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
+        color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor,
+        inlineContent = inline,
+    )
 }
 
 private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
