@@ -10,6 +10,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.ui.screens.AboutScreen
+import com.promtuz.chat.ui.screens.ChatAppearanceScreen
 import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
 import com.promtuz.chat.ui.screens.HomeScreen
@@ -47,6 +48,7 @@ fun AppNavigation(
             }
             entry<Routes.Contacts> { ContactsScreen() }
             entry<Routes.Settings> { SettingsScreen(appViewModel) }
+            entry<Routes.ChatAppearance> { ChatAppearanceScreen() }
             entry<Routes.About> { AboutScreen() }
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }

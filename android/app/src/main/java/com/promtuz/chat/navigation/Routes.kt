@@ -23,6 +23,9 @@ object Routes : NavKey {
     data object Settings : NavKey
 
     @Serializable
+    data object ChatAppearance : NavKey
+
+    @Serializable
     data object About : NavKey
 
     @Serializable

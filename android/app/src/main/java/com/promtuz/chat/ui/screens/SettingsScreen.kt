@@ -66,8 +66,9 @@ fun SettingsScreen(
             ),
             SettingGroup(
                 "Appearance", listOf(
-                    SettingItem("Theme", R.drawable.i_dark_mode) {},
-                    SettingItem("Font Size", R.drawable.i_format_size) {},
+                    SettingItem(
+                        "Chat Appearance", R.drawable.i_dark_mode
+                    ) { navigate(Routes.ChatAppearance) },
                     SettingItem("Language", R.drawable.i_language) {},
                 )
             ),
