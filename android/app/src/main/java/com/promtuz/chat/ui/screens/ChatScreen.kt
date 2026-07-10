@@ -1,6 +1,11 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.ClipData
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,8 +36,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.components.TypingBubble
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -55,18 +63,24 @@ import kotlinx.coroutines.launch
 private sealed interface ChatRow {
     data class Msg(val msg: UiMessage, val mergedTop: Boolean, val mergedBottom: Boolean) : ChatRow
     data class Frontier(val label: String) : ChatRow
+    data object Typing : ChatRow
 }
+
+/** The list's row animator (matches the reference feel; change-animations stay off). */
+private val RowPlacement = tween<IntOffset>(250, easing = CubicBezierEasing(0.19919f, 0.01064f, 0.27921f, 0.91025f))
+private val RowFade = tween<Float>(200)
 
 @Composable
 fun ChatScreen(name: String, viewModel: ChatVM) {
     val messages by viewModel.messages.collectAsState()
+    val typing by viewModel.typing.collectAsState()
     val appearance = LocalChatAppearance.current
     val layout = appearance.layout
     val mergeWindowMs = layout.mergeWindowSecs * 1000L
     val wallpaper = rememberChatWallpaper(appearance.wallpaper)
     val hazeState = rememberHazeState()
 
-    val rows = remember(messages, mergeWindowMs) { buildChatRows(messages, mergeWindowMs) }
+    val rows = remember(messages, mergeWindowMs, typing) { buildChatRows(messages, mergeWindowMs, typing) }
 
     var menu by remember { mutableStateOf<MenuAnchor?>(null) }
     var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
@@ -85,14 +99,20 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                     reverseLayout = true,
                 ) {
                     items(rows, key = ::rowKey) { row ->
+                        val animated = Modifier.animateItem(
+                            fadeInSpec = RowFade,
+                            placementSpec = RowPlacement,
+                            fadeOutSpec = RowFade,
+                        )
                         when (row) {
                             is ChatRow.Msg -> {
                                 val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
                                 SwipeToReply(
                                     enabled = row.msg.dispatchIdHex != null && !row.msg.deleted,
                                     onReply = { viewModel.beginReply(row.msg) },
-                                    Modifier
+                                    animated
                                         .padding(top = gapAbove)
+                                        .sendEnter(row.msg)
                                         // the context menu re-draws this row lifted; hide the original
                                         .graphicsLayer { alpha = if (menu?.msg?.key == row.msg.key) 0f else 1f },
                                 ) {
@@ -107,7 +127,8 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                     )
                                 }
                             }
-                            is ChatRow.Frontier -> FrontierMarker(row.label)
+                            is ChatRow.Frontier -> FrontierMarker(row.label, animated)
+                            is ChatRow.Typing -> TypingBubble(animated.padding(top = layout.groupGap.dp))
                         }
                     }
                 }
@@ -194,10 +215,10 @@ private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss
  * per tier, not per bubble (receipts are a high-water-mark).
  */
 @Composable
-private fun FrontierMarker(label: String) {
+private fun FrontierMarker(label: String, modifier: Modifier = Modifier) {
     val marker = LocalChatColors.current.marker
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp),
+        modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -214,20 +235,42 @@ private fun FrontierMarker(label: String) {
 private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.Msg -> row.msg.key
     is ChatRow.Frontier -> "frontier:${row.label}"
+    is ChatRow.Typing -> "typing"
+}
+
+/**
+ * Own-send entrance: the freshly sent bubble rises from the composer (~0.4s spring)
+ * while list placement slides everything else up. Runs only for rows first composed
+ * while Pending, so scroll-back never replays it.
+ */
+@Composable
+private fun Modifier.sendEnter(msg: UiMessage): Modifier {
+    val fresh = remember(msg.key) { msg.outgoing && msg.status == SendStatus.Pending }
+    if (!fresh) return this
+    val progress = remember(msg.key) { Animatable(0f) }
+    LaunchedEffect(msg.key) {
+        progress.animateTo(1f, spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow))
+    }
+    return graphicsLayer {
+        translationY = (1f - progress.value) * 46.dp.toPx()
+        alpha = 0.4f + 0.6f * progress.value
+    }
 }
 
 /**
  * Interleave message rows (with group merge flags) and status-frontier markers. Each frontier is the
  * newest outgoing message of its tier (lowest index in the newest-first list); the marker sits just
- * below it, so "above the line" is that status or better. Absent tiers produce no marker.
+ * below it, so "above the line" is that status or better. Absent tiers produce no marker. A live
+ * typing signal appends a [ChatRow.Typing] at the bottom (index 0 under reverseLayout).
  */
-private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long): List<ChatRow> {
+private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing: Boolean): List<ChatRow> {
     fun frontier(status: SendStatus) = messages.indexOfFirst { it.outgoing && it.status == status }
     val seen = frontier(SendStatus.Read)
     val delivered = frontier(SendStatus.Delivered)
     val sent = frontier(SendStatus.Sent)
 
-    val rows = ArrayList<ChatRow>(messages.size + 3)
+    val rows = ArrayList<ChatRow>(messages.size + 4)
+    if (typing) rows.add(ChatRow.Typing)
     for (i in messages.indices) {
         when (i) {
             seen -> rows.add(ChatRow.Frontier("Seen"))

@@ -45,29 +45,40 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     private val _typing = MutableStateFlow(false)
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
+    private var typingExpiry: Job? = null
 
     fun init(peerIpk: ByteArray) {
         if (started) return
         started = true
         peer = peerIpk
 
+        var newestIncoming: String? = null
         viewModelScope.launch {
-            observeQuery(setOf("messages", "reactions")) { load() }.collect { _messages.value = it }
+            observeQuery(setOf("messages", "reactions")) { load() }.collect { list ->
+                _messages.value = list
+                // Their message just landed — the typing bubble hands off to it.
+                val newest = list.firstOrNull { !it.outgoing }?.key
+                if (newest != newestIncoming) {
+                    newestIncoming = newest
+                    clearTyping()
+                }
+            }
         }
 
-        var expiry: Job? = null
         viewModelScope.launch {
             CoreBridge.activity.filter { it.peer.contentEquals(peer) }.collect { sig ->
                 if (Activity.Typing in Activity.fromBits(sig.bits)) {
                     _typing.value = true
-                    expiry?.cancel()
-                    expiry = launch { delay(TYPING_TTL_MS); _typing.value = false }
-                } else {
-                    expiry?.cancel()
-                    _typing.value = false
-                }
+                    typingExpiry?.cancel()
+                    typingExpiry = viewModelScope.launch { delay(TYPING_TTL_MS); _typing.value = false }
+                } else clearTyping()
             }
         }
+    }
+
+    private fun clearTyping() {
+        typingExpiry?.cancel()
+        _typing.value = false
     }
 
     private suspend fun load(): List<UiMessage> {
