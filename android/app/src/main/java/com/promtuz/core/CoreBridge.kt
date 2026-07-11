@@ -36,6 +36,7 @@ import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
+import uniffi.core.kpPublishReady as ffiKpPublishReady
 import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
 import uniffi.core.backupExport as ffiBackupExport
 import uniffi.core.backupImport as ffiBackupImport
@@ -60,6 +61,9 @@ object CoreBridge {
 
     /** Cheap identity check; safe to call before [CoreInitializer.start]. */
     fun shouldLaunchApp(): Boolean = ffiShouldLaunchApp()
+
+    /** Are we discoverable (KeyPackage quorum-published)? Gate the share QR on this. */
+    fun kpPublishReady(): Boolean = ffiKpPublishReady()
 
     suspend fun enroll(name: String) = withContext(Dispatchers.IO) { ffiEnroll(name) }
 

@@ -120,6 +120,17 @@ pub async fn run_once<C: DhtClient>(
 /// On ANY publish error the op is left in the outbox for the reconciler to
 /// retry on reconnect — NEVER propagated (a failed publish used to be lost
 /// forever once `should_refill` went false).
+/// True once our KeyPackage has been published to a quorum of homes — i.e.
+/// we're discoverable and pairable. The share screen gates the QR on this so
+/// a brand-new user can't hand out a link nobody can pair with (PAIRING.md).
+pub static KP_PUBLISH_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether our KeyPackage is quorum-published (share-QR gate).
+pub fn kp_publish_ready() -> bool {
+    KP_PUBLISH_READY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     if records.is_empty() {
         return;
@@ -128,7 +139,10 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     let kp_id = blake3::hash(&payload).as_bytes()[..16].to_vec();
     crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
     match dht.publish_keypackages(records, KpOutcomeFilter::Default).await {
-        Ok(()) => crate::delivery::retire(&kp_id),
+        Ok(()) => {
+            crate::delivery::retire(&kp_id);
+            KP_PUBLISH_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+        },
         Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),
     }
 }

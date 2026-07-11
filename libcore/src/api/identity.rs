@@ -18,6 +18,15 @@ pub fn enroll(name: String) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Whether we're discoverable — our KeyPackage is published to a quorum of
+/// homes. The share screen gates the QR on this so a brand-new user waits
+/// ("getting you discoverable…") instead of minting a link nobody can pair
+/// with. Published automatically on every relay connect.
+#[uniffi::export]
+pub fn kp_publish_ready() -> bool {
+    crate::mls::scheduler::kp_publish_ready()
+}
+
 /// Mint a fresh pairing invite and return the QR payload bytes to render.
 /// Whoever scans it may add us until the invite expires (~10 min). Needs
 /// no relay connection — built from our identity alone. The same QR works
@@ -71,6 +80,9 @@ pub struct InvitePreview {
     pub expired: bool,
     /// This is our own invite — pairing with self is refused.
     pub is_self: bool,
+    /// Unix-ms the invite window closes — the UI renders a live countdown
+    /// rather than a bare expired flag (PAIRING.md).
+    pub expiry_ms: u64,
 }
 
 /// Decode-only preview of a scanned/opened invite so the client can show an
@@ -90,5 +102,6 @@ pub fn preview_invite(qr_bytes: Vec<u8>) -> Result<InvitePreview, CoreError> {
         already_contact: Contact::exists(&qr.ipk),
         expired: qr.invite.expiry_ms < now_ms,
         is_self,
+        expiry_ms: qr.invite.expiry_ms,
     })
 }
