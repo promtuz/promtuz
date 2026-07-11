@@ -1,6 +1,10 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +42,7 @@ import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ComposerAction
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.chatBarHaze
+import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 
@@ -50,11 +58,22 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     Column(
         Modifier
             .fillMaxWidth()
+            // Bake blur to pixels while the nav card scales out (screen-space Haze
+            // shatters under an ancestor scale).
+            .freezeOnExit()
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        AnimatedVisibility(action != null) {
-            action?.let { ComposerActionChip(it, viewModel::cancelComposerAction) }
+        // Chip content is captured (not read live) so the exit animation has
+        // something to draw after the action nulls.
+        var lastAction by remember { mutableStateOf(action) }
+        if (action != null) lastAction = action
+        AnimatedVisibility(
+            action != null,
+            enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+            exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
+        ) {
+            lastAction?.let { ComposerActionChip(it, viewModel::cancelComposerAction) }
         }
         ComposerRow(viewModel, input, action, haze)
     }

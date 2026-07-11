@@ -23,6 +23,7 @@ import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.chatBarHaze
+import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 
@@ -69,7 +70,9 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
                 DrawableIcon(R.drawable.i_back_chevron)
             }
         },
-        modifier = Modifier.hazeEffect(haze, chatBarHaze()),
+        // freezeOnExit: bake the blur to pixels while the nav card scales out (Haze
+        // samples screen-space and shatters under an ancestor scale).
+        modifier = Modifier.freezeOnExit().hazeEffect(haze, chatBarHaze()),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 }
