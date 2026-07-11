@@ -1,11 +1,15 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,11 +21,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,21 +49,15 @@ import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 
-/** Composer: a rounded input pill (grows to 6 lines) + accent send, over a blurred bar. */
+/** Composer: one blurred pill holding the input (grows to 6 lines) and the accent send circle. */
 @Composable
 fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
-    val colors = MaterialTheme.colorScheme
-    val chat = LocalChatColors.current
     val input by viewModel.input.collectAsState()
     val action by viewModel.composerAction.collectAsState()
-    val hazeStyle = chatBarHaze()
 
     Column(
         Modifier
             .fillMaxWidth()
-            // Bake blur to pixels while the nav card scales out (screen-space Haze
-            // shatters under an ancestor scale).
-            .freezeOnExit()
             .navigationBarsPadding()
             .imePadding(),
     ) {
@@ -122,50 +119,52 @@ private fun ComposerActionChip(action: ComposerAction, onCancel: () -> Unit) {
 private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction?, haze: HazeState) {
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
-    val hazeStyle = chatBarHaze()
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(26.dp))
+            // Freeze must sit on the same chain as the blur it bakes (screen-space
+            // Haze shatters under the exiting nav card's scale).
+            .freezeOnExit()
+            .hazeEffect(haze, chatBarHaze())
+            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Box(
-            Modifier
-                .weight(1f)
-                .clip(RoundedCornerShape(24.dp))
-                .hazeEffect(haze, hazeStyle)
-//                .background(colors.surfaceContainerHigh.copy(alpha = 0.85f))
-                .padding(horizontal = 16.dp, vertical = 13.dp),
-            contentAlignment = Alignment.CenterStart,
+        BasicTextField(
+            value = input,
+            onValueChange = { viewModel.input.value = it },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+            cursorBrush = SolidColor(chat.accent),
+            maxLines = 6,
+            modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+            decorationBox = { inner ->
+                if (input.isEmpty()) Text(
+                    "Message",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = colors.onSurfaceVariant,
+                )
+                inner()
+            },
+        )
+        AnimatedVisibility(
+            input.isNotBlank(),
+            enter = scaleIn(tween(150)) + fadeIn(tween(150)),
+            exit = scaleOut(tween(150)) + fadeOut(tween(150)),
         ) {
-            BasicTextField(
-                value = input,
-                onValueChange = { viewModel.input.value = it },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
-                cursorBrush = SolidColor(chat.accent),
-                maxLines = 6,
-                modifier = Modifier.fillMaxWidth(),
-                decorationBox = { inner ->
-                    if (input.isEmpty()) Text(
-                        "Message",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = colors.onSurfaceVariant,
-                    )
-                    inner()
-                },
-            )
-        }
-        FilledIconButton(
-            onClick = viewModel::send,
-            enabled = input.isNotBlank(),
-            modifier = Modifier
-                .size(48.dp)
-                .hazeEffect(haze, hazeStyle),
-            colors = IconButtonDefaults.filledIconButtonColors(containerColor = chat.accent),
-        ) {
-            val icon = if (action is ComposerAction.Edit) R.drawable.i_check else R.drawable.i_send
-            DrawableIcon(icon, Modifier.size(20.dp))
+            // Solid accent, no haze: a blurred layer under the circle rendered as a square.
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(chat.accent)
+                    .clickable(onClick = viewModel::send),
+                contentAlignment = Alignment.Center,
+            ) {
+                val icon = if (action is ComposerAction.Edit) R.drawable.i_check else R.drawable.i_send
+                DrawableIcon(icon, Modifier.size(18.dp))
+            }
         }
     }
 }
