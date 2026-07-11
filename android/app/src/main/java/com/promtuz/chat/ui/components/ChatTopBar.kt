@@ -5,6 +5,7 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,6 +70,18 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
             IconButton(onClick = { back?.onBackPressedDispatcher?.onBackPressed() }) {
                 DrawableIcon(R.drawable.i_back_chevron)
             }
+        },
+        actions = {
+            AppDropMenu(
+                anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp)) },
+                groups = listOf(
+                    listOf(MenuAction("Search", null) {}, MenuAction("Mute", null) {}),
+                    listOf(
+                        MenuAction("Clear History", null) {},
+                        MenuAction("Delete Chat", null, destructive = true) {},
+                    ),
+                ),
+            )
         },
         // freezeOnExit: bake the blur to pixels while the nav card scales out (Haze
         // samples screen-space and shatters under an ancestor scale).
