@@ -1,12 +1,17 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.ClipData
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -55,11 +60,13 @@ import com.promtuz.chat.ui.components.MenuAnchor
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.MessageContextMenu
 import com.promtuz.chat.ui.components.MessageMenuState
+import com.promtuz.chat.ui.components.SelectionTopBar
 import com.promtuz.chat.ui.components.SwipeToReply
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlin.math.abs
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private sealed interface ChatRow {
@@ -111,9 +118,55 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
         menu.close()
     }
 
+    val scope = rememberCoroutineScope()
+
+    // Multi-select: keys of selected messages; non-empty = selection mode.
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var confirmBulkDelete by remember { mutableStateOf(false) }
+    val selecting = selected.isNotEmpty()
+    BackHandler(selecting) { selected = emptySet() }
+    fun toggleSelect(key: String) {
+        selected = if (key in selected) selected - key else selected + key
+    }
+    val clipboard = LocalClipboard.current
+    fun copySelection() {
+        val text = messages.asReversed()
+            .filter { it.key in selected }
+            .joinToString("\n") { (it.content as? MessageContent.Text)?.text.orEmpty() }
+        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("messages", text))) }
+    }
+
+    // Tap on a reply's quote → glide to the quoted message and flash it.
+    var highlightKey by remember { mutableStateOf<String?>(null) }
+    fun jumpToQuoted(didHex: String) {
+        val idx = rows.indexOfFirst { it is ChatRow.Msg && it.msg.dispatchIdHex == didHex }
+        if (idx == -1) return
+        val key = (rows[idx] as ChatRow.Msg).msg.key
+        scope.launch {
+            listState.animateScrollToItem(idx)
+            highlightKey = key
+            delay(1400)
+            if (highlightKey == key) highlightKey = null
+        }
+    }
+
     Box {
         Scaffold(
-            topBar = { ChatTopBar(name, viewModel, hazeState) },
+            topBar = {
+                AnimatedContent(selecting, label = "topbar") { inSelection ->
+                    if (inSelection) SelectionTopBar(
+                        count = selected.size,
+                        haze = hazeState,
+                        onClose = { selected = emptySet() },
+                        onCopy = {
+                            copySelection()
+                            selected = emptySet()
+                        },
+                        onDelete = { confirmBulkDelete = true },
+                    )
+                    else ChatTopBar(name, viewModel, hazeState)
+                }
+            },
             bottomBar = { ChatBottomBar(viewModel, hazeState) },
         ) { padding ->
             // Wallpaper + list are the haze source; the translucent bars sample them. contentPadding
@@ -134,24 +187,42 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                         when (row) {
                             is ChatRow.Msg -> {
                                 val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                                SwipeToReply(
-                                    enabled = row.msg.dispatchIdHex != null && !row.msg.deleted,
-                                    onReply = { viewModel.beginReply(row.msg) },
-                                    animated
-                                        .padding(top = gapAbove)
-                                        .sendEnter(row.msg)
-                                        // the context menu re-draws this row lifted; hide the original
-                                        .graphicsLayer { alpha = if (menu.anchor?.msg?.key == row.msg.key) 0f else 1f },
-                                ) {
-                                    MessageBubble(
-                                        msg = row.msg,
-                                        mergedTop = row.mergedTop,
-                                        mergedBottom = row.mergedBottom,
-                                        onLongPress = { bounds ->
-                                            menu.open(MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom))
-                                        },
-                                        menuState = menu,
-                                        onReactionTap = { viewModel.toggleReaction(row.msg, it) },
+                                val isSelected = row.msg.key in selected
+                                val rowTint by animateColorAsState(
+                                    if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    else if (highlightKey == row.msg.key) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                                    else Color.Transparent,
+                                    label = "rowTint",
+                                )
+                                Box(animated.background(rowTint)) {
+                                    SwipeToReply(
+                                        enabled = !selecting && row.msg.dispatchIdHex != null && !row.msg.deleted,
+                                        onReply = { viewModel.beginReply(row.msg) },
+                                        Modifier
+                                            .padding(top = gapAbove)
+                                            .sendEnter(row.msg)
+                                            // the context menu re-draws this row lifted; hide the original
+                                            .graphicsLayer { alpha = if (menu.anchor?.msg?.key == row.msg.key) 0f else 1f },
+                                    ) {
+                                        MessageBubble(
+                                            msg = row.msg,
+                                            mergedTop = row.mergedTop,
+                                            mergedBottom = row.mergedBottom,
+                                            onLongPress = { bounds ->
+                                                menu.open(MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom))
+                                            },
+                                            menuState = menu,
+                                            onReactionTap = { viewModel.toggleReaction(row.msg, it) },
+                                        )
+                                    }
+                                    // Selection mode: any tap on the row toggles; drawn above so it wins.
+                                    if (selecting) Box(
+                                        Modifier
+                                            .matchParentSize()
+                                            .clickable(
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null,
+                                            ) { toggleSelect(row.msg.key) },
                                     )
                                 }
                             }
@@ -182,6 +253,22 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                 onDismiss = { confirmDelete = null },
             )
         }
+
+        if (confirmBulkDelete) AlertDialog(
+            onDismissRequest = { confirmBulkDelete = false },
+            title = { Text("Delete ${selected.size} messages?") },
+            text = { Text("Your own messages are deleted for everyone; theirs only from this device.") },
+            confirmButton = {
+                TextButton({
+                    messages.filter { it.key in selected }.forEach { m ->
+                        m.dispatchIdHex?.let { viewModel.delete(it, forEveryone = m.outgoing) }
+                    }
+                    selected = emptySet()
+                    confirmBulkDelete = false
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton({ confirmBulkDelete = false }) { Text("Cancel") } },
+        )
     }
 }
 
