@@ -68,8 +68,8 @@ use crate::types::bytes::Bytes;
 /// (bumping it is a wider flag day). This one is peer-to-peer only, so
 /// bumping it to 5 for the typed `AppPayload` seam is a client-only
 /// coordinated redeploy. Bumped to 6 for the Edit/Delete variants, 7 for
-/// the React variant, 8 for the Reply variant.
-pub const MLS_WIRE_VERSION: u16 = 8;
+/// the React variant, 8 for the Reply variant, 9 for the PairAck variant.
+pub const MLS_WIRE_VERSION: u16 = 9;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
 /// union so receipts/edits/etc. ride the same encrypted channel. The
@@ -91,6 +91,11 @@ pub enum AppPayload {
     /// Text that quotes the message with dispatch_id `reply_to`. Appended
     /// after React so postcard's ordinal tags for older variants hold.
     Reply { reply_to: [u8; 16], content: String },
+    /// The invitee's proof-of-pair: sent as the first app message right after
+    /// accepting a Welcome. Carries nothing — its value is *being* a valid
+    /// inbound MLS message, which proves the group works end-to-end and flips
+    /// the inviter's contact PENDING → PAIRED. Not stored as a message.
+    PairAck,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

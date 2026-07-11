@@ -20,9 +20,13 @@ pub struct ContactRow {
     /// Replaces the v2-era `(epk, enc_esk)` columns and
     /// `Contact::shared_key()` derivation.
     pub mls_group_id:  Option<[u8; 32]>,
+    /// Pairing state: 0 = pending (welcome published, not yet confirmed),
+    /// 1 = paired (proven by an inbound MLS message), 2 = rejected. Legacy
+    /// rows default to paired — they already work.
+    pub status:        u8,
 }
 
-from_row!(ContactRow { ipk, name, added_at, mls_group_id });
+from_row!(ContactRow { ipk, name, added_at, mls_group_id, status });
 
 /// Hard cutover: drop the v2 shared-key columns (`epk`, `enc_esk`) and
 /// add `mls_group_id`.
@@ -56,6 +60,9 @@ const MIGRATION_ARRAY: &[M] = &[
         );
         "#,
     ),
+    // Pairing state machine (PAIRING.md). Default paired: legacy contacts
+    // already have a working group.
+    M::up("ALTER TABLE contacts ADD COLUMN status INTEGER NOT NULL DEFAULT 1;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -95,11 +102,12 @@ mod tests {
             .expect("query")
             .filter_map(|r| r.ok())
             .collect();
-        assert_eq!(cols.len(), 4, "expected 4 columns post-migration, got {cols:?}");
+        assert_eq!(cols.len(), 5, "expected 5 columns post-migration, got {cols:?}");
         assert!(cols.contains(&"ipk".to_string()));
         assert!(cols.contains(&"name".to_string()));
         assert!(cols.contains(&"added_at".to_string()));
         assert!(cols.contains(&"mls_group_id".to_string()));
+        assert!(cols.contains(&"status".to_string()));
         assert!(!cols.contains(&"epk".to_string()), "v2 epk column must be dropped");
         assert!(
             !cols.contains(&"enc_esk".to_string()),
@@ -125,6 +133,46 @@ mod tests {
         assert_eq!(row.name, "alice");
         assert_eq!(row.added_at, 1234);
         assert!(row.mls_group_id.is_none());
+    }
+
+    /// Pairing status transitions (PAIRING.md): a fresh row defaults to paired
+    /// (legacy safety); save_pending's insert sets pending; mark_paired's
+    /// guarded UPDATE flips pending→paired once and never downgrades a paired.
+    #[test]
+    fn status_flip_is_one_way_and_guarded() {
+        let conn = open_in_memory();
+        let ipk = [7u8; 32];
+        let status = |c: &Connection| -> u8 {
+            c.query_row("SELECT status FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap() as u8
+        };
+        // save_pending shape: insert as pending (0).
+        conn.execute(
+            "INSERT INTO contacts (ipk, name, added_at, mls_group_id, status) VALUES (?1,?2,?3,NULL,0)",
+            (ipk.as_slice(), "b", 1u64),
+        )
+        .unwrap();
+        assert_eq!(status(&conn), 0, "saved pending");
+
+        // mark_paired shape: pending → paired, once.
+        let flip = |c: &Connection| {
+            c.execute("UPDATE contacts SET status = 1 WHERE ipk = ?1 AND status = 0", [ipk.as_slice()])
+                .unwrap()
+        };
+        assert_eq!(flip(&conn), 1, "flips pending → paired");
+        assert_eq!(status(&conn), 1);
+        assert_eq!(flip(&conn), 0, "idempotent — already paired, no rows touched");
+
+        // A paired row is never downgraded by a re-pair's ON CONFLICT (name only).
+        conn.execute(
+            "INSERT INTO contacts (ipk, name, added_at, mls_group_id, status) VALUES (?1,?2,?3,NULL,0) \
+             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name",
+            (ipk.as_slice(), "b2", 2u64),
+        )
+        .unwrap();
+        assert_eq!(status(&conn), 1, "re-pair must not downgrade a live paired contact");
     }
 
     /// Insert a row with a populated `mls_group_id` and read it back.

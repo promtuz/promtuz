@@ -127,6 +127,7 @@ mod tests {
                 name:         "alice".into(),
                 added_at:     42,
                 mls_group_id: Some([9u8; 32]),
+                status:       1,
             }],
             messages:  Vec::new(),
             reactions: Vec::new(),

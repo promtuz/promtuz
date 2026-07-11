@@ -322,6 +322,13 @@ pub async fn send_receipt(to: [u8; 32], kind: ReceiptKind, upto: [u8; 16]) -> Re
     send_control(to, AppPayload::Receipt { kind, upto }).await
 }
 
+/// Proof-of-pair (PAIRING.md): the invitee's first app message after accepting
+/// a Welcome. Flips the inviter's contact PENDING → PAIRED by simply being a
+/// decryptable inbound message.
+pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
+    send_control(to, AppPayload::PairAck).await
+}
+
 /// Send a control `AppPayload` (Edit/Delete/React/Receipt) into the existing 1:1 group as an
 /// MLS application message. The group must already exist — you're mutating a
 /// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
@@ -434,11 +441,13 @@ pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
     Ok(())
 }
 
-/// Eager pairing: create the implicit 1:1 group with `to` and publish a
-/// Welcome carrying `pairing` (the inviter's invite + our display name),
-/// so a not-yet-contact recipient can gate-accept us. Persists the
-/// group_id on success. Entry point for `api::identity::pair_from_qr`.
-pub async fn pair(to: [u8; 32], pairing: PairingP) -> Result<()> {
+/// Pairing (PAIRING.md): fetch `to`'s KeyPackage, build the 1:1 group, and
+/// publish a Welcome carrying `pairing` (our invite + name). The contact is
+/// saved as **PENDING only on success** — an unreachable peer (KP not
+/// published; the common new-user case) errors WITHOUT leaving a bricked
+/// contact behind. `peer_name` is the invitee's self-asserted name for the
+/// saved row. Entry point for `api::identity::pair_from_qr`.
+pub async fn pair(to: [u8; 32], peer_name: String, pairing: PairingP) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -458,8 +467,10 @@ pub async fn pair(to: [u8; 32], pairing: PairingP) -> Result<()> {
         dht:      client.as_ref(),
     };
 
+    // `?` on a KP-fetch miss returns before any save — no bricked contact.
     let group =
         lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, Some(pairing)).await?;
+    Contact::save_pending(to, peer_name)?;
     if let Err(e) = Contact::set_mls_group_id(&to, &group.group_id()) {
         warn!("PAIR: persist mls_group_id failed: {e}");
     }

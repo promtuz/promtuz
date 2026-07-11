@@ -44,15 +44,14 @@ pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     if qr.ipk == me.ipk() {
         return Err(CoreError::Internal { msg: "cannot pair with yourself".into() });
     }
-    let our_name = me.name();
+    let pairing = PairingP { invite: qr.invite, sender_name: me.name() };
 
-    // We have the sharer's identity from the QR — save them right away.
-    let _ = Contact::save(qr.ipk, qr.name);
-
-    let to = qr.ipk;
-    let pairing = PairingP { invite: qr.invite, sender_name: our_name };
+    // Do NOT save eagerly — pair() saves the contact as PENDING only after the
+    // welcome is published (PAIRING.md), so an unreachable peer never leaves a
+    // bricked row. The contact surfaces via the reactive doorbell on success.
+    let (to, peer_name) = (qr.ipk, qr.name);
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = messaging::pair(to, pairing).await {
+        if let Err(e) = messaging::pair(to, peer_name, pairing).await {
             log::error!("PAIR: {e}");
         }
     });

@@ -681,6 +681,10 @@ async fn process_deliver(
             // even if a downstream save fails — the ratchet key is spent
             // either way.
             crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
+            // Proof of pair (PAIRING.md): a decryptable inbound message means
+            // the group works, so a PENDING contact is now confirmed. No-op if
+            // already paired. Fires for PairAck and any real message alike.
+            Contact::mark_paired(&msg.from);
             match AppPayload::deser(&plaintext) {
                 // Reply is Text + the quoted message's dispatch_id.
                 Ok(p @ (AppPayload::Text(..) | AppPayload::Reply { .. })) => {
@@ -774,6 +778,10 @@ async fn process_deliver(
                         .emit();
                     }
                 },
+                Ok(AppPayload::PairAck) => {
+                    // Proof-of-pair — its whole job was the mark_paired above.
+                    info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
+                },
                 Err(e) => {
                     warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&msg.from[..4]));
                     bail!("bad AppPayload");
@@ -783,6 +791,14 @@ async fn process_deliver(
         Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
             crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
+            // Accepting the welcome built the group → prove it works back to
+            // the inviter so their contact flips PENDING → PAIRED.
+            let to = *msg.from;
+            crate::RUNTIME.spawn(async move {
+                if let Err(e) = crate::messaging::send_pair_ack(to).await {
+                    warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
+                }
+            });
         },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {
             // Buffered for a future epoch / staged commit merged.
