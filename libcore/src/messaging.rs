@@ -241,7 +241,7 @@ fn build_self_credential(
 /// live relay's peer/1 dialer and hands off to [`send_message_inner`].
 /// Errors (rather than silently no-op'ing against a non-wired dialer) if
 /// no relay connection is up. Entry point for `api::messaging::send_message`.
-pub async fn send(to: [u8; 32], content: String) -> Result<()> {
+pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> Result<()> {
     // Pull the production peer/1 dialer from the global `RELAY` (attached
     // at connect-time by `Relay::connect`). If no relay connection is
     // live, surface a clean error rather than silently no-op against
@@ -262,7 +262,7 @@ pub async fn send(to: [u8; 32], content: String) -> Result<()> {
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            send_message_inner(&ctx, to, content).await
+            send_message_inner(&ctx, to, content, reply_to).await
         },
         None => {
             error!("MESSAGE: no relay connection / dialer; send aborted");
@@ -693,10 +693,10 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
 /// Generic over the [`DhtClient`] backend so unit tests inject a
 /// fake; production wires the real dialer.
 pub async fn send_message_inner<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], content: String,
+    ctx: &MlsContext<'_, C>, to: [u8; 32], content: String, reply_to: Option<[u8; 16]>,
 ) -> Result<()> {
     // 0. Save to local DB first (status = pending), then drive one attempt.
-    let msg = Message::save_outgoing(to, &content)?;
+    let msg = Message::save_outgoing(to, &content, reply_to)?;
     attempt_send(ctx, to, msg).await
 }
 
@@ -809,10 +809,15 @@ pub async fn attempt_send<C: DhtClient>(
     //    one for application messages by reading it back.
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
-    // 5. Build the application envelope.
-    let payload_bytes = common::proto::mls_wire::AppPayload::Text(content.clone())
-        .ser()
-        .map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    // 5. Build the application envelope. A reply row rebuilds the Reply
+    //    payload on retry too, since reply_to rides on the row.
+    let reply_to: Option<[u8; 16]> =
+        msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    let app_payload = match reply_to {
+        Some(rt) => common::proto::mls_wire::AppPayload::Reply { reply_to: rt, content: content.clone() },
+        None => common::proto::mls_wire::AppPayload::Text(content.clone()),
+    };
+    let payload_bytes = app_payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
     let payload = build_application_envelope_bytes(
         ctx,
         &mut group,
@@ -1196,10 +1201,14 @@ fn persist_drained(
     sender_ipk: [u8; 32],
 ) {
     for m in drained {
-        let Ok(AppPayload::Text(content)) = AppPayload::deser(&m.plaintext) else { continue };
+        let (content, reply_to) = match AppPayload::deser(&m.plaintext) {
+            Ok(AppPayload::Text(content)) => (content, None),
+            Ok(AppPayload::Reply { reply_to, content }) => (content, Some(reply_to)),
+            _ => continue,
+        };
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
         let ts = crate::utils::systime().as_secs();
-        if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts) {
+        if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, reply_to) {
             MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
                 .emit();
         }

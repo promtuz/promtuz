@@ -21,6 +21,8 @@ pub struct MessageRecord {
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
+    /// dispatch_id of the quoted message, when this is a reply.
+    pub reply_to: Option<Vec<u8>>,
 }
 
 /// One emoji reaction, projected for the client. `mine` is `reactor == self`
@@ -42,15 +44,19 @@ pub struct ContactInfo {
     pub added_at: u64,
 }
 
-/// Send `content` to `to_ipk`. Fire-and-forget: the outcome arrives via
+/// Send `content` to `to_ipk`, optionally quoting a prior message by its
+/// 16-byte `reply_to` dispatch_id. Fire-and-forget: the outcome arrives via
 /// `CoreEvents::on_message` (Sent / Failed), matching the engine's
 /// event-driven model. The `Result` only reports invalid input (a bad
 /// IPK length) synchronously.
 #[uniffi::export]
-pub fn send_message(to_ipk: Vec<u8>, content: String) -> Result<(), CoreError> {
+pub fn send_message(
+    to_ipk: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
+) -> Result<(), CoreError> {
     let to = to_ipk32(&to_ipk)?;
+    let reply = reply_to.as_deref().map(to_did16).transpose()?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::send(to, content).await {
+        if let Err(e) = crate::messaging::send(to, content, reply).await {
             log::error!("MESSAGE: send failed: {e}");
         }
     });
@@ -282,6 +288,7 @@ impl From<MessageRow> for MessageRecord {
             dispatch_id: r.dispatch_id,
             edited: r.edited,
             deleted: r.deleted,
+            reply_to: r.reply_to,
         }
     }
 }

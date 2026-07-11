@@ -41,14 +41,17 @@ pub struct Message {
 /// This code is bullshit crap written by AI
 impl Message {
     /// Save an outgoing message (status = pending until relay confirms).
-    pub fn save_outgoing(peer_ipk: [u8; 32], content: &str) -> Result<Self> {
+    /// `reply_to` is the quoted message's dispatch_id, if this is a reply.
+    pub fn save_outgoing(
+        peer_ipk: [u8; 32], content: &str, reply_to: Option<[u8; 16]>,
+    ) -> Result<Self> {
         let id = Ulid::new();
         let timestamp = systime().as_secs();
         let dispatch_id = next_dispatch_id();
         let conn = MESSAGES_DB.lock();
         conn.execute(
-            "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
-            (&id.to_string(), peer_ipk, content, timestamp, STATUS_PENDING, dispatch_id.as_slice()),
+            "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)",
+            (&id.to_string(), peer_ipk, content, timestamp, STATUS_PENDING, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
         Ok(Self {
@@ -62,6 +65,7 @@ impl Message {
                 dispatch_id: Some(dispatch_id.to_vec()),
                 edited: false,
                 deleted: false,
+                reply_to: reply_to.map(|r| r.to_vec()),
             },
         })
     }
@@ -71,13 +75,14 @@ impl Message {
     /// tells the caller "already have it", not an error.
     pub fn save_incoming(
         peer_ipk: [u8; 32], dispatch_id: &[u8; 16], content: &str, timestamp: u64,
+        reply_to: Option<[u8; 16]>,
     ) -> Result<Option<Self>> {
         let id = Ulid::new();
         let conn = MESSAGES_DB.lock();
         let changed = conn.execute(
-            "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)
+            "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7)
              ON CONFLICT(peer_ipk, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
-            (&id.to_string(), peer_ipk, content, timestamp, STATUS_SENT, dispatch_id.as_slice()),
+            (&id.to_string(), peer_ipk, content, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
         if changed == 0 {
@@ -95,6 +100,7 @@ impl Message {
                 dispatch_id: Some(dispatch_id.to_vec()),
                 edited: false,
                 deleted: false,
+                reply_to: reply_to.map(|r| r.to_vec()),
             },
         }))
     }

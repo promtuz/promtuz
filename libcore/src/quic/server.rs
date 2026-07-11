@@ -669,9 +669,15 @@ async fn process_deliver(
     match result {
         Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
             match AppPayload::deser(&plaintext) {
-                Ok(AppPayload::Text(content)) => {
+                // Reply is Text + the quoted message's dispatch_id.
+                Ok(p @ (AppPayload::Text(..) | AppPayload::Reply { .. })) => {
+                    let (content, reply_to) = match p {
+                        AppPayload::Text(c) => (c, None),
+                        AppPayload::Reply { reply_to, content } => (content, Some(reply_to)),
+                        _ => unreachable!(),
+                    };
                     let timestamp = systime().as_secs();
-                    match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp) {
+                    match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp, reply_to) {
                         Ok(Some(saved)) => {
                             info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Received {

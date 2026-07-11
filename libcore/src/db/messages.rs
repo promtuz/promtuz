@@ -33,9 +33,11 @@ pub struct MessageRow {
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
+    /// dispatch_id of the message this one quotes (reply). NULL = plain text.
+    pub reply_to: Option<Vec<u8>>,
 }
 
-from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted });
+from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to });
 
 /// One emoji reaction on a message. Keyed by `reactor` (an IPK, not a
 /// me/them bool) so a multi-member group attributes each reaction to its
@@ -85,6 +87,7 @@ const MIGRATION_ARRAY: &[M] = &[
         ) WITHOUT ROWID;
     CREATE INDEX idx_reactions_msg ON reactions(peer_ipk, dispatch_id);",
     ),
+    M::up("ALTER TABLE messages ADD COLUMN reply_to BLOB;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

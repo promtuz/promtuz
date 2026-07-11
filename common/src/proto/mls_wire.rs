@@ -68,8 +68,8 @@ use crate::types::bytes::Bytes;
 /// (bumping it is a wider flag day). This one is peer-to-peer only, so
 /// bumping it to 5 for the typed `AppPayload` seam is a client-only
 /// coordinated redeploy. Bumped to 6 for the Edit/Delete variants, 7 for
-/// the React variant.
-pub const MLS_WIRE_VERSION: u16 = 7;
+/// the React variant, 8 for the Reply variant.
+pub const MLS_WIRE_VERSION: u16 = 8;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
 /// union so receipts/edits/etc. ride the same encrypted channel. The
@@ -88,6 +88,9 @@ pub enum AppPayload {
     /// payload — so this stays correct for multi-member groups (each member's
     /// reaction is attributed to their own IPK on receipt).
     React { target: [u8; 16], emoji: String, add: bool },
+    /// Text that quotes the message with dispatch_id `reply_to`. Appended
+    /// after React so postcard's ordinal tags for older variants hold.
+    Reply { reply_to: [u8; 16], content: String },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
