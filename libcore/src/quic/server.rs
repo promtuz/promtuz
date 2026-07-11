@@ -620,6 +620,14 @@ fn is_welcome_envelope(payload: &[u8]) -> bool {
 async fn process_deliver(
     msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
+    // Already decrypted on an earlier connection? A different home is
+    // redelivering. Ack (Ok → relay GCs) but NEVER re-decrypt: the ratchet
+    // key is spent and openmls would SecretReuseError. Outer-keyed + pre-
+    // decrypt, so it covers text, control, and welcome alike.
+    if crate::data::seen::Seen::contains(&msg.from, &msg.id.0) {
+        return Ok(());
+    }
+
     // The wire envelope is `MlsEnvelopeP` (postcard-encoded), so we
     // hand off to `api::messaging::process_inbound_envelope` rather
     // than the v2 shared-key decrypt.
@@ -668,6 +676,11 @@ async fn process_deliver(
 
     match result {
         Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
+            // Decrypt succeeded → ratchet advanced. Record now (before the
+            // payload sub-match) so any redelivery is caught pre-decrypt,
+            // even if a downstream save fails — the ratchet key is spent
+            // either way.
+            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
             match AppPayload::deser(&plaintext) {
                 // Reply is Text + the quoted message's dispatch_id.
                 Ok(p @ (AppPayload::Text(..) | AppPayload::Reply { .. })) => {
@@ -768,6 +781,7 @@ async fn process_deliver(
             }
         },
         Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
+            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
         },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {

@@ -6,6 +6,7 @@ pub mod message;
 pub mod reaction;
 pub mod recovery;
 pub mod relay;
+pub mod seen;
 
 use std::str::FromStr;
 

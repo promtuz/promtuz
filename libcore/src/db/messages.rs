@@ -88,6 +88,17 @@ const MIGRATION_ARRAY: &[M] = &[
     CREATE INDEX idx_reactions_msg ON reactions(peer_ipk, dispatch_id);",
     ),
     M::up("ALTER TABLE messages ADD COLUMN reply_to BLOB;"),
+    // Delivery dedup ledger: a dispatch we already decrypted must never be
+    // re-decrypted (the MLS ratchet consumed its key → SecretReuseError).
+    // Redelivery from the other K-home relays on reconnect is the trigger.
+    M::up(
+        "CREATE TABLE seen_dispatch (
+            peer_ipk BLOB NOT NULL CHECK(length(peer_ipk) = 32),
+            dispatch_id BLOB NOT NULL,
+            seen_at INTEGER NOT NULL,
+            PRIMARY KEY (peer_ipk, dispatch_id)
+        ) WITHOUT ROWID;",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
