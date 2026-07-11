@@ -62,8 +62,7 @@ private const val SCRIM_MAX = 0.2f // dim over the revealed screen while back-sw
 // (~2 frames @ 60fps); normal frames fall well under it, only real hitches get clamped.
 private const val FRAME_CAP_NANOS = 33_000_000L
 private val fwdEase = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
-private val scaleEase = CubicBezierEasing(0.12f, 0.85f, 0.25f, 1f) // front-loaded: scale settles early in the drag
-private val commitEase = CubicBezierEasing(0.3f, 0f, 0.1f, 1f)     // EASE_OUT_QUINT-ish fling
+private val commitEase = CubicBezierEasing(0.3f, 0f, 0.1f, 1f) // EASE_OUT_QUINT-ish fling
 
 /** A card that's been popped and is now a detached ghost sliding off — no longer on the stack. */
 private class ExitingCard(
@@ -175,7 +174,7 @@ fun NavStage(
             // the stack immediately, and slide it off in `scope` (survives the next gesture's coroutine).
             val leaving = ExitingCard(
                 entry = top,
-                scale = lerp(1f, SCALE_TO, scaleEase.transform(progress.value)),
+                scale = lerp(1f, SCALE_TO, progress.value),
                 edgeRight = fromRight,
                 touchYFrac = (touchY / heightPx).coerceIn(0f, 1f),
                 cornerProgress = progress.value,
@@ -199,7 +198,7 @@ fun NavStage(
     // Live top transform. graphicsLayer lambdas read the animatables (draw-only, no recomposition).
     val frontMod = when {
         backActive -> Modifier.graphicsLayer {
-            val s = lerp(1f, SCALE_TO, scaleEase.transform(progress.value))
+            val s = lerp(1f, SCALE_TO, progress.value)
             scaleX = s
             scaleY = s
             transformOrigin = TransformOrigin(
