@@ -1,10 +1,13 @@
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -47,6 +50,9 @@ class ChatVM(private val application: Application) : ViewModel() {
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
     private var typingExpiry: Job? = null
 
+    private val _presence = MutableStateFlow<Presence?>(null)
+    val presence: StateFlow<Presence?> = _presence.asStateFlow()
+
     fun init(peerIpk: ByteArray) {
         if (started) return
         started = true
@@ -72,6 +78,44 @@ class ChatVM(private val application: Application) : ViewModel() {
                     typingExpiry?.cancel()
                     typingExpiry = viewModelScope.launch { delay(TYPING_TTL_MS); _typing.value = false }
                 } else clearTyping()
+            }
+        }
+
+        viewModelScope.launch {
+            CoreBridge.presence.filter { it.peer.contentEquals(peer) }.collect { sig ->
+                _presence.value = when (sig.lastSeen) {
+                    null -> Presence.Online
+                    0L -> Presence.Unknown
+                    else -> Presence.LastSeen(sig.lastSeen)
+                }
+            }
+        }
+
+        // The relay drops a subscribe sent while disconnected, so re-express
+        // interest on every (re)connect, not once at chat-open.
+        viewModelScope.launch {
+            CoreBridge.connection.filter { it == ConnectionState.Connected }.collect {
+                runCatching { CoreBridge.subscribePresence(listOf(peer)) }
+            }
+        }
+
+        // Outbound typing: refresh under the peer's TTL while keystrokes flow,
+        // one idle signal when the draft empties (send() clears input → same path).
+        var lastSentAt = 0L
+        viewModelScope.launch {
+            input.collect { text ->
+                if (text.isEmpty()) {
+                    if (lastSentAt != 0L) {
+                        lastSentAt = 0L
+                        runCatching { CoreBridge.setActivity(peer, 0) }
+                    }
+                } else {
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastSentAt >= TYPING_RESEND_MS) {
+                        lastSentAt = now
+                        runCatching { CoreBridge.setActivity(peer, Activity.Typing.bit) }
+                    }
+                }
             }
         }
     }
@@ -135,6 +179,9 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     private companion object {
         const val TYPING_TTL_MS = 6_000L
+
+        /** Outbound refresh cadence; must stay under the peer's [TYPING_TTL_MS]. */
+        const val TYPING_RESEND_MS = 4_000L
     }
 }
 
