@@ -48,8 +48,20 @@ fun HomeChatListItem(chat: ChatSummary, roundShape: Shape, onOpen: () -> Unit) {
                     color = colors.onSecondaryContainer.copy(0.5f),
                 )
             }
-            chat.lastPreview?.let {
-                Text(it, style = type.bodySmallEmphasized, color = colors.onSecondaryContainer.copy(0.7f))
+            when (chat.status) {
+                0 -> Text(
+                    "Waiting to connect…",
+                    style = type.bodySmallEmphasized,
+                    color = colors.primary.copy(0.8f),
+                )
+                2 -> Text(
+                    "Couldn't connect",
+                    style = type.bodySmallEmphasized,
+                    color = colors.error.copy(0.8f),
+                )
+                else -> chat.lastPreview?.let {
+                    Text(it, style = type.bodySmallEmphasized, color = colors.onSecondaryContainer.copy(0.7f))
+                }
             }
         }
     }

@@ -17,6 +17,7 @@ import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -99,7 +100,7 @@ class AppVM(
         viewModelScope.launch {
             _invite.value = try {
                 val p = bridge.previewInvite(bytes)
-                InviteSheet.Confirm(bytes, p.ipk, p.name, p.alreadyContact, p.expired)
+                InviteSheet.Confirm(bytes, p.ipk, p.name, p.alreadyContact, p.expiryMs.toLong(), p.isSelf)
             } catch (e: Exception) {
                 Timber.tag(TAG).w(e, "previewInvite failed")
                 InviteSheet.Invalid
@@ -107,16 +108,26 @@ class AppVM(
         }
     }
 
-    /** User tapped [Add]: queue the pairing (Ok != paired) and show brief success. */
-    fun acceptInvite(bytes: ByteArray, name: String) {
+    /** User tapped Add: queue the pairing, then WATCH for the contact to appear.
+     *  pair() saves it PENDING only after the welcome publishes, so its arrival
+     *  is our success signal; nothing within the window means unreachable
+     *  (their KeyPackage isn't published — the common "new user" case). */
+    fun acceptInvite(bytes: ByteArray, ipk: ByteArray, name: String) {
+        _invite.value = InviteSheet.Pairing(name)
         viewModelScope.launch {
             try {
                 bridge.pairFromQr(bytes)
-                _invite.value = InviteSheet.Added(name)
             } catch (e: Exception) {
                 Timber.tag(TAG).w(e, "pairFromQr failed")
-                _invite.value = InviteSheet.Invalid
+                _invite.value = InviteSheet.Unreachable(bytes, name)
+                return@launch
             }
+            val appeared = withTimeoutOrNull(12_000) {
+                while (bridge.contacts().none { it.ipk.contentEquals(ipk) }) delay(400)
+                true
+            } ?: false
+            _invite.value =
+                if (appeared) InviteSheet.Added(ipk, name) else InviteSheet.Unreachable(bytes, name)
         }
     }
 
@@ -140,6 +151,7 @@ class AppVM(
                 name = c.name,
                 lastPreview = last?.content,
                 timestampMs = (last?.timestamp ?: c.addedAt).toLong() * 1000,
+                status = c.status.toInt(),
             )
         }.sortedByDescending { it.timestampMs }
     } catch (e: Exception) {

@@ -6,4 +6,6 @@ data class ChatSummary(
     val name: String,
     val lastPreview: String?,
     val timestampMs: Long,
+    /** Pairing state: 0 = pending, 1 = paired, 2 = rejected (PAIRING.md). */
+    val status: Int = 1,
 )

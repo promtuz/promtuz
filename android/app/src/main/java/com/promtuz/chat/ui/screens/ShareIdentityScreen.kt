@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +36,8 @@ import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
 import com.promtuz.chat.ui.components.BackTopBar
 import com.promtuz.chat.ui.components.IdentityQrCode
 import com.promtuz.chat.utils.InviteLink
+import com.promtuz.core.CoreBridge
+import kotlinx.coroutines.delay
 
 @Composable
 fun ShareIdentityScreen(
@@ -42,6 +46,17 @@ fun ShareIdentityScreen(
 ) {
     val colors = MaterialTheme.colorScheme
     var showScanner by remember { mutableStateOf(false) }
+
+    // Gate the QR + share link on discoverability: a link is useless until our
+    // KeyPackage is published, so a brand-new user waits (PAIRING.md). Scanning
+    // someone else's code doesn't need our KP, so that stays available.
+    var discoverable by remember { mutableStateOf(CoreBridge.kpPublishReady()) }
+    LaunchedEffect(Unit) {
+        while (!discoverable) {
+            delay(1000)
+            discoverable = CoreBridge.kpPublishReady()
+        }
+    }
 
     Scaffold(
         topBar = { BackTopBar("Share Identity") }
@@ -61,7 +76,26 @@ fun ShareIdentityScreen(
                         .wrapContentSize()
                         .align(Alignment.CenterHorizontally)
                 ) {
-                    IdentityQrCode(viewModel.qrData.collectAsState())
+                    if (discoverable) {
+                        IdentityQrCode(viewModel.qrData.collectAsState())
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            CircularProgressIndicator()
+                            Text(
+                                "Getting you discoverable…",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                "Publishing your keys so others can add you.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colors.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                 }
 
                 Column(
@@ -69,7 +103,7 @@ fun ShareIdentityScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    ShareLinkButton(viewModel.qrData.collectAsState().value)
+                    ShareLinkButton(viewModel.qrData.collectAsState().value.takeIf { discoverable })
                     ScanQRButton(onClick = { showScanner = true })
                 }
             }
