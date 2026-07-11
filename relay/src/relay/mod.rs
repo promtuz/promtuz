@@ -93,6 +93,10 @@ pub struct Relay {
     /// A sees B's presence only when `subs[A] ∋ B` and `subs[B] ∋ A` — so this
     /// one map is both the interest list and the consent list.
     pub presence_subs: RwLock<HashMap<[u8; 32], HashSet<[u8; 32]>>>,
+
+    /// Clients that flagged themselves Idle → the unix-ms they did. Absence =
+    /// Active. Populated by `SetPresence`, cleared on Active or disconnect.
+    pub presence_mode: RwLock<HashMap<[u8; 32], u64>>,
 }
 
 impl Relay {
@@ -192,6 +196,7 @@ impl Relay {
             endpoint,
             clients,
             presence_subs: RwLock::new(HashMap::new()),
+            presence_mode: RwLock::new(HashMap::new()),
         }
     }
 }

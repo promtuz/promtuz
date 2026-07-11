@@ -191,11 +191,24 @@ pub struct SubscribePresenceP {
     pub contacts: Vec<Bytes<32>>,
 }
 
-/// Relay → client: one contact's presence, as a single "when last seen" field
-/// (online is just its absence — no redundant bool that could contradict it):
-/// - `None`      → online now
-/// - `Some(0)`   → offline, last-seen unknown (e.g. relay restarted)
-/// - `Some(ms)`  → offline since this unix-ms stamp
+/// A contact's presence, one state that can't self-contradict (no separate
+/// online bool alongside a timestamp). `Idle` is client-asserted (a
+/// backgrounded app sends `SetPresence(Idle)` as its last packet before
+/// freezing); `Online`/`Offline` the relay derives from the connection.
+///
+/// Necessary once the QUIC idle timeout went to 240s: a frozen app keeps its
+/// connection, so "connected" no longer means "actively here".
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum PresenceState {
+    /// Connected and active.
+    Online,
+    /// Connected but backgrounded since this unix-ms.
+    Idle { since: u64 },
+    /// Not connected. `last_seen` unix-ms; `0` = unknown (e.g. relay restart).
+    Offline { last_seen: u64 },
+}
+
+/// Relay → client: one contact's presence state.
 ///
 /// Relay-asserted, not peer-signed: the relay inherently knows who is
 /// connected, so it is the authority here (unlike `ActivityP`, peer content the
@@ -203,8 +216,17 @@ pub struct SubscribePresenceP {
 /// metadata; presence exposes nothing new to it.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct PresenceP {
-    pub who:       Bytes<32>,
-    pub last_seen: Option<u64>,
+    pub who:   Bytes<32>,
+    pub state: PresenceState,
+}
+
+/// Client → relay: my activity mode. Fire-and-forget, connection-authenticated
+/// (no sig — same trust as `SubscribePresence`). `Idle` on backgrounding,
+/// `Active` on return to the foreground.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum PresenceMode {
+    Active,
+    Idle,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -401,6 +423,10 @@ pub enum CRelayPacket {
     /// order, so new variants must go at the end to stay wire-compatible with
     /// an already-deployed relay (which drops this via its `_` catch-all).
     SubscribePresence(SubscribePresenceP),
+
+    /// Set our activity mode (Active/Idle). Fire-and-forget; the relay updates
+    /// the state it reports to our mutual contacts. Appended last (postcard).
+    SetPresence(PresenceMode),
 }
 
 /// Server Relay Packet

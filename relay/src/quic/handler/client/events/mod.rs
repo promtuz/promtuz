@@ -76,6 +76,8 @@ pub(super) async fn handle_packet(
 
         SubscribePresence(sub) => presence::handle_subscribe(sub, ctx.clone()).await,
 
+        SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await,
+
         // Ignore Extra
         _ => Ok(()),
     }

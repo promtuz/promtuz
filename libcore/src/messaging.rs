@@ -475,6 +475,28 @@ pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
     Ok(())
 }
 
+/// Tell the relay our activity mode: `idle = true` on backgrounding (sent as
+/// the last packet before the app freezes), `false` on return. Fire-and-forget;
+/// the relay updates the state it reports to our mutual contacts (PRESENCE.md).
+pub async fn set_presence(idle: bool) -> Result<()> {
+    let mode = if idle {
+        common::proto::client_rel::PresenceMode::Idle
+    } else {
+        common::proto::client_rel::PresenceMode::Active
+    };
+    let bytes = CRelayPacket::SetPresence(mode).pack().map_err(|e| anyhow!("pack set_presence: {e}"))?;
+    let conn = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else { return Ok(()) };
+    if let Ok((mut tx, _rx)) = conn.open_bi().await {
+        let _ = tx.write_all(&bytes).await;
+        let _ = tx.finish();
+    }
+    Ok(())
+}
+
 /// Pairing (PAIRING.md): fetch `to`'s KeyPackage, build the 1:1 group, and
 /// publish a Welcome carrying `pairing` (our invite + name). The contact is
 /// saved as **PENDING only on success** — an unreachable peer (KP not

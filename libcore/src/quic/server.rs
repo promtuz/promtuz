@@ -593,13 +593,20 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
 
 /// Surface a relay-asserted presence push (snapshot or delta). Relay-trusted
 /// (no sig — the relay is the presence authority), but we still drop entries
-/// for non-contacts as defense-in-depth. `last_seen`: `None` = online.
+/// for non-contacts as defense-in-depth.
 fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
+    use common::proto::client_rel::PresenceState;
+    use crate::platform::Presence;
     for e in list {
         if !Contact::exists(&e.who.0) {
             continue;
         }
-        crate::events::messaging::PresenceEv { peer: e.who.0, last_seen: e.last_seen }.emit();
+        let presence = match e.state {
+            PresenceState::Online => Presence::Online,
+            PresenceState::Idle { since } => Presence::Idle { since },
+            PresenceState::Offline { last_seen } => Presence::Offline { last_seen },
+        };
+        crate::events::messaging::PresenceEv { peer: e.who.0, presence }.emit();
     }
 }
 

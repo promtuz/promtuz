@@ -164,6 +164,17 @@ pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Set our activity mode: `idle = true` on backgrounding, `false` on
+/// foreground. Fire-and-forget; contacts see us go idle/active (PRESENCE.md).
+#[uniffi::export]
+pub fn set_presence(idle: bool) {
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::set_presence(idle).await {
+            log::debug!("PRESENCE: set_presence failed: {e}");
+        }
+    });
+}
+
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]

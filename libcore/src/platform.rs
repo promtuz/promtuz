@@ -25,6 +25,15 @@ pub trait SecureStore: Send + Sync {
     fn open(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CoreError>;
 }
 
+/// A contact's presence, for the client. `Idle`/`Offline` carry a unix-ms
+/// timestamp (`Offline.last_seen = 0` means unknown).
+#[derive(uniffi::Enum, Debug, Clone)]
+pub enum Presence {
+    Online,
+    Idle { since: u64 },
+    Offline { last_seen: u64 },
+}
+
 /// Typed event delivery to the client — replaces the old single
 /// CBOR-over-`onEvent` callback. The client implements it; core calls it.
 #[uniffi::export(with_foreign)]
@@ -34,9 +43,8 @@ pub trait CoreEvents: Send + Sync {
     /// A contact's live activity (typing/recording/… bitset; 0 = idle/online).
     /// Ephemeral — never stored; drop if the peer isn't in the current view.
     fn on_activity(&self, peer: Vec<u8>, activity: u16);
-    /// A contact's presence changed. `last_seen`: `None` = online now,
-    /// `Some(0)` = offline/unknown, `Some(ms)` = offline since that unix-ms.
-    fn on_presence(&self, peer: Vec<u8>, last_seen: Option<u64>);
+    /// A contact's presence changed (online / idle-since / offline-last-seen).
+    fn on_presence(&self, peer: Vec<u8>, presence: Presence);
     /// A reaction was added (`add = true`) or removed on a message. `reactor`
     /// is the author's IPK — compare to self for "mine". `peer` is the
     /// conversation, `dispatch_id` the reacted message.

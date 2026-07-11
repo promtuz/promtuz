@@ -77,18 +77,17 @@ impl Emittable for ActivityEv {
     }
 }
 
-/// A contact's presence changed. `last_seen`: `None` = online now, `Some(0)` =
-/// offline/last-seen-unknown, `Some(ms)` = offline since that unix-ms stamp.
+/// A contact's presence changed (online / idle-since / offline-last-seen).
 #[derive(Debug, Clone)]
 pub struct PresenceEv {
     pub peer: [u8; 32],
-    pub last_seen: Option<u64>,
+    pub presence: crate::platform::Presence,
 }
 
 impl Emittable for PresenceEv {
     fn emit(self) {
         if let Some(events) = crate::platform::EVENTS.get() {
-            events.on_presence(self.peer.to_vec(), self.last_seen);
+            events.on_presence(self.peer.to_vec(), self.presence);
         }
     }
 }
