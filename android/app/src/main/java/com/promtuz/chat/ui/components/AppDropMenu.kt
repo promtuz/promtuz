@@ -42,6 +42,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -177,24 +179,61 @@ fun AppDropMenu(
                     enter = scaleIn(tween(120), 0.85f, TransformOrigin(1f, 0f)) + fadeIn(tween(120)),
                     exit = scaleOut(tween(100), 0.85f, TransformOrigin(1f, 0f)) + fadeOut(tween(100)),
                 ) {
-                    Surface(
-                        shape = shape,
-                        color = MaterialTheme.colorScheme.surfaceContainer,
-                        tonalElevation = 3.dp,
-                        shadowElevation = 8.dp,
+                    MenuCard(
+                        groups = groups,
+                        hovered = hovered,
                         modifier = Modifier.onSizeChanged { menuWidthPx = it.width },
-                    ) {
-                        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding)) {
-                            var i = 0
-                            groups.forEachIndexed { gi, group ->
-                                if (gi != 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                group.forEach { action ->
-                                    MenuRow(action, itemHeight, hovered == i) { action.onClick(); close() }
-                                    i++
-                                }
-                            }
-                        }
-                    }
+                        itemHeight = itemHeight,
+                        verticalPadding = verticalPadding,
+                        shape = shape,
+                        onPick = { action -> action.onClick(); close() },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The menu surface itself — grouped rows with dividers, hover highlight — shared
+ * by [AppDropMenu] and the message context menu so every menu in the app reads
+ * the same. [hovered] is a flat index across all groups (-1 = none);
+ * [onRowPositioned] hands each row's live coordinates to drag-select hit-testing.
+ */
+@Composable
+fun MenuCard(
+    groups: List<List<MenuAction>>,
+    hovered: Int,
+    modifier: Modifier = Modifier,
+    itemHeight: Dp = 48.dp,
+    verticalPadding: Dp = 0.dp,
+    shape: Shape = RoundedCornerShape(20.dp),
+    onRowPositioned: ((Int, LayoutCoordinates) -> Unit)? = null,
+    onPick: (MenuAction) -> Unit,
+) {
+    Surface(
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        modifier = modifier,
+    ) {
+        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding)) {
+            var i = 0
+            groups.forEachIndexed { gi, group ->
+                if (gi != 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                group.forEach { action ->
+                    val index = i
+                    MenuRow(
+                        action,
+                        itemHeight,
+                        hovered == index,
+                        Modifier.let { m ->
+                            if (onRowPositioned == null) m
+                            else m.onGloballyPositioned { onRowPositioned(index, it) }
+                        },
+                    ) { onPick(action) }
+                    i++
                 }
             }
         }
@@ -202,12 +241,18 @@ fun AppDropMenu(
 }
 
 @Composable
-private fun MenuRow(action: MenuAction, itemHeight: Dp, highlighted: Boolean, onClick: () -> Unit) {
+private fun MenuRow(
+    action: MenuAction,
+    itemHeight: Dp,
+    highlighted: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     val color =
         if (action.destructive) MaterialTheme.colorScheme.error
         else MaterialTheme.colorScheme.onSurface
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .widthIn(min = 160.dp, max = 280.dp)
             .height(itemHeight)

@@ -54,6 +54,7 @@ import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.MenuAnchor
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.MessageContextMenu
+import com.promtuz.chat.ui.components.MessageMenuState
 import com.promtuz.chat.ui.components.SwipeToReply
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import dev.chrisbanes.haze.hazeSource
@@ -93,8 +94,12 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
         }
     }
 
-    var menu by remember { mutableStateOf<MenuAnchor?>(null) }
+    val menu = remember { MessageMenuState() }
     var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
+    menu.onReact = { emoji ->
+        menu.anchor?.let { viewModel.toggleReaction(it.msg, emoji) }
+        menu.close()
+    }
 
     Box {
         Scaffold(
@@ -126,15 +131,16 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                         .padding(top = gapAbove)
                                         .sendEnter(row.msg)
                                         // the context menu re-draws this row lifted; hide the original
-                                        .graphicsLayer { alpha = if (menu?.msg?.key == row.msg.key) 0f else 1f },
+                                        .graphicsLayer { alpha = if (menu.anchor?.msg?.key == row.msg.key) 0f else 1f },
                                 ) {
                                     MessageBubble(
                                         msg = row.msg,
                                         mergedTop = row.mergedTop,
                                         mergedBottom = row.mergedBottom,
                                         onLongPress = { bounds ->
-                                            menu = MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom)
+                                            menu.open(MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom))
                                         },
+                                        menuState = menu,
                                         onReactionTap = { viewModel.toggleReaction(row.msg, it) },
                                     )
                                 }
@@ -147,13 +153,12 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
             }
         }
 
-        menu?.let { anchor ->
+        menu.anchor?.let { anchor ->
             MessageContextMenu(
-                anchor = anchor,
+                state = menu,
                 quickReactions = QuickReactions,
-                actions = menuActionsFor(anchor.msg, viewModel, onDelete = { confirmDelete = it }) { menu = null },
-                onReact = { viewModel.toggleReaction(anchor.msg, it); menu = null },
-                onDismiss = { menu = null },
+                actionGroups = menuActionsFor(anchor.msg, viewModel, onDelete = { confirmDelete = it }) { menu.close() },
+                onReact = { viewModel.toggleReaction(anchor.msg, it); menu.close() },
             )
         }
 
@@ -172,17 +177,17 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
 
 private val QuickReactions = listOf("❤️", "👍", "👎", "😂", "🔥", "😢")
 
-/** Menu items gated by ownership/state; every action closes the menu via [close]. */
+/** Menu groups gated by ownership/state (destructive rides alone); every action closes via [close]. */
 @Composable
 private fun menuActionsFor(
     msg: UiMessage,
     viewModel: ChatVM,
     onDelete: (UiMessage) -> Unit,
     close: () -> Unit,
-): List<MenuAction> {
+): List<List<MenuAction>> {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    return buildList {
+    val main = buildList {
         val actionable = msg.dispatchIdHex != null && !msg.deleted
         if (actionable) add(MenuAction("Reply", R.drawable.i_reply) {
             viewModel.beginReply(msg); close()
@@ -197,10 +202,13 @@ private fun menuActionsFor(
         if (actionable && msg.outgoing) add(MenuAction("Edit", R.drawable.i_edit) {
             viewModel.beginEdit(msg); close()
         })
+    }
+    val destructive = buildList {
         if (msg.dispatchIdHex != null) add(MenuAction("Delete", R.drawable.i_delete, destructive = true) {
             onDelete(msg); close()
         })
     }
+    return listOf(main, destructive).filter { it.isNotEmpty() }
 }
 
 @Composable

@@ -3,10 +3,11 @@ package com.promtuz.chat.ui.components
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -68,8 +71,10 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift) and
  * [onReactionTap] are optional so the bubble stays a pure renderer elsewhere.
+ * With [menuState] set, the long-press gesture keeps streaming into the open
+ * menu — drag over an item, release to pick it (one continuous pointer stream,
+ * same interaction grammar as AppDropMenu).
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubble(
     modifier: Modifier = Modifier,
@@ -77,6 +82,7 @@ fun MessageBubble(
     mergedTop: Boolean = false,
     mergedBottom: Boolean = false,
     onLongPress: ((Rect) -> Unit)? = null,
+    menuState: MessageMenuState? = null,
     onReactionTap: ((String) -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
@@ -87,6 +93,7 @@ fun MessageBubble(
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
     val haptic = LocalHapticFeedback.current
     var rowBounds by remember { mutableStateOf(Rect.Zero) }
+    var bubbleCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
     BoxWithConstraints(
         modifier
@@ -103,15 +110,49 @@ fun MessageBubble(
                 .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow))
                 .clip(shape)
                 .background(bubbleColor)
+                .onGloballyPositioned { bubbleCoords = it }
                 .then(
                     if (onLongPress == null) Modifier
-                    else Modifier.combinedClickable(
-                        onClick = {},
-                        onLongClick = {
+                    else Modifier.pointerInput(menuState) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (menuState?.isOpen == true) return@awaitEachGesture
+                            val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onLongPress(rowBounds)
-                        },
-                    )
+                            if (menuState == null) return@awaitEachGesture
+
+                            // Same finger now drives the open menu: drag hovers, release picks.
+                            var dragged = false
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                val ch = ev.changes.firstOrNull { it.id == press.id } ?: ev.changes.first()
+                                val root = bubbleCoords?.takeIf { it.isAttached }?.localToRoot(ch.position)
+                                if (!ch.pressed) {
+                                    when (val hit = root?.let(menuState::release)) {
+                                        is MenuHit.Action -> {
+                                            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                                            hit.action.onClick()
+                                        }
+                                        is MenuHit.Reaction -> {
+                                            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                                            menuState.onReact?.invoke(hit.emoji)
+                                        }
+                                        // Drag to nowhere cancels; a plain long-press-release stays open.
+                                        null -> if (dragged) menuState.close()
+                                    }
+                                    break
+                                }
+                                if (!dragged &&
+                                    (ch.position - down.position).getDistance() > viewConfiguration.touchSlop
+                                ) dragged = true
+                                if (dragged && root != null && menuState.drag(root)) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                }
+                                ch.consume()
+                            }
+                        }
+                    }
                 )
                 .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
