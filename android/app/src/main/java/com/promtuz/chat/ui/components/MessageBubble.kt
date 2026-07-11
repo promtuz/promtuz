@@ -8,10 +8,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -38,6 +38,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -62,15 +63,16 @@ import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 
 /**
- * A message bubble as an ordered column of content blocks (text today; media /
+ * A message bubble as an ordered stack of content blocks (text today; media /
  * reply become sibling blocks with the polymorphic content). Shape/colors/width
  * come from [LocalChatAppearance]. The trailing meta — a sent-time, or a spinner
- * for a not-yet-sent message — tucks into the last text line's trailing space and
- * only wraps below when there's genuinely no room (via a measured inline
- * placeholder). No per-message ticks: delivery state rides the frontier markers.
+ * for a not-yet-sent message — is pinned to the bubble's bottom-end corner; a
+ * measured inline placeholder keeps that corner glyph-free so text never collides.
+ * No per-message ticks: delivery state rides the frontier markers.
  *
- * [onLongPress] (fired with the row's root bounds, for the context-menu lift) and
- * [onReactionTap] are optional so the bubble stays a pure renderer elsewhere.
+ * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
+ * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
+ * and [onDoubleTap] are optional so the bubble stays a pure renderer elsewhere.
  * With [menuState] set, the long-press gesture keeps streaming into the open
  * menu — drag over an item, release to pick it (one continuous pointer stream,
  * same interaction grammar as AppDropMenu).
@@ -84,6 +86,8 @@ fun MessageBubble(
     onLongPress: ((Rect) -> Unit)? = null,
     menuState: MessageMenuState? = null,
     onReactionTap: ((String) -> Unit)? = null,
+    onQuoteClick: ((String) -> Unit)? = null,
+    onDoubleTap: (() -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -102,12 +106,34 @@ fun MessageBubble(
             .padding(horizontal = 12.dp),
     ) {
         val maxBubble = maxWidth * appearance.layout.maxWidthFraction
-        Column(
-            Modifier
+        Layout(
+            content = {
+                msg.quote?.let { q ->
+                    QuoteBlock(q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } })
+                }
+
+                BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
+
+                if (msg.reactions.isNotEmpty()) {
+                    Row(
+                        Modifier.padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        msg.reactions.forEach { rg ->
+                            ReactionChip(rg, textColor, chat.accent, onReactionTap)
+                        }
+                    }
+                }
+            },
+            modifier = Modifier
                 .align(if (outgoing) Alignment.CenterEnd else Alignment.CenterStart)
                 .widthIn(max = maxBubble)
-                // edit/delete/reactions change the bubble's size in place — glide, don't snap
-                .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow))
+                // edit/delete/reactions change the bubble's size in place — glide from the
+                // tail corner, not TopStart, so the anchored edge stays put
+                .animateContentSize(
+                    spring(stiffness = Spring.StiffnessMediumLow),
+                    alignment = if (outgoing) Alignment.BottomEnd else Alignment.BottomStart,
+                )
                 .clip(shape)
                 .background(bubbleColor)
                 .onGloballyPositioned { bubbleCoords = it }
@@ -154,21 +180,31 @@ fun MessageBubble(
                         }
                     }
                 )
-                .padding(horizontal = 11.dp, vertical = 6.dp),
-        ) {
-            msg.quote?.let { QuoteBlock(it, textColor, chat.accent) }
-
-            BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
-
-            if (msg.reactions.isNotEmpty()) {
-                Row(
-                    Modifier.padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    msg.reactions.forEach { rg ->
-                        ReactionChip(rg, textColor, chat.accent, onReactionTap)
+                .then(
+                    if (onDoubleTap == null) Modifier
+                    else Modifier.pointerInput(onDoubleTap) {
+                        detectTapGestures(onDoubleTap = { onDoubleTap() })
                     }
-                }
+                )
+                .padding(horizontal = 11.dp, vertical = 6.dp),
+        ) { measurables, constraints ->
+            // Column would leave the quote at its natural width; a quote must span the
+            // widest sibling. Each measurable measures once, so the quote goes last with
+            // that width as its minimum (a naturally wider quote still wins).
+            val hasQuote = msg.quote != null
+            val loose = constraints.copy(minWidth = 0, minHeight = 0)
+            val text = measurables[if (hasQuote) 1 else 0].measure(loose)
+            val reactions = measurables.getOrNull(if (hasQuote) 2 else 1)?.measure(loose)
+            val contentWidth = maxOf(text.width, reactions?.width ?: 0)
+            val quote = if (hasQuote) measurables[0].measure(loose.copy(minWidth = contentWidth)) else null
+
+            val width = maxOf(contentWidth, quote?.width ?: 0)
+            val height = (quote?.height ?: 0) + text.height + (reactions?.height ?: 0)
+            layout(width, height) {
+                var y = 0
+                quote?.let { it.placeRelative(0, 0); y = it.height }
+                text.placeRelative(0, y)
+                reactions?.placeRelative(0, y + text.height)
             }
         }
     }
@@ -176,12 +212,13 @@ fun MessageBubble(
 
 /** The quoted-message block a reply carries: accent rail + short snippet. */
 @Composable
-private fun QuoteBlock(quote: Quote, textColor: Color, accent: Color) {
+private fun QuoteBlock(quote: Quote, textColor: Color, accent: Color, onClick: (() -> Unit)?) {
     Row(
         Modifier
             .padding(top = 2.dp, bottom = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(textColor.copy(alpha = 0.08f))
+            .then(onClick?.let { Modifier.clickable(onClick = it) } ?: Modifier)
             .height(IntrinsicSize.Min),
     ) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(accent))
@@ -231,8 +268,9 @@ private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.gr
     val timeStr = if (pending || failed) null else clock(msg.timestampMs)
     val edited = msg.edited && !msg.deleted
 
-    // Reserve exactly the meta's width at the end of the text so it tucks into the last line's
-    // trailing gap, wrapping to its own (short) line only when the line is genuinely full.
+    // The invisible trailing placeholder reserves exactly the meta's footprint, so the
+    // bottom-end corner is glyph-free; the real meta overlays there — corner-true even
+    // when an earlier line is longer than the last.
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val label = buildString {
@@ -251,34 +289,34 @@ private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.gr
     val inline = mapOf(
         "meta" to InlineTextContent(
             Placeholder(metaWidth, 1.2.em, PlaceholderVerticalAlign.TextBottom)
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                if (edited) Text(
-                    "edited",
-                    style = metaStyle,
-                    color = metaColor,
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-                when {
-                    pending -> CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
-                    failed -> Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
-                    timeStr != null -> Text(timeStr, style = metaStyle, color = metaColor)
-                }
-            }
-        }
+        ) {}
     )
 
-    Text(
-        annotated,
-        style = textStyle,
-        fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
-        color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor,
-        inlineContent = inline,
-    )
+    Box {
+        Text(
+            annotated,
+            style = textStyle,
+            fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
+            color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor,
+            inlineContent = inline,
+        )
+        Row(
+            Modifier.align(Alignment.BottomEnd),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            if (edited) Text(
+                "edited",
+                style = metaStyle,
+                color = metaColor,
+                modifier = Modifier.padding(end = 4.dp),
+            )
+            when {
+                pending -> CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
+                failed -> Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                timeStr != null -> Text(timeStr, style = metaStyle, color = metaColor)
+            }
+        }
+    }
 }
 
 private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())

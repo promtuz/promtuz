@@ -39,6 +39,7 @@ import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.ui.appearance.ChatAppearance
+import com.promtuz.chat.ui.appearance.DoubleTapAction
 import com.promtuz.chat.ui.appearance.ThemeMode
 import com.promtuz.chat.ui.appearance.Wallpaper
 import com.promtuz.chat.ui.components.FlexibleScreen
@@ -110,6 +111,36 @@ fun ChatAppearanceScreen() {
                 set { copy(wallpaper = pattern.copy(alpha = it)) }
             }
 
+            SectionLabel("Interaction")
+            Text(
+                "Double tap",
+                Modifier.padding(bottom = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                DoubleTapAction.entries.forEachIndexed { i, action ->
+                    SegmentedButton(
+                        selected = appearance.interaction.doubleTapAction == action,
+                        onClick = { set { copy(interaction = interaction.copy(doubleTapAction = action)) } },
+                        shape = SegmentedButtonDefaults.itemShape(i, DoubleTapAction.entries.size),
+                    ) { Text(action.name) }
+                }
+            }
+            if (appearance.interaction.doubleTapAction == DoubleTapAction.React) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 10.dp).horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    DoubleTapEmojis.forEach { emoji ->
+                        Swatch(
+                            MaterialTheme.colorScheme.surfaceContainerHigh,
+                            appearance.interaction.doubleTapEmoji == emoji,
+                            { set { copy(interaction = interaction.copy(doubleTapEmoji = emoji)) } },
+                        ) { Text(emoji) }
+                    }
+                }
+            }
+
             TextButton(
                 { AppearanceStore.update { ChatAppearance.Default } },
                 Modifier.align(Alignment.CenterHorizontally).padding(top = 24.dp),
@@ -134,6 +165,8 @@ private val AccentPalette = listOf(
     0xFF5A91D8, 0xFF7C6CF0, 0xFFB06CF0, 0xFFF06CB4, 0xFFF0756C,
     0xFFF0A93C, 0xFF3CC98A, 0xFF3CB8C9,
 )
+
+private val DoubleTapEmojis = listOf("❤️", "👍", "🔥", "😂", "😮", "🎉")
 
 @Composable
 private fun PreviewCard(appearance: ChatAppearance) {

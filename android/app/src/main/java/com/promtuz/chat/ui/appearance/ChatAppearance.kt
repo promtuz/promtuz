@@ -19,6 +19,7 @@ data class ChatAppearance(
     val colors: ChatColors = ChatColors(),
     val wallpaper: Wallpaper = Wallpaper.Default,
     val type: TypeStyle = TypeStyle(),
+    val interaction: InteractionStyle = InteractionStyle(),
     val themeMode: ThemeMode = ThemeMode.System,
 ) {
     companion object {
@@ -66,6 +67,16 @@ data class ChatColors(
 data class TypeStyle(
     val fontScale: Float = 1f,
 )
+
+/** Gesture behavior. */
+@Serializable
+data class InteractionStyle(
+    val doubleTapAction: DoubleTapAction = DoubleTapAction.React,
+    val doubleTapEmoji: String = "❤️",
+)
+
+@Serializable
+enum class DoubleTapAction { None, React, Reply, Edit }
 
 /** Chat background. Platform-neutral: [Pattern] = "the app's built-in chat pattern". */
 @Serializable
