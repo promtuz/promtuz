@@ -88,11 +88,7 @@ class ChatVM(private val application: Application) : ViewModel() {
 
         viewModelScope.launch {
             CoreBridge.presence.filter { it.peer.contentEquals(peer) }.collect { sig ->
-                _presence.value = when (sig.lastSeen) {
-                    null -> Presence.Online
-                    0L -> Presence.Unknown
-                    else -> Presence.LastSeen(sig.lastSeen)
-                }
+                _presence.value = sig.presence
             }
         }
 

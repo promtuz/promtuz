@@ -60,9 +60,15 @@ class Promtuz : Application() {
         AppearanceStore.init(this)
 
         // Foreground → nudge core for an instant reconnect (the raised idle
-        // timeout means most app switches never dropped the connection at all).
+        // timeout means most app switches never dropped the connection) and go
+        // Active. Background → assert Idle (the last packet before we freeze).
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = CoreBridge.onForeground()
+            override fun onStart(owner: LifecycleOwner) {
+                CoreBridge.onForeground()
+                CoreBridge.setPresence(idle = false)
+            }
+
+            override fun onStop(owner: LifecycleOwner) = CoreBridge.setPresence(idle = true)
         })
 
         startKoin {

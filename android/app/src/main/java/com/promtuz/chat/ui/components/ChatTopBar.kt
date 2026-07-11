@@ -41,6 +41,11 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
     val (subtitle, subtitleColor) = when {
         typing -> "typing…" to chat.accent
         presence == Presence.Online -> "online" to chat.accent
+        presence is Presence.Idle -> {
+            val since = (presence as Presence.Idle).sinceMs
+            val rel = DateUtils.getRelativeTimeSpanString(since, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
+            "idle since $rel" to colors.onSurfaceVariant
+        }
         presence is Presence.LastSeen -> {
             val at = (presence as Presence.LastSeen).atMs
             val rel = DateUtils.getRelativeTimeSpanString(at, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)

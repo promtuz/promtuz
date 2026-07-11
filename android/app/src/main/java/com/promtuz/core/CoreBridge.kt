@@ -37,6 +37,7 @@ import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
 import uniffi.core.kpPublishReady as ffiKpPublishReady
+import uniffi.core.setPresence as ffiSetPresence
 import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
 import uniffi.core.backupExport as ffiBackupExport
 import uniffi.core.backupImport as ffiBackupImport
@@ -58,6 +59,9 @@ import com.promtuz.core.adapter.PresenceSignal
 object CoreBridge {
     /** App returned to foreground — wake the relay loop for an instant reconnect. */
     fun onForeground() = ffiOnForeground()
+
+    /** Assert our activity mode to contacts: idle on background, active on foreground. */
+    fun setPresence(idle: Boolean) = ffiSetPresence(idle)
 
     /** Cheap identity check; safe to call before [CoreInitializer.start]. */
     fun shouldLaunchApp(): Boolean = ffiShouldLaunchApp()

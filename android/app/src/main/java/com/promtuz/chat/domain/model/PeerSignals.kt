@@ -17,9 +17,11 @@ enum class Activity(val bit: Int) {
     }
 }
 
-/** A contact's presence (relay-derived). */
+/** A contact's presence (relay-derived; Idle is client-asserted). */
 sealed interface Presence {
     data object Online : Presence
+    /** Connected but backgrounded since [sinceMs] (unix ms). */
+    data class Idle(val sinceMs: Long) : Presence
     /** Offline since [atMs] (unix ms). */
     data class LastSeen(val atMs: Long) : Presence
     /** Offline, time unknown. */

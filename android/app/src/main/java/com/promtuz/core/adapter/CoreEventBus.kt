@@ -8,15 +8,17 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.promtuz.chat.domain.model.Presence
 import uniffi.core.CoreEvents
 import uniffi.core.MessageEvent
 import uniffi.core.ConnectionState as FfiConnectionState
+import uniffi.core.Presence as FfiPresence
 
 /** Ephemeral peer activity — `bits` is an OR of ACTIVITY_* (0 = present-idle). */
 class ActivitySignal(val peer: ByteArray, val bits: Int)
 
-/** Ephemeral presence — `lastSeen`: null = online now, 0 = offline/unknown, else unix-ms since offline. */
-class PresenceSignal(val peer: ByteArray, val lastSeen: Long?)
+/** Ephemeral presence delta for a contact. */
+class PresenceSignal(val peer: ByteArray, val presence: Presence)
 
 /**
  * The client's [CoreEvents] port. core calls these off-main (tokio threads);
@@ -66,8 +68,14 @@ object CoreEventBus : CoreEvents {
         _activity.tryEmit(ActivitySignal(peer, activity.toInt()))
     }
 
-    override fun onPresence(peer: ByteArray, lastSeen: ULong?) {
-        _presence.tryEmit(PresenceSignal(peer, lastSeen?.toLong()))
+    override fun onPresence(peer: ByteArray, presence: FfiPresence) {
+        val p = when (presence) {
+            is FfiPresence.Online -> Presence.Online
+            is FfiPresence.Idle -> Presence.Idle(presence.since.toLong())
+            is FfiPresence.Offline ->
+                if (presence.lastSeen == 0uL) Presence.Unknown else Presence.LastSeen(presence.lastSeen.toLong())
+        }
+        _presence.tryEmit(PresenceSignal(peer, p))
     }
 
     private fun <T> bounded(): MutableSharedFlow<T> = MutableSharedFlow(
