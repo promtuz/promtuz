@@ -63,13 +63,11 @@ use crate::types::bytes::Bytes;
 /// signing transcript here and gates the app-plaintext format
 /// ([`AppPayload`]).
 ///
-/// Diverges from [`crate::PROTOCOL_VERSION`] (= 4): that constant
-/// governs the relay-auth handshake and is intentionally left at 4
-/// (bumping it is a wider flag day). This one is peer-to-peer only, so
-/// bumping it to 5 for the typed `AppPayload` seam is a client-only
-/// coordinated redeploy. Bumped to 6 for the Edit/Delete variants, 7 for
-/// the React variant, 8 for the Reply variant, 9 for the PairAck variant,
-/// 10 for the PairDecline envelope.
+/// Diverges from [`crate::PROTOCOL_VERSION`] (= 4): that constant governs
+/// the relay-auth handshake and is a wider flag day to bump. This one is
+/// peer-to-peer only, so a bump is just a client-coordinated redeploy —
+/// cheap by comparison, so it moves independently as `AppPayload` variants
+/// are added.
 pub const MLS_WIRE_VERSION: u16 = 10;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
@@ -320,7 +318,7 @@ pub enum MlsEnvelopeP {
     /// bytes to `MlsGroup::new_from_welcome` after verifying the
     /// outer signature against the inviter's IPK.
     Welcome(WelcomeEnvelopeP),
-    /// Pairing declined (PAIRING.md). Sent by the invitee back to the
+    /// Pairing declined. Sent by the invitee back to the
     /// inviter when a Welcome couldn't be accepted (KP consumed, group build
     /// failed, or user rejected). Not MLS — a plain signed control message on
     /// the same dispatch/queue channel; the relay treats it as opaque payload.
@@ -433,7 +431,7 @@ pub struct PairingP {
     pub sender_name: String,
 }
 
-/// Why an invitee declined a Welcome (PAIRING.md). Machine reasons — the
+/// Why an invitee declined a Welcome. Machine reasons — the
 /// inviter renders a message.
 pub const DECLINE_GROUP_BUILD_FAILED: u8 = 0;
 pub const DECLINE_KP_CONSUMED: u8 = 1;
@@ -1284,23 +1282,16 @@ pub fn kp_fetch_wrap_signing_input(
 /// Layout:
 /// ```text
 ///   WELCOME_PUBLISH_WRAP_DOMAIN || protocol_version (BE u16)
-///     || sender_ipk (32) || welcome_blob_digest (32) || timestamp (BE u64)
-/// ```
-///
-/// Hashes `welcome_blob` internally to `BLAKE3(welcome_blob)` — the
-/// same hash the envelope's own [`welcome_envelope_signing_input`]
-/// covers, so the wrapper sig is bound to the exact MLS payload being
-/// published. Hashing here (rather than taking a pre-computed digest)
-/// keeps the one blake3 call in `common` so neither the relay nor
-/// libcore needs a direct blake3 dependency. The envelope's
-/// `sender_sig` already covers the recipient/group/kp_ref metadata, so
-/// the wrapper does not re-bind them.
-///
-/// Layout:
-/// ```text
-///   WELCOME_PUBLISH_WRAP_DOMAIN || protocol_version (BE u16)
 ///     || sender_ipk (32) || BLAKE3(welcome_blob) (32) || timestamp (BE u64)
 /// ```
+///
+/// Hashes `welcome_blob` internally — the same hash the envelope's own
+/// [`welcome_envelope_signing_input`] covers, so the wrapper sig is bound
+/// to the exact MLS payload being published. Hashing here (rather than
+/// taking a pre-computed digest) keeps the one blake3 call in `common` so
+/// neither the relay nor libcore needs a direct blake3 dependency. The
+/// envelope's `sender_sig` already covers the recipient/group/kp_ref
+/// metadata, so the wrapper does not re-bind them.
 pub fn welcome_publish_wrap_signing_input(
     protocol_version: u16, sender_ipk: &[u8; 32], welcome_blob: &[u8], timestamp: u64,
 ) -> Vec<u8> {
@@ -1398,7 +1389,7 @@ mod tests {
     /// verifier reconstructed a transcript that doesn't match what the
     /// phone signed, breaking auth silently in the field.
     #[test]
-    fn phase9_gate_wrapper_signing_input_layouts_are_pinned() {
+    fn gate_wrapper_signing_input_layouts_are_pinned() {
         let ipk: [u8; 32] = [0x11; 32];
         let target_ipk: [u8; 32] = [0x22; 32];
         let blob: &[u8] = b"opaque-welcome-blob";
