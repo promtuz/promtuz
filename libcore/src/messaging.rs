@@ -1108,6 +1108,17 @@ fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result
     if !Contact::exists(&sender_ipk) {
         bail!("pair-decline from non-contact");
     }
+    // A live MLS group is ground truth: a decline for some late/redundant
+    // handshake must not tear down an already-paired conversation (nor fail its
+    // messages). Only a never-completed, group-less pair is rejectable.
+    if Contact::get(&sender_ipk).is_some_and(|c| c.inner.mls_group_id.is_some()) {
+        warn!(
+            "PAIR: ignoring decline (reason {}) from already-paired {}",
+            d.reason,
+            hex::encode(&sender_ipk[..4])
+        );
+        return Ok(());
+    }
     Contact::mark_rejected(&sender_ipk, d.reason);
     Message::mark_all_failed_by_peer(&sender_ipk);
     warn!("PAIR: {} declined (reason {})", hex::encode(&sender_ipk[..4]), d.reason);

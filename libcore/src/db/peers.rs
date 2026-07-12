@@ -66,6 +66,10 @@ const MIGRATION_ARRAY: &[M] = &[
     // already have a working group.
     M::up("ALTER TABLE contacts ADD COLUMN status INTEGER NOT NULL DEFAULT 1;"),
     M::up("ALTER TABLE contacts ADD COLUMN reject_reason INTEGER;"),
+    // Heal contacts falsely rejected by an unconditional pair-decline (before
+    // mark_rejected gated on group-presence): a live MLS group is proof of a
+    // working pair, so restore PAIRED and clear the stale reason.
+    M::up("UPDATE contacts SET status = 1, reject_reason = NULL WHERE status = 2 AND mls_group_id IS NOT NULL;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

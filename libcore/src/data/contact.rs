@@ -170,11 +170,13 @@ impl Contact {
     }
 
     /// Mark a pending pair as REJECTED with `reason` (a `DECLINE_*` code). The
-    /// UPDATE rides the reactive doorbell → UI re-reads.
+    /// UPDATE rides the reactive doorbell → UI re-reads. Gated on
+    /// `mls_group_id IS NULL`: a live group is a working pair, and a stray
+    /// decline for some late handshake must never tear it down.
     pub fn mark_rejected(ipk: &[u8; 32], reason: u8) {
         let conn = CONTACTS_DB.lock();
         let _ = conn.execute(
-            "UPDATE contacts SET status = ?1, reject_reason = ?2 WHERE ipk = ?3",
+            "UPDATE contacts SET status = ?1, reject_reason = ?2 WHERE ipk = ?3 AND mls_group_id IS NULL",
             params![PAIR_STATUS_REJECTED, reason, ipk],
         );
     }
