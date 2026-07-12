@@ -162,7 +162,7 @@ fun HomeChatListItem(
 private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme): Pair<String, Color> = when {
     typing -> "typing…" to colors.primary
     chat.status == 0 -> "Waiting to connect…" to colors.primary.copy(0.8f)
-    chat.status == 2 -> "Couldn't connect" to colors.error.copy(0.85f)
+    chat.status == 2 -> declineText(chat.rejectReason) to colors.error.copy(0.85f)
     chat.lastDeleted -> "deleted message" to colors.onSurfaceVariant.copy(0.6f)
     chat.lastPreview.isNullOrEmpty() -> "No messages yet" to colors.onSurfaceVariant.copy(0.6f)
     else -> {
@@ -170,6 +170,14 @@ private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme):
         val col = if (chat.unreadCount > 0) colors.onSurface.copy(0.9f) else colors.onSurfaceVariant.copy(0.7f)
         text to col
     }
+}
+
+/** "Couldn't connect" plus the decline reason (DECLINE_* code), when known. */
+private fun declineText(reason: Int?): String = when (reason) {
+    0 -> "Couldn't connect — secure group failed"
+    1 -> "Couldn't connect — their invite was already used"
+    2 -> "Couldn't connect — they declined"
+    else -> "Couldn't connect"
 }
 
 /** Delivery tick for our last message; nothing while still pending. */

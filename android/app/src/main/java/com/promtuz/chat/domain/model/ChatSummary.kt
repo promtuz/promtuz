@@ -8,6 +8,8 @@ data class ChatSummary(
     val timestampMs: Long,
     /** Pairing state: 0 = pending, 1 = paired, 2 = rejected (PAIRING.md). */
     val status: Int = 1,
+    /** Why rejected (a DECLINE_* code), when status = 2: 0 group-build, 1 invite-used, 2 declined. */
+    val rejectReason: Int? = null,
     /** Unread incoming messages — drives the badge; 0 = none. */
     val unreadCount: Int = 0,
     /** Last message is ours (render a "You:" prefix + delivery tick). */

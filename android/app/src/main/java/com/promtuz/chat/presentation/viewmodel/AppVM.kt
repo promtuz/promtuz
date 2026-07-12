@@ -224,6 +224,7 @@ class AppVM(
                 lastPreview = last?.content,
                 timestampMs = (last?.timestamp ?: c.addedAt).toLong() * 1000,
                 status = c.status.toInt(),
+                rejectReason = c.rejectReason?.toInt(),
                 unreadCount = unread[c.ipk.toList()] ?: 0,
                 lastOutgoing = last?.outgoing == true,
                 lastDeleted = last?.deleted == true,
