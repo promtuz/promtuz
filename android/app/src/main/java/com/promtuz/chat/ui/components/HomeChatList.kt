@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.util.groupedRoundShape
 
@@ -20,6 +21,8 @@ import com.promtuz.chat.ui.util.groupedRoundShape
 fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
     val direction = LocalLayoutDirection.current
     val chats by appViewModel.chats.collectAsState()
+    val presence by appViewModel.presenceByPeer.collectAsState()
+    val activity by appViewModel.activityByPeer.collectAsState()
 
     LazyColumn(
         Modifier
@@ -33,7 +36,12 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
         item { Spacer(Modifier.height(innerPadding.calculateTopPadding())) }
 
         itemsIndexed(chats, key = { _, c -> c.peerHex }) { index, chat ->
-            HomeChatListItem(chat, groupedRoundShape(index, chats.size)) {
+            HomeChatListItem(
+                chat,
+                groupedRoundShape(index, chats.size),
+                presence[chat.peerHex],
+                typing = Activity.Typing in Activity.fromBits(activity[chat.peerHex] ?: 0),
+            ) {
                 appViewModel.openChat(chat.peerHex, chat.name)
             }
         }

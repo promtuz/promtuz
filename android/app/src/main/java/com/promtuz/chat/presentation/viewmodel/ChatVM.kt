@@ -8,7 +8,6 @@ import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.Quote
-import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -92,20 +91,14 @@ class ChatVM(private val application: Application) : ViewModel() {
             }
         }
 
-        // Seed from the last-known cache (deltas emitted while this chat was
-        // closed are otherwise lost until the next subscribe), then track live.
+        // Seed from the app-wide cache (AppVM subscribes presence for all
+        // contacts; a delta may have landed before this chat opened), then
+        // track live. Subscription itself is owned by AppVM — not re-expressed
+        // here, or the relay's full-set replace would narrow us to one peer.
         _presence.value = CoreBridge.presenceByPeer.value[peer.toHex()]
         viewModelScope.launch {
             CoreBridge.presence.filter { it.peer.contentEquals(peer) }.collect { sig ->
                 _presence.value = sig.presence
-            }
-        }
-
-        // The relay drops a subscribe sent while disconnected, so re-express
-        // interest on every (re)connect, not once at chat-open.
-        viewModelScope.launch {
-            CoreBridge.connection.filter { it == ConnectionState.Connected }.collect {
-                runCatching { CoreBridge.subscribePresence(listOf(peer)) }
             }
         }
 

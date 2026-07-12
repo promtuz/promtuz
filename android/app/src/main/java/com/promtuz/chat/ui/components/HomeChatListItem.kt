@@ -13,13 +13,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.ChatSummary
+import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
 
 @Composable
-fun HomeChatListItem(chat: ChatSummary, roundShape: Shape, onOpen: () -> Unit) {
+fun HomeChatListItem(
+    chat: ChatSummary,
+    roundShape: Shape,
+    presence: Presence?,
+    typing: Boolean,
+    onOpen: () -> Unit,
+) {
     val type = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
 
@@ -33,7 +41,7 @@ fun HomeChatListItem(chat: ChatSummary, roundShape: Shape, onOpen: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(chat.name)
+        Avatar(chat.name, statusColor = presenceColor(presence))
 
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(
@@ -48,13 +56,18 @@ fun HomeChatListItem(chat: ChatSummary, roundShape: Shape, onOpen: () -> Unit) {
                     color = colors.onSecondaryContainer.copy(0.5f),
                 )
             }
-            when (chat.status) {
-                0 -> Text(
+            when {
+                typing -> Text(
+                    "typing…",
+                    style = type.bodySmallEmphasized,
+                    color = colors.primary,
+                )
+                chat.status == 0 -> Text(
                     "Waiting to connect…",
                     style = type.bodySmallEmphasized,
                     color = colors.primary.copy(0.8f),
                 )
-                2 -> Text(
+                chat.status == 2 -> Text(
                     "Couldn't connect",
                     style = type.bodySmallEmphasized,
                     color = colors.error.copy(0.8f),
@@ -65,4 +78,14 @@ fun HomeChatListItem(chat: ChatSummary, roundShape: Shape, onOpen: () -> Unit) {
             }
         }
     }
+}
+
+private val OnlineDot = Color(0xFF34C759)
+private val IdleDot = Color(0xFFF5A623)
+
+/** Generic status colour for the avatar dot; null hides it (offline/unknown). */
+private fun presenceColor(p: Presence?): Color? = when (p) {
+    Presence.Online -> OnlineDot
+    is Presence.Idle -> IdleDot
+    else -> null
 }
