@@ -11,14 +11,20 @@ use common::quic::protorole::ProtoRole;
 use quinn::Endpoint;
 use quinn::ServerConfig;
 
+use common::warn;
+
 use crate::config::AppConfig;
+use crate::fcm::FcmSender;
 use crate::registry::PushRegistry;
 
-/// The push gateway node: a blind QUIC listener that registers `P → token`
-/// and (next cut) dispatches wake requests to APNs/FCM.
+/// The push gateway node: a blind QUIC listener that registers `P → token` and
+/// dispatches wake requests to the platform push service.
 pub struct Gateway {
     pub endpoint: Arc<Endpoint>,
     pub registry: PushRegistry,
+    /// `None` when no service-account is configured — the gateway still serves
+    /// registrations, but FCM wakes are dropped.
+    pub fcm:      Option<FcmSender>,
 }
 
 impl Gateway {
@@ -51,6 +57,19 @@ impl Gateway {
                 info!("initializing gateway with IPK({})", key.key());
             }
         }
-        Self { endpoint: Arc::new(Self::endpoint(&cfg)), registry: PushRegistry::default() }
+        let fcm = cfg.push.fcm_service_account.as_deref().and_then(|path| {
+            match FcmSender::from_service_account(path) {
+                Ok(sender) => {
+                    info!("FCM dispatch enabled (project {})", sender.project_id());
+                    Some(sender)
+                },
+                Err(e) => {
+                    warn!("FCM disabled — could not load service-account: {e:#}");
+                    None
+                },
+            }
+        });
+
+        Self { endpoint: Arc::new(Self::endpoint(&cfg)), registry: PushRegistry::default(), fcm }
     }
 }

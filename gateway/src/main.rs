@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod fcm;
 mod gateway;
 mod quic;
 mod registry;

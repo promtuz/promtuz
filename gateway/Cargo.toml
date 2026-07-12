@@ -14,9 +14,15 @@ serde.workspace = true
 quinn.workspace = true
 tokio.workspace = true
 clap.workspace = true
+base64.workspace = true
 parking_lot = "0.12.5"
 # Per-source-IP accept-side rate limiter (same pattern as the resolver).
 governor = "0.10.4"
+# FCM HTTP v1: rustls-only client (webpki roots, no OpenSSL) + service-account
+# JWT signing (RS256 via ring, already in the tree). serde_json builds bodies.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+jsonwebtoken = "9"
+serde_json = "1"
 
 [dev-dependencies]
 # Test-only: mint a push keypair to sign a RegisterToken in registry tests.

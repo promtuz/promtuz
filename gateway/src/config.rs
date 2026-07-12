@@ -11,6 +11,15 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub log:     LogConfig,
+    #[serde(default)]
+    pub push:    PushConfig,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct PushConfig {
+    /// Path to the FCM service-account JSON. Absent → FCM dispatch is disabled
+    /// (the gateway still runs; a wake for an FCM token is logged and dropped).
+    pub fcm_service_account: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize, Debug, Default)]
