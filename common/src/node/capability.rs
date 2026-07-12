@@ -10,8 +10,7 @@
 //! lives with whoever already parses certs: `certgen` writes it,
 //! relay/gateway read it off an already-parsed `X509Certificate`.
 
-use serde::Deserialize;
-use serde::Serialize;
+use bitflags::bitflags;
 
 /// OID arcs for the capability extension. Self-issued private tag: it only has
 /// to be unique inside our own closed CA (we are the sole issuer *and* the sole
@@ -21,47 +20,36 @@ use serde::Serialize;
 // leaves our PKI.
 pub const CAPABILITY_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 58888, 1];
 
-/// CA-attested capability bitset carried in a node's leaf cert (PUSH.md §1).
-///
-/// Extensible: add bits, never renumber. Trust (CA tier) and capability are
-/// orthogonal — the tier says *how trusted*, these bits say *what it offers*.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeCapabilities(pub u32);
+bitflags! {
+    /// CA-attested capability bitset carried in a node's leaf cert (PUSH.md §1).
+    ///
+    /// Extensible: add bits, never renumber. Trust (CA tier) and capability are
+    /// orthogonal — the tier says *how trusted*, these bits say *what it offers*.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct NodeCapabilities: u32 {
+        const RELAY             = 1 << 0; // basic store-and-forward (every relay)
+        const PUSH_GATEWAY      = 1 << 1; // holds APNs/FCM creds, runs the wake path
+        const BLOB_STORE        = 1 << 2; // content-addressed encrypted media
+        const CALL_RELAY        = 1 << 3; // SFrame / TURN for A/V
+        const HIGH_AVAILABILITY = 1 << 4; // tier-1 stable-node SLA
+    }
+}
 
 impl NodeCapabilities {
-    pub const RELAY: u32 = 1 << 0; // basic store-and-forward (every relay)
-    pub const PUSH_GATEWAY: u32 = 1 << 1; // holds APNs/FCM creds, runs the wake path
-    pub const BLOB_STORE: u32 = 1 << 2; // content-addressed encrypted media
-    pub const CALL_RELAY: u32 = 1 << 3; // SFrame / TURN for A/V
-    pub const HIGH_AVAILABILITY: u32 = 1 << 4; // tier-1 stable-node SLA
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-
-    /// Return a copy with `bit` set (chainable).
-    pub const fn with(self, bit: u32) -> Self {
-        Self(self.0 | bit)
-    }
-
-    /// True iff every bit in `bit` is set.
-    pub const fn has(self, bit: u32) -> bool {
-        self.0 & bit == bit
-    }
-
     /// Bytes to embed as the extension content.
     ///
-    // ponytail: plain 4-byte LE u32. If caps ever outgrow 32 bits or become a
-    // struct, switch to postcard here + in `decode` and bump the format.
+    // ponytail: plain 4-byte LE u32. If caps ever outgrow 32 bits, widen the
+    // backing int here + in `decode` and bump the format.
     pub fn encode(self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
+        self.bits().to_le_bytes().to_vec()
     }
 
-    /// Parse the extension content back to a bitset. Strict: exactly 4 bytes,
-    /// else `None` (a malformed extension yields no capabilities, never a
-    /// wrong guess).
+    /// Parse the extension content back to a bitset. Strict length (exactly 4
+    /// bytes, else `None`), but `from_bits_retain` keeps bits this build does
+    /// not know — a newer CA can add a capability without an older node
+    /// mangling it.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        bytes.try_into().ok().map(|b| Self(u32::from_le_bytes(b)))
+        bytes.try_into().ok().map(|b| Self::from_bits_retain(u32::from_le_bytes(b)))
     }
 }
 
@@ -71,17 +59,22 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trips() {
-        let caps = NodeCapabilities::empty()
-            .with(NodeCapabilities::PUSH_GATEWAY)
-            .with(NodeCapabilities::HIGH_AVAILABILITY);
+        let caps = NodeCapabilities::PUSH_GATEWAY | NodeCapabilities::HIGH_AVAILABILITY;
         assert_eq!(NodeCapabilities::decode(&caps.encode()), Some(caps));
     }
 
     #[test]
-    fn has_checks_all_bits() {
-        let caps = NodeCapabilities::empty().with(NodeCapabilities::PUSH_GATEWAY);
-        assert!(caps.has(NodeCapabilities::PUSH_GATEWAY));
-        assert!(!caps.has(NodeCapabilities::BLOB_STORE));
+    fn contains_checks_bits() {
+        let caps = NodeCapabilities::PUSH_GATEWAY;
+        assert!(caps.contains(NodeCapabilities::PUSH_GATEWAY));
+        assert!(!caps.contains(NodeCapabilities::BLOB_STORE));
+    }
+
+    #[test]
+    fn decode_retains_unknown_future_bits() {
+        // bit 31 isn't defined here; a newer CA might set it. We must not drop it.
+        let raw = (1u32 << 31).to_le_bytes();
+        assert_eq!(NodeCapabilities::decode(&raw).map(|c| c.bits()), Some(1 << 31));
     }
 
     #[test]

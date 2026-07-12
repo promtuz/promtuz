@@ -39,7 +39,7 @@ enum Capability {
 }
 
 impl Capability {
-    fn bit(self) -> u32 {
+    fn flag(self) -> NodeCapabilities {
         match self {
             Capability::Relay => NodeCapabilities::RELAY,
             Capability::PushGateway => NodeCapabilities::PUSH_GATEWAY,
@@ -51,7 +51,7 @@ impl Capability {
 }
 
 fn fold_caps(caps: &[Capability]) -> NodeCapabilities {
-    caps.iter().fold(NodeCapabilities::empty(), |acc, c| acc.with(c.bit()))
+    caps.iter().fold(NodeCapabilities::empty(), |acc, c| acc | c.flag())
 }
 
 /// The CA-signed capability extension for a cert (empty caps → no extension;
@@ -152,7 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             csr.params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into()?)];
 
             let caps = fold_caps(&caps);
-            if caps != NodeCapabilities::empty() {
+            if !caps.is_empty() {
                 csr.params.custom_extensions.push(capability_extension(caps));
             }
 
@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into()?)];
 
             let caps = fold_caps(&caps);
-            if caps != NodeCapabilities::empty() {
+            if !caps.is_empty() {
                 params.custom_extensions.push(capability_extension(caps));
             }
 

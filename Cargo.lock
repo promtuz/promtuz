@@ -700,6 +700,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "bitflags",
  "blake3",
  "ciborium",
  "clap",
