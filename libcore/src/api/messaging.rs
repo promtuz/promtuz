@@ -215,6 +215,18 @@ pub fn set_presence(idle: bool) {
     });
 }
 
+/// (Re)register our push-pseudonym with the connected home relay so it can
+/// wake us on offline delivery. Fire-and-forget; also runs automatically on
+/// each connect. Call after obtaining/refreshing the platform push token.
+#[uniffi::export]
+pub fn register_push() {
+    crate::RUNTIME.spawn(async {
+        if let Err(e) = crate::push::register_push().await {
+            log::debug!("PUSH: register failed: {e}");
+        }
+    });
+}
+
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]

@@ -13,6 +13,7 @@ pub mod events;
 pub mod messaging;
 pub mod mls;
 pub mod platform;
+pub mod push;
 pub mod quic;
 pub mod state;
 pub mod utils;
