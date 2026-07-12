@@ -379,6 +379,60 @@ impl Message {
             .filter_map(|r| r.ok())
             .collect()
     }
+
+    /// Advance the local read high-water-mark for `peer` to `upto` (a 16-byte
+    /// dispatch id). Monotonic — a BLOB compare keeps it from moving backwards
+    /// (dispatch ids are big-endian, so memcmp == send order). Writes
+    /// MESSAGES_DB, so it rings the reactive doorbell and the home unread
+    /// count re-reads.
+    pub fn set_read_watermark(peer_ipk: &[u8; 32], upto: &[u8; 16]) {
+        let conn = MESSAGES_DB.lock();
+        conn.execute(
+            "INSERT INTO read_state (peer_ipk, upto_dispatch_id) VALUES (?1, ?2)
+             ON CONFLICT(peer_ipk) DO UPDATE SET upto_dispatch_id = excluded.upto_dispatch_id
+             WHERE excluded.upto_dispatch_id > read_state.upto_dispatch_id",
+            (peer_ipk.as_slice(), upto.as_slice()),
+        )
+        .ok();
+    }
+
+    /// Newest incoming (dispatch-bearing) message's id for `peer` — the
+    /// watermark target when marking a whole conversation read.
+    pub fn newest_incoming_dispatch(peer_ipk: &[u8; 32]) -> Option<[u8; 16]> {
+        let conn = MESSAGES_DB.lock();
+        conn.query_row(
+            "SELECT dispatch_id FROM messages
+             WHERE peer_ipk = ?1 AND outgoing = 0 AND dispatch_id IS NOT NULL
+             ORDER BY dispatch_id DESC LIMIT 1",
+            [peer_ipk.as_slice()],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .ok()
+        .and_then(|v| v.try_into().ok())
+    }
+
+    /// Unread incoming count per peer: incoming, non-deleted, dispatch-bearing
+    /// messages newer than the peer's read watermark. Only peers with unread > 0.
+    pub fn unread_counts() -> Vec<([u8; 32], u32)> {
+        let conn = MESSAGES_DB.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.peer_ipk, COUNT(*) FROM messages m
+                 LEFT JOIN read_state r ON r.peer_ipk = m.peer_ipk
+                 WHERE m.outgoing = 0 AND m.deleted = 0 AND m.dispatch_id IS NOT NULL
+                   AND (r.upto_dispatch_id IS NULL OR m.dispatch_id > r.upto_dispatch_id)
+                 GROUP BY m.peer_ipk",
+            )
+            .expect("failed to prepare");
+        stmt.query_map([], |row| {
+            let peer: Vec<u8> = row.get(0)?;
+            let count: u32 = row.get(1)?;
+            Ok((peer.try_into().unwrap_or([0u8; 32]), count))
+        })
+        .expect("failed to query")
+        .filter_map(|r| r.ok())
+        .collect()
+    }
 }
 
 #[cfg(test)]

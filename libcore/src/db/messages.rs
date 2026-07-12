@@ -99,6 +99,14 @@ const MIGRATION_ARRAY: &[M] = &[
             PRIMARY KEY (peer_ipk, dispatch_id)
         ) WITHOUT ROWID;",
     ),
+    // Local read high-water-mark per peer: the newest incoming dispatch_id the
+    // user has read. Drives the home-list unread count; mark_read upserts it.
+    M::up(
+        "CREATE TABLE read_state (
+            peer_ipk BLOB PRIMARY KEY CHECK(length(peer_ipk) = 32),
+            upto_dispatch_id BLOB NOT NULL
+        ) WITHOUT ROWID;",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

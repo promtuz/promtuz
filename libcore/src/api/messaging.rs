@@ -36,6 +36,13 @@ pub struct ReactionRecord {
     pub mine: bool,
 }
 
+/// Unread incoming count for one conversation — the home-list badge source.
+#[derive(uniffi::Record)]
+pub struct UnreadCount {
+    pub peer_ipk: Vec<u8>,
+    pub count: u32,
+}
+
 /// An address-book entry, projected for the client.
 #[derive(uniffi::Record)]
 pub struct ContactInfo {
@@ -138,6 +145,9 @@ pub fn reactions_for(peer_ipk: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError
 pub fn mark_read(peer_ipk: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
     let to = to_ipk32(&peer_ipk)?;
     let upto = to_did16(&upto_dispatch_id)?;
+    // Persist locally first so the home unread count clears the moment the user
+    // reads in-chat (the write rings the reactive doorbell); then tell the peer.
+    Message::set_read_watermark(&to, &upto);
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send_receipt(
             to, common::proto::mls_wire::ReceiptKind::Read, upto,
@@ -148,6 +158,36 @@ pub fn mark_read(peer_ipk: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), Cor
         }
     });
     Ok(())
+}
+
+/// Mark the whole conversation with `peer` read: advance the local watermark to
+/// the newest incoming message and send a Read receipt. No-op if nothing's
+/// incoming. For the home-list "Mark read" action, where the caller has no
+/// specific dispatch id in hand.
+#[uniffi::export]
+pub fn mark_conversation_read(peer_ipk: Vec<u8>) -> Result<(), CoreError> {
+    let peer = to_ipk32(&peer_ipk)?;
+    let Some(upto) = Message::newest_incoming_dispatch(&peer) else { return Ok(()) };
+    Message::set_read_watermark(&peer, &upto);
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::send_receipt(
+            peer, common::proto::mls_wire::ReceiptKind::Read, upto,
+        )
+        .await
+        {
+            log::debug!("MESSAGE: mark_conversation_read failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Unread incoming count per peer (only peers with unread > 0). Home-list badges.
+#[uniffi::export]
+pub fn unread_counts() -> Vec<UnreadCount> {
+    Message::unread_counts()
+        .into_iter()
+        .map(|(peer, count)| UnreadCount { peer_ipk: peer.to_vec(), count })
+        .collect()
 }
 
 /// Subscribe to presence for `contacts` (replaces the prior interest set).
