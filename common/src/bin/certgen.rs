@@ -11,8 +11,12 @@ use std::process;
 
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
+use common::node::capability::CAPABILITY_OID;
+use common::node::capability::NodeCapabilities;
 use common::quic::id::NodeId;
 use rcgen::CertificateParams;
+use rcgen::CustomExtension;
 use rcgen::DnType;
 use rcgen::Issuer;
 use rcgen::KeyPair;
@@ -22,6 +26,39 @@ static OUT_DIR: &str = "out";
 
 /// will try to find CA.{KEY,PEM} in current directory
 static CA: &str = "RootCA";
+
+/// A CA-attestable capability, mapped to its [`NodeCapabilities`] bit. The CA
+/// operator asserts these at sign time — a node can never self-assert one.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Capability {
+    Relay,
+    PushGateway,
+    BlobStore,
+    CallRelay,
+    HighAvailability,
+}
+
+impl Capability {
+    fn bit(self) -> u32 {
+        match self {
+            Capability::Relay => NodeCapabilities::RELAY,
+            Capability::PushGateway => NodeCapabilities::PUSH_GATEWAY,
+            Capability::BlobStore => NodeCapabilities::BLOB_STORE,
+            Capability::CallRelay => NodeCapabilities::CALL_RELAY,
+            Capability::HighAvailability => NodeCapabilities::HIGH_AVAILABILITY,
+        }
+    }
+}
+
+fn fold_caps(caps: &[Capability]) -> NodeCapabilities {
+    caps.iter().fold(NodeCapabilities::empty(), |acc, c| acc.with(c.bit()))
+}
+
+/// The CA-signed capability extension for a cert (empty caps → no extension;
+/// the caller guards on that).
+fn capability_extension(caps: NodeCapabilities) -> CustomExtension {
+    CustomExtension::from_oid_content(CAPABILITY_OID, caps.encode())
+}
 
 #[derive(Parser)]
 #[command(name = "certgen")]
@@ -36,12 +73,20 @@ enum Command {
     Gen {
         /// Output file name; defaults to the NodeId derived from the generated key.
         name: Option<String>,
+        /// Capability bit to bake into the cert (repeatable), e.g.
+        /// `--cap push-gateway`.
+        #[arg(long = "cap", value_enum)]
+        caps: Vec<Capability>,
     },
     /// Sign a CSR with the local CA.
     /// Omit the path to read PEM from stdin and print the signed cert to stdout.
     Sign {
         /// Path to PEM-encoded CSR; omit to use stdin/stdout.
         csr_path: Option<PathBuf>,
+        /// Capability bit to bake into the cert (repeatable), e.g.
+        /// `--cap push-gateway`.
+        #[arg(long = "cap", value_enum)]
+        caps: Vec<Capability>,
     },
 }
 
@@ -68,7 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     match cli.command {
-        Command::Sign { csr_path } => {
+        Command::Sign { csr_path, caps } => {
             let to_stdout = csr_path.is_none();
 
             let csr_pem = match &csr_path {
@@ -106,6 +151,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             csr.params.distinguished_name.push(DnType::CommonName, id.to_string());
             csr.params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into()?)];
 
+            let caps = fold_caps(&caps);
+            if caps != NodeCapabilities::empty() {
+                csr.params.custom_extensions.push(capability_extension(caps));
+            }
+
             let cert = csr.signed_by(&issuer)?;
 
             if to_stdout {
@@ -120,7 +170,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        Command::Gen { name } => {
+        Command::Gen { name, caps } => {
             let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
 
             let id = NodeId::new(leaf_key.public_key_raw());
@@ -130,6 +180,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut params = CertificateParams::default();
             params.distinguished_name.push(DnType::CommonName, id.to_string());
             params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into()?)];
+
+            let caps = fold_caps(&caps);
+            if caps != NodeCapabilities::empty() {
+                params.custom_extensions.push(capability_extension(caps));
+            }
 
             let cert = params.signed_by(&leaf_key, &issuer)?;
 
