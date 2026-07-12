@@ -25,7 +25,7 @@ import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.presentation.viewmodel.AppVM
 
 @Composable
-fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
+fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: HomeMenuState) {
     val direction = LocalLayoutDirection.current
     val chats by appViewModel.chats.collectAsState()
     val presence by appViewModel.presenceByPeer.collectAsState()
@@ -53,6 +53,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
                 typing = Activity.Typing in Activity.fromBits(activity[chat.peerHex] ?: 0),
                 pinned = chat.peerHex in pinned,
                 muted = chat.peerHex in muted,
+                menuState = menuState,
                 onOpen = { appViewModel.openChat(chat.peerHex, chat.name) },
                 onPin = { ChatPrefs.togglePin(chat.peerHex) },
                 onMute = { ChatPrefs.toggleMute(chat.peerHex) },

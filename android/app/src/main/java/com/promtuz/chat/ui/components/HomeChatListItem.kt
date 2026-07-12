@@ -1,7 +1,11 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,28 +20,31 @@ import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
+import kotlinx.coroutines.withTimeoutOrNull
+
+private enum class DownResult { TAP, SCROLL, GONE }
 
 @Composable
 fun HomeChatListItem(
@@ -46,6 +53,7 @@ fun HomeChatListItem(
     typing: Boolean,
     pinned: Boolean,
     muted: Boolean,
+    menuState: HomeMenuState,
     onOpen: () -> Unit,
     onPin: () -> Unit,
     onMute: () -> Unit,
@@ -58,22 +66,85 @@ fun HomeChatListItem(
     val haptic = LocalHapticFeedback.current
     val unread = chat.unreadCount > 0
 
-    var menuOpen by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
-    var rowHeight by remember { mutableIntStateOf(0) }
+    val interaction = remember { MutableInteractionSource() }
+    val rowCoord = remember { object { var c: LayoutCoordinates? = null } }
+
+    val groups = listOf(
+        buildList {
+            add(MenuAction(if (pinned) "Unpin" else "Pin") { onPin() })
+            add(MenuAction(if (muted) "Unmute" else "Mute") { onMute() })
+            if (unread) add(MenuAction("Mark read") { onMarkRead() })
+        },
+        listOf(MenuAction("Delete chat", destructive = true) { confirmDelete = true }),
+    )
 
     Box(modifier) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .onSizeChanged { rowHeight = it.height }
-                .combinedClickable(
-                    onClick = onOpen,
-                    onLongClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        menuOpen = true
-                    },
-                )
+                .onGloballyPositioned { rowCoord.c = it }
+                .indication(interaction, ripple())
+                // One gesture arbitrates tap / scroll / long-press: a quick lift opens
+                // the chat, a pre-timeout drag lets the list scroll, and a stationary
+                // hold opens the menu — then the SAME finger drags to an item and
+                // releases to pick it (the iconic hold-and-swipe).
+                .pointerInput(chat.peerHex, pinned, muted, unread) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        if (menuState.isOpen) return@awaitEachGesture
+                        val press = PressInteraction.Press(down.position)
+                        interaction.tryEmit(press)
+                        try {
+                            val res = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                while (true) {
+                                    val ev = awaitPointerEvent()
+                                    val ch = ev.changes.firstOrNull { it.id == down.id }
+                                        ?: return@withTimeoutOrNull DownResult.GONE
+                                    if (!ch.pressed) return@withTimeoutOrNull DownResult.TAP
+                                    if ((ch.position - down.position).getDistance() > viewConfiguration.touchSlop)
+                                        return@withTimeoutOrNull DownResult.SCROLL
+                                }
+                                @Suppress("UNREACHABLE_CODE") DownResult.SCROLL
+                            }
+                            when (res) {
+                                DownResult.TAP -> onOpen()
+                                null -> {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    val at = rowCoord.c?.takeIf { it.isAttached }?.localToRoot(down.position)
+                                        ?: Offset.Zero
+                                    menuState.open(HomeMenuAnchor(at, groups))
+                                    var dragged = false
+                                    while (true) {
+                                        val ev = awaitPointerEvent()
+                                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
+                                        val root = rowCoord.c?.takeIf { it.isAttached }?.localToRoot(ch.position)
+                                        if (!ch.pressed) {
+                                            if (dragged) {
+                                                val a = root?.let(menuState::release)
+                                                if (a != null) {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                                                    a.onClick()
+                                                }
+                                                menuState.close()
+                                            }
+                                            break
+                                        }
+                                        if (!dragged &&
+                                            (ch.position - down.position).getDistance() > viewConfiguration.touchSlop
+                                        ) dragged = true
+                                        if (dragged && root != null && menuState.drag(root))
+                                            haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                        ch.consume()
+                                    }
+                                }
+                                else -> {} // SCROLL / GONE — leave it for the list to scroll
+                            }
+                        } finally {
+                            interaction.tryEmit(PressInteraction.Release(press))
+                        }
+                    }
+                }
                 .padding(horizontal = 16.dp, vertical = 9.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -124,29 +195,6 @@ fun HomeChatListItem(
                     )
                     if (unread) UnreadBadge(chat.unreadCount, muted, colors)
                 }
-            }
-        }
-
-        if (menuOpen) {
-            val topGroup = buildList {
-                add(MenuAction(if (pinned) "Unpin" else "Pin") { onPin() })
-                add(MenuAction(if (muted) "Unmute" else "Mute") { onMute() })
-                if (unread) add(MenuAction("Mark read") { onMarkRead() })
-            }
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, rowHeight),
-                onDismissRequest = { menuOpen = false },
-                properties = PopupProperties(focusable = true),
-            ) {
-                MenuCard(
-                    groups = listOf(
-                        topGroup,
-                        listOf(MenuAction("Delete chat", destructive = true) { confirmDelete = true }),
-                    ),
-                    hovered = -1,
-                    onPick = { it.onClick(); menuOpen = false },
-                )
             }
         }
 
