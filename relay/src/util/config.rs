@@ -6,6 +6,7 @@ use std::process;
 
 use common::node::config::NetworkConfig;
 use common::node::config::NodeConfig;
+use common::node::config::NodeSeed;
 use serde::Deserialize;
 
 use crate::dht::DhtConfig;
@@ -40,6 +41,18 @@ pub struct AppConfig {
     /// Optional logging block. Absent → info. `PZ_LOG` env overrides.
     #[serde(default)]
     pub log: LogConfig,
+
+    /// Optional push block. Absent → the relay queues offline messages but
+    /// triggers no background wake.
+    #[serde(default)]
+    pub push: PushConfig,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct PushConfig {
+    /// The push gateway to wake devices through: `{ key = "<node-id>", addr =
+    /// "host[:port]" }`. Absent → no wakes.
+    pub gateway: Option<NodeSeed>,
 }
 
 #[derive(Deserialize, Debug, Default)]

@@ -50,6 +50,7 @@ impl NetworkConfig {
 /// Default QUIC ports, applied when a [`HostAddr`] in config omits one.
 pub const DEFAULT_RESOLVER_PORT: u16 = 40433;
 pub const DEFAULT_RELAY_PORT: u16 = 40432;
+pub const DEFAULT_GATEWAY_PORT: u16 = 40434;
 
 /// A `host[:port]` from config — either a literal IP or a DNS name, with an
 /// optional port. Unlike [`SocketAddr`] it accepts hostnames; the name is

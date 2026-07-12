@@ -162,6 +162,9 @@ impl Relay {
         // inner map can be cloned-by-Arc into `Dht.clients` for the
         // home-side `Forward` handler.
         let clients = Arc::new(RwLock::new(HashMap::new()));
+        // Shared `IPK → P` map: the per-client handler writes it, the DHT
+        // enqueue path reads it to wake offline recipients.
+        let push_pseudonyms = Arc::new(RwLock::new(HashMap::new()));
 
         // DHT construction is gated on `cfg.dht.enabled`. When disabled,
         // the field stays `None` and every consumer falls through to
@@ -178,6 +181,9 @@ impl Relay {
                     // `Forward` handler can deliver locally when the
                     // recipient is online here.
                     d.attach_clients(clients.clone());
+                    // Wire the offline-wake path: shared IPK→P map + the
+                    // configured gateway (if any).
+                    d.attach_push(push_pseudonyms.clone(), cfg.push.gateway.clone());
                     info!("DHT enabled (node_id = {node_id})");
                     Some(Arc::new(d))
                 },
@@ -204,7 +210,7 @@ impl Relay {
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_mode: RwLock::new(HashMap::new()),
-            push_pseudonyms: Arc::new(RwLock::new(HashMap::new())),
+            push_pseudonyms,
         }
     }
 }

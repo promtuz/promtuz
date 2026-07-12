@@ -21,6 +21,7 @@ pub(crate) mod lookup;
 pub mod metrics;
 pub(crate) mod mls;
 pub(crate) mod peer_dial;
+pub(crate) mod push_wake;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
@@ -32,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::node::config::NodeSeed;
 use common::quic::id::NodeId;
 use ed25519_dalek::SigningKey;
 use parking_lot::RwLock;
@@ -191,12 +193,24 @@ pub struct Dht {
     /// compiling — a relay-level `Relay::new` populates this via
     /// [`Self::attach_clients`].
     pub(crate) clients: Option<ClientsMap>,
+
+    /// Shared `IPK → push-pseudonym P` map (the relay owns it; see
+    /// `Relay::push_pseudonyms`). Read by the enqueue path to wake an offline
+    /// recipient. `Option` for the bare-`Dht` test fixtures, same as
+    /// [`Self::clients`].
+    pub(crate) push_pseudonyms: Option<PushMap>,
+
+    /// The push gateway to send [`WakeRequest`]s to. `None` → no wakes.
+    pub(crate) push_gateway: Option<NodeSeed>,
 }
 
 /// Shared reference to the relay's connected-clients map. Aliased so
 /// the field type stays readable. See `Dht::clients` for the lock
 /// contract and the `Option<...>` rationale.
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
+
+/// Shared `IPK → push-pseudonym` map. See `Dht::push_pseudonyms`.
+pub(crate) type PushMap = Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>;
 
 impl Dht {
     /// Construct the runtime DHT state over the shared fjall [`Store`].
@@ -224,6 +238,8 @@ impl Dht {
             kp_fetch_limiters: KpFetchLimiters::new(),
             welcome_limiters: WelcomeLimiters::new(),
             clients: None,
+            push_pseudonyms: None,
+            push_gateway: None,
         })
     }
 
@@ -246,6 +262,14 @@ impl Dht {
     /// drive the home-side delivery path.
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
+    }
+
+    /// Wire the shared `IPK → P` map and the push gateway so the enqueue path
+    /// can trigger an offline wake. Skipped in test fixtures and when no
+    /// gateway is configured (the map alone is harmless).
+    pub fn attach_push(&mut self, pseudonyms: PushMap, gateway: Option<NodeSeed>) {
+        self.push_pseudonyms = Some(pseudonyms);
+        self.push_gateway = gateway;
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path.

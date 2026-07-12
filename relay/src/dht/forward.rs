@@ -238,7 +238,10 @@ pub(crate) async fn forward_to_homes(
         let outcome =
             super::store::enqueue_for_home(&dht, &user_ipk_bytes, &dispatch, now_ms);
         match outcome {
-            ForwardOutcome::Stored => summary.stored_at.push(self_id),
+            ForwardOutcome::Stored => {
+                summary.stored_at.push(self_id);
+                dht.trigger_wake(&user_ipk_bytes);
+            },
             other => summary.failed_at.push(HomeReply { node_id: self_id, outcome: other }),
         }
     }
@@ -497,6 +500,9 @@ pub(crate) async fn handle_forward_rpc(
     // 6. Offline (or local-deliver failed): durably enqueue.
     let outcome =
         super::store::enqueue_for_home(dht, &recipient_ipk, &fwd.dispatch, now_ms);
+    if matches!(outcome, ForwardOutcome::Stored) {
+        dht.trigger_wake(&recipient_ipk);
+    }
     ForwardResp { outcome }
 }
 
