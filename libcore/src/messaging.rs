@@ -324,7 +324,7 @@ pub async fn send_receipt(to: [u8; 32], kind: ReceiptKind, upto: [u8; 16]) -> Re
     send_control(to, AppPayload::Receipt { kind, upto }).await
 }
 
-/// Proof-of-pair (PAIRING.md): the invitee's first app message after accepting
+/// Proof-of-pair: the invitee's first app message after accepting
 /// a Welcome. Flips the inviter's contact PENDING → PAIRED by simply being a
 /// decryptable inbound message.
 pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
@@ -400,7 +400,7 @@ async fn dispatch_envelope(
     Ok(())
 }
 
-/// Tell `to` we declined their pairing Welcome (PAIRING.md). A plain signed
+/// Tell `to` we declined their pairing Welcome. A plain signed
 /// control message on the dispatch/queue channel — no MLS group (accepting it
 /// is what failed). The inviter verifies the signature under our IPK, marks us
 /// REJECTED, and fails the messages it sent us while PENDING.
@@ -477,7 +477,7 @@ pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
 
 /// Tell the relay our activity mode: `idle = true` on backgrounding (sent as
 /// the last packet before the app freezes), `false` on return. Fire-and-forget;
-/// the relay updates the state it reports to our mutual contacts (PRESENCE.md).
+/// the relay updates the state it reports to our mutual contacts.
 pub async fn set_presence(idle: bool) -> Result<()> {
     let mode = if idle {
         common::proto::client_rel::PresenceMode::Idle
@@ -497,7 +497,7 @@ pub async fn set_presence(idle: bool) -> Result<()> {
     Ok(())
 }
 
-/// Pairing (PAIRING.md): fetch `to`'s KeyPackage, build the 1:1 group, and
+/// Pairing: fetch `to`'s KeyPackage, build the 1:1 group, and
 /// publish a Welcome carrying `pairing` (our invite + name). The contact is
 /// saved as **PENDING only on success** — an unreachable peer (KP not
 /// published; the common new-user case) errors WITHOUT leaving a bricked
@@ -1090,7 +1090,7 @@ pub async fn process_inbound_envelope<C: DhtClient>(
     }
 }
 
-/// Handle an inbound `PairDecline` (PAIRING.md): verify it's from the pending
+/// Handle an inbound `PairDecline`: verify it's from the pending
 /// contact and validly signed (a malicious relay must not forge a rejection to
 /// grief a pair), then mark them REJECTED and fail the messages we sent them.
 fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result<()> {
@@ -1128,7 +1128,7 @@ fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result
 /// Post-restore self-heal: a known contact sent into a group we hold no
 /// state for — mint a fresh group + Welcome toward them so the NEXT
 /// messages flow (the mirror of the send path's "no local state;
-/// recreating"). The lost ciphertext stays lost (FS, spec §9).
+/// recreating"). The lost ciphertext stays lost (forward secrecy).
 ///
 /// Mint-storm guard: a backlog of N dead-group messages must re-establish
 /// once, not N times. Under the per-recipient lock, recreate only while the
@@ -1326,7 +1326,7 @@ fn process_application_inbound<C: DhtClient>(
 
 /// Persist messages drained from the epoch-ahead buffer. These were
 /// `let _ =`-discarded before — every catch-up message silently lost
-/// once its epoch became current (spec §7).
+/// once its epoch became current.
 ///
 /// ponytail: attributes all drained messages to `sender_ipk`, the current
 /// envelope's authenticated sender — correct for 1:1 (one possible peer),
