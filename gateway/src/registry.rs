@@ -11,8 +11,8 @@ pub struct TokenEntry {
     pub token:    Vec<u8>,
 }
 
-/// The `P → token` registry (PUSH.md §3). The gateway learns the token only
-/// under the pseudonym `P`; it never sees the IPK.
+/// The `P → token` registry. The gateway learns the token only under the
+/// pseudonym `P`; it never sees the IPK.
 ///
 // ponytail: in-memory. A gateway restart drops registrations until devices
 // re-register (which they do on next foreground). Persist to a small on-disk

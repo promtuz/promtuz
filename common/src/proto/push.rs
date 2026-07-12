@@ -1,11 +1,10 @@
-//! Push wire types: device → gateway registration and relay → gateway wake
-//! (PUSH.md §3–4). The gateway holds `P → token`; relays hold `IPK → P` —
-//! neither alone links a user to a wakeable device.
+//! Push wire types: device → gateway registration and relay → gateway wake.
+//! The gateway holds `P → token`; relays hold `IPK → P` — neither alone links
+//! a user to a wakeable device.
 //!
 //! **Pseudonym `P` is a per-install Ed25519 public key** (random, unrelated to
 //! the IPK). The device keeps the secret and self-signs each registration, so
-//! the gateway can authenticate `P → token` without ever seeing the IPK — the
-//! pseudonymity the §7 ledger relies on. (Refines §3's bare "signed".)
+//! the gateway can authenticate `P → token` without ever seeing the IPK.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,7 +17,7 @@ const REGISTER_DOMAIN: &[u8] = b"promtuz-push-register-v1";
 
 /// Which platform wake service a token targets. The tag travels with every
 /// registration so the gateway can add APNs / UnifiedPush as new dispatch arms
-/// without a registry migration — the iOS-readiness pin (PUSH.md §6).
+/// without a registry migration — the iOS-readiness pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushProvider {
     Fcm,
@@ -49,23 +48,24 @@ pub fn register_signing_input(provider: PushProvider, token: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Device registers `P → token` with the gateway (PUSH.md §3). Signed by the
-/// device IPK so the gateway accepts only genuine registrations, yet the
-/// gateway learns the token only under the pseudonym `P`, never the IPK.
+/// Device registers `P → token` with the gateway. Self-signed by `P` (see the
+/// module note) so the gateway accepts only genuine registrations while never
+/// seeing the IPK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterToken {
-    /// Per-install push pseudonym `P` — random, not derivable from the IPK.
+    /// Per-install push pseudonym `P` — a random Ed25519 pubkey, not derivable
+    /// from the IPK. Also the key that verifies `sig`.
     pub pseudonym: Bytes<32>,
     pub provider:  PushProvider,
     /// Opaque platform token (FCM registration token / APNs device token /
     /// UnifiedPush endpoint URL). Variable length.
     pub token:     Vec<u8>,
-    /// Device IPK signature over the registration.
+    /// Signature by `P` over `(provider, token)`.
     pub sig:       Bytes<64>,
 }
 
-/// A home relay asks the gateway to wake a device (PUSH.md §4). Only a relay
-/// holding the recipient's queue initiates this.
+/// A home relay asks the gateway to wake a device. Only a relay holding the
+/// recipient's queue initiates this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeRequest {
     /// Recipient's push pseudonym `P` (the relay holds `IPK → P`).

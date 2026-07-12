@@ -1,4 +1,4 @@
-//! CA-attested node capabilities (PUSH.md §1).
+//! CA-attested node capabilities.
 //!
 //! A capability is a bit the RootCA stamps into a leaf cert's custom X.509
 //! extension. Because it rides *inside* the CA-signed cert, anyone who
@@ -21,7 +21,7 @@ use bitflags::bitflags;
 pub const CAPABILITY_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 58888, 1];
 
 bitflags! {
-    /// CA-attested capability bitset carried in a node's leaf cert (PUSH.md §1).
+    /// CA-attested capability bitset carried in a node's leaf cert.
     ///
     /// Extensible: add bits, never renumber. Trust (CA tier) and capability are
     /// orthogonal — the tier says *how trusted*, these bits say *what it offers*.
