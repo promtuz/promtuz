@@ -1,33 +1,22 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.ClipData
-import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -39,13 +28,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
-import com.promtuz.chat.ui.components.TypingBubble
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -61,9 +49,11 @@ import com.promtuz.chat.ui.components.MenuAnchor
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.MessageContextMenu
 import com.promtuz.chat.ui.components.MessageMenuState
-import com.promtuz.chat.ui.components.SelectionTopBar
 import com.promtuz.chat.ui.components.SwipeToReply
+import com.promtuz.chat.ui.components.TypingBubble
 import com.promtuz.chat.ui.components.rememberChatWallpaper
+import com.promtuz.chat.ui.stage.MessageStage
+import com.promtuz.chat.ui.stage.rememberMessageStageState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlin.math.abs
@@ -76,10 +66,6 @@ private sealed interface ChatRow {
     data object Typing : ChatRow
 }
 
-/** The list's row animator (matches the reference feel; change-animations stay off). */
-private val RowPlacement = tween<IntOffset>(250, easing = CubicBezierEasing(0.19919f, 0.01064f, 0.27921f, 0.91025f))
-private val RowFade = tween<Float>(200)
-
 @Composable
 fun ChatScreen(name: String, viewModel: ChatVM) {
     val messages by viewModel.messages.collectAsState()
@@ -89,30 +75,23 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     val mergeWindowMs = layout.mergeWindowSecs * 1000L
     val wallpaper = rememberChatWallpaper(appearance.wallpaper)
     val hazeState = rememberHazeState()
+    val scope = rememberCoroutineScope()
 
+    // Messages paint the moment they load — no nav-slide gate, no cascade. The stage
+    // is windowed (only the visible band is measured), so the full loaded window sits
+    // in the list free off-screen; older pages arrive via onNearTop on scroll.
     val rows = remember(messages, mergeWindowMs, typing) { buildChatRows(messages, mergeWindowMs, typing) }
-    val listState = rememberLazyListState()
+    val stage = rememberMessageStageState()
 
-    // Follow the conversation. Any change to the bottom row (new message, frontier
-    // moving under it, typing bubble) re-evaluates; own sends always land us at the
-    // bottom, incoming only pulls us when we're near it (scrolled-up reading holds).
-    // Already exactly at the bottom → no scroll call at all: the placement
-    // animations carry the motion, and a competing animateScroll just jitters.
-    val bottomKey = rows.firstOrNull()?.let(::rowKey)
+    // Own sends always land us at the bottom; incoming near the bottom is the
+    // stage's built-in follow, and scrolled-up reading holds.
     val newestOutKey = (rows.firstOrNull { it is ChatRow.Msg } as? ChatRow.Msg)
         ?.msg?.takeIf { it.outgoing }?.key
     var lastOutKey by remember { mutableStateOf(newestOutKey) }
-    LaunchedEffect(bottomKey) {
+    LaunchedEffect(newestOutKey) {
         val ownSend = newestOutKey != null && newestOutKey != lastOutKey
         lastOutKey = newestOutKey
-        val nearBottom = listState.firstVisibleItemIndex <= 3
-        if (bottomKey != null && (nearBottom || ownSend)) {
-            // Pinned at the bottom: re-anchor without animating and let the items'
-            // placement animations carry the motion (an animateScroll here cancels
-            // and restarts per send — the burst jitter). Away from it: glide.
-            if (listState.firstVisibleItemIndex == 0) listState.requestScrollToItem(0)
-            else listState.animateScrollToItem(0)
-        }
+        if (ownSend) stage.scrollToBottom()
     }
 
     val menu = remember { MessageMenuState() }
@@ -122,134 +101,109 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
         menu.close()
     }
 
-    val scope = rememberCoroutineScope()
-
-    // Multi-select: keys of selected messages; non-empty = selection mode.
-    var selected by remember { mutableStateOf(setOf<String>()) }
-    var confirmBulkDelete by remember { mutableStateOf(false) }
-    val selecting = selected.isNotEmpty()
-    BackHandler(selecting) { selected = emptySet() }
-    fun toggleSelect(key: String) {
-        selected = if (key in selected) selected - key else selected + key
-    }
-    val clipboard = LocalClipboard.current
-    fun copySelection() {
-        val text = messages.asReversed()
-            .filter { it.key in selected }
-            .joinToString("\n") { (it.content as? MessageContent.Text)?.text.orEmpty() }
-        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("messages", text))) }
+    // Suspended row = the anchor: the stage derives scroll so it never moves while
+    // the menu is up; everything else grows away from it.
+    LaunchedEffect(menu.anchor) {
+        val anchor = menu.anchor
+        if (anchor != null) stage.pin(anchor.msg.key, anchor.bounds.bottom)
+        else stage.unpin()
     }
 
     // Tap on a reply's quote → glide to the quoted message and flash it.
     var highlightKey by remember { mutableStateOf<String?>(null) }
     fun jumpToQuoted(didHex: String) {
-        val idx = rows.indexOfFirst { it is ChatRow.Msg && it.msg.dispatchIdHex == didHex }
-        if (idx == -1) return
-        val key = (rows[idx] as ChatRow.Msg).msg.key
+        val target = (rows.firstOrNull { it is ChatRow.Msg && it.msg.dispatchIdHex == didHex } as? ChatRow.Msg)
+            ?: return
         scope.launch {
-            listState.animateScrollToItem(idx)
-            highlightKey = key
+            stage.scrollToKey(target.msg.key)
+            highlightKey = target.msg.key
             delay(1400)
-            if (highlightKey == key) highlightKey = null
+            if (highlightKey == target.msg.key) highlightKey = null
         }
     }
 
     Box {
         Scaffold(
-            topBar = {
-                AnimatedContent(selecting, label = "topbar") { inSelection ->
-                    if (inSelection) SelectionTopBar(
-                        count = selected.size,
-                        haze = hazeState,
-                        onClose = { selected = emptySet() },
-                        onCopy = {
-                            copySelection()
-                            selected = emptySet()
-                        },
-                        onDelete = { confirmBulkDelete = true },
-                    )
-                    else ChatTopBar(name, viewModel, hazeState)
-                }
-            },
+            topBar = { ChatTopBar(name, viewModel, hazeState) },
             bottomBar = { ChatBottomBar(viewModel, hazeState) },
         ) { padding ->
-            // Wallpaper + list are the haze source; the translucent bars sample them. contentPadding
-            // (not Modifier.padding) so messages scroll *under* the bars for the blur to have something.
-            Box(Modifier.fillMaxSize().then(wallpaper).hazeSource(hazeState)) {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    state = listState,
-                    contentPadding = padding,
-                    reverseLayout = true,
-                ) {
-                    items(rows, key = ::rowKey, contentType = { it::class }) { row ->
-                        val animated = Modifier.animateItem(
-                            fadeInSpec = RowFade,
-                            placementSpec = RowPlacement,
-                            fadeOutSpec = RowFade,
+        // Wallpaper + stage are the haze source; the translucent bars sample them.
+        // contentPadding (not an outer padding) so messages draw under the bars.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .then(wallpaper)
+                .hazeSource(hazeState),
+        ) {
+            val handoff by viewModel.typingHandoff.collectAsState()
+            MessageStage(
+                rows = rows,
+                key = ::rowKey,
+                state = stage,
+                contentPadding = padding,
+                modifier = Modifier.fillMaxSize(),
+                // The incoming message that ended a live typing signal inherits the
+                // typing bubble: same spot, its height, dots out / text in.
+                morphFrom = { r -> if (r is ChatRow.Msg && r.msg.key == handoff) "typing" else null },
+                transformOrigin = { r ->
+                    when (r) {
+                        is ChatRow.Msg -> TransformOrigin(if (r.msg.outgoing) 1f else 0f, 1f)
+                        is ChatRow.Typing -> TransformOrigin(0f, 1f)
+                        else -> TransformOrigin(0.5f, 1f)
+                    }
+                },
+                onNearTop = viewModel::loadOlder,
+            ) { chatRow ->
+                when (chatRow) {
+                    is ChatRow.Msg -> {
+                        val gapAbove = if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp
+                        val highlight by animateColorAsState(
+                            if (highlightKey == chatRow.msg.key)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                            else Color.Transparent,
+                            label = "highlight",
                         )
-                        when (row) {
-                            is ChatRow.Msg -> {
-                                val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                                val isSelected = row.msg.key in selected
-                                val rowTint by animateColorAsState(
-                                    if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-                                    else if (highlightKey == row.msg.key) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-                                    else Color.Transparent,
-                                    label = "rowTint",
+                        Box(Modifier.background(highlight)) {
+                            SwipeToReply(
+                                enabled = chatRow.msg.dispatchIdHex != null && !chatRow.msg.deleted,
+                                onReply = { viewModel.beginReply(chatRow.msg) },
+                                Modifier
+                                    .padding(top = gapAbove)
+                                    .sendEnter(chatRow.msg)
+                                    // the context menu re-draws this row lifted; hide the original
+                                    .graphicsLayer { alpha = if (menu.anchor?.msg?.key == chatRow.msg.key) 0f else 1f },
+                            ) {
+                                val actionable = chatRow.msg.dispatchIdHex != null && !chatRow.msg.deleted
+                                val interaction = appearance.interaction
+                                MessageBubble(
+                                    msg = chatRow.msg,
+                                    mergedTop = chatRow.mergedTop,
+                                    mergedBottom = chatRow.mergedBottom,
+                                    onLongPress = { bounds ->
+                                        menu.open(MenuAnchor(chatRow.msg, bounds, chatRow.mergedTop, chatRow.mergedBottom))
+                                    },
+                                    menuState = menu,
+                                    onReactionTap = { viewModel.toggleReaction(chatRow.msg, it) },
+                                    onQuoteClick = ::jumpToQuoted,
+                                    onDoubleTap = when {
+                                        !actionable -> null
+                                        interaction.doubleTapAction == DoubleTapAction.React ->
+                                            { { viewModel.toggleReaction(chatRow.msg, interaction.doubleTapEmoji) } }
+                                        interaction.doubleTapAction == DoubleTapAction.Reply ->
+                                            { { viewModel.beginReply(chatRow.msg) } }
+                                        interaction.doubleTapAction == DoubleTapAction.Edit && chatRow.msg.outgoing ->
+                                            { { viewModel.beginEdit(chatRow.msg) } }
+                                        else -> null
+                                    },
                                 )
-                                Box(animated.background(rowTint)) {
-                                    SwipeToReply(
-                                        enabled = !selecting && row.msg.dispatchIdHex != null && !row.msg.deleted,
-                                        onReply = { viewModel.beginReply(row.msg) },
-                                        Modifier
-                                            .padding(top = gapAbove)
-                                            .sendEnter(row.msg)
-                                            // the context menu re-draws this row lifted; hide the original
-                                            .graphicsLayer { alpha = if (menu.anchor?.msg?.key == row.msg.key) 0f else 1f },
-                                    ) {
-                                        val actionable = row.msg.dispatchIdHex != null && !row.msg.deleted
-                                        val interaction = appearance.interaction
-                                        MessageBubble(
-                                            msg = row.msg,
-                                            mergedTop = row.mergedTop,
-                                            mergedBottom = row.mergedBottom,
-                                            onLongPress = { bounds ->
-                                                menu.open(MenuAnchor(row.msg, bounds, row.mergedTop, row.mergedBottom))
-                                            },
-                                            menuState = menu,
-                                            onReactionTap = { viewModel.toggleReaction(row.msg, it) },
-                                            onQuoteClick = ::jumpToQuoted,
-                                            onDoubleTap = when {
-                                                !actionable || selecting -> null
-                                                interaction.doubleTapAction == DoubleTapAction.React ->
-                                                    { { viewModel.toggleReaction(row.msg, interaction.doubleTapEmoji) } }
-                                                interaction.doubleTapAction == DoubleTapAction.Reply ->
-                                                    { { viewModel.beginReply(row.msg) } }
-                                                interaction.doubleTapAction == DoubleTapAction.Edit && row.msg.outgoing ->
-                                                    { { viewModel.beginEdit(row.msg) } }
-                                                else -> null
-                                            },
-                                            onRowLongPress = { toggleSelect(row.msg.key) },
-                                        )
-                                    }
-                                    // Selection mode: any tap on the row toggles; drawn above so it wins.
-                                    if (selecting) Box(
-                                        Modifier
-                                            .matchParentSize()
-                                            .clickable(
-                                                interactionSource = remember { MutableInteractionSource() },
-                                                indication = null,
-                                            ) { toggleSelect(row.msg.key) },
-                                    )
-                                }
                             }
-                            is ChatRow.Frontier -> FrontierMarker(row.label, animated)
-                            is ChatRow.Typing -> TypingBubble(animated.padding(top = layout.groupGap.dp))
                         }
                     }
+                    is ChatRow.Frontier -> FrontierMarker(chatRow.label)
+                    is ChatRow.Typing -> TypingBubble(Modifier.padding(top = layout.groupGap.dp))
                 }
             }
+        }
         }
 
         menu.anchor?.let { anchor ->
@@ -271,22 +225,6 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                 onDismiss = { confirmDelete = null },
             )
         }
-
-        if (confirmBulkDelete) AlertDialog(
-            onDismissRequest = { confirmBulkDelete = false },
-            title = { Text("Delete ${selected.size} messages?") },
-            text = { Text("Your own messages are deleted for everyone; theirs only from this device.") },
-            confirmButton = {
-                TextButton({
-                    messages.filter { it.key in selected }.forEach { m ->
-                        m.dispatchIdHex?.let { viewModel.delete(it, forEveryone = m.outgoing) }
-                    }
-                    selected = emptySet()
-                    confirmBulkDelete = false
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton({ confirmBulkDelete = false }) { Text("Cancel") } },
-        )
     }
 }
 
@@ -374,9 +312,9 @@ private fun rowKey(row: ChatRow): Any = when (row) {
 }
 
 /**
- * Own-send entrance: the freshly sent bubble rises from the composer (~0.4s spring)
- * while list placement slides everything else up. Runs only for rows first composed
- * while Pending, so scroll-back never replays it.
+ * Own-send entrance: the freshly sent bubble rises from the composer while the
+ * stage opens room for it. Runs only for rows first composed while Pending, so
+ * scroll-back never replays it.
  */
 @Composable
 private fun Modifier.sendEnter(msg: UiMessage): Modifier {
@@ -398,7 +336,8 @@ private fun Modifier.sendEnter(msg: UiMessage): Modifier {
  * responded?" — so it only shows when NOTHING incoming is newer than the tier's newest outgoing
  * message (their reply/receipt-by-response makes the marker redundant), and Sent has no marker at
  * all (pending already wears a spinner; everything else on screen is at least sent). A live typing
- * signal appends a [ChatRow.Typing] at the bottom (index 0 under reverseLayout).
+ * signal appends a [ChatRow.Typing] at the bottom (index 0). A frontier line between two messages
+ * severs their merge group: the marker itself is the visual break.
  */
 private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing: Boolean): List<ChatRow> {
     val newestIncoming = messages.indexOfFirst { !it.outgoing }
@@ -411,9 +350,7 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
 
     val rows = ArrayList<ChatRow>(messages.size + 3)
     if (typing) rows.add(ChatRow.Typing)
-    // A frontier line between two messages severs their group: the marker itself
-    // is the visual break, so the bubbles on either side get full corners.
-    fun frontierBetween(newer: Int, older: Int) = older == seen || older == delivered
+    fun frontierBetween(older: Int) = older == seen || older == delivered
     for (i in messages.indices) {
         when (i) {
             seen -> rows.add(ChatRow.Frontier("Seen"))
@@ -422,8 +359,8 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
         val m = messages[i]
         val older = messages.getOrNull(i + 1)
         val newer = messages.getOrNull(i - 1)
-        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs) && !frontierBetween(i, i + 1)
-        val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs) && !frontierBetween(i - 1, i)
+        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs) && !frontierBetween(i + 1)
+        val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs) && !frontierBetween(i)
         rows.add(ChatRow.Msg(m, mergedTop, mergedBottom))
     }
     return rows

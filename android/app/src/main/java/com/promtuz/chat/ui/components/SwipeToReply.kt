@@ -3,7 +3,8 @@ package com.promtuz.chat.ui.components
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
@@ -17,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
@@ -66,26 +68,49 @@ fun SwipeToReply(
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
-                    var vibrated = false
-                    detectHorizontalDragGestures(
-                        onDragStart = { vibrated = false },
-                        onDragEnd = {
-                            if (offsetX.value <= -commitPx) onReply()
-                            scope.launch {
-                                offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                    // Two-phase: observe (never consume) until the direction is
+                    // DECISIVELY a left swipe — 3:1 horizontal dominance past slop.
+                    // Anything vertical-ish or rightward bails silently, so the
+                    // list's scroll never loses a frame to this gesture.
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var dx = 0f
+                        var dy = 0f
+                        val slop = viewConfiguration.touchSlop
+                        while (true) {
+                            val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                                ?: return@awaitEachGesture
+                            if (!ch.pressed || ch.isConsumed) return@awaitEachGesture
+                            val d = ch.positionChange()
+                            dx += d.x
+                            dy += d.y
+                            if (kotlin.math.abs(dy) > slop && kotlin.math.abs(dy) >= kotlin.math.abs(dx)) {
+                                return@awaitEachGesture // the scroll's gesture
                             }
-                        },
-                        onDragCancel = { scope.launch { offsetX.animateTo(0f) } },
-                    ) { change, dx ->
-                        change.consume()
-                        val next = (offsetX.value + dx).coerceIn(-clampPx, 0f)
-                        scope.launch { offsetX.snapTo(next) }
-                        if (next <= -commitPx) {
-                            if (!vibrated) {
-                                vibrated = true
-                                haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                            }
-                        } else vibrated = false
+                            if (dx > slop) return@awaitEachGesture // right swipe = nothing
+                            if (dx < -slop && kotlin.math.abs(dx) > 3 * kotlin.math.abs(dy)) break
+                        }
+
+                        // Claimed: drive the clamp, one haptic at the threshold.
+                        var vibrated = false
+                        scope.launch { offsetX.snapTo(dx.coerceIn(-clampPx, 0f)) }
+                        while (true) {
+                            val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            ch.consume()
+                            val next = (offsetX.value + ch.positionChange().x).coerceIn(-clampPx, 0f)
+                            scope.launch { offsetX.snapTo(next) }
+                            if (next <= -commitPx) {
+                                if (!vibrated) {
+                                    vibrated = true
+                                    haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                }
+                            } else vibrated = false
+                        }
+                        if (offsetX.value <= -commitPx) onReply()
+                        scope.launch {
+                            offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                        }
                     }
                 },
         ) { content() }

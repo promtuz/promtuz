@@ -1,8 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -11,7 +10,6 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -20,19 +18,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
@@ -49,6 +51,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.promtuz.chat.domain.model.MessageContent
@@ -58,6 +61,7 @@ import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.stage.ChatMotion
 
 /**
  * A message bubble as an ordered stack of content blocks (text today; media /
@@ -68,12 +72,11 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
  * No per-message ticks: delivery state rides the frontier markers.
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
- * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id),
- * [onDoubleTap] and [onRowLongPress] (long-press on the row OUTSIDE the bubble —
- * the multi-select entry) are optional so the bubble stays a pure renderer
- * elsewhere. With [menuState] set, the long-press gesture keeps streaming into
- * the open menu — drag over an item, release to pick it (one continuous pointer
- * stream, same interaction grammar as AppDropMenu).
+ * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
+ * and [onDoubleTap] are optional so the bubble stays a pure renderer elsewhere.
+ * With [menuState] set, the long-press gesture keeps streaming into the open
+ * menu — drag over an item, release to pick it (one continuous pointer stream,
+ * same interaction grammar as AppDropMenu).
  */
 @Composable
 fun MessageBubble(
@@ -86,7 +89,6 @@ fun MessageBubble(
     onReactionTap: ((String) -> Unit)? = null,
     onQuoteClick: ((String) -> Unit)? = null,
     onDoubleTap: (() -> Unit)? = null,
-    onRowLongPress: (() -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -99,34 +101,24 @@ fun MessageBubble(
     // animations and are only ever read inside gesture handlers.
     val coords = remember { CoordsHolder() }
 
-    BoxWithConstraints(
+    // Plain Box, not BoxWithConstraints — that's a nested SubcomposeLayout per
+    // bubble, real weight on every bubble birth. The width cap is applied inside
+    // the bubble Layout's own measure from its incoming constraints.
+    val widthFraction = appearance.layout.maxWidthFraction
+    Box(
         modifier
             .fillMaxWidth()
             .onGloballyPositioned { coords.row = it }
-            .then(
-                if (onRowLongPress == null) Modifier
-                else Modifier.pointerInput(onRowLongPress) {
-                    detectTapGestures(onLongPress = { pos ->
-                        val inBubble = coords.bubble?.takeIf { it.isAttached }
-                            ?.boundsInRoot()
-                            ?.contains(coords.row?.localToRoot(pos) ?: return@detectTapGestures) == true
-                        if (!inBubble) {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onRowLongPress()
-                        }
-                    })
-                }
-            )
             .padding(horizontal = 12.dp),
+        contentAlignment = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
-        val maxBubble = maxWidth * appearance.layout.maxWidthFraction
         Layout(
             content = {
                 msg.quote?.let { q ->
                     QuoteBlock(q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } })
                 }
 
-                BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
+                BubbleText(msg, textColor, appearance.type.fontScale)
 
                 if (msg.reactions.isNotEmpty()) {
                     Row(
@@ -138,14 +130,14 @@ fun MessageBubble(
                         }
                     }
                 }
+
+                MetaRow(msg, textColor)
             },
             modifier = Modifier
-                .align(if (outgoing) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = maxBubble)
                 // edit/delete/reactions change the bubble's size in place — glide from the
-                // tail corner, not TopStart, so the anchored edge stays put
+                // tail corner on the shared clock so neighbors (stage) track frame-locked
                 .animateContentSize(
-                    spring(stiffness = Spring.StiffnessMediumLow),
+                    ChatMotion.spec(),
                     alignment = if (outgoing) Alignment.BottomEnd else Alignment.BottomStart,
                 )
                 .clip(shape)
@@ -169,7 +161,10 @@ fun MessageBubble(
                                 val ch = ev.changes.firstOrNull { it.id == press.id } ?: ev.changes.first()
                                 val root = coords.bubble?.takeIf { it.isAttached }?.localToRoot(ch.position)
                                 if (!ch.pressed) {
-                                    when (val hit = root?.let(menuState::release)) {
+                                    // Commits require an actual drag: a stationary hold-and-lift
+                                    // only leaves the menu open, even if an item spawned under
+                                    // the finger. Drag to nowhere cancels.
+                                    if (dragged) when (val hit = root?.let(menuState::release)) {
                                         is MenuHit.Action -> {
                                             haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                                             hit.action.onClick()
@@ -178,8 +173,7 @@ fun MessageBubble(
                                             haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                                             menuState.onReact?.invoke(hit.emoji)
                                         }
-                                        // Drag to nowhere cancels; a plain long-press-release stays open.
-                                        null -> if (dragged) menuState.close()
+                                        null -> menuState.close()
                                     }
                                     break
                                 }
@@ -202,14 +196,25 @@ fun MessageBubble(
                 )
                 .padding(horizontal = 11.dp, vertical = 6.dp),
         ) { measurables, constraints ->
-            // Column would leave the quote at its natural width; a quote must span the
-            // widest sibling. Each measurable measures once, so the quote goes last with
-            // that width as its minimum (a naturally wider quote still wins).
+            // Children: [quote?] text [reactions?] meta. The quote must span the widest
+            // sibling (measured last with that width as its minimum — measurables measure
+            // once); the meta is pinned to the bubble's absolute bottom-end corner — the
+            // text reserves that corner via its invisible trailing placeholder, and a
+            // reactions row shares its line with the meta instead.
             val hasQuote = msg.quote != null
-            val loose = constraints.copy(minWidth = 0, minHeight = 0)
-            val text = measurables[if (hasQuote) 1 else 0].measure(loose)
-            val reactions = measurables.getOrNull(if (hasQuote) 2 else 1)?.measure(loose)
-            val contentWidth = maxOf(text.width, reactions?.width ?: 0)
+            val hasReactions = msg.reactions.isNotEmpty()
+            val cap = (constraints.maxWidth * widthFraction).toInt()
+            val loose = Constraints(maxWidth = cap)
+            var idx = if (hasQuote) 1 else 0
+            val text = measurables[idx].measure(loose)
+            val reactions = if (hasReactions) measurables[++idx].measure(loose) else null
+            val meta = measurables[idx + 1].measure(loose)
+
+            val metaGap = 8.dp.roundToPx()
+            val contentWidth = maxOf(
+                text.width,
+                reactions?.let { it.width + metaGap + meta.width } ?: 0,
+            )
             val quote = if (hasQuote) measurables[0].measure(loose.copy(minWidth = contentWidth)) else null
 
             val width = maxOf(contentWidth, quote?.width ?: 0)
@@ -219,6 +224,7 @@ fun MessageBubble(
                 quote?.let { it.placeRelative(0, 0); y = it.height }
                 text.placeRelative(0, y)
                 reactions?.placeRelative(0, y + text.height)
+                meta.placeRelative(width - meta.width, height - meta.height)
             }
         }
     }
@@ -267,35 +273,23 @@ private fun ReactionChip(rg: ReactionGroup, textColor: Color, accent: Color, onT
     }
 }
 
+/**
+ * The message text with an invisible trailing placeholder reserving the meta's
+ * final footprint — the timestamp is known at send time, so the flip never
+ * re-wraps a line. The meta itself is a sibling pinned to the absolute corner.
+ */
 @Composable
-private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.graphics.Color, fontScale: Float) {
+private fun BubbleText(msg: UiMessage, textColor: Color, fontScale: Float) {
+    val color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor
+    val text = BubbleTextLayouts.contentOf(msg)
+
     val base = MaterialTheme.typography.bodyLarge
-    val textStyle = base.copy(fontSize = base.fontSize * fontScale, color = textColor)
     val metaStyle = MaterialTheme.typography.labelSmall
-    val metaColor = textColor.copy(alpha = 0.55f)
-
-    val text = if (msg.deleted) "This message was deleted"
-    else (msg.content as? MessageContent.Text)?.text.orEmpty()
-
-    val pending = msg.outgoing && msg.status == SendStatus.Pending
-    val failed = msg.outgoing && msg.status == SendStatus.Failed
-    val timeStr = if (pending || failed) null else clock(msg.timestampMs)
-    val edited = msg.edited && !msg.deleted
-
-    // The invisible trailing placeholder reserves exactly the meta's footprint, so the
-    // bottom-end corner is glyph-free; the real meta overlays there — corner-true even
-    // when an earlier line is longer than the last.
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
-    val label = buildString {
-        if (edited) append("edited ")
-        if (timeStr != null) append(timeStr)
-    }
-    val labelPx = if (label.isEmpty()) 0
-    else remember(label, metaStyle) { measurer.measure(label, metaStyle).size.width }
-    val iconPx = if (pending || failed) with(density) { 14.dp.roundToPx() } else 0
-    val gapPx = with(density) { 8.dp.roundToPx() }
-    val metaWidth = with(density) { (labelPx + iconPx + gapPx).toSp() }
+    val label = BubbleTextLayouts.metaLabelOf(msg)
+    val labelPx = remember(label, metaStyle) { measurer.measure(label, metaStyle).size.width }
+    val metaWidth = with(density) { (labelPx + 8.dp.roundToPx()).toSp() }
 
     val annotated = buildAnnotatedString {
         append(text)
@@ -306,39 +300,67 @@ private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.gr
             Placeholder(metaWidth, 1.2.em, PlaceholderVerticalAlign.TextBottom)
         ) {}
     )
+    Text(
+        annotated,
+        Modifier.fadeOnChange(text),
+        style = base.copy(fontSize = base.fontSize * fontScale, color = color),
+        fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
+        color = color,
+        inlineContent = inline,
+    )
+}
 
-    Box {
-        Text(
-            annotated,
-            style = textStyle,
-            fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
-            color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor,
-            inlineContent = inline,
+/** Fades the node in when [value] changes after first composition. Near-free at rest. */
+@Composable
+private fun Modifier.fadeOnChange(value: Any?): Modifier {
+    val anim = remember { Animatable(1f) }
+    var last by remember { mutableStateOf(value) }
+    LaunchedEffect(value) {
+        if (last != value) {
+            last = value
+            anim.snapTo(0f)
+            anim.animateTo(1f, ChatMotion.spec())
+        }
+    }
+    return graphicsLayer { alpha = anim.value }
+}
+
+/** Pending spinner / failed dot / sent time, crossfading inside the corner slot. */
+@Composable
+private fun MetaRow(msg: UiMessage, textColor: Color) {
+    val metaStyle = MaterialTheme.typography.labelSmall
+    val metaColor = textColor.copy(alpha = 0.55f)
+    val edited = msg.edited && !msg.deleted
+    val state = when {
+        msg.outgoing && msg.status == SendStatus.Pending -> MetaState.Pending
+        msg.outgoing && msg.status == SendStatus.Failed -> MetaState.Failed
+        else -> MetaState.Sent
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (edited) Text(
+            "edited",
+            style = metaStyle,
+            color = metaColor,
+            modifier = Modifier.padding(end = 4.dp),
         )
-        Row(
-            Modifier.align(Alignment.BottomEnd),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            if (edited) Text(
-                "edited",
-                style = metaStyle,
-                color = metaColor,
-                modifier = Modifier.padding(end = 4.dp),
-            )
-            when {
-                pending -> CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
-                failed -> Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
-                timeStr != null -> Text(timeStr, style = metaStyle, color = metaColor)
+        Box(Modifier.fadeOnChange(state), contentAlignment = Alignment.CenterEnd) {
+            when (state) {
+                MetaState.Pending ->
+                    CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
+                MetaState.Failed ->
+                    Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                MetaState.Sent ->
+                    Text(BubbleTextLayouts.clock(msg.timestampMs), style = metaStyle, color = metaColor)
             }
         }
     }
 }
+
+private enum class MetaState { Pending, Failed, Sent }
 
 private class CoordsHolder {
     var row: LayoutCoordinates? = null
     var bubble: LayoutCoordinates? = null
 }
 
-private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-
-private fun clock(ms: Long): String = clockFormat.format(java.util.Date(ms))

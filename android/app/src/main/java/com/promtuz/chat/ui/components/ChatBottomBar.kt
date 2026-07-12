@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -8,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -148,22 +151,36 @@ private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction
                 inner()
             },
         )
-        AnimatedVisibility(
-            input.isNotBlank(),
-            enter = scaleIn(tween(150)) + fadeIn(tween(150)),
-            exit = scaleOut(tween(150)) + fadeOut(tween(150)),
+        // The trailing slot is ALWAYS occupied at a fixed size so the pill's
+        // height never jumps: mic by default (voice notes soon), send when
+        // there's a draft, crossfading in place. Solid accent, no haze — a
+        // blurred layer under the circle rendered as a square.
+        val hasDraft = input.isNotBlank()
+        Box(
+            Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(if (hasDraft) chat.accent else Color.Transparent)
+                .clickable(enabled = hasDraft) { viewModel.send() },
+            contentAlignment = Alignment.Center,
         ) {
-            // Solid accent, no haze: a blurred layer under the circle rendered as a square.
-            Box(
-                Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(chat.accent)
-                    .clickable(onClick = viewModel::send),
-                contentAlignment = Alignment.Center,
-            ) {
-                val icon = if (action is ComposerAction.Edit) R.drawable.i_check else R.drawable.i_send
-                DrawableIcon(icon, Modifier.size(18.dp))
+            AnimatedContent(
+                targetState = when {
+                    action is ComposerAction.Edit && hasDraft -> R.drawable.i_check
+                    hasDraft -> R.drawable.i_send
+                    else -> R.drawable.i_mic
+                },
+                transitionSpec = {
+                    (scaleIn(tween(140), 0.6f) + fadeIn(tween(140)))
+                        .togetherWith(scaleOut(tween(140), 0.6f) + fadeOut(tween(140)))
+                },
+                label = "composerAction",
+            ) { icon ->
+                DrawableIcon(
+                    icon,
+                    Modifier.size(18.dp),
+                    tint = if (hasDraft) colors.onPrimary else colors.onSurfaceVariant,
+                )
             }
         }
     }

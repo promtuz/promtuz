@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.utils.extensions.toHex
 import uniffi.core.CoreEvents
 import uniffi.core.MessageEvent
 import uniffi.core.ConnectionState as FfiConnectionState
@@ -44,6 +45,14 @@ object CoreEventBus : CoreEvents {
     private val _presence = bounded<PresenceSignal>()
     val presence: SharedFlow<PresenceSignal> = _presence.asSharedFlow()
 
+    /**
+     * Last-known presence per peer (hex IPK). The event stream has no memory, so a
+     * delta arriving while no screen collects was simply lost until the next
+     * subscribe — this cache is what late collectors read first.
+     */
+    private val _presenceByPeer = MutableStateFlow<Map<String, Presence>>(emptyMap())
+    val presenceByPeer: StateFlow<Map<String, Presence>> = _presenceByPeer.asStateFlow()
+
     override fun onConnection(state: FfiConnectionState) {
         _connection.value = ConnectionState.entries.getOrElse(state.ordinal) { ConnectionState.Idle }
     }
@@ -76,6 +85,7 @@ object CoreEventBus : CoreEvents {
                 if (presence.lastSeen == 0uL) Presence.Unknown else Presence.LastSeen(presence.lastSeen.toLong())
         }
         _presence.tryEmit(PresenceSignal(peer, p))
+        _presenceByPeer.value = _presenceByPeer.value + (peer.toHex() to p)
     }
 
     private fun <T> bounded(): MutableSharedFlow<T> = MutableSharedFlow(

@@ -176,4 +176,7 @@ object CoreBridge {
 
     /** Ephemeral peer presence changes (online / last-seen). */
     val presence: SharedFlow<PresenceSignal> get() = CoreEventBus.presence
+
+    /** Last-known presence per peer (hex IPK) — what a freshly opened chat reads first. */
+    val presenceByPeer get() = CoreEventBus.presenceByPeer
 }

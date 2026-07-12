@@ -52,6 +52,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 val LocalNavCardExiting = compositionLocalOf { false }
 
+/**
+ * False while this card is still sliding in from a push. Screens defer heavy
+ * content fills (a chat's message list) until it flips true, so the expensive
+ * first layout lands on a still frame instead of mid-animation.
+ */
+val LocalNavEnterSettled = compositionLocalOf { true }
+
 private const val FWD_DUR = 260
 private const val COMMIT_DUR = 340
 private const val CANCEL_DUR = 260
@@ -238,7 +245,10 @@ fun NavStage(
             key(entry.contentKey) {
                 val isTop = entry.contentKey == topKey
                 Box(Modifier.fillMaxSize().then(mod).onPlaced { if (isTop) placed.value = true }) {
-                    CompositionLocalProvider(LocalNavCardExiting provides exit) {
+                    CompositionLocalProvider(
+                        LocalNavCardExiting provides exit,
+                        LocalNavEnterSettled provides (!isTop || !showPush),
+                    ) {
                         entry.Content()
                     }
                 }

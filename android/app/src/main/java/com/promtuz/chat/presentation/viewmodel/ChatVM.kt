@@ -51,6 +51,9 @@ class ChatVM(private val application: Application) : ViewModel() {
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
     private var typingExpiry: Job? = null
 
+    /** Key of the incoming message that ended a live typing signal — the morph target. */
+    val typingHandoff = MutableStateFlow<String?>(null)
+
     private val _presence = MutableStateFlow<Presence?>(null)
     val presence: StateFlow<Presence?> = _presence.asStateFlow()
 
@@ -62,17 +65,20 @@ class ChatVM(private val application: Application) : ViewModel() {
         var newestIncoming: String? = null
         viewModelScope.launch {
             observeQuery(setOf("messages", "reactions")) { load() }.collect { list ->
-                _messages.value = list
-                // Their message just landed — the typing bubble hands off to it,
-                // and with this chat on screen it's read: receipt the high-water mark.
+                // Their message just landed — if they were typing, it inherits the
+                // typing bubble (morph), and with this chat on screen it's read:
+                // receipt the high-water mark. Handoff is set BEFORE the list so
+                // one recomposition sees both.
                 val newest = list.firstOrNull { !it.outgoing }
                 if (newest?.key != newestIncoming) {
                     newestIncoming = newest?.key
+                    if (_typing.value && newest != null) typingHandoff.value = newest.key
                     clearTyping()
                     newest?.dispatchIdHex?.let { did ->
                         fire { CoreBridge.markRead(peer, did.fromHex()) }
                     }
                 }
+                _messages.value = list
             }
         }
 
@@ -86,6 +92,9 @@ class ChatVM(private val application: Application) : ViewModel() {
             }
         }
 
+        // Seed from the last-known cache (deltas emitted while this chat was
+        // closed are otherwise lost until the next subscribe), then track live.
+        _presence.value = CoreBridge.presenceByPeer.value[peer.toHex()]
         viewModelScope.launch {
             CoreBridge.presence.filter { it.peer.contentEquals(peer) }.collect { sig ->
                 _presence.value = sig.presence
@@ -126,14 +135,45 @@ class ChatVM(private val application: Application) : ViewModel() {
         _typing.value = false
     }
 
+    @Volatile
+    private var limit = INITIAL_LIMIT
+
+
+    /** A load returned fewer rows than asked → all history is loaded. */
+    @Volatile
+    private var exhausted = false
+    private var loadingOlder = false
+
     private suspend fun load(): List<UiMessage> {
-        val rows = CoreBridge.messages(peer, 200)                    // oldest-first
+        val want = limit
+        val rows = CoreBridge.messages(peer, want)                   // oldest-first
+        if (rows.size < want) exhausted = true
         val byMsg = CoreBridge.reactions(peer).groupBy { it.dispatchId.toHex() }
         // Quote resolution: replies name a dispatch_id; snippet comes from the
         // loaded window (null text → "unavailable" shell, e.g. outside window).
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
         // reversed → newest at index 0 → drawn at the bottom under reverseLayout
         return rows.asReversed().map { it.toUi(byMsg, byDid) }
+    }
+
+    /**
+     * Near-top pagination: grow the window and re-read. An accumulating beforeId
+     * cursor would fight the reactive re-read (observeQuery reloads the whole
+     * window on every commit); a bigger limit composes with it.
+     * ponytail: grow-limit re-reads the full window per page — beforeId keyset
+     * paging if that re-read ever gets too heavy.
+     */
+    fun loadOlder() {
+        if (loadingOlder || exhausted) return
+        loadingOlder = true
+        limit += PAGE
+        viewModelScope.launch {
+            try {
+                _messages.value = load()
+            } finally {
+                loadingOlder = false
+            }
+        }
     }
 
     fun send() {
@@ -188,6 +228,12 @@ class ChatVM(private val application: Application) : ViewModel() {
 
         /** Outbound refresh cadence; must stay under the peer's [TYPING_TTL_MS]. */
         const val TYPING_RESEND_MS = 4_000L
+
+        /** First load window: a screenful + buffer. loadOlder() pages the rest on scroll. */
+        const val INITIAL_LIMIT = 40
+
+        /** Near-top page-in growth per [loadOlder]. */
+        const val PAGE = 100
     }
 }
 

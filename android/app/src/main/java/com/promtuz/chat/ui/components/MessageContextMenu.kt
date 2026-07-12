@@ -12,9 +12,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -226,9 +231,20 @@ fun MessageContextMenu(
             MessageBubble(msg = anchor.msg, mergedTop = anchor.mergedTop, mergedBottom = anchor.mergedBottom)
         }
 
-        // Pop is handed down as a getter and read only inside graphicsLayer, so
-        // animation frames never recompose the stack.
-        MenuStack(state, anchor, quickReactions, actionGroups, { pop.value }, origin, shift, onReact)
+        // The strip/card ensemble fits inside the visible safe area (IME + bars),
+        // with its own origin so the anchor math stays exact in the padded space —
+        // the card must never sink behind the keyboard; the bubble shifts instead.
+        var stackOrigin by remember { mutableStateOf(Offset.Zero) }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
+                .onGloballyPositioned { stackOrigin = it.positionInRoot() },
+        ) {
+            // Pop is handed down as a getter and read only inside graphicsLayer, so
+            // animation frames never recompose the stack.
+            MenuStack(state, anchor, quickReactions, actionGroups, { pop.value }, stackOrigin, shift, onReact)
+        }
     }
 }
 

@@ -1,12 +1,9 @@
 package com.promtuz.chat.ui.components
 
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -17,13 +14,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
@@ -47,26 +41,15 @@ fun TypingBubble(modifier: Modifier = Modifier) {
         style = appearance.bubble,
     )
 
+    // Enter/exit (fold at the tail corner) belong to the stage; this row only
+    // owns the dots' pulse.
     val phase by rememberInfiniteTransition(label = "typing")
         .animateFloat(0f, 1f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "phase")
-
-    // Pops from the tail corner on appearance; the row animator fades it out.
-    val enter = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        enter.animateTo(1f, spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow))
-    }
 
     Box(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
         Row(
             Modifier
                 .align(Alignment.CenterStart)
-                .graphicsLayer {
-                    val s = 0.7f + 0.3f * enter.value
-                    scaleX = s
-                    scaleY = s
-                    alpha = enter.value.coerceIn(0f, 1f)
-                    transformOrigin = TransformOrigin(0f, 1f)
-                }
                 .clip(shape)
                 .background(chat.incomingBubble)
                 .padding(horizontal = 13.dp, vertical = 11.dp),

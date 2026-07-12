@@ -50,7 +50,9 @@ fun AppNavigation(
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
                 val chatVM = koinViewModel<ChatVM>()
-                LaunchedEffect(key.user) { chatVM.init(key.user.fromHex()) }
+                LaunchedEffect(key.user) {
+                    chatVM.init(key.user.fromHex())
+                }
                 ChatScreen(key.name, chatVM)
             }
             entry<Routes.ShareIdentity> {
