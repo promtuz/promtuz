@@ -6,6 +6,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.jetbrains.kotlin.serialization)
+
+    id("com.google.gms.google-services")
 }
 
 val localProperties = Properties().apply {
@@ -283,9 +285,13 @@ dependencies {
 
     implementation(libs.capturable)
 
+    implementation(platform(libs.firebase.bom))
+
+    implementation(libs.firebase.messaging)
+
     // uniffi Kotlin bindings run on JNA. MUST be @aar (bundles the per-ABI
     // jnidispatch.so); the version pin (>=5.17) is 16KB-page-safe.
-    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
+    implementation(libs.jna)
 
     testImplementation(kotlin("test"))
 }

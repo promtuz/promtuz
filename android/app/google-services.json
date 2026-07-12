@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "266262056219",
+    "project_id": "promtuz-chat",
+    "storage_bucket": "promtuz-chat.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:266262056219:android:665d8e8b65da7c6eaed7be",
+        "android_client_info": {
+          "package_name": "com.promtuz.chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCSWvjq5YegqNF0R2fCv3Nx96q60sFhI8I"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
