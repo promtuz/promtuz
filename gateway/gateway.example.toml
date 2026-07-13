@@ -16,8 +16,9 @@ level = "info"
 
 # Resolver(s) to register with, so relays can discover this gateway. Omit to
 # run undiscoverable (e.g. local testing with a statically-known relay).
-[resolver]
-seed = [{ key = "<resolver-node-id>", addr = "resolver.promtuz.app:40433" }]
+[[resolver.seed]]
+key = "<resolver-node-id>"
+addr = "resolver.promtuz.app:40433"
 
 [push]
 # FCM HTTP v1 service-account JSON (Firebase console → Project settings →
