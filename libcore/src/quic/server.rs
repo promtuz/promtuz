@@ -233,10 +233,14 @@ impl Relay {
 
         *RELAY.write() = Some(self);
 
-        // Register our push-pseudonym so this home can wake us when offline.
+        // Register our push-pseudonym so this home can wake us when offline,
+        // and (re)register P→token with a gateway if we hold a push token.
         tokio::spawn(async {
             if let Err(e) = crate::push::register_push().await {
                 warn!("register_push failed: {e}");
+            }
+            if let Err(e) = crate::push::register_token_at_gateway().await {
+                debug!("register_token_at_gateway failed: {e}");
             }
         });
 

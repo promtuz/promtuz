@@ -70,6 +70,7 @@ fn init_inner(
     EVENTS.set(events).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
     let seeds = ResolverSeeds::from_str(&resolver_seeds)?;
+    crate::RESOLVER_SEEDS.set(seeds.clone()).ok();
 
     let _guard = RUNTIME.enter();
 

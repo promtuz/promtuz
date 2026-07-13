@@ -227,6 +227,16 @@ pub fn register_push() {
     });
 }
 
+/// Provide/refresh the platform push token — call from the FCM `onNewToken`
+/// callback. Stores it and registers `P → token` with a gateway so a wake can
+/// reach this device.
+#[uniffi::export]
+pub fn register_push_token(token: Vec<u8>) {
+    crate::RUNTIME.spawn(async move {
+        crate::push::set_push_token(token).await;
+    });
+}
+
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]
