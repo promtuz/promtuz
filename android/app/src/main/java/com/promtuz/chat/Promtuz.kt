@@ -12,8 +12,10 @@ import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import com.google.firebase.messaging.FirebaseMessaging
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
+import com.promtuz.core.push.PushNotifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -60,6 +62,14 @@ class Promtuz : Application() {
         BackupWorker.start(this)
         AppearanceStore.init(this)
         ChatPrefs.init(this)
+
+        // Push: post notifications from delivered messages, and hand libcore the current FCM token
+        // (onNewToken won't re-fire if unchanged). registerPushToken stores it and re-registers on
+        // each relay connect, so calling before the first connect is fine.
+        PushNotifier.start(this)
+        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+            CoreBridge.registerPushToken(token.toByteArray())
+        }
 
         // Foreground → nudge core for an instant reconnect (the raised idle
         // timeout means most app switches never dropped the connection) and go

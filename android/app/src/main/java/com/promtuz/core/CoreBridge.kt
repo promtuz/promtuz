@@ -39,6 +39,8 @@ import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
+import uniffi.core.registerPushToken as ffiRegisterPushToken
+import uniffi.core.registerPush as ffiRegisterPush
 import uniffi.core.kpPublishReady as ffiKpPublishReady
 import uniffi.core.setPresence as ffiSetPresence
 import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
@@ -62,6 +64,12 @@ import com.promtuz.core.adapter.PresenceSignal
 object CoreBridge {
     /** App returned to foreground — wake the relay loop for an instant reconnect. */
     fun onForeground() = ffiOnForeground()
+
+    /** Hand libcore the FCM push token; it registers `P → token` with a gateway. Fire-and-forget. */
+    fun registerPushToken(token: ByteArray) = ffiRegisterPushToken(token)
+
+    /** Re-assert our push pseudonym with the home relay. Auto-runs on connect; rarely needed manually. */
+    fun registerPush() = ffiRegisterPush()
 
     /** Assert our activity mode to contacts: idle on background, active on foreground. */
     fun setPresence(idle: Boolean) = ffiSetPresence(idle)
