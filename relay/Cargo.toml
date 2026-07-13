@@ -59,7 +59,7 @@ x509-parser = "0.18.1"
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
 name = "pzrelay"
-maintainer = "Promtuz <relay@promtuz.dev>"
+maintainer = "Bhuvnesh <bhuvnesh@promtuz.dev>"
 copyright = "2026 Promtuz, AGPL-3.0-or-later"
 section = "net"
 priority = "optional"

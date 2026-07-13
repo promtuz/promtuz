@@ -25,3 +25,20 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 jsonwebtoken = "9"
 serde_json = "1"
 
+[package.metadata.deb]
+name = "pzgateway"
+maintainer = "Bhuvnesh <bhuvnesh@promtuz.dev>"
+copyright = "2026 Promtuz, AGPL-3.0-or-later"
+section = "net"
+priority = "optional"
+depends = "libc6 (>= 2.28)"
+recommends = "unattended-upgrades"
+extended-description = "Promtuz Gateway Server"
+assets = [
+    ["target/release/gateway", "usr/bin/pzgateway", "755"],
+    ["pkg/gateway.toml", "etc/promtuz/gateway.toml", "644"],
+    ["pkg/pzgateway.service", "lib/systemd/system/pzgateway.service", "644"],
+    ["pkg/51pzgateway-unattended", "etc/apt/apt.conf.d/51pzgateway-unattended", "644"],
+]
+conf-files = ["/etc/promtuz/gateway.toml", "/etc/apt/apt.conf.d/51pzgateway-unattended"]
+maintainer-scripts = "pkg/scripts/"
