@@ -66,7 +66,17 @@ pub enum ClientRequest {
         /// liveness recency (proxy for RTT).
         count_rtt_near: u8,
     },
+
+    /// Fetch the currently-registered push gateways. Auth: none (public
+    /// directory lookup). A relay caches the result and dials one to send a
+    /// wake, verifying the `PUSH_GATEWAY` capability on the gateway's cert at
+    /// dial. Appended last (postcard variant order).
+    GetGateways(),
 }
+
+/// A push gateway's directory entry — same wire shape as [`RelayDescriptor`]
+/// (id to check the dialed NodeId, addr to dial, pubkey carried along).
+pub type GatewayDescriptor = RelayDescriptor;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClientResponse {
@@ -86,6 +96,8 @@ pub enum ClientResponse {
         /// proxy for RTT (most-recently-active first).
         rtt_near: Vec<RelayDescriptor>,
     },
+    /// Resolver's response to [`ClientRequest::GetGateways`].
+    GetGateways { gateways: Vec<GatewayDescriptor> },
 }
 
 #[cfg(test)]
