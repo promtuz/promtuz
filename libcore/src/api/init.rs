@@ -179,15 +179,19 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                     debug!("no relays in database, resolving");
                     match Relay::resolve(&seeds).await {
                         Ok(_) => {},
-                        Err(ResolveError::EmptyResponse) => {
-                            error!("resolver returned no relays");
-                            ConnectionState::Failed.emit();
-                            return;
-                        },
-                        Err(err) => error!("resolver failed: {err}"),
+                        // NEVER return here. `return` exits the one and only
+                        // relay-loop task — an empty/failed resolve (common on a
+                        // fresh install when the network is still warming up)
+                        // then permanently bricked the app: all relays greyed,
+                        // no relay ever retried, unrecoverable without a restart.
+                        // Log and fall through to a short backoff + retry.
+                        Err(ResolveError::EmptyResponse) => error!("resolver returned no relays; retrying"),
+                        Err(err) => error!("resolver failed: {err}; retrying"),
                     }
-                    // All known relays may be circuit-open; back off before retry.
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    // Short backoff: a fresh resolve may have just populated the
+                    // table, or all known relays are circuit-open and will reset.
+                    // (Was 30s — too slow for a cold-boot fresh install.)
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 },
                 Err(err) => error!("failed to fetch relay: {err}"),
