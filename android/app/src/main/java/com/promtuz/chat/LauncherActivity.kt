@@ -1,15 +1,10 @@
 package com.promtuz.chat
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -29,16 +24,12 @@ import org.koin.android.ext.android.inject
 class LauncherActivity : ComponentActivity() {
     private val viewModel: AppVM by inject()
 
-    private val requestNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
         consumeInvite(intent)
-        requestNotificationPermission()
 
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
@@ -53,14 +44,6 @@ class LauncherActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeInvite(intent)
-    }
-
-    /** POST_NOTIFICATIONS is a runtime permission on Android 13+; without it nothing shows. */
-    private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     /**

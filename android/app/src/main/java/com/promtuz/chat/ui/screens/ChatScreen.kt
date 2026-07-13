@@ -44,6 +44,7 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.DashedHorizontalDivider
+import com.promtuz.chat.ui.components.NotificationPrimer
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.MenuAnchor
 import com.promtuz.chat.ui.components.MessageBubble
@@ -76,6 +77,9 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     val wallpaper = rememberChatWallpaper(appearance.wallpaper)
     val hazeState = rememberHazeState()
     val scope = rememberCoroutineScope()
+
+    // High-intent moment to ask for notifications: they're in a conversation. One-shot, self-gated.
+    NotificationPrimer()
 
     // Messages paint the moment they load — no nav-slide gate, no cascade. The stage
     // is windowed (only the visible band is measured), so the full loaded window sits
