@@ -38,6 +38,7 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
     let contacts: HashSet<[u8; 32]> = sub.contacts.iter().map(|b| b.0).collect();
 
     relay.presence_subs.write().insert(me, contacts.clone());
+    let _ = relay.store.put_presence_consent(&me, &contacts);
 
     let snapshot: Vec<PresenceP> = {
         let subs = relay.presence_subs.read();
@@ -45,7 +46,7 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
         let idle = relay.presence_mode.read();
         contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, &me))
+            .filter(|c| is_mutual(relay, &subs, c, &me))
             .map(|c| PresenceP { who: Bytes(*c), state: state_of(relay, &clients, &idle, c) })
             .collect()
     };
@@ -88,12 +89,12 @@ pub(crate) async fn on_disconnect(relay: &RelayRef, me: &[u8; 32]) {
     relay.presence_mode.write().remove(me);
 
     let targets: Vec<Connection> = {
-        let mut subs = relay.presence_subs.write();
-        let Some(my_contacts) = subs.remove(me) else { return };
+        let subs = relay.presence_subs.read();
+        let my_contacts = subs.get(me).cloned().unwrap_or_default();
         let clients = relay.clients.read();
         my_contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, me))
+            .filter(|c| is_mutual(relay, &subs, c, me))
             .filter_map(|c| clients.get(c).cloned())
             .collect()
     };
@@ -110,7 +111,7 @@ async fn announce(relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32],
         let clients = relay.clients.read();
         contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, me))
+            .filter(|c| is_mutual(relay, &subs, c, me))
             .filter_map(|c| clients.get(c).cloned())
             .collect()
     };
@@ -125,8 +126,13 @@ async fn announce(relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32],
 
 /// `contact` and `me` each subscribed to the other. `me`'s side is the caller's
 /// responsibility (it iterates its own contact set); this checks `contact`'s.
-fn is_mutual(subs: &HashMap<[u8; 32], HashSet<[u8; 32]>>, contact: &[u8; 32], me: &[u8; 32]) -> bool {
-    subs.get(contact).map(|s| s.contains(me)).unwrap_or(false)
+fn is_mutual(
+    relay: &RelayRef, subs: &HashMap<[u8; 32], HashSet<[u8; 32]>>,
+    contact: &[u8; 32], me: &[u8; 32],
+) -> bool {
+    subs.get(contact)
+        .map(|s| s.contains(me))
+        .unwrap_or_else(|| relay.store.has_presence_consent(contact, me))
 }
 
 /// Derive a contact's state: connected → Idle{since} if it flagged idle, else

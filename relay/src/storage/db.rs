@@ -26,6 +26,7 @@ pub const KS_DHT_QUEUE: &str = "dht_queue";
 pub const KS_DHT_KEYPACKAGE: &str = "dht_keypackage";
 pub const KS_DHT_WELCOME: &str = "dht_welcome";
 pub const KS_LAST_SEEN: &str = "last_seen";
+pub const KS_PRESENCE_CONSENT: &str = "presence_consent";
 
 /// Owns the relay's fjall `Database` and its keyspace handles. Shared as
 /// `Arc<Store>` between the `Relay` (message queue) and the `Dht` (home
@@ -38,6 +39,8 @@ pub struct Store {
     pub welcome:    Keyspace,
     /// IPK (32B) -> last-disconnect unix-ms (u64 BE). Powers presence last-seen.
     pub last_seen:  Keyspace,
+    /// Subscriber IPK -> concatenated 32-byte contact IPKs.
+    pub presence_consent: Keyspace,
 }
 
 impl std::fmt::Debug for Store {
@@ -65,7 +68,10 @@ impl Store {
         let last_seen = db
             .keyspace(KS_LAST_SEEN, KeyspaceCreateOptions::default)
             .context("open `last_seen`")?;
-        Ok(Self { db, messages, queue, keypackage, welcome, last_seen })
+        let presence_consent = db
+            .keyspace(KS_PRESENCE_CONSENT, KeyspaceCreateOptions::default)
+            .context("open `presence_consent`")?;
+        Ok(Self { db, messages, queue, keypackage, welcome, last_seen, presence_consent })
     }
 
     /// Record a peer's last-disconnect time (unix-ms). Buffered, not fsynced —
@@ -78,6 +84,21 @@ impl Store {
     pub fn get_last_seen(&self, ipk: &[u8; 32]) -> Option<u64> {
         let v = self.last_seen.get(ipk).ok().flatten()?;
         Some(u64::from_be_bytes(v.as_ref().try_into().ok()?))
+    }
+
+    pub fn put_presence_consent(
+        &self, ipk: &[u8; 32], contacts: &std::collections::HashSet<[u8; 32]>,
+    ) -> fjall::Result<()> {
+        let mut contacts: Vec<_> = contacts.iter().copied().collect();
+        contacts.sort_unstable();
+        let mut value = Vec::with_capacity(contacts.len() * 32);
+        for contact in contacts { value.extend_from_slice(&contact); }
+        self.presence_consent.insert(ipk, value)
+    }
+
+    pub fn has_presence_consent(&self, ipk: &[u8; 32], contact: &[u8; 32]) -> bool {
+        self.presence_consent.get(ipk).ok().flatten()
+            .is_some_and(|v| v.chunks_exact(32).any(|entry| entry == contact))
     }
 
     /// Insert then fsync the journal — the durability contract the old
@@ -100,7 +121,7 @@ impl Store {
     /// Leaves the daemon's in-memory routing/connections intact.
     pub fn clear_all(&self) -> Result<usize> {
         let mut n = 0usize;
-        for ks in [&self.messages, &self.queue, &self.keypackage, &self.welcome, &self.last_seen] {
+        for ks in [&self.messages, &self.queue, &self.keypackage, &self.welcome, &self.last_seen, &self.presence_consent] {
             let keys: Vec<UserKey> = ks
                 .iter()
                 .map(|g| g.into_inner().map(|(k, _)| k))
