@@ -133,7 +133,7 @@ pub type ClientCtxHandle = Arc<ClientContext>;
 /// `Connection` is internally an `Arc`, so cloning is cheap, but it does
 /// not expose its inner pointer for `Arc::ptr_eq`. `stable_id()` returns a
 /// per-connection unique id that survives clones — equivalent guarantee.
-pub(crate) fn remove_client_if_same(relay: &RelayRef, ipk: &[u8; 32], owned: &Connection) {
+pub(crate) fn remove_client_if_same(relay: &RelayRef, ipk: &[u8; 32], owned: &Connection) -> bool {
     let mut clients = relay.clients.write();
     let same = clients
         .get(ipk)
@@ -142,6 +142,7 @@ pub(crate) fn remove_client_if_same(relay: &RelayRef, ipk: &[u8; 32], owned: &Co
     if same {
         clients.remove(ipk);
     }
+    same
 }
 
 impl Handler {
@@ -214,10 +215,12 @@ impl Handler {
         // points at *our* connection. A re-handshake for the same IPK that
         // raced past our `accept_bi` failure would have already replaced
         // the entry; in that case we must leave it alone.
-        remove_client_if_same(&relay, ipk.as_bytes(), &self.conn);
+        let removed = remove_client_if_same(&relay, ipk.as_bytes(), &self.conn);
 
         // Presence: record last-seen and notify mutual online contacts. Runs
         // after the eviction above so this IPK no longer reads as online.
-        events::presence::on_disconnect(&relay, &ipk.to_bytes()).await;
+        if removed {
+            events::presence::on_disconnect(&relay, &ipk.to_bytes()).await;
+        }
     }
 }
