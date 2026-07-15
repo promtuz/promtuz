@@ -260,22 +260,22 @@ pub const MAX_CONCURRENT_MIGRATIONS: usize = 8;
 /// is generous enough to absorb iterative-lookup batches with hedged
 /// retries. Sustained 100 req/s with bursts of 50 means a steady-state
 /// of 50 req/s with one in-flight batch of 50 spikes not getting flagged.
-pub const RATE_LIMIT_CHEAP_PER_SEC: u32 = 100;
-pub const RATE_LIMIT_CHEAP_BURST: u32 = 50;
+pub const RATE_LIMIT_CHEAP_PER_SEC: u32 = 1_000;
+pub const RATE_LIMIT_CHEAP_BURST: u32 = 500;
 
 /// Expensive verify RPCs (Store, Tombstone). Each triggers Ed25519
 /// signature verification and a synced fjall write. Tighter quota
 /// than CHEAP because the per-op cost is ~100 µs of crypto + an fsync;
 /// at 20/s sustained the verify load is 0.2% of one CPU.
-pub const RATE_LIMIT_EXPENSIVE_PER_SEC: u32 = 20;
-pub const RATE_LIMIT_EXPENSIVE_BURST: u32 = 10;
+pub const RATE_LIMIT_EXPENSIVE_PER_SEC: u32 = 200;
+pub const RATE_LIMIT_EXPENSIVE_BURST: u32 = 100;
 
 /// Bulk RPCs (FetchRecord). Each request is bounded by
 /// [`FETCH_RECORD_MAX = 64`] entries; sustained 50 req/s × 64 ipks/req
 /// = 3200 record reads/s, which is well within fjall's hot-path
 /// ceiling and matches the cold-join concurrency budget.
-pub const RATE_LIMIT_BULK_PER_SEC: u32 = 50;
-pub const RATE_LIMIT_BULK_BURST: u32 = 25;
+pub const RATE_LIMIT_BULK_PER_SEC: u32 = 500;
+pub const RATE_LIMIT_BULK_BURST: u32 = 250;
 
 // ---------------------------------------------------------------------------
 // Operator-tunable config (TOML-deserialisable)

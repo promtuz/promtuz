@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# Reload units after removal. The service user and /etc/promtuz (key, cert, and
+# the FCM service-account secret) are intentionally left in place so a reinstall
+# keeps the node identity.
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+exit 0

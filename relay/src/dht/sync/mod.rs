@@ -22,7 +22,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use common::info;
-use common::warn;
 use tokio_util::sync::CancellationToken;
 
 use super::Dht;
@@ -96,9 +95,9 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 let known = dht.routing.read().total_known();
                 let sparse = known < BOOTSTRAP_RETRY_THRESHOLD;
                 if sparse && !was_sparse {
-                    warn!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
+                    crate::dht_log!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
                 } else if !sparse && was_sparse {
-                    info!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
+                    crate::dht_log!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
                 }
                 was_sparse = sparse;
                 if sparse {
@@ -112,8 +111,9 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                         match handle_opt {
                             Some(handle) => match bootstrap(dht.clone(), handle).await {
                                 Ok(state) => {
-                                    info!("DHT bootstrap retry succeeded (state {state:?})");
+                                    crate::dht_log!("DHT bootstrap retry succeeded (state {state:?})");
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                                    super::push_replication::retry_pending(dht.clone()).await;
                                 },
                                 // Brand-new-network case — hold base backoff so a
                                 // peer joining shortly after lets us re-converge.
@@ -121,7 +121,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
                                 },
                                 Err(e) => {
-                                    warn!("DHT bootstrap retry failed: {e}; backing off");
+                                    crate::dht_log!("DHT bootstrap retry failed: {e}; backing off");
                                     bootstrap_backoff_ms =
                                         (bootstrap_backoff_ms * 2).min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
                                 },
@@ -134,6 +134,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                     }
                 } else {
                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                    super::push_replication::retry_pending(dht.clone()).await;
                 }
             }
             _ = drift_tick.tick() => {

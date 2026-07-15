@@ -18,7 +18,7 @@ use common::quic::id::NodeKey;
 #[derive(Debug)]
 pub struct ResolverSeeds {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolverSeed {
     pub key: NodeKey,
     /// `host[:port]` — IP or DNS name; the port defaults to

@@ -81,6 +81,26 @@ const MIGRATION_ARRAY: &[M] = &[
                 CHECK(pubkey IS NULL OR length(pubkey) = 32);
         "#,
     ),
+    M::up(
+        r#"--sql
+            CREATE TABLE gateways (
+              id     TEXT PRIMARY KEY,
+              addr   TEXT NOT NULL,
+              pubkey BLOB NOT NULL CHECK(length(pubkey) = 32)
+            );
+        "#,
+    ),
+    M::up(
+        r#"--sql
+            CREATE TABLE presence_contacts (
+              peer BLOB PRIMARY KEY CHECK(length(peer) = 32)
+            );
+            CREATE TABLE presence_state (
+              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+              lease_version INTEGER NOT NULL
+            );
+        "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

@@ -32,7 +32,7 @@ governor = "0.10.4"
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
 name = "pzresolver"
-maintainer = "Promtuz <relay@promtuz.dev>"
+maintainer = "Bhuvnesh <bhuvnesh@promtuz.dev>"
 copyright = "2026 Promtuz, AGPL-3.0-or-later"
 section = "net"
 priority = "optional"

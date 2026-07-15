@@ -20,6 +20,11 @@ object ChatPrefs {
     private val _muted = MutableStateFlow<Set<String>>(emptySet())
     val muted: StateFlow<Set<String>> = _muted
 
+    /** One-shot: has the notification-permission priming prompt been shown? */
+    var notifPrimed: Boolean
+        get() = prefs.getBoolean(NOTIF_PRIMED, false)
+        set(value) = prefs.edit { putBoolean(NOTIF_PRIMED, value) }
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences("chat_flags", Context.MODE_PRIVATE)
         _pinned.value = prefs.getStringSet(PINNED, emptySet()).orEmpty().toSet()
@@ -45,4 +50,5 @@ object ChatPrefs {
 
     private const val PINNED = "pinned"
     private const val MUTED = "muted"
+    private const val NOTIF_PRIMED = "notif_primed"
 }

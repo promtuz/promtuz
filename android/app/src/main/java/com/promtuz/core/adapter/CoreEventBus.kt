@@ -18,6 +18,9 @@ import uniffi.core.Presence as FfiPresence
 /** Ephemeral peer activity — `bits` is an OR of ACTIVITY_* (0 = present-idle). */
 class ActivitySignal(val peer: ByteArray, val bits: Int)
 
+/** A newly-delivered incoming message — drives push notifications (a transient projection). */
+class IncomingMessage(val peerHex: String, val content: String, val timestampMs: Long)
+
 /** Ephemeral presence delta for a contact. */
 class PresenceSignal(val peer: ByteArray, val presence: Presence)
 
@@ -45,6 +48,10 @@ object CoreEventBus : CoreEvents {
     private val _presence = bounded<PresenceSignal>()
     val presence: SharedFlow<PresenceSignal> = _presence.asSharedFlow()
 
+    /** Newly-delivered incoming messages, typed — the push-notification source. */
+    private val _incoming = bounded<IncomingMessage>()
+    val incoming: SharedFlow<IncomingMessage> = _incoming.asSharedFlow()
+
     /**
      * Last-known presence per peer (hex IPK). The event stream has no memory, so a
      * delta arriving while no screen collects was simply lost until the next
@@ -67,9 +74,13 @@ object CoreEventBus : CoreEvents {
     }
 
     // Redundant with the doorbell (each maps to a DB write) but funneled in too, so a write path that
-    // ever bypasses the hook still triggers a re-read. No payload is trusted — the DB is re-read.
+    // ever bypasses the hook still triggers a re-read. No persistent state trusts the payload — the DB
+    // is re-read. A received message is also surfaced typed, for the (transient) push notification.
     override fun onMessage(event: MessageEvent) {
         _dbChanged.tryEmit(MESSAGES)
+        if (event is MessageEvent.Received) {
+            _incoming.tryEmit(IncomingMessage(event.from.toHex(), event.content, event.timestamp.toLong() * 1000))
+        }
     }
 
     override fun onReaction(

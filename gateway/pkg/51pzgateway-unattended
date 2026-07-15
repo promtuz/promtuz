@@ -1,0 +1,4 @@
+// Auto-upgrade promtuz packages from the signed repo daily.
+Unattended-Upgrade::Origins-Pattern { "site=apt.promtuz.dev"; };
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";

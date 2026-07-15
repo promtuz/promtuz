@@ -15,11 +15,9 @@ private data class PresenceSnapshot(val savedAt: Long, val peers: Map<String, Pr
 
 /**
  * Persists the last-known presence per contact (hex IPK) so a cold app start
- * shows last-seens immediately instead of a blank — the relay can't re-serve an
- * offline contact's last-seen (their subscription is dropped on disconnect, so
- * the mutual-consent snapshot excludes them). Live states (online/idle) can't be
- * trusted across a restart, so [seed] downgrades them to "last seen" until a
- * fresh delta reconfirms. One JSON blob in prefs; written off the hot path.
+ * shows relay-reported last-seens immediately. Live states cannot be trusted
+ * across restart, so [seed] drops them until a fresh relay snapshot confirms
+ * their current state. One JSON blob in prefs; written off the hot path.
  */
 object PresenceStore {
     private const val KEY = "presence"
@@ -30,12 +28,12 @@ object PresenceStore {
         prefs = context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     }
 
-    /** Cold-start seed: persisted states, with live ones downgraded to last-seen. */
+    /** Cold-start seed: only persisted relay-reported offline states are valid. */
     fun seed(): Map<String, Presence> {
         val snap = prefs.getString(KEY, null)
             ?.let { runCatching { json.decodeFromString<PresenceSnapshot>(it) }.getOrNull() }
             ?: return emptyMap()
-        return snap.peers.mapValues { (_, e) -> restore(e, snap.savedAt) }
+        return snap.peers.mapValues { (_, e) -> restore(e) }
     }
 
     fun save(map: Map<String, Presence>, savedAt: Long) {
@@ -50,12 +48,9 @@ object PresenceStore {
         Presence.Unknown -> PresenceEntry(3, 0)
     }
 
-    // On load we can't confirm liveness: a persisted "online" becomes "last seen
-    // when we last had contact", and "idle since T" becomes "last seen T" (their
-    // last active moment). A fresh subscribe snapshot upgrades still-online peers.
-    private fun restore(e: PresenceEntry, savedAt: Long): Presence = when (e.kind) {
-        0 -> Presence.LastSeen(savedAt)
-        1 -> Presence.LastSeen(e.ts)
+    // A cached live state cannot prove when a peer was last online.
+    private fun restore(e: PresenceEntry): Presence = when (e.kind) {
+        0, 1 -> Presence.Unknown
         2 -> Presence.LastSeen(e.ts)
         else -> Presence.Unknown
     }

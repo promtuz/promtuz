@@ -21,6 +21,10 @@ pub const RELAY_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-relay-hello-v1";
 /// signature for one packet kind cannot be replayed as the other.
 pub const RELAY_HEARTBEAT_SIG_DOMAIN: &[u8] = b"promtuz-relay-heartbeat-v1";
 
+/// Domain separation tag for [`LifetimeP::GatewayHello`]. Distinct from the
+/// relay tags so a relay's hello can't be replayed as a gateway registration.
+pub const GATEWAY_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-gateway-hello-v1";
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum LifetimeP {
     /// Initial registration message sent by a relay node to a resolver.
@@ -92,6 +96,20 @@ pub enum LifetimeP {
         /// Node uptime in seconds since its last restart.
         uptime_seconds: u64,
     },
+
+    /// Registration + keepalive for a push gateway. Same shape and auth as
+    /// [`LifetimeP::RelayHello`] (the sig binds id↔pubkey + freshness), but a
+    /// distinct variant so the resolver files it in its gateway directory.
+    /// The gateway's `PUSH_GATEWAY` capability is **not** verified here — the
+    /// resolver never sees its cert (no client auth); a relay verifies the
+    /// capability when it dials the gateway. Re-sent periodically as liveness.
+    /// Appended last (postcard variant order).
+    GatewayHello {
+        gateway_id: RelayId,
+        pubkey:     Bytes<32>,
+        timestamp:  u128,
+        sig:        Bytes<64>,
+    },
 }
 
 /// Builds the canonical signing transcript for [`LifetimeP::RelayHello`].
@@ -114,6 +132,14 @@ pub fn relay_heartbeat_signing_input(
     relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
 ) -> Vec<u8> {
     signing_input(RELAY_HEARTBEAT_SIG_DOMAIN, relay_id, pubkey, timestamp)
+}
+
+/// Builds the canonical signing transcript for [`LifetimeP::GatewayHello`].
+/// Same field layout as the relay helpers, distinct domain tag.
+pub fn gateway_hello_signing_input(
+    gateway_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
+) -> Vec<u8> {
+    signing_input(GATEWAY_HELLO_SIG_DOMAIN, gateway_id, pubkey, timestamp)
 }
 
 /// Shared low-level transcript builder. Kept private so callers go through

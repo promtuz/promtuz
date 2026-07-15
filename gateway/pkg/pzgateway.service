@@ -1,0 +1,31 @@
+[Unit]
+Description=Promtuz push gateway (blind FCM/APNs background-wake node)
+Documentation=https://github.com/promtuz/promtuz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pzgateway
+Group=pzgateway
+ExecStart=/usr/bin/pzgateway --config /etc/promtuz/gateway.toml
+WorkingDirectory=/etc/promtuz
+Restart=on-failure
+RestartSec=2
+
+# Least-privilege hardening. Stateless (in-memory registry) — no /var/lib. The
+# only writable path is /etc/promtuz: it generates its key, writes a CSR, reads
+# the enrolled cert, and reads the FCM service-account secret. Egress needs
+# AF_INET/AF_INET6 (QUIC to relays/resolver + HTTPS to FCM).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ConfigurationDirectory=promtuz
+ReadWritePaths=/etc/promtuz
+
+[Install]
+WantedBy=multi-user.target

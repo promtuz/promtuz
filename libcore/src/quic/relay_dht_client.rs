@@ -220,12 +220,15 @@ impl DhtClient for RelayDhtClient {
             id:      Bytes(id),
             payload: ByteVec(payload),
             sig:     Bytes(sig),
+            accepted_at_ms: 0,
         };
 
         match self.rpc(CRelayPacket::Dispatch(fwd)).await? {
             // Delivered (live) / Forwarded / Queued (offline) = relay owns it.
             SRelayPacket::DispatchAck(
-                DispatchAckP::Delivered | DispatchAckP::Forwarded | DispatchAckP::Queued,
+                DispatchAckP::Delivered { .. }
+                | DispatchAckP::Forwarded { .. }
+                | DispatchAckP::Queued { .. },
             ) => Ok(()),
             // Not stored → caller rolls back the group.
             SRelayPacket::DispatchAck(other) => Err(DhtClientError::Protocol(format!(

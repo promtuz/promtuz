@@ -106,9 +106,12 @@ impl Message {
     }
 
     /// Mark an outgoing message as sent (relay accepted).
-    pub fn mark_sent(id: &Ulid) {
+    pub fn mark_sent(id: &Ulid, timestamp: u64) {
         let conn = MESSAGES_DB.lock();
-        conn.execute("UPDATE messages SET status = ?1 WHERE id = ?2", (STATUS_SENT, id.to_string()))
+        conn.execute(
+            "UPDATE messages SET status = ?1, timestamp = ?2 WHERE id = ?3",
+            (STATUS_SENT, timestamp, id.to_string()),
+        )
             .ok();
     }
 
@@ -123,14 +126,16 @@ impl Message {
     /// updated row. The async reconciler holds the `dispatch_id` (the outbox
     /// key), not the local ULID, so this is how it reflects a
     /// delivered/failed outcome back onto the message the UI reads.
-    pub fn mark_by_dispatch_id(dispatch_id: &[u8], status: u8) -> Option<MessageRow> {
+    pub fn mark_by_dispatch_id(
+        dispatch_id: &[u8], status: u8, timestamp: Option<u64>,
+    ) -> Option<MessageRow> {
         let conn = MESSAGES_DB.lock();
         // Scope to outgoing rows: dispatch_id is globally monotonic among OUR
         // sends (unique), but an incoming message carries a *peer's* dispatch_id
         // and could in principle collide — never touch those.
         conn.execute(
-            "UPDATE messages SET status = ?1 WHERE dispatch_id = ?2 AND outgoing = 1",
-            (status, dispatch_id),
+            "UPDATE messages SET status = ?1, timestamp = COALESCE(?2, timestamp) WHERE dispatch_id = ?3 AND outgoing = 1",
+            (status, timestamp, dispatch_id),
         )
         .ok()?;
         conn.query_row(

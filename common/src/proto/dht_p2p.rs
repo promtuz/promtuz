@@ -3,31 +3,24 @@
 //! This module is the source of truth for the DHT relay-to-relay wire
 //! protocol. It carries:
 //!
-//! 1. The [`PresenceRecord`] data type and its dual-signature transcripts
-//!    (user_sig covering `(user_ipk, relay_id, generation)`;
-//!    relay_sig covering the full record).
-//! 2. The full RPC catalogue: `Ping`/`Pong`, `FindNode`/`Resp`,
-//!    `FindValue`/`Resp`, `Store`/`Resp`, `Tombstone`/`Resp`,
-//!    `MerkleSummary`/`Resp`, `MerkleDiff`/`Resp`, and
-//!    `FetchRecord`/`Resp`.
-//! 3. Length-bound constants that downstream handlers check at
-//!    deserialization / construction time.
+//! 1. The [`PresenceRecord`] data type and its dual-signature transcripts (user_sig covering
+//!    `(user_ipk, relay_id, generation)`; relay_sig covering the full record).
+//! 2. The full RPC catalogue: `Ping`/`Pong`, `FindNode`/`Resp`, `FindValue`/`Resp`, `Store`/`Resp`,
+//!    `Tombstone`/`Resp`, `MerkleSummary`/`Resp`, `MerkleDiff`/`Resp`, and `FetchRecord`/`Resp`.
+//! 3. Length-bound constants that downstream handlers check at deserialization / construction time.
 //!
 //! ## Why a `DhtRequest` + `DhtResponse` split (not a single `DhtPacket`)
 //!
 //! We choose **separate request and response enums** plus a thin outer
 //! [`DhtPacket`] wrapper because:
 //!
-//! - Per-RPC bi-streams: one stream carries exactly one request and one
-//!   (possibly multi-frame) response, so the *direction* is implicit in
-//!   the stream side. Splitting the enums means the dispatcher on each
-//!   side can match exhaustively against only the variants it ever
-//!   receives, instead of dynamic-checking "did the peer send a response
-//!   to a question I never asked".
-//! - Mirrors the exemplar in `common/src/proto/relay_res.rs` (`LifetimeP`
-//!   — all packet kinds are sibling variants of one enum) but specialises
-//!   it to a request/response idiom because every DHT call has exactly
-//!   one of each, whereas the relay/resolver lifecycle is asymmetric.
+//! - Per-RPC bi-streams: one stream carries exactly one request and one (possibly multi-frame)
+//!   response, so the *direction* is implicit in the stream side. Splitting the enums means the
+//!   dispatcher on each side can match exhaustively against only the variants it ever receives,
+//!   instead of dynamic-checking "did the peer send a response to a question I never asked".
+//! - Mirrors the exemplar in `common/src/proto/relay_res.rs` (`LifetimeP` — all packet kinds are
+//!   sibling variants of one enum) but specialises it to a request/response idiom because every DHT
+//!   call has exactly one of each, whereas the relay/resolver lifecycle is asymmetric.
 //!
 //! [`DhtPacket`] still exists as a convenience for the framing layer so a
 //! future non-RPC sync mode (push, gossip, etc.) can join the same wire
@@ -56,6 +49,8 @@ use thiserror::Error;
 
 use crate::PROTOCOL_VERSION;
 use crate::proto::RelayId;
+use crate::proto::client_rel::ActivityP;
+use crate::proto::client_rel::PresenceState;
 use crate::types::bytes::Bytes;
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -78,8 +73,8 @@ pub const DHT_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-dht-hello-v1";
 /// outside this window is treated as a replay or a misconfigured clock
 /// and rejected with [`crate::quic::CloseReason::DhtClockSkew`].
 ///
-/// Mirrors `HELLO_MAX_SKEW_MS` at `resolver/src/resolver/mod.rs:47` —
-/// the resolver applies the same window to `RelayHello`/`RelayHeartbeat`,
+/// Mirrors the resolver's `HELLO_MAX_SKEW_MS` — it applies the same
+/// window to `RelayHello`/`RelayHeartbeat`,
 /// and consistency across packet kinds keeps a relay's local clock-drift
 /// behaviour identical against either receiver.
 pub const MAX_DHT_HELLO_SKEW_MS: u64 = 60_000;
@@ -132,7 +127,6 @@ pub const MAX_FIND_NODE_RESULTS: usize = DHT_K;
 /// DHT_HELLO_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
 ///   || node_id (32) || pubkey (32) || timestamp (BE u64)
 /// ```
-///
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DhtHello {
@@ -180,9 +174,8 @@ pub fn dht_hello_signing_input(
 ) -> Vec<u8> {
     // domain (varies) + version (2) + node_id (32) + pubkey (32) + ts (8) = 76
     // + domain bytes.
-    let mut buf = Vec::with_capacity(
-        DHT_HELLO_SIG_DOMAIN.len() + 2 + crate::quic::id::NodeId::LEN + 32 + 8,
-    );
+    let mut buf =
+        Vec::with_capacity(DHT_HELLO_SIG_DOMAIN.len() + 2 + crate::quic::id::NodeId::LEN + 32 + 8);
     buf.extend_from_slice(DHT_HELLO_SIG_DOMAIN);
     buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     buf.extend_from_slice(node_id.as_bytes());
@@ -195,11 +188,9 @@ pub fn dht_hello_signing_input(
 /// `relay/src/dht/handler.rs::handle_peer_connection`.
 ///
 /// Maps onto the [`crate::quic::CloseReason`]`::Dht*` variants 1:1:
-/// - [`Self::IdMismatch`], [`Self::MalformedPubkey`], [`Self::BadSignature`]
-///   → `DhtBadSignature` (or `DhtMalformedKey` for malformed pubkey
-///   shape — caller's choice).
+/// - [`Self::IdMismatch`], [`Self::MalformedPubkey`], [`Self::BadSignature`] → `DhtBadSignature`
+///   (or `DhtMalformedKey` for malformed pubkey shape — caller's choice).
 /// - [`Self::ClockSkew`] → `DhtClockSkew`.
-///
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DhtHelloVerifyError {
     /// `node_id != BLAKE3(pubkey)` — the dialer is presenting a pubkey
@@ -238,12 +229,20 @@ mod verify_impl {
     use super::ForwardVerifyError;
     use super::MAX_DHT_HELLO_SKEW_MS;
     use super::MAX_FETCH_QUEUE_ACK_IDS;
+    use super::PRESENCE_LEASE_MAX_MS;
+    use super::PRESENCE_STATE_MAX_SKEW_MS;
+    use super::PresenceConsent;
+    use super::PresenceLease;
     use super::QueueFetch;
     use super::QueueFetchAck;
     use super::QueueFetchAckVerifyError;
     use super::QueueFetchVerifyError;
+    use super::RelayPresenceState;
     use super::dht_hello_signing_input;
     use super::forward_signing_input;
+    use super::presence_consent_signing_input;
+    use super::presence_lease_signing_input;
+    use super::presence_state_signing_input;
     use super::queue_fetch_ack_signing_input;
     use super::queue_fetch_signing_input;
     use crate::quic::id::NodeId;
@@ -255,31 +254,24 @@ mod verify_impl {
         /// `self.node_id` post-success) on a clean check.
         ///
         /// Mirrors the order, semantics and failure modes of the
-        /// resolver-side `verify_signed_packet` at
-        /// `resolver/src/resolver/mod.rs:315-346`:
+        /// resolver-side `verify_signed_packet`:
         ///
-        /// 1. **id ↔ pubkey binding**: `BLAKE3(pubkey) == node_id`.
-        ///    Catches an attacker presenting a benign pubkey under a
-        ///    different claimed `node_id`.
-        /// 2. **Pubkey shape**: `pubkey` parses as an Ed25519 verifying
-        ///    key. Surfaced as `MalformedPubkey` (distinct from
-        ///    `BadSignature`) so operators can distinguish key-shape
-        ///    problems from sig-mismatch problems.
-        /// 3. **Signature**: `sig` verifies under `pubkey` over the
-        ///    canonical transcript built by
-        ///    [`dht_hello_signing_input`]. Uses `verify_strict` (same
-        ///    choice as `resolver/src/resolver/mod.rs:332`) for the
-        ///    standard small-subgroup defence.
-        /// 4. **Timestamp window**: `|now_ms − timestamp| ≤
-        ///    MAX_DHT_HELLO_SKEW_MS`.
+        /// 1. **id ↔ pubkey binding**: `BLAKE3(pubkey) == node_id`. Catches an attacker presenting
+        ///    a benign pubkey under a different claimed `node_id`.
+        /// 2. **Pubkey shape**: `pubkey` parses as an Ed25519 verifying key. Surfaced as
+        ///    `MalformedPubkey` (distinct from `BadSignature`) so operators can distinguish
+        ///    key-shape problems from sig-mismatch problems.
+        /// 3. **Signature**: `sig` verifies under `pubkey` over the canonical transcript built by
+        ///    [`dht_hello_signing_input`]. Uses `verify_strict` (same choice as the resolver) for
+        ///    the standard small-subgroup defence.
+        /// 4. **Timestamp window**: `|now_ms − timestamp| ≤ MAX_DHT_HELLO_SKEW_MS`.
         ///
         /// `now_ms` is wall-clock in milliseconds since the Unix epoch,
         /// passed in explicitly so unit tests can pin a deterministic
         /// clock.
         pub fn verify(&self, now_ms: u64) -> Result<(), DhtHelloVerifyError> {
-            // 1. id-binding to pubkey. NodeId::new = BLAKE3(pubkey) —
-            //    same construction every other call site uses (cf.
-            //    `verify_signed_packet` and `PresenceRecord::verify`).
+            // 1. id-binding to pubkey. NodeId::new = BLAKE3(pubkey) — same construction every other
+            //    call site uses (cf. `verify_signed_packet` and `PresenceRecord::verify`).
             let derived_id = NodeId::new(self.pubkey.as_ref());
             if derived_id != self.node_id {
                 return Err(DhtHelloVerifyError::IdMismatch);
@@ -292,8 +284,7 @@ mod verify_impl {
             // 3. Signature.
             let sig = Signature::from_bytes(&self.sig.0);
             let msg = dht_hello_signing_input(&self.node_id, &self.pubkey.0, self.timestamp);
-            vk.verify_strict(&msg, &sig)
-                .map_err(|_| DhtHelloVerifyError::BadSignature)?;
+            vk.verify_strict(&msg, &sig).map_err(|_| DhtHelloVerifyError::BadSignature)?;
 
             // 4. Timestamp freshness (replay protection).
             let skew = now_ms.abs_diff(self.timestamp);
@@ -302,6 +293,71 @@ mod verify_impl {
             }
 
             Ok(())
+        }
+    }
+
+    impl PresenceConsent {
+        pub fn verify(&self, now_ms: u64) -> bool {
+            if now_ms.abs_diff(self.issued_at_ms) > PRESENCE_STATE_MAX_SKEW_MS {
+                return false;
+            }
+            let Ok(key) = VerifyingKey::from_bytes(&self.owner.0) else {
+                return false;
+            };
+            key.verify_strict(
+                &presence_consent_signing_input(
+                    &self.owner.0,
+                    &self.recipient.0,
+                    self.version,
+                    self.issued_at_ms,
+                    self.granted,
+                ),
+                &Signature::from_bytes(&self.user_sig.0),
+            )
+            .is_ok()
+        }
+    }
+
+    impl PresenceLease {
+        pub fn verify(&self, now_ms: u64) -> bool {
+            if self.expires_at_ms <= self.issued_at_ms
+                || self.expires_at_ms - self.issued_at_ms > PRESENCE_LEASE_MAX_MS
+                || now_ms > self.expires_at_ms
+                || self.issued_at_ms > now_ms + PRESENCE_STATE_MAX_SKEW_MS
+            {
+                return false;
+            }
+            let Ok(key) = VerifyingKey::from_bytes(&self.user.0) else {
+                return false;
+            };
+            key.verify_strict(
+                &presence_lease_signing_input(
+                    &self.user.0,
+                    &self.relay_id,
+                    self.version,
+                    self.issued_at_ms,
+                    self.expires_at_ms,
+                ),
+                &Signature::from_bytes(&self.user_sig.0),
+            )
+            .is_ok()
+        }
+    }
+
+    impl RelayPresenceState {
+        pub fn verify(&self, authenticated_relay: &NodeId, now_ms: u64) -> bool {
+            self.who == self.lease.user
+                && self.lease.relay_id == *authenticated_relay
+                && NodeId::new(&self.relay_pubkey.0) == self.lease.relay_id
+                && self.lease.verify(now_ms)
+                && now_ms.abs_diff(self.observed_at_ms) <= PRESENCE_STATE_MAX_SKEW_MS
+                && VerifyingKey::from_bytes(&self.relay_pubkey.0).ok().is_some_and(|key| {
+                    key.verify_strict(
+                        &presence_state_signing_input(self),
+                        &Signature::from_bytes(&self.relay_sig.0),
+                    )
+                    .is_ok()
+                })
         }
     }
 
@@ -330,16 +386,14 @@ mod verify_impl {
         /// argument from `Dht::peer_conns`.
         ///
         /// Steps:
-        /// 1. **Pubkey shape**: caller's `sender_relay_pubkey` parses
-        ///    as Ed25519. Surfaced as `MalformedField`.
-        /// 2. **Signature**: `sig` verifies under
-        ///    `sender_relay_pubkey` over [`forward_signing_input`].
-        ///    Uses `verify_strict` for small-subgroup defence (mirrors
+        /// 1. **Pubkey shape**: caller's `sender_relay_pubkey` parses as Ed25519. Surfaced as
+        ///    `MalformedField`.
+        /// 2. **Signature**: `sig` verifies under `sender_relay_pubkey` over
+        ///    [`forward_signing_input`]. Uses `verify_strict` for small-subgroup defence (mirrors
         ///    [`DhtHello::verify`]).
-        /// 3. **Timestamp window**: `|now_ms − timestamp| ≤
-        ///    MAX_DHT_HELLO_SKEW_MS`. Stale and future skew surface as
-        ///    distinct `StaleTimestamp` / `FutureTimestamp` error
-        ///    variants so the home relay can log them separately.
+        /// 3. **Timestamp window**: `|now_ms − timestamp| ≤ MAX_DHT_HELLO_SKEW_MS`. Stale and
+        ///    future skew surface as distinct `StaleTimestamp` / `FutureTimestamp` error variants
+        ///    so the home relay can log them separately.
         pub fn verify(
             &self, sender_relay_pubkey: &[u8; 32], now_ms: u64,
         ) -> Result<(), ForwardVerifyError> {
@@ -349,27 +403,18 @@ mod verify_impl {
 
             // 2. Signature over the canonical transcript.
             let sig = Signature::from_bytes(&self.sig.0);
-            let msg = forward_signing_input(
-                &self.dispatch.id.0,
-                &self.sender_relay_id,
-                self.timestamp,
-            );
-            vk.verify_strict(&msg, &sig)
-                .map_err(|_| ForwardVerifyError::BadForwardSig)?;
+            let msg =
+                forward_signing_input(&self.dispatch.id.0, &self.sender_relay_id, self.timestamp);
+            vk.verify_strict(&msg, &sig).map_err(|_| ForwardVerifyError::BadForwardSig)?;
 
-            // 3. Timestamp freshness — split stale-vs-future so the home
-            //    relay can log them distinctly. `MAX_DHT_HELLO_SKEW_MS` is the
-            //    same window used for `DhtHello` and resolver-side
-            //    `RelayHello` so a relay's clock-drift behaviour is
-            //    consistent across packet kinds.
-            if now_ms > self.timestamp
-                && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS
-            {
+            // 3. Timestamp freshness — split stale-vs-future so the home relay can log them
+            //    distinctly. `MAX_DHT_HELLO_SKEW_MS` is the same window used for `DhtHello` and
+            //    resolver-side `RelayHello` so a relay's clock-drift behaviour is consistent across
+            //    packet kinds.
+            if now_ms > self.timestamp && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS {
                 return Err(ForwardVerifyError::StaleTimestamp);
             }
-            if self.timestamp > now_ms
-                && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS
-            {
+            if self.timestamp > now_ms && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS {
                 return Err(ForwardVerifyError::FutureTimestamp);
             }
 
@@ -387,8 +432,7 @@ mod verify_impl {
         /// 1. **Pubkey shape**: `user_ipk` parses as Ed25519.
         /// 2. **Signature**: `user_sig` verifies under `user_ipk` over
         ///    [`queue_fetch_signing_input`].
-        /// 3. **Timestamp window**: split stale / future per
-        ///    [`Forward::verify`].
+        /// 3. **Timestamp window**: split stale / future per [`Forward::verify`].
         pub fn verify(&self, now_ms: u64) -> Result<(), QueueFetchVerifyError> {
             let vk = VerifyingKey::from_bytes(&self.user_ipk.0)
                 .map_err(|_| QueueFetchVerifyError::MalformedField)?;
@@ -399,17 +443,12 @@ mod verify_impl {
                 &self.requester_relay_id,
                 self.timestamp,
             );
-            vk.verify_strict(&msg, &sig)
-                .map_err(|_| QueueFetchVerifyError::BadUserSig)?;
+            vk.verify_strict(&msg, &sig).map_err(|_| QueueFetchVerifyError::BadUserSig)?;
 
-            if now_ms > self.timestamp
-                && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS
-            {
+            if now_ms > self.timestamp && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS {
                 return Err(QueueFetchVerifyError::StaleTimestamp);
             }
-            if self.timestamp > now_ms
-                && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS
-            {
+            if self.timestamp > now_ms && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS {
                 return Err(QueueFetchVerifyError::FutureTimestamp);
             }
 
@@ -422,19 +461,15 @@ mod verify_impl {
         /// id-list length and timestamp window.
         ///
         /// Steps:
-        /// 1. **Length bound**: `delivered_ids.len() ≤
-        ///    MAX_FETCH_QUEUE_ACK_IDS`. Done first so a malicious
-        ///    requester cannot ship a 100k-id ack and force the
-        ///    home relay to allocate a multi-MB signing-input vector
-        ///    before discovering the size violation.
+        /// 1. **Length bound**: `delivered_ids.len() ≤ MAX_FETCH_QUEUE_ACK_IDS`. Done first so a
+        ///    malicious requester cannot ship a 100k-id ack and force the home relay to allocate a
+        ///    multi-MB signing-input vector before discovering the size violation.
         /// 2. **Pubkey shape**: `user_ipk` parses as Ed25519.
         /// 3. **Signature**: `user_sig` verifies under `user_ipk` over
-        ///    [`queue_fetch_ack_signing_input`] — the transcript binds
-        ///    `(user_ipk, requester_relay_id, delivered_ids,
-        ///    timestamp)`, so a captured signature is non-replayable
-        ///    against a different requester (cross-relay replay
-        ///    defense; see [`QueueFetchAck`]'s doc-comment for the
-        ///    threat model).
+        ///    [`queue_fetch_ack_signing_input`] — the transcript binds `(user_ipk,
+        ///    requester_relay_id, delivered_ids, timestamp)`, so a captured signature is
+        ///    non-replayable against a different requester (cross-relay replay defense; see
+        ///    [`QueueFetchAck`]'s doc-comment for the threat model).
         /// 4. **Timestamp window**: split stale / future.
         ///
         /// **Note**: this verifier does *not* check that
@@ -464,18 +499,13 @@ mod verify_impl {
                 &self.delivered_ids,
                 self.timestamp,
             );
-            vk.verify_strict(&msg, &sig)
-                .map_err(|_| QueueFetchAckVerifyError::BadUserSig)?;
+            vk.verify_strict(&msg, &sig).map_err(|_| QueueFetchAckVerifyError::BadUserSig)?;
 
             // 4. Timestamp freshness.
-            if now_ms > self.timestamp
-                && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS
-            {
+            if now_ms > self.timestamp && now_ms - self.timestamp > MAX_DHT_HELLO_SKEW_MS {
                 return Err(QueueFetchAckVerifyError::StaleTimestamp);
             }
-            if self.timestamp > now_ms
-                && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS
-            {
+            if self.timestamp > now_ms && self.timestamp - now_ms > MAX_DHT_HELLO_SKEW_MS {
                 return Err(QueueFetchAckVerifyError::FutureTimestamp);
             }
 
@@ -555,16 +585,46 @@ pub struct FindNodeResp {
 /// the forward transcript bump the suffix.
 pub const DHT_FORWARD_SIG_DOMAIN: &[u8] = b"promtuz-dht-forward-v1";
 
+/// Domain for an IPK-authorized push pseudonym replica. This record contains
+/// no platform token; only the gateway can resolve its pseudonym to a token.
+pub const DHT_PUSH_PSEUDONYM_SIG_DOMAIN: &[u8] = b"promtuz-dht-push-pseudonym-v1";
+pub const DHT_LIVE_FORWARD_SIG_DOMAIN: &[u8] = b"promtuz-dht-live-forward-v1";
+
+pub fn push_pseudonym_signing_input(
+    user_ipk: &[u8; 32], pseudonym: &[u8; 32], timestamp: u64,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(DHT_PUSH_PSEUDONYM_SIG_DOMAIN.len() + 2 + 32 + 32 + 8);
+    buf.extend_from_slice(DHT_PUSH_PSEUDONYM_SIG_DOMAIN);
+    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    buf.extend_from_slice(user_ipk);
+    buf.extend_from_slice(pseudonym);
+    buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf
+}
+
+/// User-authorized replication of a push pseudonym to one DHT home.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushPseudonymPublish {
+    pub user_ipk:  Bytes<32>,
+    pub pseudonym: Bytes<32>,
+    pub timestamp: u64,
+    pub user_sig:  Bytes<64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushPseudonymPublishResp {
+    pub accepted: bool,
+}
+
 /// Sender-relay → home-relay request: please deliver-or-queue this
 /// dispatch on behalf of the sending relay.
 ///
 /// **Two-layer signing model:**
-/// - `dispatch.sig` is the *sender user's* signature over the dispatch
-///   payload (built at the originating client, transports unchanged).
-/// - `sig` is the *sender relay's* identity-key signature over a
-///   transcript that binds `(dispatch_id, sender_relay_id, timestamp)`
-///   together — this gives the home relay a non-repudiable record of
-///   which relay forwarded the dispatch and at what wall-clock time, so
+/// - `dispatch.sig` is the *sender user's* signature over the dispatch payload (built at the
+///   originating client, transports unchanged).
+/// - `sig` is the *sender relay's* identity-key signature over a transcript that binds
+///   `(dispatch_id, sender_relay_id, timestamp)` together — this gives the home relay a
+///   non-repudiable record of which relay forwarded the dispatch and at what wall-clock time, so
 ///   per-relay rate-limit attribution and replay defence both work.
 ///
 /// **Field declaration order is load-bearing.** The postcard wire layout
@@ -578,7 +638,7 @@ pub struct Forward {
     /// [`crate::proto::client_rel::DISPATCH_SIG_DOMAIN`]). Carried verbatim
     /// so the home relay can deliver to the recipient client without
     /// rewriting the payload — preserving the end-to-end signature chain.
-    pub dispatch: crate::proto::client_rel::DispatchP,
+    pub dispatch:        crate::proto::client_rel::DispatchP,
     /// Issuing relay's `BLAKE3(NodeKey)` identity. The home relay uses
     /// this for per-peer rate-limit attribution and to look up the
     /// routing-table entry that holds the verifying pubkey.
@@ -586,12 +646,12 @@ pub struct Forward {
     /// Sender-relay-local Unix time in milliseconds at the moment of
     /// signing. Bound into the transcript for ±[`MAX_DHT_HELLO_SKEW_MS`]
     /// replay defence at the home relay.
-    pub timestamp: u64,
+    pub timestamp:       u64,
     /// Sender-relay's Ed25519 signature over [`forward_signing_input`].
     /// The home relay pulls the verifying pubkey from its routing-table
     /// entry for `sender_relay_id` (populated by `peer/1`'s `DhtHello`
     /// handshake) and runs `verify_strict`.
-    pub sig: Bytes<64>,
+    pub sig:             Bytes<64>,
 }
 
 /// Build the canonical signing transcript for [`Forward`].
@@ -661,6 +721,151 @@ pub struct ForwardResp {
     pub outcome: ForwardOutcome,
 }
 
+/// Sender relay → recipient home relay: deliver a signed activity only when
+/// its recipient is connected locally. Homes never store this packet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityForward {
+    pub activity: ActivityP,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityForwardResp {
+    pub delivered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceConsent {
+    pub owner:        Bytes<32>,
+    pub recipient:    Bytes<32>,
+    pub version:      u64,
+    pub issued_at_ms: u64,
+    pub granted:      bool,
+    pub user_sig:     Bytes<64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceLease {
+    pub user:          Bytes<32>,
+    pub relay_id:      crate::quic::id::NodeId,
+    pub version:       u64,
+    pub issued_at_ms:  u64,
+    pub expires_at_ms: u64,
+    pub user_sig:      Bytes<64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayPresenceState {
+    pub recipient:      Bytes<32>,
+    pub who:            Bytes<32>,
+    pub lease:          PresenceLease,
+    pub state:          PresenceState,
+    pub version:        u64,
+    pub observed_at_ms: u64,
+    pub relay_pubkey:   Bytes<32>,
+    pub relay_sig:      Bytes<64>,
+}
+
+pub const PRESENCE_CONSENT_SIG_DOMAIN: &[u8] = b"promtuz-presence-consent-v1";
+pub const PRESENCE_LEASE_SIG_DOMAIN: &[u8] = b"promtuz-presence-lease-v1";
+pub const PRESENCE_STATE_SIG_DOMAIN: &[u8] = b"promtuz-presence-state-v1";
+pub const PRESENCE_LEASE_MAX_MS: u64 = 10 * 60 * 1000;
+pub const PRESENCE_STATE_MAX_SKEW_MS: u64 = 60_000;
+
+pub fn presence_consent_signing_input(
+    owner: &[u8; 32], recipient: &[u8; 32], version: u64, issued_at_ms: u64, granted: bool,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PRESENCE_CONSENT_SIG_DOMAIN.len() + 2 + 32 + 32 + 8 + 8 + 1);
+    out.extend_from_slice(PRESENCE_CONSENT_SIG_DOMAIN);
+    out.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    out.extend_from_slice(owner);
+    out.extend_from_slice(recipient);
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&issued_at_ms.to_be_bytes());
+    out.push(granted as u8);
+    out
+}
+
+pub fn presence_lease_signing_input(
+    user: &[u8; 32], relay_id: &crate::quic::id::NodeId, version: u64, issued_at_ms: u64,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PRESENCE_LEASE_SIG_DOMAIN.len() + 2 + 32 + 32 + 8 * 3);
+    out.extend_from_slice(PRESENCE_LEASE_SIG_DOMAIN);
+    out.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    out.extend_from_slice(user);
+    out.extend_from_slice(relay_id.as_bytes());
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&issued_at_ms.to_be_bytes());
+    out.extend_from_slice(&expires_at_ms.to_be_bytes());
+    out
+}
+
+pub fn presence_state_signing_input(record: &RelayPresenceState) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(PRESENCE_STATE_SIG_DOMAIN);
+    out.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    out.extend_from_slice(&record.recipient.0);
+    out.extend_from_slice(&record.who.0);
+    out.extend_from_slice(&record.lease.user.0);
+    out.extend_from_slice(record.lease.relay_id.as_bytes());
+    out.extend_from_slice(&record.lease.version.to_be_bytes());
+    out.extend_from_slice(&record.lease.issued_at_ms.to_be_bytes());
+    out.extend_from_slice(&record.lease.expires_at_ms.to_be_bytes());
+    out.extend_from_slice(&record.lease.user_sig.0);
+    out.push(match record.state {
+        PresenceState::Online => 0,
+        PresenceState::Idle { .. } => 1,
+        PresenceState::Offline { .. } => 2,
+    });
+    let state_ts = match record.state {
+        PresenceState::Online => 0,
+        PresenceState::Idle { since } => since,
+        PresenceState::Offline { last_seen } => last_seen,
+    };
+    out.extend_from_slice(&state_ts.to_be_bytes());
+    out.extend_from_slice(&record.version.to_be_bytes());
+    out.extend_from_slice(&record.observed_at_ms.to_be_bytes());
+    out.extend_from_slice(&record.relay_pubkey.0);
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceReplicationResp {
+    pub accepted: bool,
+}
+
+/// Recipient homes retain this user-signed assignment long enough to attempt
+/// live delivery at the relay currently serving the user.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveForward {
+    pub dispatch:        crate::proto::client_rel::DispatchP,
+    pub lease:           PresenceLease,
+    pub sender_relay_id: crate::quic::id::NodeId,
+    pub timestamp:       u64,
+    pub sig:             Bytes<64>,
+}
+
+pub fn live_forward_signing_input(
+    dispatch_id: &[u8; 16], lease: &PresenceLease, sender_relay_id: &crate::quic::id::NodeId,
+    timestamp: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(DHT_LIVE_FORWARD_SIG_DOMAIN.len() + 2 + 16 + 32 + 8 + 32 + 8);
+    out.extend_from_slice(DHT_LIVE_FORWARD_SIG_DOMAIN);
+    out.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    out.extend_from_slice(dispatch_id);
+    out.extend_from_slice(&lease.user.0);
+    out.extend_from_slice(&lease.version.to_be_bytes());
+    out.extend_from_slice(lease.relay_id.as_bytes());
+    out.extend_from_slice(sender_relay_id.as_bytes());
+    out.extend_from_slice(&timestamp.to_be_bytes());
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveForwardResp {
+    pub delivered: bool,
+}
+
 // --- QueueFetch (recipient_relay → home_relay) --------------------------
 
 /// Domain-separation tag for the recipient-user signature on a
@@ -681,7 +886,7 @@ pub const DHT_QUEUE_FETCH_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-v1";
 pub struct QueueFetch {
     /// User whose queue to drain. Same byte shape as
     /// [`PresenceRecord::user_ipk`].
-    pub user_ipk: Bytes<32>,
+    pub user_ipk:           Bytes<32>,
     /// Requesting relay's `BLAKE3(NodeKey)` identity. Bound into the
     /// signed transcript so a captured `user_sig` cannot be redirected
     /// to a different requester (the user authorises *this* relay to
@@ -689,11 +894,11 @@ pub struct QueueFetch {
     pub requester_relay_id: crate::quic::id::NodeId,
     /// User-local Unix time in milliseconds at the moment of signing.
     /// ±[`MAX_DHT_HELLO_SKEW_MS`] replay-defence window.
-    pub timestamp: u64,
+    pub timestamp:          u64,
     /// User's Ed25519 signature over [`queue_fetch_signing_input`].
     /// Verified under `user_ipk` (the user's own IPK is the verifying
     /// key, no external pubkey lookup needed).
-    pub user_sig: Bytes<64>,
+    pub user_sig:           Bytes<64>,
 }
 
 /// Build the canonical signing transcript for [`QueueFetch`].
@@ -738,7 +943,7 @@ pub struct QueueFetchResp {
     /// (the on-disk key is `recipient || ts_be || dispatch_id`, so a
     /// prefix iterator naturally yields chronological order). Bounded
     /// by [`MAX_FETCH_QUEUE_BATCH`].
-    pub messages: Vec<crate::proto::client_rel::DispatchP>,
+    pub messages:  Vec<crate::proto::client_rel::DispatchP>,
     /// `true` iff the home relay's queue for this user is empty after
     /// this batch. The requesting relay terminates the page-loop when
     /// this is `true`.
@@ -792,7 +997,7 @@ pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-
 pub struct QueueFetchAck {
     /// User whose queue to GC. Must match the `QueueFetchResp` whose
     /// dispatches we're acking.
-    pub user_ipk: Bytes<32>,
+    pub user_ipk:           Bytes<32>,
     /// Requesting relay's `BLAKE3(NodeKey)` identity. Bound into the
     /// signed transcript so a captured `user_sig` cannot be redirected
     /// to a different home (the user authorises *this* relay to drain
@@ -808,13 +1013,13 @@ pub struct QueueFetchAck {
     /// ack covers exactly one fetch batch. `Vec<[u8; 16]>` because each
     /// id is the same UUIDv7 [`crate::proto::client_rel::DispatchP::id`]
     /// shape.
-    pub delivered_ids: Vec<[u8; 16]>,
+    pub delivered_ids:      Vec<[u8; 16]>,
     /// User-local Unix time in milliseconds at the moment of signing.
     /// ±[`MAX_DHT_HELLO_SKEW_MS`] replay-defence window.
-    pub timestamp: u64,
+    pub timestamp:          u64,
     /// User's Ed25519 signature over [`queue_fetch_ack_signing_input`].
     /// Verified under `user_ipk`.
-    pub user_sig: Bytes<64>,
+    pub user_sig:           Bytes<64>,
 }
 
 /// Build the canonical signing transcript for [`QueueFetchAck`].
@@ -840,8 +1045,8 @@ pub struct QueueFetchAck {
 /// transcript) but pre-1.0 the project accepts these breaks;
 /// `PROTOCOL_VERSION` already advanced past that earlier release.
 pub fn queue_fetch_ack_signing_input(
-    user_ipk: &[u8; 32], requester_relay_id: &crate::quic::id::NodeId,
-    delivered_ids: &[[u8; 16]], timestamp: u64,
+    user_ipk: &[u8; 32], requester_relay_id: &crate::quic::id::NodeId, delivered_ids: &[[u8; 16]],
+    timestamp: u64,
 ) -> Vec<u8> {
     let count = delivered_ids.len() as u32;
     // domain + version (2) + ipk (32) + node_id (32) + count (4) + n*16 + ts (8)
@@ -986,6 +1191,13 @@ pub enum DhtRequest {
     /// Sticky-home: sender-relay → home-relay deliver-or-queue. Handled
     /// in `relay/src/dht/handler.rs`.
     Forward(Forward),
+    /// Ephemeral activity fan-out to recipient homes; never persisted.
+    ActivityForward(ActivityForward),
+    PresenceConsent(PresenceConsent),
+    PresenceState(RelayPresenceState),
+    PresenceLease(PresenceLease),
+    LiveForward(LiveForward),
+    PushPseudonymPublish(PushPseudonymPublish),
     /// Sticky-home: recipient-relay → home-relay drain request.
     QueueFetch(QueueFetch),
     /// Sticky-home: recipient-relay → home-relay post-delivery GC of
@@ -1029,6 +1241,13 @@ pub enum DhtResponse {
     FindNode(FindNodeResp),
     /// Sticky-home — reply to [`DhtRequest::Forward`].
     Forward(ForwardResp),
+    /// Reply to [`DhtRequest::ActivityForward`].
+    ActivityForward(ActivityForwardResp),
+    PresenceConsent(PresenceReplicationResp),
+    PresenceState(PresenceReplicationResp),
+    PresenceLease(PresenceReplicationResp),
+    LiveForward(LiveForwardResp),
+    PushPseudonymPublish(PushPseudonymPublishResp),
     /// Sticky-home — reply to [`DhtRequest::QueueFetch`].
     QueueFetch(QueueFetchResp),
     /// Sticky-home — reply to [`DhtRequest::QueueFetchAck`].
@@ -1080,7 +1299,7 @@ mod tests {
     use super::*;
     use crate::PROTOCOL_VERSION;
     use crate::crypto::get_signing_key;
-use crate::proto::pack::Packer;
+    use crate::proto::pack::Packer;
     use crate::proto::pack::Unpacker;
     use crate::quic::id::NodeId;
 
@@ -1100,12 +1319,7 @@ use crate::proto::pack::Packer;
         let node_id = NodeId::new(pubkey);
         let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
         let sig = key.sign(&msg);
-        DhtHello {
-            node_id,
-            pubkey: pubkey.into(),
-            timestamp,
-            sig: sig.to_bytes().into(),
-        }
+        DhtHello { node_id, pubkey: pubkey.into(), timestamp, sig: sig.to_bytes().into() }
     }
 
     #[test]
@@ -1176,7 +1390,7 @@ use crate::proto::pack::Packer;
         let fake_id = NodeId::new(key_b.verifying_key().to_bytes());
         hello.node_id = fake_id;
         match hello.verify(now) {
-            Err(DhtHelloVerifyError::IdMismatch) => {}
+            Err(DhtHelloVerifyError::IdMismatch) => {},
             other => panic!("expected IdMismatch, got {other:?}"),
         }
     }
@@ -1190,14 +1404,14 @@ use crate::proto::pack::Packer;
         // Stale: timestamp ~2 minutes in the past.
         let stale = build_dht_hello(&key, now - 120_000);
         match stale.verify(now) {
-            Err(DhtHelloVerifyError::ClockSkew) => {}
+            Err(DhtHelloVerifyError::ClockSkew) => {},
             other => panic!("expected ClockSkew (stale), got {other:?}"),
         }
 
         // Future: timestamp ~2 minutes in the future.
         let future = build_dht_hello(&key, now + 120_000);
         match future.verify(now) {
-            Err(DhtHelloVerifyError::ClockSkew) => {}
+            Err(DhtHelloVerifyError::ClockSkew) => {},
             other => panic!("expected ClockSkew (future), got {other:?}"),
         }
     }
@@ -1210,7 +1424,7 @@ use crate::proto::pack::Packer;
         let mut hello = build_dht_hello(&key, now);
         hello.sig.0[0] ^= 0x01;
         match hello.verify(now) {
-            Err(DhtHelloVerifyError::BadSignature) => {}
+            Err(DhtHelloVerifyError::BadSignature) => {},
             other => panic!("expected BadSignature, got {other:?}"),
         }
     }
@@ -1237,11 +1451,12 @@ use crate::proto::pack::Packer;
         let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
         let sig = from_user.sign(&msg);
         DispatchP {
-            to:      (*to_ipk).into(),
-            from:    from_ipk.into(),
-            id:      id.into(),
-            payload: payload.to_vec().into(),
-            sig:     sig.to_bytes().into(),
+            to:             (*to_ipk).into(),
+            from:           from_ipk.into(),
+            id:             id.into(),
+            payload:        payload.to_vec().into(),
+            sig:            sig.to_bytes().into(),
+            accepted_at_ms: 1,
         }
     }
 
@@ -1249,19 +1464,12 @@ use crate::proto::pack::Packer;
     /// timestamp)`. The signing flow mirrors the production sender-side
     /// helper — keeping the test fixture in this file so any drift between
     /// fixture and production blows up on either side.
-    fn build_forward(
-        sender_relay: &SigningKey, dispatch: DispatchP, timestamp: u64,
-    ) -> Forward {
+    fn build_forward(sender_relay: &SigningKey, dispatch: DispatchP, timestamp: u64) -> Forward {
         let sender_relay_pubkey: [u8; 32] = sender_relay.verifying_key().to_bytes();
         let sender_relay_id = NodeId::new(sender_relay_pubkey);
         let msg = forward_signing_input(&dispatch.id.0, &sender_relay_id, timestamp);
         let sig = sender_relay.sign(&msg);
-        Forward {
-            dispatch,
-            sender_relay_id,
-            timestamp,
-            sig: sig.to_bytes().into(),
-        }
+        Forward { dispatch, sender_relay_id, timestamp, sig: sig.to_bytes().into() }
     }
 
     fn build_queue_fetch(
@@ -1279,8 +1487,7 @@ use crate::proto::pack::Packer;
     }
 
     fn build_queue_fetch_ack(
-        user: &SigningKey, requester_relay_id: NodeId,
-        delivered_ids: Vec<[u8; 16]>, timestamp: u64,
+        user: &SigningKey, requester_relay_id: NodeId, delivered_ids: Vec<[u8; 16]>, timestamp: u64,
     ) -> QueueFetchAck {
         let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
         let msg = queue_fetch_ack_signing_input(
@@ -1317,10 +1524,7 @@ use crate::proto::pack::Packer;
         let buf = forward_signing_input(&id_bytes, &node_id, timestamp);
 
         // domain + version (2) + id (16) + node_id (32) + ts (8)
-        assert_eq!(
-            buf.len(),
-            DHT_FORWARD_SIG_DOMAIN.len() + 2 + 16 + 32 + 8
-        );
+        assert_eq!(buf.len(), DHT_FORWARD_SIG_DOMAIN.len() + 2 + 16 + 32 + 8);
         assert!(buf.starts_with(DHT_FORWARD_SIG_DOMAIN));
         let off = DHT_FORWARD_SIG_DOMAIN.len();
         assert_eq!(&buf[off..off + 2], &PROTOCOL_VERSION.to_be_bytes());
@@ -1342,10 +1546,7 @@ use crate::proto::pack::Packer;
 
         let buf = queue_fetch_signing_input(&ipk, &node_id, timestamp);
 
-        assert_eq!(
-            buf.len(),
-            DHT_QUEUE_FETCH_SIG_DOMAIN.len() + 2 + 32 + 32 + 8
-        );
+        assert_eq!(buf.len(), DHT_QUEUE_FETCH_SIG_DOMAIN.len() + 2 + 32 + 32 + 8);
         assert!(buf.starts_with(DHT_QUEUE_FETCH_SIG_DOMAIN));
         let off = DHT_QUEUE_FETCH_SIG_DOMAIN.len();
         assert_eq!(&buf[off..off + 2], &PROTOCOL_VERSION.to_be_bytes());
@@ -1370,10 +1571,7 @@ use crate::proto::pack::Packer;
 
         // domain + version (2) + ipk (32) + node_id (32) + count (4)
         //   + 2*16 + ts (8)
-        assert_eq!(
-            buf.len(),
-            DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 32 + 4 + 2 * 16 + 8
-        );
+        assert_eq!(buf.len(), DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 32 + 4 + 2 * 16 + 8);
         assert!(buf.starts_with(DHT_QUEUE_FETCH_ACK_SIG_DOMAIN));
         let off = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len();
         assert_eq!(&buf[off..off + 2], &PROTOCOL_VERSION.to_be_bytes());
@@ -1461,9 +1659,7 @@ use crate::proto::pack::Packer;
         assert_eq!(decoded, qf);
 
         decoded.verify(now).expect("verify ok");
-        decoded
-            .verify(now + MAX_DHT_HELLO_SKEW_MS - 1)
-            .expect("inside skew");
+        decoded.verify(now + MAX_DHT_HELLO_SKEW_MS - 1).expect("inside skew");
     }
 
     #[test]
@@ -1472,12 +1668,7 @@ use crate::proto::pack::Packer;
         let req_relay = fresh_signing_key();
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
-        let ack = build_queue_fetch_ack(
-            &user,
-            req_id,
-            vec![[1u8; 16], [2u8; 16], [3u8; 16]],
-            now,
-        );
+        let ack = build_queue_fetch_ack(&user, req_id, vec![[1u8; 16], [2u8; 16], [3u8; 16]], now);
 
         let bytes = ack.ser().expect("ser");
         let decoded = QueueFetchAck::deser(&bytes).expect("deser");
@@ -1510,7 +1701,7 @@ use crate::proto::pack::Packer;
         // Flip a bit in the outer sender-relay signature.
         fwd.sig.0[0] ^= 0x01;
         match fwd.verify(&sender_pubkey, now) {
-            Err(ForwardVerifyError::BadForwardSig) => {}
+            Err(ForwardVerifyError::BadForwardSig) => {},
             other => panic!("expected BadForwardSig, got {other:?}"),
         }
     }
@@ -1528,7 +1719,7 @@ use crate::proto::pack::Packer;
         let dispatch = build_dispatch(&from_user, &to_ipk, [13u8; 16], b"hi");
         let fwd = build_forward(&sender_relay, dispatch, stale_ts);
         match fwd.verify(&sender_pubkey, now) {
-            Err(ForwardVerifyError::StaleTimestamp) => {}
+            Err(ForwardVerifyError::StaleTimestamp) => {},
             other => panic!("expected StaleTimestamp, got {other:?}"),
         }
     }
@@ -1546,7 +1737,7 @@ use crate::proto::pack::Packer;
         let dispatch = build_dispatch(&from_user, &to_ipk, [14u8; 16], b"hi");
         let fwd = build_forward(&sender_relay, dispatch, future_ts);
         match fwd.verify(&sender_pubkey, now) {
-            Err(ForwardVerifyError::FutureTimestamp) => {}
+            Err(ForwardVerifyError::FutureTimestamp) => {},
             other => panic!("expected FutureTimestamp, got {other:?}"),
         }
     }
@@ -1567,7 +1758,7 @@ use crate::proto::pack::Packer;
         let dispatch = build_dispatch(&from_user, &to_ipk, [15u8; 16], b"hi");
         let fwd = build_forward(&sender_a, dispatch, now);
         match fwd.verify(&wrong_pubkey, now) {
-            Err(ForwardVerifyError::BadForwardSig) => {}
+            Err(ForwardVerifyError::BadForwardSig) => {},
             other => panic!("expected BadForwardSig, got {other:?}"),
         }
     }
@@ -1581,7 +1772,7 @@ use crate::proto::pack::Packer;
         let mut qf = build_queue_fetch(&user, req_id, now);
         qf.user_sig.0[0] ^= 0x01;
         match qf.verify(now) {
-            Err(QueueFetchVerifyError::BadUserSig) => {}
+            Err(QueueFetchVerifyError::BadUserSig) => {},
             other => panic!("expected BadUserSig, got {other:?}"),
         }
     }
@@ -1595,7 +1786,7 @@ use crate::proto::pack::Packer;
         let stale_ts = now - 120_000;
         let qf = build_queue_fetch(&user, req_id, stale_ts);
         match qf.verify(now) {
-            Err(QueueFetchVerifyError::StaleTimestamp) => {}
+            Err(QueueFetchVerifyError::StaleTimestamp) => {},
             other => panic!("expected StaleTimestamp, got {other:?}"),
         }
     }
@@ -1606,11 +1797,10 @@ use crate::proto::pack::Packer;
         let req_relay = fresh_signing_key();
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
-        let mut ack =
-            build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], now);
+        let mut ack = build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], now);
         ack.user_sig.0[0] ^= 0x01;
         match ack.verify(now) {
-            Err(QueueFetchAckVerifyError::BadUserSig) => {}
+            Err(QueueFetchAckVerifyError::BadUserSig) => {},
             other => panic!("expected BadUserSig, got {other:?}"),
         }
     }
@@ -1632,13 +1822,12 @@ use crate::proto::pack::Packer;
         let req_a_id = NodeId::new(req_a.verifying_key().to_bytes());
         let req_b_id = NodeId::new(req_b.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
-        let mut ack =
-            build_queue_fetch_ack(&user, req_a_id, vec![[1u8; 16]], now);
+        let mut ack = build_queue_fetch_ack(&user, req_a_id, vec![[1u8; 16]], now);
         // Forward the captured ack with a different requester id (the
         // attacker's redirection attempt).
         ack.requester_relay_id = req_b_id;
         match ack.verify(now) {
-            Err(QueueFetchAckVerifyError::BadUserSig) => {}
+            Err(QueueFetchAckVerifyError::BadUserSig) => {},
             other => panic!("expected BadUserSig, got {other:?}"),
         }
     }
@@ -1655,17 +1844,16 @@ use crate::proto::pack::Packer;
         let req_relay = fresh_signing_key();
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
-        let oversize: Vec<[u8; 16]> =
-            (0..MAX_FETCH_QUEUE_ACK_IDS as u32 + 1)
-                .map(|i| {
-                    let mut id = [0u8; 16];
-                    id[..4].copy_from_slice(&i.to_be_bytes());
-                    id
-                })
-                .collect();
+        let oversize: Vec<[u8; 16]> = (0..MAX_FETCH_QUEUE_ACK_IDS as u32 + 1)
+            .map(|i| {
+                let mut id = [0u8; 16];
+                id[..4].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
         let ack = build_queue_fetch_ack(&user, req_id, oversize, now);
         match ack.verify(now) {
-            Err(QueueFetchAckVerifyError::TooManyIds) => {}
+            Err(QueueFetchAckVerifyError::TooManyIds) => {},
             other => panic!("expected TooManyIds, got {other:?}"),
         }
     }
@@ -1677,10 +1865,9 @@ use crate::proto::pack::Packer;
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
         let stale_ts = now - 120_000;
-        let ack =
-            build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], stale_ts);
+        let ack = build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], stale_ts);
         match ack.verify(now) {
-            Err(QueueFetchAckVerifyError::StaleTimestamp) => {}
+            Err(QueueFetchAckVerifyError::StaleTimestamp) => {},
             other => panic!("expected StaleTimestamp, got {other:?}"),
         }
     }

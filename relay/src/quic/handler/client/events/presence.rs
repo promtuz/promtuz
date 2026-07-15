@@ -13,6 +13,9 @@
 //! MVP scope: same-relay + plaintext. Cross-relay fan-out and the encrypted
 //! privacy pass (beacons + blinded tokens) are follow-ups — see `PRESENCE.md`.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use anyhow::Result;
 use common::proto::Sender;
 use common::proto::client_rel::PresenceMode;
@@ -20,10 +23,10 @@ use common::proto::client_rel::PresenceP;
 use common::proto::client_rel::PresenceState;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::SubscribePresenceP;
+use common::proto::dht_p2p::RelayPresenceState;
+use common::proto::dht_p2p::presence_state_signing_input;
 use common::types::bytes::Bytes;
 use quinn::Connection;
-use std::collections::HashMap;
-use std::collections::HashSet;
 
 use crate::quic::handler::client::ClientCtxHandle;
 use crate::relay::RelayRef;
@@ -37,6 +40,28 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
     let relay = &ctx.relay;
     let contacts: HashSet<[u8; 32]> = sub.contacts.iter().map(|b| b.0).collect();
 
+    let now = systime().as_millis() as u64;
+    let Some(dht) = relay.dht.as_ref() else { return Ok(()) };
+    if sub.lease.user.0 != me || sub.lease.relay_id != dht.node_id || !sub.lease.verify(now) {
+        return Ok(());
+    }
+    for consent in &sub.consents {
+        if consent.owner.0 != me || !consent.verify(now) {
+            return Ok(());
+        }
+        let _ = relay.store.put_presence_consent(consent);
+        tokio::spawn(crate::dht::forward::forward_presence_consent(dht.clone(), consent.clone()));
+    }
+    if contacts.iter().any(|contact| {
+        !sub.consents.iter().any(|consent| consent.recipient.0 == *contact && consent.granted)
+    }) {
+        return Ok(());
+    }
+    if !relay.store.put_presence_lease(&sub.lease).unwrap_or(false) {
+        return Ok(());
+    }
+    relay.presence_leases.write().insert(me, sub.lease.clone());
+    tokio::spawn(crate::dht::forward::forward_presence_lease(dht.clone(), sub.lease));
     relay.presence_subs.write().insert(me, contacts.clone());
 
     let snapshot: Vec<PresenceP> = {
@@ -45,8 +70,8 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
         let idle = relay.presence_mode.read();
         contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, &me))
-            .map(|c| PresenceP { who: Bytes(*c), state: state_of(relay, &clients, &idle, c) })
+            .filter(|c| is_mutual(relay, &subs, c, &me))
+            .map(|c| PresenceP { who: Bytes(*c), state: state_of(relay, &clients, &idle, &me, c) })
             .collect()
     };
     if !snapshot.is_empty() {
@@ -54,7 +79,7 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
     }
 
     // Subscribing = foregrounded, so announce Online.
-    announce(relay, &contacts, &me, PresenceState::Online).await;
+    announce(relay, &contacts, &me, PresenceState::Online, systime().as_millis() as u64).await;
     Ok(())
 }
 
@@ -75,7 +100,7 @@ pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle
         },
     };
     let contacts = relay.presence_subs.read().get(&me).cloned().unwrap_or_default();
-    announce(relay, &contacts, &me, state).await;
+    announce(relay, &contacts, &me, state, systime().as_millis() as u64).await;
     Ok(())
 }
 
@@ -87,53 +112,93 @@ pub(crate) async fn on_disconnect(relay: &RelayRef, me: &[u8; 32]) {
     let _ = relay.store.put_last_seen(me, now);
     relay.presence_mode.write().remove(me);
 
+    let my_contacts = relay.presence_subs.read().get(me).cloned().unwrap_or_default();
     let targets: Vec<Connection> = {
-        let mut subs = relay.presence_subs.write();
-        let Some(my_contacts) = subs.remove(me) else { return };
+        let subs = relay.presence_subs.read();
         let clients = relay.clients.read();
         my_contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, me))
+            .filter(|c| is_mutual(relay, &subs, c, me))
             .filter_map(|c| clients.get(c).cloned())
             .collect()
     };
-    let offline = vec![PresenceP { who: Bytes(*me), state: PresenceState::Offline { last_seen: now } }];
+    let offline =
+        vec![PresenceP { who: Bytes(*me), state: PresenceState::Offline { last_seen: now } }];
     for conn in targets {
         push(&conn, offline.clone()).await;
     }
+    forward_to_homes(relay, &my_contacts, me, PresenceState::Offline { last_seen: now }, now);
 }
 
 /// Push our `state` (as `who = me`) to every mutual contact online here.
-async fn announce(relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32], state: PresenceState) {
+async fn announce(
+    relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32], state: PresenceState,
+    observed_at_ms: u64,
+) {
     let targets: Vec<Connection> = {
         let subs = relay.presence_subs.read();
         let clients = relay.clients.read();
         contacts
             .iter()
-            .filter(|c| is_mutual(&subs, c, me))
+            .filter(|c| is_mutual(relay, &subs, c, me))
             .filter_map(|c| clients.get(c).cloned())
             .collect()
     };
-    if targets.is_empty() {
-        return;
-    }
-    let entry = vec![PresenceP { who: Bytes(*me), state }];
+    let entry = vec![PresenceP { who: Bytes(*me), state: state.clone() }];
     for conn in targets {
         push(&conn, entry.clone()).await;
+    }
+    forward_to_homes(relay, contacts, me, state, observed_at_ms);
+}
+
+fn forward_to_homes(
+    relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32], state: PresenceState,
+    observed_at_ms: u64,
+) {
+    let Some(dht) = relay.dht.as_ref().cloned() else { return };
+    let Some(lease) = relay.presence_leases.read().get(me).cloned() else { return };
+    let version = {
+        let mut versions = relay.presence_versions.write();
+        let next = versions.get(me).copied().unwrap_or(0).max(observed_at_ms).saturating_add(1);
+        versions.insert(*me, next);
+        next
+    };
+    for contact in contacts {
+        if relay.store.has_presence_consent(me, contact) {
+            let mut record = RelayPresenceState {
+                recipient: (*contact).into(),
+                who: (*me).into(),
+                lease: lease.clone(),
+                state: state.clone(),
+                version,
+                observed_at_ms,
+                relay_pubkey: dht.signing_key.verifying_key().to_bytes().into(),
+                relay_sig: [0; 64].into(),
+            };
+            use ed25519_dalek::Signer;
+            record.relay_sig =
+                dht.signing_key.sign(&presence_state_signing_input(&record)).to_bytes().into();
+            tokio::spawn(crate::dht::forward::forward_presence_state(dht.clone(), record));
+        }
     }
 }
 
 /// `contact` and `me` each subscribed to the other. `me`'s side is the caller's
 /// responsibility (it iterates its own contact set); this checks `contact`'s.
-fn is_mutual(subs: &HashMap<[u8; 32], HashSet<[u8; 32]>>, contact: &[u8; 32], me: &[u8; 32]) -> bool {
-    subs.get(contact).map(|s| s.contains(me)).unwrap_or(false)
+fn is_mutual(
+    relay: &RelayRef, subs: &HashMap<[u8; 32], HashSet<[u8; 32]>>, contact: &[u8; 32],
+    me: &[u8; 32],
+) -> bool {
+    subs.get(contact)
+        .map(|s| s.contains(me))
+        .unwrap_or_else(|| relay.store.has_presence_consent(contact, me))
 }
 
 /// Derive a contact's state: connected → Idle{since} if it flagged idle, else
 /// Online; not connected → Offline{last_seen} (0 = unknown).
 fn state_of(
     relay: &RelayRef, clients: &HashMap<[u8; 32], Connection>, idle: &HashMap<[u8; 32], u64>,
-    c: &[u8; 32],
+    viewer: &[u8; 32], c: &[u8; 32],
 ) -> PresenceState {
     if clients.contains_key(c) {
         match idle.get(c) {
@@ -141,7 +206,9 @@ fn state_of(
             None => PresenceState::Online,
         }
     } else {
-        PresenceState::Offline { last_seen: relay.store.get_last_seen(c).unwrap_or(0) }
+        relay.store.get_presence_state(viewer, c).unwrap_or(PresenceState::Offline {
+            last_seen: relay.store.get_last_seen(c).unwrap_or(0),
+        })
     }
 }
 

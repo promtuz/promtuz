@@ -5,7 +5,9 @@ capturable = "3.0.1"
 constraintlayoutCompose = "1.1.1"
 core = "3.5.4"
 coreSplashscreen = "1.2.0"
+firebaseBom = "34.16.0"
 hazeMaterials = "1.7.2"
+jnaVersion = "5.19.0"
 kotlin = "2.4.0"
 coreKtx = "1.19.0"
 junit = "4.13.2"
@@ -53,6 +55,9 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = 
 androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "coreSplashscreen" }
 barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref = "barcodeScanning" }
 capturable = { module = "dev.shreyaspatil:capturable", version.ref = "capturable" }
+firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
+firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jnaVersion" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-coroutines-play-services = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutinesCore" }

@@ -8,6 +8,8 @@
 
 use std::net::Ipv6Addr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -50,18 +52,14 @@ const ROOT_CA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.
 /// is the bootstrap seed list the client bundles (see its app resources).
 #[uniffi::export]
 pub fn init(
-    secure_store: Arc<dyn SecureStore>,
-    events: Arc<dyn CoreEvents>,
-    resolver_seeds: String,
+    secure_store: Arc<dyn SecureStore>, events: Arc<dyn CoreEvents>, resolver_seeds: String,
 ) -> Result<(), CoreError> {
     init_inner(secure_store, events, resolver_seeds)?;
     Ok(())
 }
 
 fn init_inner(
-    secure_store: Arc<dyn SecureStore>,
-    events: Arc<dyn CoreEvents>,
-    resolver_seeds: String,
+    secure_store: Arc<dyn SecureStore>, events: Arc<dyn CoreEvents>, resolver_seeds: String,
 ) -> Result<()> {
     init_logging();
     setup_crypto_provider()?;
@@ -70,6 +68,7 @@ fn init_inner(
     EVENTS.set(events).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
     let seeds = ResolverSeeds::from_str(&resolver_seeds)?;
+    crate::RESOLVER_SEEDS.set(seeds.clone()).ok();
 
     let _guard = RUNTIME.enter();
 
@@ -86,10 +85,8 @@ fn init_inner(
 
     let mut transport_cfg = TransportConfig::default();
     transport_cfg.keep_alive_interval(Some(Duration::from_secs(15)));
-    // Long idle timeout so a backgrounded (frozen) app keeps its connection
-    // across an app switch — QUIC resumes it via connection-ID path migration
-    // on the new NAT port, skipping the reconnect handshake entirely. Must
-    // match the relay's server idle (both = IDLE_TIMEOUT_SECS).
+    // Must match the relay's server idle; foreground keepalives keep the link
+    // open, while a frozen background app ages out quickly.
     transport_cfg.max_idle_timeout(Some(
         Duration::from_secs(common::quic::config::IDLE_TIMEOUT_SECS)
             .try_into()
@@ -100,21 +97,44 @@ fn init_inner(
     endpoint.set_default_client_config(client_cfg);
     ENDPOINT.set(Arc::new(endpoint)).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
+    // Re-drive the outbox on a timer so retries + the pending→failed timeout fire without a
+    // reconnect.
+    RUNTIME.spawn(async {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            ticker.tick().await;
+            crate::delivery::reconcile().await;
+        }
+    });
+
     start_relay_loop(seeds);
     Ok(())
 }
 
 /// Woken when the app returns to the foreground. The relay loop races its
-/// post-disconnect backoff against this so a reconnect (needed only after a
-/// background longer than the idle timeout) fires immediately instead of
-/// waiting out the 2 s retry sleep. A no-op when the connection is still live —
-/// QUIC path migration already continued it, nothing to reconnect.
+/// post-disconnect backoff against this so a reconnect fires immediately instead
+/// of waiting out the 2 s retry sleep.
 static FOREGROUND: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
+static TASK_REMOVED: AtomicBool = AtomicBool::new(false);
 
 /// Client hook: call from the platform's app-foreground lifecycle event.
 #[uniffi::export]
 pub fn on_foreground() {
-    FOREGROUND.notify_waiters();
+    TASK_REMOVED.store(false, Ordering::Relaxed);
+    // `notify_one` retains a permit when the relay loop has not started waiting.
+    FOREGROUND.notify_one();
+}
+
+/// Client hook: call when the OS task is removed. Best-effort close makes the
+/// relay mark us offline immediately instead of waiting for idle timeout.
+#[uniffi::export]
+pub fn on_task_removed() {
+    TASK_REMOVED.store(true, Ordering::Relaxed);
+    if let Some(relay) = crate::state::RELAY.read().as_ref() {
+        if let Some(conn) = &relay.connection {
+            conn.close(quinn::VarInt::from_u32(0), b"task removed");
+        }
+    }
 }
 
 /// Initialize logging. ponytail: android_logger writes to logcat on
@@ -147,6 +167,12 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                 continue;
             };
 
+            if TASK_REMOVED.load(Ordering::Relaxed) {
+                ConnectionState::Disconnected.emit();
+                FOREGROUND.notified().await;
+                continue;
+            }
+
             if !crate::utils::has_internet() {
                 ConnectionState::NoInternet.emit();
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -171,22 +197,30 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                             Err(join_err) => error!("relay({id}) handle join failed: {join_err}"),
                         },
                         Err(RelayConnError::Continue) => {},
-                        Err(RelayConnError::Error(err)) => error!("relay({id}) connect error: {err}"),
+                        Err(RelayConnError::Error(err)) => {
+                            error!("relay({id}) connect error: {err}")
+                        },
                     }
                 },
                 Err(RelayError::NoneAvailable) => {
                     debug!("no relays in database, resolving");
                     match Relay::resolve(&seeds).await {
                         Ok(_) => {},
+                        // NEVER return here. `return` exits the one and only
+                        // relay-loop task — an empty/failed resolve (common on a
+                        // fresh install when the network is still warming up)
+                        // then permanently bricked the app: all relays greyed,
+                        // no relay ever retried, unrecoverable without a restart.
+                        // Log and fall through to a short backoff + retry.
                         Err(ResolveError::EmptyResponse) => {
-                            error!("resolver returned no relays");
-                            ConnectionState::Failed.emit();
-                            return;
+                            error!("resolver returned no relays; retrying")
                         },
-                        Err(err) => error!("resolver failed: {err}"),
+                        Err(err) => error!("resolver failed: {err}; retrying"),
                     }
-                    // All known relays may be circuit-open; back off before retry.
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    // Short backoff: a fresh resolve may have just populated the
+                    // table, or all known relays are circuit-open and will reset.
+                    // (Was 30s — too slow for a cold-boot fresh install.)
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 },
                 Err(err) => error!("failed to fetch relay: {err}"),

@@ -3,17 +3,15 @@
 //!
 //! This module implements the in-memory routing-table state: bucket
 //! geometry, refresh, eviction, and learning. The lookup loop in
-//! `super::lookup`, the publish path in `super::publish`, and the
-//! bootstrap state machine in `super::bootstrap` all read/write through
-//! these methods.
+//! `super::lookup` and the bootstrap state machine in `super::bootstrap`
+//! read/write through these methods.
 //!
 //! ## Lock contract
 //!
 //! [`RoutingTable`] is held inside a single `parking_lot::RwLock` on
 //! [`super::Dht::routing`]. Every method takes `&self` or `&mut self`
 //! directly — the caller manages the lock and **never** holds it across
-//! `await` (project-wide rule, cf.
-//! `relay/src/quic/handler/client/events/forward.rs:59`).
+//! `await` (project-wide rule).
 //!
 //! ## Metrics
 //!
@@ -159,10 +157,9 @@ impl RoutingEntry {
 pub struct Bucket {
     /// Active peers, head = LRU.
     ///
-    /// `Vec` not `SmallVec`: the design doc suggests `SmallVec<…, B>` but
-    /// adding a dependency for ~16 entries is not worth it for v1. The
-    /// per-bucket peak is `BUCKET_SIZE`, so a `Vec::with_capacity(B)`
-    /// stays inline with no growth-time reallocation.
+    /// `Vec` not `SmallVec`: adding a dependency for ~16 entries isn't
+    /// worth it. The per-bucket peak is `BUCKET_SIZE`, so a
+    /// `Vec::with_capacity(B)` never reallocates at runtime anyway.
     pub entries: Vec<RoutingEntry>,
 
     /// Last point in time something in this bucket was touched. Used by
@@ -177,8 +174,7 @@ pub struct Bucket {
     ///
     /// Capped at `BUCKET_SIZE`: an unbounded `candidates` vec would let
     /// an attacker force unbounded memory growth by spraying fresh
-    /// peer-descriptor RPCs at a full bucket. Matches the doc's
-    /// `SmallVec<RoutingEntry, B>` shape.
+    /// peer-descriptor RPCs at a full bucket.
     pub candidates: Vec<RoutingEntry>,
 }
 
@@ -269,9 +265,8 @@ pub(crate) enum PingFailedOutcome {
 /// **Lock granularity.** A single `parking_lot::RwLock<RoutingTable>`
 /// lives on `Dht::routing` (read-mostly: every lookup hop reads, only
 /// insert/eviction writes). Per the codebase rule, the lock is never
-/// held across `await` — the standard pattern is to clone what you need
-/// out of the lock and drop the guard before any I/O (cf.
-/// `relay/src/quic/handler/client/events/forward.rs:59`).
+/// held across `await` — clone what you need out of the lock and drop
+/// the guard before any I/O.
 ///
 #[derive(Debug)]
 pub struct RoutingTable {
@@ -456,7 +451,7 @@ impl RoutingTable {
     /// Routing tables are small (`BUCKETS * BUCKET_SIZE = 4096` entries
     /// max), so a plain full-table scan + sort is fine. A
     /// `BinaryHeap`-of-k would shave a constant factor but is harder to
-    /// reason about; the design doc does not call for one.
+    /// reason about, and not worth it at this size.
     pub(crate) fn closest(&self, target: &NodeId, count: usize) -> Vec<RoutingEntry> {
         if count == 0 {
             return Vec::new();

@@ -1,0 +1,44 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition = "2024"
+description = "Push gateway — blind APNs/FCM/UnifiedPush wake node"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+common = { path = "../common", features = ["proto", "macros", "server", "crypto"] }
+anyhow.workspace = true
+toml.workspace = true
+serde.workspace = true
+quinn.workspace = true
+tokio.workspace = true
+clap.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+parking_lot = "0.12.5"
+# Per-source-IP accept-side rate limiter (same pattern as the resolver).
+governor = "0.10.4"
+# FCM HTTP v1: rustls-only client (webpki roots, no OpenSSL) + service-account
+# JWT signing (RS256 via ring, already in the tree). serde_json builds bodies.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+jsonwebtoken = "9"
+serde_json = "1"
+
+[package.metadata.deb]
+name = "pzgateway"
+maintainer = "Bhuvnesh <bhuvnesh@promtuz.dev>"
+copyright = "2026 Promtuz, AGPL-3.0-or-later"
+section = "net"
+priority = "optional"
+depends = "libc6 (>= 2.28)"
+recommends = "unattended-upgrades"
+extended-description = "Promtuz Gateway Server"
+assets = [
+    ["target/release/gateway", "usr/bin/pzgateway", "755"],
+    ["pkg/gateway.toml", "etc/promtuz/gateway.toml", "644"],
+    ["pkg/pzgateway.service", "lib/systemd/system/pzgateway.service", "644"],
+    ["pkg/51pzgateway-unattended", "etc/apt/apt.conf.d/51pzgateway-unattended", "644"],
+]
+conf-files = ["/etc/promtuz/gateway.toml", "/etc/apt/apt.conf.d/51pzgateway-unattended"]
+maintainer-scripts = "pkg/scripts/"

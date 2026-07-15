@@ -26,8 +26,6 @@
 
 use std::sync::Arc;
 
-use common::info;
-use common::warn;
 use common::proto::client_res::RelayDescriptor;
 use common::proto::dht_p2p::NodeDescriptor;
 use thiserror::Error;
@@ -119,7 +117,7 @@ pub async fn bootstrap(
     dht: Arc<Dht>, resolver: ResolverLinkHandle,
 ) -> Result<BootstrapState, BootstrapError> {
     // ---- Phase A: resolver query ([Cold] -> [Warming]) ---------------
-    info!(
+    crate::dht_log!(
         "DHT bootstrap: querying resolver for {} XOR-near + {} RTT-near peers",
         BOOTSTRAP_COUNT_XOR_NEAR, BOOTSTRAP_COUNT_RTT_NEAR
     );
@@ -172,7 +170,7 @@ pub async fn bootstrap(
         }
     }
 
-    info!(
+    crate::dht_log!(
         "DHT bootstrap: inserted={}, refreshed={}, deferred={}, self={} (xor_near={}, rtt_near={})",
         inserted,
         refreshed,
@@ -195,12 +193,12 @@ pub async fn bootstrap(
     // scheduler re-runs it on a backoff, and cached peer connections make
     // the repeats cheap.
     match crate::dht::lookup::lookup_node(dht.clone(), dht.node_id).await {
-        Ok(peers) => info!("DHT bootstrap: self-FindNode converged on {} peer(s)", peers.len()),
-        Err(e) => warn!("DHT bootstrap: self-FindNode walk failed: {e}; proceeding with seeded routing"),
+        Ok(peers) => crate::dht_log!("DHT bootstrap: self-FindNode converged on {} peer(s)", peers.len()),
+        Err(e) => crate::dht_log!("DHT bootstrap: self-FindNode walk failed: {e}; proceeding with seeded routing"),
     }
 
     // ---- Phase D: mark ready ([Ready]) -------------------------------
-    info!("DHT bootstrap: complete (resolver seed + self-FindNode convergence)");
+    crate::dht_log!("DHT bootstrap: complete (resolver seed + self-FindNode convergence)");
     Ok(BootstrapState::Ready)
 }
 

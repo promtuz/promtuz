@@ -6,6 +6,7 @@ use common::graceful;
 use common::info;
 use common::proto::RelayId;
 use common::proto::relay_res::LifetimeP;
+use common::proto::relay_res::gateway_hello_signing_input;
 use common::proto::relay_res::relay_heartbeat_signing_input;
 use common::proto::relay_res::relay_hello_signing_input;
 use common::quic::CloseReason;
@@ -41,6 +42,10 @@ pub type ResolverRef = Arc<Resolver>;
 /// registrations from many spoofed-but-real relays.
 const MAX_RELAYS: usize = 1024;
 
+/// Max simultaneously-registered gateways. Gateways are project infra, so this
+/// is a generous ceiling, not an expected count.
+const MAX_GATEWAYS: usize = 64;
+
 /// Maximum permitted clock skew between the relay's signed `timestamp` and
 /// our local clock, in milliseconds. Anything outside this window is treated
 /// as a replay (or a misconfigured clock) and rejected.
@@ -67,6 +72,11 @@ pub struct Resolver {
     /// it, only registration/eviction writes. Hence `RwLock` rather than
     /// `Mutex`.
     relays: RwLock<HashMap<RelayId, RelayEntry>>,
+
+    /// Registered push gateways. Same entry type as relays; a plain directory
+    /// — the resolver can't see the gateway's capability cert (no client
+    /// auth), so a relay verifies `PUSH_GATEWAY` when it dials the gateway.
+    gateways: RwLock<HashMap<RelayId, RelayEntry>>,
 }
 
 impl Resolver {
@@ -115,6 +125,7 @@ impl Resolver {
             key,
             endpoint: Arc::new(Self::endpoint(&cfg)),
             relays: RwLock::new(HashMap::new()),
+            gateways: RwLock::new(HashMap::new()),
             cfg,
         }
     }
@@ -288,11 +299,83 @@ impl Resolver {
         Ok(())
     }
 
-    /// Closes resolver — best-effort kicks every registered relay so they
-    /// stop trying to send into a soon-to-be-dead endpoint.
+    /// Admit a gateway registration. Mirrors [`Self::register_relay`]:
+    /// id↔pubkey binding + signature + freshness, then last-connection-wins.
+    /// The `PUSH_GATEWAY` capability is deliberately NOT checked here — the
+    /// resolver never sees the gateway's cert; a relay verifies it at dial.
+    pub fn register_gateway(
+        &self, conn: Arc<Connection>, hello: &LifetimeP,
+    ) -> Result<LifetimeP, CloseReason> {
+        let LifetimeP::GatewayHello { gateway_id, pubkey, timestamp, sig } = hello else {
+            return Err(CloseReason::PacketMismatch);
+        };
+        let (gateway_id, timestamp) = (*gateway_id, *timestamp);
+
+        let msg = gateway_hello_signing_input(&gateway_id, &pubkey.0, timestamp);
+        verify_signed_packet(
+            conn.remote_address(),
+            "gateway-hello",
+            &gateway_id,
+            &pubkey.0,
+            &sig.0,
+            &msg,
+            timestamp,
+        )?;
+
+        let now = systime().as_millis();
+        let mut gateways = self.gateways.write();
+
+        if let Some(existing) = gateways.get(&gateway_id) {
+            if existing.conn.close_reason().is_none() {
+                info!("gateway({gateway_id}) reconnected, superseding prior session");
+                CloseReason::Reconnecting.close(&existing.conn);
+            }
+            gateways.remove(&gateway_id);
+        }
+
+        if gateways.len() >= MAX_GATEWAYS {
+            warn!("gateway({}) rejected: registry full", conn.remote_address());
+            return Err(CloseReason::RegistryFull);
+        }
+
+        gateways.insert(gateway_id, RelayEntry::new(gateway_id, conn, *pubkey));
+        Ok(LifetimeP::HelloAck { resolver_time: now })
+    }
+
+    /// Evict the gateway entry once its connection closes (ptr-guarded against
+    /// a racing re-registration), mirroring [`Self::watch_relay`].
+    pub fn watch_gateway(self: &Arc<Self>, gateway_id: RelayId, conn: Arc<Connection>) {
+        let resolver = self.clone();
+        tokio::spawn(async move {
+            let _ = conn.closed().await;
+            resolver.remove_gateway_if_same(gateway_id, &conn);
+        });
+    }
+
+    fn remove_gateway_if_same(&self, gateway_id: RelayId, conn: &Arc<Connection>) {
+        let mut gateways = self.gateways.write();
+        let same = gateways
+            .get(&gateway_id)
+            .map(|e| Arc::ptr_eq(&e.conn, conn))
+            .unwrap_or(false);
+        if same {
+            gateways.remove(&gateway_id);
+        }
+    }
+
+    /// Snapshot of the gateway directory for serving `GetGateways`.
+    pub fn snapshot_gateways(&self) -> Vec<RelayEntry> {
+        self.gateways.read().values().cloned().collect()
+    }
+
+    /// Closes resolver — best-effort kicks every registered relay and gateway
+    /// so they stop trying to send into a soon-to-be-dead endpoint.
     pub fn close(&self) {
         for r in self.relays.read().values() {
             r.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
+        }
+        for g in self.gateways.read().values() {
+            g.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
         }
     }
 }

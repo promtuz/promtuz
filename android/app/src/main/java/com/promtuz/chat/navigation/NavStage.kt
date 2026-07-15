@@ -127,6 +127,9 @@ fun NavStage(
     val forward = topKey != shownKey && backStack.size > shownSize
     val enter = remember { Animatable(1f) } // 0 = new fully offscreen right, 1 = settled
     var pushing by remember { mutableStateOf(false) }
+    // Detached pop ghosts sliding off — declared here (not with the back gesture below) so the
+    // forward-push effect can read it for reopen-continuity.
+    val exiting = remember { mutableStateListOf<ExitingCard>() }
     // Fresh per destination (remember(topKey) auto-resets); the incoming card flips it in onPlaced.
     val placed = remember(topKey) { mutableStateOf(false) }
     LaunchedEffect(topKey) {
@@ -136,7 +139,11 @@ fun NavStage(
         if (isForward) {
             pushing = true
             try {
-                enter.snapTo(0f)
+                // Continuity: reopening a chat whose pop-ghost is still sliding off starts the slide-in
+                // from where the ghost is now (not full offscreen-right), so the card reads as returning.
+                val startEnter = exiting.firstOrNull { it.entry.contentKey == topKey }
+                    ?.let { 1f - it.commit.value } ?: 0f
+                enter.snapTo(startEnter)
                 // Hold offscreen until the incoming screen has laid out, so its first-frame cost is
                 // spent while parked, not eating the slide (timeout is a safety net).
                 withTimeoutOrNull(250) { snapshotFlow { placed.value }.first { it } }
@@ -149,7 +156,8 @@ fun NavStage(
                     val now = withFrameNanos { it }
                     elapsed += (now - last).coerceAtMost(FRAME_CAP_NANOS)
                     last = now
-                    enter.snapTo(fwdEase.transform((elapsed.toFloat() / durNanos).coerceIn(0f, 1f)))
+                    val t = fwdEase.transform((elapsed.toFloat() / durNanos).coerceIn(0f, 1f))
+                    enter.snapTo(startEnter + (1f - startEnter) * t)
                 }
                 enter.snapTo(1f)
             } finally {
@@ -166,7 +174,6 @@ fun NavStage(
     var touchY by remember { mutableFloatStateOf(heightPx / 2f) }
     var fromRight by remember { mutableStateOf(false) }
     val progress = remember { Animatable(0f) }
-    val exiting = remember { mutableStateListOf<ExitingCard>() }
 
     PredictiveBackHandler(enabled = entries.size > 1) { events: Flow<BackEventCompat> ->
         backActive = true
@@ -202,6 +209,12 @@ fun NavStage(
         }
     }
 
+    // Reopening a chat whose pop-ghost is mid-slide: the incoming card's first frame starts at the
+    // ghost's current offset (not full-right) so there's no gap before the continuity slide-in.
+    val firstFrameEnter = if (forward) {
+        exiting.firstOrNull { it.entry.contentKey == topKey }?.let { 1f - it.commit.value } ?: 0f
+    } else 0f
+
     // Live top transform. graphicsLayer lambdas read the animatables (draw-only, no recomposition).
     val frontMod = when {
         backActive -> Modifier.graphicsLayer {
@@ -217,7 +230,7 @@ fun NavStage(
             shape = RoundedCornerShape(lerp(deviceRadius.toPx(), pbgCorner.toPx(), progress.value))
         }
         showPush -> Modifier
-            .graphicsLayer { translationX = (1f - (if (forward) 0f else enter.value)) * widthPx }
+            .graphicsLayer { translationX = (1f - (if (forward) firstFrameEnter else enter.value)) * widthPx }
             .clip(restShape)
         else -> Modifier.clip(restShape)
     }
@@ -227,9 +240,15 @@ fun NavStage(
         // One keyed loop → a screen changing role (top ⇄ revealed) is matched by contentKey and MOVED
         // by Compose, not disposed+recreated (which would reset its scroll/state, and pop a ghost early).
         val layers = buildList {
-            if ((backActive || showPush) && below != null) add(Triple(below, Modifier.clip(restShape), false))
-            add(Triple(top, frontMod, backActive))
+            val seen = HashSet<Any?>()
+            if ((backActive || showPush) && below != null) { add(Triple(below, Modifier.clip(restShape), false)); seen += below.contentKey }
+            add(Triple(top, frontMod, backActive)); seen += top.contentKey
+            // Drop any exiting ghost whose key is already live — every entry shares one
+            // SaveableStateHolder, so two with the same contentKey crash ("used multiple times").
+            // This is the reopen-while-sliding-off case; the live reopened card takes over (and picks
+            // up the ghost's position via firstFrameEnter).
             exiting.forEach { ex ->
+                if (!seen.add(ex.entry.contentKey)) return@forEach
                 add(Triple(ex.entry, Modifier.graphicsLayer {
                     scaleX = ex.scale
                     scaleY = ex.scale

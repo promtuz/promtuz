@@ -30,6 +30,10 @@ impl HandleRPC for Resolver {
             ClientRequest::GetBootstrapPeers { near, count_xor_near, count_rtt_near } => {
                 handle_get_bootstrap_peers(self, near, count_xor_near, count_rtt_near)
             },
+            ClientRequest::GetGateways() => {
+                let gateways = self.snapshot_gateways().iter().map(|g| g.to_descriptor()).collect();
+                Ok(ClientResponse::GetGateways { gateways })
+            },
         }
     }
 }

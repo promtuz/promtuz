@@ -6,6 +6,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.jetbrains.kotlin.serialization)
+
+    id("com.google.gms.google-services")
 }
 
 val localProperties = Properties().apply {
@@ -283,8 +285,14 @@ dependencies {
 
     implementation(libs.capturable)
 
+    implementation(platform(libs.firebase.bom))
+
+    implementation(libs.firebase.messaging)
+
     // uniffi Kotlin bindings run on JNA. MUST be @aar (bundles the per-ABI
-    // jnidispatch.so); the version pin (>=5.17) is 16KB-page-safe.
+    // jnidispatch.so; a plain jar throws UnsatisfiedLinkError at the first FFI
+    // call). A version-catalog alias can't carry the @aar classifier, so pin it
+    // here with the catalog version. >=5.17 is 16KB-page-safe.
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     testImplementation(kotlin("test"))

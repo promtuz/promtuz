@@ -153,8 +153,8 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 /// _each_other_synchronously`) and rely on the unit tests of each
 /// half. A real two-relay harness covers the rest.
 ///
-/// Visible to the rest of `dht/` (notably `publish.rs`) so the cache +
-/// dial path is shared rather than duplicated.
+/// Visible to the rest of `dht/` (e.g. `forward.rs`, `queue_drain.rs`) so
+/// the cache + dial path is shared rather than duplicated.
 pub(crate) async fn connect_to_peer(
     dht: &Arc<Dht>, peer: &NodeDescriptor,
 ) -> anyhow::Result<Connection> {

@@ -1,0 +1,36 @@
+# Promtuz push-gateway config. dpkg conffile: your edits survive `apt upgrade`.
+# On first start the gateway generates /etc/promtuz/keys/gateway/gateway.key,
+# writes a CSR to /etc/promtuz/keys/gateway/gateway.csr, and waits. Sign it WITH
+# the push-gateway capability (`certgen sign … --cap push-gateway`) and drop the
+# cert at /etc/promtuz/certs/gateway.crt — it then starts automatically.
+
+[network]
+# Bind. 0.0.0.0:<port> is fine on a single-public-IP box. Default port 40434.
+address = "0.0.0.0:40434"
+
+# One Ed25519 key = identity (signs GatewayHello, derives node id) + TLS server
+# key. Auto-generated 0600 on first boot if absent.
+key_path = "/etc/promtuz/keys/gateway/gateway.key"
+
+# CA-issued cert certifying key_path, carrying the PUSH_GATEWAY capability.
+cert_path = "/etc/promtuz/certs/gateway.crt"
+
+# Production RootCA public cert. Provision it here before first start (NOT
+# shipped in the package — the gateway won't come up without it):
+#   install -m 0644 RootCA.pem /etc/promtuz/ca.pem
+root_ca_path = "/etc/promtuz/ca.pem"
+
+[log]
+# trace|debug|info|warn|error ; the PZ_LOG env var overrides this.
+level = "info"
+
+# Resolver(s) to register with, so relays can discover this gateway.
+[[resolver.seed]]
+# Resolver identity pubkey (hex) + address (host[:port]; port defaults 40433).
+key = "55ECA4054C27FF7E8D613F876CBED9C9AC72F7737AF520511663EBA4F6CE1D1B"
+addr = "resolver.promtuz.dev"
+
+[push]
+# FCM HTTP v1 service-account JSON. This is a SECRET — it is NOT shipped in the
+# package. Provision it out of band: drop the file here, 0600, owned pzgateway.
+fcm_service_account = "/etc/promtuz/fcm-service-account.json"

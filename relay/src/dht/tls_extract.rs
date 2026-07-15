@@ -54,6 +54,8 @@
 //! cert, so we only need to extract the SPKI.
 //!
 
+use common::node::capability::CAPABILITY_OID;
+use common::node::capability::NodeCapabilities;
 use thiserror::Error;
 use x509_parser::der_parser::Oid;
 use x509_parser::oid_registry::asn1_rs::oid;
@@ -64,6 +66,24 @@ use common::quic::id::NodeId;
 
 /// Ed25519 SPKI algorithm OID per RFC 8410.
 const ED25519_OID: Oid<'static> = oid!(1.3.101 .112);
+
+/// Read the CA-signed [`NodeCapabilities`] from a connection's peer leaf cert,
+/// if the capability extension is present. Used to check a dialed gateway
+/// actually carries `PUSH_GATEWAY` before trusting it with a wake — the
+/// resolver directory is untrusted. Works because the dialed peer is the TLS
+/// *server* and always presents its cert (no client-auth needed).
+pub(crate) fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
+    let identity = conn.peer_identity()?;
+    let chain = identity.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()?;
+    capabilities_from_leaf_der(chain.first()?.as_ref())
+}
+
+fn capabilities_from_leaf_der(der: &[u8]) -> Option<NodeCapabilities> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    let oid = Oid::from(CAPABILITY_OID).ok()?;
+    let ext = cert.extensions().iter().find(|e| e.oid == oid)?;
+    NodeCapabilities::decode(ext.value)
+}
 
 /// Reasons the post-handshake TLS pubkey extraction can fail. Each
 /// maps to a `CloseReason` at the call site (currently always

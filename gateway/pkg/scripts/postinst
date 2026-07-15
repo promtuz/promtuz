@@ -1,0 +1,38 @@
+#!/bin/sh
+set -e
+
+if ! getent passwd pzgateway >/dev/null 2>&1; then
+    adduser --system --group --no-create-home --home /etc/promtuz pzgateway
+fi
+
+install -d -o root      -g root      -m 0755 /etc/promtuz
+install -d -o root      -g root      -m 0711 /etc/promtuz/keys
+install -d -o root      -g root      -m 0755 /etc/promtuz/certs
+install -d -o pzgateway -g pzgateway -m 0700 /etc/promtuz/keys/gateway
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+# Fresh install ($2 empty): enable + start now. The gateway generates its key,
+# writes a CSR, and waits for the signed cert (ensure_enrolled never
+# crash-loops), so starting before enrollment is safe. Upgrade: try-restart to
+# pick up the new binary if running.
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    systemctl enable --now pzgateway >/dev/null 2>&1 || true
+else
+    systemctl try-restart pzgateway >/dev/null 2>&1 || true
+fi
+
+cat <<'EOF'
+pzgateway installed and enabled. It won't come up until the RootCA is present,
+then it writes a CSR and waits for its cert. Three steps left:
+  1. Provide the RootCA public cert (required to start):
+       install -m 0644 RootCA.pem /etc/promtuz/ca.pem
+  2. On your CA box, sign the CSR WITH the push-gateway capability:
+       certgen sign /etc/promtuz/keys/gateway/gateway.csr --cap push-gateway
+     then drop the signed cert at /etc/promtuz/certs/gateway.crt   # starts serving automatically
+  3. Provide the FCM service-account JSON (a secret):
+       install -o pzgateway -g pzgateway -m 0600 fcm-sa.json /etc/promtuz/fcm-service-account.json
+Edit /etc/promtuz/gateway.toml for a non-default resolver seed or bind address.
+EOF
+
+exit 0

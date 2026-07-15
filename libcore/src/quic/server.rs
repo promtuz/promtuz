@@ -39,7 +39,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::ENDPOINT;
-use crate::state::CONNECTION_START_TIME;
 use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
@@ -50,6 +49,7 @@ use crate::events::connection::ConnectionState;
 use crate::events::messaging::MessageEv;
 use crate::quic::relay_dht_client::RelayDhtClient;
 use crate::ret_err;
+use crate::state::CONNECTION_START_TIME;
 use crate::utils::systime;
 
 /// KP rotation scheduler tick cadence. Each tick the libcore checks
@@ -126,7 +126,10 @@ impl Relay {
             Ok(Err(err)) => {
                 ConnectionState::Failed.emit();
                 if is_terminal_for_relay(&err) {
-                    warn!("relay({}) at {addr} cert/auth failure ({err}) — terminal, will not retry", self.id);
+                    warn!(
+                        "relay({}) at {addr} cert/auth failure ({err}) — terminal, will not retry",
+                        self.id
+                    );
                     _ = self.record_terminal_failure();
                 } else {
                     error!("relay({}) at {addr} connect failed: {err}", self.id);
@@ -135,7 +138,11 @@ impl Relay {
                 return Err(RelayConnError::Continue);
             },
             Err(_) => {
-                warn!("relay({}) at {addr} unreachable — timed out after {}s", self.id, CONNECT_TIMEOUT.as_secs());
+                warn!(
+                    "relay({}) at {addr} unreachable — timed out after {}s",
+                    self.id,
+                    CONNECT_TIMEOUT.as_secs()
+                );
                 ConnectionState::Failed.emit();
                 _ = self.record_failure();
                 return Err(RelayConnError::Continue);
@@ -215,7 +222,7 @@ impl Relay {
             async move { relay.sample_rtt(&conn).await }
         });
 
-        self.connection = Some(conn);
+        self.connection = Some(conn.clone());
 
         // Build the production DHT-RPC dialer once the relay/1 connection
         // is established. The dialer rides this same connection, stored on
@@ -236,6 +243,33 @@ impl Relay {
         });
 
         *RELAY.write() = Some(self);
+
+        // Lease is short-lived by design. Refresh below half-life while this
+        // exact home connection remains live; reconnect also re-registers it.
+        tokio::spawn({
+            let conn = conn.clone();
+            async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(4 * 60));
+                tick.tick().await;
+                while conn.close_reason().is_none() {
+                    tick.tick().await;
+                    if let Err(e) = crate::messaging::renew_presence_lease().await {
+                        debug!("presence lease renewal failed: {e}");
+                    }
+                }
+            }
+        });
+
+        // Register our push-pseudonym so this home can wake us when offline,
+        // and (re)register P→token with a gateway if we hold a push token.
+        tokio::spawn(async {
+            if let Err(e) = crate::push::register_push().await {
+                warn!("register_push failed: {e}");
+            }
+            if let Err(e) = crate::push::register_token_at_gateway().await {
+                debug!("register_token_at_gateway failed: {e}");
+            }
+        });
 
         Ok(handle)
     }
@@ -260,9 +294,7 @@ impl Relay {
     /// The transcript binds (self_ipk, this_relay_id, timestamp); the same
     /// signature is reusable across all K homes (no per-home identity in the
     /// transcript) within the ±60s skew window. Part of the sticky-home flow.
-    async fn send_drain_auth(
-        &self, conn: &quinn::Connection, ipk: VerifyingKey,
-    ) -> Result<()> {
+    async fn send_drain_auth(&self, conn: &quinn::Connection, ipk: VerifyingKey) -> Result<()> {
         let timestamp = systime().as_millis() as u64;
         let relay_node_id = NodeId::from_str(&self.id)
             .map_err(|e| anyhow!("relay id {:?} not parseable as NodeId: {e:?}", self.id))?;
@@ -271,10 +303,7 @@ impl Relay {
         let sig = IdentitySigner::sign(&transcript)?;
 
         let (mut tx, _rx) = conn.open_bi().await?;
-        let packet = CRelayPacket::DrainAuth {
-            timestamp,
-            sig: Bytes::from(sig.to_bytes()),
-        };
+        let packet = CRelayPacket::DrainAuth { timestamp, sig: Bytes::from(sig.to_bytes()) };
         packet.send(&mut tx).await?;
         _ = tx.finish();
         Ok(())
@@ -389,11 +418,8 @@ impl Relay {
             // that references its group is drained (a drained message
             // from a not-yet-known sender would be dropped). Bounded so
             // a dead DHT can't stall the drain.
-            match tokio::time::timeout(
-                Duration::from_secs(15),
-                poll_welcomes_once(client.clone()),
-            )
-            .await
+            match tokio::time::timeout(Duration::from_secs(15), poll_welcomes_once(client.clone()))
+                .await
             {
                 Ok(Ok(())) => {},
                 Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
@@ -448,27 +474,21 @@ impl Relay {
             _ = tx.finish();
 
             let mut received = 0usize;
+            let mut failed = false;
             while let Ok(packet) = SRelayPacket::unpack(&mut rx).await {
                 match packet {
                     SRelayPacket::Deliver(msg) => {
                         received += 1;
-                        // A failure here is terminal for the message
-                        // (bad sig / no group state / undecryptable) —
-                        // we still ack the batch below; redelivering
-                        // bytes we already failed on cannot go better.
-                        // ponytail: batch-level ack; per-id acks when
-                        // the wire grows them (architecture round).
-                        if let Err(e) =
-                            process_deliver(msg, self.dht_client.clone()).await
-                        {
-                            warn!("relay({}) drain: dropping message: {e}", self.id);
+                        if let Err(e) = process_deliver(msg, self.dht_client.clone()).await {
+                            failed = true;
+                            warn!("relay({}) drain: retaining message for retry: {e}", self.id);
                         }
                     },
                     other => debug!("unexpected packet in drain response: {other:?}"),
                 }
             }
 
-            if received > 0 {
+            if received > 0 && !failed {
                 info!("relay({}): drained {received} queued message(s)", self.id);
                 self.ack_drain(conn, ipk).await;
             }
@@ -512,13 +532,7 @@ impl Relay {
                 while let Ok(packet) = SRelayPacket::unpack(&mut recv).await {
                     if let Err(err) = match packet {
                         SRelayPacket::Deliver(msg) => {
-                            handle_deliver(
-                                &mut send,
-                                ipk,
-                                msg,
-                                dht_client_for_stream.clone(),
-                            )
-                            .await
+                            handle_deliver(&mut send, ipk, msg, dht_client_for_stream.clone()).await
                         },
                         SRelayPacket::Activity(eph) => {
                             handle_activity(ipk, eph);
@@ -573,10 +587,9 @@ impl Relay {
 
 /// Live-delivery entry point: process one relay-initiated `Deliver`,
 /// then ack on the stream — the relay's `try_deliver` waits on this
-/// ack (3s) before treating the message as delivered.
+/// ack before treating the message as delivered.
 async fn handle_deliver(
-    tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
-    dht_client: Option<Arc<RelayDhtClient>>,
+    tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
     process_deliver(msg, dht_client).await?;
     CRelayPacket::DeliverAck.send(tx).await?;
@@ -592,7 +605,10 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     }
     let Ok(vk) = VerifyingKey::from_bytes(&eph.from.0) else { return };
     let transcript = common::proto::client_rel::activity_sig_message(
-        &eph.to.0, &eph.from.0, eph.activity, eph.timestamp,
+        &eph.to.0,
+        &eph.from.0,
+        eph.activity,
+        eph.timestamp,
     );
     if vk.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&eph.sig.0)).is_err() {
         return;
@@ -608,6 +624,7 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
 /// for non-contacts as defense-in-depth.
 fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
     use common::proto::client_rel::PresenceState;
+
     use crate::platform::Presence;
     for e in list {
         if !Contact::exists(&e.who.0) {
@@ -636,9 +653,7 @@ fn is_welcome_envelope(payload: &[u8]) -> bool {
     )
 }
 
-async fn process_deliver(
-    msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
-) -> Result<()> {
+async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>) -> Result<()> {
     // Already decrypted on an earlier connection? A different home is
     // redelivering. Ack (Ok → relay GCs) but NEVER re-decrypt: the ratchet
     // key is spent and openmls would SecretReuseError. Outer-keyed + pre-
@@ -712,10 +727,11 @@ async fn process_deliver(
                         AppPayload::Reply { reply_to, content } => (content, Some(reply_to)),
                         _ => unreachable!(),
                     };
-                    let timestamp = systime().as_secs();
-                    match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp, reply_to) {
+                    let timestamp = msg.accepted_at_ms / 1_000;
+                    match Message::save_incoming(
+                        *msg.from, &msg.id.0, &content, timestamp, reply_to,
+                    ) {
                         Ok(Some(saved)) => {
-                            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Received {
                                 id: saved.inner.id,
                                 from: *msg.from,
@@ -729,7 +745,9 @@ async fn process_deliver(
                             let upto = msg.id.0;
                             crate::RUNTIME.spawn(async move {
                                 let _ = crate::messaging::send_receipt(
-                                    from, ReceiptKind::Delivered, upto,
+                                    from,
+                                    ReceiptKind::Delivered,
+                                    upto,
                                 )
                                 .await;
                             });
@@ -737,7 +755,10 @@ async fn process_deliver(
                         // Relay redelivered a dispatch_id we already stored: no
                         // re-emit, but still Ok so the caller acks and the relay GCs.
                         Ok(None) => {
-                            debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&msg.from[..4]));
+                            debug!(
+                                "MESSAGE: duplicate from {}, already stored",
+                                hex::encode(&msg.from[..4])
+                            );
                         },
                         Err(e) => {
                             warn!("MESSAGE: failed to save incoming: {e}");
@@ -786,7 +807,9 @@ async fn process_deliver(
                     // Reactor is the MLS sender (`msg.from`) — attributed to its
                     // own IPK, so this is already group-correct.
                     let ts = systime().as_secs();
-                    if crate::data::reaction::Reaction::apply(&msg.from, &target, &msg.from, &emoji, add, ts) {
+                    if crate::data::reaction::Reaction::apply(
+                        &msg.from, &target, &msg.from, &emoji, add, ts,
+                    ) {
                         crate::events::messaging::ReactionEv {
                             peer: *msg.from,
                             dispatch_id: target,
@@ -802,7 +825,10 @@ async fn process_deliver(
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
                 },
                 Err(e) => {
-                    warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&msg.from[..4]));
+                    warn!(
+                        "MESSAGE: undecodable AppPayload from {}: {e}",
+                        hex::encode(&msg.from[..4])
+                    );
                     bail!("bad AppPayload");
                 },
             }
@@ -855,10 +881,7 @@ async fn process_deliver(
             // a stale epoch — openmls only retains a small past-epoch
             // key window — so re-delivery is hopeless, and an explicit
             // ack is the correct response.
-            warn!(
-                "MESSAGE: stale-epoch envelope from {}; dropping",
-                hex::encode(&msg.from[..4])
-            );
+            warn!("MESSAGE: stale-epoch envelope from {}; dropping", hex::encode(&msg.from[..4]));
         },
         Ok(None) => {
             // Currently unreachable — process_inbound_envelope only
@@ -867,7 +890,10 @@ async fn process_deliver(
             bail!("no inbound action");
         },
         Err(e) => {
-            warn!("MESSAGE: process_inbound_envelope failed from {}: {e}", hex::encode(&msg.from[..4]));
+            warn!(
+                "MESSAGE: process_inbound_envelope failed from {}: {e}",
+                hex::encode(&msg.from[..4])
+            );
             bail!("process failed: {e}");
         },
     }
@@ -948,13 +974,9 @@ async fn handle_ack_auth_request(
 ///
 /// Returns `Err` if the connection isn't established yet; the caller
 /// logs and skips the MLS background work.
-fn build_relay_dht_client(
-    relay: &Relay, ipk: VerifyingKey,
-) -> Result<Arc<RelayDhtClient>> {
-    let conn = relay
-        .connection
-        .clone()
-        .ok_or_else(|| anyhow!("relay connection not established"))?;
+fn build_relay_dht_client(relay: &Relay, ipk: VerifyingKey) -> Result<Arc<RelayDhtClient>> {
+    let conn =
+        relay.connection.clone().ok_or_else(|| anyhow!("relay connection not established"))?;
     Ok(Arc::new(RelayDhtClient::new(conn, ipk.to_bytes(), relay.home_node_id)))
 }
 
@@ -1004,9 +1026,7 @@ async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
 /// then delegates to [`run_scheduler_inner`]. Errors loading the
 /// identity exit the loop early (logged); the inner loop owns the
 /// cancellation contract.
-async fn run_scheduler_loop(
-    client: Arc<RelayDhtClient>, cancel: CancellationToken,
-) {
+async fn run_scheduler_loop(client: Arc<RelayDhtClient>, cancel: CancellationToken) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
@@ -1048,26 +1068,14 @@ async fn run_scheduler_loop(
 ///
 /// Generic over [`crate::quic::dht_client::DhtClient`] so unit tests
 /// can drive it with the in-process `FakeDhtClient`.
-///
 async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
-    provider: &crate::mls::PromtuzMlsProvider,
-    stash: &crate::mls::KeyPackageStash,
-    signing: &ed25519_dalek::SigningKey,
-    dht: &C,
-    tick_interval: Duration,
+    provider: &crate::mls::PromtuzMlsProvider, stash: &crate::mls::KeyPackageStash,
+    signing: &ed25519_dalek::SigningKey, dht: &C, tick_interval: Duration,
     cancel: CancellationToken,
 ) {
     loop {
         let now_ms = systime().as_millis() as u64;
-        match crate::mls::scheduler::run_once(
-            provider,
-            stash,
-            signing,
-            dht,
-            now_ms,
-        )
-        .await
-        {
+        match crate::mls::scheduler::run_once(provider, stash, signing, dht, now_ms).await {
             Ok(crate::mls::scheduler::SchedulerOutcome::NoOp) => {},
             Ok(other) => {
                 debug!("MLS scheduler: {other:?}");
@@ -1158,17 +1166,14 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Stash is full; second tick is NoOp; no new batch published.
-        assert_eq!(
-            dht.published_kp_batches.lock().len(),
-            1,
-            "healthy-stash tick is NoOp"
-        );
+        assert_eq!(dht.published_kp_batches.lock().len(), 1, "healthy-stash tick is NoOp");
 
         // Cancel and confirm the loop exits.
         cancel.cancel();
         // Give it a chance to observe cancel + return.
         tokio::time::advance(Duration::from_millis(1)).await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), join).await
+        let _ = tokio::time::timeout(Duration::from_secs(1), join)
+            .await
             .expect("scheduler exits within 1s of cancel");
     }
 }

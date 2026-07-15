@@ -30,8 +30,8 @@
 //! ## Lock contract
 //!
 //! `parking_lot::Mutex<Option<DrainAuth>>` on `ClientContext`. Per the
-//! workspace-wide rule (cf. `forward.rs:59`) we never hold the guard
-//! across an `await`. The handler does no I/O after taking the lock,
+//! workspace-wide rule we never hold the guard across an `await`. The
+//! handler does no I/O after taking the lock,
 //! so the constraint is trivially satisfied.
 
 use common::crypto::PublicKey;

@@ -389,7 +389,7 @@ impl KeyPackageStash {
 
     /// Fill the stash up to [`KP_STASH_TARGET`] unconsumed in-lifetime
     /// KPs. Returns the freshly-generated records (so the caller can
-    /// publish them via [`Self::publish_to_homes`]).
+    /// publish them via the QUIC client's `DhtClient::publish_keypackages`).
     ///
     /// Idempotent: if the stash is already at target, returns an empty
     /// vec without minting anything.
@@ -508,44 +508,6 @@ impl KeyPackageStash {
         .unwrap_or(0)
     }
 
-    // -----------------------------------------------------------------
-    // Publish
-    // -----------------------------------------------------------------
-
-    /// Stub — the wire-side fan-out to `K=3` homes via the
-    /// `KeyPackagePublish` RPC.
-    ///
-    /// This ships **only the surface and contract**: the actual
-    /// relay-dial path is owned by libcore's QUIC client
-    /// (`libcore/src/quic/server.rs` and friends). The function
-    /// signature is fixed here so the implementation can drop in
-    /// without changing the call sites the rotation/refill paths use.
-    ///
-    /// Contract:
-    /// - `records` is the batch produced by [`Self::ensure_stash_full`]
-    ///   or [`Self::rotate_periodic`].
-    /// - `homes` are the K=3 closest-by-XOR `NodeId`s of
-    ///   `BLAKE3("kp:" || ipk)` (computed by the QUIC layer from its
-    ///   routing table).
-    /// - Returns `Ok(())` on K_MIN=2 successful stores, otherwise an
-    ///   error documenting the partial state. The error variant is
-    ///   still to be defined.
-    ///
-    /// Today this returns `Err(KeyPackageStashError::OpenMlsBuild(...))`
-    /// with a clear "not yet wired" message — the Welcome flow does not
-    /// depend on publish. We deliberately do not fake-publish to avoid
-    /// silently shipping unverified KPs.
-    #[allow(dead_code, unused_variables)] // Wiring entrypoint.
-    pub async fn publish_to_homes(
-        records: &[KeyPackageRecord],
-        homes: &[common::quic::id::NodeId],
-    ) -> Result<()> {
-        Err(KeyPackageStashError::OpenMlsBuild(
-            "publish_to_homes wiring is Phase 4 work — \
-             call from a libcore QUIC client when Phase 4 lands"
-                .to_string(),
-        ))
-    }
 }
 
 // ---------------------------------------------------------------------------

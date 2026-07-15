@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 pub mod config;
+pub mod dht_log;
 
 pub fn systime() -> Duration {
     let now = SystemTime::now();

@@ -21,6 +21,8 @@ pub(crate) mod lookup;
 pub mod metrics;
 pub(crate) mod mls;
 pub(crate) mod peer_dial;
+pub(crate) mod push_replication;
+pub(crate) mod push_wake;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
@@ -32,34 +34,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use common::proto::client_res::GatewayDescriptor;
 use common::quic::id::NodeId;
+pub use config::DhtConfig;
 use ed25519_dalek::SigningKey;
 use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
 
-use crate::quic::resolver_link::ResolverLinkHandle;
-use crate::storage::db::Store;
-
-pub use config::DhtConfig;
-
 use self::metrics::Metrics;
 use self::mls::kp::KpFetchLimiters;
 use self::mls::welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
+use crate::quic::resolver_link::ResolverLinkHandle;
+use crate::storage::db::Store;
 
 /// Top-level DHT runtime state.
 ///
 /// Lock granularity:
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
-/// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring
-///   the existing `Relay::clients` pattern.
+/// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring the existing
+///   `Relay::clients` pattern.
 ///
 /// All sub-locks are `parking_lot` and *never* held across `await` —
-/// callers clone what they need out of the lock first (cf. the
-/// project-wide rule documented at
-/// `relay/src/quic/handler/client/events/forward.rs:59`).
+/// callers clone what they need out of the lock first (project-wide rule).
 ///
 /// `routing`/`peer_conns` are `pub(crate)` because only
 /// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
@@ -191,12 +190,29 @@ pub struct Dht {
     /// compiling — a relay-level `Relay::new` populates this via
     /// [`Self::attach_clients`].
     pub(crate) clients: Option<ClientsMap>,
+
+    /// Current user-signed active-relay leases. Shared with the client
+    /// handler so a lease relay can reject stale cross-relay routes.
+    pub(crate) presence_leases: Option<PresenceLeases>,
+
+    /// Shared `IPK -> P` map for offline push wake-up.
+    pub(crate) push_pseudonyms: Option<PushMap>,
+
+    /// Cached push-gateway directory, refreshed from the resolver. The enqueue
+    /// path dials one of these to send a [`WakeRequest`], verifying its
+    /// `PUSH_GATEWAY` capability at dial. Empty → no wakes.
+    pub(crate) push_gateways: PushGateways,
 }
 
 /// Shared reference to the relay's connected-clients map. Aliased so
 /// the field type stays readable. See `Dht::clients` for the lock
 /// contract and the `Option<...>` rationale.
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
+pub(crate) type PresenceLeases = Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>;
+pub(crate) type PushMap = Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>;
+
+/// Cached push-gateway descriptors from the resolver. See `Dht::push_gateways`.
+pub(crate) type PushGateways = Arc<RwLock<Vec<GatewayDescriptor>>>;
 
 impl Dht {
     /// Construct the runtime DHT state over the shared fjall [`Store`].
@@ -224,6 +240,9 @@ impl Dht {
             kp_fetch_limiters: KpFetchLimiters::new(),
             welcome_limiters: WelcomeLimiters::new(),
             clients: None,
+            presence_leases: None,
+            push_pseudonyms: None,
+            push_gateways: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -246,6 +265,14 @@ impl Dht {
     /// drive the home-side delivery path.
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
+    }
+
+    pub fn attach_presence_leases(&mut self, leases: PresenceLeases) {
+        self.presence_leases = Some(leases);
+    }
+
+    pub fn attach_push(&mut self, pseudonyms: PushMap) {
+        self.push_pseudonyms = Some(pseudonyms);
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path.

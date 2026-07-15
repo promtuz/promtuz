@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+    systemctl stop pzgateway >/dev/null 2>&1 || true
+    systemctl disable pzgateway >/dev/null 2>&1 || true
+fi
+
+exit 0

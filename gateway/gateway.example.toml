@@ -1,0 +1,27 @@
+# Push gateway config. Copy to /etc/promtuz/gateway.toml (or pass --config).
+# The gateway needs a cert the CA signed WITH the push-gateway capability:
+#   certgen sign gateway.csr --cap push-gateway
+# On first run with no valid cert it writes a CSR next to key_path and waits.
+
+[network]
+address = "0.0.0.0:40434"
+cert_path = "/etc/promtuz/gateway.crt"
+key_path = "/etc/promtuz/gateway.key"
+root_ca_path = "/etc/promtuz/ca.pem"
+# Restart in place when this file changes. Default off.
+watch_reload = false
+
+[log]
+level = "info"
+
+# Resolver(s) to register with, so relays can discover this gateway. Omit to
+# run undiscoverable (e.g. local testing with a statically-known relay).
+[[resolver.seed]]
+key = "<resolver-node-id>"
+addr = "resolver.promtuz.app:40433"
+
+[push]
+# FCM HTTP v1 service-account JSON (Firebase console → Project settings →
+# Service accounts → Generate new private key). Holds the sender credential;
+# keep it off community nodes. Omit to run without FCM dispatch.
+fcm_service_account = "/etc/promtuz/fcm-service-account.json"

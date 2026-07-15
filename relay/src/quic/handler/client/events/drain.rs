@@ -490,6 +490,7 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
         from:    d.from,
         payload: d.payload,
         sig:     d.sig,
+        accepted_at_ms: d.accepted_at_ms,
     }
 }
 
@@ -602,12 +603,14 @@ mod tests {
             id:      [3u8; 16].into(),
             payload: vec![4u8, 5, 6].into(),
             sig:     [7u8; 64].into(),
+            accepted_at_ms: 1,
         };
         let deliver = dispatch_to_deliver(dispatch.clone());
         assert_eq!(deliver.id, dispatch.id);
         assert_eq!(deliver.from, dispatch.from);
         assert_eq!(deliver.payload.0, dispatch.payload.0);
         assert_eq!(deliver.sig, dispatch.sig);
+        assert_eq!(deliver.accepted_at_ms, dispatch.accepted_at_ms);
     }
 
     /// The real cross-source drain dedupe — the guard that stops a
@@ -622,6 +625,7 @@ mod tests {
             from:    [from; 32].into(),
             payload: vec![id].into(),
             sig:     [0u8; 64].into(),
+            accepted_at_ms: 1,
         };
         let remote_dispatch = |id: u8, from: u8| DispatchP {
             to:      [9u8; 32].into(),
@@ -629,6 +633,7 @@ mod tests {
             id:      [id; 16].into(),
             payload: vec![id].into(),
             sig:     [0u8; 64].into(),
+            accepted_at_ms: 1,
         };
 
         // Local drains A, B (from=1); remote returns B, C (from=2). B overlaps.

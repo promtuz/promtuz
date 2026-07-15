@@ -46,6 +46,10 @@ pub struct AppConfig {
 pub struct LogConfig {
     /// trace|debug|info|warn|error. `PZ_LOG` env overrides. Default: info.
     pub level: Option<String>,
+
+    /// `[log] dht = true` unhides the DHT bootstrap/routing chatter.
+    #[serde(default)]
+    pub dht: bool,
 }
 
 impl AppConfig {

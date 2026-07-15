@@ -1,6 +1,7 @@
 package com.promtuz.chat
 
 import android.app.Application
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -12,8 +13,11 @@ import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import com.google.firebase.messaging.FirebaseMessaging
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
+import com.promtuz.core.AppCloseService
+import com.promtuz.core.push.PushNotifier
 import com.promtuz.core.PresenceStore
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CoroutineScope
@@ -71,6 +75,14 @@ class Promtuz : Application() {
         AppearanceStore.init(this)
         ChatPrefs.init(this)
 
+        // Push: post notifications from delivered messages, and hand libcore the current FCM token
+        // (onNewToken won't re-fire if unchanged). registerPushToken stores it and re-registers on
+        // each relay connect, so calling before the first connect is fine.
+        PushNotifier.start(this)
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token -> CoreBridge.registerPushToken(token.toByteArray()) }
+            .addOnFailureListener { Timber.tag("Push").w(it, "FCM token fetch failed — no wake until it succeeds") }
+
         CoroutineScope(Dispatchers.IO).launch {
             CoreEventBus.presenceByPeer.collectLatest { map ->
                 delay(1500) // collectLatest cancels+restarts on a new value → debounce
@@ -78,11 +90,11 @@ class Promtuz : Application() {
             }
         }
 
-        // Foreground → nudge core for an instant reconnect (the raised idle
-        // timeout means most app switches never dropped the connection) and go
-        // Active. Background → assert Idle (the last packet before we freeze).
+        // Foreground → nudge core for an instant reconnect and go Active.
+        // Background → assert Idle (the last packet before we freeze).
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
+                startService(Intent(this@Promtuz, AppCloseService::class.java))
                 CoreBridge.onForeground()
                 CoreBridge.setPresence(idle = false)
             }

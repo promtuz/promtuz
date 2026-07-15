@@ -31,6 +31,7 @@ use common::debug;
 use common::info;
 use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
+use common::proto::client_res::GatewayDescriptor;
 use common::proto::client_res::RelayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -142,6 +143,23 @@ impl ResolverLinkHandle {
                 "GetBootstrapPeers: resolver returned unexpected variant {:?}",
                 other
             )),
+        }
+    }
+
+    /// Fetch the resolver's push-gateway directory. One bi-stream per RPC, same
+    /// contract as [`Self::get_bootstrap_peers`].
+    pub async fn get_gateways(&self) -> Result<Vec<GatewayDescriptor>> {
+        let conn =
+            self.current_connection().context("no live resolver session for GetGateways")?;
+
+        let bytes = ClientRequest::GetGateways().pack()?;
+        let (mut send, mut recv) = conn.open_bi().await?;
+        send.write_all(&bytes).await?;
+        send.finish()?;
+
+        match ClientResponse::unpack(&mut recv).await? {
+            ClientResponse::GetGateways { gateways } => Ok(gateways),
+            other => Err(anyhow!("GetGateways: resolver returned unexpected variant {:?}", other)),
         }
     }
 }

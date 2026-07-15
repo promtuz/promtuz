@@ -137,6 +137,24 @@ async fn handle_lifetime(
             // so the auth path can't regress quietly.
             Ok(())
         },
+        GatewayHello { gateway_id, pubkey, timestamp, sig } => {
+            let hello = GatewayHello { gateway_id, pubkey, timestamp, sig };
+            let hello_ack = match resolver.register_gateway(conn.clone(), &hello) {
+                Ok(ack) => ResolverPacket::Lifetime(ack),
+                Err(close) => {
+                    close.close(&conn);
+                    return Err(PacketError::PolicyClose);
+                },
+            };
+            resolver.watch_gateway(gateway_id, conn.clone());
+
+            let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
+            hello_ack.send(&mut send).await?;
+            send.finish().map_err(anyhow::Error::from)?;
+
+            info!("gateway({addr}) connected with ID({gateway_id})");
+            Ok(())
+        },
         _ => {
             warn!("unexpected lifetime packet from relay({})", conn.remote_address());
             Err(PacketError::Other(anyhow!("unexpected lifetime packet")))

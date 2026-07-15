@@ -34,7 +34,7 @@
 //!
 //! `parking_lot::RwLock<RoutingTable>` is read once to compute the
 //! K-closest descriptors; we clone descriptors out of the guard
-//! before any `await` (project-wide rule, cf. `forward.rs:59`).
+//! before any `await` (project-wide rule, same as `forward.rs`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -190,8 +190,8 @@ pub(crate) async fn fetch_remote_queues_with_homes(
     //    `user_sig`) covers `(user_ipk, requester_relay_id,
     //    timestamp)`, none of which depend on the home being
     //    addressed — one signature works for every home in `homes`.
-    //    Mirrors the publish.rs / forward.rs "build record once,
-    //    multiplex over K peers" pattern.
+    //    Mirrors forward.rs's "build record once, multiplex over K
+    //    peers" pattern.
     let fetch_pkt = QueueFetch {
         user_ipk:           Bytes(*user_ipk),
         requester_relay_id: self_relay_id,
@@ -365,12 +365,6 @@ async fn remote_fetch_one(
 /// produces soft "no data for you" responses so a misbehaving
 /// requester is silently rate-limited rather than disconnecting.
 ///
-/// 1. `QueueFetch::verify(req, now_ms)` — user_sig + skew check.
-/// 2. `self_is_in_k_closest(user_ipk)` — defensive.
-/// 3. Read up to `MAX_FETCH_QUEUE_BATCH + 1` entries; the +1 lets us
-///    set `exhausted = false` correctly without a second range
-///    query when the queue extends past the cap.
-///
 /// **Verification ladder** (mirrors `handle_queue_fetch_ack_rpc`):
 /// 1. `req.requester_relay_id == authenticated_peer_id` — the
 ///    connection's authenticated `DhtHello` peer id must equal the
@@ -380,6 +374,9 @@ async fn remote_fetch_one(
 ///    first because a mismatch shortcuts the Ed25519 verify.
 /// 2. `QueueFetch::verify(req, now_ms)` — user_sig + skew.
 /// 3. `self_is_in_k_closest_qd` — defensive K-set check.
+/// 4. Read up to `MAX_FETCH_QUEUE_BATCH + 1` entries; the +1 lets us
+///    set `exhausted = false` correctly without a second range query
+///    when the queue extends past the cap.
 ///
 pub(crate) async fn handle_queue_fetch_rpc(
     dht: &Arc<Dht>, req: QueueFetch, authenticated_peer_id: NodeId, now_ms: u64,
@@ -406,7 +403,7 @@ pub(crate) async fn handle_queue_fetch_rpc(
         return QueueFetchResp { messages: Vec::new(), exhausted: true };
     }
 
-    // 3. Read up to MAX_FETCH_QUEUE_BATCH + 1 entries; the +1 is the
+    // 4. Read up to MAX_FETCH_QUEUE_BATCH + 1 entries; the +1 is the
     //    lookahead that tells us whether more remain.
     let probe_max = MAX_FETCH_QUEUE_BATCH + 1;
     let mut peek = super::store::lookup_queue_for_user(dht, &user_ipk, probe_max);
