@@ -26,9 +26,10 @@ class PushService : FirebaseMessagingService() {
         val work = OneTimeWorkRequestBuilder<DrainWorker>()
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
-        // Coalesce a burst of wakes: keep any drain already enqueued/running
-        // rather than spawning parallel 12s workers that burn the expedited quota.
+        // One worker owns the drain, but a later wake must renew its deadline.
+        // KEEP can leave a just-arrived queued message waiting behind a worker
+        // that is about to time out.
         WorkManager.getInstance(applicationContext)
-            .enqueueUniqueWork("push-drain", ExistingWorkPolicy.KEEP, work)
+            .enqueueUniqueWork("push-drain", ExistingWorkPolicy.REPLACE, work)
     }
 }

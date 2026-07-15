@@ -27,11 +27,11 @@ impl Dht {
     /// gateway. No-op otherwise. Fire-and-forget: spawns the dial so the
     /// enqueue path never blocks on the gateway.
     pub(crate) fn trigger_wake(&self, recipient_ipk: &[u8; 32]) {
-        let (Some(map), Some(endpoint)) = (&self.push_pseudonyms, &self.endpoint) else {
+        let Some(endpoint) = &self.endpoint else {
             return;
         };
-        let Some(pseudonym) = map.read().get(recipient_ipk).copied() else {
-            return; // this relay isn't a home the device registered with
+        let Some(pseudonym) = self.store.get_push_pseudonym(recipient_ipk) else {
+            return;
         };
         // Pick a cached gateway (first). Empty → no wakes.
         let Some(gateway) = self.push_gateways.read().first().cloned() else {

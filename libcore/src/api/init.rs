@@ -7,9 +7,9 @@
 //! airplane mode; the loop already no-ops on a dead network).
 
 use std::net::Ipv6Addr;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -52,18 +52,14 @@ const ROOT_CA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.
 /// is the bootstrap seed list the client bundles (see its app resources).
 #[uniffi::export]
 pub fn init(
-    secure_store: Arc<dyn SecureStore>,
-    events: Arc<dyn CoreEvents>,
-    resolver_seeds: String,
+    secure_store: Arc<dyn SecureStore>, events: Arc<dyn CoreEvents>, resolver_seeds: String,
 ) -> Result<(), CoreError> {
     init_inner(secure_store, events, resolver_seeds)?;
     Ok(())
 }
 
 fn init_inner(
-    secure_store: Arc<dyn SecureStore>,
-    events: Arc<dyn CoreEvents>,
-    resolver_seeds: String,
+    secure_store: Arc<dyn SecureStore>, events: Arc<dyn CoreEvents>, resolver_seeds: String,
 ) -> Result<()> {
     init_logging();
     setup_crypto_provider()?;
@@ -101,7 +97,8 @@ fn init_inner(
     endpoint.set_default_client_config(client_cfg);
     ENDPOINT.set(Arc::new(endpoint)).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
-    // Re-drive the outbox on a timer so retries + the pending→failed timeout fire without a reconnect.
+    // Re-drive the outbox on a timer so retries + the pending→failed timeout fire without a
+    // reconnect.
     RUNTIME.spawn(async {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -124,7 +121,8 @@ static TASK_REMOVED: AtomicBool = AtomicBool::new(false);
 #[uniffi::export]
 pub fn on_foreground() {
     TASK_REMOVED.store(false, Ordering::Relaxed);
-    FOREGROUND.notify_waiters();
+    // `notify_one` retains a permit when the relay loop has not started waiting.
+    FOREGROUND.notify_one();
 }
 
 /// Client hook: call when the OS task is removed. Best-effort close makes the
@@ -199,7 +197,9 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                             Err(join_err) => error!("relay({id}) handle join failed: {join_err}"),
                         },
                         Err(RelayConnError::Continue) => {},
-                        Err(RelayConnError::Error(err)) => error!("relay({id}) connect error: {err}"),
+                        Err(RelayConnError::Error(err)) => {
+                            error!("relay({id}) connect error: {err}")
+                        },
                     }
                 },
                 Err(RelayError::NoneAvailable) => {
@@ -212,7 +212,9 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                         // then permanently bricked the app: all relays greyed,
                         // no relay ever retried, unrecoverable without a restart.
                         // Log and fall through to a short backoff + retry.
-                        Err(ResolveError::EmptyResponse) => error!("resolver returned no relays; retrying"),
+                        Err(ResolveError::EmptyResponse) => {
+                            error!("resolver returned no relays; retrying")
+                        },
                         Err(err) => error!("resolver failed: {err}; retrying"),
                     }
                     // Short backoff: a fresh resolve may have just populated the

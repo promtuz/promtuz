@@ -39,7 +39,7 @@ pub fn dispatch_sig_message(
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ServerHandshakeResultP {
     Accept {
-        timestamp: u64,
+        timestamp:     u64,
         /// This relay's DHT NodeId (`BLAKE3(NodeKey)`),
         /// or `None` when the relay has DHT disabled. The phone binds it
         /// as `requester_relay_id` when signing the
@@ -50,7 +50,9 @@ pub enum ServerHandshakeResultP {
         /// relay replies `DhtUnavailable` to those RPCs anyway.
         relay_node_id: Option<Bytes<32>>,
     },
-    Reject { reason: String },
+    Reject {
+        reason: String,
+    },
 }
 
 /// Client Handshake Packet
@@ -118,14 +120,14 @@ pub enum QueryResultP {
 /// authenticated metadata.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DispatchP {
-    pub to:      Bytes<32>,
-    pub from:    Bytes<32>,
+    pub to:             Bytes<32>,
+    pub from:           Bytes<32>,
     /// Sender-authoritative dispatch_id (monotonic 16B, from the sender's
     /// `messages.dispatch_id`); promoted to `DeliverP::id` unchanged. The
     /// recipient dedups on it, so a retry re-sends the same id.
-    pub id:      Bytes<16>,
-    pub payload: ByteVec,
-    pub sig:     Bytes<64>,
+    pub id:             Bytes<16>,
+    pub payload:        ByteVec,
+    pub sig:            Bytes<64>,
     /// Unix milliseconds stamped by the first relay that accepts this dispatch.
     /// Clients send zero; the authenticated ingress relay overwrites it after
     /// verifying `sig`. It deliberately stays outside the sender signature.
@@ -137,10 +139,10 @@ pub struct DispatchP {
 pub struct DeliverP {
     /// Sender's dispatch_id, copied verbatim from `DispatchP::id`. The
     /// recipient dedups on `(from, id)`.
-    pub id:      Bytes<16>,
-    pub from:    Bytes<32>,
-    pub payload: ByteVec,
-    pub sig:     Bytes<64>,
+    pub id:             Bytes<16>,
+    pub from:           Bytes<32>,
+    pub payload:        ByteVec,
+    pub sig:            Bytes<64>,
     /// Origin relay acceptance time, copied unchanged through queues and DHT
     /// forwarding. Recipients use it rather than local receive time.
     pub accepted_at_ms: u64,
@@ -173,7 +175,8 @@ pub struct ActivityP {
 }
 
 /// Canonical bytes signed/verified for an [`ActivityP`].
-/// Layout: `ACTIVITY_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || activity_be || timestamp_be`
+/// Layout: `ACTIVITY_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || activity_be ||
+/// timestamp_be`
 pub fn activity_sig_message(
     to: &[u8; 32], from: &[u8; 32], activity: u16, timestamp: u64,
 ) -> Vec<u8> {
@@ -196,6 +199,8 @@ pub fn activity_sig_message(
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SubscribePresenceP {
     pub contacts: Vec<Bytes<32>>,
+    pub consents: Vec<crate::proto::dht_p2p::PresenceConsent>,
+    pub lease:    crate::proto::dht_p2p::PresenceLease,
 }
 
 /// A contact's presence, one state that can't self-contradict (no separate
@@ -238,8 +243,12 @@ pub enum PresenceMode {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum DispatchAckP {
-    Queued { accepted_at_ms: u64 },
-    Delivered { accepted_at_ms: u64 },
+    Queued {
+        accepted_at_ms: u64,
+    },
+    Delivered {
+        accepted_at_ms: u64,
+    },
     NotFound,
     InvalidSig,
     /// Recipient's per-user RocksDB queue is at capacity. Sender should back
@@ -256,8 +265,12 @@ pub enum DispatchAckP {
     /// The dispatch is queued at K_MIN homes; eventual delivery depends on
     /// the recipient draining one of those homes on reconnect. Sender
     /// has no further proof of delivery — read receipts are out of scope.
-    Forwarded { accepted_at_ms: u64 },
-    Error { reason: String },
+    Forwarded {
+        accepted_at_ms: u64,
+    },
+    Error {
+        reason: String,
+    },
 }
 
 // // // // // // // // // // // // // // // // // //
@@ -318,7 +331,10 @@ pub enum CRelayPacket {
     /// [`Self::AckAuth`] — a transcript over `delivered_ids` requires
     /// the relay to know the id list before it can ask libcore to sign,
     /// which is impossible before fetching has happened.
-    DrainAuth { timestamp: u64, sig: Bytes<64> },
+    DrainAuth {
+        timestamp: u64,
+        sig:       Bytes<64>,
+    },
 
     /// Sticky-home — user-signed authorisation for the K
     /// home relays to GC the listed dispatch ids from their
@@ -344,7 +360,10 @@ pub enum CRelayPacket {
     /// queued messages without delivery. Routing the ack through the
     /// user's IPK signature mirrors the existing `DrainAuth` design
     /// for the fetch direction.
-    AckAuth { sig: Bytes<64>, timestamp: u64 },
+    AckAuth {
+        sig:       Bytes<64>,
+        timestamp: u64,
+    },
 
     /// Libcore wrapper around `KeyPackagePublish` (when `mode = Publish`)
     /// or `KeyPackageRefill` (when `mode = Refill`). **User-signed RPC**:
@@ -439,7 +458,11 @@ pub enum CRelayPacket {
     /// background wake for our offline queue without ever learning the device
     /// token. Bound to the connection-authenticated IPK — no separate
     /// signature. Fire-and-forget; no reply. Appended last (postcard).
-    RegisterPush { pseudonym: Bytes<32> },
+    RegisterPush {
+        pseudonym: Bytes<32>,
+        timestamp: u64,
+        sig:       Bytes<64>,
+    },
 }
 
 /// Server Relay Packet
@@ -623,14 +646,8 @@ mod tests {
                 timestamp:   1_700_000_000_005,
                 sig:         Bytes([0x10; 64]),
             },
-            CRelayPacket::DrainAuth {
-                timestamp: 1_700_000_000_001,
-                sig:       Bytes([0xAB; 64]),
-            },
-            CRelayPacket::AckAuth {
-                sig:       Bytes([0xCD; 64]),
-                timestamp: 1_700_000_000_002,
-            },
+            CRelayPacket::DrainAuth { timestamp: 1_700_000_000_001, sig: Bytes([0xAB; 64]) },
+            CRelayPacket::AckAuth { sig: Bytes([0xCD; 64]), timestamp: 1_700_000_000_002 },
         ] {
             let bytes = pkt.ser().expect("postcard ser");
             let decoded = CRelayPacket::deser(&bytes).expect("postcard deser");

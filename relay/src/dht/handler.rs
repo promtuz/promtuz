@@ -13,17 +13,14 @@
 //! fresh timestamp) on the **first uni-stream** of the connection.
 //! The receiver:
 //!
-//! 1. Awaits `accept_uni()` with a 5-second timeout (
-//!    [`HELLO_RECV_TIMEOUT`]). A peer that connects but never sends a
-//!    hello gets dropped — see [`HELLO_RECV_TIMEOUT`] doc-comment for
-//!    the rationale on the value.
-//! 2. Decodes via `DhtHello::unpack` and validates with
-//!    `DhtHello::verify(now_ms())` — same checks the resolver does for
-//!    `RelayHello` (id-binding, signature, ±60s skew window).
-//! 3. On any failure, closes with the appropriate `CloseReason::Dht*`
-//!    and bumps `metrics.dht_hello_rejected`. On success, the
-//!    authenticated `NodeId` is bound to the connection for its full
-//!    lifetime.
+//! 1. Awaits `accept_uni()` with a 5-second timeout ( [`HELLO_RECV_TIMEOUT`]). A peer that connects
+//!    but never sends a hello gets dropped — see [`HELLO_RECV_TIMEOUT`] doc-comment for the
+//!    rationale on the value.
+//! 2. Decodes via `DhtHello::unpack` and validates with `DhtHello::verify(now_ms())` — same checks
+//!    the resolver does for `RelayHello` (id-binding, signature, ±60s skew window).
+//! 3. On any failure, closes with the appropriate `CloseReason::Dht*` and bumps
+//!    `metrics.dht_hello_rejected`. On success, the authenticated `NodeId` is bound to the
+//!    connection for its full lifetime.
 //!
 //! Authenticated identity then **replaces** the synthetic-stable_id
 //! and `[0u8; 32]` placeholders that would otherwise be needed because
@@ -62,7 +59,6 @@
 //! their quota — the NodeId is identity-bound.
 //! Tripping the limiter closes the whole connection with
 //! `CloseReason::DhtFlood` (and bumps `metrics.rate_limit_rejections`).
-//!
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,31 +111,24 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// Drive a single inbound `peer/1` connection through its full lifetime.
 ///
 /// 1. Best-effort TLS leaf-cert pubkey extraction via
-///    [`tls_extract::extract_pubkey_from_leaf_der`]. Under the relay's
-///    current `with_no_client_auth()` server config this typically
-///    yields no cert chain at all; preserved as a forward-looking
-///    cross-check that *if* a cert chain ever lands (e.g. once mTLS
-///    is enabled on `peer/1` per the gap doc'd in `tls_extract.rs`),
-///    the cert SPKI agrees with the application-layer hello below.
-/// 2. **Application-layer signed handshake:** wait up to
-///    [`HELLO_RECV_TIMEOUT`] for the dialer's first uni-stream and
-///    decode it as a [`DhtHello`]. Verify with `DhtHello::verify` —
-///    on any failure close the connection with the appropriate
-///    `CloseReason::Dht*` and bump `metrics.dht_hello_rejected`.
-///    On success the `(authenticated_id, authenticated_pubkey)` pair
-///    is bound to this connection for its full lifetime, and the
-///    routing table / `peer_conns` cache is populated immediately
-///    so anti-entropy and bucket-refresh can find this peer even
-///    before it sends any RPC.
+///    [`tls_extract::extract_pubkey_from_leaf_der`]. Under the relay's current
+///    `with_no_client_auth()` server config this typically yields no cert chain at all; preserved
+///    as a forward-looking cross-check that *if* a cert chain ever lands (e.g. once mTLS is enabled
+///    on `peer/1` per the gap doc'd in `tls_extract.rs`), the cert SPKI agrees with the
+///    application-layer hello below.
+/// 2. **Application-layer signed handshake:** wait up to [`HELLO_RECV_TIMEOUT`] for the dialer's
+///    first uni-stream and decode it as a [`DhtHello`]. Verify with `DhtHello::verify` — on any
+///    failure close the connection with the appropriate `CloseReason::Dht*` and bump
+///    `metrics.dht_hello_rejected`. On success the `(authenticated_id, authenticated_pubkey)` pair
+///    is bound to this connection for its full lifetime, and the routing table / `peer_conns` cache
+///    is populated immediately so anti-entropy and bucket-refresh can find this peer even before it
+///    sends any RPC.
 /// 3. Wait for bi-streams in a loop.
-/// 4. Spawn a per-stream task that reads one DhtRequest, checks the
-///    per-peer rate limiter ([`crate::dht::rate_limit`]) keyed on the
-///    *authenticated* NodeId from step 2, dispatches via
-///    `handle_dht_request`, writes the matching DhtResponse, and
-///    `finish()`es the send side.
-/// 5. On `Connection::closed()` (peer rebooted, network failed), evict
-///    the routing-table entry only if it still points at this exact
-///    `Connection` — same race-guard as `remove_client_if_same`.
+/// 4. Spawn a per-stream task that reads one DhtRequest, checks the per-peer rate limiter
+///    ([`crate::dht::rate_limit`]) keyed on the *authenticated* NodeId from step 2, dispatches via
+///    `handle_dht_request`, writes the matching DhtResponse, and `finish()`es the send side.
+/// 5. On `Connection::closed()` (peer rebooted, network failed), evict the routing-table entry only
+///    if it still points at this exact `Connection` — same race-guard as `remove_client_if_same`.
 pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Forward-compatible TLS pubkey extraction. Under the current
     // `with_no_client_auth()` server config this returns `None`
@@ -161,7 +150,7 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
                     );
                     CloseReason::DhtMalformedKey.close(&conn);
                     return;
-                }
+                },
             },
             None => None,
         }
@@ -176,7 +165,7 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
             // recv_and_verify_hello already mapped the failure to a
             // close-reason and bumped metrics; nothing more to do.
             return;
-        }
+        },
     };
 
     // Optional cross-check: if mTLS *did* yield a cert SPKI and the
@@ -184,15 +173,13 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // misconfigured. Same reasoning as the outbound-side post-handshake
     // check at `lookup::connect_to_peer`.
     if let Some(cert_pk) = extracted_pubkey
-        && cert_pk != auth.pubkey {
-            dht.metrics.inc_dht_hello_rejected();
-            common::warn!(
-                "DHT inbound: cert SPKI != DhtHello.pubkey for {}; closing",
-                auth.node_id
-            );
-            CloseReason::DhtBadSignature.close(&conn);
-            return;
-        }
+        && cert_pk != auth.pubkey
+    {
+        dht.metrics.inc_dht_hello_rejected();
+        common::warn!("DHT inbound: cert SPKI != DhtHello.pubkey for {}; closing", auth.node_id);
+        CloseReason::DhtBadSignature.close(&conn);
+        return;
+    }
 
     // Populate routing-table + peer_conns cache *now*, before any RPC
     // arrives. We do it once at this natural boundary — the
@@ -201,8 +188,8 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Store, Tombstone, etc.) still get routing-table coverage.
     {
         let desc = NodeDescriptor {
-            id:     auth.node_id,
-            addr:   conn.remote_address(),
+            id: auth.node_id,
+            addr: conn.remote_address(),
             pubkey: auth.pubkey.into(),
         };
         let _ = dht.routing.write().insert(desc);
@@ -267,21 +254,20 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
     // exact connection (race-guard against a reconnect that replaced it).
     let peer_id_to_remove: Option<NodeId> = {
         let map = dht.peer_conns.read();
-        map.iter().find_map(|(id, (c, _pk))| {
-            if c.stable_id() == conn_id {
-                Some(*id)
-            } else {
-                None
-            }
-        })
+        map.iter().find_map(
+            |(id, (c, _pk))| {
+                if c.stable_id() == conn_id { Some(*id) } else { None }
+            },
+        )
     };
     if let Some(id) = peer_id_to_remove {
         let mut map = dht.peer_conns.write();
         if let Some((c, _pk)) = map.get(&id)
-            && c.stable_id() == conn_id {
-                map.remove(&id);
-                dht.metrics.inc_peer_conns_closed();
-            }
+            && c.stable_id() == conn_id
+        {
+            map.remove(&id);
+            dht.metrics.inc_peer_conns_closed();
+        }
     }
 }
 
@@ -296,7 +282,7 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AuthenticatedPeer {
     node_id: NodeId,
-    pubkey:  [u8; 32],
+    pubkey: [u8; 32],
 }
 
 impl AuthenticatedPeer {
@@ -326,9 +312,7 @@ impl AuthenticatedPeer {
 ///
 /// All paths bump `metrics.dht_hello_rejected` exactly once on failure,
 /// `metrics.dht_hello_accepted` once on success.
-async fn recv_and_verify_hello(
-    dht: &Arc<Dht>, conn: &Connection,
-) -> Result<AuthenticatedPeer, ()> {
+async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<AuthenticatedPeer, ()> {
     // Wait for the first uni-stream within HELLO_RECV_TIMEOUT.
     let mut recv = match timeout(HELLO_RECV_TIMEOUT, conn.accept_uni()).await {
         Ok(Ok(s)) => s,
@@ -343,7 +327,7 @@ async fn recv_and_verify_hello(
                 conn.remote_address()
             );
             return Err(());
-        }
+        },
         Err(_) => {
             // Timeout. Peer connected but never sent a hello.
             dht.metrics.inc_dht_hello_rejected();
@@ -354,7 +338,7 @@ async fn recv_and_verify_hello(
             );
             CloseReason::DhtClockSkew.close(conn);
             return Err(());
-        }
+        },
     };
 
     // Decode the framed DhtHello. `unpack` reads the u16 length prefix
@@ -369,16 +353,13 @@ async fn recv_and_verify_hello(
             );
             CloseReason::DhtMalformedKey.close(conn);
             return Err(());
-        }
+        },
     };
 
     // Verify (id-binding, pubkey shape, signature, timestamp window).
     let now = now_ms();
     match verify_hello_with_close_reason(&hello, now) {
-        Ok(()) => Ok(AuthenticatedPeer {
-            node_id: hello.node_id,
-            pubkey:  hello.pubkey.0,
-        }),
+        Ok(()) => Ok(AuthenticatedPeer { node_id: hello.node_id, pubkey: hello.pubkey.0 }),
         Err(reason) => {
             dht.metrics.inc_dht_hello_rejected();
             common::warn!(
@@ -388,7 +369,7 @@ async fn recv_and_verify_hello(
             );
             reason.close(conn);
             Err(())
-        }
+        },
     }
 }
 
@@ -405,13 +386,11 @@ async fn recv_and_verify_hello(
 /// | `IdMismatch` / `MalformedPubkey` | `DhtMalformedKey` |
 /// | `BadSignature` | `DhtBadSignature` |
 /// | `ClockSkew` | `DhtClockSkew` |
-fn verify_hello_with_close_reason(
-    hello: &DhtHello, now_ms: u64,
-) -> Result<(), CloseReason> {
+fn verify_hello_with_close_reason(hello: &DhtHello, now_ms: u64) -> Result<(), CloseReason> {
     hello.verify(now_ms).map_err(|e| match e {
         DhtHelloVerifyError::IdMismatch | DhtHelloVerifyError::MalformedPubkey => {
             CloseReason::DhtMalformedKey
-        }
+        },
         DhtHelloVerifyError::BadSignature => CloseReason::DhtBadSignature,
         DhtHelloVerifyError::ClockSkew => CloseReason::DhtClockSkew,
     })
@@ -434,8 +413,8 @@ fn verify_hello_with_close_reason(
 /// here (parse failure → `DhtMalformedKey` close), and a misbehaving
 /// peer can't avoid the bookkeeping cost of one parse per RPC.
 async fn handle_one_stream(
-    dht: Arc<Dht>, conn: Connection, mut send: SendStream,
-    recv: &mut quinn::RecvStream, auth: AuthenticatedPeer,
+    dht: Arc<Dht>, conn: Connection, mut send: SendStream, recv: &mut quinn::RecvStream,
+    auth: AuthenticatedPeer,
 ) {
     // Read request packet.
     let pkt = match DhtPacket::unpack(recv).await {
@@ -443,7 +422,7 @@ async fn handle_one_stream(
         Err(_) => {
             CloseReason::DhtMalformedKey.close(&conn);
             return;
-        }
+        },
     };
     let req = match pkt {
         DhtPacket::Request(r) => r,
@@ -452,7 +431,7 @@ async fn handle_one_stream(
         DhtPacket::Response(_) => {
             CloseReason::PacketMismatch.close(&conn);
             return;
-        }
+        },
     };
 
     // Per-peer inbound rate limiting, keyed on the authenticated
@@ -477,8 +456,8 @@ async fn handle_one_stream(
     // is the LRU-rotate-to-tail path inside `RoutingTable::insert`.
     {
         let desc = NodeDescriptor {
-            id:     auth.node_id,
-            addr:   conn.remote_address(),
+            id: auth.node_id,
+            addr: conn.remote_address(),
             pubkey: auth.pubkey.into(),
         };
         // Scoped write guard, never held across `await`.
@@ -491,7 +470,7 @@ async fn handle_one_stream(
         Err(_) => {
             CloseReason::DhtMalformedKey.close(&conn);
             return;
-        }
+        },
     };
     if send.write_all(&bytes).await.is_err() {
         return;
@@ -520,7 +499,7 @@ pub(crate) async fn handle_dht_request(
             let target_id = NodeId::from_bytes(f.target.0);
             let closer = closest_excluding(&dht.routing.read(), &target_id, &f.requester);
             DhtResponse::FindNode(FindNodeResp { closer })
-        }
+        },
         // ----- Sticky-home handlers -------------------------------------
         //
         // `Forward` arms a deliver-or-queue ladder (online recipient
@@ -530,18 +509,30 @@ pub(crate) async fn handle_dht_request(
         // bodies (`forwards_*` / `dht_queue_*` / `queue_fetches_*`).
         DhtRequest::Forward(fwd) => {
             DhtResponse::Forward(super::forward::handle_forward_rpc(dht, fwd, now_ms()).await)
-        }
+        },
         DhtRequest::ActivityForward(activity) => DhtResponse::ActivityForward(
             super::forward::handle_activity_forward_rpc(dht, activity, now_ms()).await,
         ),
+        DhtRequest::PresenceConsent(consent) => DhtResponse::PresenceConsent(
+            super::forward::handle_presence_consent_rpc(dht, consent, now_ms()).await,
+        ),
+        DhtRequest::PresenceState(state) => DhtResponse::PresenceState(
+            super::forward::handle_presence_state_rpc(dht, state, authenticated_peer_id, now_ms())
+                .await,
+        ),
+        DhtRequest::PresenceLease(lease) => DhtResponse::PresenceLease(
+            super::forward::handle_presence_lease_rpc(dht, lease, authenticated_peer_id, now_ms())
+                .await,
+        ),
+        DhtRequest::LiveForward(forward) => DhtResponse::LiveForward(
+            super::forward::handle_live_forward_rpc(dht, forward, authenticated_peer_id, now_ms()).await,
+        ),
+        DhtRequest::PushPseudonymPublish(publish) => DhtResponse::PushPseudonymPublish(
+            super::push_replication::handle_publish(dht, publish, now_ms()),
+        ),
         DhtRequest::QueueFetch(req) => DhtResponse::QueueFetch(
-            super::queue_drain::handle_queue_fetch_rpc(
-                dht,
-                req,
-                authenticated_peer_id,
-                now_ms(),
-            )
-            .await,
+            super::queue_drain::handle_queue_fetch_rpc(dht, req, authenticated_peer_id, now_ms())
+                .await,
         ),
         DhtRequest::QueueFetchAck(req) => DhtResponse::QueueFetchAck(
             super::queue_drain::handle_queue_fetch_ack_rpc(
@@ -559,35 +550,23 @@ pub(crate) async fn handle_dht_request(
         // in their `wrap_*_outcome` helpers so the dispatch returns
         // the structured `*Resp` shape.
         DhtRequest::KeyPackagePublish(req) => DhtResponse::KeyPackagePublish(
-            super::mls::kp::wrap_publish_outcome(
-                super::mls::kp::handle_keypackage_publish(
-                    dht,
-                    req,
-                    authenticated_peer_id,
-                    now_ms(),
-                ),
-            ),
+            super::mls::kp::wrap_publish_outcome(super::mls::kp::handle_keypackage_publish(
+                dht,
+                req,
+                authenticated_peer_id,
+                now_ms(),
+            )),
         ),
-        DhtRequest::KeyPackageFetch(req) => DhtResponse::KeyPackageFetch(
-            super::mls::kp::wrap_fetch_outcome(
-                super::mls::kp::handle_keypackage_fetch(
-                    dht,
-                    req,
-                    authenticated_peer_id,
-                    now_ms(),
-                ),
-            ),
-        ),
-        DhtRequest::KeyPackageRefill(req) => DhtResponse::KeyPackageRefill(
-            super::mls::kp::wrap_refill_outcome(
-                super::mls::kp::handle_keypackage_refill(
-                    dht,
-                    req,
-                    authenticated_peer_id,
-                    now_ms(),
-                ),
-            ),
-        ),
+        DhtRequest::KeyPackageFetch(req) => {
+            DhtResponse::KeyPackageFetch(super::mls::kp::wrap_fetch_outcome(
+                super::mls::kp::handle_keypackage_fetch(dht, req, authenticated_peer_id, now_ms()),
+            ))
+        },
+        DhtRequest::KeyPackageRefill(req) => {
+            DhtResponse::KeyPackageRefill(super::mls::kp::wrap_refill_outcome(
+                super::mls::kp::handle_keypackage_refill(dht, req, authenticated_peer_id, now_ms()),
+            ))
+        },
         // ----- MLS Welcome queue (`mls/welcome.rs`) ---------------------
         //
         // Three sync handlers — fjall I/O + verifies, no `await`
@@ -595,32 +574,23 @@ pub(crate) async fn handle_dht_request(
         // returns its own concrete `WelcomeAckResp` so no wrapper is
         // needed.
         DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(
-            super::mls::welcome::wrap_publish_outcome(
-                super::mls::welcome::handle_welcome_publish(
-                    dht,
-                    req,
-                    authenticated_peer_id,
-                    now_ms(),
-                ),
-            ),
-        ),
-        DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(
-            super::mls::welcome::wrap_fetch_outcome(
-                super::mls::welcome::handle_welcome_fetch(
-                    dht,
-                    req,
-                    authenticated_peer_id,
-                    now_ms(),
-                ),
-            ),
-        ),
-        DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(
-            super::mls::welcome::handle_welcome_ack(
+            super::mls::welcome::wrap_publish_outcome(super::mls::welcome::handle_welcome_publish(
                 dht,
                 req,
                 authenticated_peer_id,
                 now_ms(),
-            ),
+            )),
+        ),
+        DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(
+            super::mls::welcome::wrap_fetch_outcome(super::mls::welcome::handle_welcome_fetch(
+                dht,
+                req,
+                authenticated_peer_id,
+                now_ms(),
+            )),
+        ),
+        DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(
+            super::mls::welcome::handle_welcome_ack(dht, req, authenticated_peer_id, now_ms()),
         ),
     }
 }
@@ -633,10 +603,7 @@ pub(crate) async fn handle_dht_request(
 /// `relay/src/util/mod.rs::systime` but inlined here so the handler
 /// doesn't drag in a `crate::util` dependency for a one-liner.
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Top-(MAX_FIND_NODE_RESULTS) descriptors closest to `target`, **excluding**
@@ -727,17 +694,14 @@ mod tests {
         target_seed[0] = 4;
         let target = NodeId::new(target_seed);
 
-        let req = DhtRequest::FindNode(FindNode {
-            target:    (*target.as_bytes()).into(),
-            requester,
-        });
+        let req = DhtRequest::FindNode(FindNode { target: (*target.as_bytes()).into(), requester });
         let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::FindNode(r) => {
                 assert!(r.closer.len() <= MAX_FIND_NODE_RESULTS);
                 // Requester must be filtered out.
                 assert!(r.closer.iter().all(|d| d.id != requester));
-            }
+            },
             other => panic!("expected FindNode, got {other:?}"),
         }
     }
@@ -770,12 +734,7 @@ mod tests {
         let node_id = NodeId::new(pubkey);
         let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
         let sig = key.sign(&msg).to_bytes();
-        DhtHello {
-            node_id,
-            pubkey: Bytes(pubkey),
-            timestamp,
-            sig: Bytes(sig),
-        }
+        DhtHello { node_id, pubkey: Bytes(pubkey), timestamp, sig: Bytes(sig) }
     }
 
     #[test]
@@ -785,7 +744,7 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let stale = make_hello(&key, now - 120_000); // 2 min in the past
         match verify_hello_with_close_reason(&stale, now) {
-            Err(CloseReason::DhtClockSkew) => {}
+            Err(CloseReason::DhtClockSkew) => {},
             other => panic!("expected DhtClockSkew, got {other:?}"),
         }
     }
@@ -798,7 +757,7 @@ mod tests {
         let mut hello = make_hello(&key, now);
         hello.sig.0[0] ^= 0xFF;
         match verify_hello_with_close_reason(&hello, now) {
-            Err(CloseReason::DhtBadSignature) => {}
+            Err(CloseReason::DhtBadSignature) => {},
             other => panic!("expected DhtBadSignature, got {other:?}"),
         }
     }
@@ -816,7 +775,7 @@ mod tests {
         // the original (a-derived) pubkey + sig.
         hello.node_id = NodeId::new(key_b.verifying_key().to_bytes());
         match verify_hello_with_close_reason(&hello, now) {
-            Err(CloseReason::DhtMalformedKey) => {}
+            Err(CloseReason::DhtMalformedKey) => {},
             other => panic!("expected DhtMalformedKey, got {other:?}"),
         }
     }
@@ -827,8 +786,7 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let hello = make_hello(&key, now);
         verify_hello_with_close_reason(&hello, now).expect("valid hello must pass");
-        verify_hello_with_close_reason(&hello, now + 5)
-            .expect("inside skew window must pass");
+        verify_hello_with_close_reason(&hello, now + 5).expect("inside skew window must pass");
     }
 
     // -----------------------------------------------------------------
@@ -853,11 +811,11 @@ mod tests {
         let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
         let sig = from_user.sign(&msg);
         DispatchP {
-            to:      (*to_ipk).into(),
-            from:    from_ipk.into(),
-            id:      id.into(),
+            to: (*to_ipk).into(),
+            from: from_ipk.into(),
+            id: id.into(),
             payload: payload.to_vec().into(),
-            sig:     sig.to_bytes().into(),
+            sig: sig.to_bytes().into(),
             accepted_at_ms: 1,
         }
     }
@@ -870,16 +828,10 @@ mod tests {
     fn build_signed_forward(
         sender_relay_key: &SigningKey, dispatch: DispatchP, now_ms: u64,
     ) -> Forward {
-        let sender_relay_id =
-            NodeId::new(sender_relay_key.verifying_key().to_bytes());
+        let sender_relay_id = NodeId::new(sender_relay_key.verifying_key().to_bytes());
         let msg = forward_signing_input(&dispatch.id.0, &sender_relay_id, now_ms);
         let sig = sender_relay_key.sign(&msg).to_bytes();
-        Forward {
-            dispatch,
-            sender_relay_id,
-            timestamp: now_ms,
-            sig: sig.into(),
-        }
+        Forward { dispatch, sender_relay_id, timestamp: now_ms, sig: sig.into() }
     }
 
     /// Install a routing-table entry for `sender` so the home-side
@@ -890,8 +842,8 @@ mod tests {
         let sender_id = NodeId::new(sender_key.verifying_key().to_bytes());
         let pubkey = sender_key.verifying_key().to_bytes();
         let desc = NodeDescriptor {
-            id:     sender_id,
-            addr:   "127.0.0.1:1".parse().unwrap(),
+            id: sender_id,
+            addr: "127.0.0.1:1".parse().unwrap(),
             pubkey: pubkey.into(),
         };
         dht.routing.write().insert(desc);
@@ -1072,7 +1024,7 @@ mod tests {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), 3, "all three queued returned");
                 assert!(r.exhausted, "fewer than batch cap → exhausted");
-            }
+            },
             other => panic!("expected QueueFetch, got {other:?}"),
         }
     }
@@ -1123,7 +1075,7 @@ mod tests {
                         r.exhausted, expected_exhausted,
                         "enqueued={enqueued}: exhausted must reflect entries past the cap"
                     );
-                }
+                },
                 other => panic!("expected QueueFetch, got {other:?}"),
             }
         }
@@ -1160,12 +1112,7 @@ mod tests {
         req_seed[0] = 0x77;
         let requester_relay_id = NodeId::new(req_seed);
         let to_delete = vec![ids[0], ids[1]];
-        let msg = queue_fetch_ack_signing_input(
-            &user_ipk,
-            &requester_relay_id,
-            &to_delete,
-            now,
-        );
+        let msg = queue_fetch_ack_signing_input(&user_ipk, &requester_relay_id, &to_delete, now);
         let sig = user.sign(&msg).to_bytes();
         let req = DhtRequest::QueueFetchAck(QueueFetchAck {
             user_ipk: Bytes(user_ipk),
@@ -1220,12 +1167,7 @@ mod tests {
         let requester_b = NodeId::new(b);
 
         let to_delete = vec![id];
-        let msg = queue_fetch_ack_signing_input(
-            &user_ipk,
-            &requester_a,
-            &to_delete,
-            now,
-        );
+        let msg = queue_fetch_ack_signing_input(&user_ipk, &requester_a, &to_delete, now);
         let sig = user.sign(&msg).to_bytes();
         let req = DhtRequest::QueueFetchAck(QueueFetchAck {
             user_ipk: Bytes(user_ipk),
@@ -1241,7 +1183,7 @@ mod tests {
         match resp {
             DhtResponse::QueueFetchAck(r) => {
                 assert!(!r.ok, "redirected ack must be rejected");
-            }
+            },
             other => panic!("expected QueueFetchAck, got {other:?}"),
         }
 
@@ -1291,7 +1233,7 @@ mod tests {
             DhtResponse::QueueFetch(r) => {
                 assert!(r.messages.is_empty(), "must not leak queue to redirector");
                 assert!(r.exhausted);
-            }
+            },
             other => panic!("expected QueueFetch, got {other:?}"),
         }
     }

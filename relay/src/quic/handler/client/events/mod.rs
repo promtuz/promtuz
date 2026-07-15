@@ -34,9 +34,7 @@ pub(super) async fn handle_packet(
         // Sticky-home. The packet has no response; we drop
         // verification failures silently (a malicious client could
         // otherwise probe the verifier — see `drain_auth.rs`).
-        DrainAuth { timestamp, sig } => {
-            handle_drain_auth(ctx.clone(), timestamp, sig.0).await
-        },
+        DrainAuth { timestamp, sig } => handle_drain_auth(ctx.clone(), timestamp, sig.0).await,
         // Sticky-home. Hand-off to the parked `oneshot::Sender`
         // installed by `handle_ack_drain` before sending the
         // `AckAuthRequest`. If no sender is parked (out-of-order client
@@ -53,10 +51,8 @@ pub(super) async fn handle_packet(
         // replies with the matching SRelayPacket (or DhtUnavailable
         // when this relay has DHT disabled).
         PublishKeyPackage { records, timestamp, mode, sig } => {
-            mls_relay::handle_publish_keypackage(
-                ctx.clone(), records, timestamp, mode, sig.0, tx,
-            )
-            .await
+            mls_relay::handle_publish_keypackage(ctx.clone(), records, timestamp, mode, sig.0, tx)
+                .await
         },
         FetchKeyPackage { target_ipk, timestamp, sig } => {
             mls_relay::handle_fetch_keypackage(ctx.clone(), target_ipk.0, timestamp, sig.0, tx)
@@ -78,8 +74,8 @@ pub(super) async fn handle_packet(
 
         SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await,
 
-        RegisterPush { pseudonym } => {
-            misc::handle_register_push(pseudonym.0, ctx.clone()).await
+        RegisterPush { pseudonym, timestamp, sig } => {
+            misc::handle_register_push(pseudonym.0, timestamp, sig.0, ctx.clone()).await
         },
 
         // Ignore Extra

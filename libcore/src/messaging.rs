@@ -14,36 +14,29 @@
 //!
 //! 1. Fetch the recipient's KeyPackage via [`DhtClient::fetch_keypackage_for`].
 //! 2. Build a fresh group with [`MlsGroupHandle::create`].
-//! 3. Add the recipient via [`MlsGroupHandle::add_members`] →
-//!    `(commit, welcome)`.
-//! 4. Wrap the welcome via [`make_welcome_envelope`] and publish to
-//!    the recipient's K-closest homes via
-//!    [`DhtClient::publish_welcome_to_homes`].
-//! 5. Merge the founder's own commit; persist the new group_id back
-//!    onto the contact row.
+//! 3. Add the recipient via [`MlsGroupHandle::add_members`] → `(commit, welcome)`.
+//! 4. Wrap the welcome via [`make_welcome_envelope`] and publish to the recipient's K-closest homes
+//!    via [`DhtClient::publish_welcome_to_homes`].
+//! 5. Merge the founder's own commit; persist the new group_id back onto the contact row.
 //!
 //! After lazy-creation (or if the group already exists), application
 //! messaging is straightforward:
 //!
-//! 1. [`MlsGroupHandle::create_application_message`] yields an
-//!    `MlsMessageOut`.
-//! 2. The bytes are wrapped into [`MlsApplicationEnvelopeP`] with an
-//!    outer [`envelope_signing_input`] sig under the sender's IPK
-//!    (outer sig binds `to_ipk` so a malicious relay can't redirect).
-//! 3. The envelope ships in `DispatchP::payload` over the existing
-//!    sticky-home queue.
+//! 1. [`MlsGroupHandle::create_application_message`] yields an `MlsMessageOut`.
+//! 2. The bytes are wrapped into [`MlsApplicationEnvelopeP`] with an outer
+//!    [`envelope_signing_input`] sig under the sender's IPK (outer sig binds `to_ipk` so a
+//!    malicious relay can't redirect).
+//! 3. The envelope ships in `DispatchP::payload` over the existing sticky-home queue.
 //!
 //! # Receive path
 //!
 //! `quic/server.rs::handle_deliver` decodes the envelope, dispatches
 //! on variant:
 //!
-//! - **Welcome**: verify outer sig → [`process_welcome`] → persist
-//!   group → bind contact's `mls_group_id` → mark consumed KP via
-//!   [`KeyPackageStash::on_consumed`].
-//! - **Application**: verify outer sig → load group →
-//!   [`MlsGroupHandle::process_incoming`] (or buffer in the
-//!   epoch-ahead queue if `epoch > current`).
+//! - **Welcome**: verify outer sig → [`process_welcome`] → persist group → bind contact's
+//!   `mls_group_id` → mark consumed KP via [`KeyPackageStash::on_consumed`].
+//! - **Application**: verify outer sig → load group → [`MlsGroupHandle::process_incoming`] (or
+//!   buffer in the epoch-ahead queue if `epoch > current`).
 //!
 //! # Welcome poll on reconnect
 //!
@@ -55,24 +48,25 @@
 //!
 //! # Module organisation
 //!
-//! - [`send_message_inner`] — entry point for outgoing messages
-//!   (called by the JNI `sendMessage`).
-//! - [`process_inbound_envelope`] — dispatcher for inbound MLS
-//!   envelopes; called from `quic/server.rs::handle_deliver`.
+//! - [`send_message_inner`] — entry point for outgoing messages (called by the JNI `sendMessage`).
+//! - [`process_inbound_envelope`] — dispatcher for inbound MLS envelopes; called from
+//!   `quic/server.rs::handle_deliver`.
 //! - [`poll_welcomes`] — drain pending welcomes on reconnect.
-//!
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use common::PROTOCOL_VERSION;
+use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchP;
-use common::proto::client_rel::ActivityP;
-use common::proto::client_rel::SubscribePresenceP;
 use common::proto::client_rel::SRelayPacket;
-use common::proto::client_rel::dispatch_sig_message;
+use common::proto::client_rel::SubscribePresenceP;
 use common::proto::client_rel::activity_sig_message;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
@@ -81,10 +75,10 @@ use common::proto::mls_wire::MlsApplicationEnvelopeP;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::PairDeclineP;
 use common::proto::mls_wire::PairingP;
-use common::proto::mls_wire::pair_decline_signing_input;
 use common::proto::mls_wire::ReceiptKind;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
+use common::proto::mls_wire::pair_decline_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::types::bytes::ByteVec;
@@ -95,6 +89,7 @@ use ed25519_dalek::VerifyingKey;
 use log::error;
 use log::info;
 use log::warn;
+use once_cell::sync::Lazy;
 use openmls::prelude::BasicCredential;
 use openmls::prelude::CredentialWithKey;
 use openmls::prelude::KeyPackage;
@@ -104,11 +99,6 @@ use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::SignatureScheme;
-
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use once_cell::sync::Lazy;
 use parking_lot::Mutex as PlMutex;
 use tokio::sync::Mutex as TokMutex;
 
@@ -160,9 +150,7 @@ static GROUP_CREATE_LOCKS: Lazy<PlMutex<HashMap<[u8; 32], Arc<TokMutex<()>>>>> =
 /// Acquire (or create) the per-recipient `lazy_create_group` lock.
 fn group_create_lock(recipient_ipk: &[u8; 32]) -> Arc<TokMutex<()>> {
     let mut map = GROUP_CREATE_LOCKS.lock();
-    map.entry(*recipient_ipk)
-        .or_insert_with(|| Arc::new(TokMutex::new(())))
-        .clone()
+    map.entry(*recipient_ipk).or_insert_with(|| Arc::new(TokMutex::new(()))).clone()
 }
 
 #[cfg(not(test))]
@@ -198,8 +186,7 @@ fn mint_group_id(creator_ipk: &[u8; 32]) -> [u8; 32] {
 fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError> {
     use openmls::prelude::KeyPackageIn;
     use openmls::prelude::ProtocolVersion;
-    let kp_in = KeyPackageIn::tls_deserialize_exact(kp_bytes)
-        .map_err(MlsGroupError::from_codec)?;
+    let kp_in = KeyPackageIn::tls_deserialize_exact(kp_bytes).map_err(MlsGroupError::from_codec)?;
     let kp = kp_in
         .validate(
             // We use openmls's `RustCrypto` provider — provided here via
@@ -225,10 +212,7 @@ fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError>
 /// before invoking `MlsGroup::new_with_group_id`.
 fn build_self_credential(
     own_ipk: &[u8; 32],
-) -> Result<
-    (openmls_basic_credential::SignatureKeyPair, CredentialWithKey),
-    MlsGroupError,
-> {
+) -> Result<(openmls_basic_credential::SignatureKeyPair, CredentialWithKey), MlsGroupError> {
     let credential = BasicCredential::new(own_ipk.to_vec());
     let leaf_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
         .map_err(|e| MlsGroupError::Internal(format!("leaf signature key: {e:?}")))?;
@@ -297,11 +281,7 @@ pub async fn delete(to: [u8; 32], target: [u8; 16], for_everyone: bool) -> Resul
     if let Some(row) = row {
         MessageEv::Deleted { id: row.id, peer: to }.emit();
     }
-    if for_everyone {
-        send_control(to, AppPayload::Delete { target }).await
-    } else {
-        Ok(())
-    }
+    if for_everyone { send_control(to, AppPayload::Delete { target }).await } else { Ok(()) }
 }
 
 /// Add or remove our own emoji reaction on a prior message, then propagate it.
@@ -354,9 +334,16 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
     let stash = KeyPackageStash::new(stash_db_handle());
     let buffer = EpochCatchupBuffer::new(stash_db_handle());
     let dht = crate::quic::dht_client::NotWiredDhtClient;
-    let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
+    let ctx =
+        MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
     let env_bytes = build_application_envelope_bytes(
-        &ctx, &mut group, &leaf_kp, &our_ipk, &to, &payload_bytes, &ipk_signer,
+        &ctx,
+        &mut group,
+        &leaf_kp,
+        &our_ipk,
+        &to,
+        &payload_bytes,
+        &ipk_signer,
     )
     .map_err(|e| anyhow!("build envelope: {e}"))?;
 
@@ -376,11 +363,11 @@ async fn dispatch_envelope(
         ipk_signer.sign(&sig_message).to_bytes()
     };
     let fwd = DispatchP {
-        to:      Bytes(to),
-        from:    Bytes(our_ipk),
-        id:      Bytes(id),
-        payload: ByteVec(env_bytes),
-        sig:     Bytes(sig),
+        to:             Bytes(to),
+        from:           Bytes(our_ipk),
+        id:             Bytes(id),
+        payload:        ByteVec(env_bytes),
+        sig:            Bytes(sig),
         accepted_at_ms: 0,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
@@ -414,11 +401,11 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
         ipk_signer.sign(&pair_decline_signing_input(&our_ipk, &to, reason, ts)).to_bytes()
     };
     let envelope = MlsEnvelopeP::PairDecline(PairDeclineP {
-        sender_ipk:    Bytes(our_ipk),
+        sender_ipk: Bytes(our_ipk),
         recipient_ipk: Bytes(to),
         reason,
-        timestamp:     ts,
-        sig:           Bytes(sig),
+        timestamp: ts,
+        sig: Bytes(sig),
     });
     let env_bytes = envelope.ser().map_err(|e| anyhow!("encode decline: {e}"))?;
     dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes).await
@@ -436,11 +423,11 @@ pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
     .map_err(|e| anyhow!("sign ephemeral: {e}"))?
     .to_bytes();
     let eph = ActivityP {
-        to:        Bytes(peer),
-        from:      Bytes(our_ipk),
+        to: Bytes(peer),
+        from: Bytes(our_ipk),
         activity,
         timestamp: ts,
-        sig:       Bytes(sig),
+        sig: Bytes(sig),
     };
     let bytes = CRelayPacket::Activity(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
 
@@ -460,10 +447,74 @@ pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
 /// Fire-and-forget: the relay pushes a snapshot then deltas via `on_presence`.
 /// The UI re-calls this on connect and whenever the contact list changes.
 pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
-    let sub = SubscribePresenceP { contacts: contacts.into_iter().map(Bytes).collect() };
-    let bytes = CRelayPacket::SubscribePresence(sub)
-        .pack()
-        .map_err(|e| anyhow!("pack subscribe: {e}"))?;
+    let previous = previous_presence_contacts()?;
+    replace_presence_contacts(&contacts)?;
+    send_presence_subscription(contacts, previous).await
+}
+
+/// Reissue a fresh lease while relay connection remains active. Contact state
+/// is durable, so restarts retain revocation diff source-of-truth.
+pub async fn renew_presence_lease() -> Result<()> {
+    let contacts = persisted_presence_contacts()?;
+    if contacts.is_empty() {
+        return Ok(());
+    }
+    let previous = contacts.iter().copied().collect();
+    send_presence_subscription(contacts, previous).await
+}
+
+async fn send_presence_subscription(
+    contacts: Vec<[u8; 32]>, previous: std::collections::HashSet<[u8; 32]>,
+) -> Result<()> {
+    use common::proto::dht_p2p::PresenceConsent;
+    use common::proto::dht_p2p::PresenceLease;
+    use common::proto::dht_p2p::presence_consent_signing_input;
+    use common::proto::dht_p2p::presence_lease_signing_input;
+    use ed25519_dalek::Signer;
+    let identity = Identity::get().ok_or_else(|| anyhow!("identity not found"))?;
+    let me = identity.ipk();
+    let signer = crate::data::identity::secret_key_signing(&me)?;
+    let now = crate::utils::systime().as_millis() as u64;
+    let relay_id = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.home_node_id)
+    }
+    .ok_or_else(|| anyhow!("presence requires DHT-enabled relay"))?;
+    let relay_id = common::quic::id::NodeId::from_bytes(relay_id);
+    let desired: std::collections::HashSet<_> = contacts.iter().copied().collect();
+    let consents = desired
+        .iter()
+        .map(|recipient| (*recipient, true))
+        .chain(previous.difference(&desired).map(|recipient| (*recipient, false)))
+        .map(|(recipient, granted)| PresenceConsent {
+            owner: me.into(),
+            recipient: recipient.into(),
+            version: now,
+            issued_at_ms: now,
+            granted,
+            user_sig: signer
+                .sign(&presence_consent_signing_input(&me, &recipient, now, now, granted))
+                .to_bytes()
+                .into(),
+        })
+        .collect();
+    let version = next_presence_lease_version(now)?;
+    let expires_at_ms = now + common::proto::dht_p2p::PRESENCE_LEASE_MAX_MS;
+    let lease = PresenceLease {
+        user: me.into(),
+        relay_id,
+        version,
+        issued_at_ms: now,
+        expires_at_ms,
+        user_sig: signer
+            .sign(&presence_lease_signing_input(&me, &relay_id, version, now, expires_at_ms))
+            .to_bytes()
+            .into(),
+    };
+    let sub =
+        SubscribePresenceP { contacts: contacts.into_iter().map(Bytes).collect(), consents, lease };
+    let bytes =
+        CRelayPacket::SubscribePresence(sub).pack().map_err(|e| anyhow!("pack subscribe: {e}"))?;
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -476,6 +527,42 @@ pub async fn subscribe_presence(contacts: Vec<[u8; 32]>) -> Result<()> {
     Ok(())
 }
 
+fn persisted_presence_contacts() -> Result<Vec<[u8; 32]>> {
+    let conn = crate::db::network::NETWORK_DB.lock();
+    let mut stmt = conn.prepare("SELECT peer FROM presence_contacts")?;
+    Ok(stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .filter_map(|peer| peer.ok().and_then(|peer| peer.try_into().ok()))
+        .collect())
+}
+
+fn previous_presence_contacts() -> Result<std::collections::HashSet<[u8; 32]>> {
+    Ok(persisted_presence_contacts()?.into_iter().collect())
+}
+
+fn replace_presence_contacts(contacts: &[[u8; 32]]) -> Result<()> {
+    let mut conn = crate::db::network::NETWORK_DB.lock();
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM presence_contacts", [])?;
+    for peer in contacts {
+        tx.execute("INSERT OR IGNORE INTO presence_contacts(peer) VALUES (?1)", [peer.as_slice()])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn next_presence_lease_version(now: u64) -> Result<u64> {
+    let conn = crate::db::network::NETWORK_DB.lock();
+    let old = conn
+        .query_row("SELECT lease_version FROM presence_state WHERE singleton = 1", [], |row| row.get(0))
+        .unwrap_or(0);
+    let version = old.max(now).saturating_add(1);
+    conn.execute(
+        "INSERT INTO presence_state(singleton, lease_version) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET lease_version = excluded.lease_version",
+        [version],
+    )?;
+    Ok(version)
+}
+
 /// Tell the relay our activity mode: `idle = true` on backgrounding (sent as
 /// the last packet before the app freezes), `false` on return. Fire-and-forget;
 /// the relay updates the state it reports to our mutual contacts.
@@ -485,7 +572,8 @@ pub async fn set_presence(idle: bool) -> Result<()> {
     } else {
         common::proto::client_rel::PresenceMode::Active
     };
-    let bytes = CRelayPacket::SetPresence(mode).pack().map_err(|e| anyhow!("pack set_presence: {e}"))?;
+    let bytes =
+        CRelayPacket::SetPresence(mode).pack().map_err(|e| anyhow!("pack set_presence: {e}"))?;
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -512,8 +600,8 @@ pub async fn pair(to: [u8; 32], peer_name: String, pairing: PairingP) -> Result<
         let guard = RELAY.read();
         guard.as_ref().and_then(|r| r.dht_client.clone())
     };
-    let client = dht_client
-        .ok_or_else(|| anyhow!("not connected to a relay; reconnect before pairing"))?;
+    let client =
+        dht_client.ok_or_else(|| anyhow!("not connected to a relay; reconnect before pairing"))?;
     let provider = PromtuzMlsProvider::shared();
     let stash = KeyPackageStash::new(stash_db_handle());
     let buffer = EpochCatchupBuffer::new(stash_db_handle());
@@ -525,8 +613,7 @@ pub async fn pair(to: [u8; 32], peer_name: String, pairing: PairingP) -> Result<
     };
 
     // `?` on a KP-fetch miss returns before any save — no bricked contact.
-    let group =
-        lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, Some(pairing)).await?;
+    let group = lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, Some(pairing)).await?;
     Contact::save_pending(to, peer_name)?;
     if let Err(e) = Contact::set_mls_group_id(&to, &group.group_id()) {
         warn!("PAIR: persist mls_group_id failed: {e}");
@@ -615,9 +702,7 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     let kp = decode_keypackage_bytes(&fetched.record.kp_bytes.0)
         .map_err(|e| anyhow!("decode KP: {e}"))?;
     let kp_ref_used: [u8; 32] = {
-        let r = kp
-            .hash_ref(ctx.provider.crypto())
-            .map_err(|e| anyhow!("kp hash_ref: {e:?}"))?;
+        let r = kp.hash_ref(ctx.provider.crypto()).map_err(|e| anyhow!("kp hash_ref: {e:?}"))?;
         let mut out = [0u8; 32];
         let s = r.as_slice();
         let copy = s.len().min(32);
@@ -631,19 +716,12 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     // 3. Build credential + leaf signer.
     let (leaf_kp, _cwk_unused) =
         build_self_credential(our_ipk).map_err(|e| anyhow!("build credential: {e}"))?;
-    leaf_kp
-        .store(ctx.provider.storage())
-        .map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
+    leaf_kp.store(ctx.provider.storage()).map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
 
     // 4. Create group with us as founder.
-    let mut group = MlsGroupHandle::create(
-        ctx.provider,
-        &leaf_kp,
-        our_ipk,
-        leaf_kp.public(),
-        &group_id,
-    )
-    .map_err(|e| anyhow!("create group: {e}"))?;
+    let mut group =
+        MlsGroupHandle::create(ctx.provider, &leaf_kp, our_ipk, leaf_kp.public(), &group_id)
+            .map_err(|e| anyhow!("create group: {e}"))?;
 
     // 5. Add the recipient via their KP.
     let (_commit, welcome) = group
@@ -651,10 +729,8 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
         .map_err(|e| anyhow!("add_members: {e}"))?;
 
     // 6. Wrap + publish welcome.
-    let mut env = make_welcome_envelope(
-        welcome, group_id, *our_ipk, *to, kp_ref_used, ipk_signer,
-    )
-    .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
+    let mut env = make_welcome_envelope(welcome, group_id, *our_ipk, *to, kp_ref_used, ipk_signer)
+        .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
     env.pairing = pairing;
 
     if env.welcome_blob.0.len() > MAX_WELCOME_BYTES {
@@ -691,9 +767,7 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     }
 
     // 7. Merge our own commit.
-    group
-        .merge_pending_commit(ctx.provider)
-        .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
+    group.merge_pending_commit(ctx.provider).map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
 
     // Caller (send_message_inner) persists the group_id on the contact
     // row. Keeping the Contact-DB write out of this helper keeps it
@@ -712,8 +786,9 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
 /// without going through `send_message_inner` (which fetches IPK via
 /// the global `Identity` table).
 pub fn build_application_envelope_bytes<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, group: &mut MlsGroupHandle, leaf_signer: &openmls_basic_credential::SignatureKeyPair,
-    our_ipk: &[u8; 32], to: &[u8; 32], plaintext: &[u8], ipk_signer: &SigningKey,
+    ctx: &MlsContext<'_, C>, group: &mut MlsGroupHandle,
+    leaf_signer: &openmls_basic_credential::SignatureKeyPair, our_ipk: &[u8; 32], to: &[u8; 32],
+    plaintext: &[u8], ipk_signer: &SigningKey,
 ) -> Result<Vec<u8>, MlsGroupError> {
     let mls_msg = group.create_application_message(ctx.provider, leaf_signer, plaintext)?;
     let mls_bytes = mls_msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)?;
@@ -730,26 +805,19 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
     let epoch = group.epoch();
 
     use ed25519_dalek::Signer;
-    let transcript = envelope_signing_input(
-        PROTOCOL_VERSION,
-        to,
-        &group_id,
-        epoch,
-        &mls_bytes,
-    );
+    let transcript = envelope_signing_input(PROTOCOL_VERSION, to, &group_id, epoch, &mls_bytes);
     let outer_sig = ipk_signer.sign(&transcript);
 
     let env = MlsApplicationEnvelopeP {
-        version:     MLS_ENVELOPE_VERSION,
-        group_id:    group_id.into(),
+        version: MLS_ENVELOPE_VERSION,
+        group_id: group_id.into(),
         epoch,
         mls_message: ByteVec(mls_bytes),
-        sender_sig:  outer_sig.to_bytes().into(),
+        sender_sig: outer_sig.to_bytes().into(),
     };
     let outer = MlsEnvelopeP::Application(env);
-    let bytes = outer
-        .ser()
-        .map_err(|e| MlsGroupError::Internal(format!("postcard ser envelope: {e}")))?;
+    let bytes =
+        outer.ser().map_err(|e| MlsGroupError::Internal(format!("postcard ser envelope: {e}")))?;
 
     let _ = our_ipk; // bound only via transcript, not the postcard wire
     Ok(bytes)
@@ -822,9 +890,7 @@ pub async fn attempt_send<C: DhtClient>(
                     // The contact references a group_id we no longer have
                     // local state for — the libcore DB and SQLite drifted.
                     // Fall back to lazy-create (and overwrite the stale id).
-                    warn!(
-                        "MESSAGE: contact's mls_group_id has no local state; recreating"
-                    );
+                    warn!("MESSAGE: contact's mls_group_id has no local state; recreating");
                     let g = lazy_create_group(ctx, &our_ipk, &ipk_signer, &to).await?;
                     if let Err(e) = Contact::set_mls_group_id(&to, &g.group_id()) {
                         warn!("MESSAGE: persist mls_group_id failed: {e}");
@@ -833,8 +899,7 @@ pub async fn attempt_send<C: DhtClient>(
                 },
                 Err(e) => {
                     Message::mark_failed(&msg_id);
-                    MessageEv::Failed { id: msg_id, to, reason: format!("load group: {e}") }
-                        .emit();
+                    MessageEv::Failed { id: msg_id, to, reason: format!("load group: {e}") }.emit();
                     return Err(anyhow!("load group: {e}"));
                 },
             },
@@ -870,18 +935,18 @@ pub async fn attempt_send<C: DhtClient>(
         }
     };
 
-    // 4. The leaf signing key for this member's seat. After
-    //    lazy-create the founder's signer is stored in the openmls
-    //    storage by the credential lookup; we re-derive a transient
-    //    one for application messages by reading it back.
+    // 4. The leaf signing key for this member's seat. After lazy-create the founder's signer is
+    //    stored in the openmls storage by the credential lookup; we re-derive a transient one for
+    //    application messages by reading it back.
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
-    // 5. Build the application envelope. A reply row rebuilds the Reply
-    //    payload on retry too, since reply_to rides on the row.
-    let reply_to: Option<[u8; 16]> =
-        msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    // 5. Build the application envelope. A reply row rebuilds the Reply payload on retry too, since
+    //    reply_to rides on the row.
+    let reply_to: Option<[u8; 16]> = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
     let app_payload = match reply_to {
-        Some(rt) => common::proto::mls_wire::AppPayload::Reply { reply_to: rt, content: content.clone() },
+        Some(rt) => {
+            common::proto::mls_wire::AppPayload::Reply { reply_to: rt, content: content.clone() }
+        },
         None => common::proto::mls_wire::AppPayload::Text(content.clone()),
     };
     let payload_bytes = app_payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
@@ -909,26 +974,30 @@ pub async fn attempt_send<C: DhtClient>(
         .try_into()
         .expect("dispatch_id is 16 bytes");
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
-    let sig = { use ed25519_dalek::Signer; ipk_signer.sign(&sig_message).to_bytes() };
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&sig_message).to_bytes()
+    };
     let fwd = DispatchP {
-        to:      Bytes(to),
-        from:    Bytes(our_ipk),
-        id:      Bytes(id),
-        payload: ByteVec(payload),
-        sig:     Bytes(sig),
+        to:             Bytes(to),
+        from:           Bytes(our_ipk),
+        id:             Bytes(id),
+        payload:        ByteVec(payload),
+        sig:            Bytes(sig),
         accepted_at_ms: 0,
     };
 
-    // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the
-    //    length-prefixed bytes `send()` writes; the relay's read side is
-    //    length-prefixed, so storing raw postcard would desync every frame. Store
-    //    framed, send framed, reconciler re-sends framed — all byte-identical.
-    let dispatch_bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
+    // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the length-prefixed
+    //    bytes `send()` writes; the relay's read side is length-prefixed, so storing raw postcard
+    //    would desync every frame. Store framed, send framed, reconciler re-sends framed — all
+    //    byte-identical.
+    let dispatch_bytes =
+        CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
     delivery::enqueue(&id, OpType::Message, Some(to), &dispatch_bytes);
 
-    // 8. Send via the existing relay channel. Offline / mid-send drops leave the
-    //    row `pending` and return Ok — the reconciler (Task 7) re-sends. Only a
-    //    durable or terminal ack retires the row.
+    // 8. Send via the existing relay channel. Offline / mid-send drops leave the row `pending` and
+    //    return Ok — the reconciler (Task 7) re-sends. Only a durable or terminal ack retires the
+    //    row.
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -950,17 +1019,22 @@ pub async fn attempt_send<C: DhtClient>(
         Ok(SRelayPacket::DispatchAck(ack)) => match delivery::outcome_for_ack(&ack) {
             LastOutcome::Durable => {
                 delivery::retire(&id);
-                let timestamp = delivery::accepted_at_secs(&ack).expect("durable dispatch ack has timestamp");
+                let timestamp =
+                    delivery::accepted_at_secs(&ack).expect("durable dispatch ack has timestamp");
                 Message::mark_sent(&msg_id, timestamp);
                 MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp }.emit();
             },
             LastOutcome::Terminal => {
                 delivery::retire(&id);
                 Message::mark_failed(&msg_id);
-                MessageEv::Failed { id: msg_id, to, reason: format!("relay rejected: {ack:?}") }.emit();
+                MessageEv::Failed { id: msg_id, to, reason: format!("relay rejected: {ack:?}") }
+                    .emit();
             },
             LastOutcome::Queued | LastOutcome::Reachable => {
-                info!("MESSAGE: {} accepted non-durably ({ack:?}); left in outbox", hex::encode(&to[..4]));
+                info!(
+                    "MESSAGE: {} accepted non-durably ({ack:?}); left in outbox",
+                    hex::encode(&to[..4])
+                );
             },
             LastOutcome::Silence => {},
         },
@@ -989,11 +1063,7 @@ pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
     // this snapshot is safe.
     let deferred: Vec<_> = Message::pending_outgoing()
         .into_iter()
-        .filter(|row| {
-            Contact::get(&row.peer_ipk)
-                .and_then(|c| c.inner.mls_group_id)
-                .is_none()
-        })
+        .filter(|row| Contact::get(&row.peer_ipk).and_then(|c| c.inner.mls_group_id).is_none())
         .collect();
     for row in deferred {
         let to = row.peer_ipk;
@@ -1041,8 +1111,8 @@ pub fn leaf_signer_for_group(
 pub async fn process_inbound_envelope<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], payload: &[u8],
 ) -> Result<Option<InboundDecoded>> {
-    let envelope = MlsEnvelopeP::deser(payload)
-        .map_err(|e| anyhow!("postcard deser MlsEnvelopeP: {e}"))?;
+    let envelope =
+        MlsEnvelopeP::deser(payload).map_err(|e| anyhow!("postcard deser MlsEnvelopeP: {e}"))?;
 
     // Enforce inner-byte size caps at the decode boundary. Bigger
     // blobs are dropped before openmls touches them — defends against
@@ -1160,16 +1230,16 @@ async fn heal_dead_group<C: DhtClient>(
                 hex::encode(&sender_ipk[..4])
             );
         },
-        Err(e) => warn!(
-            "MLS: dead-group re-establish with {} failed: {e}",
-            hex::encode(&sender_ipk[..4])
-        ),
+        Err(e) => {
+            warn!("MLS: dead-group re-establish with {} failed: {e}", hex::encode(&sender_ipk[..4]))
+        },
     }
 }
 
 /// Result of [`process_inbound_envelope`] — what kind of payload was
 /// processed (UI / metrics consumer).
-#[allow(dead_code)] // ApplicationStale is reachable only when the
+#[allow(dead_code)]
+// ApplicationStale is reachable only when the
 // receive path passes a stale message through. The current dispatcher
 // folds it into ApplicationBuffered; the explicit stale-drop path is
 // future work.
@@ -1194,15 +1264,10 @@ pub enum InboundDecoded {
     /// construction (FS) — the caller MUST ack so the relay GCs it instead
     /// of redelivering forever; `process_inbound_envelope` fires the
     /// re-establishment toward known contacts (see `heal_dead_group`).
-    ApplicationNoGroup {
-        group_id: [u8; 32],
-    },
+    ApplicationNoGroup { group_id: [u8; 32] },
     /// We couldn't accept a Welcome (KP consumed / group build failed). The
     /// caller sends a `PairDecline` back to the inviter and acks.
-    WelcomeRejected {
-        sender_ipk: [u8; 32],
-        reason:     u8,
-    },
+    WelcomeRejected { sender_ipk: [u8; 32], reason: u8 },
     /// The invitee declined our pair; already applied (contact REJECTED,
     /// PENDING-era messages failed). Terminal — the caller just acks.
     PairDeclined,
@@ -1230,9 +1295,7 @@ fn process_welcome_inbound<C: DhtClient>(
     // But a delivery-layer bug could deliver an envelope intended for
     // a different device to this one; surface that as a typed error
     // instead of silently activating a group we don't belong to.
-    let our_ipk = Identity::get()
-        .ok_or_else(|| anyhow!("identity not found"))?
-        .ipk();
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     if env.recipient_ipk.0 != our_ipk {
         warn!(
             "MLS: dropped Welcome addressed to {} (we are {})",
@@ -1250,8 +1313,7 @@ fn process_welcome_inbound<C: DhtClient>(
     let new_contact_name: Option<String> = if Contact::exists(&sender_ipk) {
         None
     } else {
-        let invited =
-            env.pairing.as_ref().is_some_and(|p| Identity::verify_invite(&p.invite));
+        let invited = env.pairing.as_ref().is_some_and(|p| Identity::verify_invite(&p.invite));
         if !invited {
             warn!(
                 "MLS: dropped Welcome from unknown sender {} (no valid invite)",
@@ -1310,8 +1372,7 @@ pub fn process_welcome_inbound_no_contacts<C: DhtClient>(
         bail!("welcome envelope sender_ipk mismatch with DispatchP.from");
     }
     let kp_ref = env.kp_ref_used.0;
-    let group = process_welcome(ctx.provider, &env)
-        .map_err(|e| anyhow!("process_welcome: {e}"))?;
+    let group = process_welcome(ctx.provider, &env).map_err(|e| anyhow!("process_welcome: {e}"))?;
     if let Err(e) = ctx.stash.on_consumed(&kp_ref) {
         warn!("MLS: stash on_consumed failed: {e}");
     }
@@ -1336,8 +1397,7 @@ fn process_application_inbound<C: DhtClient>(
 /// dedups fine but won't sort by send-time, so Part 2 delivery watermarks
 /// must thread the real id to the push before relying on ordering.
 fn persist_drained(
-    drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>,
-    sender_ipk: [u8; 32],
+    drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, sender_ipk: [u8; 32],
 ) {
     for m in drained {
         let (content, reply_to) = match AppPayload::deser(&m.plaintext) {
@@ -1361,8 +1421,7 @@ fn persist_drained(
 /// this directly so each test client can assert against its own IPK
 /// without sharing a process-global identity row.
 pub fn process_application_inbound_for<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32],
-    env: MlsApplicationEnvelopeP,
+    ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32], env: MlsApplicationEnvelopeP,
 ) -> Result<InboundDecoded> {
     // 1. Outer envelope sig verifies under sender's IPK.
     let transcript = envelope_signing_input(
@@ -1376,12 +1435,11 @@ pub fn process_application_inbound_for<C: DhtClient>(
         .map_err(|e| anyhow!("sender_ipk not Ed25519: {e}"))?;
     let sig = Signature::from_bytes(&env.sender_sig.0);
     // `verify_strict` for non-canonical-sig rejection.
-    vk.verify_strict(&transcript, &sig)
-        .map_err(|_| anyhow!("application envelope sig invalid"))?;
+    vk.verify_strict(&transcript, &sig).map_err(|_| anyhow!("application envelope sig invalid"))?;
 
-    // 2. Look up the group. No local state (post-restore / state loss) is a
-    //    typed outcome, not an error: an `Err` here meant the live path never
-    //    acked and the relay redelivered the same doomed envelope forever.
+    // 2. Look up the group. No local state (post-restore / state loss) is a typed outcome, not an
+    //    error: an `Err` here meant the live path never acked and the relay redelivered the same
+    //    doomed envelope forever.
     let Some(mut group) = MlsGroupHandle::load(ctx.provider, &env.group_id.0)
         .map_err(|e| anyhow!("load group: {e}"))?
     else {
@@ -1444,9 +1502,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
     use openmls::prelude::tls_codec::Deserialize as _;
     let in_msg = openmls::prelude::MlsMessageIn::tls_deserialize_exact(&env.mls_message.0)
         .map_err(|e| anyhow!("MlsMessageIn deser: {e:?}"))?;
-    let proto: ProtocolMessage = in_msg
-        .try_into_protocol_message()
-        .map_err(|e| anyhow!("not a ProtocolMessage: {e:?}"))?;
+    let proto: ProtocolMessage =
+        in_msg.try_into_protocol_message().map_err(|e| anyhow!("not a ProtocolMessage: {e:?}"))?;
 
     let processed = group
         .process_incoming(ctx.provider, proto)
@@ -1461,10 +1518,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
                 sender_ipk,
             );
-            Ok(InboundDecoded::Application {
-                plaintext,
-                group_id: env.group_id.0,
-            })
+            Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0 })
         },
         ProcessedMessageContent::StagedCommitMessage(staged) => {
             group
@@ -1516,20 +1570,15 @@ static WELCOME_RETRY_COUNTS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<[u
 ///
 /// Distinguishes three outcome classes per welcome:
 ///   - **Success**: ack immediately (the welcome did its job).
-///   - **Known sender, bad processing**: ack (a known contact sending
-///     us malformed welcomes is a contact-flow bug, not abuse).
-///   - **Unknown sender or bad sig**: hold without acking; bump a
-///     per-`welcome_id` retry counter. Ack-and-drop only after
-///     `POLL_WELCOMES_MAX_RETRY` failed attempts. This preserves the
-///     evidence the future anti-abuse spec (HANDOFF priority 2) wants
-///     while still bounding queue growth.
+///   - **Known sender, bad processing**: ack (a known contact sending us malformed welcomes is a
+///     contact-flow bug, not abuse).
+///   - **Unknown sender or bad sig**: hold without acking; bump a per-`welcome_id` retry counter.
+///     Ack-and-drop only after `POLL_WELCOMES_MAX_RETRY` failed attempts. This preserves the
+///     evidence the future anti-abuse spec (HANDOFF priority 2) wants while still bounding queue
+///     growth.
 #[allow(dead_code)] // The production call site is wired in quic/server.
 pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usize> {
-    let entries = ctx
-        .dht
-        .fetch_welcomes()
-        .await
-        .map_err(|e| anyhow!("fetch_welcomes: {e}"))?;
+    let entries = ctx.dht.fetch_welcomes().await.map_err(|e| anyhow!("fetch_welcomes: {e}"))?;
 
     let mut ack_ids: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     let mut count = 0usize;
@@ -1686,12 +1735,7 @@ mod tests {
         }
 
         fn ctx<'a, C: DhtClient>(&'a self, dht: &'a C) -> MlsContext<'a, C> {
-            MlsContext {
-                provider: &self.provider,
-                stash:    &self.stash,
-                buffer:   &self.buffer,
-                dht,
-            }
+            MlsContext { provider: &self.provider, stash: &self.stash, buffer: &self.buffer, dht }
         }
     }
 
@@ -1713,22 +1757,15 @@ mod tests {
             .stash
             .ensure_stash_full(&bob.provider, &bob.ipk_signer)
             .expect("bob ensure_stash_full");
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .expect("seed bob's published kps");
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .expect("seed bob's published kps");
 
         // Alice runs lazy_create_group.
-        let g = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .expect("lazy_create_group");
+        let g =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .expect("lazy_create_group");
 
         // Group is at epoch 1 (alice + bob added).
         assert_eq!(g.epoch(), 1);
@@ -1740,8 +1777,7 @@ mod tests {
         let entry = entries.into_iter().next().unwrap();
 
         // Bob materialises the group via the low-level `process_welcome`.
-        let bob_group = process_welcome(&bob.provider, &entry.envelope)
-            .expect("process welcome");
+        let bob_group = process_welcome(&bob.provider, &entry.envelope).expect("process welcome");
         assert_eq!(bob_group.epoch(), g.epoch());
         assert_eq!(bob_group.member_count(), g.member_count());
         assert_eq!(bob_group.group_id(), g.group_id());
@@ -1760,18 +1796,14 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
         // NB: bob never publishes a KP → fetch_keypackage_for → NoStash.
 
-        let err = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .expect_err("no published KP must fail lazy_create");
+        let err =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .expect_err("no published KP must fail lazy_create");
 
-        let is_nostash = err.chain().any(|c| {
-            matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash))
-        });
+        let is_nostash = err
+            .chain()
+            .any(|c| matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash)));
         assert!(is_nostash, "NoStash must be downcastable for the defer path; got: {err:?}");
 
         // Blanket-defer guard: an unrelated error must NOT match.
@@ -1798,22 +1830,15 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
         // Alice creates the group + Welcome; Bob materialises.
-        let mut alice_group = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .unwrap();
+        let mut alice_group =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .unwrap();
         let entries = dht.fetch_welcomes().await.unwrap();
         let _ = process_welcome(&bob.provider, &entries[0].envelope).expect("process welcome");
 
@@ -1853,14 +1878,11 @@ mod tests {
         vk.verify(&transcript, &sig).expect("outer sig verifies");
 
         // Decode + decrypt with Bob's group state.
-        let mut bob_group = MlsGroupHandle::load(&bob.provider, &alice_group.group_id())
-            .unwrap()
-            .unwrap();
+        let mut bob_group =
+            MlsGroupHandle::load(&bob.provider, &alice_group.group_id()).unwrap().unwrap();
         use openmls::prelude::tls_codec::Deserialize as _;
-        let in_msg = openmls::prelude::MlsMessageIn::tls_deserialize_exact(
-            &env_app.mls_message.0,
-        )
-        .unwrap();
+        let in_msg =
+            openmls::prelude::MlsMessageIn::tls_deserialize_exact(&env_app.mls_message.0).unwrap();
         let proto: ProtocolMessage = in_msg.try_into_protocol_message().unwrap();
         let processed = bob_group.process_incoming(&bob.provider, proto).unwrap();
         match processed {
@@ -1879,26 +1901,18 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
-        let mut alice_group = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .unwrap();
+        let mut alice_group =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .unwrap();
         let entries = dht.fetch_welcomes().await.unwrap();
         let _ = process_welcome(&bob.provider, &entries[0].envelope).expect("process welcome");
-        let mut bob_group = MlsGroupHandle::load(&bob.provider, &alice_group.group_id())
-            .unwrap()
-            .unwrap();
+        let mut bob_group =
+            MlsGroupHandle::load(&bob.provider, &alice_group.group_id()).unwrap().unwrap();
 
         // Alice encrypts an Application at the current epoch. We
         // shove it into Bob's buffer at `current_epoch`; the drain
@@ -1918,10 +1932,7 @@ mod tests {
             .expect("push");
         assert_eq!(outcome, crate::mls::PushOutcome::Inserted);
 
-        let drained = bob
-            .buffer
-            .drain_when_ready(&mut bob_group, &bob.provider)
-            .expect("drain");
+        let drained = bob.buffer.drain_when_ready(&mut bob_group, &bob.provider).expect("drain");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].plaintext, plaintext);
     }
@@ -1936,21 +1947,14 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
-        let g = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .expect("lazy_create_group");
+        let g =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .expect("lazy_create_group");
 
         let pubs = dht.welcomes_published.lock();
         assert_eq!(pubs.len(), 1);
@@ -2049,21 +2053,14 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
-        let mut alice_group = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .unwrap();
+        let mut alice_group =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .unwrap();
         let entries = dht.fetch_welcomes().await.unwrap();
         let _ = process_welcome(&bob.provider, &entries[0].envelope).expect("process welcome");
 
@@ -2071,14 +2068,12 @@ mod tests {
         // is strictly greater than what alice will sign in the test.
         // Easier: build an envelope claiming epoch 0 and feed it to
         // a freshly-loaded bob_group whose epoch is 1.
-        let bob_group = MlsGroupHandle::load(&bob.provider, &alice_group.group_id())
-            .unwrap()
-            .unwrap();
+        let bob_group =
+            MlsGroupHandle::load(&bob.provider, &alice_group.group_id()).unwrap().unwrap();
         assert!(bob_group.epoch() >= 1, "fresh group is at epoch >= 1");
 
         // Build an envelope at epoch 0 (stale by design).
-        let alice_leaf =
-            leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
+        let alice_leaf = leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
         let mls_msg = alice_group
             .create_application_message(&alice.provider, &alice_leaf, b"stale msg")
             .unwrap();
@@ -2104,13 +2099,9 @@ mod tests {
         };
 
         let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
-        let result = process_application_inbound_for(
-            &bob.ctx(dht.as_ref()),
-            alice.ipk,
-            &bob.ipk,
-            env,
-        )
-        .expect("stale envelope returns ApplicationStale, not Err");
+        let result =
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env)
+                .expect("stale envelope returns ApplicationStale, not Err");
 
         match result {
             InboundDecoded::ApplicationStale => {},
@@ -2118,10 +2109,7 @@ mod tests {
         }
 
         let buffered_after = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
-        assert_eq!(
-            buffered_before, buffered_after,
-            "stale envelope must not grow the buffer"
-        );
+        assert_eq!(buffered_before, buffered_after, "stale envelope must not grow the buffer");
     }
 
     /// An Application envelope for a group the recipient holds NO state
@@ -2135,26 +2123,18 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
-        let mut alice_group = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .unwrap();
+        let mut alice_group =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .unwrap();
         // Bob never processes the Welcome — his provider holds no state for
         // this group, exactly the post-restore shape.
 
-        let alice_leaf =
-            leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
+        let alice_leaf = leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
         let mls_msg = alice_group
             .create_application_message(&alice.provider, &alice_leaf, b"into the void")
             .unwrap();
@@ -2173,20 +2153,16 @@ mod tests {
         let outer_sig = alice.ipk_signer.sign(&transcript);
 
         let env = MlsApplicationEnvelopeP {
-            version:     MLS_ENVELOPE_VERSION,
-            group_id:    alice_group.group_id().into(),
+            version: MLS_ENVELOPE_VERSION,
+            group_id: alice_group.group_id().into(),
             epoch,
             mls_message: ByteVec(mls_bytes),
-            sender_sig:  outer_sig.to_bytes().into(),
+            sender_sig: outer_sig.to_bytes().into(),
         };
 
-        let result = process_application_inbound_for(
-            &bob.ctx(dht.as_ref()),
-            alice.ipk,
-            &bob.ipk,
-            env,
-        )
-        .expect("dead-group envelope must be a typed outcome, not Err");
+        let result =
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env)
+                .expect("dead-group envelope must be a typed outcome, not Err");
 
         match result {
             InboundDecoded::ApplicationNoGroup { group_id } => {
@@ -2209,35 +2185,26 @@ mod tests {
         let dht = FakeDhtClient::new_arc();
 
         let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
-        dht.publish_keypackages(
-            &bob_kps[..1],
-            crate::quic::dht_client::KpOutcomeFilter::Default,
-        )
-        .await
-        .unwrap();
+        dht.publish_keypackages(&bob_kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default)
+            .await
+            .unwrap();
 
-        let mut alice_group = lazy_create_group(
-            &alice.ctx(dht.as_ref()),
-            &alice.ipk,
-            &alice.ipk_signer,
-            &bob.ipk,
-        )
-        .await
-        .unwrap();
+        let mut alice_group =
+            lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk)
+                .await
+                .unwrap();
         let entries = dht.fetch_welcomes().await.unwrap();
         let _ = process_welcome(&bob.provider, &entries[0].envelope).expect("process welcome");
 
-        let alice_leaf =
-            leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
+        let alice_leaf = leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
         let mls_msg = alice_group
             .create_application_message(&alice.provider, &alice_leaf, b"far future")
             .unwrap();
         let mls_bytes =
             openmls::prelude::tls_codec::Serialize::tls_serialize_detached(&mls_msg).unwrap();
 
-        let bob_group = MlsGroupHandle::load(&bob.provider, &alice_group.group_id())
-            .unwrap()
-            .unwrap();
+        let bob_group =
+            MlsGroupHandle::load(&bob.provider, &alice_group.group_id()).unwrap().unwrap();
         let bad_epoch = bob_group.epoch() + MAX_EPOCH_AHEAD + 1;
 
         use ed25519_dalek::Signer;
@@ -2257,21 +2224,12 @@ mod tests {
             sender_sig:  outer_sig.to_bytes().into(),
         };
 
-        let buffered_before =
-            bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
-        let result = process_application_inbound_for(
-            &bob.ctx(dht.as_ref()),
-            alice.ipk,
-            &bob.ipk,
-            env,
-        );
+        let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
+        let result =
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env);
         assert!(result.is_err(), "far-future envelope must be rejected");
-        let buffered_after =
-            bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
-        assert_eq!(
-            buffered_before, buffered_after,
-            "far-future envelope must not grow the buffer"
-        );
+        let buffered_after = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
+        assert_eq!(buffered_before, buffered_after, "far-future envelope must not grow the buffer");
     }
 
     /// Oversize Welcome blob is rejected at the envelope decode
@@ -2303,9 +2261,6 @@ mod tests {
         let r = process_inbound_envelope(&bob.ctx(dht.as_ref()), [0u8; 32], &bytes).await;
         assert!(r.is_err(), "oversize welcome must be rejected at decode");
         let msg = format!("{:?}", r.unwrap_err());
-        assert!(
-            msg.contains("MAX_WELCOME_BYTES"),
-            "error must cite MAX_WELCOME_BYTES, got: {msg}"
-        );
+        assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");
     }
 }

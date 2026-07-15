@@ -11,14 +11,12 @@
 //!
 //! The cost of an RPC drives the quota:
 //!
-//! - **Cheap** (`FindNode`, `QueueFetchAck`): zero crypto verification, only routing-table
-//!   reads. 100/s sustained, burst 50.
-//! - **Expensive verify** (`Store`, `Tombstone`): each does an
-//!   Ed25519 verify (~100 µs) + a sync fjall write. 20/s sustained,
-//!   burst 10.
-//! - **Bulk** (`FetchRecord`): bounded by `MAX_FETCH_RECORD_BATCH`
-//!   per request, so each RPC is itself an O(64) read amplification.
-//!   50/s sustained, burst 25.
+//! - **Cheap** (`FindNode`, `QueueFetchAck`): zero crypto verification, only routing-table reads.
+//!   100/s sustained, burst 50.
+//! - **Expensive verify** (`Store`, `Tombstone`): each does an Ed25519 verify (~100 µs) + a sync
+//!   fjall write. 20/s sustained, burst 10.
+//! - **Bulk** (`FetchRecord`): bounded by `MAX_FETCH_RECORD_BATCH` per request, so each RPC is
+//!   itself an O(64) read amplification. 50/s sustained, burst 25.
 //!
 //! ## Why per-NodeId, not per-IP
 //!
@@ -27,17 +25,14 @@
 //! Per-IP at the QUIC accept layer is the resolver's pattern
 //! (`resolver/src/quic/acceptor.rs`); for relay-to-relay traffic the
 //! `NodeId` is a stronger key because:
-//! - A misbehaving peer cannot evade the limit by reconnecting from a
-//!   new socket — its NodeId is cryptographically fixed
-//!   (`BLAKE3(spki)`).
-//! - A NAT'd legitimate peer and a misbehaving peer behind the same
-//!   NAT do not share a quota.
+//! - A misbehaving peer cannot evade the limit by reconnecting from a new socket — its NodeId is
+//!   cryptographically fixed (`BLAKE3(spki)`).
+//! - A NAT'd legitimate peer and a misbehaving peer behind the same NAT do not share a quota.
 //!
 //! ## Lock contract
 //!
 //! `governor::RateLimiter` is internally lock-free under the
 //! `DefaultKeyedStateStore` (DashMap-backed). Calls do not block.
-//!
 
 use std::num::NonZeroU32;
 
@@ -58,8 +53,7 @@ use super::config::RATE_LIMIT_EXPENSIVE_PER_SEC;
 /// eviction of idle entries (`DefaultKeyedStateStore` handles that
 /// internally so we don't carry per-peer state forever after a peer
 /// disconnects).
-type NodeLimiter =
-    RateLimiter<NodeId, DefaultKeyedStateStore<NodeId>, DefaultClock>;
+type NodeLimiter = RateLimiter<NodeId, DefaultKeyedStateStore<NodeId>, DefaultClock>;
 
 /// Three bundled limiters, one per RPC cost class. Cloning a
 /// [`PerPeerLimiters`] is just an `Arc` clone of each inner
@@ -75,10 +69,7 @@ impl PerPeerLimiters {
     pub(crate) fn new() -> Self {
         Self {
             cheap: build_limiter(RATE_LIMIT_CHEAP_PER_SEC, RATE_LIMIT_CHEAP_BURST),
-            expensive: build_limiter(
-                RATE_LIMIT_EXPENSIVE_PER_SEC,
-                RATE_LIMIT_EXPENSIVE_BURST,
-            ),
+            expensive: build_limiter(RATE_LIMIT_EXPENSIVE_PER_SEC, RATE_LIMIT_EXPENSIVE_BURST),
             bulk: build_limiter(RATE_LIMIT_BULK_PER_SEC, RATE_LIMIT_BULK_BURST),
         }
     }
@@ -114,8 +105,7 @@ impl RpcClass {
         match req {
             // `FindNode` is a routing-table read; the sticky-home ack is
             // a small bounded-id-list verify + delete-by-id.
-            DhtRequest::FindNode(_)
-            | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
+            DhtRequest::FindNode(_) | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
             // Sticky-home: `Forward` does an outer-sig verify plus a
             // disk write (queue) or stream open (deliver).
             // `QueueFetch` does a user-sig verify plus a per-recipient
@@ -127,6 +117,11 @@ impl RpcClass {
             // bucket is the coarser first line.
             DhtRequest::Forward(_)
             | DhtRequest::ActivityForward(_)
+            | DhtRequest::PresenceConsent(_)
+            | DhtRequest::PresenceState(_)
+            | DhtRequest::PresenceLease(_)
+            | DhtRequest::LiveForward(_)
+            | DhtRequest::PushPseudonymPublish(_)
             | DhtRequest::QueueFetch(_)
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)
@@ -176,10 +171,8 @@ mod tests {
         use common::proto::dht_p2p::FindNode;
 
         let dummy_id = NodeId::from_bytes([0u8; 32]);
-        let find_node = DhtRequest::FindNode(FindNode {
-            target:    [0u8; 32].into(),
-            requester: dummy_id,
-        });
+        let find_node =
+            DhtRequest::FindNode(FindNode { target: [0u8; 32].into(), requester: dummy_id });
         // FindNode is a routing-table read → Cheap. The signature-heavy
         // sticky-home / MLS RPCs need signed fixtures to construct, so
         // their classification is covered by the integration paths; here

@@ -20,10 +20,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 class DrainWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         CoreBridge.onForeground()
-        withTimeoutOrNull(DRAIN_WAIT_MS) {
+        val drained = withTimeoutOrNull(DRAIN_WAIT_MS) {
             CoreEventBus.dbChanged.first { "messages" in it }
         }
-        return Result.success()
+        return if (drained == null) Result.retry() else Result.success()
     }
 
     // API < 31 runs expedited work as a foreground service and requires this. A minimal, low-key
@@ -40,7 +40,7 @@ class DrainWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
     }
 
     private companion object {
-        const val DRAIN_WAIT_MS = 12_000L
+        const val DRAIN_WAIT_MS = 30_000L
         const val SYNC_NOTIF_ID = 42
     }
 }

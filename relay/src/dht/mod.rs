@@ -21,6 +21,7 @@ pub(crate) mod lookup;
 pub mod metrics;
 pub(crate) mod mls;
 pub(crate) mod peer_dial;
+pub(crate) mod push_replication;
 pub(crate) mod push_wake;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
@@ -35,28 +36,26 @@ use std::sync::Arc;
 use anyhow::Result;
 use common::proto::client_res::GatewayDescriptor;
 use common::quic::id::NodeId;
+pub use config::DhtConfig;
 use ed25519_dalek::SigningKey;
 use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
 
-use crate::quic::resolver_link::ResolverLinkHandle;
-use crate::storage::db::Store;
-
-pub use config::DhtConfig;
-
 use self::metrics::Metrics;
 use self::mls::kp::KpFetchLimiters;
 use self::mls::welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
+use crate::quic::resolver_link::ResolverLinkHandle;
+use crate::storage::db::Store;
 
 /// Top-level DHT runtime state.
 ///
 /// Lock granularity:
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
-/// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring
-///   the existing `Relay::clients` pattern.
+/// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring the existing
+///   `Relay::clients` pattern.
 ///
 /// All sub-locks are `parking_lot` and *never* held across `await` —
 /// callers clone what they need out of the lock first (project-wide rule).
@@ -192,10 +191,11 @@ pub struct Dht {
     /// [`Self::attach_clients`].
     pub(crate) clients: Option<ClientsMap>,
 
-    /// Shared `IPK → push-pseudonym P` map (the relay owns it; see
-    /// `Relay::push_pseudonyms`). Read by the enqueue path to wake an offline
-    /// recipient. `Option` for the bare-`Dht` test fixtures, same as
-    /// [`Self::clients`].
+    /// Current user-signed active-relay leases. Shared with the client
+    /// handler so a lease relay can reject stale cross-relay routes.
+    pub(crate) presence_leases: Option<PresenceLeases>,
+
+    /// Shared `IPK -> P` map for offline push wake-up.
     pub(crate) push_pseudonyms: Option<PushMap>,
 
     /// Cached push-gateway directory, refreshed from the resolver. The enqueue
@@ -208,8 +208,7 @@ pub struct Dht {
 /// the field type stays readable. See `Dht::clients` for the lock
 /// contract and the `Option<...>` rationale.
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
-
-/// Shared `IPK → push-pseudonym` map. See `Dht::push_pseudonyms`.
+pub(crate) type PresenceLeases = Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>;
 pub(crate) type PushMap = Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>;
 
 /// Cached push-gateway descriptors from the resolver. See `Dht::push_gateways`.
@@ -241,6 +240,7 @@ impl Dht {
             kp_fetch_limiters: KpFetchLimiters::new(),
             welcome_limiters: WelcomeLimiters::new(),
             clients: None,
+            presence_leases: None,
             push_pseudonyms: None,
             push_gateways: Arc::new(RwLock::new(Vec::new())),
         })
@@ -267,8 +267,10 @@ impl Dht {
         self.clients = Some(clients);
     }
 
-    /// Wire the shared `IPK → P` map so the enqueue path can trigger an offline
-    /// wake. The gateway list is filled separately from the resolver.
+    pub fn attach_presence_leases(&mut self, leases: PresenceLeases) {
+        self.presence_leases = Some(leases);
+    }
+
     pub fn attach_push(&mut self, pseudonyms: PushMap) {
         self.push_pseudonyms = Some(pseudonyms);
     }

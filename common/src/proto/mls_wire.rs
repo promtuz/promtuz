@@ -3,29 +3,22 @@
 //! This module is the wire-format source of truth for the MLS layer.
 //! It carries:
 //!
-//! 1. The application-layer **envelope** wrappers
-//!    ([`MlsEnvelopeP`] / [`MlsApplicationEnvelopeP`] /
-//!    [`WelcomeEnvelopeP`]) that promote `DispatchP::payload` from a
-//!    static-shared-key ciphertext to a postcard-encoded MLS frame.
-//! 2. The **KeyPackage distribution** RPCs
-//!    ([`KeyPackagePublishReq`], [`KeyPackageFetchReq`],
-//!    [`KeyPackageRefillReq`] and their outcome enums) plus the stored
-//!    [`KeyPackageRecord`] form the home relays use to vend
-//!    one-time KeyPackages.
-//! 3. **Signing-input helpers** that domain-separate every signed
-//!    transcript (`MLS_DOMAIN_*` tags).
+//! 1. The application-layer **envelope** wrappers ([`MlsEnvelopeP`] / [`MlsApplicationEnvelopeP`] /
+//!    [`WelcomeEnvelopeP`]) that promote `DispatchP::payload` from a static-shared-key ciphertext
+//!    to a postcard-encoded MLS frame.
+//! 2. The **KeyPackage distribution** RPCs ([`KeyPackagePublishReq`], [`KeyPackageFetchReq`],
+//!    [`KeyPackageRefillReq`] and their outcome enums) plus the stored [`KeyPackageRecord`] form
+//!    the home relays use to vend one-time KeyPackages.
+//! 3. **Signing-input helpers** that domain-separate every signed transcript (`MLS_DOMAIN_*` tags).
 //!
 //! ## What is *not* in this module
 //!
-//! - **No MLS bytes are serialised here.** Wherever the spec says
-//!   "TLS-encoded openmls value" we carry it verbatim as a
-//!   [`ByteVec`] field; the producer is openmls's own `tls_codec`,
-//!   not our codec. This is load-bearing for the layered design — we
-//!   may rewrite *our* envelope wire format without touching the MLS
-//!   internals, and vice-versa.
-//! - **No client logic.** Nothing in here decides who sends what; it
-//!   only fixes the wire grammar. The client-side composition lives in
-//!   libcore.
+//! - **No MLS bytes are serialised here.** Wherever the spec says "TLS-encoded openmls value" we
+//!   carry it verbatim as a [`ByteVec`] field; the producer is openmls's own `tls_codec`, not our
+//!   codec. This is load-bearing for the layered design — we may rewrite *our* envelope wire format
+//!   without touching the MLS internals, and vice-versa.
+//! - **No client logic.** Nothing in here decides who sends what; it only fixes the wire grammar.
+//!   The client-side composition lives in libcore.
 //!
 //! ## Version field
 //!
@@ -63,7 +56,7 @@ use crate::types::bytes::Bytes;
 /// signing transcript here and gates the app-plaintext format
 /// ([`AppPayload`]).
 ///
-/// Diverges from [`crate::PROTOCOL_VERSION`] (= 6): that constant governs
+/// Diverges from [`crate::PROTOCOL_VERSION`] (= 5): that constant governs
 /// the relay-auth handshake and is a wider flag day to bump. This one is
 /// peer-to-peer only, so a bump is just a client-coordinated redeploy —
 /// cheap by comparison, so it moves independently as `AppPayload` variants
@@ -77,19 +70,34 @@ pub const MLS_WIRE_VERSION: u16 = 10;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AppPayload {
     Text(String),
-    Receipt { kind: ReceiptKind, upto: [u8; 16] },
+    Receipt {
+        kind: ReceiptKind,
+        upto: [u8; 16],
+    },
     /// Replace the text of the message with dispatch_id `target`.
-    Edit { target: [u8; 16], content: String },
+    Edit {
+        target:  [u8; 16],
+        content: String,
+    },
     /// Tombstone the message with dispatch_id `target` (delete-for-everyone).
-    Delete { target: [u8; 16] },
+    Delete {
+        target: [u8; 16],
+    },
     /// Add (`add = true`) or remove (`add = false`) `emoji` on the message with
     /// dispatch_id `target`. The reactor is implicit — the MLS sender of this
     /// payload — so this stays correct for multi-member groups (each member's
     /// reaction is attributed to their own IPK on receipt).
-    React { target: [u8; 16], emoji: String, add: bool },
+    React {
+        target: [u8; 16],
+        emoji:  String,
+        add:    bool,
+    },
     /// Text that quotes the message with dispatch_id `reply_to`. Appended
     /// after React so postcard's ordinal tags for older variants hold.
-    Reply { reply_to: [u8; 16], content: String },
+    Reply {
+        reply_to: [u8; 16],
+        content:  String,
+    },
     /// The invitee's proof-of-pair: sent as the first app message right after
     /// accepting a Welcome. Carries nothing — its value is *being* a valid
     /// inbound MLS message, which proves the group works end-to-end and flips
@@ -269,27 +277,22 @@ pub const WELCOME_ACK_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-ack";
 //
 // Wrapper RPCs split into two signature categories:
 //
-//   1. User-signed RPCs (PublishKeyPackage, FetchWelcomes, AckWelcomes)
-//      carry the *real* inner Tier-2 user signature — over
-//      `kp_publish/refill_signing_input` and
-//      `welcome_fetch/ack_signing_input` respectively. The home verifies
-//      it against the connection-authenticated IPK (its gate) AND
-//      forwards it unchanged to the K storage homes, which verify the
-//      same signature. The home is a forwarder, not a trust root: a
-//      compromised home cannot forge a KP publish or drain/delete a
-//      user's welcome queue. (FetchWelcomes/AckWelcomes bind the home's
-//      own NodeId as `requester_relay_id`, so the phone learns it from
-//      the client/0 handshake before signing.)
+//   1. User-signed RPCs (PublishKeyPackage, FetchWelcomes, AckWelcomes) carry the *real* inner
+//      Tier-2 user signature — over `kp_publish/refill_signing_input` and
+//      `welcome_fetch/ack_signing_input` respectively. The home verifies it against the
+//      connection-authenticated IPK (its gate) AND forwards it unchanged to the K storage homes,
+//      which verify the same signature. The home is a forwarder, not a trust root: a compromised
+//      home cannot forge a KP publish or drain/delete a user's welcome queue.
+//      (FetchWelcomes/AckWelcomes bind the home's own NodeId as `requester_relay_id`, so the phone
+//      learns it from the client/0 handshake before signing.)
 //
-//   2. Gate-only RPCs (FetchKeyPackage, PublishWelcome) carry a wrapper
-//      signature over a dedicated domain that the home verifies locally
-//      and does NOT propagate — KeyPackageFetch has no inner user sig
-//      (it's DhtHello-authenticated relay-to-relay) and PublishWelcome's
-//      user authorization rides inside `envelope.sender_sig`. The wrap
-//      sig proves "this authenticated phone asked, now" for freshness +
-//      attribution.
+//   2. Gate-only RPCs (FetchKeyPackage, PublishWelcome) carry a wrapper signature over a dedicated
+//      domain that the home verifies locally and does NOT propagate — KeyPackageFetch has no inner
+//      user sig (it's DhtHello-authenticated relay-to-relay) and PublishWelcome's user
+//      authorization rides inside `envelope.sender_sig`. The wrap sig proves "this authenticated
+//      phone asked, now" for freshness + attribution.
 
-pub const KP_FETCH_WRAP_DOMAIN:        &[u8] = b"promtuz-mls-v1 kp-fetch-wrap";
+pub const KP_FETCH_WRAP_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-fetch-wrap";
 pub const WELCOME_PUBLISH_WRAP_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-publish-wrap";
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -300,14 +303,11 @@ pub const WELCOME_PUBLISH_WRAP_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-publish-
 /// libcore decodes this *before* feeding the inner bytes to openmls.
 ///
 /// Two variants:
-/// - [`MlsEnvelopeP::Application`] for in-group application messages
-///   (and Commits / Proposals — the inner discriminator is opaque to
-///   us; openmls dispatches internally).
-/// - [`MlsEnvelopeP::Welcome`] for inviting a recipient into a new
-///   group. Welcomes are special because the recipient does not yet
-///   share the group's key material; the envelope must be addressable
-///   by IPK alone.
-///
+/// - [`MlsEnvelopeP::Application`] for in-group application messages (and Commits / Proposals — the
+///   inner discriminator is opaque to us; openmls dispatches internally).
+/// - [`MlsEnvelopeP::Welcome`] for inviting a recipient into a new group. Welcomes are special
+///   because the recipient does not yet share the group's key material; the envelope must be
+///   addressable by IPK alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MlsEnvelopeP {
     /// Application-tier MLS message (could be application data, a
@@ -341,15 +341,15 @@ pub enum MlsEnvelopeP {
 pub struct MlsApplicationEnvelopeP {
     /// = [`MLS_ENVELOPE_VERSION`]. Bumped on a breaking layout change
     /// to this struct (independent of [`MLS_WIRE_VERSION`]).
-    pub version: u8,
+    pub version:     u8,
     /// 32-byte MLS GroupId — promtuz constrains it to `Bytes<32>` at
     /// group-creation time. Plaintext for routing / epoch-ahead buffering
     /// at the recipient.
-    pub group_id: Bytes<32>,
+    pub group_id:    Bytes<32>,
     /// Sender's current group epoch. Plaintext so the recipient's
     /// libcore can buffer ahead-of-epoch messages without partial
     /// decryption.
-    pub epoch: u64,
+    pub epoch:       u64,
     /// TLS-encoded `openmls::MlsMessageOut`. Opaque to promtuz —
     /// produced by openmls's `tls_codec`. We only round-trip these
     /// bytes through postcard's variable-length wire encoding via
@@ -359,7 +359,7 @@ pub struct MlsApplicationEnvelopeP {
     /// The transcript binds `to_ipk` so a malicious relay cannot redirect
     /// a captured envelope to a different recipient. Verified by the
     /// recipient's libcore before feeding `mls_message` to openmls.
-    pub sender_sig: Bytes<64>,
+    pub sender_sig:  Bytes<64>,
 }
 
 /// Welcome envelope: invites the recipient into a new MLS group. The
@@ -375,30 +375,30 @@ pub struct MlsApplicationEnvelopeP {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeEnvelopeP {
     /// = [`MLS_ENVELOPE_VERSION`]. See [`MlsApplicationEnvelopeP::version`].
-    pub version: u8,
+    pub version:       u8,
     /// 32-byte MLS GroupId of the group the recipient is being added
     /// to. Plaintext so the recipient can disambiguate concurrent
     /// invites — particularly important during onboarding flows where
     /// multiple invites might arrive in parallel.
-    pub group_id: Bytes<32>,
+    pub group_id:      Bytes<32>,
     /// IPK of the inviter (also `DispatchP::from`). Carried again
     /// inside the envelope so the signature transcript can bind it.
-    pub sender_ipk: Bytes<32>,
+    pub sender_ipk:    Bytes<32>,
     /// IPK of the invitee (also `DispatchP::to`). Bound into the
     /// transcript so a captured Welcome cannot be re-targeted at a
     /// different recipient.
     pub recipient_ipk: Bytes<32>,
     /// TLS-encoded `openmls::Welcome`. Opaque to promtuz.
-    pub welcome_blob: ByteVec,
+    pub welcome_blob:  ByteVec,
     /// MLS `KeyPackageRef` (SHA-256 of the encoded KeyPackage per
     /// RFC 9420 §5.2) of the recipient's KP this Welcome consumes. The
     /// recipient's libcore looks this up in its local stash to find
     /// the matching `hpke_init_secret` / `leaf_signing_secret`.
-    pub kp_ref_used: Bytes<32>,
+    pub kp_ref_used:   Bytes<32>,
     /// Sender's Ed25519 signature over [`welcome_envelope_signing_input`].
     /// Verified by the recipient under `sender_ipk` before openmls
     /// touches `welcome_blob`.
-    pub sender_sig: Bytes<64>,
+    pub sender_sig:    Bytes<64>,
     /// Present only on a *pairing* Welcome (recipient not yet a contact):
     /// the inviter-signed [`Invite`] that authorizes the add, plus the
     /// sender's self-asserted display name so the recipient can save the
@@ -406,7 +406,7 @@ pub struct WelcomeEnvelopeP {
     /// Deliberately *outside* the `sender_sig` transcript — the invite
     /// self-verifies under the recipient's own IPK, and the name is
     /// self-asserted (same trust as a scanned QR).
-    pub pairing: Option<PairingP>,
+    pub pairing:       Option<PairingP>,
 }
 
 /// A bearer pairing capability minted by a user and shown in their QR.
@@ -415,17 +415,17 @@ pub struct WelcomeEnvelopeP {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {
     /// Random 16-byte id (enables future single-use / revoke).
-    pub id: Bytes<16>,
+    pub id:        Bytes<16>,
     /// Unix-ms expiry; the issuer's device rejects the invite past this.
     pub expiry_ms: u64,
     /// Issuer's Ed25519 signature over [`invite_signing_input`].
-    pub sig: Bytes<64>,
+    pub sig:       Bytes<64>,
 }
 
 /// Pairing payload carried by a [`WelcomeEnvelopeP`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingP {
-    pub invite: Invite,
+    pub invite:      Invite,
     /// Sender's self-asserted display name; the recipient length-bounds it
     /// on accept.
     pub sender_name: String,
@@ -445,20 +445,21 @@ pub const PAIR_DECLINE_SIG_DOMAIN: &[u8] = b"promtuz-pair-decline-v1";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairDeclineP {
     /// Decliner IPK (also `DispatchP::from`); bound into the transcript.
-    pub sender_ipk: Bytes<32>,
+    pub sender_ipk:    Bytes<32>,
     /// Inviter IPK (also `DispatchP::to`); bound so a decline can't be
     /// re-targeted at a different inviter.
     pub recipient_ipk: Bytes<32>,
     /// One of the `DECLINE_*` reasons.
-    pub reason: u8,
-    pub timestamp: u64,
+    pub reason:        u8,
+    pub timestamp:     u64,
     /// Ed25519 signature over [`pair_decline_signing_input`], verified by the
     /// inviter under `sender_ipk`.
-    pub sig: Bytes<64>,
+    pub sig:           Bytes<64>,
 }
 
 /// Canonical bytes signed/verified for a [`PairDeclineP`].
-/// Layout: `PAIR_DECLINE_SIG_DOMAIN || MLS_WIRE_VERSION_BE || sender || recipient || reason || timestamp_be`
+/// Layout: `PAIR_DECLINE_SIG_DOMAIN || MLS_WIRE_VERSION_BE || sender || recipient || reason ||
+/// timestamp_be`
 pub fn pair_decline_signing_input(
     sender_ipk: &[u8; 32], recipient_ipk: &[u8; 32], reason: u8, timestamp: u64,
 ) -> Vec<u8> {
@@ -545,19 +546,16 @@ pub fn invite_signing_input(protocol_version: u16, id: &[u8; 16], expiry_ms: u64
 /// hash of the (potentially large) Welcome blob. A captured Welcome
 /// cannot be:
 /// - re-targeted at a different recipient (`recipient_ipk` bound),
-/// - re-attributed to a different inviter (the sig is over IPK, and
-///   `sender_ipk` is bound),
+/// - re-attributed to a different inviter (the sig is over IPK, and `sender_ipk` is bound),
 /// - replayed against a different group (`group_id` bound),
 /// - or paired with a different KP (`kp_ref_used` bound).
-///
 pub fn welcome_envelope_signing_input(
-    protocol_version: u16, group_id: &[u8; 32], sender_ipk: &[u8; 32],
-    recipient_ipk: &[u8; 32], kp_ref_used: &[u8; 32], welcome_blob: &[u8],
+    protocol_version: u16, group_id: &[u8; 32], sender_ipk: &[u8; 32], recipient_ipk: &[u8; 32],
+    kp_ref_used: &[u8; 32], welcome_blob: &[u8],
 ) -> Vec<u8> {
     let blob_hash = blake3::hash(welcome_blob);
-    let mut buf = Vec::with_capacity(
-        WELCOME_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 32 + 32 + 32,
-    );
+    let mut buf =
+        Vec::with_capacity(WELCOME_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 32 + 32 + 32);
     buf.extend_from_slice(WELCOME_ENVELOPE_SIG_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(group_id);
@@ -601,14 +599,14 @@ pub fn welcome_envelope_signing_input(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageRecord {
     /// Owner's Ed25519 IPK. Also the verifying key for [`Self::owner_sig`].
-    pub ipk: Bytes<32>,
+    pub ipk:           Bytes<32>,
     /// MLS `KeyPackageRef` — SHA-256 of the TLS-encoded KeyPackage per
     /// RFC 9420 §5.2 (32 bytes). Stored as `ByteVec` for hash-shape
     /// agnosticism; the home enforces `len == 32`.
-    pub kp_ref: ByteVec,
+    pub kp_ref:        ByteVec,
     /// TLS-encoded `openmls::KeyPackage`. Opaque to promtuz; passed
     /// verbatim to the requester at fetch time.
-    pub kp_bytes: ByteVec,
+    pub kp_bytes:      ByteVec,
     /// Wall-clock at which the KP's lifetime extension expires, in ms
     /// since Unix epoch. Records past this are silently filtered on
     /// fetch and rejected on store. Bounded above by `now +
@@ -626,7 +624,7 @@ pub struct KeyPackageRecord {
     /// the digest closes that gap: a malicious publisher cannot mint bogus
     /// triples where `kp_ref` is computed correctly but `kp_bytes` is
     /// malformed/replaced. The relay just verifies the sig.
-    pub owner_sig: Bytes<64>,
+    pub owner_sig:     Bytes<64>,
 }
 
 /// Build the canonical signing transcript for [`KeyPackageRecord::owner_sig`].
@@ -656,15 +654,12 @@ pub struct KeyPackageRecord {
 /// here prevents a stolen IPK from minting `(ipk, kp_ref, fake_kp_bytes)`
 /// triples that any home would accept.
 pub fn kp_record_signing_input(
-    protocol_version: u16, ipk: &[u8; 32], kp_ref: &[u8], kp_bytes: &[u8],
-    expires_at_ms: u64,
+    protocol_version: u16, ipk: &[u8; 32], kp_ref: &[u8], kp_bytes: &[u8], expires_at_ms: u64,
 ) -> Vec<u8> {
     let kp_ref_len = kp_ref.len() as u32;
     let kp_bytes_digest = blake3::hash(kp_bytes);
     let kp_bytes_digest_bytes = kp_bytes_digest.as_bytes();
-    let mut buf = Vec::with_capacity(
-        KP_RECORD_DOMAIN.len() + 2 + 32 + 4 + kp_ref.len() + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(KP_RECORD_DOMAIN.len() + 2 + 32 + 4 + kp_ref.len() + 32 + 8);
     buf.extend_from_slice(KP_RECORD_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(ipk);
@@ -703,11 +698,11 @@ pub fn kp_record_signing_input(
 pub struct KeyPackagePublishReq {
     /// Owner's Ed25519 IPK. Bound to the per-record `ipk` field on
     /// every entry in `records` (mismatch → rejection).
-    pub ipk: Bytes<32>,
+    pub ipk:       Bytes<32>,
     /// Vector of [`KeyPackageRecord`]s to add to the stash. Bounded
     /// by [`KP_STASH_TARGET`]; the home rejects oversized batches with
     /// [`KeyPackagePublishOutcome::TooMany`].
-    pub records: Vec<KeyPackageRecord>,
+    pub records:   Vec<KeyPackageRecord>,
     /// Publisher-local Unix time in milliseconds at the moment of
     /// signing. ±[`MAX_KP_SKEW_MS`] replay-defence window at the home.
     pub timestamp: u64,
@@ -716,7 +711,7 @@ pub struct KeyPackagePublishReq {
     /// is `BLAKE3(concat(record_signing_inputs))` — so adding,
     /// removing, or modifying any record invalidates the outer sig
     /// even though each record is also individually owner-signed.
-    pub sig: Bytes<64>,
+    pub sig:       Bytes<64>,
 }
 
 /// `KeyPackagePublish` outcome. Mirrors the
@@ -781,12 +776,10 @@ pub struct KeyPackagePublishResp {
 /// internally so a captured per-record sig can't masquerade as a
 /// publish-batch element.
 pub fn kp_publish_signing_input(
-    protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32],
-    record_count: u32, timestamp: u64,
+    protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32], record_count: u32,
+    timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        KP_PUBLISH_DOMAIN.len() + 2 + 32 + 4 + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(KP_PUBLISH_DOMAIN.len() + 2 + 32 + 4 + 32 + 8);
     buf.extend_from_slice(KP_PUBLISH_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(ipk);
@@ -804,9 +797,7 @@ pub fn kp_publish_signing_input(
 /// postcard-encoded form — keeping the digest stable across postcard
 /// version upgrades (postcard makes no byte-stability guarantees
 /// across versions).
-pub fn kp_publish_records_digest(
-    protocol_version: u16, records: &[KeyPackageRecord],
-) -> [u8; 32] {
+pub fn kp_publish_records_digest(protocol_version: u16, records: &[KeyPackageRecord]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     for r in records {
         let inp = kp_record_signing_input(
@@ -830,7 +821,7 @@ pub fn kp_publish_records_digest(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageFetchReq {
     /// Target user whose stash we want to consume from.
-    pub target_ipk: Bytes<32>,
+    pub target_ipk:         Bytes<32>,
     /// Requester relay's `BLAKE3(NodeKey)` identity. The home checks
     /// this matches the connection's authenticated `DhtHello` peer
     /// id (mirrors the `QueueFetch` pattern); per-pair rate limits
@@ -838,7 +829,7 @@ pub struct KeyPackageFetchReq {
     pub requester_relay_id: RelayId,
     /// Requester-local Unix time in milliseconds. ±[`MAX_KP_SKEW_MS`]
     /// replay-defence window at the home.
-    pub timestamp: u64,
+    pub timestamp:          u64,
 }
 
 /// `KeyPackageFetch` outcome — three terminal states.
@@ -863,11 +854,11 @@ pub enum KeyPackageFetchOutcome {
 pub struct KeyPackageFetchFound {
     /// The popped record, including its per-record `owner_sig` so the
     /// requester can re-verify before consuming.
-    pub record: KeyPackageRecord,
+    pub record:      KeyPackageRecord,
     /// Number of unconsumed in-lifetime KPs remaining at this home
     /// after this fetch. The owner's libcore can use this to decide
     /// whether to refill on next heartbeat.
-    pub remaining: u32,
+    pub remaining:   u32,
     /// `BLAKE3(target_ipk || credential_ipk || credential_signing_key_bytes)`
     /// — the *static* identity fields the cross-replica check compares
     /// across K homes. The requester optionally fans out 2-of-3 fetches
@@ -899,12 +890,9 @@ pub struct KeyPackageFetchResp {
 ///     || target_ipk (32) || requester_relay_id (32) || timestamp (BE u64)
 /// ```
 pub fn kp_fetch_signing_input(
-    protocol_version: u16, target_ipk: &[u8; 32],
-    requester_relay_id: &RelayId, timestamp: u64,
+    protocol_version: u16, target_ipk: &[u8; 32], requester_relay_id: &RelayId, timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        KP_FETCH_DOMAIN.len() + 2 + 32 + RelayId::LEN + 8,
-    );
+    let mut buf = Vec::with_capacity(KP_FETCH_DOMAIN.len() + 2 + 32 + RelayId::LEN + 8);
     buf.extend_from_slice(KP_FETCH_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(target_ipk);
@@ -927,15 +915,15 @@ pub fn kp_fetch_signing_input(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageRefillReq {
     /// Owner's Ed25519 IPK.
-    pub ipk: Bytes<32>,
+    pub ipk:       Bytes<32>,
     /// Vector of [`KeyPackageRecord`]s to add. Bounded by
     /// [`KP_STASH_TARGET`].
-    pub records: Vec<KeyPackageRecord>,
+    pub records:   Vec<KeyPackageRecord>,
     /// Publisher-local Unix time in milliseconds. ±[`MAX_KP_SKEW_MS`]
     /// replay-defence window.
     pub timestamp: u64,
     /// Owner's Ed25519 signature over [`kp_refill_signing_input`].
-    pub sig: Bytes<64>,
+    pub sig:       Bytes<64>,
 }
 
 /// `KeyPackageRefill` outcome. Mirrors [`KeyPackagePublishOutcome`]
@@ -969,12 +957,10 @@ pub struct KeyPackageRefillResp {
 /// would let an attacker silently downgrade a fresh-batch Publish
 /// into an additive-only Refill, defeating the rotation discipline).
 pub fn kp_refill_signing_input(
-    protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32],
-    record_count: u32, timestamp: u64,
+    protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32], record_count: u32,
+    timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        KP_REFILL_DOMAIN.len() + 2 + 32 + 4 + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(KP_REFILL_DOMAIN.len() + 2 + 32 + 4 + 32 + 8);
     buf.extend_from_slice(KP_REFILL_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(ipk);
@@ -1008,7 +994,7 @@ pub struct WelcomePublishReq {
     /// The full welcome envelope being queued. The home verifies
     /// `sender_sig` under `sender_ipk` over
     /// [`welcome_envelope_signing_input`] before persisting.
-    pub envelope: WelcomeEnvelopeP,
+    pub envelope:  WelcomeEnvelopeP,
     /// Forwarding-relay-local Unix time in milliseconds at the moment
     /// the publish was issued. ±[`MAX_KP_SKEW_MS`] replay-defence
     /// window at the home — same skew tolerance as the KP family.
@@ -1065,15 +1051,15 @@ pub struct WelcomePublishResp {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeFetchReq {
     /// User IPK whose welcomes we want to drain.
-    pub user_ipk: Bytes<32>,
+    pub user_ipk:           Bytes<32>,
     /// Requester relay's `BLAKE3(NodeKey)` identity. Bound to the
     /// signed transcript so a captured `WelcomeFetch` cannot be
     /// replayed by a different relay.
     pub requester_relay_id: RelayId,
     /// Requester-local Unix time in ms; ±[`MAX_KP_SKEW_MS`] window.
-    pub timestamp: u64,
+    pub timestamp:          u64,
     /// User's Ed25519 signature over [`welcome_fetch_signing_input`].
-    pub user_sig: Bytes<64>,
+    pub user_sig:           Bytes<64>,
 }
 
 /// `WelcomeFetch` outcome — found list + exhausted flag (mirrors
@@ -1120,7 +1106,7 @@ pub struct WelcomeEntry {
     pub welcome_id: Bytes<8>,
     /// The stored welcome envelope. The recipient's libcore verifies
     /// `sender_sig` again locally before feeding to openmls.
-    pub envelope: WelcomeEnvelopeP,
+    pub envelope:   WelcomeEnvelopeP,
 }
 
 // ---- Ack ---------------------------------------------------------
@@ -1137,17 +1123,17 @@ pub struct WelcomeEntry {
 pub struct WelcomeAckReq {
     /// User IPK whose welcomes we're acking. Same as
     /// [`WelcomeFetchReq::user_ipk`].
-    pub user_ipk: Bytes<32>,
+    pub user_ipk:           Bytes<32>,
     /// Requester relay's identity. Bound to the transcript.
     pub requester_relay_id: RelayId,
     /// Welcome ids the recipient confirmed processed; the home
     /// deletes the matching `cf_dht_welcome` rows. Bounded by
     /// [`MAX_WELCOME_ACK_IDS`].
-    pub welcome_ids: Vec<Bytes<8>>,
+    pub welcome_ids:        Vec<Bytes<8>>,
     /// Requester-local Unix time in ms; ±[`MAX_KP_SKEW_MS`] window.
-    pub timestamp: u64,
+    pub timestamp:          u64,
     /// User's Ed25519 signature over [`welcome_ack_signing_input`].
-    pub user_sig: Bytes<64>,
+    pub user_sig:           Bytes<64>,
 }
 
 /// `WelcomeAck` outcome.
@@ -1175,12 +1161,9 @@ pub struct WelcomeAckResp {
 /// Mirrors the `queue_fetch_signing_input` shape (the
 /// `requester_relay_id` binding).
 pub fn welcome_fetch_signing_input(
-    protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId,
-    timestamp: u64,
+    protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId, timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        WELCOME_FETCH_DOMAIN.len() + 2 + 32 + RelayId::LEN + 8,
-    );
+    let mut buf = Vec::with_capacity(WELCOME_FETCH_DOMAIN.len() + 2 + 32 + RelayId::LEN + 8);
     buf.extend_from_slice(WELCOME_FETCH_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(user_ipk);
@@ -1214,9 +1197,7 @@ pub fn welcome_ack_signing_input(
     let ids_digest = *hasher.finalize().as_bytes();
     let count = welcome_ids.len() as u32;
 
-    let mut buf = Vec::with_capacity(
-        WELCOME_ACK_DOMAIN.len() + 2 + 32 + RelayId::LEN + 4 + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(WELCOME_ACK_DOMAIN.len() + 2 + 32 + RelayId::LEN + 4 + 32 + 8);
     buf.extend_from_slice(WELCOME_ACK_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(user_ipk);
@@ -1252,7 +1233,7 @@ pub fn welcome_ack_signing_input(
 #[repr(u8)]
 pub enum KpPublishMode {
     Publish = 0,
-    Refill  = 1,
+    Refill = 1,
 }
 
 /// Build the canonical signing transcript for `CRelayPacket::FetchKeyPackage`.
@@ -1263,12 +1244,9 @@ pub enum KpPublishMode {
 ///     || sender_ipk (32) || target_ipk (32) || timestamp (BE u64)
 /// ```
 pub fn kp_fetch_wrap_signing_input(
-    protocol_version: u16, sender_ipk: &[u8; 32], target_ipk: &[u8; 32],
-    timestamp: u64,
+    protocol_version: u16, sender_ipk: &[u8; 32], target_ipk: &[u8; 32], timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        KP_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(KP_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
     buf.extend_from_slice(KP_FETCH_WRAP_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(sender_ipk);
@@ -1296,9 +1274,7 @@ pub fn welcome_publish_wrap_signing_input(
     protocol_version: u16, sender_ipk: &[u8; 32], welcome_blob: &[u8], timestamp: u64,
 ) -> Vec<u8> {
     let blob_hash = blake3::hash(welcome_blob);
-    let mut buf = Vec::with_capacity(
-        WELCOME_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8,
-    );
+    let mut buf = Vec::with_capacity(WELCOME_PUBLISH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
     buf.extend_from_slice(WELCOME_PUBLISH_WRAP_DOMAIN);
     buf.extend_from_slice(&protocol_version.to_be_bytes());
     buf.extend_from_slice(sender_ipk);
@@ -1361,13 +1337,8 @@ mod tests {
         owner: &SigningKey, kp_ref: Vec<u8>, kp_bytes: Vec<u8>, expires_at_ms: u64,
     ) -> KeyPackageRecord {
         let ipk: [u8; 32] = owner.verifying_key().to_bytes();
-        let msg = kp_record_signing_input(
-            MLS_WIRE_VERSION,
-            &ipk,
-            &kp_ref,
-            &kp_bytes,
-            expires_at_ms,
-        );
+        let msg =
+            kp_record_signing_input(MLS_WIRE_VERSION, &ipk, &kp_ref, &kp_bytes, expires_at_ms);
         let sig = owner.sign(&msg);
         KeyPackageRecord {
             ipk: ipk.into(),
@@ -1397,9 +1368,7 @@ mod tests {
 
         // KP_FETCH_WRAP: domain || version(2) || ipk(32)
         //               || target_ipk(32) || timestamp(8)
-        let kp_fetch = kp_fetch_wrap_signing_input(
-            MLS_WIRE_VERSION, &ipk, &target_ipk, ts,
-        );
+        let kp_fetch = kp_fetch_wrap_signing_input(MLS_WIRE_VERSION, &ipk, &target_ipk, ts);
         assert_eq!(kp_fetch.len(), KP_FETCH_WRAP_DOMAIN.len() + 2 + 32 + 32 + 8);
 
         // WELCOME_PUBLISH_WRAP: domain || version(2) || ipk(32)
@@ -1415,21 +1384,21 @@ mod tests {
     #[test]
     fn mls_envelope_outer_round_trip_for_each_variant() {
         let app = MlsEnvelopeP::Application(MlsApplicationEnvelopeP {
-            version: MLS_ENVELOPE_VERSION,
-            group_id: [0x42; 32].into(),
-            epoch: 1,
+            version:     MLS_ENVELOPE_VERSION,
+            group_id:    [0x42; 32].into(),
+            epoch:       1,
             mls_message: b"x".to_vec().into(),
-            sender_sig: [0; 64].into(),
+            sender_sig:  [0; 64].into(),
         });
         let welcome = MlsEnvelopeP::Welcome(WelcomeEnvelopeP {
-            version: MLS_ENVELOPE_VERSION,
-            group_id: [0x42; 32].into(),
-            sender_ipk: [1; 32].into(),
+            version:       MLS_ENVELOPE_VERSION,
+            group_id:      [0x42; 32].into(),
+            sender_ipk:    [1; 32].into(),
             recipient_ipk: [2; 32].into(),
-            welcome_blob: b"y".to_vec().into(),
-            kp_ref_used: [0; 32].into(),
-            sender_sig: [0; 64].into(),
-            pairing: None,
+            welcome_blob:  b"y".to_vec().into(),
+            kp_ref_used:   [0; 32].into(),
+            sender_sig:    [0; 64].into(),
+            pairing:       None,
         });
         for env in [app, welcome] {
             let bytes = env.ser().expect("ser");
@@ -1465,19 +1434,13 @@ mod tests {
             build_record(&owner, vec![2; 32], b"b".to_vec(), 1000),
         ];
         let digest = kp_publish_records_digest(MLS_WIRE_VERSION, &recs);
-        let msg = kp_publish_signing_input(
-            MLS_WIRE_VERSION,
-            &ipk,
-            &digest,
-            recs.len() as u32,
-            42,
-        );
+        let msg = kp_publish_signing_input(MLS_WIRE_VERSION, &ipk, &digest, recs.len() as u32, 42);
         let sig = owner.sign(&msg);
         let req = KeyPackagePublishReq {
-            ipk: ipk.into(),
-            records: recs,
+            ipk:       ipk.into(),
+            records:   recs,
             timestamp: 42,
-            sig: sig.to_bytes().into(),
+            sig:       sig.to_bytes().into(),
         };
         let bytes = req.ser().expect("ser");
         let decoded = KeyPackagePublishReq::deser(&bytes).expect("deser");
@@ -1504,9 +1467,9 @@ mod tests {
         let req_relay = fresh_signing_key();
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let req = KeyPackageFetchReq {
-            target_ipk: [0x99; 32].into(),
+            target_ipk:         [0x99; 32].into(),
             requester_relay_id: req_id,
-            timestamp: 100,
+            timestamp:          100,
         };
         let bytes = req.ser().expect("ser");
         let decoded = KeyPackageFetchReq::deser(&bytes).expect("deser");
@@ -1516,8 +1479,8 @@ mod tests {
         let rec = build_record(&owner, vec![0; 32], b"kp".to_vec(), 1_000_000);
         let outcomes = vec![
             KeyPackageFetchOutcome::Found(KeyPackageFetchFound {
-                record: rec,
-                remaining: 99,
+                record:      rec,
+                remaining:   99,
                 static_hash: [0xEE; 32].into(),
             }),
             KeyPackageFetchOutcome::NoStash,
@@ -1538,19 +1501,13 @@ mod tests {
         let ipk: [u8; 32] = owner.verifying_key().to_bytes();
         let recs = vec![build_record(&owner, vec![3; 32], b"r".to_vec(), 555)];
         let digest = kp_publish_records_digest(MLS_WIRE_VERSION, &recs);
-        let msg = kp_refill_signing_input(
-            MLS_WIRE_VERSION,
-            &ipk,
-            &digest,
-            recs.len() as u32,
-            7,
-        );
+        let msg = kp_refill_signing_input(MLS_WIRE_VERSION, &ipk, &digest, recs.len() as u32, 7);
         let sig = owner.sign(&msg);
         let req = KeyPackageRefillReq {
-            ipk: ipk.into(),
-            records: recs,
+            ipk:       ipk.into(),
+            records:   recs,
             timestamp: 7,
-            sig: sig.to_bytes().into(),
+            sig:       sig.to_bytes().into(),
         };
         let bytes = req.ser().expect("ser");
         let decoded = KeyPackageRefillReq::deser(&bytes).expect("deser");
@@ -1591,10 +1548,7 @@ mod tests {
             0xDEAD_BEEF_CAFE_F00D,
             mls,
         );
-        assert_eq!(
-            buf.len(),
-            MLS_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 8 + 32
-        );
+        assert_eq!(buf.len(), MLS_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 8 + 32);
         assert!(buf.starts_with(MLS_ENVELOPE_SIG_DOMAIN));
         let off = MLS_ENVELOPE_SIG_DOMAIN.len();
         assert_eq!(&buf[off..off + 2], &MLS_WIRE_VERSION.to_be_bytes());
@@ -1615,10 +1569,7 @@ mod tests {
             &kp_ref,
             blob,
         );
-        assert_eq!(
-            buf.len(),
-            WELCOME_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 32 + 32 + 32
-        );
+        assert_eq!(buf.len(), WELCOME_ENVELOPE_SIG_DOMAIN.len() + 2 + 32 + 32 + 32 + 32 + 32);
         assert!(buf.starts_with(WELCOME_ENVELOPE_SIG_DOMAIN));
     }
 
@@ -1627,11 +1578,10 @@ mod tests {
         // A captured Publish sig must not validate as a Refill sig (or
         // vice versa). The domain prefix is the only difference (the
         // field layout after the domain is identical), so we anchor on:
-        //   1. The full transcripts differ (so a captured sig won't
-        //      validate under the wrong helper).
-        //   2. The *suffix* after the domain bytes is byte-identical
-        //      (so a future field-layout drift breaks the assertion
-        //      and surfaces here, not weeks later).
+        //   1. The full transcripts differ (so a captured sig won't validate under the wrong
+        //      helper).
+        //   2. The *suffix* after the domain bytes is byte-identical (so a future field-layout
+        //      drift breaks the assertion and surfaces here, not weeks later).
         //
         // We do NOT assert on overall length because the two domain
         // strings are different lengths (`KP_PUBLISH_DOMAIN` vs
@@ -1640,24 +1590,15 @@ mod tests {
         let digest = [0u8; 32];
         let pub_buf = kp_publish_signing_input(MLS_WIRE_VERSION, &ipk, &digest, 0, 0);
         let refill_buf = kp_refill_signing_input(MLS_WIRE_VERSION, &ipk, &digest, 0, 0);
-        assert_ne!(
-            pub_buf, refill_buf,
-            "different domains must produce different transcripts"
-        );
+        assert_ne!(pub_buf, refill_buf, "different domains must produce different transcripts");
         assert_eq!(
             &pub_buf[KP_PUBLISH_DOMAIN.len()..],
             &refill_buf[KP_REFILL_DOMAIN.len()..],
             "post-domain layout must be byte-identical"
         );
         // And those suffixes both start with the version + ipk + ...
-        assert!(
-            pub_buf.starts_with(KP_PUBLISH_DOMAIN),
-            "publish prefix is its own domain"
-        );
-        assert!(
-            refill_buf.starts_with(KP_REFILL_DOMAIN),
-            "refill prefix is its own domain"
-        );
+        assert!(pub_buf.starts_with(KP_PUBLISH_DOMAIN), "publish prefix is its own domain");
+        assert!(refill_buf.starts_with(KP_REFILL_DOMAIN), "refill prefix is its own domain");
     }
 
     #[test]
@@ -1699,10 +1640,7 @@ mod tests {
 
         let buf_a = envelope_signing_input(MLS_WIRE_VERSION, &to_a, &group_id, 1, mls);
         let buf_b = envelope_signing_input(MLS_WIRE_VERSION, &to_b, &group_id, 1, mls);
-        assert_ne!(
-            buf_a, buf_b,
-            "different to_ipk must produce different transcripts"
-        );
+        assert_ne!(buf_a, buf_b, "different to_ipk must produce different transcripts");
     }
 
     /// Records-digest is deterministic over identical batches and
@@ -1728,8 +1666,8 @@ mod tests {
     // ---------------------------------------------------------------
 
     fn build_welcome_envelope(
-        sender: &SigningKey, recipient_ipk: [u8; 32], group_id: [u8; 32],
-        kp_ref_used: [u8; 32], welcome_blob: Vec<u8>,
+        sender: &SigningKey, recipient_ipk: [u8; 32], group_id: [u8; 32], kp_ref_used: [u8; 32],
+        welcome_blob: Vec<u8>,
     ) -> WelcomeEnvelopeP {
         let sender_ipk: [u8; 32] = sender.verifying_key().to_bytes();
         let msg = welcome_envelope_signing_input(
@@ -1742,14 +1680,14 @@ mod tests {
         );
         let sig = sender.sign(&msg);
         WelcomeEnvelopeP {
-            version: MLS_ENVELOPE_VERSION,
-            group_id: group_id.into(),
-            sender_ipk: sender_ipk.into(),
+            version:       MLS_ENVELOPE_VERSION,
+            group_id:      group_id.into(),
+            sender_ipk:    sender_ipk.into(),
             recipient_ipk: recipient_ipk.into(),
-            welcome_blob: welcome_blob.into(),
-            kp_ref_used: kp_ref_used.into(),
-            sender_sig: sig.to_bytes().into(),
-            pairing: None,
+            welcome_blob:  welcome_blob.into(),
+            kp_ref_used:   kp_ref_used.into(),
+            sender_sig:    sig.to_bytes().into(),
+            pairing:       None,
         }
     }
 
@@ -1763,10 +1701,7 @@ mod tests {
             [0xCC; 32],
             b"opaque-welcome".to_vec(),
         );
-        let req = WelcomePublishReq {
-            envelope: env,
-            timestamp: 12345,
-        };
+        let req = WelcomePublishReq { envelope: env, timestamp: 12345 };
         let bytes = req.ser().expect("ser");
         let decoded = WelcomePublishReq::deser(&bytes).expect("deser");
         assert_eq!(decoded, req);
@@ -1794,12 +1729,7 @@ mod tests {
         let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let timestamp = 999;
 
-        let msg = welcome_fetch_signing_input(
-            MLS_WIRE_VERSION,
-            &user_ipk,
-            &req_id,
-            timestamp,
-        );
+        let msg = welcome_fetch_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, timestamp);
         let sig = user.sign(&msg);
         let req = WelcomeFetchReq {
             user_ipk: user_ipk.into(),
@@ -1821,10 +1751,7 @@ mod tests {
         );
         let resp_found = WelcomeFetchResp {
             outcome: WelcomeFetchOutcome::Found(WelcomeFetchFound {
-                welcomes: vec![WelcomeEntry {
-                    welcome_id: [1u8; 8].into(),
-                    envelope: env,
-                }],
+                welcomes: vec![WelcomeEntry { welcome_id: [1u8; 8].into(), envelope: env }],
             }),
         };
         let bytes = resp_found.ser().expect("ser");
@@ -1852,13 +1779,7 @@ mod tests {
         let ids: Vec<[u8; 8]> = vec![[1u8; 8], [2u8; 8]];
         let timestamp = 555;
 
-        let msg = welcome_ack_signing_input(
-            MLS_WIRE_VERSION,
-            &user_ipk,
-            &req_id,
-            &ids,
-            timestamp,
-        );
+        let msg = welcome_ack_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, &ids, timestamp);
         let sig = user.sign(&msg);
         let req = WelcomeAckReq {
             user_ipk: user_ipk.into(),
@@ -1892,14 +1813,14 @@ mod tests {
         let b = welcome_ack_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, &ids_b, 0);
         assert_ne!(a, b, "different ids must produce different transcripts");
 
-        let c =
-            welcome_ack_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, &ids_a, 1);
+        let c = welcome_ack_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, &ids_a, 1);
         assert_ne!(a, c, "different timestamp must produce different transcripts");
     }
 
     #[test]
     fn app_payload_round_trips() {
-        use crate::proto::pack::{Packer, Unpacker};
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
         let t = AppPayload::Text("hello".into());
         assert_eq!(AppPayload::deser(&t.ser().unwrap()).unwrap(), t);
         let r = AppPayload::Receipt { kind: ReceiptKind::Delivered, upto: [9u8; 16] };

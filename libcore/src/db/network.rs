@@ -90,6 +90,17 @@ const MIGRATION_ARRAY: &[M] = &[
             );
         "#,
     ),
+    M::up(
+        r#"--sql
+            CREATE TABLE presence_contacts (
+              peer BLOB PRIMARY KEY CHECK(length(peer) = 32)
+            );
+            CREATE TABLE presence_state (
+              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+              lease_version INTEGER NOT NULL
+            );
+        "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

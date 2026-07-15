@@ -33,7 +33,7 @@ use crate::util::config::AppConfig;
 #[derive(Debug)]
 pub struct RelayKeys {
     pub signing: SigningKey,
-    pub public:  VerifyingKey,
+    pub public: VerifyingKey,
 }
 
 impl RelayKeys {
@@ -93,6 +93,8 @@ pub struct Relay {
     /// A sees B's presence only when `subs[A] ∋ B` and `subs[B] ∋ A` — so this
     /// one map is both the interest list and the consent list.
     pub presence_subs: RwLock<HashMap<[u8; 32], HashSet<[u8; 32]>>>,
+    pub presence_leases: Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>,
+    pub presence_versions: RwLock<HashMap<[u8; 32], u64>>,
 
     /// Clients that flagged themselves Idle → the unix-ms they did. Absence =
     /// Active. Populated by `SetPresence`, cleared on Active or disconnect.
@@ -127,7 +129,10 @@ impl Relay {
             "building the TLS server config"
         );
 
-        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.bind_addr()), "starting the QUIC endpoint");
+        let endpoint = graceful!(
+            Endpoint::server(server_cfg, cfg.network.bind_addr()),
+            "starting the QUIC endpoint"
+        );
         if let Ok(addr) = endpoint.local_addr() {
             info!("relay listening at QUIC({:?})", addr);
         }
@@ -144,13 +149,17 @@ impl Relay {
 
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
 
-        let client_cfg =
-            Arc::new(graceful!(build_client_cfg(ProtoRole::Relay, &roots), "building the QUIC client config"));
+        let client_cfg = Arc::new(graceful!(
+            build_client_cfg(ProtoRole::Relay, &roots),
+            "building the QUIC client config"
+        ));
         // peer/1 is the key-as-identity trust domain (self-signed NodeKey
         // certs, pinned to the dialed NodeId post-handshake), not the CA
         // hierarchy — so it gets its own verifier, not build_client_cfg.
-        let peer_client_cfg =
-            Arc::new(graceful!(crate::dht::peer_dial::build_peer_client_cfg(), "building the peer/1 client config"));
+        let peer_client_cfg = Arc::new(graceful!(
+            crate::dht::peer_dial::build_peer_client_cfg(),
+            "building the peer/1 client config"
+        ));
 
         endpoint.set_default_client_config((*client_cfg).clone());
 
@@ -162,6 +171,7 @@ impl Relay {
         // inner map can be cloned-by-Arc into `Dht.clients` for the
         // home-side `Forward` handler.
         let clients = Arc::new(RwLock::new(HashMap::new()));
+        let presence_leases = Arc::new(RwLock::new(HashMap::new()));
         // Shared `IPK → P` map: the per-client handler writes it, the DHT
         // enqueue path reads it to wake offline recipients.
         let push_pseudonyms = Arc::new(RwLock::new(HashMap::new()));
@@ -181,9 +191,10 @@ impl Relay {
                     // `Forward` handler can deliver locally when the
                     // recipient is online here.
                     d.attach_clients(clients.clone());
+                    d.attach_presence_leases(presence_leases.clone());
+                    d.attach_push(push_pseudonyms.clone());
                     // Wire the offline-wake path: the shared IPK→P map. The
                     // gateway list is filled from the resolver (see main.rs).
-                    d.attach_push(push_pseudonyms.clone());
                     info!("DHT enabled (node_id = {node_id})");
                     Some(Arc::new(d))
                 },
@@ -209,6 +220,8 @@ impl Relay {
             endpoint,
             clients,
             presence_subs: RwLock::new(HashMap::new()),
+            presence_leases,
+            presence_versions: RwLock::new(HashMap::new()),
             presence_mode: RwLock::new(HashMap::new()),
             push_pseudonyms,
         }

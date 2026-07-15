@@ -113,6 +113,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                                 Ok(state) => {
                                     crate::dht_log!("DHT bootstrap retry succeeded (state {state:?})");
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                                    super::push_replication::retry_pending(dht.clone()).await;
                                 },
                                 // Brand-new-network case — hold base backoff so a
                                 // peer joining shortly after lets us re-converge.
@@ -133,6 +134,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                     }
                 } else {
                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
+                    super::push_replication::retry_pending(dht.clone()).await;
                 }
             }
             _ = drift_tick.tick() => {

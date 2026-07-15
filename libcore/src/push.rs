@@ -12,6 +12,7 @@ use common::proto::client_rel::CRelayPacket;
 use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
 use common::proto::client_res::GatewayDescriptor;
+use common::proto::dht_p2p::push_pseudonym_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::proto::push::PushProvider;
@@ -26,6 +27,7 @@ use rusqlite::params;
 
 use crate::ENDPOINT;
 use crate::RESOLVER_SEEDS;
+use crate::data::identity::IdentitySigner;
 use crate::db::network::NETWORK_DB;
 use crate::quic::dialer::connect_to_any_seed;
 use crate::state::RELAY;
@@ -33,7 +35,6 @@ use crate::state::RELAY;
 /// The push-pseudonym keypair. Random and *not* derived from the IPK (so the
 /// gateway can't link `P` back to us), and — because it's per-install, not
 /// per-identity — distinct on each device sharing one identity.
-///
 // ponytail: process-lifetime only. Persist the seed via SecureStore for a
 // pseudonym that survives restarts, instead of registering a fresh `P` each
 // launch and orphaning the old one.
@@ -52,9 +53,15 @@ pub fn push_pseudonym() -> [u8; 32] {
 /// Tell the connected home relay our `P`. Fire-and-forget; the relay binds it
 /// to the connection-authenticated IPK. Called on each relay connect.
 pub async fn register_push() -> Result<()> {
-    let bytes = CRelayPacket::RegisterPush { pseudonym: Bytes(push_pseudonym()) }
-        .pack()
-        .map_err(|e| anyhow!("pack register_push: {e}"))?;
+    let pseudonym = push_pseudonym();
+    let timestamp = now_ms();
+    let ipk = crate::data::identity::Identity::get().context("no identity")?.ipk();
+    let sig = IdentitySigner::sign(&push_pseudonym_signing_input(&ipk, &pseudonym, timestamp))?
+        .to_bytes();
+    let bytes =
+        CRelayPacket::RegisterPush { pseudonym: Bytes(pseudonym), timestamp, sig: Bytes(sig) }
+            .pack()
+            .map_err(|e| anyhow!("pack register_push: {e}"))?;
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -65,6 +72,13 @@ pub async fn register_push() -> Result<()> {
         let _ = tx.finish();
     }
     Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The platform push token (e.g. FCM registration token), pushed in by the app
@@ -106,7 +120,8 @@ async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Resul
     let (mut tx, _rx) = conn.open_bi().await?;
     tx.write_all(&PushRequest::Register(reg).pack()?).await?;
     tx.finish()?;
-    // finish() only marks the stream done locally; await the peer's ack or close() drops the unsent op.
+    // finish() only marks the stream done locally; await the peer's ack or close() drops the unsent
+    // op.
     let _ = tx.stopped().await;
     conn.close(0u32.into(), b"registered");
     Ok(())
