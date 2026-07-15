@@ -1259,6 +1259,8 @@ pub enum InboundDecoded {
     ApplicationBuffered,
     /// Application message stale (epoch < current); dropped.
     ApplicationStale,
+    /// Application message whose sender-ratchet secret was already discarded.
+    ApplicationUndecryptable,
     /// Application message for a group we hold no local state for (post-
     /// restore, or state loss). The ciphertext is unrecoverable by
     /// construction (FS) — the caller MUST ack so the relay GCs it instead
@@ -1505,9 +1507,11 @@ pub fn process_application_inbound_for<C: DhtClient>(
     let proto: ProtocolMessage =
         in_msg.try_into_protocol_message().map_err(|e| anyhow!("not a ProtocolMessage: {e:?}"))?;
 
-    let processed = group
-        .process_incoming(ctx.provider, proto)
-        .map_err(|e| anyhow!("process_incoming: {e}"))?;
+    let processed = match group.process_incoming(ctx.provider, proto) {
+        Ok(processed) => processed,
+        Err(err) if err.is_spent_secret() => return Ok(InboundDecoded::ApplicationUndecryptable),
+        Err(err) => return Err(anyhow!("process_incoming: {err}")),
+    };
 
     match processed {
         ProcessedMessageContent::ApplicationMessage(app) => {

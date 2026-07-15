@@ -883,6 +883,10 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
             // ack is the correct response.
             warn!("MESSAGE: stale-epoch envelope from {}; dropping", hex::encode(&msg.from[..4]));
         },
+        Ok(Some(crate::messaging::InboundDecoded::ApplicationUndecryptable)) => {
+            // Sender-ratchet secret is permanently unavailable. Returning Ok
+            // lets live delivery and queue draining acknowledge this envelope.
+        },
         Ok(None) => {
             // Currently unreachable — process_inbound_envelope only
             // returns None for the protocol-mismatch path, which

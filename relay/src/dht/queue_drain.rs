@@ -60,7 +60,6 @@ use tokio::time::timeout;
 
 use super::Dht;
 use super::config::K;
-use super::config::MAX_QUEUE_FETCH_PAGES;
 use super::config::QUEUE_FETCH_TIMEOUT_MS;
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 
@@ -111,9 +110,8 @@ pub(crate) enum QueueDrainError {
 ///    self_relay_id, timestamp = drain_auth.timestamp, user_sig =
 ///    drain_auth.sig }`.
 ///    (c) Read `QueueFetchResp { messages, exhausted }`.
-///    (d) While `exhausted == false`, page (same auth — the transcript
-///    doesn't bind page index, so the home reuses the same
-///    freshness check). Up to [`MAX_QUEUE_FETCH_PAGES`] pages.
+///    (d) Read one batch. The client acknowledges it before a later
+///    reconnect requests the next batch.
 /// 5. Concat all dispatches and deduplicate by `DispatchP.id` so a
 ///    cross-home replicated message arrives at the client exactly
 ///    once. Order within `id`-duplicates is "first home in the
@@ -302,49 +300,26 @@ async fn remote_fetch_parallel_with_homes(
     results
 }
 
-/// Single home's `QueueFetch` page-loop. Issues up to
-/// [`MAX_QUEUE_FETCH_PAGES`] page requests against `peer`,
-/// concatenating the per-page `messages` until either:
-///
-/// - `exhausted == true` (home reports its queue is empty), or
-/// - the page cap is hit (defensive bound against a misbehaving home).
-///
-/// Returns `Some(messages)` (possibly empty if the home's queue is
-/// empty after page 1) or `None` if any RPC in the chain failed
-/// structurally. A mid-chain failure throws away all collected pages
-/// for *this* home — the caller's cross-home dedupe will pick up
-/// duplicates from any home that completed.
+/// Fetch one batch from a home. The queue remains unchanged until the
+/// post-drain acknowledgment, so issuing another fetch here would return
+/// the same first batch rather than advancing a page cursor.
 async fn remote_fetch_one(
     dht: &Arc<Dht>, peer: &NodeDescriptor, fetch: &QueueFetch,
 ) -> Option<Vec<DispatchP>> {
     let conn = super::lookup::connect_to_peer(dht, peer).await.ok()?;
 
-    let mut all: Vec<DispatchP> = Vec::new();
-    for _page in 0..MAX_QUEUE_FETCH_PAGES {
-        let pkt = DhtPacket::Request(DhtRequest::QueueFetch(fetch.clone()));
-        let bytes = pkt.pack().ok()?;
+    let pkt = DhtPacket::Request(DhtRequest::QueueFetch(fetch.clone()));
+    let bytes = pkt.pack().ok()?;
+    let (mut send, mut recv) = conn.open_bi().await.ok()?;
+    send.write_all(&bytes).await.ok()?;
+    send.finish().ok()?;
 
-        let (mut send, mut recv) = conn.open_bi().await.ok()?;
-        send.write_all(&bytes).await.ok()?;
-        send.finish().ok()?;
-
-        let resp = DhtPacket::unpack(&mut recv).await.ok()?;
-        let QueueFetchResp { messages, exhausted } = match resp {
-            DhtPacket::Response(DhtResponse::QueueFetch(r)) => r,
-            // Wrong response variant — peer misbehaving. We
-            // deliberately do *not* close the connection here (same
-            // policy as `remote_forward_one`): a buggy peer will
-            // surface again on the next RPC and the inbound rate
-            // limiter will eventually trip.
-            _ => return None,
-        };
-
-        all.extend(messages);
-        if exhausted {
-            break;
-        }
+    match DhtPacket::unpack(&mut recv).await.ok()? {
+        DhtPacket::Response(DhtResponse::QueueFetch(QueueFetchResp { messages, .. })) => {
+            Some(messages)
+        },
+        _ => None,
     }
-    Some(all)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,11 +538,9 @@ pub(crate) async fn ack_remote_queues(
     }
 }
 
-/// Single `QueueFetchAck` RPC against `peer`. Returns void: the only
-/// observable signal is the metrics counter (failures bump
-/// `queue_fetch_failures` for parity with the fetch path; we don't
-/// have a dedicated ack-failure counter because acks are best-effort
-/// and operators don't get a useful signal from a separate metric).
+/// Single `QueueFetchAck` RPC against `peer`. Failures, including a
+/// rejected response, bump `queue_fetch_failures` so lingering replicas
+/// are visible to operators.
 async fn remote_ack_one(dht: &Arc<Dht>, peer: &NodeDescriptor, ack: &QueueFetchAck) {
     let conn = match super::lookup::connect_to_peer(dht, peer).await {
         Ok(c) => c,
@@ -589,12 +562,17 @@ async fn remote_ack_one(dht: &Arc<Dht>, peer: &NodeDescriptor, ack: &QueueFetchA
         }
     };
     if send.write_all(&bytes).await.is_err() {
+        dht.metrics.inc_queue_fetch_failures();
         return;
     }
     let _ = send.finish();
-    // Drain the response (we don't act on `ok`); failure to read is
-    // best-effort.
-    let _ = DhtPacket::unpack(&mut recv).await;
+    let acknowledged = matches!(
+        DhtPacket::unpack(&mut recv).await,
+        Ok(DhtPacket::Response(DhtResponse::QueueFetchAck(QueueFetchAckResp { ok: true })))
+    );
+    if !acknowledged {
+        dht.metrics.inc_queue_fetch_failures();
+    }
 }
 
 // ---------------------------------------------------------------------------

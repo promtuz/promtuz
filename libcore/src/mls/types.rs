@@ -122,6 +122,15 @@ pub enum MlsGroupError {
 }
 
 impl MlsGroupError {
+    /// A previously consumed or expired sender-ratchet secret cannot be recovered.
+    pub(crate) fn is_spent_secret(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenMls(reason)
+                if reason.contains("TooDistantInThePast") || reason.contains("SecretReuseError")
+        )
+    }
+
     /// Bridge an openmls error (any variant) into the unified enum.
     /// Use the *Debug* rendering rather than Display because
     /// openmls's Display is sometimes terser than the underlying
