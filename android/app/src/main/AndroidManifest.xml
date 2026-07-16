@@ -97,6 +97,14 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- Inline notification actions (reply / mark-read); fired only by our own PendingIntents. -->
+        <receiver
+            android:name="com.promtuz.core.push.ReplyReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="com.promtuz.core.push.MarkReadReceiver"
+            android:exported="false" />
         <service
             android:name="com.promtuz.core.AppCloseService"
             android:exported="false"

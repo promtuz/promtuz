@@ -15,6 +15,7 @@ import com.promtuz.chat.ui.components.InviteBottomSheet
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
+import com.promtuz.core.push.PushNotifier
 import org.koin.android.ext.android.inject
 
 /**
@@ -30,6 +31,7 @@ class LauncherActivity : ComponentActivity() {
 
         enableEdgeToEdge()
         consumeInvite(intent)
+        consumeChatOpen(intent)
 
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
@@ -44,6 +46,7 @@ class LauncherActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeInvite(intent)
+        consumeChatOpen(intent)
     }
 
     /**
@@ -56,5 +59,14 @@ class LauncherActivity : ComponentActivity() {
             ?: return
         intent.removeExtra(InviteLink.EXTRA_INVITE) // one-shot; survive recreation
         if (CoreBridge.shouldLaunchApp()) viewModel.showInvite(invite) else viewModel.pendingInvite = invite
+    }
+
+    /** A message-notification tap carries the chat's peer + name; open that thread once we're set up. */
+    private fun consumeChatOpen(intent: Intent) {
+        val peerHex = intent.getStringExtra(PushNotifier.EXTRA_PEER) ?: return
+        val name = intent.getStringExtra(PushNotifier.EXTRA_PEER_NAME).orEmpty()
+        intent.removeExtra(PushNotifier.EXTRA_PEER) // one-shot; survive recreation
+        intent.removeExtra(PushNotifier.EXTRA_PEER_NAME)
+        if (CoreBridge.shouldLaunchApp()) viewModel.openChat(peerHex, name)
     }
 }

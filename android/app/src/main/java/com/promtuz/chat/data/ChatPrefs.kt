@@ -25,6 +25,21 @@ object ChatPrefs {
         get() = prefs.getBoolean(NOTIF_PRIMED, false)
         set(value) = prefs.edit { putBoolean(NOTIF_PRIMED, value) }
 
+    /** Master switch for new-message notifications. Default on. */
+    var notifEnabled: Boolean
+        get() = prefs.getBoolean(NOTIF_ENABLED, true)
+        set(value) = prefs.edit { putBoolean(NOTIF_ENABLED, value) }
+
+    /** Show sender + text in the shade, vs a generic "New message". Default on. */
+    var notifPreview: Boolean
+        get() = prefs.getBoolean(NOTIF_PREVIEW, true)
+        set(value) = prefs.edit { putBoolean(NOTIF_PREVIEW, value) }
+
+    /** How new-message notifications alert. Default: buzz on every message. */
+    var notifBuzz: NotifBuzz
+        get() = runCatching { NotifBuzz.valueOf(prefs.getString(NOTIF_BUZZ, "")!!) }.getOrDefault(NotifBuzz.EveryMessage)
+        set(value) = prefs.edit { putString(NOTIF_BUZZ, value.name) }
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences("chat_flags", Context.MODE_PRIVATE)
         _pinned.value = prefs.getStringSet(PINNED, emptySet()).orEmpty().toSet()
@@ -51,4 +66,10 @@ object ChatPrefs {
     private const val PINNED = "pinned"
     private const val MUTED = "muted"
     private const val NOTIF_PRIMED = "notif_primed"
+    private const val NOTIF_ENABLED = "notif_enabled"
+    private const val NOTIF_PREVIEW = "notif_preview"
+    private const val NOTIF_BUZZ = "notif_buzz"
 }
+
+/** New-message alert cadence, persisted via [ChatPrefs.notifBuzz]. */
+enum class NotifBuzz { EveryMessage, Throttled, FirstOnly }
