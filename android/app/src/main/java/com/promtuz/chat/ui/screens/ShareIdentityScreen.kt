@@ -143,7 +143,7 @@ private fun ColumnScope.ShareLinkButton(inviteBytes: ByteArray?, modifier: Modif
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                painter = painterResource(R.drawable.i_send),
+                painter = painterResource(R.drawable.i_link),
                 contentDescription = "Share Link Icon"
             )
 

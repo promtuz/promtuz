@@ -26,7 +26,7 @@ fun HomeFab(appViewModel: AppVM) {
             appViewModel.navigator.push(Routes.ShareIdentity)
         }) {
             DrawableIcon(
-                R.drawable.i_qr_code_scanner,
+                R.drawable.i_qr_code,
                 desc = "QR Code",
                 tint = colors.onPrimaryContainer
             )

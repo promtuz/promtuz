@@ -59,7 +59,7 @@ fun SettingsScreen(
                 "General", listOf(
                     SettingItem("Identity & Keys", R.drawable.i_key) { navigate(Routes.RecoveryPhrase) },
                     SettingItem("Privacy & Security", R.drawable.i_shield_lock) {},
-                    SettingItem("Blocked Users", R.drawable.i_user_blocked) {},
+                    // SettingItem("Blocked Users", R.drawable.i_user_blocked) {},
                     SettingItem(
                         "Storage", R.drawable.i_hard_drive
                     ) { context.goTo(ManageSpace::class.java) },
