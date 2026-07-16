@@ -1,7 +1,5 @@
 package com.promtuz.chat.ui.screens
 
-import android.content.Intent
-import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,13 +62,7 @@ fun SettingsScreen(
                         "Storage", R.drawable.i_hard_drive
                     ) { context.goTo(ManageSpace::class.java) },
                     SettingItem("Notifications", R.drawable.i_notifications) {
-                        // System app-notification settings: the master POST_NOTIFICATIONS toggle +
-                        // per-channel controls live there, and it's the re-enable path if the in-chat
-                        // primer was denied (the runtime prompt can't be re-summoned).
-                        context.startActivity(
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        )
+                        navigate(Routes.NotificationsSettings)
                     },
                 )
             ),
@@ -136,8 +128,8 @@ fun SettingsScreen(
             }
         }
     }
-}
 
+}
 
 @Composable
 private fun SettingsGroup(

@@ -37,6 +37,9 @@ object Routes : NavKey {
     data object About : NavKey
 
     @Serializable
+    data object NotificationsSettings : NavKey
+
+    @Serializable
     data object Logs : NavKey
 
     @Serializable
