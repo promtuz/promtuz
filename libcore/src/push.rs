@@ -98,6 +98,13 @@ pub async fn set_push_token(token: Vec<u8>) {
 /// self-signs with `P` so the gateway never learns the IPK. No-op without a
 /// token. Also (re)runs on relay connect.
 pub async fn register_token_at_gateway() -> Result<()> {
+    // Gateway registration dials over the shared endpoint (and `fetch_gateway`
+    // may dial the resolver, which `.unwrap()`s it). During cold start the FCM
+    // token callback can win the race against `init()` setting ENDPOINT, so skip
+    // quietly if it isn't up yet — the relay-connect path re-runs this once it is.
+    if ENDPOINT.get().is_none() {
+        return Ok(());
+    }
     let Some(token) = PUSH_TOKEN.read().clone() else {
         return Ok(());
     };
