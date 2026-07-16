@@ -27,21 +27,27 @@ impl Dht {
     /// gateway. No-op otherwise. Fire-and-forget: spawns the dial so the
     /// enqueue path never blocks on the gateway.
     pub(crate) fn trigger_wake(&self, recipient_ipk: &[u8; 32]) {
+        let who = hex::encode(&recipient_ipk[..8]);
         let Some(endpoint) = &self.endpoint else {
+            debug!("wake({who}) skipped: no DHT endpoint attached");
             return;
         };
         let Some(pseudonym) = self.store.get_push_pseudonym(recipient_ipk) else {
+            debug!("wake({who}) skipped: no IPK→P mapping (recipient never registered a pseudonym here)");
             return;
         };
         // Pick a cached gateway (first). Empty → no wakes.
         let Some(gateway) = self.push_gateways.read().first().cloned() else {
+            debug!("wake({who}) skipped: gateway directory empty (is a gateway registered with the resolver?)");
             return;
         };
+        debug!("wake({who} P={}): dialing gateway {}", hex::encode(&pseudonym[..8]), gateway.id);
 
         let endpoint = endpoint.clone();
         tokio::spawn(async move {
-            if let Err(e) = send_wake(&endpoint, &gateway, pseudonym).await {
-                debug!("push wake failed: {e}");
+            match send_wake(&endpoint, &gateway, pseudonym).await {
+                Ok(()) => debug!("wake({who}): delivered to gateway"),
+                Err(e) => debug!("wake({who}): failed: {e}"),
             }
         });
     }
@@ -82,6 +88,11 @@ async fn send_wake(
     let req = PushRequest::Wake(WakeRequest { pseudonym: Bytes(pseudonym), payload: Vec::new() });
     send.write_all(&req.pack()?).await?;
     send.finish()?;
+    // finish() only marks the stream done locally; close() would drop the
+    // still-in-flight frame before the gateway reads it. Await the gateway
+    // consuming it first — same handshake the token-registration path uses
+    // (libcore push::send_registration).
+    let _ = send.stopped().await;
     conn.close(0u32.into(), b"wake-sent");
     Ok(())
 }
