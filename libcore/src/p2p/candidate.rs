@@ -19,19 +19,24 @@ pub fn local_candidates(port: u16) -> Vec<SocketAddr> {
     ifaces
         .into_iter()
         .map(|iface| iface.ip())
-        .filter(|ip| !ip.is_loopback() && !is_link_local(ip))
+        .filter(|ip| !ip.is_loopback() && !is_unroutable(ip))
         .map(|ip| SocketAddr::new(ip, port))
         .collect()
 }
 
-/// Link-local addresses (IPv4 169.254/16, IPv6 fe80::/10) are only
-/// reachable on the same physical link, never from a remote peer.
-fn is_link_local(ip: &IpAddr) -> bool {
+/// Addresses a remote peer can never reach: IPv4 link-local (169.254/16),
+/// IPv6 link-local (fe80::/10), and deprecated IPv6 site-local (fec0::/10,
+/// seen mainly on emulators). Private IPv4 (192.168/10/172.16) is kept —
+/// two peers on one LAN punch through it.
+fn is_unroutable(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
-        // `Ipv6Addr::is_unicast_link_local` is still unstable, so match
-        // the fe80::/10 prefix directly.
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        // `Ipv6Addr::is_unicast_link_local` is unstable, so match prefixes
+        // directly: fe80::/10 link-local, fec0::/10 site-local.
+        IpAddr::V6(v6) => {
+            let hi = v6.segments()[0] & 0xffc0;
+            hi == 0xfe80 || hi == 0xfec0
+        },
     }
 }
 
@@ -43,12 +48,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_link_local() {
-        assert!(is_link_local(&"169.254.1.1".parse::<Ipv4Addr>().unwrap().into()));
-        assert!(is_link_local(&"fe80::1".parse::<Ipv6Addr>().unwrap().into()));
-        // routable addresses are not link-local
-        assert!(!is_link_local(&"192.168.1.5".parse::<Ipv4Addr>().unwrap().into()));
-        assert!(!is_link_local(&"2401:4900::1".parse::<Ipv6Addr>().unwrap().into()));
+    fn classifies_unroutable() {
+        assert!(is_unroutable(&"169.254.1.1".parse::<Ipv4Addr>().unwrap().into()));
+        assert!(is_unroutable(&"fe80::1".parse::<Ipv6Addr>().unwrap().into()));
+        // deprecated site-local (what the emulator advertised)
+        assert!(is_unroutable(&"fec0::5054:ff:fe12:3456".parse::<Ipv6Addr>().unwrap().into()));
+        // routable addresses (private LAN v4 + global v6) are kept
+        assert!(!is_unroutable(&"192.168.1.5".parse::<Ipv4Addr>().unwrap().into()));
+        assert!(!is_unroutable(&"2409:4117::1".parse::<Ipv6Addr>().unwrap().into()));
     }
 
     #[test]
@@ -57,7 +64,7 @@ mod tests {
         for addr in &cands {
             assert_eq!(addr.port(), 4242);
             assert!(!addr.ip().is_loopback(), "loopback leaked: {addr}");
-            assert!(!is_link_local(&addr.ip()), "link-local leaked: {addr}");
+            assert!(!is_unroutable(&addr.ip()), "unroutable leaked: {addr}");
         }
     }
 }
