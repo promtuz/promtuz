@@ -318,7 +318,7 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
 /// MLS application message. The group must already exist — you're mutating a
 /// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
 /// the relay queues it for an offline peer; if WE are offline it's dropped.
-async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
+pub(crate) async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 

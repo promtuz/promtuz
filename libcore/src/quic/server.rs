@@ -836,6 +836,11 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                     // Proof-of-pair — its whole job was the mark_paired above.
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
                 },
+                Ok(AppPayload::P2p { candidates }) => {
+                    // Candidate offer for a direct connection — hand to the
+                    // P2P layer (routed to the waiting session), never stored.
+                    crate::p2p::deliver_offer(*msg.from, candidates);
+                },
                 Err(e) => {
                     warn!(
                         "MESSAGE: undecodable AppPayload from {}: {e}",

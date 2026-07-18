@@ -15,4 +15,9 @@
 mod candidate;
 mod disco;
 mod punch;
+mod signal;
 mod socket;
+
+/// Inbound P2P candidate offer, routed from the MLS dispatch
+/// (`quic/server.rs`) to the session waiting for that peer.
+pub(crate) use signal::deliver as deliver_offer;
