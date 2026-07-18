@@ -69,6 +69,9 @@ const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long the one-shot reflexive-address probe waits for the relay's echo.
 const STUN_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a session delays its offer waiting for the reflexive probe, so
+/// the offer can carry the reflexive candidate. Immediate once probed.
+const REFLEXIVE_WAIT: Duration = Duration::from_millis(600);
 
 /// Peers we're mid-connect to. Guards against a second session (e.g. the
 /// auto-accept below) racing a button-initiated one for the same peer.
@@ -88,10 +91,10 @@ struct P2pEndpoint {
     /// Token → synthetic-address routing for TURN-bridged sessions, shared
     /// with the socket's send/recv demux.
     turn:     Arc<Mutex<TurnRoutes>>,
-    /// Our server-reflexive address from the relay's STUN echo, probed once
-    /// and offered as a candidate. `None` until the probe answers (or if it
-    /// never does).
-    reflexive: Arc<Mutex<Option<SocketAddr>>>,
+    /// Our server-reflexive address from the relay's STUN echo — a watch a
+    /// session briefly awaits so the first offer can carry it. Probed once at
+    /// build; stays `None` if the probe never answers.
+    reflexive: tokio::sync::watch::Receiver<Option<SocketAddr>>,
 }
 
 static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
@@ -119,9 +122,9 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
         });
 
         // One-shot reflexive-address probe: ask our home relay what public
-        // address this socket maps to, cached for every session's offer.
-        let reflexive = Arc::new(Mutex::new(None));
-        RUNTIME.spawn(reflexive_probe(built.pokes.clone(), built.stun_rx, reflexive.clone()));
+        // address this socket maps to, published on a watch a session awaits.
+        let (reflexive_tx, reflexive) = tokio::sync::watch::channel(None);
+        RUNTIME.spawn(reflexive_probe(built.pokes.clone(), built.stun_rx, reflexive_tx));
 
         Ok(P2pEndpoint {
             endpoint: built.endpoint,
@@ -174,7 +177,7 @@ fn home_relay_turn_addr() -> Option<SocketAddr> {
 /// TURN covers whatever the reflexive candidate can't.
 async fn reflexive_probe(
     pokes: PokeSender, mut stun_rx: mpsc::UnboundedReceiver<StunReply>,
-    reflexive: Arc<Mutex<Option<SocketAddr>>>,
+    report: tokio::sync::watch::Sender<Option<SocketAddr>>,
 ) {
     let Some(relay) = home_relay_turn_addr() else {
         log::info!("P2P: no relay on record for the STUN reflexive probe");
@@ -193,7 +196,7 @@ async fn reflexive_probe(
     while let Ok(Some((rtx, seen))) = tokio::time::timeout_at(deadline, stun_rx.recv()).await {
         if rtx == tx {
             log::info!("P2P: reflexive address {seen}");
-            *reflexive.lock() = Some(seen);
+            let _ = report.send(Some(seen));
             return;
         }
     }
@@ -290,12 +293,26 @@ async fn run_session(
     offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
 ) -> Result<PeerLink> {
+    // Wait briefly for the one-shot reflexive probe so our first offer can
+    // carry the server-reflexive address (it makes a cone-NAT peer punchable
+    // instead of forcing the bridge). Immediate once the probe has answered.
+    let mut refl_rx = ep.reflexive.clone();
+    let _ = timeout(REFLEXIVE_WAIT, async {
+        while refl_rx.borrow().is_none() {
+            if refl_rx.changed().await.is_err() {
+                break; // probe finished without a reflexive address
+            }
+        }
+    })
+    .await;
+    let reflexive = *refl_rx.borrow();
+
     // Publish our candidates (local + reflexive) and home relay, wait for
     // theirs.
     let our_relay = home_relay_turn_addr();
     let mut cands = candidate::local_candidates(ep.port);
-    if let Some(reflexive) = *ep.reflexive.lock() {
-        cands.push(reflexive);
+    if let Some(r) = reflexive {
+        cands.push(r);
     }
     signal::send_offer(peer, cands, our_relay).await?;
     let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
