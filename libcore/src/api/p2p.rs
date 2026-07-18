@@ -13,13 +13,7 @@ pub fn p2p_debug_connect(peer: Vec<u8>) -> String {
 
     crate::RUNTIME.block_on(async move {
         match crate::p2p::connect(peer).await {
-            Ok(link) => {
-                let addr = link.remote_address();
-                match link.verify_roundtrip().await {
-                    Ok(()) => format!("OK — direct link to {addr}"),
-                    Err(e) => format!("connected to {addr} but round-trip failed: {e}"),
-                }
-            },
+            Ok(link) => format!("OK — verified direct link to {}", link.remote_address()),
             Err(e) => format!("connect failed: {e}"),
         }
     })

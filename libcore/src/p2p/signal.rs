@@ -55,12 +55,25 @@ pub fn deliver(from: [u8; 32], candidates: Vec<SocketAddr>) {
             );
         },
         _ => {
+            let listening: Vec<String> =
+                LISTENERS.lock().keys().map(|k| hex::encode(&k[..4])).collect();
             log::info!(
-                "P2P: buffered offer from {} ({} candidates) — no session yet",
+                "P2P: offer from {} ({} candidates), no session (listening for {:?}) — \
+                 buffering + auto-accepting",
                 hex::encode(&from[..4]),
-                candidates.len()
+                candidates.len(),
+                listening
             );
             PENDING.lock().insert(from, candidates);
+            // Auto-accept: the peer wants a direct link and we're not already
+            // reaching for them, so start a session. It drains the buffered
+            // offer and answers. (Consent gate — may_connect — comes later.)
+            crate::RUNTIME.spawn(async move {
+                match crate::p2p::connect(from).await {
+                    Ok(_) => log::info!("P2P: auto-accepted {}", hex::encode(&from[..4])),
+                    Err(e) => log::info!("P2P: auto-accept {} ended: {e}", hex::encode(&from[..4])),
+                }
+            });
         },
     }
 }

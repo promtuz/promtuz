@@ -22,6 +22,7 @@ mod signal;
 mod socket;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use quinn::Connection;
@@ -53,8 +55,14 @@ pub(crate) use signal::deliver as deliver_offer;
 /// name, so any stable string does.
 const PEER_SNI: &str = "peer";
 /// Wait this long for the peer's candidate offer, then for the punch.
-const SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Generous on the signal leg: the offer crosses the store-and-forward
+/// relay, and the auto-accept side needs a round trip to answer.
+const SIGNAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Peers we're mid-connect to. Guards against a second session (e.g. the
+/// auto-accept below) racing a button-initiated one for the same peer.
+static CONNECTING: Lazy<Mutex<HashSet<[u8; 32]>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Disco channel → the session waiting on pokes for it. The receive loop
 /// routes each inbound poke to the right session by its channel tag.
@@ -157,6 +165,15 @@ impl PeerLink {
 /// address. Both peers call this; the IPK order decides who dials, so
 /// exactly one connection forms.
 pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
+    if !CONNECTING.lock().insert(peer) {
+        bail!("already connecting to that peer");
+    }
+    let result = connect_inner(peer).await;
+    CONNECTING.lock().remove(&peer);
+    result
+}
+
+async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
     let key = disco_key(&peer)?;
     let chan = key.channel();
@@ -171,7 +188,13 @@ pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
 
     ep.sessions.lock().remove(&chan);
     signal::stop(peer);
-    result
+
+    // Prove the link both ways as part of connecting (dialer pings, acceptor
+    // answers), so one debug tap on either side is self-verifying.
+    let link = result?;
+    link.verify_roundtrip().await?;
+    log::info!("P2P[{}]: link verified — {}", hex::encode(&peer[..4]), link.remote_address());
+    Ok(link)
 }
 
 async fn run_session(
