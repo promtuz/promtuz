@@ -197,6 +197,8 @@ async fn handle(
             let now = Instant::now();
             if let Some(br) = get_or_insert(bridges, token, src, now) {
                 br.other(src, now); // register the source; no data to forward
+                // TEMP diagnostic: which source registers under which token.
+                info!("TURN alloc {} tok {:02x?} (a={}, b={:?})", src, &token[..4], br.a, br.b);
             }
         },
         Some(RelayMsg::TurnData { token, payload }) => {
@@ -207,10 +209,12 @@ async fn handle(
                 // the QUIC payload to its own stack.
                 Some(dst) => {
                     // TEMP diagnostic: strip once TURN handshake works.
-                    info!("TURN fwd {}B {} -> {}", payload.len(), src, dst);
+                    info!("TURN fwd {}B {} -> {} tok {:02x?}", payload.len(), src, dst, &token[..4]);
                     let _ = sock.send_to(pkt, dst).await;
                 },
-                None => info!("TURN drop {}B from {} (no peer for token)", payload.len(), src),
+                None => {
+                    info!("TURN drop {}B from {} tok {:02x?} (no peer)", payload.len(), src, &token[..4])
+                },
             }
         },
         // StunResp is a reply, never inbound here; junk decodes to None.
