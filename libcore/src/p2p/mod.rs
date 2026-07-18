@@ -12,6 +12,7 @@
 // above it, so the compiler can't see all users until the top is wired.
 #![allow(dead_code)]
 
+mod candidate;
 mod disco;
 mod punch;
 mod socket;
