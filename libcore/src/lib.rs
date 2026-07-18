@@ -12,6 +12,7 @@ pub mod delivery;
 pub mod events;
 pub mod messaging;
 pub mod mls;
+pub mod p2p;
 pub mod platform;
 pub mod push;
 pub mod quic;
