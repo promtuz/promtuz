@@ -2,6 +2,7 @@ package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
@@ -55,6 +56,14 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     private val _presence = MutableStateFlow<Presence?>(null)
     val presence: StateFlow<Presence?> = _presence.asStateFlow()
+
+    /** Debug: punch a direct P2P connection to this peer, Toast the result. */
+    fun debugP2pConnect() {
+        viewModelScope.launch {
+            val report = CoreBridge.p2pDebugConnect(peer)
+            Toast.makeText(application, report, Toast.LENGTH_LONG).show()
+        }
+    }
 
     fun init(peerIpk: ByteArray) {
         if (started) return

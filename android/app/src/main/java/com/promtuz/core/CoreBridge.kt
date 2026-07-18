@@ -24,6 +24,7 @@ import uniffi.core.getMessages as ffiGetMessages
 import uniffi.core.getRelays as ffiGetRelays
 import uniffi.core.listContactsDiag as ffiListContactsDiag
 import uniffi.core.makeInviteQr as ffiMakeInviteQr
+import uniffi.core.p2pDebugConnect as ffiP2pDebugConnect
 import uniffi.core.pairFromQr as ffiPairFromQr
 import uniffi.core.previewInvite as ffiPreviewInvite
 import uniffi.core.resetRelayCircuit as ffiResetRelayCircuit
@@ -192,6 +193,10 @@ object CoreBridge {
 
     /** Connect (or reconnect) to a specific relay by id. */
     suspend fun connectRelay(id: String) = withContext(Dispatchers.IO) { ffiConnectRelay(id) }
+
+    /** Debug: punch a direct P2P connection to `peer` and return a report. */
+    suspend fun p2pDebugConnect(peer: ByteArray): String =
+        withContext(Dispatchers.IO) { ffiP2pDebugConnect(peer) }
 
     /** Latest connection state, mapped to the app enum (carries @StringRes). */
     val connection: StateFlow<ConnectionState> get() = CoreEventBus.connection
