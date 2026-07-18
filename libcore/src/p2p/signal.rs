@@ -40,6 +40,11 @@ pub fn deliver(from: [u8; 32], candidates: Vec<SocketAddr>) {
     }
 }
 
+/// Stop listening for `peer`'s offers — the session ended.
+pub fn stop(peer: [u8; 32]) {
+    LISTENERS.lock().remove(&peer);
+}
+
 /// Send our candidate addresses to `peer` over the MLS channel.
 pub async fn send_offer(peer: [u8; 32], candidates: Vec<SocketAddr>) -> Result<()> {
     crate::messaging::send_control(peer, AppPayload::P2p { candidates }).await
