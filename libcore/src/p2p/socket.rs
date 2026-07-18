@@ -43,6 +43,10 @@ use crate::quic::peer_identity::PeerIdentity;
 /// An inbound disco poke: the sender's address and the raw sealed bytes.
 pub type Poke = (SocketAddr, Vec<u8>);
 
+/// A relay's STUN echo: the query's tx-id and the public address it saw us
+/// from.
+pub type StunReply = ([u8; 8], SocketAddr);
+
 /// Where a TURN-bridged session's quinn packets really go.
 #[derive(Debug)]
 struct Route {
@@ -122,16 +126,19 @@ impl PokeSender {
 pub struct PunchSocket {
     io:       Arc<UdpSocket>,
     inbox_tx: mpsc::UnboundedSender<Poke>,
+    stun_tx:  mpsc::UnboundedSender<StunReply>,
     turn:     Arc<Mutex<TurnRoutes>>,
 }
 
 /// What one bound P2P socket yields: the socket for quinn, a poke sender,
-/// the inbound-poke stream, and the shared TURN routing table.
+/// the inbound-poke stream, the relay STUN-echo stream, and the shared TURN
+/// routing table.
 pub struct Bound {
-    pub socket: Arc<PunchSocket>,
-    pub pokes:  PokeSender,
-    pub inbox:  mpsc::UnboundedReceiver<Poke>,
-    pub turn:   Arc<Mutex<TurnRoutes>>,
+    pub socket:  Arc<PunchSocket>,
+    pub pokes:   PokeSender,
+    pub inbox:   mpsc::UnboundedReceiver<Poke>,
+    pub stun_rx: mpsc::UnboundedReceiver<StunReply>,
+    pub turn:    Arc<Mutex<TurnRoutes>>,
 }
 
 impl PunchSocket {
@@ -142,11 +149,13 @@ impl PunchSocket {
         std_sock.set_nonblocking(true)?;
         let io = Arc::new(UdpSocket::from_std(std_sock)?);
         let (inbox_tx, inbox) = mpsc::unbounded_channel();
+        let (stun_tx, stun_rx) = mpsc::unbounded_channel();
         let turn = Arc::new(Mutex::new(TurnRoutes::default()));
         Ok(Bound {
-            socket: Arc::new(Self { io: io.clone(), inbox_tx, turn: turn.clone() }),
+            socket: Arc::new(Self { io: io.clone(), inbox_tx, stun_tx, turn: turn.clone() }),
             pokes: PokeSender { io },
             inbox,
+            stun_rx,
             turn,
         })
     }
@@ -196,7 +205,11 @@ impl AsyncUdpSocket for PunchSocket {
             // we may rewrite it in place.
             let turn = match RelayMsg::decode(&bufs[0][..len]) {
                 Some(RelayMsg::TurnData { token, payload }) => Some((token, payload.len())),
-                Some(_) => continue, // StunResp etc. — not a QUIC datagram
+                Some(RelayMsg::StunResp { tx, seen }) => {
+                    let _ = self.stun_tx.send((tx, seen));
+                    continue;
+                },
+                Some(_) => continue, // StunReq/TurnAlloc — never sent to a client
                 None => None,
             };
             if let Some((token, plen)) = turn {
@@ -236,6 +249,7 @@ pub struct BuiltEndpoint {
     pub endpoint: Endpoint,
     pub pokes:    PokeSender,
     pub inbox:    mpsc::UnboundedReceiver<Poke>,
+    pub stun_rx:  mpsc::UnboundedReceiver<StunReply>,
     pub turn:     Arc<Mutex<TurnRoutes>>,
 }
 
@@ -257,7 +271,13 @@ pub fn build_endpoint() -> Result<BuiltEndpoint> {
         Arc::new(TokioRuntime),
     )?;
     endpoint.set_default_client_config(build_peer_client_cfg(&identity)?);
-    Ok(BuiltEndpoint { endpoint, pokes: bound.pokes, inbox: bound.inbox, turn: bound.turn })
+    Ok(BuiltEndpoint {
+        endpoint,
+        pokes: bound.pokes,
+        inbox: bound.inbox,
+        stun_rx: bound.stun_rx,
+        turn: bound.turn,
+    })
 }
 
 #[cfg(test)]

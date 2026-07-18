@@ -49,6 +49,7 @@ use disco::DiscoKey;
 use signal::Offer;
 use socket::Poke;
 use socket::PokeSender;
+use socket::StunReply;
 use socket::TurnRoutes;
 
 /// Inbound P2P candidate offer, routed from the MLS dispatch
@@ -66,6 +67,8 @@ const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The acceptor waits this long for the inbound connection — long enough for
 /// the dialer to exhaust its punch window and fall back to TURN.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long the one-shot reflexive-address probe waits for the relay's echo.
+const STUN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Peers we're mid-connect to. Guards against a second session (e.g. the
 /// auto-accept below) racing a button-initiated one for the same peer.
@@ -85,6 +88,10 @@ struct P2pEndpoint {
     /// Token → synthetic-address routing for TURN-bridged sessions, shared
     /// with the socket's send/recv demux.
     turn:     Arc<Mutex<TurnRoutes>>,
+    /// Our server-reflexive address from the relay's STUN echo, probed once
+    /// and offered as a candidate. `None` until the probe answers (or if it
+    /// never does).
+    reflexive: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
@@ -111,12 +118,18 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
             }
         });
 
+        // One-shot reflexive-address probe: ask our home relay what public
+        // address this socket maps to, cached for every session's offer.
+        let reflexive = Arc::new(Mutex::new(None));
+        RUNTIME.spawn(reflexive_probe(built.pokes.clone(), built.stun_rx, reflexive.clone()));
+
         Ok(P2pEndpoint {
             endpoint: built.endpoint,
             pokes: built.pokes,
             port,
             sessions,
             turn: built.turn,
+            reflexive,
         })
     })
 }
@@ -153,6 +166,37 @@ fn home_relay_turn_addr() -> Option<SocketAddr> {
     let relay = crate::data::relay::Relay::fetch_best().ok()?;
     let ip: IpAddr = relay.host.parse().ok()?;
     Some(SocketAddr::new(ip, relay.port))
+}
+
+/// Probe our server-reflexive address once via the relay's STUN echo and
+/// cache it. Peer-independent, so a single probe seeds every session's
+/// offer; a stale mapping self-heals through the punch ping exchange, and
+/// TURN covers whatever the reflexive candidate can't.
+async fn reflexive_probe(
+    pokes: PokeSender, mut stun_rx: mpsc::UnboundedReceiver<StunReply>,
+    reflexive: Arc<Mutex<Option<SocketAddr>>>,
+) {
+    let Some(relay) = home_relay_turn_addr() else {
+        log::info!("P2P: no relay on record for the STUN reflexive probe");
+        return;
+    };
+    let mut tx = [0u8; 8];
+    {
+        use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        use ed25519_dalek::ed25519::signature::rand_core::RngCore;
+        OsRng.fill_bytes(&mut tx);
+    }
+    if pokes.send(relay, &RelayMsg::StunReq { tx }.encode()).await.is_err() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + STUN_TIMEOUT;
+    while let Ok(Some((rtx, seen))) = tokio::time::timeout_at(deadline, stun_rx.recv()).await {
+        if rtx == tx {
+            log::info!("P2P: reflexive address {seen}");
+            *reflexive.lock() = Some(seen);
+            return;
+        }
+    }
 }
 
 /// A live direct connection to a peer.
@@ -237,9 +281,14 @@ async fn run_session(
     offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
 ) -> Result<PeerLink> {
-    // Publish our candidates + home relay, wait for theirs.
+    // Publish our candidates (local + reflexive) and home relay, wait for
+    // theirs.
     let our_relay = home_relay_turn_addr();
-    signal::send_offer(peer, candidate::local_candidates(ep.port), our_relay).await?;
+    let mut cands = candidate::local_candidates(ep.port);
+    if let Some(reflexive) = *ep.reflexive.lock() {
+        cands.push(reflexive);
+    }
+    signal::send_offer(peer, cands, our_relay).await?;
     let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for peer candidates"))?
