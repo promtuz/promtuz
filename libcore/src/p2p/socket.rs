@@ -93,7 +93,14 @@ impl AsyncUdpSocket for PunchSocket {
     fn try_send(&self, transmit: &udp::Transmit) -> io::Result<()> {
         // max_transmit_segments defaults to 1, so quinn never sets a GSO
         // segment_size — contents is a single datagram.
-        self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ())
+        let r = self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ());
+        if let Err(e) = &r
+            && e.kind() != io::ErrorKind::WouldBlock
+        {
+            // TEMP diagnostic: a failing QUIC send stalls the handshake.
+            log::warn!("P2P sock: send {}B to {} failed: {e}", transmit.contents.len(), transmit.destination);
+        }
+        r
     }
 
     fn poll_recv(
@@ -118,6 +125,9 @@ impl AsyncUdpSocket for PunchSocket {
                 continue;
             }
             meta[0] = udp::RecvMeta { addr: src, len, stride: len, ecn: None, dst_ip: None };
+            // TEMP diagnostic: shows whether the peer's QUIC Initial actually
+            // reaches this socket (vs. only disco crossing).
+            log::info!("P2P sock: <- quic {len}B from {src}");
             return Poll::Ready(Ok(1));
         }
     }

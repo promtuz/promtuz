@@ -86,6 +86,7 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
     P2P.get_or_try_init(|| {
         let (endpoint, pokes, mut inbox) = socket::build_endpoint()?;
         let port = endpoint.local_addr()?.port();
+        log::info!("P2P: endpoint bound to {:?}", endpoint.local_addr());
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
         let routes = sessions.clone();
@@ -238,10 +239,16 @@ async fn run_session(
             let mut rx = poke_rx;
             let _ = punch::punch(&pokes, &mut rx, key, peer_cands, PUNCH_TIMEOUT).await;
         });
+        log::info!("P2P[{}]: acceptor — waiting for inbound QUIC", hex::encode(&peer[..4]));
         let incoming = timeout(PUNCH_TIMEOUT, ep.endpoint.accept())
             .await
             .map_err(|_| anyhow!("timed out waiting for inbound connection"))?
             .ok_or_else(|| anyhow!("endpoint closed"))?;
+        log::info!(
+            "P2P[{}]: inbound connection from {}",
+            hex::encode(&peer[..4]),
+            incoming.remote_address()
+        );
         // ponytail: MVP accepts the first inbound. Only this peer knows our
         // punched address (we sent candidates over E2E MLS), and peer TLS
         // gates on a valid IPK cert — but the real filter is matching the
