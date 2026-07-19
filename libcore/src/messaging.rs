@@ -1429,16 +1429,48 @@ fn persist_drained(
     drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, sender_ipk: [u8; 32],
 ) {
     for m in drained {
-        let (content, reply_to) = match AppPayload::deser(&m.plaintext) {
-            Ok(AppPayload::Text(content)) => (content, None),
-            Ok(AppPayload::Reply { reply_to, content }) => (content, Some(reply_to)),
-            _ => continue,
-        };
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
         let ts = crate::utils::systime().as_secs();
-        if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, reply_to) {
-            MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
-                .emit();
+        match AppPayload::deser(&m.plaintext) {
+            Ok(AppPayload::Text(content)) => {
+                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, None) {
+                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
+                        .emit();
+                }
+            },
+            Ok(AppPayload::Reply { reply_to, content }) => {
+                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, Some(reply_to)) {
+                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
+                        .emit();
+                }
+            },
+            Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
+                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &caption, ts, None) {
+                    let _ = crate::data::media::save(&sender_ipk, &did, &crate::data::media::MediaRow {
+                        kind: crate::data::media::KIND_IMAGE,
+                        group_id: group_id.map(|g| g.to_vec()),
+                        mime, name: String::new(), size: data.len() as u64, width, height,
+                        blob: Some(data), thumb: None, file_id: None,
+                    });
+                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts }
+                        .emit();
+                }
+            },
+            Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
+                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &caption, ts, None) {
+                    let _ = crate::data::media::save(&sender_ipk, &did, &crate::data::media::MediaRow {
+                        kind: crate::data::media::KIND_ATTACHMENT,
+                        group_id: group_id.map(|g| g.to_vec()),
+                        mime, name, size, width: 0, height: 0,
+                        blob: None,
+                        thumb: if thumb.is_empty() { None } else { Some(thumb) },
+                        file_id: Some(file_id.to_vec()),
+                    });
+                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts }
+                        .emit();
+                }
+            },
+            _ => continue,
         }
     }
 }

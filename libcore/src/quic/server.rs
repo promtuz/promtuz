@@ -846,6 +846,68 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                     );
                     crate::p2p::deliver_offer(*msg.from, candidates, relay, token, disco_key);
                 },
+                Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
+                    let did = msg.id.0;
+                    let timestamp = msg.accepted_at_ms / 1_000;
+                    if let Some(saved) =
+                        Message::save_incoming(*msg.from, &did, &caption, timestamp, None)?
+                    {
+                        crate::data::media::save(&msg.from, &did, &crate::data::media::MediaRow {
+                            kind: crate::data::media::KIND_IMAGE,
+                            group_id: group_id.map(|g| g.to_vec()),
+                            mime, name: String::new(), size: data.len() as u64, width, height,
+                            blob: Some(data), thumb: None, file_id: None,
+                        })?;
+                        MessageEv::Received {
+                            id: saved.inner.id,
+                            from: *msg.from,
+                            content: caption,
+                            timestamp,
+                        }
+                        .emit();
+                        info!("MESSAGE: received image from {}", hex::encode(&msg.from[..4]));
+                        let from = *msg.from;
+                        let upto = did;
+                        crate::RUNTIME.spawn(async move {
+                            let _ = crate::messaging::send_receipt(from, ReceiptKind::Delivered, upto).await;
+                        });
+                    }
+                },
+                Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
+                    let did = msg.id.0;
+                    let timestamp = msg.accepted_at_ms / 1_000;
+                    if let Some(saved) =
+                        Message::save_incoming(*msg.from, &did, &caption, timestamp, None)?
+                    {
+                        crate::data::media::save(&msg.from, &did, &crate::data::media::MediaRow {
+                            kind: crate::data::media::KIND_ATTACHMENT,
+                            group_id: group_id.map(|g| g.to_vec()),
+                            mime, name, size, width: 0, height: 0,
+                            blob: None,
+                            thumb: if thumb.is_empty() { None } else { Some(thumb) },
+                            file_id: Some(file_id.to_vec()),
+                        })?;
+                        MessageEv::Received {
+                            id: saved.inner.id,
+                            from: *msg.from,
+                            content: caption,
+                            timestamp,
+                        }
+                        .emit();
+                        info!("MESSAGE: received attachment from {}", hex::encode(&msg.from[..4]));
+                        let from = *msg.from;
+                        let upto = did;
+                        crate::RUNTIME.spawn(async move {
+                            let _ = crate::messaging::send_receipt(from, ReceiptKind::Delivered, upto).await;
+                        });
+                    }
+                },
+                Ok(AppPayload::FileWant { file_id: _ }) => {
+                    // Reverse-wake control message — routed, never stored. Task 17 wires
+                    // crate::transfer::on_file_want here; for now the push wake already
+                    // brought the app up, so this is a no-op.
+                    info!("P2P: FileWant received from {}", hex::encode(&msg.from[..4]));
+                },
                 Err(e) => {
                     warn!(
                         "MESSAGE: undecodable AppPayload from {}: {e}",
