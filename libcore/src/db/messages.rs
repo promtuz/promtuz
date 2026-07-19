@@ -107,6 +107,26 @@ const MIGRATION_ARRAY: &[M] = &[
             upto_dispatch_id BLOB NOT NULL
         ) WITHOUT ROWID;",
     ),
+    // Per-message media metadata (Image inline bytes / Attachment thumb +
+    // file_id), keyed to the message it belongs to. The caption stays on
+    // messages.content; this only holds the media side of the payload.
+    M::up(
+        "CREATE TABLE message_media (
+            peer_ipk    BLOB NOT NULL,
+            dispatch_id BLOB NOT NULL,
+            kind        INTEGER NOT NULL,
+            group_id    BLOB,
+            mime        TEXT NOT NULL,
+            name        TEXT NOT NULL DEFAULT '',
+            size        INTEGER NOT NULL DEFAULT 0,
+            width       INTEGER NOT NULL DEFAULT 0,
+            height      INTEGER NOT NULL DEFAULT 0,
+            blob        BLOB,
+            thumb       BLOB,
+            file_id     BLOB,
+            PRIMARY KEY (peer_ipk, dispatch_id)
+        );",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -115,7 +135,7 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     info!("DB: MESSAGES_DB CONNECTED");
 
     PRAGMA!(conn, MIGRATIONS);
-    super::register_change_hook(&conn, &["messages", "reactions"]);
+    super::register_change_hook(&conn, &["messages", "reactions", "message_media"]);
 
     Mutex::new(conn)
 });
