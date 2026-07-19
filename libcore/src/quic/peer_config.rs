@@ -401,6 +401,40 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
     Ok(client)
 }
 
+/// Test-only peer TLS configs (server + client) from an explicit signing
+/// key, so an in-process test can stand up two peer endpoints without the
+/// global `IdentitySigner`. Same verifiers, ALPN, and cert shape as the real
+/// builders — only the key source differs.
+#[cfg(test)]
+pub(crate) fn test_peer_configs(key: &SigningKey) -> Result<(ServerConfig, ClientConfig)> {
+    fn certified(key: &SigningKey) -> CertifiedKey {
+        let public_key = key.verifying_key();
+        let tbs = build_tbs_certificate(public_key.as_bytes());
+        let sig = key.sign(&tbs);
+        let cert_der = build_certificate_der(&tbs, &sig.to_bytes());
+        let signing_key: Arc<dyn rustls::sign::SigningKey> =
+            Arc::new(IdentitySigningKey { public_key, subkey: Arc::new(key.clone()) });
+        CertifiedKey::new(vec![CertificateDer::from(cert_der)], signing_key)
+    }
+
+    let mut server_tls = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(Arc::new(PeerClientCertVerifier))
+        .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified(key))));
+    server_tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    let mut server = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls)?));
+    server.transport_config(peer_transport_cfg());
+
+    let mut client_tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PeerServerCertVerifier))
+        .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified(key))));
+    client_tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    let mut client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_tls)?));
+    client.transport_config(peer_transport_cfg());
+
+    Ok((server, client))
+}
+
 /// Extracts the peer's **TLS sub-key** Ed25519 public key from their cert.
 ///
 /// Note: this is the *TLS-layer* identity, not the user's long-term IPK.
