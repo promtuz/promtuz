@@ -63,7 +63,7 @@ use crate::types::bytes::Bytes;
 /// peer-to-peer only, so a bump is just a client-coordinated redeploy —
 /// cheap by comparison, so it moves independently as `AppPayload` variants
 /// are added.
-pub const MLS_WIRE_VERSION: u16 = 10;
+pub const MLS_WIRE_VERSION: u16 = 11;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
 /// union so receipts/edits/etc. ride the same encrypted channel. The
@@ -119,6 +119,30 @@ pub enum AppPayload {
         token:      [u8; 16],
         disco_key:  [u8; 32],
     },
+    /// Inline still image — the compressed bytes ride in the frame. Offline-safe,
+    /// no P2P. Appended after P2p so postcard ordinals for older variants hold.
+    Image {
+        caption:  String,
+        group_id: Option<[u8; 16]>,
+        mime:     String,
+        width:    u32,
+        height:   u32,
+        data:     Vec<u8>,
+    },
+    /// P2P attachment: metadata + blurred thumbnail; bytes fetched device-to-device
+    /// by `file_id` (see the transfer engine). Appended after Image.
+    Attachment {
+        caption:  String,
+        group_id: Option<[u8; 16]>,
+        mime:     String,
+        name:     String,
+        size:     u64,
+        thumb:    Vec<u8>,
+        file_id:  [u8; 32],
+    },
+    /// Reverse-wake: receiver asks an offline sender to come online and serve
+    /// `file_id`. A control message — routed, never stored. wake = true.
+    FileWant { file_id: [u8; 32] },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1841,5 +1865,23 @@ mod tests {
         assert_eq!(AppPayload::deser(&t.ser().unwrap()).unwrap(), t);
         let r = AppPayload::Receipt { kind: ReceiptKind::Delivered, upto: [9u8; 16] };
         assert_eq!(AppPayload::deser(&r.ser().unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn media_variants_roundtrip_and_ordinals_stable() {
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+        // ordinal stability: Text must still encode as discriminant 0
+        assert_eq!(AppPayload::Text("x".into()).ser().unwrap()[0], 0);
+        // new variants round-trip
+        let img = AppPayload::Image { caption: "hi".into(), group_id: Some([1u8;16]),
+            mime: "image/avif".into(), width: 4, height: 3, data: vec![9,9,9] };
+        assert_eq!(AppPayload::deser(&img.ser().unwrap()).unwrap(), img);
+        let att = AppPayload::Attachment { caption: "".into(), group_id: None,
+            mime: "application/pdf".into(), name: "a.pdf".into(), size: 12345,
+            thumb: vec![1,2], file_id: [7u8;32] };
+        assert_eq!(AppPayload::deser(&att.ser().unwrap()).unwrap(), att);
+        let want = AppPayload::FileWant { file_id: [7u8;32] };
+        assert_eq!(AppPayload::deser(&want.ser().unwrap()).unwrap(), want);
     }
 }
