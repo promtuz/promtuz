@@ -20,12 +20,14 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 /// A peer's connection offer: where to reach them directly, their home relay
-/// for the TURN fallback, and a random bridge token (the dialer's wins).
+/// for the TURN fallback, and random session secrets — a bridge token and a
+/// disco key (the dialer's win).
 #[derive(Debug, Clone)]
 pub struct Offer {
     pub candidates: Vec<SocketAddr>,
     pub relay:      Option<SocketAddr>,
     pub token:      [u8; 16],
+    pub disco_key:  [u8; 32],
 }
 
 /// Peer IPK → the live session waiting for that peer's candidate offer.
@@ -54,8 +56,9 @@ pub fn listen(peer: [u8; 32]) -> mpsc::UnboundedReceiver<Offer> {
 /// or buffer it for a session that registers momentarily later.
 pub fn deliver(
     from: [u8; 32], candidates: Vec<SocketAddr>, relay: Option<SocketAddr>, token: [u8; 16],
+    disco_key: [u8; 32],
 ) {
-    let offer = Offer { candidates, relay, token };
+    let offer = Offer { candidates, relay, token, disco_key };
     let listener = LISTENERS.lock().get(&from).cloned();
     match listener {
         Some(tx) if tx.send(offer.clone()).is_ok() => {
@@ -99,6 +102,7 @@ pub fn stop(peer: [u8; 32]) {
 /// `peer` over the MLS channel.
 pub async fn send_offer(
     peer: [u8; 32], candidates: Vec<SocketAddr>, relay: Option<SocketAddr>, token: [u8; 16],
+    disco_key: [u8; 32],
 ) -> Result<()> {
     log::info!(
         "P2P: sending offer to {} ({} candidates: {:?}, relay {:?})",
@@ -107,7 +111,8 @@ pub async fn send_offer(
         candidates,
         relay
     );
-    crate::messaging::send_control(peer, AppPayload::P2p { candidates, relay, token }).await
+    crate::messaging::send_control(peer, AppPayload::P2p { candidates, relay, token, disco_key })
+        .await
 }
 
 #[cfg(test)]
@@ -120,7 +125,7 @@ mod tests {
         let mut rx = listen(peer);
 
         let cands: Vec<SocketAddr> = vec!["1.2.3.4:5".parse().unwrap()];
-        deliver(peer, cands.clone(), None, [0; 16]);
+        deliver(peer, cands.clone(), None, [0; 16], [0; 32]);
         assert_eq!(rx.try_recv().unwrap().candidates, cands);
         stop(peer);
     }
@@ -131,13 +136,14 @@ mod tests {
         let cands: Vec<SocketAddr> = vec!["9.9.9.9:9".parse().unwrap()];
         let relay: SocketAddr = "5.5.5.5:443".parse().unwrap();
         // arrives before anyone listens → buffered, no panic
-        deliver(peer, cands.clone(), Some(relay), [7; 16]);
-        // the late session still gets it, relay + token included
+        deliver(peer, cands.clone(), Some(relay), [7; 16], [9; 32]);
+        // the late session still gets it, relay + secrets included
         let mut rx = listen(peer);
         let got = rx.try_recv().unwrap();
         assert_eq!(got.candidates, cands);
         assert_eq!(got.relay, Some(relay));
         assert_eq!(got.token, [7; 16]);
+        assert_eq!(got.disco_key, [9; 32]);
         stop(peer);
     }
 }

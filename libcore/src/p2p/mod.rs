@@ -41,10 +41,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::RUNTIME;
-use crate::data::contact::Contact;
 use crate::data::identity::Identity;
-use crate::mls::group::MlsGroupHandle;
-use crate::mls::provider::PromtuzMlsProvider;
 use disco::DiscoKey;
 use signal::Offer;
 use socket::Poke;
@@ -137,36 +134,30 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
     })
 }
 
-/// The shared disco key for `peer`, derived from the MLS group exporter (a
-/// 40-byte secret → 32-byte AEAD key + 8-byte channel tag) so the punch
-/// needs no separate key exchange. The TURN token is *not* derived here — it
-/// rides the offer (see [`run_session`]), so the bridge pairs even if the
-/// two sides' groups/epochs differ.
-fn disco_key(peer: &[u8; 32]) -> Result<DiscoKey> {
-    let provider = PromtuzMlsProvider::shared();
-    let gid = Contact::get(peer)
-        .and_then(|c| c.inner.mls_group_id)
-        .ok_or_else(|| anyhow!("no MLS group with peer"))?;
-    let group = MlsGroupHandle::load(&provider, &gid)
-        .map_err(|e| anyhow!("load group: {e}"))?
-        .ok_or_else(|| anyhow!("no local group state"))?;
-    let secret = group
-        .export_secret(&provider, "promtuz/p2p/disco", &[], 40)
-        .map_err(|e| anyhow!("export disco secret: {e}"))?;
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&secret[..32]);
+/// The disco routing channel for a peer pair — a *public* tag (only the
+/// disco key is secret; see [`disco`]), derived deterministically from the
+/// sorted IPKs so both ends agree on it before any offer, with no MLS
+/// lookup. The secret key itself rides the offer (see [`run_session`]), so
+/// the punch works even if the two sides' groups/epochs differ.
+fn channel_for(a: &[u8; 32], b: &[u8; 32]) -> [u8; 8] {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"promtuz/p2p/chan");
+    hasher.update(lo);
+    hasher.update(hi);
     let mut chan = [0u8; 8];
-    chan.copy_from_slice(&secret[32..40]);
-    Ok(DiscoKey::new(&key, chan))
+    chan.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+    chan
 }
 
-/// A fresh random TURN bridge token.
-fn rand_token() -> [u8; 16] {
+/// `N` fresh random bytes — a session secret (disco key / bridge token)
+/// generated per connect and exchanged in the offer.
+fn rand_bytes<const N: usize>() -> [u8; N] {
     use ed25519_dalek::ed25519::signature::rand_core::OsRng;
     use ed25519_dalek::ed25519::signature::rand_core::RngCore;
-    let mut t = [0u8; 16];
-    OsRng.fill_bytes(&mut t);
-    t
+    let mut b = [0u8; N];
+    OsRng.fill_bytes(&mut b);
+    b
 }
 
 /// Our home relay's address — where the TURN bridge lives (assist shares
@@ -277,16 +268,18 @@ pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
 
 async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
-    let key = disco_key(&peer)?;
-    let chan = key.channel();
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
+    let chan = channel_for(&our_ipk, &peer);
 
     // Route this session's pokes and listen for the peer's offer before we
-    // announce ourselves, so nothing races ahead of the registration.
+    // announce ourselves, so nothing races ahead of the registration. The
+    // channel is public and IPK-derived, so we know it here (the secret key
+    // comes with the offer).
     let (poke_tx, poke_rx) = mpsc::unbounded_channel();
     ep.sessions.lock().insert(chan, poke_tx);
     let mut offers = signal::listen(peer);
 
-    let result = run_session(ep, key, poke_rx, &mut offers, peer).await;
+    let result = run_session(ep, our_ipk, chan, poke_rx, &mut offers, peer).await;
 
     ep.sessions.lock().remove(&chan);
     signal::stop(peer);
@@ -301,7 +294,8 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
 
 async fn run_session(
     ep: &'static P2pEndpoint,
-    key: DiscoKey,
+    our_ipk: [u8; 32],
+    chan: [u8; 8],
     mut poke_rx: mpsc::UnboundedReceiver<Poke>,
     offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
@@ -320,22 +314,22 @@ async fn run_session(
     .await;
     let reflexive = *refl_rx.borrow();
 
-    // Publish our candidates (local + reflexive), home relay, and a random
-    // bridge token, wait for theirs.
+    // Publish our candidates (local + reflexive), home relay, and our random
+    // session secrets (bridge token + disco key), wait for theirs.
     let our_relay = home_relay_turn_addr();
-    let my_token = rand_token();
+    let my_token = rand_bytes::<16>();
+    let my_disco_key = rand_bytes::<32>();
     let mut cands = candidate::local_candidates(ep.port);
     if let Some(r) = reflexive {
         cands.push(r);
     }
-    signal::send_offer(peer, cands, our_relay, my_token).await?;
+    signal::send_offer(peer, cands, our_relay, my_token, my_disco_key).await?;
     let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for peer candidates"))?
         .ok_or_else(|| anyhow!("candidate listener closed"))?;
     let peer_cands = offer.candidates;
 
-    let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
     let dialer = our_ipk < peer;
     log::info!(
         "P2P[{}]: {} — {} peer candidates: {:?}",
@@ -344,6 +338,11 @@ async fn run_session(
         peer_cands.len(),
         peer_cands
     );
+
+    // The shared disco key: the dialer's, over the public IPK-derived channel
+    // (both exchanged/derived, never MLS-dependent, so the punch always
+    // agrees).
+    let key = DiscoKey::new(&if dialer { my_disco_key } else { offer.disco_key }, chan);
 
     // TURN fallback: bridge through the dialer's home relay under the
     // dialer's token — both ends must agree on relay + token. Register it now

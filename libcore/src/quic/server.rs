@@ -836,7 +836,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                     // Proof-of-pair — its whole job was the mark_paired above.
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
                 },
-                Ok(AppPayload::P2p { candidates, relay, token }) => {
+                Ok(AppPayload::P2p { candidates, relay, token, disco_key }) => {
                     // Candidate offer for a direct connection — hand to the
                     // P2P layer (routed to the waiting session), never stored.
                     info!(
@@ -844,7 +844,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                         hex::encode(&msg.from[..4]),
                         candidates.len()
                     );
-                    crate::p2p::deliver_offer(*msg.from, candidates, relay, token);
+                    crate::p2p::deliver_offer(*msg.from, candidates, relay, token, disco_key);
                 },
                 Err(e) => {
                     warn!(

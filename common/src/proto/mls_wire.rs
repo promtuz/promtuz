@@ -107,15 +107,17 @@ pub enum AppPayload {
     PairAck,
     /// Peer-to-peer connection offer: the sender's candidate addresses for a
     /// direct QUIC hole-punch, its home relay's address for the TURN fallback
-    /// when the punch can't land, and a random TURN bridge token (exchanged,
-    /// not derived, so both ends agree regardless of MLS group/epoch — the
-    /// dialer's token wins). A control message — routed to the P2P transport,
-    /// never shown as a chat message. Appended last so postcard's ordinal
-    /// tags for older variants hold.
+    /// when the punch can't land, and two random session secrets — a TURN
+    /// bridge `token` and a `disco_key` for the punch pokes. Both are
+    /// exchanged, not derived, so the two ends agree regardless of MLS
+    /// group/epoch (the dialer's win). A control message — routed to the P2P
+    /// transport, never shown as a chat message. Appended last so postcard's
+    /// ordinal tags for older variants hold.
     P2p {
         candidates: Vec<SocketAddr>,
         relay:      Option<SocketAddr>,
         token:      [u8; 16],
+        disco_key:  [u8; 32],
     },
 }
 
