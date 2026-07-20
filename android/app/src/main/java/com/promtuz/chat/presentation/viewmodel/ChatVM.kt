@@ -1,6 +1,7 @@
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import android.os.SystemClock
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
@@ -15,6 +16,9 @@ import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.decodeAvifCached
+import com.promtuz.chat.utils.media.decodeDownscaled
+import com.promtuz.chat.utils.media.resolvePickedFile
+import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Dispatchers
@@ -237,6 +241,27 @@ class ChatVM(private val application: Application) : ViewModel() {
         thumbRgba: ByteArray?, thumbW: Int, thumbH: Int, caption: String,
     ) = fire { CoreBridge.sendAttachment(peer, sourcePath, name, mime, thumbRgba, thumbW, thumbH, caption) }
 
+    /** Picked photo → downscaled inline image. Decode/RGBA run on IO inside [decodeDownscaled]. */
+    fun attachPhoto(uri: Uri) = fire {
+        val caption = takeCaption()
+        val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@fire
+        CoreBridge.sendImage(peer, bmp.toRgba(), bmp.width, bmp.height, caption)
+    }
+
+    /** Picked document → P2P attachment; images get a small preview thumb, everything else null. */
+    fun attachFile(uri: Uri) = fire {
+        val caption = takeCaption()
+        val picked = resolvePickedFile(application, uri) ?: return@fire
+        val thumb = if (picked.mime.startsWith("image/")) decodeDownscaled(application, uri, THUMB_MAX_EDGE) else null
+        CoreBridge.sendAttachment(
+            peer, picked.path, picked.name, picked.mime,
+            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0, caption,
+        )
+    }
+
+    /** Snapshot the draft as a caption and clear it (mirrors [send]). */
+    private fun takeCaption(): String = input.value.trim().also { input.value = "" }
+
     fun download(fileIdHex: String) = fire { CoreBridge.downloadAttachment(fileIdHex.fromHex()) }
 
     private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
@@ -246,6 +271,13 @@ class ChatVM(private val application: Application) : ViewModel() {
 
         /** Outbound refresh cadence; must stay under the peer's [TYPING_TTL_MS]. */
         const val TYPING_RESEND_MS = 4_000L
+
+        /** Cap the inline photo's longest edge: AVIF-compresses under libcore's 256KB budget
+         *  (bigger silently drops — sendImage bails when it can't hit the budget). */
+        const val INLINE_MAX_EDGE = 1600
+
+        /** Attachment preview thumb; libcore blurs it, so tiny is plenty. */
+        const val THUMB_MAX_EDGE = 256
 
         /** First load window: a screenful + buffer. loadOlder() pages the rest on scroll. */
         const val INITIAL_LIMIT = 40

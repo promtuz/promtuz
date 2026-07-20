@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.components
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -122,6 +125,15 @@ private fun ComposerActionChip(action: ComposerAction, onCancel: () -> Unit) {
 private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction?, haze: HazeState) {
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
+
+    // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri?.let { viewModel.attachPhoto(it) }
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.attachFile(it) }
+    }
+
     Row(
         Modifier
             .fillMaxWidth()
@@ -131,10 +143,30 @@ private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction
             // Haze shatters under the exiting nav card's scale).
             .freezeOnExit()
             .hazeEffect(haze, chatBarHaze())
-            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // Drag-select disabled: a bottom-anchored menu gets clamped upward on screen, which
+        // would break AppDropMenu's downward finger-Y math. Tap-open / tap-item is robust.
+        AppDropMenu(
+            anchor = {
+                Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+                    DrawableIcon(R.drawable.i_link, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
+                }
+            },
+            groups = listOf(
+                listOf(
+                    MenuAction("Photo") {
+                        photoPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                    MenuAction("File") { filePicker.launch(arrayOf("*/*")) },
+                ),
+            ),
+            dragSelect = false,
+        )
         BasicTextField(
             value = input,
             onValueChange = { viewModel.input.value = it },
