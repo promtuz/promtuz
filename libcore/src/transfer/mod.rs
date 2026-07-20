@@ -170,7 +170,14 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
             return Ok(());
         },
     };
-    pull(&link, file_id, offered_size, &auth::local_auth()?).await
+    // A mid-pull failure (network drop, or the sender edited/deleted the source
+    // so a chunk hash mismatches) must land the partial in FAILED — not leave it
+    // spinning ACTIVE, which gc never reaps. A re-tap resumes from `have`.
+    let r = pull(&link, file_id, offered_size, &auth::local_auth()?).await;
+    if r.is_err() {
+        fail(&file_id);
+    }
+    r
 }
 
 /// Mark a pull as HELD (sender offline, reverse-wake sent): upsert the partial
@@ -192,6 +199,19 @@ fn hold(file_id: &[u8; 32], peer: [u8; 32]) {
     p.source_ipk = peer;
     p.updated_at = crate::utils::systime().as_secs();
     let _ = store::partial_put(&p);
+}
+
+/// Flip an existing partial to FAILED, preserving `have` so a later re-tap
+/// resumes where it stopped. No-op when there's no partial yet — a failure
+/// before the first chunk landed left nothing to clean. `gc` only reaps
+/// FAILED/HELD, so an ACTIVE partial left by a mid-pull error would spin the
+/// UI and leak its `.part` forever.
+fn fail(file_id: &[u8; 32]) {
+    if let Some(mut p) = store::partial_get(file_id) {
+        p.state = store::FAILED;
+        p.updated_at = crate::utils::systime().as_secs();
+        let _ = store::partial_put(&p);
+    }
 }
 
 /// Handle an inbound reverse-wake: a contact wants a file we offered but
@@ -228,11 +248,7 @@ async fn pull(
     let manifest = match wire::read_frame::<wire::ServeResp>(&mut r).await? {
         wire::ServeResp::Manifest(m) => m,
         wire::ServeResp::Gone => {
-            if let Some(mut p) = store::partial_get(&file_id) {
-                p.state = store::FAILED;
-                p.updated_at = crate::utils::systime().as_secs();
-                let _ = store::partial_put(&p);
-            }
+            fail(&file_id);
             anyhow::bail!("sender no longer retains the file");
         },
     };
@@ -338,6 +354,36 @@ mod tests {
         assert!(!should_auto_download(&unpaired, AUTO_MAX, true), "unpaired never");
         assert!(!should_auto_download(&paired, AUTO_MAX, false), "metered never");
         assert!(!should_auto_download(&paired, AUTO_MAX + 1, true), "oversize never");
+    }
+
+    #[test]
+    fn fail_flips_active_to_failed_preserving_have() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let fid = [0xf1u8; 32];
+        store::partial_put(&store::Partial {
+            file_id: fid,
+            source_ipk: [1u8; 32],
+            total: 100,
+            chunk_size: 50,
+            manifest: None,
+            have: 3,
+            state: store::ACTIVE,
+            path: store::partial_path(&fid),
+            updated_at: 0,
+        })
+        .unwrap();
+
+        fail(&fid);
+        let p = store::partial_get(&fid).unwrap();
+        assert_eq!(p.state, store::FAILED);
+        assert_eq!(p.have, 3, "have preserved so a re-tap resumes");
+
+        // Nothing to fail (offline→HELD path never wrote a row) → no-op, no panic.
+        fail(&[0xf2u8; 32]);
+        assert!(store::partial_get(&[0xf2u8; 32]).is_none());
     }
 }
 
