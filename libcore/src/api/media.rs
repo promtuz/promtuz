@@ -96,17 +96,24 @@ pub fn get_media(peer_ipk: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
     let peer = to_ipk32(&peer_ipk)?;
     let rows = crate::data::media::for_peer(&peer)?;
     Ok(rows.into_iter().map(|(did, r)| {
-        let partial = r.file_id.as_deref()
-            .and_then(|f| <&[u8; 32]>::try_from(f).ok())
-            .and_then(store::partial_get);
-        let (transfer_state, transfer_have, transfer_total, local_path) = match partial {
+        let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
+        let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
             Some(p) => (
                 p.state,
                 p.have,
                 p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
                 (p.state == store::DONE).then(|| p.path.clone()),
             ),
-            None => (0, 0, 0, None),
+            // No receiver partial: this may be our OWN sent attachment, whose
+            // file lives in `retention` under the same file_id. Surface it as a
+            // complete local file so the sender can open what they sent.
+            None => match fid.and_then(store::retention_get) {
+                Some(ret) => {
+                    let chunks = ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
+                    (store::DONE, chunks, chunks, Some(ret.path))
+                },
+                None => (store::PENDING, 0, 0, None),
+            },
         };
         MediaRecord {
             dispatch_id: did.to_vec(),
@@ -212,5 +219,33 @@ mod tests {
         assert_eq!(record.transfer_have, 0);
         assert_eq!(record.transfer_total, 0);
         assert_eq!(record.local_path, None);
+    }
+
+    /// The sender's own sent attachment has no receiver `partial` — its file
+    /// lives in `retention` under the same file_id. `get_media` must surface it
+    /// as DONE with the retained path so the user can open what they sent.
+    #[test]
+    fn get_media_surfaces_sender_own_retained_file() {
+        let dir = std::env::temp_dir().join("promtuz-get-media-retain-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        use crate::transfer::store;
+        let peer = [7u8; 32];
+        let file_id = [0xcdu8; 32];
+        let msg = crate::messaging::build_attachment_message(
+            peer, file_id, 300 * 1024, "big.zip", "application/zip", None, "mine", None,
+        )
+        .unwrap();
+        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+        store::retention_put(&file_id, "/tmp/big.zip", 300 * 1024, 256 * 1024, &[1, 2, 3], u64::MAX)
+            .unwrap();
+
+        let records = super::get_media(peer.to_vec()).unwrap();
+        let record = records.iter().find(|r| r.dispatch_id == did.to_vec()).expect("record found");
+        assert_eq!(record.transfer_state, store::DONE);
+        assert_eq!(record.local_path.as_deref(), Some("/tmp/big.zip"));
+        assert_eq!(record.transfer_total, 2); // 300KB / 256KB, div_ceil
+        assert_eq!(record.transfer_have, record.transfer_total, "all chunks present");
     }
 }
