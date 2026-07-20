@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
+import uniffi.core.MediaRecord
 import uniffi.core.MessageRecord
 import uniffi.core.ReactionRecord
 import uniffi.core.RelayStat
@@ -52,6 +53,10 @@ import uniffi.core.backupImport as ffiBackupImport
 import uniffi.core.escrowSecret as ffiEscrowSecret
 import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
 import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
+import uniffi.core.sendImage as ffiSendImage
+import uniffi.core.sendAttachment as ffiSendAttachment
+import uniffi.core.downloadAttachment as ffiDownloadAttachment
+import uniffi.core.getMedia as ffiGetMedia
 import com.promtuz.core.adapter.ActivitySignal
 import com.promtuz.core.adapter.PresenceSignal
 
@@ -144,6 +149,33 @@ object CoreBridge {
 
     suspend fun sendMessage(toIpk: ByteArray, content: String, replyTo: ByteArray? = null) =
         withContext(Dispatchers.IO) { ffiSendMessage(toIpk, content, replyTo) }
+
+    // — Media (images + attachments). Unsigned FFI dimensions/sizes are taken as Int here
+    //   and widened once at the boundary, matching messages()/setActivity().
+
+    /** Compress `rgba` to inline AVIF and send as an Image. Fire-and-forget. */
+    suspend fun sendImage(
+        toIpk: ByteArray, rgba: ByteArray, width: Int, height: Int, caption: String,
+        groupId: ByteArray? = null,
+    ) = withContext(Dispatchers.IO) {
+        ffiSendImage(toIpk, rgba, width.toUInt(), height.toUInt(), caption, groupId)
+    }
+
+    /** Offer a file at `sourcePath` as a P2P Attachment (bytes pulled by file_id). Fire-and-forget. */
+    suspend fun sendAttachment(
+        toIpk: ByteArray, sourcePath: String, name: String, mime: String,
+        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int, caption: String, groupId: ByteArray? = null,
+    ) = withContext(Dispatchers.IO) {
+        ffiSendAttachment(toIpk, sourcePath, name, mime, thumbRgba, thumbW.toUInt(), thumbH.toUInt(), caption, groupId)
+    }
+
+    /** Start (or resume) the device-to-device pull of an attachment's bytes. */
+    suspend fun downloadAttachment(fileId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiDownloadAttachment(fileId) }
+
+    /** Media rows for a peer (inline blob/thumb + transfer progress in chunks). */
+    suspend fun getMedia(peerIpk: ByteArray): List<MediaRecord> =
+        withContext(Dispatchers.IO) { ffiGetMedia(peerIpk) }
 
     suspend fun editMessage(peer: ByteArray, dispatchId: ByteArray, content: String) =
         withContext(Dispatchers.IO) { ffiEditMessage(peer, dispatchId, content) }

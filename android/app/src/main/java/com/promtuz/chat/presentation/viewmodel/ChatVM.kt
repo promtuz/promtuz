@@ -14,15 +14,19 @@ import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
+import com.promtuz.chat.utils.media.decodeAvifCached
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import uniffi.core.MediaRecord
 import uniffi.core.MessageRecord
 import uniffi.core.ReactionRecord
 
@@ -72,7 +76,7 @@ class ChatVM(private val application: Application) : ViewModel() {
 
         var newestIncoming: String? = null
         viewModelScope.launch {
-            observeQuery(setOf("messages", "reactions")) { load() }.collect { list ->
+            observeQuery(setOf("messages", "reactions", "message_media", "partials")) { load() }.collect { list ->
                 // Their message just landed — if they were typing, it inherits the
                 // typing bubble (morph), and with this chat on screen it's read:
                 // receipt the high-water mark. Handoff is set BEFORE the list so
@@ -151,11 +155,13 @@ class ChatVM(private val application: Application) : ViewModel() {
         val rows = CoreBridge.messages(peer, want)                   // oldest-first
         if (rows.size < want) exhausted = true
         val byMsg = CoreBridge.reactions(peer).groupBy { it.dispatchId.toHex() }
+        val media = CoreBridge.getMedia(peer).associateBy { it.dispatchId.toHex() }
         // Quote resolution: replies name a dispatch_id; snippet comes from the
         // loaded window (null text → "unavailable" shell, e.g. outside window).
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
-        // reversed → newest at index 0 → drawn at the bottom under reverseLayout
-        return rows.asReversed().map { it.toUi(byMsg, byDid) }
+        // reversed → newest at index 0 → drawn at the bottom under reverseLayout;
+        // AVIF decode happens in toUi, so map off the main thread.
+        return withContext(Dispatchers.Default) { rows.asReversed().map { it.toUi(byMsg, byDid, media) } }
     }
 
     /**
@@ -223,6 +229,16 @@ class ChatVM(private val application: Application) : ViewModel() {
     fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
         fire { CoreBridge.react(peer, dispatchIdHex.fromHex(), emoji, add) }
 
+    fun sendImage(rgba: ByteArray, width: Int, height: Int, caption: String) =
+        fire { CoreBridge.sendImage(peer, rgba, width, height, caption) }
+
+    fun sendAttachment(
+        sourcePath: String, name: String, mime: String,
+        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int, caption: String,
+    ) = fire { CoreBridge.sendAttachment(peer, sourcePath, name, mime, thumbRgba, thumbW, thumbH, caption) }
+
+    fun download(fileIdHex: String) = fire { CoreBridge.downloadAttachment(fileIdHex.fromHex()) }
+
     private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
 
     private companion object {
@@ -250,6 +266,7 @@ sealed interface ComposerAction {
 private fun MessageRecord.toUi(
     reactionsByMsg: Map<String, List<ReactionRecord>>,
     byDid: Map<String, MessageRecord>,
+    mediaByDid: Map<String, MediaRecord>,
 ): UiMessage {
     val didHex = dispatchId?.toHex()
     val reactions = didHex?.let { reactionsByMsg[it] }
@@ -264,11 +281,12 @@ private fun MessageRecord.toUi(
             outgoing = quoted?.outgoing ?: false,
         )
     }
+    val payload = didHex?.let { h -> mediaByDid[h]?.toContent(h, content) } ?: MessageContent.Text(content)
     return UiMessage(
         key = didHex ?: id,
         localId = id,
         dispatchIdHex = didHex,
-        content = MessageContent.Text(content),
+        content = payload,
         outgoing = outgoing,
         status = SendStatus.from(status.toInt()),
         edited = edited,
@@ -278,3 +296,23 @@ private fun MessageRecord.toUi(
         quote = quote,
     )
 }
+
+/** kind: 1 = inline Image (blob), else P2P Attachment (thumb + transfer progress). */
+private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): MessageContent =
+    if (kind.toInt() == 1) MessageContent.Image(
+        caption = caption,
+        bitmap = blob?.let { decodeAvifCached(dispatchIdHex, it) },
+        width = width.toInt(),
+        height = height.toInt(),
+    ) else MessageContent.Attachment(
+        caption = caption,
+        name = name,
+        size = size.toLong(),
+        mime = mime,
+        thumb = thumb?.let { decodeAvifCached(dispatchIdHex, it) },
+        fileIdHex = fileId?.toHex().orEmpty(),
+        transferState = transferState.toInt(),
+        transferHave = transferHave.toInt(),
+        transferTotal = transferTotal.toInt(),
+        localPath = localPath,
+    )
