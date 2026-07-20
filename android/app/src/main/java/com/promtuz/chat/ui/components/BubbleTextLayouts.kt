@@ -10,7 +10,11 @@ import com.promtuz.chat.domain.model.UiMessage
 object BubbleTextLayouts {
     fun contentOf(msg: UiMessage): String =
         if (msg.deleted) "This message was deleted"
-        else (msg.content as? MessageContent.Text)?.text.orEmpty()
+        else when (val c = msg.content) {
+            is MessageContent.Text -> c.text
+            is MessageContent.Image -> c.caption
+            is MessageContent.Attachment -> c.caption
+        }
 
     fun metaLabelOf(msg: UiMessage): String = buildString {
         if (msg.edited && !msg.deleted) append("edited ")

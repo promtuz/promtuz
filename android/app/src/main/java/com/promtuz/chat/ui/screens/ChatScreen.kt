@@ -1,6 +1,12 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.ClipData
+import android.content.Context
+import android.content.Intent
+import java.io.File
+import java.net.URLConnection
+import androidx.core.content.FileProvider
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -67,6 +73,21 @@ private sealed interface ChatRow {
     data object Typing : ChatRow
 }
 
+// Best-effort "open" for a finished download: hand the file to the system via the
+// app's FileProvider. Silently no-ops if the path isn't under a shared root or no
+// app can view the type — the ready state on the card is the real signal.
+private fun openAttachment(context: Context, path: String) {
+    runCatching {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
+        val mime = URLConnection.guessContentTypeFromName(path) ?: "*/*"
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+}
+
 @Composable
 fun ChatScreen(name: String, viewModel: ChatVM) {
     val messages by viewModel.messages.collectAsState()
@@ -77,6 +98,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     val wallpaper = rememberChatWallpaper(appearance.wallpaper)
     val hazeState = rememberHazeState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // High-intent moment to ask for notifications: they're in a conversation. One-shot, self-gated.
     NotificationPrimer()
@@ -189,6 +211,8 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                     menuState = menu,
                                     onReactionTap = { viewModel.toggleReaction(chatRow.msg, it) },
                                     onQuoteClick = ::jumpToQuoted,
+                                    onDownload = viewModel::download,
+                                    onOpen = { openAttachment(context, it) },
                                     onDoubleTap = when {
                                         !actionable -> null
                                         interaction.doubleTapAction == DoubleTapAction.React ->

@@ -89,6 +89,8 @@ fun MessageBubble(
     onReactionTap: ((String) -> Unit)? = null,
     onQuoteClick: ((String) -> Unit)? = null,
     onDoubleTap: (() -> Unit)? = null,
+    onDownload: ((String) -> Unit)? = null,
+    onOpen: ((String) -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -118,7 +120,21 @@ fun MessageBubble(
                     QuoteBlock(q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } })
                 }
 
-                BubbleText(msg, textColor, appearance.type.fontScale)
+                // One content child in a fixed slot: the bubble Layout hardcodes child
+                // indices, so a deleted-or-text bubble and a media bubble must emit exactly
+                // one measurable here. The meta corner is reserved inside each variant.
+                val content = msg.content
+                when {
+                    msg.deleted || content is MessageContent.Text ->
+                        BubbleText(msg, textColor, appearance.type.fontScale)
+                    content is MessageContent.Image ->
+                        ImageBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
+                    content is MessageContent.Attachment ->
+                        AttachmentBlock(
+                            content, textColor, appearance.type.fontScale,
+                            BubbleTextLayouts.metaLabelOf(msg), onDownload, onOpen,
+                        )
+                }
 
                 if (msg.reactions.isNotEmpty()) {
                     Row(

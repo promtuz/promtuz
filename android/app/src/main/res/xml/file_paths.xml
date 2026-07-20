@@ -7,5 +7,13 @@
         <cache-path
             name="update_apks"
             path="updates/" />
+        <!-- Downloaded attachments live in app-private storage; expose them so the
+             file card's open action can hand them to a viewer. -->
+        <files-path
+            name="files"
+            path="." />
+        <external-files-path
+            name="ext_files"
+            path="." />
     </paths>
 </resources>
