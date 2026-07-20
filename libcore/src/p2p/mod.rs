@@ -225,7 +225,7 @@ impl Drop for TurnGuard {
 /// A live direct connection to a peer.
 #[derive(Clone)]
 pub struct PeerLink {
-    conn: Connection,
+    pub(crate) conn: Connection,
     dialer: bool,
     pub ipk: [u8; 32],
 }

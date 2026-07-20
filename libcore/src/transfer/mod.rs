@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+pub mod auth;
 pub mod store;
 pub mod wire;
 
@@ -53,16 +54,32 @@ pub fn prepare_send(path: &str, ttl_secs: u64) -> anyhow::Result<([u8; 32], u64)
 /// The framed manifest is the only length-delimited part; the chunk bytes ride
 /// after it unframed, since the puller sizes and counts them from that manifest.
 ///
-/// v1 needs no per-pull auth handshake: the link is already consent-gated to a
-/// paired contact, and the content-addressed `file_id` is the capability — you
-/// can only pull a file whose manifest hash you were handed over the E2E
-/// channel. An explicit IPK binding lands later.
+/// Every stream starts with the mutual [`auth`] handshake pinning the peer's
+/// IPK to this connection's TLS key; a stream that fails it is dropped before
+/// any pull is read.
 pub async fn serve_link(link: crate::p2p::PeerLink) {
+    let local = match auth::local_auth() {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("transfer: cannot serve without local auth: {e}");
+            return;
+        },
+    };
+    serve_streams(link, local).await
+}
+
+/// [`serve_link`] minus the process-global identity, so a test can drive two
+/// in-process endpoints with distinct constructed identities.
+async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
     loop {
         let (mut s, mut r) = match link.accept_stream().await {
             Ok(x) => x,
             Err(_) => break,
         };
+        if let Err(e) = auth::exchange(&link.conn, &mut s, &mut r, link.ipk, &local).await {
+            log::warn!("transfer: stream auth failed: {e}");
+            continue;
+        }
         let pull: wire::Pull = match wire::read_frame(&mut r).await {
             Ok(p) => p,
             Err(_) => continue,
@@ -153,7 +170,7 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
             return Ok(());
         },
     };
-    pull(&link, file_id).await
+    pull(&link, file_id, &auth::local_auth()?).await
 }
 
 /// Mark a pull as HELD (sender offline, reverse-wake sent): upsert the partial
@@ -200,9 +217,12 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
 /// Crash-safety contract: a chunk's bytes are synced to disk BEFORE the
 /// `have` watermark covering them is persisted, so a resume never trusts a
 /// watermark ahead of real bytes — the worst crash re-pulls one chunk.
-async fn pull(link: &crate::p2p::PeerLink, file_id: [u8; 32]) -> anyhow::Result<()> {
+async fn pull(
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], local: &wire::Auth,
+) -> anyhow::Result<()> {
     let have0 = store::partial_get(&file_id).map(|p| p.have).unwrap_or(0);
     let (mut s, mut r) = link.open_stream().await?;
+    auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local).await?;
     wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }).await?;
     s.finish()?;
     let manifest = match wire::read_frame::<wire::ServeResp>(&mut r).await? {
@@ -322,11 +342,36 @@ mod download_resume {
     use super::*;
     use crate::p2p::PeerLink;
 
+    /// Both loopback endpoints present this TLS key ([`linked_pair`] builds
+    /// them from it), so a test Auth's `tls_pub` must vouch for it.
+    const TLS_SEED: [u8; 32] = [7u8; 32];
+
+    /// A per-endpoint identity for the handshake: the IPK from `ipk_seed`
+    /// signing the binding over the shared loopback TLS key, saved as a
+    /// paired contact so `verify_auth`'s consent check passes.
+    fn paired_identity(ipk_seed: [u8; 32]) -> wire::Auth {
+        use ed25519_dalek::Signer;
+        let ipk_key = SigningKey::from_bytes(&ipk_seed);
+        let tls_pub = SigningKey::from_bytes(&TLS_SEED).verifying_key().to_bytes();
+        let msg = crate::quic::peer_config::ipk_binding_message(&tls_pub);
+        let a = wire::Auth {
+            ipk: ipk_key.verifying_key().to_bytes(),
+            tls_pub,
+            sig: ipk_key.sign(&msg).to_bytes(),
+        };
+        crate::data::contact::Contact::save_pending(a.ipk, "peer".into()).unwrap();
+        crate::data::contact::Contact::mark_paired(&a.ipk);
+        a
+    }
+
     /// Two directly-connected peer endpoints on loopback — the real QUIC
-    /// stack minus the punch layer, which a unit test can't drive.
-    async fn linked_pair() -> (PeerLink, PeerLink, quinn::Endpoint, quinn::Endpoint) {
+    /// stack minus the punch layer, which a unit test can't drive. Each
+    /// link's `ipk` is the peer that side expects on its streams.
+    async fn linked_pair(
+        a_expects: [u8; 32], b_expects: [u8; 32],
+    ) -> (PeerLink, PeerLink, quinn::Endpoint, quinn::Endpoint) {
         let _ = common::quic::config::setup_crypto_provider();
-        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let key = SigningKey::from_bytes(&TLS_SEED);
         let (server_cfg, client_cfg) = crate::quic::peer_config::test_peer_configs(&key).unwrap();
         let ep_a = quinn::Endpoint::server(server_cfg, (Ipv6Addr::LOCALHOST, 0).into()).unwrap();
         let mut ep_b = quinn::Endpoint::client((Ipv6Addr::LOCALHOST, 0).into()).unwrap();
@@ -336,7 +381,12 @@ mod download_resume {
             async { ep_a.accept().await.unwrap().accept().unwrap().await.unwrap() },
             async { dial.await.unwrap() },
         );
-        (crate::p2p::test_link(conn_a, [1; 32]), crate::p2p::test_link(conn_b, [2; 32]), ep_a, ep_b)
+        (
+            crate::p2p::test_link(conn_a, a_expects),
+            crate::p2p::test_link(conn_b, b_expects),
+            ep_a,
+            ep_b,
+        )
     }
 
     #[tokio::test]
@@ -345,8 +395,10 @@ mod download_resume {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let (link_a, link_b, _ep_a, _ep_b) = linked_pair().await;
-        tokio::spawn(serve_link(link_a));
+        let id_a = paired_identity([51u8; 32]);
+        let id_b = paired_identity([52u8; 32]);
+        let (link_a, link_b, _ep_a, _ep_b) = linked_pair(id_b.ipk, id_a.ipk).await;
+        tokio::spawn(serve_streams(link_a, id_a));
 
         // Distinct per-chunk content so a mis-aligned resume can't verify.
         let src = std::env::temp_dir().join("promtuz-dl-src.bin");
@@ -356,7 +408,7 @@ mod download_resume {
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
 
         // Fresh pull: every chunk lands, verifies, and the partial promotes.
-        pull(&link_b, file_id).await.unwrap();
+        pull(&link_b, file_id, &id_b).await.unwrap();
         let p = store::partial_get(&file_id).unwrap();
         assert_eq!(p.state, store::DONE);
         assert_eq!(p.have, 2);
@@ -386,11 +438,37 @@ mod download_resume {
         })
         .unwrap();
 
-        pull(&link_b, file_id2).await.unwrap();
+        pull(&link_b, file_id2, &id_b).await.unwrap();
         assert_eq!(store::partial_get(&file_id2).unwrap().state, store::DONE);
         let got = std::fs::read(&path2).unwrap();
         assert_eq!(got.len(), 300 * 1024);
         assert!(got[..wire::CHUNK_SIZE].iter().all(|&b| b == 0x99), "chunk 0 was re-transferred");
         assert_eq!(&got[wire::CHUNK_SIZE..], &bytes2[wire::CHUNK_SIZE..]);
+    }
+
+    #[tokio::test]
+    async fn serve_refuses_wrong_ipk_before_any_chunk() {
+        let dir = std::env::temp_dir().join("promtuz-download-resume-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let id_a = paired_identity([53u8; 32]);
+        let id_b = paired_identity([54u8; 32]);
+        // The imposter is even a paired contact with a valid binding — only
+        // its IPK differs from the peer the server expects on this link.
+        let imposter = paired_identity([55u8; 32]);
+        let (link_a, link_b, _ep_a, _ep_b) = linked_pair(id_b.ipk, id_a.ipk).await;
+        tokio::spawn(serve_streams(link_a, id_a));
+
+        let src = std::env::temp_dir().join("promtuz-dl-src3.bin");
+        std::fs::write(&src, vec![0x33u8; 300 * 1024]).unwrap();
+        let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+
+        assert!(pull(&link_b, file_id, &imposter).await.is_err());
+        assert!(store::partial_get(&file_id).is_none(), "no state before auth passes");
+        assert!(
+            !std::path::Path::new(&store::partial_path(&file_id)).exists(),
+            "no bytes before auth passes"
+        );
     }
 }

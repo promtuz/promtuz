@@ -69,7 +69,7 @@ pub enum ServeResp {
     Gone,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Auth {
     pub ipk: [u8; 32],
     pub tls_pub: [u8; 32],
