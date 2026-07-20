@@ -17,6 +17,10 @@ pub const AUTO_MAX: u64 = 5 * 1024 * 1024;
 /// Abandoned receiver partials older than this are reaped by [`gc`].
 const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
+/// Don't re-wake a still-offline sender on every reconnect: only re-send the
+/// reverse-wake if the held partial hasn't been poked within this window.
+const WAKE_BACKOFF_SECS: u64 = 60;
+
 /// Periodic housekeeping. Drops sender retention rows whose TTL has passed —
 /// a DB-row delete ONLY: the retained `path` is the user's own source file
 /// (the photo/document they chose to send) and is never unlinked. Then reaps
@@ -155,18 +159,30 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
         Err(e) => {
             // Sender unreachable — offline, or the punch/TURN path is exhausted
             // for a large file. Reverse-wake them and hold; the receiver retries
-            // on reconnect or a user tap. Not an error: the UI reads HELD.
+            // on reconnect or a user tap. Not an error: the UI reads HELD. But a
+            // sender we poked seconds ago won't have come up yet, so on a fresh
+            // reconnect re-drive we suppress the wake within the backoff (the row
+            // stays HELD with its wake time); a first-time hold always wakes.
+            let woke_recently = store::partial_get(&file_id)
+                .filter(|p| p.state == store::HELD)
+                .is_some_and(|p| {
+                    crate::utils::systime().as_secs().saturating_sub(p.updated_at)
+                        < WAKE_BACKOFF_SECS
+                });
             log::info!(
-                "transfer: {} unreachable ({e}); reverse-waking, holding {}",
+                "transfer: {} unreachable ({e}); holding {}{}",
                 hex::encode(&peer[..4]),
                 hex::encode(&file_id[..4]),
+                if woke_recently { " (wake suppressed)" } else { ", reverse-waking" },
             );
-            let _ = crate::messaging::send_control_wake(
-                peer,
-                common::proto::mls_wire::AppPayload::FileWant { file_id },
-            )
-            .await;
-            hold(&file_id, peer);
+            if !woke_recently {
+                let _ = crate::messaging::send_control_wake(
+                    peer,
+                    common::proto::mls_wire::AppPayload::FileWant { file_id },
+                )
+                .await;
+                hold(&file_id, peer);
+            }
             return Ok(());
         },
     };
@@ -228,6 +244,21 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
             log::warn!("transfer: P2P endpoint bring-up failed: {e}");
         }
     });
+}
+
+/// Re-drive every HELD pull on reconnect: the sender was offline when we last
+/// tried, so re-attempt now that we're back (and maybe they are too). One spawn
+/// per file_id — the `DOWNLOADING` guard dedups a racing user tap, and
+/// [`download`] re-runs link→pull, completing if the sender is up. Only HELD is
+/// retried; a FAILED transfer must not auto-loop.
+pub async fn retry_held_downloads() {
+    for file_id in store::held_file_ids() {
+        crate::RUNTIME.spawn(async move {
+            if let Err(e) = download(file_id).await {
+                log::warn!("transfer: held retry {} failed: {e}", hex::encode(&file_id[..4]));
+            }
+        });
+    }
 }
 
 /// The wire+disk half of [`download`] over an already-open link, split out so

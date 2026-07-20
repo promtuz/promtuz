@@ -200,9 +200,54 @@ pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     paths
 }
 
+/// Every `file_id` whose partial is HELD — the sender was offline when we last
+/// tried. The reconnect retry re-drives each once the sender may be back.
+pub fn held_file_ids() -> Vec<[u8; 32]> {
+    let conn = TRANSFERS_DB.lock();
+    let mut stmt =
+        conn.prepare("SELECT file_id FROM partials WHERE state = ?1").expect("held_file_ids prepare");
+    stmt.query_map(params![HELD], |r| r.get(0))
+        .expect("held_file_ids query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("held_file_ids rows")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_file_ids_lists_only_held() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let mk = |fid: [u8; 32], state: u8| {
+            partial_put(&Partial {
+                file_id: fid,
+                source_ipk: [1u8; 32],
+                total: 1,
+                chunk_size: 1,
+                manifest: None,
+                have: 0,
+                state,
+                path: partial_path(&fid),
+                updated_at: 0,
+            })
+            .unwrap();
+        };
+        mk([0xe1; 32], HELD);
+        mk([0xe2; 32], DONE);
+        mk([0xe3; 32], FAILED);
+        mk([0xe4; 32], ACTIVE);
+        mk([0xe5; 32], HELD);
+
+        let ids = held_file_ids();
+        assert!(ids.contains(&[0xe1; 32]) && ids.contains(&[0xe5; 32]), "HELD retried");
+        assert!(!ids.contains(&[0xe2; 32]), "DONE not retried");
+        assert!(!ids.contains(&[0xe3; 32]), "FAILED not retried");
+        assert!(!ids.contains(&[0xe4; 32]), "ACTIVE not retried");
+    }
 
     #[test]
     fn retention_and_partial_roundtrip() {

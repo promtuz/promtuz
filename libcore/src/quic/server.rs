@@ -457,6 +457,11 @@ impl Relay {
                 }
             });
 
+            // Receive-side mirror: re-drive HELD attachment pulls whose sender
+            // may now be reachable. Spawns per file_id; the DOWNLOADING guard
+            // dedups a racing user tap.
+            tokio::spawn(crate::transfer::retry_held_downloads());
+
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
             // `mls_cancel`.
