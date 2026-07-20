@@ -46,7 +46,7 @@ pub fn send_image(
 
 /// Read media records for a peer from the message_media table.
 /// Transfer progress fields (transfer_state, transfer_have, transfer_total, local_path)
-/// default to 0/0/0/None here; they are wired to the real transfer store in Task 16.
+/// default to 0/0/0/None — the transfer-store lookup that fills them isn't wired yet.
 #[uniffi::export]
 pub fn get_media(peer_ipk: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
     let peer = to_ipk32(&peer_ipk)?;
