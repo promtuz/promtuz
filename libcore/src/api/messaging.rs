@@ -388,3 +388,8 @@ pub(crate) fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
 pub(crate) fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "dispatch_id must be 16 bytes".into() })
 }
+
+/// Validate a client-supplied file_id is exactly 32 bytes.
+pub(crate) fn to_fid32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
+    bytes.try_into().map_err(|_| CoreError::Internal { msg: "file_id must be 32 bytes".into() })
+}

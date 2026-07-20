@@ -291,6 +291,37 @@ pub async fn send_image(
     }
 }
 
+/// Send a P2P attachment (metadata + blurred thumb; bytes pulled by `file_id`)
+/// to `to`. Mirrors [`send_image`] — same production `MlsContext` — but hands
+/// off to [`send_attachment_inner`].
+pub async fn send_attachment(
+    to: [u8; 32], file_id: [u8; 32], size: u64, name: String, mime: String,
+    thumb: Option<Vec<u8>>, caption: String, group_id: Option<[u8; 16]>,
+) -> Result<()> {
+    let dht_client = {
+        let guard = RELAY.read();
+        guard.as_ref().and_then(|r| r.dht_client.clone())
+    };
+    let provider = PromtuzMlsProvider::shared();
+    let stash = KeyPackageStash::new(stash_db_handle());
+    let buffer = EpochCatchupBuffer::new(stash_db_handle());
+    match dht_client {
+        Some(client) => {
+            let ctx = MlsContext {
+                provider: &provider,
+                stash:    &stash,
+                buffer:   &buffer,
+                dht:      client.as_ref(),
+            };
+            send_attachment_inner(&ctx, to, file_id, size, name, mime, thumb, caption, group_id).await
+        },
+        None => {
+            error!("MESSAGE: no relay connection / dialer; attachment send aborted");
+            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
+        },
+    }
+}
+
 /// Edit a prior message to `to` and apply the change locally. Best-effort on
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
@@ -350,6 +381,17 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
 /// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
 /// the relay queues it for an offline peer; if WE are offline it's dropped.
 pub(crate) async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
+    send_control_inner(to, payload, false).await
+}
+
+/// Reverse-wake variant of [`send_control`]: the same row-less MLS control send,
+/// but flags the `DispatchP` for push-wake so an offline peer is revived. The
+/// attachment reverse-wake uses it to bring an offline sender back online.
+pub(crate) async fn send_control_wake(to: [u8; 32], payload: AppPayload) -> Result<()> {
+    send_control_inner(to, payload, true).await
+}
+
+async fn send_control_inner(to: [u8; 32], payload: AppPayload, wake: bool) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -381,14 +423,16 @@ pub(crate) async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()
     )
     .map_err(|e| anyhow!("build envelope: {e}"))?;
 
-    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes).await
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, wake).await
 }
 
 /// Sign a `DispatchP` over `env_bytes` and send it (the relay queues it for an
 /// offline peer). Shared tail of the MLS control path and the non-MLS
 /// PairDecline — both just need an authenticated dispatch of opaque bytes.
+/// `wake` sets the push-wake flag: false for chat-side control, true for the
+/// reverse-wake that must revive an offline sender.
 async fn dispatch_envelope(
-    to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey, env_bytes: Vec<u8>,
+    to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey, env_bytes: Vec<u8>, wake: bool,
 ) -> Result<()> {
     let id = crate::data::message::next_dispatch_id();
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
@@ -403,9 +447,7 @@ async fn dispatch_envelope(
         payload:        ByteVec(env_bytes),
         sig:            Bytes(sig),
         accepted_at_ms: 0,
-        // Control traffic (receipt/edit/delete/react/pair-ack/pair-decline):
-        // deliver on next drain, never push-wake.
-        wake:           false,
+        wake,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
 
@@ -445,7 +487,7 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
         sig: Bytes(sig),
     });
     let env_bytes = envelope.ser().map_err(|e| anyhow!("encode decline: {e}"))?;
-    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes).await
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, false).await
 }
 
 /// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
@@ -930,6 +972,51 @@ pub(crate) async fn send_image_inner<C: DhtClient>(
     send_payload(ctx, to, &msg, payload_bytes).await
 }
 
+/// Sync, pure-DB prep for an outgoing attachment: persist the optimistic caption
+/// row plus the `message_media` side row (thumb, file_id, name, size, mime — no
+/// inline blob; the bytes are pulled P2P). Mirrors [`build_image_message`].
+pub(crate) fn build_attachment_message(
+    to: [u8; 32], file_id: [u8; 32], size: u64, name: &str, mime: &str,
+    thumb: Option<Vec<u8>>, caption: &str, group_id: Option<[u8; 16]>,
+) -> Result<Message> {
+    crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
+        kind: crate::data::media::KIND_ATTACHMENT,
+        group_id: group_id.map(|g| g.to_vec()),
+        mime: mime.to_string(),
+        name: name.to_string(),
+        size,
+        width: 0,
+        height: 0,
+        blob: None,
+        thumb,
+        file_id: Some(file_id.to_vec()),
+    })
+}
+
+/// The attachment counterpart to [`send_image_inner`]: persist via
+/// [`build_attachment_message`], then build `AppPayload::Attachment` and hand
+/// off to the shared [`send_payload`] tail. A first send deferred because the
+/// peer had no published KeyPackage is re-driven by [`retry_pending_sends`],
+/// which rebuilds the `Attachment` from the stored media row.
+pub(crate) async fn send_attachment_inner<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, to: [u8; 32], file_id: [u8; 32], size: u64, name: String, mime: String,
+    thumb: Option<Vec<u8>>, caption: String, group_id: Option<[u8; 16]>,
+) -> Result<()> {
+    let msg = build_attachment_message(to, file_id, size, &name, &mime, thumb.clone(), &caption, group_id)?;
+    let payload = AppPayload::Attachment {
+        caption,
+        group_id,
+        mime,
+        name,
+        size,
+        // Wire carries a bare Vec; an absent preview flattens to empty.
+        thumb: thumb.unwrap_or_default(),
+        file_id,
+    };
+    let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    send_payload(ctx, to, &msg, payload_bytes).await
+}
+
 /// Drive one send attempt for an already-persisted outgoing `msg` row:
 /// contact lookup → group resolve/lazy-create → envelope → outbox enqueue
 /// → wire send → ack. Split out of [`send_message_inner`] so
@@ -963,6 +1050,15 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
             width:    m.width,
             height:   m.height,
             data:     m.blob.unwrap_or_default(),
+        },
+        Some(m) if m.kind == crate::data::media::KIND_ATTACHMENT => AppPayload::Attachment {
+            caption:  msg.inner.content.clone(),
+            group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
+            mime:     m.mime,
+            name:     m.name,
+            size:     m.size,
+            thumb:    m.thumb.unwrap_or_default(),
+            file_id:  m.file_id.as_deref().and_then(|f| f.try_into().ok()).unwrap_or([0u8; 32]),
         },
         _ => {
             let reply_to: Option<[u8; 16]> =

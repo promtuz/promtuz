@@ -110,8 +110,64 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
     let _guard = PullGuard(file_id);
     let peer = crate::data::media::sender_of(&file_id)?
         .ok_or_else(|| anyhow::anyhow!("no media row for that file_id"))?;
-    let link = crate::p2p::link(peer).await?;
+    let link = match crate::p2p::link(peer).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Sender unreachable — offline, or the punch/TURN path is exhausted
+            // for a large file. Reverse-wake them and hold; the receiver retries
+            // on reconnect or a user tap. Not an error: the UI reads HELD.
+            log::info!(
+                "transfer: {} unreachable ({e}); reverse-waking, holding {}",
+                hex::encode(&peer[..4]),
+                hex::encode(&file_id[..4]),
+            );
+            let _ = crate::messaging::send_control_wake(
+                peer,
+                common::proto::mls_wire::AppPayload::FileWant { file_id },
+            )
+            .await;
+            hold(&file_id, peer);
+            return Ok(());
+        },
+    };
     pull(&link, file_id).await
+}
+
+/// Mark a pull as HELD (sender offline, reverse-wake sent): upsert the partial
+/// so `get_media` surfaces the held state to the UI. Mirrors [`pull`]'s upsert
+/// but with no manifest yet — the real bytes arrive once the sender comes back.
+fn hold(file_id: &[u8; 32], peer: [u8; 32]) {
+    let mut p = store::partial_get(file_id).unwrap_or(store::Partial {
+        file_id: *file_id,
+        source_ipk: peer,
+        total: 0,
+        chunk_size: 0,
+        manifest: None,
+        have: 0,
+        state: store::HELD,
+        path: store::partial_path(file_id),
+        updated_at: 0,
+    });
+    p.state = store::HELD;
+    p.source_ipk = peer;
+    p.updated_at = crate::utils::systime().as_secs();
+    let _ = store::partial_put(&p);
+}
+
+/// Handle an inbound reverse-wake: a contact wants a file we offered but
+/// couldn't reach us for. The platform push already revived the app; make sure
+/// our P2P listener is live so their retry-dial can land (they drive the connect).
+pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
+    log::info!(
+        "transfer: FileWant from {} for {}",
+        hex::encode(&peer[..4]),
+        hex::encode(&file_id[..4]),
+    );
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::p2p::ensure_endpoint() {
+            log::warn!("transfer: P2P endpoint bring-up failed: {e}");
+        }
+    });
 }
 
 /// The wire+disk half of [`download`] over an already-open link, split out so

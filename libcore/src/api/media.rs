@@ -1,6 +1,7 @@
 //! Inline-image send: FFI entry point for `send_image`.
 
 use crate::api::messaging::to_did16;
+use crate::api::messaging::to_fid32;
 use crate::api::messaging::to_ipk32;
 use crate::platform::CoreError;
 
@@ -39,6 +40,47 @@ pub fn send_image(
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send_image(to, avif, w, h, caption, gid).await {
             log::warn!("MEDIA: send_image failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Offer `source_path` to `to_ipk` as a P2P attachment: retain its manifest for
+/// a week, blur an optional preview thumbnail, persist the caption + metadata
+/// rows, and send the `Attachment` control (the bytes are pulled device-to-device
+/// by `file_id`). Fire-and-forget like [`send_image`] — the `Result` reports only
+/// synchronous input errors; the send outcome arrives via `on_message`.
+#[uniffi::export]
+pub fn send_attachment(
+    to_ipk: Vec<u8>, source_path: String, name: String, mime: String,
+    thumb_rgba: Option<Vec<u8>>, thumb_w: u32, thumb_h: u32, caption: String,
+    group_id: Option<Vec<u8>>,
+) -> Result<(), CoreError> {
+    let to = to_ipk32(&to_ipk)?;
+    let gid = group_id.as_deref().map(to_did16).transpose()?;
+    let (file_id, size) = crate::transfer::prepare_send(&source_path, 7 * 24 * 3600)?;
+    // No preview (zip/doc/audio) → None, stored as a NULL thumb so the UI's
+    // "has preview?" check stays clean; only the wire field flattens to empty.
+    let thumb = thumb_rgba.map(|r| crate::media::blur_thumb(&r, thumb_w, thumb_h)).transpose()?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) =
+            crate::messaging::send_attachment(to, file_id, size, name, mime, thumb, caption, gid).await
+        {
+            log::warn!("MEDIA: send_attachment failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Pull a received attachment's bytes by `file_id`. Fire-and-forget: dials the
+/// sender (or reverse-wakes them if offline) and drives the resumable transfer;
+/// progress and completion surface through `get_media`'s transfer_state.
+#[uniffi::export]
+pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
+    let fid = to_fid32(&file_id)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::transfer::download(fid).await {
+            log::warn!("MEDIA: download_attachment failed: {e}");
         }
     });
     Ok(())
@@ -114,6 +156,36 @@ mod tests {
         assert_eq!(*got_did, did);
         assert_eq!(row.kind, media::KIND_IMAGE);
         assert!(row.blob.as_deref().is_some_and(|b| !b.is_empty()));
+    }
+
+    /// `build_attachment_message` persists both rows in one pass: the caption
+    /// on `messages`, and a `message_media` row carrying kind=Attachment with
+    /// the blurred thumb, file_id, name and size (no inline blob). Guards the
+    /// thumb-as-`Option` contract and the file_id round-trip.
+    #[test]
+    fn attachment_prep_persists_media_row() {
+        let dir = std::env::temp_dir().join("promtuz-send-attachment-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let peer = [9u8; 32];
+        let file_id = [0xabu8; 32];
+        let thumb = vec![1u8, 2, 3];
+        let msg = crate::messaging::build_attachment_message(
+            peer, file_id, 4096, "doc.pdf", "application/pdf", Some(thumb.clone()), "here", None,
+        )
+        .unwrap();
+        assert_eq!(msg.inner.content, "here");
+        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+
+        let rows = media::for_peer(&peer).unwrap();
+        let (_d, row) = rows.iter().find(|(d, _)| *d == did).expect("attachment media row persisted");
+        assert_eq!(row.kind, media::KIND_ATTACHMENT);
+        assert_eq!(row.file_id.as_deref(), Some(file_id.as_slice()));
+        assert_eq!(row.thumb, Some(thumb));
+        assert_eq!(row.name, "doc.pdf");
+        assert_eq!(row.size, 4096);
+        assert!(row.blob.is_none());
     }
 
     #[test]

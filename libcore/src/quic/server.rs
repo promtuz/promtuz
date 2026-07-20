@@ -902,11 +902,12 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                         });
                     }
                 },
-                Ok(AppPayload::FileWant { file_id: _ }) => {
-                    // Reverse-wake control message — routed, never stored. The push wake
-                    // already brought the app up; the receiver's reconnect is what actually
-                    // serves the file, so there's nothing to do here yet.
+                Ok(AppPayload::FileWant { file_id }) => {
+                    // Reverse-wake control message — routed, never stored. The push
+                    // wake already revived us; bring the P2P listener up so the
+                    // receiver's retry-dial can land (they drive the connect).
                     info!("P2P: FileWant received from {}", hex::encode(&msg.from[..4]));
+                    crate::transfer::on_file_want(*msg.from, file_id);
                 },
                 Err(e) => {
                     warn!(

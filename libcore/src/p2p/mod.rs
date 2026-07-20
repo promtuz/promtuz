@@ -342,6 +342,13 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     Ok(link)
 }
 
+/// Build the P2P endpoint (and its accept/routing loop) if it isn't up yet.
+/// The reverse-wake path calls this after a push revives us, so we're ready to
+/// accept the receiver's retry-dial.
+pub fn ensure_endpoint() -> Result<()> {
+    endpoint().map(|_| ())
+}
+
 /// Return a live link to `peer`, reusing an open one or forming a new connection.
 pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
