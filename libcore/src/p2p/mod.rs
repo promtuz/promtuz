@@ -329,6 +329,9 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     link.verify_roundtrip().await?;
     log::info!("P2P[{}]: link verified — {}", hex::encode(&peer[..4]), link.remote_address());
     ep.links.lock().insert(peer, link.clone());
+    // Both ends serve pulls for whatever they retain, so a file offered either
+    // direction is fetchable over this one link.
+    RUNTIME.spawn(crate::transfer::serve_link(link.clone()));
     Ok(link)
 }
 

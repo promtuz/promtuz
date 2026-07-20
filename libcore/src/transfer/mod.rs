@@ -17,6 +17,67 @@ pub fn prepare_send(path: &str, ttl_secs: u64) -> anyhow::Result<([u8; 32], u64)
     Ok((file_id, size))
 }
 
+/// Answer pulls over `link` until the peer stops opening streams: read one
+/// [`wire::Pull`] per bi-stream, then either reply [`wire::ServeResp::Gone`]
+/// (we no longer retain it) or frame the [`wire::Manifest`] and stream the
+/// requested chunk bytes raw from `have` to EOF.
+///
+/// The framed manifest is the only length-delimited part; the chunk bytes ride
+/// after it unframed, since the puller sizes and counts them from that manifest.
+///
+/// v1 needs no per-pull auth handshake: the link is already consent-gated to a
+/// paired contact, and the content-addressed `file_id` is the capability — you
+/// can only pull a file whose manifest hash you were handed over the E2E
+/// channel. An explicit IPK binding lands later.
+pub async fn serve_link(link: crate::p2p::PeerLink) {
+    loop {
+        let (mut s, mut r) = match link.accept_stream().await {
+            Ok(x) => x,
+            Err(_) => break,
+        };
+        let pull: wire::Pull = match wire::read_frame(&mut r).await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        match store::retention_get(&pull.file_id) {
+            None => {
+                let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
+                let _ = s.finish();
+            },
+            Some(ret) => {
+                // A stored manifest that won't decode is our corruption, not the
+                // peer's; treat it as gone rather than panic this detached loop.
+                let manifest: wire::Manifest = match postcard::from_bytes(&ret.manifest) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::warn!("transfer: undecodable retained manifest: {e}");
+                        let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
+                        let _ = s.finish();
+                        continue;
+                    },
+                };
+                let _ = wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest)).await;
+                if let Ok(mut f) = std::fs::File::open(&ret.path) {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let _ = f.seek(SeekFrom::Start(pull.have as u64 * ret.chunk_size as u64));
+                    let mut buf = vec![0u8; ret.chunk_size as usize];
+                    loop {
+                        let n = match f.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+                        if s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                let _ = s.finish();
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
