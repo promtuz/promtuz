@@ -172,6 +172,34 @@ pub fn partial_have(file_id: &[u8; 32]) -> u32 {
         .unwrap_or(0)
 }
 
+/// Reap genuinely-abandoned receiver transfers: `FAILED`/`HELD` partials last
+/// touched before `older_than`. A `DONE` partial is NEVER selected — its
+/// `.part` file IS the delivered attachment the user keeps (`get_media`'s
+/// `local_path`), so only junk bytes get unlinked. Unlink is best-effort (a
+/// HELD row may have no file yet); the row is deleted regardless. Returns the
+/// paths it removed.
+pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
+    let conn = TRANSFERS_DB.lock();
+    let mut stmt = conn
+        .prepare("SELECT path FROM partials WHERE state IN (?1, ?2) AND updated_at < ?3")
+        .expect("gc_dead_partials prepare");
+    let paths: Vec<String> = stmt
+        .query_map(params![FAILED, HELD, older_than as i64], |r| r.get(0))
+        .expect("gc_dead_partials query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("gc_dead_partials rows");
+    drop(stmt);
+    for p in &paths {
+        let _ = std::fs::remove_file(p);
+    }
+    conn.execute(
+        "DELETE FROM partials WHERE state IN (?1, ?2) AND updated_at < ?3",
+        params![FAILED, HELD, older_than as i64],
+    )
+    .expect("gc_dead_partials delete");
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +242,47 @@ mod tests {
         retention_gc(20); // now past soon's expiry
         assert!(retention_get(&never).is_some());
         assert!(retention_get(&soon).is_none());
+    }
+
+    #[test]
+    fn gc_dead_partials_reaps_dead_but_spares_done() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        // Cutoff t=1000: an old FAILED (reap), a DONE at the same age (KEEP —
+        // its .part IS the delivered file), a fresh FAILED past the cutoff (KEEP).
+        let mk = |fid: [u8; 32], state: u8, updated_at: u64| {
+            let path = format!("{}/gc-{}.part", dir.display(), hex::encode(&fid[..2]));
+            std::fs::write(&path, b"bytes").unwrap();
+            partial_put(&Partial {
+                file_id: fid,
+                source_ipk: [9u8; 32],
+                total: 5,
+                chunk_size: 5,
+                manifest: None,
+                have: 0,
+                state,
+                path: path.clone(),
+                updated_at,
+            })
+            .unwrap();
+            path
+        };
+        let dead = mk([0xd1; 32], FAILED, 100);
+        let done = mk([0xd2; 32], DONE, 100);
+        let fresh = mk([0xd3; 32], FAILED, 5000);
+
+        let removed = gc_dead_partials(1000);
+
+        assert!(removed.contains(&dead));
+        assert!(partial_get(&[0xd1; 32]).is_none(), "old FAILED row reaped");
+        assert!(!std::path::Path::new(&dead).exists(), "old FAILED .part unlinked");
+
+        assert!(partial_get(&[0xd2; 32]).is_some(), "DONE row spared");
+        assert!(std::path::Path::new(&done).exists(), "DONE .part kept");
+
+        assert!(partial_get(&[0xd3; 32]).is_some(), "fresh FAILED row spared");
+        assert!(std::path::Path::new(&fresh).exists(), "fresh FAILED .part kept");
     }
 }

@@ -10,6 +10,29 @@ use parking_lot::Mutex;
 pub mod store;
 pub mod wire;
 
+/// Auto-download ceiling: bigger offers wait for a user tap even on wifi.
+pub const AUTO_MAX: u64 = 5 * 1024 * 1024;
+
+/// Abandoned receiver partials older than this are reaped by [`gc`].
+const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Periodic housekeeping. Drops sender retention rows whose TTL has passed —
+/// a DB-row delete ONLY: the retained `path` is the user's own source file
+/// (the photo/document they chose to send) and is never unlinked. Then reaps
+/// abandoned receiver partials, unlinking only their junk `.part` bytes; a
+/// delivered `DONE` partial (the file the user keeps) is spared.
+pub fn gc(now: u64) {
+    let _ = store::retention_gc(now);
+    let _ = store::gc_dead_partials(now.saturating_sub(DEAD_PARTIAL_TTL_SECS));
+}
+
+/// Whether to pull an offered attachment without a user tap: only from a paired
+/// contact, over a trusted (un-metered) network, and at or below [`AUTO_MAX`].
+/// Pure policy so the receive arm and its test share one rule.
+pub fn should_auto_download(ipk: &[u8; 32], size: u64, on_wifi: bool) -> bool {
+    on_wifi && size <= AUTO_MAX && crate::data::contact::Contact::is_paired(ipk)
+}
+
 /// Builds the manifest for `path`, retains it (and the source location) so we
 /// keep serving pulls until `ttl_secs` elapses, and returns the offer's
 /// `(file_id, size)`.
@@ -268,6 +291,25 @@ mod tests {
         let (file_id, size) = prepare_send(path.to_str().unwrap(), 3600).unwrap();
         assert_eq!(size, 300 * 1024);
         assert!(store::retention_get(&file_id).is_some());
+    }
+
+    #[test]
+    fn auto_download_only_paired_wifi_and_small() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        use crate::data::contact::Contact;
+        let paired = [0xa1u8; 32];
+        Contact::save_pending(paired, "peer".into()).unwrap();
+        Contact::mark_paired(&paired);
+        assert!(Contact::is_paired(&paired));
+        let unpaired = [0xa2u8; 32];
+
+        assert!(should_auto_download(&paired, AUTO_MAX, true), "paired + wifi + at-cap");
+        assert!(!should_auto_download(&unpaired, AUTO_MAX, true), "unpaired never");
+        assert!(!should_auto_download(&paired, AUTO_MAX, false), "metered never");
+        assert!(!should_auto_download(&paired, AUTO_MAX + 1, true), "oversize never");
     }
 }
 

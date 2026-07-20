@@ -104,6 +104,7 @@ fn init_inner(
         loop {
             ticker.tick().await;
             crate::delivery::reconcile().await;
+            crate::transfer::gc(crate::utils::systime().as_secs());
         }
     });
 

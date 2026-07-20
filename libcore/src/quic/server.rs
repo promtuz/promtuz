@@ -900,6 +900,15 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                         crate::RUNTIME.spawn(async move {
                             let _ = crate::messaging::send_receipt(from, ReceiptKind::Delivered, upto).await;
                         });
+                        // Fetch the bytes without a tap only from a paired contact
+                        // over a trusted network; otherwise the UI drives the pull.
+                        // ponytail: on_wifi is hardcoded false until the platform
+                        // feeds real network state — no-op today, correct and ready.
+                        if crate::transfer::should_auto_download(&from, size, false) {
+                            crate::RUNTIME.spawn(async move {
+                                let _ = crate::transfer::download(file_id).await;
+                            });
+                        }
                     }
                 },
                 Ok(AppPayload::FileWant { file_id }) => {
