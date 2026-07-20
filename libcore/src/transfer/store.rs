@@ -163,15 +163,6 @@ pub fn partial_put(p: &Partial) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub fn partial_have(file_id: &[u8; 32]) -> u32 {
-    TRANSFERS_DB
-        .lock()
-        .query_row("SELECT have FROM partials WHERE file_id = ?1", params![file_id], |r| r.get(0))
-        .optional()
-        .expect("partial_have read")
-        .unwrap_or(0)
-}
-
 /// Reap genuinely-abandoned receiver transfers: `FAILED`/`HELD` partials last
 /// touched before `older_than`. A `DONE` partial is NEVER selected — its
 /// `.part` file IS the delivered attachment the user keeps (`get_media`'s
@@ -247,30 +238,6 @@ mod tests {
         assert!(!ids.contains(&[0xe2; 32]), "DONE not retried");
         assert!(!ids.contains(&[0xe3; 32]), "FAILED not retried");
         assert!(!ids.contains(&[0xe4; 32]), "ACTIVE not retried");
-    }
-
-    #[test]
-    fn retention_and_partial_roundtrip() {
-        let dir = std::env::temp_dir().join("promtuz-transfers-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        let fid = [5u8; 32];
-        retention_put(&fid, "/tmp/x", 100, 256 * 1024, &vec![1, 2, 3], u64::MAX).unwrap();
-        assert!(retention_get(&fid).is_some());
-        let p = Partial {
-            file_id: fid,
-            source_ipk: [6u8; 32],
-            total: 100,
-            chunk_size: 256 * 1024,
-            manifest: None,
-            have: 2,
-            state: ACTIVE,
-            path: "/tmp/p".into(),
-            updated_at: 1,
-        };
-        partial_put(&p).unwrap();
-        assert_eq!(partial_have(&fid), 2);
     }
 
     #[test]
