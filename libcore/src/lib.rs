@@ -18,6 +18,7 @@ pub mod platform;
 pub mod push;
 pub mod quic;
 pub mod state;
+pub mod transfer;
 pub mod utils;
 
 uniffi::setup_scaffolding!();
