@@ -14,6 +14,35 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Streams `path` a chunk at a time, hashing each block, so a multi-GB file
+    /// never lands in memory whole.
+    pub fn from_file(path: &str) -> Result<Manifest> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path)?;
+        let mut chunks = Vec::new();
+        let mut total = 0u64;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        loop {
+            let mut filled = 0;
+            while filled < CHUNK_SIZE {
+                let n = f.read(&mut buf[filled..])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            chunks.push(*blake3::hash(&buf[..filled]).as_bytes());
+            total += filled as u64;
+            if filled < CHUNK_SIZE {
+                break;
+            }
+        }
+        Ok(Manifest { total_size: total, chunk_size: CHUNK_SIZE as u32, chunks })
+    }
+
     /// Content-addresses the manifest itself, not the file bytes, so two
     /// manifests that describe the same chunks always resolve to the same id.
     pub fn file_id(&self) -> [u8; 32] {
@@ -90,6 +119,29 @@ mod tests {
         let mut m3 = m1.clone();
         m3.chunks[0] = [9u8; 32];
         assert_ne!(m1.file_id(), m3.file_id());
+    }
+
+    #[test]
+    fn from_file_chunks_a_partial_trailing_block() {
+        let path = std::env::temp_dir().join("promtuz-from_file-300k.bin");
+        std::fs::write(&path, vec![0xabu8; 300 * 1024]).unwrap();
+
+        let m = Manifest::from_file(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(m.total_size, 300 * 1024);
+        assert_eq!(m.chunk_size, CHUNK_SIZE as u32);
+        assert_eq!(m.chunks.len(), 2); // 256KB + 44KB
+    }
+
+    #[test]
+    fn from_file_exact_multiple_has_no_empty_trailing_chunk() {
+        let path = std::env::temp_dir().join("promtuz-from_file-exact.bin");
+        std::fs::write(&path, vec![0u8; 2 * CHUNK_SIZE]).unwrap();
+
+        let m = Manifest::from_file(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(m.total_size, 2 * CHUNK_SIZE as u64);
+        assert_eq!(m.chunks.len(), 2);
     }
 
     #[test]
