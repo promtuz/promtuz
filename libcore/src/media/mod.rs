@@ -65,6 +65,40 @@ pub fn compress_image(
     Ok((out.avif_file, w, h))
 }
 
+/// Downscale RGBA to ≤48px longest side, gaussian blur, then AVIF-encode.
+/// Returns a tiny blurred thumbnail (a few KB).
+pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if rgba.len() != (width as usize * height as usize * 4) {
+        bail!("rgba len mismatch");
+    }
+
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).unwrap();
+
+    // Downscale to ≤48px longest side, preserving aspect ratio.
+    let scale = 48.0 / width.max(height) as f32;
+    let (tw, th) = (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    );
+
+    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+    let blurred = image::imageops::blur(&small, 2.0);
+
+    // Convert pixels to RGBA8 for encoding.
+    let px: Vec<RGBA8> = blurred
+        .pixels()
+        .map(|p| RGBA8::new(p[0], p[1], p[2], p[3]))
+        .collect();
+
+    // Encode with modest quality.
+    let out = Encoder::new()
+        .with_quality(50.0)
+        .with_speed(8)
+        .encode_rgba(Img::new(px.as_slice(), tw as usize, th as usize))?;
+
+    Ok(out.avif_file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +118,13 @@ mod tests {
         assert_eq!(&bytes[4..8], b"ftyp");
         assert!(bytes.windows(4).any(|c| c == b"avif"));
         assert!(ow <= w && oh <= h);
+    }
+
+    #[test]
+    fn blur_thumb_is_small_avif() {
+        let (w, h) = (640, 480);
+        let out = blur_thumb(&solid_rgba(w, h), w, h).unwrap();
+        assert!(!out.is_empty());
+        assert!(out.len() < 8 * 1024, "thumb too big: {}", out.len());
     }
 }
