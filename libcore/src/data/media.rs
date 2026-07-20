@@ -106,6 +106,19 @@ pub fn get(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> 
     .map_err(Into::into)
 }
 
+/// The conversation peer whose message carries `file_id` — for an incoming
+/// attachment that is the sender to dial for the pull.
+pub fn sender_of(file_id: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+    let db = MESSAGES_DB.lock();
+    db.query_row(
+        "SELECT peer_ipk FROM message_media WHERE file_id=?1 LIMIT 1",
+        [file_id.as_slice()],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {
     let db = MESSAGES_DB.lock();
     let mut stmt = db.prepare(

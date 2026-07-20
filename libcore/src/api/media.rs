@@ -44,29 +44,45 @@ pub fn send_image(
     Ok(())
 }
 
-/// Read media records for a peer from the message_media table.
-/// Transfer progress fields (transfer_state, transfer_have, transfer_total, local_path)
-/// default to 0/0/0/None — the transfer-store lookup that fills them isn't wired yet.
+/// Read media records for a peer from the message_media table, with transfer
+/// progress (state/have/total in chunks) joined in from the transfer store.
+/// `local_path` is only exposed once the download is DONE — until then the
+/// `.part` file holds unverified-tail bytes no platform should open.
 #[uniffi::export]
 pub fn get_media(peer_ipk: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
+    use crate::transfer::store;
     let peer = to_ipk32(&peer_ipk)?;
     let rows = crate::data::media::for_peer(&peer)?;
-    Ok(rows.into_iter().map(|(did, r)| MediaRecord {
-        dispatch_id: did.to_vec(),
-        kind: r.kind,
-        group_id: r.group_id,
-        mime: r.mime,
-        name: r.name,
-        size: r.size,
-        width: r.width,
-        height: r.height,
-        blob: r.blob,
-        thumb: r.thumb,
-        file_id: r.file_id,
-        transfer_state: 0,
-        transfer_have: 0,
-        transfer_total: 0,
-        local_path: None,
+    Ok(rows.into_iter().map(|(did, r)| {
+        let partial = r.file_id.as_deref()
+            .and_then(|f| <&[u8; 32]>::try_from(f).ok())
+            .and_then(store::partial_get);
+        let (transfer_state, transfer_have, transfer_total, local_path) = match partial {
+            Some(p) => (
+                p.state,
+                p.have,
+                p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
+                (p.state == store::DONE).then(|| p.path.clone()),
+            ),
+            None => (0, 0, 0, None),
+        };
+        MediaRecord {
+            dispatch_id: did.to_vec(),
+            kind: r.kind,
+            group_id: r.group_id,
+            mime: r.mime,
+            name: r.name,
+            size: r.size,
+            width: r.width,
+            height: r.height,
+            blob: r.blob,
+            thumb: r.thumb,
+            file_id: r.file_id,
+            transfer_state,
+            transfer_have,
+            transfer_total,
+            local_path,
+        }
     }).collect())
 }
 

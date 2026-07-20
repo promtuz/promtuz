@@ -284,6 +284,13 @@ impl PeerLink {
     }
 }
 
+/// Wrap a raw connection as a [`PeerLink`] so transfer tests can drive
+/// serve/pull over a direct loopback pair without the punch choreography.
+#[cfg(test)]
+pub(crate) fn test_link(conn: Connection, ipk: [u8; 32]) -> PeerLink {
+    PeerLink { conn, dialer: false, ipk }
+}
+
 /// The bail `connect` emits when a dial to this peer is already in flight;
 /// `link` matches on it to wait for the winner instead of failing.
 const ALREADY_CONNECTING: &str = "already connecting to that peer";
