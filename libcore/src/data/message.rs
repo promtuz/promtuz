@@ -77,8 +77,22 @@ impl Message {
         peer_ipk: [u8; 32], dispatch_id: &[u8; 16], content: &str, timestamp: u64,
         reply_to: Option<[u8; 16]>,
     ) -> Result<Option<Self>> {
-        let id = Ulid::new();
         let conn = MESSAGES_DB.lock();
+        Self::save_incoming_tx(&conn, peer_ipk, dispatch_id, content, timestamp, reply_to)
+    }
+
+    /// Transaction-scoped [`Self::save_incoming`]: same insert, but against a
+    /// caller-supplied connection (a `rusqlite::Transaction` derefs to
+    /// `&Connection`) so an incoming media message persists its caption row and
+    /// its `message_media` row in ONE transaction — a media-write failure then
+    /// rolls the caption back instead of leaving a permanent caption-only
+    /// orphan (the MLS ratchet is spent by receive time, so redelivery can
+    /// never re-store the media). Same `Ok(None)`-on-duplicate contract.
+    pub fn save_incoming_tx(
+        conn: &rusqlite::Connection, peer_ipk: [u8; 32], dispatch_id: &[u8; 16], content: &str,
+        timestamp: u64, reply_to: Option<[u8; 16]>,
+    ) -> Result<Option<Self>> {
+        let id = Ulid::new();
         let changed = conn.execute(
             "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7)
              ON CONFLICT(peer_ipk, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",

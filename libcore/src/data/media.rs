@@ -22,7 +22,15 @@ pub struct MediaRow {
 
 pub fn save(peer: &[u8; 32], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()> {
     let db = MESSAGES_DB.lock();
-    db.execute(
+    save_tx(&db, peer, dispatch_id, r)
+}
+
+/// Transaction-scoped [`save`]: writes the media row against a caller-supplied
+/// connection so it can share one transaction with the caption insert.
+pub fn save_tx(
+    conn: &rusqlite::Connection, peer: &[u8; 32], dispatch_id: &[u8; 16], r: &MediaRow,
+) -> Result<()> {
+    conn.execute(
         "INSERT OR REPLACE INTO message_media
          (peer_ipk,dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -30,6 +38,29 @@ pub fn save(peer: &[u8; 32], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()>
             r.mime, r.name, r.size, r.width, r.height, r.blob, r.thumb, r.file_id],
     )?;
     Ok(())
+}
+
+/// Atomically persist an incoming media message: its caption row on `messages`
+/// and its media row on `message_media`, in ONE transaction — either both land
+/// or neither does. On a media-write failure the caption rolls back and the
+/// error propagates, so the (un-acked) message redelivers whole rather than
+/// becoming a permanent caption-only orphan (the MLS ratchet is spent by
+/// receive time, so a partial can never self-heal). Returns the caption row,
+/// or `None` when the dispatch_id was already stored (redelivery: a clean
+/// no-op that still commits, so the caller acks and the relay GCs).
+pub fn save_incoming_with_media(
+    peer: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64, r: &MediaRow,
+) -> Result<Option<crate::data::message::Message>> {
+    let mut db = MESSAGES_DB.lock();
+    let tx = db.transaction()?;
+    let saved = crate::data::message::Message::save_incoming_tx(
+        &tx, *peer, dispatch_id, caption, timestamp, None,
+    )?;
+    if saved.is_some() {
+        save_tx(&tx, peer, dispatch_id, r)?;
+    }
+    tx.commit()?;
+    Ok(saved)
 }
 
 pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {
@@ -70,5 +101,51 @@ mod tests {
         save(&peer, &did, &row).unwrap();
         let got = for_peer(&peer).unwrap();
         assert!(got.iter().any(|(d, r)| *d == did && r.blob == row.blob && r.kind == KIND_IMAGE));
+    }
+
+    /// The atomicity guarantee behind `save_incoming_with_media`: caption and
+    /// media commit together, and a media-write failure inside the transaction
+    /// rolls the caption back — no permanent caption-only orphan. Driven on an
+    /// in-memory connection with the real tx-scoped helpers. (The real trigger
+    /// is SQLITE_BUSY / disk-full, unforceable in a unit test; a NOT NULL
+    /// violation stands in as the failing media write.)
+    #[test]
+    fn caption_and_media_are_atomic() {
+        use crate::data::message::Message;
+        fn count(conn: &rusqlite::Connection, sql: &str, k: &[u8]) -> i64 {
+            conn.query_row(sql, [k], |r| r.get(0)).unwrap()
+        }
+        let mut conn = crate::db::messages::open_in_memory();
+        let peer = [5u8; 32];
+
+        // Happy path: both rows land in one committed transaction.
+        let did = [6u8; 16];
+        let media = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
+            name: String::new(), size: 3, width: 1, height: 1,
+            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None };
+        {
+            let tx = conn.transaction().unwrap();
+            assert!(Message::save_incoming_tx(&tx, peer, &did, "cap", 100, None).unwrap().is_some());
+            save_tx(&tx, &peer, &did, &media).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did.as_slice()), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM message_media WHERE dispatch_id=?1", did.as_slice()), 1);
+
+        // Rollback path: a failing media write undoes the caption row already
+        // inserted in the same transaction.
+        let did2 = [7u8; 16];
+        {
+            let tx = conn.transaction().unwrap();
+            assert!(Message::save_incoming_tx(&tx, peer, &did2, "cap2", 100, None).unwrap().is_some());
+            let bad = tx.execute(
+                "INSERT INTO message_media (peer_ipk,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
+                rusqlite::params![peer.as_slice(), did2.as_slice(), "image/avif"],
+            );
+            assert!(bad.is_err(), "NULL kind must violate NOT NULL");
+            // tx dropped without commit → rollback
+        }
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did2.as_slice()), 0,
+            "media failure rolled back the caption — no orphan");
     }
 }

@@ -849,15 +849,15 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                 Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
                     let did = msg.id.0;
                     let timestamp = msg.accepted_at_ms / 1_000;
-                    if let Some(saved) =
-                        Message::save_incoming(*msg.from, &did, &caption, timestamp, None)?
-                    {
-                        crate::data::media::save(&msg.from, &did, &crate::data::media::MediaRow {
-                            kind: crate::data::media::KIND_IMAGE,
-                            group_id: group_id.map(|g| g.to_vec()),
-                            mime, name: String::new(), size: data.len() as u64, width, height,
-                            blob: Some(data), thumb: None, file_id: None,
-                        })?;
+                    let media = crate::data::media::MediaRow {
+                        kind: crate::data::media::KIND_IMAGE,
+                        group_id: group_id.map(|g| g.to_vec()),
+                        mime, name: String::new(), size: data.len() as u64, width, height,
+                        blob: Some(data), thumb: None, file_id: None,
+                    };
+                    if let Some(saved) = crate::data::media::save_incoming_with_media(
+                        &msg.from, &did, &caption, timestamp, &media,
+                    )? {
                         MessageEv::Received {
                             id: saved.inner.id,
                             from: *msg.from,
@@ -876,17 +876,17 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                 Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
                     let did = msg.id.0;
                     let timestamp = msg.accepted_at_ms / 1_000;
-                    if let Some(saved) =
-                        Message::save_incoming(*msg.from, &did, &caption, timestamp, None)?
-                    {
-                        crate::data::media::save(&msg.from, &did, &crate::data::media::MediaRow {
-                            kind: crate::data::media::KIND_ATTACHMENT,
-                            group_id: group_id.map(|g| g.to_vec()),
-                            mime, name, size, width: 0, height: 0,
-                            blob: None,
-                            thumb: if thumb.is_empty() { None } else { Some(thumb) },
-                            file_id: Some(file_id.to_vec()),
-                        })?;
+                    let media = crate::data::media::MediaRow {
+                        kind: crate::data::media::KIND_ATTACHMENT,
+                        group_id: group_id.map(|g| g.to_vec()),
+                        mime, name, size, width: 0, height: 0,
+                        blob: None,
+                        thumb: if thumb.is_empty() { None } else { Some(thumb) },
+                        file_id: Some(file_id.to_vec()),
+                    };
+                    if let Some(saved) = crate::data::media::save_incoming_with_media(
+                        &msg.from, &did, &caption, timestamp, &media,
+                    )? {
                         MessageEv::Received {
                             id: saved.inner.id,
                             from: *msg.from,

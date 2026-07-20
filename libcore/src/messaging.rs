@@ -1549,29 +1549,35 @@ fn persist_drained(
                 }
             },
             Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
-                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &caption, ts, None) {
-                    let _ = crate::data::media::save(&sender_ipk, &did, &crate::data::media::MediaRow {
-                        kind: crate::data::media::KIND_IMAGE,
-                        group_id: group_id.map(|g| g.to_vec()),
-                        mime, name: String::new(), size: data.len() as u64, width, height,
-                        blob: Some(data), thumb: None, file_id: None,
-                    });
-                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts }
-                        .emit();
+                let media = crate::data::media::MediaRow {
+                    kind: crate::data::media::KIND_IMAGE,
+                    group_id: group_id.map(|g| g.to_vec()),
+                    mime, name: String::new(), size: data.len() as u64, width, height,
+                    blob: Some(data), thumb: None, file_id: None,
+                };
+                match crate::data::media::save_incoming_with_media(&sender_ipk, &did, &caption, ts, &media) {
+                    Ok(Some(saved)) => MessageEv::Received {
+                        id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts,
+                    }.emit(),
+                    Ok(None) => {},
+                    Err(e) => warn!("MESSAGE: drained image persist failed: {e}"),
                 }
             },
             Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
-                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &caption, ts, None) {
-                    let _ = crate::data::media::save(&sender_ipk, &did, &crate::data::media::MediaRow {
-                        kind: crate::data::media::KIND_ATTACHMENT,
-                        group_id: group_id.map(|g| g.to_vec()),
-                        mime, name, size, width: 0, height: 0,
-                        blob: None,
-                        thumb: if thumb.is_empty() { None } else { Some(thumb) },
-                        file_id: Some(file_id.to_vec()),
-                    });
-                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts }
-                        .emit();
+                let media = crate::data::media::MediaRow {
+                    kind: crate::data::media::KIND_ATTACHMENT,
+                    group_id: group_id.map(|g| g.to_vec()),
+                    mime, name, size, width: 0, height: 0,
+                    blob: None,
+                    thumb: if thumb.is_empty() { None } else { Some(thumb) },
+                    file_id: Some(file_id.to_vec()),
+                };
+                match crate::data::media::save_incoming_with_media(&sender_ipk, &did, &caption, ts, &media) {
+                    Ok(Some(saved)) => MessageEv::Received {
+                        id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts,
+                    }.emit(),
+                    Ok(None) => {},
+                    Err(e) => warn!("MESSAGE: drained attachment persist failed: {e}"),
                 }
             },
             _ => continue,
