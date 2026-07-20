@@ -63,6 +63,29 @@ pub fn save_incoming_with_media(
     Ok(saved)
 }
 
+/// Atomically persist an outgoing media message: its caption row on `messages`
+/// and its media row on `message_media`, in ONE transaction — the send-side
+/// mirror of [`save_incoming_with_media`]. A media-write failure rolls the
+/// caption back instead of committing a caption-only orphan with no picture and
+/// no retry. The media row keys off the freshly-minted dispatch_id.
+pub fn save_outgoing_with_media(
+    peer: &[u8; 32], caption: &str, reply_to: Option<[u8; 16]>, r: &MediaRow,
+) -> Result<crate::data::message::Message> {
+    let mut db = MESSAGES_DB.lock();
+    let tx = db.transaction()?;
+    let msg = crate::data::message::Message::save_outgoing_tx(&tx, *peer, caption, reply_to)?;
+    let did: [u8; 16] = msg
+        .inner
+        .dispatch_id
+        .as_deref()
+        .expect("save_outgoing mints a dispatch_id")
+        .try_into()
+        .expect("dispatch_id is 16 bytes");
+    save_tx(&tx, peer, &did, r)?;
+    tx.commit()?;
+    Ok(msg)
+}
+
 pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {
     let db = MESSAGES_DB.lock();
     let mut stmt = db.prepare(
@@ -145,6 +168,53 @@ mod tests {
             assert!(bad.is_err(), "NULL kind must violate NOT NULL");
             // tx dropped without commit → rollback
         }
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did2.as_slice()), 0,
+            "media failure rolled back the caption — no orphan");
+    }
+
+    /// The send-side mirror of `caption_and_media_are_atomic`: an outgoing
+    /// image persists its caption and its AVIF media row together, and a
+    /// failing media write rolls the caption back — no caption-only orphan the
+    /// send path can never repair. Driven on an in-memory connection with the
+    /// real tx-scoped helpers (`save_outgoing_tx` + `save_tx`, the exact pair
+    /// `save_outgoing_with_media` composes).
+    #[test]
+    fn outgoing_caption_and_media_are_atomic() {
+        use crate::data::message::Message;
+        fn count(conn: &rusqlite::Connection, sql: &str, k: &[u8]) -> i64 {
+            conn.query_row(sql, [k], |r| r.get(0)).unwrap()
+        }
+        let mut conn = crate::db::messages::open_in_memory();
+        let peer = [8u8; 32];
+        let media = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
+            name: String::new(), size: 3, width: 4, height: 3,
+            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None };
+
+        // Happy path: caption + media land in one committed transaction.
+        let did: [u8; 16] = {
+            let tx = conn.transaction().unwrap();
+            let msg = Message::save_outgoing_tx(&tx, peer, "cap", None).unwrap();
+            let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
+            save_tx(&tx, &peer, &d, &media).unwrap();
+            tx.commit().unwrap();
+            d
+        };
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did.as_slice()), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM message_media WHERE dispatch_id=?1", did.as_slice()), 1);
+
+        // Rollback path: a failing media write undoes the caption already
+        // inserted in the same transaction.
+        let did2: [u8; 16] = {
+            let tx = conn.transaction().unwrap();
+            let msg = Message::save_outgoing_tx(&tx, peer, "cap2", None).unwrap();
+            let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
+            let bad = tx.execute(
+                "INSERT INTO message_media (peer_ipk,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
+                rusqlite::params![peer.as_slice(), d.as_slice(), "image/avif"],
+            );
+            assert!(bad.is_err(), "NULL kind must violate NOT NULL");
+            d // tx dropped without commit → rollback
+        };
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did2.as_slice()), 0,
             "media failure rolled back the caption — no orphan");
     }

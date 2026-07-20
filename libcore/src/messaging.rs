@@ -893,15 +893,7 @@ pub(crate) fn build_image_message(
     to: [u8; 32], avif: &[u8], width: u32, height: u32, caption: &str,
     group_id: Option<[u8; 16]>,
 ) -> Result<Message> {
-    let msg = Message::save_outgoing(to, caption, None)?;
-    let did: [u8; 16] = msg
-        .inner
-        .dispatch_id
-        .as_deref()
-        .expect("save_outgoing always mints a dispatch_id")
-        .try_into()
-        .expect("dispatch_id is 16 bytes");
-    crate::data::media::save(&to, &did, &crate::data::media::MediaRow {
+    crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
         kind: crate::data::media::KIND_IMAGE,
         group_id: group_id.map(|g| g.to_vec()),
         mime: "image/avif".into(),
@@ -912,8 +904,7 @@ pub(crate) fn build_image_message(
         blob: Some(avif.to_vec()),
         thumb: None,
         file_id: None,
-    })?;
-    Ok(msg)
+    })
 }
 
 /// The image-send counterpart to [`send_message_inner`]: prep (compress

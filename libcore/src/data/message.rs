@@ -45,10 +45,22 @@ impl Message {
     pub fn save_outgoing(
         peer_ipk: [u8; 32], content: &str, reply_to: Option<[u8; 16]>,
     ) -> Result<Self> {
+        let conn = MESSAGES_DB.lock();
+        Self::save_outgoing_tx(&conn, peer_ipk, content, reply_to)
+    }
+
+    /// Transaction-scoped [`Self::save_outgoing`]: same insert against a
+    /// caller-supplied connection, so an outgoing media message persists its
+    /// caption row and its `message_media` row in ONE transaction — a
+    /// media-write failure rolls the caption back instead of leaving a
+    /// caption-only orphan the send path can never repair.
+    pub fn save_outgoing_tx(
+        conn: &rusqlite::Connection, peer_ipk: [u8; 32], content: &str,
+        reply_to: Option<[u8; 16]>,
+    ) -> Result<Self> {
         let id = Ulid::new();
         let timestamp = systime().as_secs();
         let dispatch_id = next_dispatch_id();
-        let conn = MESSAGES_DB.lock();
         conn.execute(
             "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)",
             (&id.to_string(), peer_ipk, content, timestamp, STATUS_PENDING, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
