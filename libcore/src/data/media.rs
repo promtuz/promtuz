@@ -106,14 +106,19 @@ pub fn get(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> 
     .map_err(Into::into)
 }
 
-/// The conversation peer whose message carries `file_id` — for an incoming
-/// attachment that is the sender to dial for the pull.
-pub fn sender_of(file_id: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+/// The sender to dial for an incoming attachment and the size they advertised
+/// in the offer — the pull rejects a manifest whose `total_size` belies it.
+/// Restricted to the INCOMING row (`m.outgoing = 0`): if we both received and
+/// re-sent the same content-addressed file, the outgoing row's peer is our own
+/// recipient (who serves `Gone`), not the sender we must pull from.
+pub fn attachment_offer(file_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
     let db = MESSAGES_DB.lock();
     db.query_row(
-        "SELECT peer_ipk FROM message_media WHERE file_id=?1 LIMIT 1",
+        "SELECT mm.peer_ipk, mm.size FROM message_media mm
+           JOIN messages m ON m.peer_ipk = mm.peer_ipk AND m.dispatch_id = mm.dispatch_id
+         WHERE mm.file_id = ?1 AND m.outgoing = 0 LIMIT 1",
         [file_id.as_slice()],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
     .map_err(Into::into)

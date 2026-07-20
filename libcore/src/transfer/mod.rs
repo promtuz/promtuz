@@ -148,7 +148,7 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
         return Ok(());
     }
     let _guard = PullGuard(file_id);
-    let peer = crate::data::media::sender_of(&file_id)?
+    let (peer, offered_size) = crate::data::media::attachment_offer(&file_id)?
         .ok_or_else(|| anyhow::anyhow!("no media row for that file_id"))?;
     let link = match crate::p2p::link(peer).await {
         Ok(l) => l,
@@ -170,7 +170,7 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
             return Ok(());
         },
     };
-    pull(&link, file_id, &auth::local_auth()?).await
+    pull(&link, file_id, offered_size, &auth::local_auth()?).await
 }
 
 /// Mark a pull as HELD (sender offline, reverse-wake sent): upsert the partial
@@ -218,7 +218,7 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
 /// `have` watermark covering them is persisted, so a resume never trusts a
 /// watermark ahead of real bytes — the worst crash re-pulls one chunk.
 async fn pull(
-    link: &crate::p2p::PeerLink, file_id: [u8; 32], local: &wire::Auth,
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
 ) -> anyhow::Result<()> {
     let have0 = store::partial_get(&file_id).map(|p| p.have).unwrap_or(0);
     let (mut s, mut r) = link.open_stream().await?;
@@ -249,6 +249,14 @@ async fn pull(
         "chunk count does not match total_size"
     );
     anyhow::ensure!(have0 as usize <= manifest.chunks.len(), "partial ahead of manifest");
+    // Fail closed on a disk-fill DoS: a hostile contact can offer a tiny `size`
+    // (passing the auto-download policy and the size shown to the user) while
+    // the manifest describes gigabytes. The offer is the ceiling we consented to.
+    anyhow::ensure!(
+        manifest.total_size == offered_size,
+        "manifest size {} belies the offered {offered_size}",
+        manifest.total_size,
+    );
 
     let path = store::partial_path(&file_id);
     let mut part = store::Partial {
@@ -408,7 +416,7 @@ mod download_resume {
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
 
         // Fresh pull: every chunk lands, verifies, and the partial promotes.
-        pull(&link_b, file_id, &id_b).await.unwrap();
+        pull(&link_b, file_id, 300 * 1024, &id_b).await.unwrap();
         let p = store::partial_get(&file_id).unwrap();
         assert_eq!(p.state, store::DONE);
         assert_eq!(p.have, 2);
@@ -438,7 +446,7 @@ mod download_resume {
         })
         .unwrap();
 
-        pull(&link_b, file_id2, &id_b).await.unwrap();
+        pull(&link_b, file_id2, 300 * 1024, &id_b).await.unwrap();
         assert_eq!(store::partial_get(&file_id2).unwrap().state, store::DONE);
         let got = std::fs::read(&path2).unwrap();
         assert_eq!(got.len(), 300 * 1024);
@@ -464,11 +472,36 @@ mod download_resume {
         std::fs::write(&src, vec![0x33u8; 300 * 1024]).unwrap();
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
 
-        assert!(pull(&link_b, file_id, &imposter).await.is_err());
+        assert!(pull(&link_b, file_id, 300 * 1024, &imposter).await.is_err());
         assert!(store::partial_get(&file_id).is_none(), "no state before auth passes");
         assert!(
             !std::path::Path::new(&store::partial_path(&file_id)).exists(),
             "no bytes before auth passes"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_size_that_belies_the_offer() {
+        let dir = std::env::temp_dir().join("promtuz-download-resume-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let id_a = paired_identity([61u8; 32]);
+        let id_b = paired_identity([62u8; 32]);
+        let (link_a, link_b, _ep_a, _ep_b) = linked_pair(id_b.ipk, id_a.ipk).await;
+        tokio::spawn(serve_streams(link_a, id_a));
+
+        let src = std::env::temp_dir().join("promtuz-dl-belie.bin");
+        std::fs::write(&src, vec![0x77u8; 300 * 1024]).unwrap();
+        let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+
+        // The offer lied: claim 1KB while the manifest describes 300KB. The pull
+        // must reject before allocating/writing a single .part byte.
+        assert!(pull(&link_b, file_id, 1024, &id_b).await.is_err());
+        assert!(store::partial_get(&file_id).is_none(), "no partial when size belies offer");
+        assert!(
+            !std::path::Path::new(&store::partial_path(&file_id)).exists(),
+            "no bytes when the manifest belies the offer"
         );
     }
 }
