@@ -1,6 +1,7 @@
 //! Per-message media metadata (Image inline bytes / Attachment thumb + file_id),
 //! keyed by (peer_ipk, dispatch_id). The caption itself lives on messages.content.
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use crate::db::messages::MESSAGES_DB;
 
 pub const KIND_IMAGE: u8 = 1;
@@ -84,6 +85,25 @@ pub fn save_outgoing_with_media(
     save_tx(&tx, peer, &did, r)?;
     tx.commit()?;
     Ok(msg)
+}
+
+/// The media side-row for one message (by peer + dispatch_id), or `None` if
+/// the message carries no media. Lets the send-retry path rebuild the original
+/// media payload instead of downgrading it to bare text.
+pub fn get(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> {
+    let db = MESSAGES_DB.lock();
+    db.query_row(
+        "SELECT kind,group_id,mime,name,size,width,height,blob,thumb,file_id
+         FROM message_media WHERE peer_ipk=?1 AND dispatch_id=?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+        |row| Ok(MediaRow {
+            kind: row.get(0)?, group_id: row.get(1)?, mime: row.get(2)?, name: row.get(3)?,
+            size: row.get(4)?, width: row.get(5)?, height: row.get(6)?,
+            blob: row.get(7)?, thumb: row.get(8)?, file_id: row.get(9)?,
+        }),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {

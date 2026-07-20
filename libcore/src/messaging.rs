@@ -910,9 +910,9 @@ pub(crate) fn build_image_message(
 /// The image-send counterpart to [`send_message_inner`]: prep (compress
 /// already done by the caller) + persist via [`build_image_message`], then
 /// build `AppPayload::Image` and hand off to the same [`send_payload`] tail
-/// `attempt_send` uses. Not wired into [`retry_pending_sends`] — an image
-/// left `pending` by an offline first-send is not currently re-driven on
-/// reconnect (that retry path rebuilds `Text`/`Reply` only; see module docs).
+/// `attempt_send` uses. A first send deferred because the peer had no published
+/// KeyPackage is re-driven by [`retry_pending_sends`], which rebuilds the
+/// `Image` from the stored media row — the picture survives the retry.
 pub(crate) async fn send_image_inner<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], avif: Vec<u8>, width: u32, height: u32, caption: String,
     group_id: Option<[u8; 16]>,
@@ -934,21 +934,46 @@ pub(crate) async fn send_image_inner<C: DhtClient>(
 /// contact lookup → group resolve/lazy-create → envelope → outbox enqueue
 /// → wire send → ack. Split out of [`send_message_inner`] so
 /// [`retry_pending_sends`] can re-run a still-`pending` row on reconnect
-/// without re-inserting it. Rebuilds the `Text`/`Reply` payload from the
-/// row (`content`/`reply_to`) so a retry reuses the same dispatch id and
-/// the recipient dedups it, then hands off to [`send_payload`] for the
+/// without re-inserting it. Rebuilds the payload from the row (via
+/// [`rebuild_pending_payload`], which re-emits an `Image` for a row that has a
+/// stored media side, else `Text`/`Reply`) so a retry reuses the same dispatch
+/// id and the recipient dedups it, then hands off to [`send_payload`] for the
 /// group-resolve/envelope/wire tail shared with [`send_image_inner`].
 pub async fn attempt_send<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
 ) -> Result<()> {
-    let reply_to: Option<[u8; 16]> = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
-    let content = msg.inner.content.clone();
-    let app_payload = match reply_to {
-        Some(rt) => AppPayload::Reply { reply_to: rt, content },
-        None => AppPayload::Text(content),
-    };
-    let payload_bytes = app_payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
     send_payload(ctx, to, &msg, payload_bytes).await
+}
+
+/// Reconstruct the wire `AppPayload` for a pending outgoing row on (re)send.
+/// A row whose message carries a stored `KIND_IMAGE` media side-row resends as
+/// `Image` (caption + AVIF blob), so a first-send deferred while the peer had
+/// no published KeyPackage doesn't silently downgrade to a bare-caption `Text`.
+/// Everything else — including media kinds not yet re-driven here, whose bytes
+/// live off-row — falls through to `Text`/`Reply` from the row.
+fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
+    let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
+    let media = did.and_then(|d| crate::data::media::get(to, &d).ok().flatten());
+    let payload = match media {
+        Some(m) if m.kind == crate::data::media::KIND_IMAGE => AppPayload::Image {
+            caption:  msg.inner.content.clone(),
+            group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
+            mime:     m.mime,
+            width:    m.width,
+            height:   m.height,
+            data:     m.blob.unwrap_or_default(),
+        },
+        _ => {
+            let reply_to: Option<[u8; 16]> =
+                msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+            match reply_to {
+                Some(rt) => AppPayload::Reply { reply_to: rt, content: msg.inner.content.clone() },
+                None => AppPayload::Text(msg.inner.content.clone()),
+            }
+        },
+    };
+    payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
 }
 
 /// Shared tail of [`attempt_send`] and [`send_image_inner`]: resolve or
@@ -1171,11 +1196,8 @@ async fn send_payload<C: DhtClient>(
 /// send. Per-message errors are logged and swallowed — one peer still
 /// missing its KP must not block retrying the rest.
 ///
-/// Rebuilds via [`attempt_send`], i.e. `Text`/`Reply` only: an `Image` row
-/// deferred here (first send to a peer with no published KeyPackage yet)
-/// would be re-sent as a bare-caption `Text`, dropping the picture. Not hit
-/// in the common case (KP is usually already published), but a real gap —
-/// fold `message_media` lookup in here before relying on this for images.
+/// Re-drives via [`attempt_send`], which rebuilds the row's original payload
+/// (an `Image` row resends its stored picture, not a bare-caption `Text`).
 pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
     // Snapshot the no-group rows BEFORE attempting any. The first send to a
     // peer persists its `mls_group_id`, so a live per-row check would skip
@@ -1945,6 +1967,44 @@ mod tests {
         assert_eq!(bob_group.epoch(), g.epoch());
         assert_eq!(bob_group.member_count(), g.member_count());
         assert_eq!(bob_group.group_id(), g.group_id());
+    }
+
+    /// The retry-path guarantee: a pending outgoing Image, when its payload is
+    /// rebuilt for resend, comes back as `AppPayload::Image` carrying the AVIF
+    /// blob — NOT a bare-caption `Text`. This is the send-side content-loss the
+    /// media-aware rebuild closes; a peer whose KeyPackage was late would
+    /// otherwise receive the caption with no picture. Drives the real
+    /// process-global `MESSAGES_DB` (build_image_message + media::get), so
+    /// point it at a scratch dir first.
+    #[test]
+    fn deferred_image_resends_as_image_not_text() {
+        let dir = std::env::temp_dir().join("promtuz-deferred-image-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let to = [0x51u8; 32];
+        let avif = vec![7u8, 8, 9, 10];
+        let msg = build_image_message(to, &avif, 4, 3, "look at this", None).unwrap();
+
+        // The rebuilt payload a resend would encrypt: must be the whole Image.
+        let bytes = rebuild_pending_payload(&to, &msg).unwrap();
+        match AppPayload::deser(&bytes).unwrap() {
+            AppPayload::Image { caption, data, width, height, mime, .. } => {
+                assert_eq!(caption, "look at this");
+                assert_eq!(data, avif, "the AVIF blob must ride the resend");
+                assert_eq!((width, height), (4, 3));
+                assert_eq!(mime, "image/avif");
+            },
+            other => panic!("deferred image must rebuild as Image, got {other:?}"),
+        }
+
+        // A plain text row (no media side-row) still rebuilds as Text.
+        let tmsg = Message::save_outgoing(to, "hi", None).unwrap();
+        let tbytes = rebuild_pending_payload(&to, &tmsg).unwrap();
+        assert!(
+            matches!(AppPayload::deser(&tbytes).unwrap(), AppPayload::Text(t) if t == "hi"),
+            "a text row must not be dressed up as media",
+        );
     }
 
     /// The defer predicate `attempt_send` relies on: a lazy-create that
