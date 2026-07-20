@@ -193,6 +193,11 @@ impl Contact {
         .map(|s| s as u8)
     }
 
+    /// Contacts-only P2P consent check — backs [`crate::p2p::consent::may_connect`].
+    pub fn is_paired(ipk: &[u8; 32]) -> bool {
+        Self::status(ipk) == Some(PAIR_STATUS_PAIRED)
+    }
+
     /// Drop the address-book row. Last step of the `forget_contact`
     /// cascade — run only after its `mls_group_id` has been consumed.
     pub fn delete(ipk: &[u8; 32]) -> Result<()> {

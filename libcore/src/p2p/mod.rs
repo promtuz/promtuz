@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 mod candidate;
+pub(crate) mod consent;
 mod disco;
 mod punch;
 mod signal;
@@ -286,6 +287,10 @@ impl PeerLink {
 pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
     if !CONNECTING.lock().insert(peer) {
         bail!("already connecting to that peer");
+    }
+    if matches!(consent::may_connect(&peer), consent::Decision::No) {
+        CONNECTING.lock().remove(&peer);
+        bail!("consent: not permitted to connect to that peer");
     }
     let result = connect_inner(peer).await;
     CONNECTING.lock().remove(&peer);

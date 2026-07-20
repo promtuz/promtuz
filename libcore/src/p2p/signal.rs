@@ -69,6 +69,11 @@ pub fn deliver(
             );
         },
         _ => {
+            if matches!(crate::p2p::consent::may_connect(&from), crate::p2p::consent::Decision::No)
+            {
+                log::info!("P2P: offer from {} denied by consent", hex::encode(&from[..4]));
+                return;
+            }
             let listening: Vec<String> =
                 LISTENERS.lock().keys().map(|k| hex::encode(&k[..4])).collect();
             log::info!(
@@ -79,9 +84,9 @@ pub fn deliver(
                 listening
             );
             PENDING.lock().insert(from, offer);
-            // Auto-accept: the peer wants a direct link and we're not already
-            // reaching for them, so start a session. It drains the buffered
-            // offer and answers. (Consent gate — may_connect — comes later.)
+            // Auto-accept: consent already checked this offer is from a
+            // paired contact, so start a session — it drains the buffered
+            // offer and answers.
             crate::RUNTIME.spawn(async move {
                 match crate::p2p::connect(from).await {
                     Ok(_) => log::info!("P2P: auto-accepted {}", hex::encode(&from[..4])),
