@@ -379,8 +379,17 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
         {
             return Ok(l);
         }
-        // Winner cleared CONNECTING without publishing a live link → it failed.
+        // Winner cleared CONNECTING. It publishes the link (connect_inner)
+        // before clearing the flag (connect), so once the flag is gone one more
+        // cache check is authoritative: present → use it, still absent → the
+        // dial failed. Without this re-check a loser that sampled the cache just
+        // before the winner's insert-then-clear would bail on a live link.
         if !CONNECTING.lock().contains(&peer) {
+            if let Some(l) = ep.links.lock().get(&peer).cloned()
+                && l.conn.close_reason().is_none()
+            {
+                return Ok(l);
+            }
             bail!("in-flight dial to {} finished without a link", hex::encode(&peer[..4]));
         }
         if tokio::time::Instant::now() >= deadline {
