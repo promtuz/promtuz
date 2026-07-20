@@ -330,14 +330,34 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
 
 /// Return a live link to `peer`, reusing an open one or forming a new connection.
 pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
-    if let Some(l) = endpoint()?.links.lock().get(&peer) {
+    let ep = endpoint()?;
+    if let Some(l) = ep.links.lock().get(&peer).cloned() {
         if l.conn.close_reason().is_none() {
-            return Ok(l.clone());
+            // Re-gate on reuse: a live QUIC link must not outlive consent. If
+            // the peer was unpaired/forgotten since it opened, sever it rather
+            // than hand the open connection back.
+            if matches!(consent::may_connect(&peer), consent::Decision::Direct) {
+                return Ok(l);
+            }
+            ep.links.lock().remove(&peer);
+            l.conn.close(0u32.into(), b"consent revoked");
+            bail!("consent: not permitted to connect to that peer");
         }
     }
     // ponytail: prune-on-dead is enough for v1; a timed idle sweep is a later optimization.
-    endpoint()?.links.lock().remove(&peer);
+    ep.links.lock().remove(&peer);
     connect(peer).await
+}
+
+/// Sever any live direct link to `peer` — the P2P half of the forget/unpair
+/// cascade, so a revoked contact's open QUIC connection dies with the pairing.
+/// Best-effort: a no-op if the endpoint was never built or no link is open.
+pub(crate) fn drop_link(peer: &[u8; 32]) {
+    if let Some(ep) = P2P.get() {
+        if let Some(link) = ep.links.lock().remove(peer) {
+            link.conn.close(0u32.into(), b"contact forgotten");
+        }
+    }
 }
 
 async fn run_session(

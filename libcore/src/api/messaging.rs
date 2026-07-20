@@ -330,6 +330,9 @@ pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
     Message::delete_by_peer(&ipk);
     crate::data::reaction::Reaction::delete_by_peer(&ipk);
     crate::delivery::forget_target(&ipk);
+    // Sever any live direct link so a forgotten contact can't keep talking
+    // over an already-open P2P connection.
+    crate::p2p::drop_link(&ipk);
     if let Err(e) = Contact::delete(&ipk) {
         log::error!("FORGET: contact delete failed: {e}");
     }
