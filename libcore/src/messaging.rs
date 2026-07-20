@@ -260,6 +260,37 @@ pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> 
     }
 }
 
+/// Send an inline image (compressed AVIF bytes) to `to`, with an optional
+/// caption and album `group_id`. Mirrors [`send`] — same production
+/// `MlsContext` construction — but hands off to [`send_image_inner`].
+pub async fn send_image(
+    to: [u8; 32], avif: Vec<u8>, width: u32, height: u32, caption: String,
+    group_id: Option<[u8; 16]>,
+) -> Result<()> {
+    let dht_client = {
+        let guard = RELAY.read();
+        guard.as_ref().and_then(|r| r.dht_client.clone())
+    };
+    let provider = PromtuzMlsProvider::shared();
+    let stash = KeyPackageStash::new(stash_db_handle());
+    let buffer = EpochCatchupBuffer::new(stash_db_handle());
+    match dht_client {
+        Some(client) => {
+            let ctx = MlsContext {
+                provider: &provider,
+                stash:    &stash,
+                buffer:   &buffer,
+                dht:      client.as_ref(),
+            };
+            send_image_inner(&ctx, to, avif, width, height, caption, group_id).await
+        },
+        None => {
+            error!("MESSAGE: no relay connection / dialer; image send aborted");
+            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
+        },
+    }
+}
+
 /// Edit a prior message to `to` and apply the change locally. Best-effort on
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
@@ -854,15 +885,89 @@ pub async fn send_message_inner<C: DhtClient>(
     attempt_send(ctx, to, msg).await
 }
 
+/// Sync, pure-DB prep for an outgoing image: persist the optimistic local
+/// message row (caption as `content`) plus the `message_media` side row
+/// (AVIF blob, dims, mime), and return the saved row. No network — callers
+/// (production [`send_image_inner`], tests) drive the send separately.
+pub(crate) fn build_image_message(
+    to: [u8; 32], avif: &[u8], width: u32, height: u32, caption: &str,
+    group_id: Option<[u8; 16]>,
+) -> Result<Message> {
+    let msg = Message::save_outgoing(to, caption, None)?;
+    let did: [u8; 16] = msg
+        .inner
+        .dispatch_id
+        .as_deref()
+        .expect("save_outgoing always mints a dispatch_id")
+        .try_into()
+        .expect("dispatch_id is 16 bytes");
+    crate::data::media::save(&to, &did, &crate::data::media::MediaRow {
+        kind: crate::data::media::KIND_IMAGE,
+        group_id: group_id.map(|g| g.to_vec()),
+        mime: "image/avif".into(),
+        name: String::new(),
+        size: avif.len() as u64,
+        width,
+        height,
+        blob: Some(avif.to_vec()),
+        thumb: None,
+        file_id: None,
+    })?;
+    Ok(msg)
+}
+
+/// The image-send counterpart to [`send_message_inner`]: prep (compress
+/// already done by the caller) + persist via [`build_image_message`], then
+/// build `AppPayload::Image` and hand off to the same [`send_payload`] tail
+/// `attempt_send` uses. Not wired into [`retry_pending_sends`] — an image
+/// left `pending` by an offline first-send is not currently re-driven on
+/// reconnect (that retry path rebuilds `Text`/`Reply` only; see module docs).
+pub(crate) async fn send_image_inner<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, to: [u8; 32], avif: Vec<u8>, width: u32, height: u32, caption: String,
+    group_id: Option<[u8; 16]>,
+) -> Result<()> {
+    let msg = build_image_message(to, &avif, width, height, &caption, group_id)?;
+    let payload = AppPayload::Image {
+        caption,
+        group_id,
+        mime: "image/avif".into(),
+        width,
+        height,
+        data: avif,
+    };
+    let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    send_payload(ctx, to, &msg, payload_bytes).await
+}
+
 /// Drive one send attempt for an already-persisted outgoing `msg` row:
 /// contact lookup → group resolve/lazy-create → envelope → outbox enqueue
 /// → wire send → ack. Split out of [`send_message_inner`] so
 /// [`retry_pending_sends`] can re-run a still-`pending` row on reconnect
-/// without re-inserting it. Reads everything it needs off the row
-/// (`content`, `dispatch_id`, `timestamp`) so a retry reuses the same
-/// dispatch id and the recipient dedups it.
+/// without re-inserting it. Rebuilds the `Text`/`Reply` payload from the
+/// row (`content`/`reply_to`) so a retry reuses the same dispatch id and
+/// the recipient dedups it, then hands off to [`send_payload`] for the
+/// group-resolve/envelope/wire tail shared with [`send_image_inner`].
 pub async fn attempt_send<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
+) -> Result<()> {
+    let reply_to: Option<[u8; 16]> = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    let content = msg.inner.content.clone();
+    let app_payload = match reply_to {
+        Some(rt) => AppPayload::Reply { reply_to: rt, content },
+        None => AppPayload::Text(content),
+    };
+    let payload_bytes = app_payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    send_payload(ctx, to, &msg, payload_bytes).await
+}
+
+/// Shared tail of [`attempt_send`] and [`send_image_inner`]: resolve or
+/// lazy-create the 1:1 MLS group with `to`, encrypt `payload_bytes` (an
+/// already-serialized `AppPayload`) into an application envelope, and drive
+/// one send attempt (durable outbox enqueue → wire send → ack handling).
+/// `msg` supplies the row identity (`id`/`content`/`dispatch_id`) for
+/// mark_sent/mark_failed/`MessageEv` — the payload itself is opaque here.
+async fn send_payload<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, to: [u8; 32], msg: &Message, payload_bytes: Vec<u8>,
 ) -> Result<()> {
     let msg_id = msg.inner.id;
     let content = &msg.inner.content;
@@ -958,16 +1063,9 @@ pub async fn attempt_send<C: DhtClient>(
     //    application messages by reading it back.
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
-    // 5. Build the application envelope. A reply row rebuilds the Reply payload on retry too, since
-    //    reply_to rides on the row.
-    let reply_to: Option<[u8; 16]> = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
-    let app_payload = match reply_to {
-        Some(rt) => {
-            common::proto::mls_wire::AppPayload::Reply { reply_to: rt, content: content.clone() }
-        },
-        None => common::proto::mls_wire::AppPayload::Text(content.clone()),
-    };
-    let payload_bytes = app_payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+    // 5. Encrypt the caller-supplied payload into the application envelope. The
+    //    caller (attempt_send / send_image_inner) rebuilds it from the row on
+    //    every retry, so a resend reuses the same dispatch id below.
     let payload = build_application_envelope_bytes(
         ctx,
         &mut group,
@@ -1081,6 +1179,12 @@ pub async fn attempt_send<C: DhtClient>(
 /// `delivery::reconcile` owns it, so we skip it here to avoid a double
 /// send. Per-message errors are logged and swallowed — one peer still
 /// missing its KP must not block retrying the rest.
+///
+/// Rebuilds via [`attempt_send`], i.e. `Text`/`Reply` only: an `Image` row
+/// deferred here (first send to a peer with no published KeyPackage yet)
+/// would be re-sent as a bare-caption `Text`, dropping the picture. Not hit
+/// in the common case (KP is usually already published), but a real gap —
+/// fold `message_media` lookup in here before relying on this for images.
 pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
     // Snapshot the no-group rows BEFORE attempting any. The first send to a
     // peer persists its `mls_group_id`, so a live per-row check would skip

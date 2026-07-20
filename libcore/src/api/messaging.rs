@@ -377,11 +377,11 @@ impl From<MessageRow> for MessageRecord {
 }
 
 /// Validate a client-supplied IPK is exactly 32 bytes.
-fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
+pub(crate) fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "ipk must be 32 bytes".into() })
 }
 
 /// Validate a client-supplied dispatch_id is exactly 16 bytes.
-fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
+pub(crate) fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "dispatch_id must be 16 bytes".into() })
 }
