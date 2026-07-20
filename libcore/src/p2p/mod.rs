@@ -93,6 +93,9 @@ struct P2pEndpoint {
     /// session briefly awaits so the first offer can carry it. Probed once at
     /// build; stays `None` if the probe never answers.
     reflexive: tokio::sync::watch::Receiver<Option<SocketAddr>>,
+    /// Live links keyed by peer IPK, so signaling and transfer reuse one
+    /// connection instead of re-dialing. See [`link`].
+    links: Mutex<HashMap<[u8; 32], PeerLink>>,
 }
 
 static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
@@ -131,6 +134,7 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
             sessions,
             turn: built.turn,
             reflexive,
+            links: Mutex::new(HashMap::new()),
         })
     })
 }
@@ -320,7 +324,20 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     let link = result?;
     link.verify_roundtrip().await?;
     log::info!("P2P[{}]: link verified — {}", hex::encode(&peer[..4]), link.remote_address());
+    ep.links.lock().insert(peer, link.clone());
     Ok(link)
+}
+
+/// Return a live link to `peer`, reusing an open one or forming a new connection.
+pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
+    if let Some(l) = endpoint()?.links.lock().get(&peer) {
+        if l.conn.close_reason().is_none() {
+            return Ok(l.clone());
+        }
+    }
+    // ponytail: prune-on-dead is enough for v1; a timed idle sweep is a later optimization.
+    endpoint()?.links.lock().remove(&peer);
+    connect(peer).await
 }
 
 async fn run_session(
