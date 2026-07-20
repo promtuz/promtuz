@@ -230,12 +230,6 @@ pub struct PeerLink {
     pub ipk: [u8; 32],
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum LinkStatus {
-    Direct,
-    Relayed,
-}
-
 impl PeerLink {
     pub fn remote_address(&self) -> SocketAddr {
         self.conn.remote_address()
@@ -247,16 +241,6 @@ impl PeerLink {
 
     pub async fn accept_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
         Ok(self.conn.accept_bi().await?)
-    }
-
-    /// Direct vs relayed: a TURN-bridged link presents as the synthetic
-    /// `100::/64` address `socket.rs`'s `TurnRoutes::register` mints, so its
-    /// first hextet is the tell.
-    pub fn status(&self) -> LinkStatus {
-        match self.conn.remote_address().ip() {
-            IpAddr::V6(a) if a.segments()[0] == 0x0100 => LinkStatus::Relayed,
-            _ => LinkStatus::Direct,
-        }
     }
 
     /// One bi-stream ping/pong to prove the link end-to-end. Dialer sends
