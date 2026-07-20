@@ -10,6 +10,7 @@ pub mod data;
 pub mod db;
 pub mod delivery;
 pub mod events;
+pub mod media;
 pub mod messaging;
 pub mod mls;
 pub mod p2p;

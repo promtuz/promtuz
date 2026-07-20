@@ -53,6 +53,12 @@ hkdf = "0.13.0"
 lz4_flex = "0.11.6"
 postcard = { version = "1.1.3", features = ["alloc"] }
 x509-parser = "0.18.1"
+# Still-image pipeline (FILE_TRANSFER.md): RGBA→AVIF + blurred thumb.
+# `image` decoders off — the platform supplies decoded RGBA pixels.
+image = { version = "0.25", default-features = false }
+# `asm` off: rav1e's SIMD needs nasm, absent on x86 CI hosts (the NDK
+# aarch64 build doesn't use it). Pure-Rust encode, slower but portable.
+ravif = { version = "0.11", default-features = false }
 
 # MLS (RFC 9420) — see misc/specs/MLS.md
 openmls = "0.8.1"
