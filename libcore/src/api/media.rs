@@ -4,6 +4,25 @@ use crate::api::messaging::to_did16;
 use crate::api::messaging::to_ipk32;
 use crate::platform::CoreError;
 
+#[derive(uniffi::Record)]
+pub struct MediaRecord {
+    pub dispatch_id: Vec<u8>,
+    pub kind: u8,
+    pub group_id: Option<Vec<u8>>,
+    pub mime: String,
+    pub name: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub blob: Option<Vec<u8>>,
+    pub thumb: Option<Vec<u8>>,
+    pub file_id: Option<Vec<u8>>,
+    pub transfer_state: u8,
+    pub transfer_have: u32,
+    pub transfer_total: u32,
+    pub local_path: Option<String>,
+}
+
 /// Compress `rgba` to AVIF (≤256KB) and send it to `to_ipk` as an inline
 /// `Image` message, with an optional `caption` and album `group_id`.
 /// Fire-and-forget like [`crate::api::messaging::send_message`]: the
@@ -23,6 +42,32 @@ pub fn send_image(
         }
     });
     Ok(())
+}
+
+/// Read media records for a peer from the message_media table.
+/// Transfer progress fields (transfer_state, transfer_have, transfer_total, local_path)
+/// default to 0/0/0/None here; they are wired to the real transfer store in Task 16.
+#[uniffi::export]
+pub fn get_media(peer_ipk: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
+    let peer = to_ipk32(&peer_ipk)?;
+    let rows = crate::data::media::for_peer(&peer)?;
+    Ok(rows.into_iter().map(|(did, r)| MediaRecord {
+        dispatch_id: did.to_vec(),
+        kind: r.kind,
+        group_id: r.group_id,
+        mime: r.mime,
+        name: r.name,
+        size: r.size,
+        width: r.width,
+        height: r.height,
+        blob: r.blob,
+        thumb: r.thumb,
+        file_id: r.file_id,
+        transfer_state: 0,
+        transfer_have: 0,
+        transfer_total: 0,
+        local_path: None,
+    }).collect())
 }
 
 #[cfg(test)]
@@ -53,5 +98,31 @@ mod tests {
         assert_eq!(*got_did, did);
         assert_eq!(row.kind, media::KIND_IMAGE);
         assert!(row.blob.as_deref().is_some_and(|b| !b.is_empty()));
+    }
+
+    #[test]
+    fn get_media_returns_media_records_for_peer() {
+        let dir = std::env::temp_dir().join("promtuz-get-media-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let peer = [6u8; 32];
+        let rgba = vec![128u8; 8 * 8 * 4];
+        let (avif, w, h) = crate::media::compress_image(&rgba, 8, 8, 256 * 1024).unwrap();
+        assert!(!avif.is_empty());
+
+        let msg = crate::messaging::build_image_message(peer, &avif, w, h, "caption", None).unwrap();
+        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+
+        let records = super::get_media(peer.to_vec()).unwrap();
+        let record = records.iter()
+            .find(|r| r.dispatch_id == did.to_vec())
+            .expect("media record found via FFI");
+        assert_eq!(record.kind, media::KIND_IMAGE);
+        assert!(record.blob.as_ref().is_some_and(|b| !b.is_empty()));
+        assert_eq!(record.transfer_state, 0);
+        assert_eq!(record.transfer_have, 0);
+        assert_eq!(record.transfer_total, 0);
+        assert_eq!(record.local_path, None);
     }
 }
