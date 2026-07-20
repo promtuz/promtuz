@@ -1,8 +1,6 @@
 //! Still-image pipeline: RGBA (from the platform decoder) → AVIF, plus a
 //! gaussian-blurred thumbnail. libcore owns encode/blur so it's one impl for
 //! every platform; the platform owns decode (HEIC/HDR/EXIF) + video/PDF.
-//!
-//! `blur_thumb` lands in Task 5.
 
 use anyhow::{bail, Result};
 use ravif::{Encoder, Img, RGBA8};
@@ -15,6 +13,9 @@ pub fn compress_image(
     height: u32,
     max_bytes: usize,
 ) -> Result<(Vec<u8>, u32, u32)> {
+    if width == 0 || height == 0 {
+        bail!("zero dimension");
+    }
     if rgba.len() != width as usize * height as usize * 4 {
         bail!("rgba len mismatch");
     }
@@ -56,18 +57,19 @@ pub fn compress_image(
         }
     }
 
-    // Last resort: smallest/fastest attempt even if still over budget —
-    // caller decides whether to reject.
-    let out = Encoder::new()
-        .with_quality(28.0)
-        .with_speed(8)
-        .encode_rgba(Img::new(buf.as_slice(), w as usize, h as usize))?;
-    Ok((out.avif_file, w, h))
+    // Nothing on the ladder fit. This buffer is inlined into a hard-capped MLS
+    // `Image` frame, so returning an over-budget buffer would be a silent
+    // contract break — error instead. An image too large to inline is meant to
+    // route to the P2P `Attachment` path; the caller propagates this Err.
+    bail!("could not compress under {max_bytes} bytes");
 }
 
 /// Downscale RGBA to ≤48px longest side, gaussian blur, then AVIF-encode.
 /// Returns a tiny blurred thumbnail (a few KB).
 pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 {
+        bail!("zero dimension");
+    }
     if rgba.len() != (width as usize * height as usize * 4) {
         bail!("rgba len mismatch");
     }
@@ -107,24 +109,73 @@ mod tests {
         vec![128u8; (w * h * 4) as usize]
     }
 
+    // High-entropy input: AVIF can't crush it to a trivial size, so the
+    // quality/scale ladder is actually forced to run (solid gray fits at q70
+    // on the first try and never exercises the ladder).
+    fn noisy_rgba(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        let mut s: u32 = 0x9E37_79B9;
+        for _ in 0..(w * h) {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            v.extend_from_slice(&[(s >> 24) as u8, (s >> 16) as u8, (s >> 8) as u8, 255]);
+        }
+        v
+    }
+
+    // ISOBMFF: bytes[4..8] is the `ftyp` box type; the `avif` brand sits after.
+    fn is_avif(b: &[u8]) -> bool {
+        b.len() > 8 && &b[4..8] == b"ftyp" && b.windows(4).any(|c| c == b"avif")
+    }
+
     #[test]
     fn compress_produces_valid_bounded_avif() {
         let (w, h) = (640, 480);
         let (bytes, ow, oh) = compress_image(&solid_rgba(w, h), w, h, 256 * 1024).unwrap();
-        assert!(!bytes.is_empty());
+        assert!(is_avif(&bytes));
         assert!(bytes.len() <= 256 * 1024, "over budget: {}", bytes.len());
-        // ISOBMFF: bytes[4..8] is the `ftyp` box type; the brand (`avif`/`avis`)
-        // sits right after it.
-        assert_eq!(&bytes[4..8], b"ftyp");
-        assert!(bytes.windows(4).any(|c| c == b"avif"));
         assert!(ow <= w && oh <= h);
     }
 
+    // Tight budget on noisy input that a full-res encode can't meet: the ladder
+    // must downscale to fit, and the output must actually be <= budget (I1).
+    // 256x256 noise is ~72KB at q70; a 15KB budget can only be met after at
+    // least one halving.
     #[test]
-    fn blur_thumb_is_small_avif() {
+    fn compress_engages_ladder_under_tight_budget() {
+        let (w, h) = (256, 256);
+        let budget = 15 * 1000;
+        let (bytes, ow, oh) = compress_image(&noisy_rgba(w, h), w, h, budget).unwrap();
+        assert!(is_avif(&bytes));
+        assert!(bytes.len() <= budget, "over budget: {}", bytes.len());
+        assert!(ow < w || oh < h, "ladder never downscaled: {ow}x{oh}");
+    }
+
+    // Impossibly tight budget: no ladder rung (down to 32x32) can fit under
+    // 100 bytes of AVIF container overhead, so compress must Err rather than
+    // silently hand back an over-budget buffer (I1).
+    #[test]
+    fn compress_bails_when_budget_impossible() {
+        let (w, h) = (256, 256);
+        assert!(compress_image(&noisy_rgba(w, h), w, h, 100).is_err());
+    }
+
+    #[test]
+    fn compress_rejects_zero_dimension() {
+        assert!(compress_image(&[], 0, 0, 256 * 1024).is_err());
+    }
+
+    #[test]
+    fn blur_thumb_is_small_valid_avif() {
         let (w, h) = (640, 480);
         let out = blur_thumb(&solid_rgba(w, h), w, h).unwrap();
-        assert!(!out.is_empty());
+        assert!(is_avif(&out), "not a valid avif");
         assert!(out.len() < 8 * 1024, "thumb too big: {}", out.len());
+    }
+
+    #[test]
+    fn blur_thumb_rejects_zero_dimension() {
+        assert!(blur_thumb(&[], 0, 0).is_err());
     }
 }
