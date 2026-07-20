@@ -137,7 +137,12 @@ mod tests {
 
     #[test]
     fn offer_before_listener_is_buffered_then_drained() {
+        use crate::data::contact::Contact;
         let peer = [43u8; 32];
+        // The consent gate discards offers from unpaired contacts, so pair the
+        // source before delivering — otherwise the offer never buffers.
+        Contact::save_pending(peer, "peer".into()).unwrap();
+        Contact::mark_paired(&peer);
         let cands: Vec<SocketAddr> = vec!["9.9.9.9:9".parse().unwrap()];
         let relay: SocketAddr = "5.5.5.5:443".parse().unwrap();
         // arrives before anyone listens → buffered, no panic
@@ -150,5 +155,6 @@ mod tests {
         assert_eq!(got.token, [7; 16]);
         assert_eq!(got.disco_key, [9; 32]);
         stop(peer);
+        let _ = Contact::delete(&peer);
     }
 }
