@@ -36,6 +36,9 @@ pub fn send_image(
 ) -> Result<(), CoreError> {
     let to = to_ipk32(&to_ipk)?;
     let gid = group_id.as_deref().map(to_did16).transpose()?;
+    // ponytail: compress_image stays SYNC on purpose — it surfaces the "can't
+    // meet the 256KB inline budget → send as an attachment instead" error to the
+    // caller, a signal the UI must get back before it commits to an inline image.
     let (avif, w, h) = crate::media::compress_image(&rgba, width, height, 256 * 1024)?;
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send_image(to, avif, w, h, caption, gid).await {
@@ -58,14 +61,20 @@ pub fn send_attachment(
 ) -> Result<(), CoreError> {
     let to = to_ipk32(&to_ipk)?;
     let gid = group_id.as_deref().map(to_did16).transpose()?;
-    let (file_id, size) = crate::transfer::prepare_send(&source_path, 7 * 24 * 3600)?;
-    // No preview (zip/doc/audio) → None, stored as a NULL thumb so the UI's
-    // "has preview?" check stays clean; only the wire field flattens to empty.
-    let thumb = thumb_rgba.map(|r| crate::media::blur_thumb(&r, thumb_w, thumb_h)).transpose()?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) =
-            crate::messaging::send_attachment(to, file_id, size, name, mime, thumb, caption, gid).await
-        {
+        // prepare_send (a BLAKE3 pass over the whole file) and blur_thumb are
+        // heavy — an ANR-class stall on the FFI caller thread for a multi-GB
+        // file. Nothing here reports synchronously, so run it all off-thread.
+        let send = async move {
+            let (file_id, size) = crate::transfer::prepare_send(&source_path, 7 * 24 * 3600)?;
+            // No preview (zip/doc/audio) → None, stored as a NULL thumb so the
+            // UI's "has preview?" check stays clean; the wire field flattens.
+            let thumb =
+                thumb_rgba.map(|r| crate::media::blur_thumb(&r, thumb_w, thumb_h)).transpose()?;
+            crate::messaging::send_attachment(to, file_id, size, name, mime, thumb, caption, gid)
+                .await
+        };
+        if let Err(e) = send.await {
             log::warn!("MEDIA: send_attachment failed: {e}");
         }
     });
