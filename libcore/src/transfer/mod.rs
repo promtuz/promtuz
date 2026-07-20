@@ -2,4 +2,5 @@
 //! the inline `Image` message (>256KB), carried over a direct link from
 //! [`crate::p2p`] rather than the store-and-forward relay.
 
+pub mod store;
 pub mod wire;
