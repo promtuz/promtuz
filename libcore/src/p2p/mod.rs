@@ -284,13 +284,17 @@ impl PeerLink {
     }
 }
 
+/// The bail `connect` emits when a dial to this peer is already in flight;
+/// `link` matches on it to wait for the winner instead of failing.
+const ALREADY_CONNECTING: &str = "already connecting to that peer";
+
 /// Open a direct connection to `peer`: trade candidates over MLS, punch a
 /// hole, then dial (lower IPK) or accept (higher IPK) over the validated
 /// address. Both peers call this; the IPK order decides who dials, so
 /// exactly one connection forms.
 pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
     if !CONNECTING.lock().insert(peer) {
-        bail!("already connecting to that peer");
+        bail!("{ALREADY_CONNECTING}");
     }
     if matches!(consent::may_connect(&peer), consent::Decision::No) {
         CONNECTING.lock().remove(&peer);
@@ -331,22 +335,59 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
 /// Return a live link to `peer`, reusing an open one or forming a new connection.
 pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
-    if let Some(l) = ep.links.lock().get(&peer).cloned() {
-        if l.conn.close_reason().is_none() {
-            // Re-gate on reuse: a live QUIC link must not outlive consent. If
-            // the peer was unpaired/forgotten since it opened, sever it rather
-            // than hand the open connection back.
-            if matches!(consent::may_connect(&peer), consent::Decision::Direct) {
-                return Ok(l);
+    // Reuse-or-prune under one lock: return a live, still-consented link; sever
+    // a revoked one; drop a dead one. A separate get-then-remove could evict a
+    // link a concurrent dialer just inserted.
+    {
+        let mut links = ep.links.lock();
+        if let Some(l) = links.get(&peer).cloned() {
+            if l.conn.close_reason().is_none() {
+                // Re-gate on reuse: a live QUIC link must not outlive consent.
+                // Unpaired/forgotten since it opened → sever, don't hand back.
+                if matches!(consent::may_connect(&peer), consent::Decision::Direct) {
+                    return Ok(l);
+                }
+                links.remove(&peer);
+                drop(links);
+                l.conn.close(0u32.into(), b"consent revoked");
+                bail!("consent: not permitted to connect to that peer");
             }
-            ep.links.lock().remove(&peer);
-            l.conn.close(0u32.into(), b"consent revoked");
-            bail!("consent: not permitted to connect to that peer");
+            // ponytail: prune-on-dead is enough for v1; a timed idle sweep is a
+            // later optimization.
+            links.remove(&peer);
         }
     }
-    // ponytail: prune-on-dead is enough for v1; a timed idle sweep is a later optimization.
-    ep.links.lock().remove(&peer);
-    connect(peer).await
+    // Cold IPK: dial. connect() gates on consent and dedups concurrent dials
+    // via CONNECTING; a caller that loses that race waits for the winner's link
+    // instead of surfacing a spurious "already connecting".
+    match connect(peer).await {
+        Ok(l) => Ok(l),
+        Err(e) if e.to_string() == ALREADY_CONNECTING => wait_for_cached_link(ep, peer).await,
+        Err(e) => Err(e),
+    }
+}
+
+/// Wait for the in-flight dial to `peer` (started by another caller) to publish
+/// its link. ponytail: fixed-interval poll of the link cache; a shared
+/// dial-future would drop the wakeup latency, worth it only if cold-dial
+/// contention gets common.
+async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Result<PeerLink> {
+    let deadline = tokio::time::Instant::now() + SIGNAL_TIMEOUT;
+    loop {
+        if let Some(l) = ep.links.lock().get(&peer).cloned()
+            && l.conn.close_reason().is_none()
+        {
+            return Ok(l);
+        }
+        // Winner cleared CONNECTING without publishing a live link → it failed.
+        if !CONNECTING.lock().contains(&peer) {
+            bail!("in-flight dial to {} finished without a link", hex::encode(&peer[..4]));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("timed out waiting for in-flight dial to {}", hex::encode(&peer[..4]));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Sever any live direct link to `peer` — the P2P half of the forget/unpair
