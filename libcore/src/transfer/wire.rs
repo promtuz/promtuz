@@ -50,8 +50,14 @@ pub struct Auth {
     pub sig: [u8; 64],
 }
 
+/// Max size of a single length-prefixed frame. Bounds the reader's allocation
+/// and stops an oversize write from silently truncating under the `u32` prefix
+/// (a manifest this large already describes a multi-TB file).
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+
 pub async fn write_frame<T: Serialize>(w: &mut quinn::SendStream, v: &T) -> Result<()> {
     let bytes = postcard::to_allocvec(v)?;
+    anyhow::ensure!(bytes.len() <= MAX_FRAME, "frame too large");
     w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     w.write_all(&bytes).await?;
     Ok(())
@@ -61,7 +67,7 @@ pub async fn read_frame<T: DeserializeOwned>(r: &mut quinn::RecvStream) -> Resul
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let n = u32::from_le_bytes(len) as usize;
-    anyhow::ensure!(n <= 8 * 1024 * 1024, "frame too large");
+    anyhow::ensure!(n <= MAX_FRAME, "frame too large");
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf).await?;
     Ok(postcard::from_bytes(&buf)?)
