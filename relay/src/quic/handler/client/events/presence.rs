@@ -100,11 +100,19 @@ pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle
             relay.active_clients.write().insert(me, now);
             PresenceState::Online
         },
-        // Idle = backgrounded / not foreground. Stamp last-seen on the way down.
+        // Idle = backgrounded / not foreground. Only a device that was actually
+        // foreground-Active counts as "seen now": a background wake (reverse-wake,
+        // push-drain, reconnect) asserts Idle without ever going Active, so it
+        // reports its real prior last-seen instead of stamping now.
         PresenceMode::Idle => {
-            relay.active_clients.write().remove(&me);
-            let _ = relay.store.put_last_seen(&me, now);
-            PresenceState::Offline { last_seen: now }
+            let was_active = relay.active_clients.write().remove(&me).is_some();
+            let last_seen = if was_active {
+                let _ = relay.store.put_last_seen(&me, now);
+                now
+            } else {
+                relay.store.get_last_seen(&me).unwrap_or(0)
+            };
+            PresenceState::Offline { last_seen }
         },
     };
     let contacts = relay.presence_subs.read().get(&me).cloned().unwrap_or_default();
@@ -112,13 +120,19 @@ pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle
     Ok(())
 }
 
-/// On disconnect: persist last-seen, drop the active flag, tell mutual online
-/// contacts we're gone. Called after the clients-map eviction, so we no longer
-/// read as online to ourselves.
+/// On disconnect: drop the active flag, stamp last-seen only if we were
+/// foreground-active (a background connection keeps its real prior last-seen),
+/// and tell mutual online contacts we're gone. Called after the clients-map
+/// eviction, so we no longer read as online to ourselves.
 pub(crate) async fn on_disconnect(relay: &RelayRef, me: &[u8; 32]) {
     let now = systime().as_millis() as u64;
-    let _ = relay.store.put_last_seen(me, now);
-    relay.active_clients.write().remove(me);
+    let was_active = relay.active_clients.write().remove(me).is_some();
+    let last_seen = if was_active {
+        let _ = relay.store.put_last_seen(me, now);
+        now
+    } else {
+        relay.store.get_last_seen(me).unwrap_or(0)
+    };
 
     let my_contacts = relay.presence_subs.read().get(me).cloned().unwrap_or_default();
     let targets: Vec<Connection> = {
@@ -131,11 +145,11 @@ pub(crate) async fn on_disconnect(relay: &RelayRef, me: &[u8; 32]) {
             .collect()
     };
     let offline =
-        vec![PresenceP { who: Bytes(*me), state: PresenceState::Offline { last_seen: now } }];
+        vec![PresenceP { who: Bytes(*me), state: PresenceState::Offline { last_seen } }];
     for conn in targets {
         push(&conn, offline.clone()).await;
     }
-    forward_to_homes(relay, &my_contacts, me, PresenceState::Offline { last_seen: now }, now);
+    forward_to_homes(relay, &my_contacts, me, PresenceState::Offline { last_seen }, now);
 }
 
 /// Push our `state` (as `who = me`) to every mutual contact online here.

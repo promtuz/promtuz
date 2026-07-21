@@ -107,8 +107,10 @@ impl Store {
         })
     }
 
-    /// Record a peer's last-disconnect time (unix-ms). Buffered, not fsynced —
-    /// a lost stamp on crash just degrades to "last-seen unknown".
+    /// Record when a peer was last foreground-active (unix-ms) — stamped only on
+    /// leaving an Active state, never on a background connect/disconnect, so a
+    /// wake doesn't read as "seen now". Buffered, not fsynced — a lost stamp on
+    /// crash just degrades to "last-seen unknown".
     pub fn put_last_seen(&self, ipk: &[u8; 32], ts_ms: u64) -> fjall::Result<()> {
         self.last_seen.insert(ipk, ts_ms.to_be_bytes())
     }
