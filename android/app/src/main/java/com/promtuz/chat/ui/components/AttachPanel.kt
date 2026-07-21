@@ -98,10 +98,13 @@ fun AttachPanel(
                 presence.animateTo(1f, tween(240))  // no keyboard: slide up
             }
         } else if (closingToKeyboard) {
-            // Hold until the rising keyboard has covered the sheet, then drop in one
-            // step. Timeout guards a keyboard that never actually shows.
+            // Hold the sheet until the keyboard is FULLY up (live ime has reached its
+            // target), THEN drop in one step. Snapping any earlier leaves the region
+            // below where the keyboard now is — that's the end-of-close jump. Timeout
+            // guards a keyboard that never actually shows.
             withTimeoutOrNull(600) {
-                snapshotFlow { imeLive.value }.first { it >= (panelH * 0.9f).roundToInt() }
+                snapshotFlow { imeLive.value to imeTargetState.value }
+                    .first { (live, target) -> target > kbdUp && live >= target }
             }
             presence.snapTo(0f)
         } else {
