@@ -6,11 +6,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -30,79 +32,96 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.appearance.chatBarHaze
+import com.promtuz.chat.ui.util.freezeOnExit
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeEffect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 /**
- * The attach region: an IME-height panel that SWAPS with the software keyboard.
+ * The attach region: an IME-height sheet that SWAPS with the software keyboard.
  * Last child of the composer [Column]; it owns the whole bottom region (why
  * [ChatBottomBar] drops `.imePadding()`/`.navigationBarsPadding()`).
  *
- * The one rule that keeps the swap jump-free: the region height is sourced from
- * ONE animating thing at a time, never a blend of two. [presence] is snapped
- * (not tweened) whenever the keyboard is the thing moving, so we ride the
- * system's own keyboard animation instead of racing it:
- *  - open with keyboard up   → snap present, hide the keyboard; its slide-down
- *    uncovers the already-full-height panel while `panelH` holds the region.
+ * Jump-free rule: the region height is sourced from ONE animating thing at a
+ * time, never a blend. [presence] is SNAPPED (not tweened) whenever the keyboard
+ * is what's moving, so we ride the system's own keyboard animation:
+ *  - open with keyboard up   → snap present, THEN hide the keyboard (order matters:
+ *    `panelH` must hold the region before the ime starts dropping, or it collapses
+ *    for a frame). The keyboard's slide-down uncovers the already-full-height sheet.
  *  - close to keyboard        → hold present while the rising keyboard covers the
- *    panel, then drop it in one step (never tween down INTO a rising inset).
- *  - open/close with no keyboard → the only case we animate ourselves (slide).
+ *    sheet, then drop it in one step (never tween down INTO a rising inset).
+ *  - open/close with no keyboard → the only case we animate ourselves.
+ * [panelH] is learned from `imeAnimationTarget` (the SETTLED target), not the live
+ * max — the live max captures the keyboard's overshoot and makes the sheet too tall.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AttachPanel(
     open: Boolean,
     closingToKeyboard: Boolean,
+    haze: HazeState,
+    onHideKeyboard: () -> Unit,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
 ) {
     val density = LocalDensity.current
-    val ime = WindowInsets.ime.getBottom(density)          // raw, system-animated
+    val ime = WindowInsets.ime.getBottom(density)                      // live, system-animated
+    val imeTarget = WindowInsets.imeAnimationTarget.getBottom(density) // settled target (no overshoot)
     val nav = WindowInsets.navigationBars.getBottom(density)
-    val kbdUp = with(density) { 120.dp.roundToPx() }        // ime above this = keyboard really up
+    val kbdUp = with(density) { 120.dp.roundToPx() }                   // ime above this = keyboard really up
 
-    // ponytail: learn the keyboard's pixel height (largest ime seen while up); a
-    // single collector, not a per-frame write. Falls back to 300.dp until first seen.
+    // Learn the SETTLED keyboard height. Falls back to 300.dp until first seen.
     var learned by remember { mutableIntStateOf(0) }
-    val imeState = rememberUpdatedState(ime)
+    val imeTargetState = rememberUpdatedState(imeTarget)
     LaunchedEffect(Unit) {
-        snapshotFlow { imeState.value }.collect { if (it > kbdUp && it > learned) learned = it }
+        snapshotFlow { imeTargetState.value }.collect { if (it > kbdUp) learned = it }
     }
     val panelH = if (learned > 0) learned else with(density) { 300.dp.roundToPx() }
 
-    // Panel presence 0..1. Snapped for keyboard-driven transitions, tweened only
-    // when no keyboard moves — so the region never averages two curves.
+    // Presence 0..1. Snapped for keyboard-driven transitions, tweened only when no
+    // keyboard moves — so the region never averages two curves.
     val presence = remember { Animatable(0f) }
+    val imeLive = rememberUpdatedState(ime)
+    val hide = rememberUpdatedState(onHideKeyboard)
     LaunchedEffect(open) {
         if (open) {
-            if (imeState.value > kbdUp) presence.snapTo(1f)   // ride the keyboard's exit
-            else presence.animateTo(1f, tween(240))            // no keyboard: slide up
+            if (imeLive.value > kbdUp) {
+                presence.snapTo(1f)   // present FIRST so panelH holds the region,
+                hide.value()          // THEN hide the keyboard — its exit uncovers the sheet
+            } else {
+                presence.animateTo(1f, tween(240))  // no keyboard: slide up
+            }
         } else if (closingToKeyboard) {
-            // Hold until the rising keyboard has covered the panel, then drop in one
+            // Hold until the rising keyboard has covered the sheet, then drop in one
             // step. Timeout guards a keyboard that never actually shows.
             withTimeoutOrNull(600) {
-                snapshotFlow { imeState.value }.first { it >= (panelH * 0.9f).roundToInt() }
+                snapshotFlow { imeLive.value }.first { it >= (panelH * 0.9f).roundToInt() }
             }
             presence.snapTo(0f)
         } else {
-            presence.animateTo(0f, tween(240))                 // no keyboard: slide down
+            presence.animateTo(0f, tween(240))       // no keyboard: slide down
         }
     }
 
     val regionPx = maxOf(ime, (panelH * presence.value).roundToInt(), nav)
     Box(Modifier.fillMaxWidth().height(with(density) { regionPx.toDp() })) {
         if (presence.value > 0f) {
-            // Anchored bottom at the full learned height; the region uncovers it.
+            // Anchored bottom at the full learned height; the region uncovers it. A
+            // rounded-top translucent sheet sharing the composer's blur recipe.
             Box(
                 Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(with(density) { panelH.toDp() })
-                    .align(Alignment.BottomCenter)
-                    .background(MaterialTheme.colorScheme.surfaceContainer),
+                    .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+                    .freezeOnExit()
+                    .hazeEffect(haze, chatBarHaze()),
             ) {
                 AttachPanelBody(onPickPhotos, onPickFiles)
             }
@@ -143,9 +162,8 @@ private fun PillTab(label: String, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(percent = 50)
     Box(
         Modifier
-            .shadow(4.dp, shape)
             .clip(shape)
-            .background(if (selected) accent else colors.surfaceVariant)
+            .background(if (selected) accent else colors.surfaceVariant.copy(alpha = 0.7f))
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 10.dp),
     ) {

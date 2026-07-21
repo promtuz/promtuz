@@ -105,8 +105,7 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
                     closingToKeyboard = false // paperclip close → no keyboard, slide down
                     attachOpen = false
                 } else {
-                    attachOpen = true
-                    focusManager.clearFocus() // hide keyboard so the panel takes the region
+                    attachOpen = true // AttachPanel hides the keyboard once it's present (order matters)
                 }
             },
             onFieldFocused = {
@@ -116,6 +115,8 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
         AttachPanel(
             open = attachOpen,
             closingToKeyboard = closingToKeyboard,
+            haze = haze,
+            onHideKeyboard = { focusManager.clearFocus() },
             onPickPhotos = {
                 photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
