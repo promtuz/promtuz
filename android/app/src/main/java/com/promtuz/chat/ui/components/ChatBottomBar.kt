@@ -1,10 +1,12 @@
 package com.promtuz.chat.ui.components
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -21,8 +23,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,8 +41,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
@@ -61,12 +64,25 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     val input by viewModel.input.collectAsState()
     val action by viewModel.composerAction.collectAsState()
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .imePadding(),
-    ) {
+    // The attach panel swaps with the keyboard, so its open-state and the system
+    // pickers live here — both the paperclip toggle and the panel's tabs reach them.
+    var attachOpen by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+
+    // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        if (uris.isNotEmpty()) { viewModel.attachPhotos(uris); attachOpen = false }
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) { viewModel.attachFiles(uris); attachOpen = false }
+    }
+
+    // Back closes the panel before the nav stack.
+    BackHandler(attachOpen) { attachOpen = false }
+
+    // No .imePadding()/.navigationBarsPadding(): AttachPanel owns the bottom region
+    // and reserves the keyboard/nav space itself (see its region formula).
+    Column(Modifier.fillMaxWidth()) {
         // Chip content is captured (not read live) so the exit animation has
         // something to draw after the action nulls.
         var lastAction by remember { mutableStateOf(action) }
@@ -78,7 +94,22 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
         ) {
             lastAction?.let { ComposerActionChip(it, viewModel::cancelComposerAction) }
         }
-        ComposerRow(viewModel, input, action, haze)
+        ComposerRow(
+            viewModel, input, action, haze,
+            attachOpen = attachOpen,
+            onToggleAttach = {
+                attachOpen = !attachOpen
+                if (attachOpen) focusManager.clearFocus() // hide keyboard so the panel takes the region
+            },
+            onFieldFocused = { attachOpen = false },
+        )
+        AttachPanel(
+            open = attachOpen,
+            onPickPhotos = {
+                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+            },
+            onPickFiles = { filePicker.launch(arrayOf("*/*")) },
+        )
     }
 }
 
@@ -122,17 +153,17 @@ private fun ComposerActionChip(action: ComposerAction, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction?, haze: HazeState) {
+private fun ComposerRow(
+    viewModel: ChatVM,
+    input: String,
+    action: ComposerAction?,
+    haze: HazeState,
+    attachOpen: Boolean,
+    onToggleAttach: () -> Unit,
+    onFieldFocused: () -> Unit,
+) {
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
-
-    // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-        if (uris.isNotEmpty()) viewModel.attachPhotos(uris)
-    }
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) viewModel.attachFiles(uris)
-    }
 
     Row(
         Modifier
@@ -147,33 +178,27 @@ private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Drag-select disabled: a bottom-anchored menu gets clamped upward on screen, which
-        // would break AppDropMenu's downward finger-Y math. Tap-open / tap-item is robust.
-        AppDropMenu(
-            anchor = {
-                Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
-                    DrawableIcon(R.drawable.i_link, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
-                }
-            },
-            groups = listOf(
-                listOf(
-                    MenuAction("Photo") {
-                        photoPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
-                        )
-                    },
-                    MenuAction("File") { filePicker.launch(arrayOf("*/*")) },
-                ),
-            ),
-            dragSelect = false,
-        )
+        // Paperclip toggles the attach panel (was a drop menu). Subtle rotate + accent tint when open.
+        val attachRot by animateFloatAsState(if (attachOpen) 45f else 0f, tween(200), label = "attachRot")
+        Box(
+            Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onToggleAttach),
+            contentAlignment = Alignment.Center,
+        ) {
+            DrawableIcon(
+                R.drawable.i_link,
+                Modifier.size(22.dp).rotate(attachRot),
+                tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
+            )
+        }
         BasicTextField(
             value = input,
             onValueChange = { viewModel.input.value = it },
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
             cursorBrush = SolidColor(chat.accent),
             maxLines = 6,
-            modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+            // Tapping the field to type raises the keyboard, so close the panel it replaces.
+            modifier = Modifier.weight(1f).padding(vertical = 7.dp)
+                .onFocusChanged { if (it.isFocused) onFieldFocused() },
             decorationBox = { inner ->
                 if (input.isEmpty()) Text(
                     "Message",
