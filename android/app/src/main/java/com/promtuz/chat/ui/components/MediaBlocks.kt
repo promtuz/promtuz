@@ -2,6 +2,7 @@ package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -126,14 +127,20 @@ private fun TransferAffordance(
     onOpen: ((String) -> Unit)?,
 ) {
     when (att.transferState) {
-        1 -> if (att.transferTotal > 0)
-            CircularProgressIndicator(
-                progress = { att.transferHave.toFloat() / att.transferTotal },
-                modifier = Modifier.size(26.dp),
-                color = textColor,
-                strokeWidth = 2.dp,
-            )
-        else CircularProgressIndicator(Modifier.size(26.dp), color = textColor, strokeWidth = 2.dp)
+        // Downloading — tapping the ring re-drives download(): the in-flight
+        // guard no-ops a genuinely-live pull, so a tap only force-resumes a
+        // stalled one (e.g. one auto-resume hasn't picked up yet).
+        1 -> {
+            val ring = Modifier.size(26.dp).clickable { onDownload?.invoke(att.fileIdHex) }
+            if (att.transferTotal > 0)
+                CircularProgressIndicator(
+                    progress = { att.transferHave.toFloat() / att.transferTotal },
+                    modifier = ring,
+                    color = textColor,
+                    strokeWidth = 2.dp,
+                )
+            else CircularProgressIndicator(ring, color = textColor, strokeWidth = 2.dp)
+        }
         2 -> IconButton({ att.localPath?.let { onOpen?.invoke(it) } }) {
             DrawableIcon(R.drawable.i_check, Modifier.size(20.dp), tint = textColor)
         }
