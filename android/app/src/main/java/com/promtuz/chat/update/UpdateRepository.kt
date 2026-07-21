@@ -109,7 +109,6 @@ class UpdateRepository(private val context: Context) {
                 validateManifest(manifest, abi)
                 if (manifest.versionCode.toLong() >= minInstallableCode()) {
                     _state.value = UpdateState.Available(manifest)
-                    log().v("New Update Available, ${installedVersionName()} (${installedVersionCode()}) -> ${manifest.versionName} (${manifest.versionCode})")
                 } else {
                     _state.value = UpdateState.None
                 }
@@ -272,7 +271,6 @@ class UpdateRepository(private val context: Context) {
     }
 
     private fun installedVersionCode(): Long = packageVersionCode(installedPackage(0))
-    private fun installedVersionName(): String = packageVersionName(installedPackage(0))
 
     @Suppress("DEPRECATION")
     private fun packageVersionCode(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -280,8 +278,6 @@ class UpdateRepository(private val context: Context) {
     } else {
         info.versionCode.toLong()
     }
-
-    private fun packageVersionName(info: PackageInfo) = info.packageName
 
     private fun updatesDirectory(): File = File(context.cacheDir, "updates").apply { mkdirs() }
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(Locale.ROOT, it) }

@@ -1,7 +1,11 @@
 package com.promtuz.chat.ui.screens
 
+import android.content.ClipData
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,65 +17,136 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.Icon
+import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
 fun LogsScreen() {
-    var wrapText by remember { mutableStateOf(false) }
+    var showExport by remember { mutableStateOf(false) }
 
     SimpleScreen({ Text("App Logs") }, actions = {
-        IconButton(
-            {
-                wrapText = !wrapText
-            }, colors = IconButtonDefaults.iconButtonColors(
-                containerColor = if (wrapText) MaterialTheme.colorScheme.surfaceContainer else Color.Unspecified
-            )
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.i_wrap_text),
-                contentDescription = "Wrap Text",
-                Modifier,
-                MaterialTheme.colorScheme.onSurface
-            )
+        IconButton({ showExport = true }) {
+            DrawableIcon(R.drawable.i_send, desc = "Export logs")
         }
     }) { padding ->
-        LogsContainer(Modifier, padding, wrapText)
+        LogsContainer(Modifier, padding)
+    }
+
+    if (showExport) LogExportSheet { showExport = false }
+}
+
+@Composable
+private fun LogExportSheet(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val logs by AppLogger.logs.collectAsState()
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Export logs", style = MaterialTheme.typography.titleMedium)
+            Button(
+                onClick = {
+                    val text = formatLogs(logs)
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Promtuz logs", text)))
+                        Toast.makeText(context, "Logs copied", Toast.LENGTH_SHORT).show()
+                        onDismiss()
+                    }
+                },
+                Modifier.fillMaxWidth(),
+            ) { Text("Copy to clipboard") }
+            OutlinedButton(
+                onClick = {
+                    shareLogFile(context, formatLogs(logs))
+                    onDismiss()
+                },
+                Modifier.fillMaxWidth(),
+            ) { Text("Export as file") }
+        }
     }
 }
 
+private fun shareLogFile(context: Context, text: String) {
+    val file = File(context.cacheDir, "logs").apply { mkdirs() }.resolve("promtuz-logs.txt")
+    file.writeText(text)
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, "Export logs"))
+}
+
+/** Header (build/device) + chronological body, one tight line per entry, stacktraces indented. */
+private fun formatLogs(logs: List<AppLog>): String {
+    val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.ENGLISH)
+    val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH)
+    return buildString {
+        appendLine("app: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        appendLine("android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        appendLine("device: ${Build.MANUFACTURER} ${Build.MODEL}")
+        appendLine("abi: ${Build.SUPPORTED_ABIS.firstOrNull() ?: "?"}")
+        appendLine("exported: ${stamp.format(Date())}")
+        appendLine("=== PROMTUZ LOGS ===")
+        // Stored newest-first; reverse so the file reads top-to-bottom chronologically.
+        logs.asReversed().forEach { log ->
+            val tag = log.tag?.takeIf { it.isNotBlank() }?.let { "[$it] " }.orEmpty()
+            append(time.format(Date(log.time)))
+            append("  ${prioLabel(log.priority)}  ")
+            appendLine("$tag${log.message}")
+            log.t?.let { t ->
+                t.stackTraceToString().trimEnd().lineSequence().forEach { appendLine("    $it") }
+            }
+        }
+    }
+}
 
 @Composable
 fun LogsContainer(
     modifier: Modifier = Modifier,
     padding: PaddingValues = PaddingValues(0.dp),
-    wrapText: Boolean = false
 ) {
     val logs by AppLogger.logs.collectAsState()
 
@@ -83,10 +158,7 @@ fun LogsContainer(
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .fillMaxWidth()
             .fillMaxHeight()
-            .padding(3.dp)
-            .let {
-                if (wrapText) it.horizontalScroll(rememberScrollState()) else it
-            },
+            .padding(3.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.Bottom),
         reverseLayout = true
     ) {
