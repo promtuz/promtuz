@@ -3,7 +3,7 @@ members = ["resolver", "relay", "gateway", "common", "libcore", "tools/uniffi-bi
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7-alpha0"
+version = "0.2.0-beta1"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/promtuz/promtuz"
 
