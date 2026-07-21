@@ -188,16 +188,20 @@ pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     paths
 }
 
-/// Every `file_id` whose partial is HELD — the sender was offline when we last
-/// tried. The reconnect retry re-drives each once the sender may be back.
-pub fn held_file_ids() -> Vec<[u8; 32]> {
+/// Every `file_id` whose partial is resumable — HELD (sender was offline) or
+/// ACTIVE (a pull the process died mid-way, so nothing drives it now). The
+/// reconnect retry re-drives each; the in-memory DOWNLOADING guard skips any a
+/// live pull already owns, so re-driving a genuinely-active one is a no-op.
+/// FAILED/DONE are excluded.
+pub fn incomplete_file_ids() -> Vec<[u8; 32]> {
     let conn = TRANSFERS_DB.lock();
-    let mut stmt =
-        conn.prepare("SELECT file_id FROM partials WHERE state = ?1").expect("held_file_ids prepare");
-    stmt.query_map(params![HELD], |r| r.get(0))
-        .expect("held_file_ids query")
+    let mut stmt = conn
+        .prepare("SELECT file_id FROM partials WHERE state IN (?1, ?2)")
+        .expect("incomplete_file_ids prepare");
+    stmt.query_map(params![HELD, ACTIVE], |r| r.get(0))
+        .expect("incomplete_file_ids query")
         .collect::<rusqlite::Result<_>>()
-        .expect("held_file_ids rows")
+        .expect("incomplete_file_ids rows")
 }
 
 #[cfg(test)]
@@ -205,7 +209,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn held_file_ids_lists_only_held() {
+    fn incomplete_file_ids_lists_held_and_active() {
         let dir = std::env::temp_dir().join("promtuz-transfers-test");
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
@@ -230,11 +234,11 @@ mod tests {
         mk([0xe4; 32], ACTIVE);
         mk([0xe5; 32], HELD);
 
-        let ids = held_file_ids();
-        assert!(ids.contains(&[0xe1; 32]) && ids.contains(&[0xe5; 32]), "HELD retried");
-        assert!(!ids.contains(&[0xe2; 32]), "DONE not retried");
-        assert!(!ids.contains(&[0xe3; 32]), "FAILED not retried");
-        assert!(!ids.contains(&[0xe4; 32]), "ACTIVE not retried");
+        let ids = incomplete_file_ids();
+        assert!(ids.contains(&[0xe1; 32]) && ids.contains(&[0xe5; 32]), "HELD resumed");
+        assert!(ids.contains(&[0xe4; 32]), "ACTIVE resumed");
+        assert!(!ids.contains(&[0xe2; 32]), "DONE not resumed");
+        assert!(!ids.contains(&[0xe3; 32]), "FAILED not resumed");
     }
 
     #[test]

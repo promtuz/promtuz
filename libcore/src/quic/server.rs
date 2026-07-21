@@ -462,10 +462,11 @@ impl Relay {
                 }
             });
 
-            // Receive-side mirror: re-drive HELD attachment pulls whose sender
-            // may now be reachable. Spawns per file_id; the DOWNLOADING guard
-            // dedups a racing user tap.
-            tokio::spawn(crate::transfer::retry_held_downloads());
+            // Receive-side mirror: re-drive incomplete attachment pulls — HELD
+            // (sender may now be reachable) and ACTIVE (a transfer interrupted by
+            // a restart). Spawns per file_id; the DOWNLOADING guard dedups a
+            // racing user tap or a live pull.
+            tokio::spawn(crate::transfer::resume_incomplete_downloads());
 
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via

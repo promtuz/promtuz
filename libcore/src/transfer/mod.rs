@@ -246,16 +246,18 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
     });
 }
 
-/// Re-drive every HELD pull on reconnect: the sender was offline when we last
-/// tried, so re-attempt now that we're back (and maybe they are too). One spawn
-/// per file_id — the `DOWNLOADING` guard dedups a racing user tap, and
-/// [`download`] re-runs link→pull, completing if the sender is up. Only HELD is
-/// retried; a FAILED transfer must not auto-loop.
-pub async fn retry_held_downloads() {
-    for file_id in store::held_file_ids() {
+/// Re-drive every incomplete pull on reconnect (and app-open, which reconnects):
+/// HELD (sender was offline last time) and ACTIVE (a transfer whose process died
+/// mid-pull, so nothing is driving it now — the usual "stuck at 65% after a
+/// restart"). One spawn per file_id — the `DOWNLOADING` guard dedups a racing
+/// user tap or a genuinely-live pull, and [`download`] resumes from the stored
+/// `have` watermark, completing if the sender is up or falling to HELD if not.
+/// FAILED is excluded: a real error must not auto-loop.
+pub async fn resume_incomplete_downloads() {
+    for file_id in store::incomplete_file_ids() {
         crate::RUNTIME.spawn(async move {
             if let Err(e) = download(file_id).await {
-                log::warn!("transfer: held retry {} failed: {e}", hex::encode(&file_id[..4]));
+                log::warn!("transfer: resume {} failed: {e}", hex::encode(&file_id[..4]));
             }
         });
     }
