@@ -378,6 +378,11 @@ pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
 
     let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
     cfg.transport_config(peer_transport_cfg());
+    // The punch socket pins each peer to a fixed synthetic address and swaps
+    // the real path underneath (relay → direct). A datagram that arrives
+    // before its source is relabeled must be dropped, not treated as a
+    // migration to the raw address.
+    cfg.migration(false);
     Ok(cfg)
 }
 
@@ -423,6 +428,7 @@ pub(crate) fn test_peer_configs(key: &SigningKey) -> Result<(ServerConfig, Clien
     server_tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
     let mut server = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls)?));
     server.transport_config(peer_transport_cfg());
+    server.migration(false);
 
     let mut client_tls = rustls::ClientConfig::builder()
         .dangerous()

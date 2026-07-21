@@ -1,17 +1,18 @@
-//! Direct peer-to-peer transport: punch a NAT hole and stand up a direct
-//! QUIC link between two clients, so calls and >256KB transfers skip the
-//! store-and-forward relay.
+//! Direct peer-to-peer transport: connect through the relay's TURN bridge
+//! immediately — so a link is usable in about one round trip — and punch a
+//! NAT hole in the background. When the punch validates a direct path, the
+//! socket swaps that connection's egress to raw UDP ([`TurnRoutes`]): same
+//! QUIC connection, same synthetic peer address, bulk traffic now
+//! device-to-device.
 //!
-//! The relay stays the fallback and the signaling path — candidates ride
-//! the existing MLS channel ([`signal`]) — but bulk/live traffic goes
-//! straight device-to-device once a hole is open. Bottom-up: the poke
-//! wire ([`disco`]) and the socket that carries it ([`socket`]); the punch
-//! state machine ([`punch`]); local candidates ([`candidate`]); and here,
-//! the session manager that ties them together.
+//! Candidates ride the existing MLS channel ([`signal`]). Bottom-up: the
+//! poke wire ([`disco`]) and the socket that carries it ([`socket`]); the
+//! punch state machine ([`punch`]); local candidates ([`candidate`]); and
+//! here, the session manager that ties them together.
 //!
-//! One [`connect`] call per peer: derive a shared disco key from the MLS
-//! group, trade candidates, punch, then connect (lower IPK) or accept
-//! (higher IPK) over the validated address.
+//! One [`connect`] call per peer: the lower IPK dials, the higher accepts,
+//! so exactly one connection forms. Peers with no relay on record punch
+//! first and connect direct — the only path they have.
 
 #![allow(dead_code)]
 
@@ -59,14 +60,16 @@ pub(crate) use signal::deliver as deliver_offer;
 /// TLS SNI for peer connections. The peer verifier pins the IPK, not the
 /// name, so any stable string does.
 const PEER_SNI: &str = "peer";
-/// Wait this long for the peer's candidate offer, then for the punch.
-/// Generous on the signal leg: the offer crosses the store-and-forward
-/// relay, and the auto-accept side needs a round trip to answer.
+/// Wait this long for the peer's candidate offer — in the background on
+/// the relay-first path, in the foreground when the punch is the only
+/// path. Generous: the offer crosses the store-and-forward relay, and the
+/// auto-accept side needs a round trip to answer.
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// The acceptor waits this long for the inbound connection — long enough for
-/// the dialer to exhaust its punch window and fall back to TURN.
-const ACCEPT_TIMEOUT: Duration = Duration::from_secs(25);
+/// The acceptor waits this long for the inbound connection. The dialer
+/// connects over the bridge as soon as its offer is out, so the inbound
+/// lands about one relay round trip after our `TurnAlloc`.
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the one-shot reflexive-address probe waits for the relay's echo.
 const STUN_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a session delays its offer waiting for the reflexive probe, so
@@ -207,8 +210,8 @@ async fn reflexive_probe(
     }
 }
 
-/// Aborts a background task when dropped — bounds a session's TURN
-/// keepalive to the session's lifetime across every return path.
+/// Aborts a background task when dropped — bounds the TURN keepalive to
+/// its route's lifetime across every return path.
 struct AbortGuard(tokio::task::JoinHandle<()>);
 impl Drop for AbortGuard {
     fn drop(&mut self) {
@@ -216,12 +219,87 @@ impl Drop for AbortGuard {
     }
 }
 
-/// Deregisters a session's TURN route when dropped, across every return
-/// path (the token is decided inside the session, not the caller).
+/// Deregisters a TURN route when dropped, across every return path (the
+/// token is decided inside the session, not the caller).
 struct TurnGuard(&'static P2pEndpoint, [u8; 16]);
 impl Drop for TurnGuard {
     fn drop(&mut self) {
         self.0.turn.lock().unregister(&self.1);
+    }
+}
+
+type RouteGuards = (AbortGuard, TurnGuard);
+
+/// Register the TURN bridge and keep its NAT mapping to the relay warm.
+/// Returns the synthetic address quinn dials/accepts for it, plus the
+/// guards that tear the route down.
+fn open_turn_route(
+    ep: &'static P2pEndpoint, token: [u8; 16], relay: SocketAddr,
+) -> (SocketAddr, RouteGuards) {
+    let synth = ep.turn.lock().register(token, relay);
+    // Re-send the TurnAlloc every few seconds to keep the NAT mapping to
+    // the relay warm. A symmetric NAT (the case that forces TURN) drops an
+    // idle per-destination mapping — without this the return path is
+    // stranded at a stale source the relay never registered.
+    let pokes = ep.pokes.clone();
+    let alloc = RelayMsg::TurnAlloc { token }.encode();
+    let keepalive = RUNTIME.spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(4));
+        loop {
+            tick.tick().await; // fires immediately, then every 4s
+            if pokes.send(relay, &alloc).await.is_err() {
+                break;
+            }
+        }
+    });
+    (synth, (AbortGuard(keepalive), TurnGuard(ep, token)))
+}
+
+/// Quinn egresses to the synth for the connection's whole life, so the
+/// route (and its keepalive) must outlive `run_session` — park the guards
+/// on a task bound to the connection.
+fn hold_route_while_open(conn: Connection, guards: RouteGuards) {
+    RUNTIME.spawn(async move {
+        conn.closed().await;
+        drop(guards);
+    });
+}
+
+/// Unroutes a session's pokes and offer listener when dropped — by
+/// `run_session` on its foreground paths, or by the background punch task,
+/// which can outlive the session. A newer session for the same peer reuses
+/// the same chan, so the poke route is only removed if it is still ours.
+struct SessionCleanup {
+    ep:   &'static P2pEndpoint,
+    chan: [u8; 8],
+    peer: [u8; 32],
+    tx:   mpsc::UnboundedSender<Poke>,
+}
+impl Drop for SessionCleanup {
+    fn drop(&mut self) {
+        {
+            let mut sessions = self.ep.sessions.lock();
+            if sessions.get(&self.chan).is_some_and(|t| t.same_channel(&self.tx)) {
+                sessions.remove(&self.chan);
+            }
+        }
+        signal::stop(self.peer);
+    }
+}
+
+/// Background upgrade: punch, and on a validated address flip the bridge's
+/// egress to direct. `set_direct` returning false means the route (and its
+/// connection) died first — nothing to upgrade.
+async fn punch_upgrade(
+    ep: &'static P2pEndpoint, mut poke_rx: mpsc::UnboundedReceiver<Poke>, key: DiscoKey,
+    cands: Vec<SocketAddr>, token: [u8; 16], peer: [u8; 32],
+) {
+    match punch::punch(&ep.pokes, &mut poke_rx, key, cands, PUNCH_TIMEOUT).await {
+        Some(addr) if ep.turn.lock().set_direct(&token, addr) => {
+            log::info!("P2P[{}]: upgraded to direct {}", hex::encode(&peer[..4]), addr_short(addr));
+        },
+        Some(_) => {},
+        None => log::debug!("P2P[{}]: no direct path — staying relayed", hex::encode(&peer[..4])),
     }
 }
 
@@ -307,15 +385,15 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     // Route this session's pokes and listen for the peer's offer before we
     // announce ourselves, so nothing races ahead of the registration. The
     // channel is public and IPK-derived, so we know it here (the secret key
-    // comes with the offer).
+    // comes with the offer). Teardown rides the cleanup guard: run_session
+    // either drops it on return or hands it to its background punch task,
+    // which needs the routes alive after the connect completes.
     let (poke_tx, poke_rx) = mpsc::unbounded_channel();
-    ep.sessions.lock().insert(chan, poke_tx);
-    let mut offers = signal::listen(peer);
+    ep.sessions.lock().insert(chan, poke_tx.clone());
+    let offers = signal::listen(peer);
+    let cleanup = SessionCleanup { ep, chan, peer, tx: poke_tx };
 
-    let result = run_session(ep, our_ipk, chan, poke_rx, &mut offers, peer).await;
-
-    ep.sessions.lock().remove(&chan);
-    signal::stop(peer);
+    let result = run_session(ep, our_ipk, chan, poke_rx, offers, cleanup, peer).await;
 
     // Single terminal outcome per attempt: warn with the reason on failure,
     // info with the winning route on success.
@@ -330,6 +408,7 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     // is self-verifying before we hand it out.
     if let Err(e) = link.verify_roundtrip().await {
         log::warn!("P2P[{}]: link verify failed — {e}", hex::encode(&peer[..4]));
+        link.conn.close(0u32.into(), b"verify failed");
         return Err(e);
     }
     log::info!(
@@ -433,8 +512,9 @@ async fn run_session(
     ep: &'static P2pEndpoint,
     our_ipk: [u8; 32],
     chan: [u8; 8],
-    mut poke_rx: mpsc::UnboundedReceiver<Poke>,
-    offers: &mut mpsc::UnboundedReceiver<Offer>,
+    poke_rx: mpsc::UnboundedReceiver<Poke>,
+    mut offers: mpsc::UnboundedReceiver<Offer>,
+    cleanup: SessionCleanup,
     peer: [u8; 32],
 ) -> Result<(PeerLink, &'static str)> {
     // Wait briefly for the one-shot reflexive probe so our first offer can
@@ -452,7 +532,10 @@ async fn run_session(
     let reflexive = *refl_rx.borrow();
 
     // Publish our candidates (local + reflexive), home relay, and our random
-    // session secrets (bridge token + disco key), wait for theirs.
+    // session secrets (bridge token + disco key). The bridge, the disco key,
+    // and the punch channel are all the dialer's, so the dialer needs
+    // nothing back before it connects — only the punch waits on the peer's
+    // candidates.
     let our_relay = home_relay_turn_addr();
     let my_token = rand_bytes::<16>();
     let my_disco_key = rand_bytes::<32>();
@@ -461,93 +544,86 @@ async fn run_session(
         cands.push(r);
     }
     signal::send_offer(peer, cands, our_relay, my_token, my_disco_key).await?;
+
+    let dialer = our_ipk < peer;
+
+    if dialer && let Some(tr) = our_relay {
+        // Relay-first: dial the bridge now so the link is usable in about a
+        // round trip; the punch runs behind it and upgrades the socket's
+        // egress in place when a direct path validates.
+        log::info!("P2P[{}]: dialer, connecting via relay bridge", hex::encode(&peer[..4]));
+        let (synth, guards) = open_turn_route(ep, my_token, tr);
+        let key = DiscoKey::new(&my_disco_key, chan);
+        RUNTIME.spawn(async move {
+            let _cleanup = cleanup;
+            let Ok(Some(offer)) = timeout(SIGNAL_TIMEOUT, offers.recv()).await else {
+                log::debug!("P2P[{}]: no peer offer — staying relayed", hex::encode(&peer[..4]));
+                return;
+            };
+            log::info!(
+                "P2P[{}]: peer offers [{}], punching in background",
+                hex::encode(&peer[..4]),
+                addrs_short(&offer.candidates)
+            );
+            punch_upgrade(ep, poke_rx, key, offer.candidates, my_token, peer).await;
+        });
+        let conn = ep.endpoint.connect(synth, PEER_SNI)?.await?;
+        hold_route_while_open(conn.clone(), guards);
+        return Ok((PeerLink { conn, dialer: true, ipk: peer }, "relay"));
+    }
+
+    // Both remaining roles need the peer's offer first: the no-relay dialer
+    // for the punch targets, the acceptor for the dialer's secrets.
     let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for peer candidates"))?
         .ok_or_else(|| anyhow!("candidate listener closed"))?;
-    let peer_cands = offer.candidates;
-
-    let dialer = our_ipk < peer;
     log::info!(
         "P2P[{}]: {}, peer offers [{}]",
         hex::encode(&peer[..4]),
-        if dialer { "dialer" } else { "acceptor" },
-        addrs_short(&peer_cands)
+        if dialer { "dialer (no relay)" } else { "acceptor" },
+        addrs_short(&offer.candidates)
     );
 
-    // The shared disco key: the dialer's, over the public IPK-derived channel
-    // (both exchanged/derived, never MLS-dependent, so the punch always
-    // agrees).
-    let key = DiscoKey::new(&if dialer { my_disco_key } else { offer.disco_key }, chan);
-
-    // TURN fallback: bridge through the dialer's home relay under the
-    // dialer's token — both ends must agree on relay + token. Register it now
-    // so it's ready if the punch fails.
-    let turn_token = if dialer { my_token } else { offer.token };
-    let turn_relay = if dialer { our_relay } else { offer.relay };
-    let (turn_synth, _guards) = match turn_relay {
-        Some(tr) => {
-            let synth = ep.turn.lock().register(turn_token, tr);
-            // Re-send the TurnAlloc every few seconds to keep the NAT mapping
-            // to the relay warm. A symmetric NAT (the case that forced TURN)
-            // drops an idle per-destination mapping, and the ~10s punch window
-            // is all relay-silence — without this the return path is stranded
-            // at a stale source the relay never registered.
-            let pokes = ep.pokes.clone();
-            let alloc = RelayMsg::TurnAlloc { token: turn_token }.encode();
-            let keepalive = RUNTIME.spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(4));
-                loop {
-                    tick.tick().await; // fires immediately, then every 4s
-                    if pokes.send(tr, &alloc).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            (Some(synth), Some((AbortGuard(keepalive), TurnGuard(ep, turn_token))))
-        },
-        None => (None, None),
-    };
-
     if dialer {
-        // Dialer: punch, then connect to whichever path opened — the
-        // validated direct address, else the TURN bridge's synthetic address.
-        let punched = punch::punch(&ep.pokes, &mut poke_rx, key, peer_cands, PUNCH_TIMEOUT).await;
-        let (addr, route) = match (punched, turn_synth) {
-            (Some(a), _) => {
-                log::info!("P2P[{}]: hole punched, dialing {}", hex::encode(&peer[..4]), addr_short(a));
-                (a, "direct")
-            },
-            (None, Some(s)) => {
-                log::info!("P2P[{}]: punch failed, dialing via TURN relay", hex::encode(&peer[..4]));
-                (s, "relay")
-            },
-            (None, None) => bail!("punch failed and no relay for TURN"),
-        };
-        let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
-        Ok((PeerLink { conn, dialer: true, ipk: peer }, route))
-    } else {
-        // Acceptor: run the punch in the background purely to open our NAT
-        // (its validation result doesn't matter — the hole is what counts),
-        // and accept the dialer's connection — direct, or presented from the
-        // synthetic address by the socket if it arrived over TURN.
-        let pokes = ep.pokes.clone();
-        let engine = RUNTIME.spawn(async move {
-            let mut rx = poke_rx;
-            let _ = punch::punch(&pokes, &mut rx, key, peer_cands, PUNCH_TIMEOUT).await;
-        });
-        log::info!("P2P[{}]: acceptor waiting for inbound", hex::encode(&peer[..4]));
-        let incoming = timeout(ACCEPT_TIMEOUT, ep.endpoint.accept())
+        // No bridge to lean on: the punch is the only path (still serves
+        // un-NATed global-IPv6 peers).
+        let key = DiscoKey::new(&my_disco_key, chan);
+        let mut poke_rx = poke_rx;
+        let addr = punch::punch(&ep.pokes, &mut poke_rx, key, offer.candidates, PUNCH_TIMEOUT)
             .await
-            .map_err(|_| anyhow!("timed out waiting for inbound connection"))?
-            .ok_or_else(|| anyhow!("endpoint closed"))?;
-        // ponytail: MVP accepts the first inbound. Only this peer knows our
-        // punched address (candidates went over E2E MLS) and the TURN token
-        // (MLS-derived), and peer TLS gates on a valid IPK cert — but the
-        // real filter is matching the accepted connection's IPK to `peer`;
-        // add when >1 concurrent session is possible.
-        let conn = incoming.accept()?.await?;
-        engine.abort();
-        Ok((PeerLink { conn, dialer: false, ipk: peer }, "inbound"))
+            .ok_or_else(|| anyhow!("no relay and no direct path"))?;
+        log::info!("P2P[{}]: hole punched, dialing {}", hex::encode(&peer[..4]), addr_short(addr));
+        let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
+        return Ok((PeerLink { conn, dialer: true, ipk: peer }, "direct"));
     }
+
+    // Acceptor: bridge through the dialer's relay under the dialer's token,
+    // and run the punch in the background — it opens our NAT for the
+    // dialer's packets, and its validated address upgrades a relayed
+    // connection to direct (each side learns the peer's real address from
+    // its own pong; no extra signaling).
+    let key = DiscoKey::new(&offer.disco_key, chan);
+    let token = offer.token;
+    let guards = offer.relay.map(|tr| open_turn_route(ep, token, tr).1);
+    let peer_cands = offer.candidates;
+    RUNTIME.spawn(async move {
+        let _cleanup = cleanup;
+        punch_upgrade(ep, poke_rx, key, peer_cands, token, peer).await;
+    });
+    log::info!("P2P[{}]: acceptor waiting for inbound", hex::encode(&peer[..4]));
+    let incoming = timeout(ACCEPT_TIMEOUT, ep.endpoint.accept())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for inbound connection"))?
+        .ok_or_else(|| anyhow!("endpoint closed"))?;
+    // ponytail: MVP accepts the first inbound. Only this peer knows our
+    // punched address (candidates went over E2E MLS) and the TURN token
+    // (MLS-derived), and peer TLS gates on a valid IPK cert — but the
+    // real filter is matching the accepted connection's IPK to `peer`;
+    // add when >1 concurrent session is possible.
+    let conn = incoming.accept()?.await?;
+    if let Some(g) = guards {
+        hold_route_while_open(conn.clone(), g);
+    }
+    Ok((PeerLink { conn, dialer: false, ipk: peer }, "inbound"))
 }

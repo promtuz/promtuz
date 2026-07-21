@@ -48,22 +48,28 @@ pub type Poke = (SocketAddr, Vec<u8>);
 /// from.
 pub type StunReply = ([u8; 8], SocketAddr);
 
-/// Where a TURN-bridged session's quinn packets really go.
-#[derive(Debug)]
-struct Route {
-    relay: SocketAddr,
-    token: [u8; 16],
+/// Where quinn packets for one synthetic peer address really go: wrapped to
+/// the TURN relay (the default), or raw to a punch-validated direct address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Egress {
+    Relay { relay: SocketAddr, token: [u8; 16] },
+    Direct { addr: SocketAddr },
 }
 
 /// Maps between TURN bridge tokens and the synthetic peer addresses quinn
 /// uses for them. Shared between the session manager (which registers a
-/// bridge) and the socket (which wraps outbound and unwraps inbound TURN
-/// datagrams). The synthetic address is a pure quinn-side handle — packets
-/// to it are redirected to the relay, never sent to it.
+/// bridge and later upgrades it via [`Self::set_direct`]) and the socket
+/// (which redirects outbound and relabels inbound datagrams). The synthetic
+/// address is a pure quinn-side handle — packets to it are redirected,
+/// never sent to it — and it stays the peer's address for the connection's
+/// whole life, whichever real path carries the traffic.
 #[derive(Debug, Default)]
 pub struct TurnRoutes {
-    by_synth: HashMap<SocketAddr, Route>,
+    by_synth: HashMap<SocketAddr, Egress>,
     by_token: HashMap<[u8; 16], SocketAddr>,
+    /// Peer's punch-validated real address → synth, for the inbound relabel
+    /// once a session goes direct.
+    by_real:  HashMap<SocketAddr, SocketAddr>,
     next:     u32,
 }
 
@@ -83,7 +89,7 @@ impl TurnRoutes {
             Ipv6Addr::new(0x0100, 0, 0, 0, 0, 0, (n >> 16) as u16, n as u16).into(),
             9,
         );
-        self.by_synth.insert(synth, Route { relay, token });
+        self.by_synth.insert(synth, Egress::Relay { relay, token });
         self.by_token.insert(token, synth);
         synth
     }
@@ -91,13 +97,31 @@ impl TurnRoutes {
     pub fn unregister(&mut self, token: &[u8; 16]) {
         if let Some(synth) = self.by_token.remove(token) {
             self.by_synth.remove(&synth);
+            self.by_real.retain(|_, s| *s != synth);
         }
     }
 
-    /// If `dest` is a synthetic TURN address, the `(relay, token)` its quinn
-    /// packets must be wrapped and sent to.
-    fn wrap_target(&self, dest: SocketAddr) -> Option<(SocketAddr, [u8; 16])> {
-        self.by_synth.get(&dest).map(|r| (r.relay, r.token))
+    /// Upgrade `token`'s bridge to a punch-validated direct path: egress
+    /// flips to raw UDP toward `addr`, and inbound datagrams from `addr` are
+    /// relabeled to the synth so quinn never sees the peer's address change.
+    /// The relay ingress stays live, so nothing in flight is dropped.
+    /// `false` if the route is already gone (its connection died first).
+    pub fn set_direct(&mut self, token: &[u8; 16], addr: SocketAddr) -> bool {
+        let Some(&synth) = self.by_token.get(token) else { return false };
+        self.by_synth.insert(synth, Egress::Direct { addr });
+        self.by_real.insert(addr, synth);
+        true
+    }
+
+    /// If `dest` is a synthetic address, where its quinn packets really go.
+    fn egress(&self, dest: SocketAddr) -> Option<Egress> {
+        self.by_synth.get(&dest).copied()
+    }
+
+    /// The synth for a peer's punch-validated real address, if any — the
+    /// inbound half of a direct upgrade.
+    fn synth_for_real(&self, src: &SocketAddr) -> Option<SocketAddr> {
+        self.by_real.get(src).copied()
     }
 
     /// The synthetic address for an inbound TURN datagram's token, if we
@@ -170,15 +194,17 @@ impl AsyncUdpSocket for PunchSocket {
     fn try_send(&self, transmit: &udp::Transmit) -> io::Result<()> {
         // max_transmit_segments defaults to 1, so quinn never sets a GSO
         // segment_size — contents is a single datagram.
-        let wrap = self.turn.lock().wrap_target(transmit.destination);
-        match wrap {
+        let egress = self.turn.lock().egress(transmit.destination);
+        match egress {
             // TURN path: wrap the QUIC datagram so the relay forwards it to
             // the peer under this bridge's token.
-            Some((relay, token)) => {
+            Some(Egress::Relay { relay, token }) => {
                 let framed = RelayMsg::TurnData { token, payload: transmit.contents }.encode();
                 log::trace!("P2P: TURN send {}B -> {}", transmit.contents.len(), addr_short(relay));
                 self.io.try_send_to(&framed, relay).map(|_| ())
             },
+            // Upgraded: same synth for quinn, raw UDP underneath.
+            Some(Egress::Direct { addr }) => self.io.try_send_to(transmit.contents, addr).map(|_| ()),
             None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),
         }
     }
@@ -216,14 +242,18 @@ impl AsyncUdpSocket for PunchSocket {
             };
             if let Some((token, plen)) = turn {
                 let Some(synth) = self.turn.lock().synth_for(&token) else { continue };
-                // TEMP diagnostic: TURN recv path (strip once handshake works).
-                log::info!("P2P: TURN recv {plen}B <- relay, as {synth}");
                 // Present the bridged QUIC payload to quinn as if it came
                 // direct from the peer's synthetic address.
                 let off = len - plen;
                 bufs[0].copy_within(off..len, 0);
                 meta[0] =
                     udp::RecvMeta { addr: synth, len: plen, stride: plen, ecn: None, dst_ip: None };
+                return Poll::Ready(Ok(1));
+            }
+            // A direct datagram from an upgraded session's peer: same synth
+            // relabel, so quinn sees one unchanging address either way.
+            if let Some(synth) = self.turn.lock().synth_for_real(&src) {
+                meta[0] = udp::RecvMeta { addr: synth, len, stride: len, ecn: None, dst_ip: None };
                 return Poll::Ready(Ok(1));
             }
             meta[0] = udp::RecvMeta { addr: src, len, stride: len, ecn: None, dst_ip: None };
@@ -309,13 +339,37 @@ mod tests {
         let s2 = r.register([2; 16], relay);
         assert_ne!(s1, s2); // distinct synthetic address per token
         assert_eq!(r.register([1; 16], relay), s1); // idempotent
-        assert_eq!(r.wrap_target(s1), Some((relay, [1; 16])));
+        assert_eq!(r.egress(s1), Some(Egress::Relay { relay, token: [1; 16] }));
         assert_eq!(r.synth_for(&[1; 16]), Some(s1));
         // a real (non-synthetic) address passes straight through
-        assert_eq!(r.wrap_target("1.2.3.4:5".parse().unwrap()), None);
+        assert_eq!(r.egress("1.2.3.4:5".parse().unwrap()), None);
         r.unregister(&[1; 16]);
-        assert_eq!(r.wrap_target(s1), None);
+        assert_eq!(r.egress(s1), None);
         assert_eq!(r.synth_for(&[1; 16]), None);
+    }
+
+    #[test]
+    fn set_direct_flips_egress_keeps_relay_ingress() {
+        let mut r = TurnRoutes::default();
+        let relay: SocketAddr = "9.9.9.9:443".parse().unwrap();
+        let direct: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+        let synth = r.register([1; 16], relay);
+
+        assert!(r.set_direct(&[1; 16], direct));
+        // egress goes raw to the validated address...
+        assert_eq!(r.egress(synth), Some(Egress::Direct { addr: direct }));
+        // ...inbound direct datagrams relabel to the synth...
+        assert_eq!(r.synth_for_real(&direct), Some(synth));
+        // ...and relay-wrapped inbound still relabels too (both paths live).
+        assert_eq!(r.synth_for(&[1; 16]), Some(synth));
+
+        // teardown clears the reverse map with the rest
+        r.unregister(&[1; 16]);
+        assert_eq!(r.synth_for_real(&direct), None);
+        assert_eq!(r.egress(synth), None);
+
+        // a dead route can't be upgraded
+        assert!(!r.set_direct(&[1; 16], direct));
     }
 
     /// A poke reaches the punch inbox; a non-poke surfaces to quinn. Runs
@@ -370,73 +424,81 @@ mod tests {
         driver.abort();
     }
 
-    /// A full QUIC handshake + bidirectional stream complete end-to-end over
-    /// a TURN bridge: two peer endpoints on loopback whose only path to each
-    /// other is a stub relay forwarding `TurnData` by token. This is the
-    /// exact fallback mechanism the on-device path uses — synthetic address,
-    /// wrap on send, forward at the relay, unwrap on receive — and the one
-    /// leg the two-phone tests never got to finish (they died on token
-    /// pairing before the handshake could complete).
-    #[tokio::test]
-    async fn quic_completes_over_turn_bridge() {
-        use std::collections::HashMap;
-        use std::net::Ipv6Addr;
+    /// Stub relay: forward each TurnData to the other source seen under its
+    /// token — the minimal version of the real bridge.
+    async fn stub_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let relay = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
+        let relay_addr = relay.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1600];
+            let mut ends: HashMap<[u8; 16], Vec<SocketAddr>> = HashMap::new();
+            while let Ok((n, src)) = relay.recv_from(&mut buf).await {
+                let (token, is_data) = match RelayMsg::decode(&buf[..n]) {
+                    Some(RelayMsg::TurnAlloc { token }) => (token, false),
+                    Some(RelayMsg::TurnData { token, .. }) => (token, true),
+                    _ => continue,
+                };
+                let list = ends.entry(token).or_default();
+                if !list.contains(&src) {
+                    list.push(src);
+                }
+                if is_data
+                    && let Some(&dst) = list.iter().find(|&&a| a != src)
+                {
+                    let _ = relay.send_to(&buf[..n], dst).await;
+                }
+            }
+        });
+        (relay_addr, task)
+    }
 
+    /// A peer endpoint on a fresh punch socket (throwaway key — the verifier
+    /// accepts any valid self-signed Ed25519 cert).
+    fn peer_endpoint() -> (Endpoint, PokeSender, Arc<Mutex<TurnRoutes>>) {
         use ed25519_dalek::SigningKey;
 
         use crate::quic::peer_config::test_peer_configs;
 
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let bound = PunchSocket::bind((Ipv6Addr::LOCALHOST, 0).into()).unwrap();
+        let (server_cfg, client_cfg) = test_peer_configs(&key).unwrap();
+        let mut ep_cfg = EndpointConfig::default();
+        ep_cfg.grease_quic_bit(false);
+        let mut ep = Endpoint::new_with_abstract_socket(
+            ep_cfg,
+            Some(server_cfg),
+            bound.socket,
+            Arc::new(TokioRuntime),
+        )
+        .unwrap();
+        ep.set_default_client_config(client_cfg);
+        (ep, bound.pokes, bound.turn)
+    }
+
+    async fn roundtrip(a: &quinn::Connection, b: &quinn::Connection, msg: &[u8]) {
+        let (mut send, mut recv) = a.open_bi().await.unwrap();
+        send.write_all(msg).await.unwrap();
+        send.finish().unwrap();
+        let (mut bsend, mut brecv) = b.accept_bi().await.unwrap();
+        assert_eq!(brecv.read_to_end(64).await.unwrap(), msg);
+        bsend.write_all(b"ack").await.unwrap();
+        bsend.finish().unwrap();
+        assert_eq!(recv.read_to_end(64).await.unwrap(), b"ack");
+    }
+
+    /// A full QUIC handshake + bidirectional stream complete end-to-end over
+    /// a TURN bridge: two peer endpoints on loopback whose only path to each
+    /// other is a stub relay forwarding `TurnData` by token. This is the
+    /// exact mechanism the on-device relay-first path uses — synthetic
+    /// address, wrap on send, forward at the relay, unwrap on receive.
+    #[tokio::test]
+    async fn quic_completes_over_turn_bridge() {
         // rustls needs its process-level provider (the app does this at init).
         let _ = common::quic::config::setup_crypto_provider();
 
-        // Stub relay: forward each TurnData to the other source seen under its
-        // token — the minimal version of the real bridge.
-        let relay = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-        let relay_addr = relay.local_addr().unwrap();
-        let relay_task = {
-            let relay = relay.clone();
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 1600];
-                let mut ends: HashMap<[u8; 16], Vec<SocketAddr>> = HashMap::new();
-                while let Ok((n, src)) = relay.recv_from(&mut buf).await {
-                    let (token, is_data) = match RelayMsg::decode(&buf[..n]) {
-                        Some(RelayMsg::TurnAlloc { token }) => (token, false),
-                        Some(RelayMsg::TurnData { token, .. }) => (token, true),
-                        _ => continue,
-                    };
-                    let list = ends.entry(token).or_default();
-                    if !list.contains(&src) {
-                        list.push(src);
-                    }
-                    if is_data
-                        && let Some(&dst) = list.iter().find(|&&a| a != src)
-                    {
-                        let _ = relay.send_to(&buf[..n], dst).await;
-                    }
-                }
-            })
-        };
-
-        // Two peer endpoints (same throwaway key — the verifier accepts any
-        // valid self-signed Ed25519 cert), each on a fresh punch socket.
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let mk = || {
-            let bound = PunchSocket::bind((Ipv6Addr::LOCALHOST, 0).into()).unwrap();
-            let (server_cfg, client_cfg) = test_peer_configs(&key).unwrap();
-            let mut ep_cfg = EndpointConfig::default();
-            ep_cfg.grease_quic_bit(false);
-            let mut ep = Endpoint::new_with_abstract_socket(
-                ep_cfg,
-                Some(server_cfg),
-                bound.socket,
-                Arc::new(TokioRuntime),
-            )
-            .unwrap();
-            ep.set_default_client_config(client_cfg);
-            (ep, bound.pokes, bound.turn)
-        };
-        let (ep_a, pokes_a, turn_a) = mk();
-        let (ep_b, pokes_b, turn_b) = mk();
+        let (relay_addr, relay_task) = stub_relay().await;
+        let (ep_a, pokes_a, turn_a) = peer_endpoint();
+        let (ep_b, pokes_b, turn_b) = peer_endpoint();
 
         // Both register the shared token → their synthetic address, and alloc
         // at the relay so it learns both ends before the handshake starts.
@@ -457,20 +519,58 @@ mod tests {
         let run = tokio::time::timeout(Duration::from_secs(15), async move {
             let conn_a = ep_a.connect(synth_a, "peer").unwrap().await.expect("dial handshake");
             let conn_b = accept.await.unwrap();
-
-            // Data flows both ways over the bridge.
-            let (mut send, mut recv) = conn_a.open_bi().await.unwrap();
-            send.write_all(b"ping").await.unwrap();
-            send.finish().unwrap();
-            let (mut bsend, mut brecv) = conn_b.accept_bi().await.unwrap();
-            assert_eq!(brecv.read_to_end(16).await.unwrap(), b"ping");
-            bsend.write_all(b"pong").await.unwrap();
-            bsend.finish().unwrap();
-            assert_eq!(recv.read_to_end(16).await.unwrap(), b"pong");
+            roundtrip(&conn_a, &conn_b, b"ping").await;
         })
         .await;
 
         relay_task.abort();
         run.expect("TURN bridge handshake + stream timed out");
+    }
+
+    /// The upgrade: a connection formed over the TURN bridge keeps working —
+    /// same connection, same synthetic address — after both ends flip their
+    /// egress to the peer's real address and the relay disappears. This is
+    /// what the background punch does on device, minus the punch itself.
+    #[tokio::test]
+    async fn quic_upgrades_to_direct_mid_connection() {
+        let _ = common::quic::config::setup_crypto_provider();
+
+        let (relay_addr, relay_task) = stub_relay().await;
+        let (ep_a, pokes_a, turn_a) = peer_endpoint();
+        let (ep_b, pokes_b, turn_b) = peer_endpoint();
+        let a_real = ep_a.local_addr().unwrap();
+        let b_real = ep_b.local_addr().unwrap();
+
+        let token = [43u8; 16];
+        let synth_a = turn_a.lock().register(token, relay_addr);
+        let _synth_b = turn_b.lock().register(token, relay_addr);
+        let alloc = RelayMsg::TurnAlloc { token }.encode();
+        pokes_a.send(relay_addr, &alloc).await.unwrap();
+        pokes_b.send(relay_addr, &alloc).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let accept = tokio::spawn(async move {
+            let inc = ep_b.accept().await.expect("inbound connection");
+            inc.accept().unwrap().await.expect("accept-side handshake")
+        });
+        let run = tokio::time::timeout(Duration::from_secs(15), async move {
+            let conn_a = ep_a.connect(synth_a, "peer").unwrap().await.expect("dial handshake");
+            let conn_b = accept.await.unwrap();
+            roundtrip(&conn_a, &conn_b, b"over-relay").await;
+
+            // Both ends learn the peer's real address (what a validated
+            // punch reports) and flip. Kill the relay: if anything still
+            // depended on it, the second roundtrip would hang.
+            assert!(turn_a.lock().set_direct(&token, b_real));
+            assert!(turn_b.lock().set_direct(&token, a_real));
+            relay_task.abort();
+            roundtrip(&conn_a, &conn_b, b"over-direct").await;
+
+            // quinn never saw the path change.
+            assert_eq!(conn_a.remote_address(), synth_a);
+        })
+        .await;
+
+        run.expect("direct upgrade broke the connection");
     }
 }
