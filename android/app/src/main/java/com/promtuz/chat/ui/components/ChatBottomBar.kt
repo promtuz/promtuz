@@ -67,6 +67,9 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     // The attach panel swaps with the keyboard, so its open-state and the system
     // pickers live here — both the paperclip toggle and the panel's tabs reach them.
     var attachOpen by remember { mutableStateOf(false) }
+    // Which close path we're on: field tapped (keyboard coming — hold the panel
+    // until it covers) vs back/paperclip (no keyboard — slide down). AttachPanel reads it.
+    var closingToKeyboard by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
     // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
@@ -78,7 +81,7 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     }
 
     // Back closes the panel before the nav stack.
-    BackHandler(attachOpen) { attachOpen = false }
+    BackHandler(attachOpen) { closingToKeyboard = false; attachOpen = false }
 
     // No .imePadding()/.navigationBarsPadding(): AttachPanel owns the bottom region
     // and reserves the keyboard/nav space itself (see its region formula).
@@ -98,13 +101,21 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
             viewModel, input, action, haze,
             attachOpen = attachOpen,
             onToggleAttach = {
-                attachOpen = !attachOpen
-                if (attachOpen) focusManager.clearFocus() // hide keyboard so the panel takes the region
+                if (attachOpen) {
+                    closingToKeyboard = false // paperclip close → no keyboard, slide down
+                    attachOpen = false
+                } else {
+                    attachOpen = true
+                    focusManager.clearFocus() // hide keyboard so the panel takes the region
+                }
             },
-            onFieldFocused = { attachOpen = false },
+            onFieldFocused = {
+                if (attachOpen) { closingToKeyboard = true; attachOpen = false } // keyboard taking over
+            },
         )
         AttachPanel(
             open = attachOpen,
+            closingToKeyboard = closingToKeyboard,
             onPickPhotos = {
                 photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
