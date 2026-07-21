@@ -133,7 +133,7 @@ fun MessageBubble(
                     content is MessageContent.Attachment ->
                         AttachmentBlock(
                             content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), peerName, onDownload, onOpen,
+                            BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
                         )
                 }
 

@@ -131,6 +131,19 @@ impl Message {
         }))
     }
 
+    /// The outgoing row for (peer, dispatch_id) — reloaded by the media
+    /// finish path once heavy prep (compress / manifest) completes.
+    pub fn get_by_dispatch(peer_ipk: &[u8; 32], dispatch_id: &[u8; 16]) -> Option<Self> {
+        let conn = MESSAGES_DB.lock();
+        conn.query_row(
+            "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2 AND outgoing = 1",
+            (peer_ipk.as_slice(), dispatch_id.as_slice()),
+            MessageRow::from_row,
+        )
+        .ok()
+        .map(|inner| Self { inner })
+    }
+
     /// Mark an outgoing message as sent (relay accepted).
     pub fn mark_sent(id: &Ulid, timestamp: u64) {
         let conn = MESSAGES_DB.lock();

@@ -87,6 +87,49 @@ pub fn save_outgoing_with_media(
     Ok(msg)
 }
 
+/// Fill an outgoing image's compressed bytes + final size/dims once encoding
+/// finishes (the placeholder row was inserted with a null blob so the bubble
+/// could show instantly).
+pub fn set_blob(
+    peer: &[u8; 32], dispatch_id: &[u8; 16], blob: &[u8], width: u32, height: u32,
+) -> Result<()> {
+    MESSAGES_DB.lock().execute(
+        "UPDATE message_media SET blob=?3, size=?4, width=?5, height=?6
+         WHERE peer_ipk=?1 AND dispatch_id=?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice(), blob, blob.len() as u64,
+            width, height],
+    )?;
+    Ok(())
+}
+
+/// Fill an outgoing attachment's content-addressed file_id once the manifest
+/// pass finishes (placeholder inserted with a null file_id).
+pub fn set_file_id(peer: &[u8; 32], dispatch_id: &[u8; 16], file_id: &[u8; 32]) -> Result<()> {
+    MESSAGES_DB.lock().execute(
+        "UPDATE message_media SET file_id=?3 WHERE peer_ipk=?1 AND dispatch_id=?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice(), file_id.as_slice()],
+    )?;
+    Ok(())
+}
+
+/// Remove an outgoing media message wholesale — caption row + media side-row —
+/// when the heavy prep (compress / manifest) fails before the send ever
+/// started, so no dead placeholder bubble lingers. One transaction.
+pub fn discard_outgoing(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<()> {
+    let mut db = MESSAGES_DB.lock();
+    let tx = db.transaction()?;
+    tx.execute(
+        "DELETE FROM message_media WHERE peer_ipk=?1 AND dispatch_id=?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+    )?;
+    tx.execute(
+        "DELETE FROM messages WHERE peer_ipk=?1 AND dispatch_id=?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// The media side-row for one message (by peer + dispatch_id), or `None` if
 /// the message carries no media. Lets the send-retry path rebuild the original
 /// media payload instead of downgrading it to bare text.
@@ -162,6 +205,53 @@ mod tests {
         save(&peer, &did, &row).unwrap();
         let got = for_peer(&peer).unwrap();
         assert!(got.iter().any(|(d, r)| *d == did && r.blob == row.blob && r.kind == KIND_IMAGE));
+    }
+
+    /// Two-phase optimistic send: a placeholder saved with a null blob is
+    /// filled in place by `set_blob` once the encode finishes.
+    #[test]
+    fn set_blob_fills_placeholder() {
+        let dir = std::env::temp_dir().join("promtuz-media-setblob-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let peer = [0x21u8; 32];
+        let did = [0x22u8; 16];
+        let row = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
+            name: "".into(), size: 0, width: 4, height: 3,
+            blob: None, thumb: None, file_id: None };
+        save(&peer, &did, &row).unwrap();
+        assert!(get(&peer, &did).unwrap().unwrap().blob.is_none());
+
+        set_blob(&peer, &did, &[7, 8, 9], 2, 2).unwrap();
+        let got = get(&peer, &did).unwrap().unwrap();
+        assert_eq!(got.blob, Some(vec![7, 8, 9]));
+        assert_eq!(got.size, 3);
+        assert_eq!((got.width, got.height), (2, 2));
+    }
+
+    /// A failed prep must not leave a dead placeholder bubble: both the
+    /// caption row and the media side-row go.
+    #[test]
+    fn discard_outgoing_removes_caption_and_media() {
+        let dir = std::env::temp_dir().join("promtuz-media-discard-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let peer = [0x23u8; 32];
+        let row = MediaRow { kind: KIND_ATTACHMENT, group_id: None,
+            mime: "application/pdf".into(), name: "a.pdf".into(), size: 9,
+            width: 0, height: 0, blob: None, thumb: None, file_id: None };
+        let msg = save_outgoing_with_media(&peer, "cap", None, &row).unwrap();
+        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+        assert!(get(&peer, &did).unwrap().is_some());
+
+        discard_outgoing(&peer, &did).unwrap();
+        assert!(get(&peer, &did).unwrap().is_none(), "media side-row gone");
+        assert!(
+            crate::data::message::Message::get_by_dispatch(&peer, &did).is_none(),
+            "caption row gone"
+        );
     }
 
     /// The atomicity guarantee behind `save_incoming_with_media`: caption and

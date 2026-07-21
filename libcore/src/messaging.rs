@@ -260,13 +260,11 @@ pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> 
     }
 }
 
-/// Send an inline image (compressed AVIF bytes) to `to`, with an optional
-/// caption and album `group_id`. Mirrors [`send`] — same production
-/// `MlsContext` construction — but hands off to [`send_image_inner`].
-pub async fn send_image(
-    to: [u8; 32], avif: Vec<u8>, width: u32, height: u32, caption: String,
-    group_id: Option<[u8; 16]>,
-) -> Result<()> {
+/// Send an already-persisted `msg` with an already-serialized payload: build
+/// the production `MlsContext` (same dance as [`send`]) and drive
+/// [`send_payload`]. Tail of the optimistic-media path — the row landed
+/// before the heavy prep, so on failure it stays pending rather than lost.
+pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Vec<u8>) -> Result<()> {
     let dht_client = {
         let guard = RELAY.read();
         guard.as_ref().and_then(|r| r.dht_client.clone())
@@ -282,41 +280,10 @@ pub async fn send_image(
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            send_image_inner(&ctx, to, avif, width, height, caption, group_id).await
+            send_payload(&ctx, to, msg, payload_bytes).await
         },
         None => {
-            error!("MESSAGE: no relay connection / dialer; image send aborted");
-            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
-        },
-    }
-}
-
-/// Send a P2P attachment (metadata + blurred thumb; bytes pulled by `file_id`)
-/// to `to`. Mirrors [`send_image`] — same production `MlsContext` — but hands
-/// off to [`send_attachment_inner`].
-pub async fn send_attachment(
-    to: [u8; 32], file_id: [u8; 32], size: u64, name: String, mime: String,
-    thumb: Option<Vec<u8>>, caption: String, group_id: Option<[u8; 16]>,
-) -> Result<()> {
-    let dht_client = {
-        let guard = RELAY.read();
-        guard.as_ref().and_then(|r| r.dht_client.clone())
-    };
-    let provider = PromtuzMlsProvider::shared();
-    let stash = KeyPackageStash::new(stash_db_handle());
-    let buffer = EpochCatchupBuffer::new(stash_db_handle());
-    match dht_client {
-        Some(client) => {
-            let ctx = MlsContext {
-                provider: &provider,
-                stash:    &stash,
-                buffer:   &buffer,
-                dht:      client.as_ref(),
-            };
-            send_attachment_inner(&ctx, to, file_id, size, name, mime, thumb, caption, group_id).await
-        },
-        None => {
-            error!("MESSAGE: no relay connection / dialer; attachment send aborted");
+            error!("MESSAGE: no relay connection / dialer; media send aborted");
             Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
         },
     }
@@ -927,57 +894,34 @@ pub async fn send_message_inner<C: DhtClient>(
     attempt_send(ctx, to, msg).await
 }
 
-/// Sync, pure-DB prep for an outgoing image: persist the optimistic local
-/// message row (caption as `content`) plus the `message_media` side row
-/// (AVIF blob, dims, mime), and return the saved row. No network — callers
-/// (production [`send_image_inner`], tests) drive the send separately.
+/// Sync, pure-DB prep for an outgoing image: persist the optimistic caption
+/// row plus a PLACEHOLDER `message_media` side row (null blob — the encode
+/// hasn't run yet), so the bubble shows the instant the user hits send.
+/// [`finish_image`] lands the bytes and drives the send.
 pub(crate) fn build_image_message(
-    to: [u8; 32], avif: &[u8], width: u32, height: u32, caption: &str,
-    group_id: Option<[u8; 16]>,
+    to: [u8; 32], width: u32, height: u32, caption: &str, group_id: Option<[u8; 16]>,
 ) -> Result<Message> {
     crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
         kind: crate::data::media::KIND_IMAGE,
         group_id: group_id.map(|g| g.to_vec()),
         mime: "image/avif".into(),
         name: String::new(),
-        size: avif.len() as u64,
+        size: 0,
         width,
         height,
-        blob: Some(avif.to_vec()),
+        blob: None,
         thumb: None,
         file_id: None,
     })
 }
 
-/// The image-send counterpart to [`send_message_inner`]: prep (compress
-/// already done by the caller) + persist via [`build_image_message`], then
-/// build `AppPayload::Image` and hand off to the same [`send_payload`] tail
-/// `attempt_send` uses. A first send deferred because the peer had no published
-/// KeyPackage is re-driven by [`retry_pending_sends`], which rebuilds the
-/// `Image` from the stored media row — the picture survives the retry.
-pub(crate) async fn send_image_inner<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], avif: Vec<u8>, width: u32, height: u32, caption: String,
-    group_id: Option<[u8; 16]>,
-) -> Result<()> {
-    let msg = build_image_message(to, &avif, width, height, &caption, group_id)?;
-    let payload = AppPayload::Image {
-        caption,
-        group_id,
-        mime: "image/avif".into(),
-        width,
-        height,
-        data: avif,
-    };
-    let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
-    send_payload(ctx, to, &msg, payload_bytes).await
-}
-
-/// Sync, pure-DB prep for an outgoing attachment: persist the optimistic caption
-/// row plus the `message_media` side row (thumb, file_id, name, size, mime — no
-/// inline blob; the bytes are pulled P2P). Mirrors [`build_image_message`].
+/// Sync, pure-DB prep for an outgoing attachment: persist the optimistic
+/// caption row plus a PLACEHOLDER `message_media` side row (thumb, name, size,
+/// mime — null file_id; the manifest hash hasn't run yet). Mirrors
+/// [`build_image_message`]; [`finish_attachment`] lands the file_id and sends.
 pub(crate) fn build_attachment_message(
-    to: [u8; 32], file_id: [u8; 32], size: u64, name: &str, mime: &str,
-    thumb: Option<Vec<u8>>, caption: &str, group_id: Option<[u8; 16]>,
+    to: [u8; 32], size: u64, name: &str, mime: &str, thumb: Option<Vec<u8>>, caption: &str,
+    group_id: Option<[u8; 16]>,
 ) -> Result<Message> {
     crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
         kind: crate::data::media::KIND_ATTACHMENT,
@@ -989,32 +933,32 @@ pub(crate) fn build_attachment_message(
         height: 0,
         blob: None,
         thumb,
-        file_id: Some(file_id.to_vec()),
+        file_id: None,
     })
 }
 
-/// The attachment counterpart to [`send_image_inner`]: persist via
-/// [`build_attachment_message`], then build `AppPayload::Attachment` and hand
-/// off to the shared [`send_payload`] tail. A first send deferred because the
-/// peer had no published KeyPackage is re-driven by [`retry_pending_sends`],
-/// which rebuilds the `Attachment` from the stored media row.
-pub(crate) async fn send_attachment_inner<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], file_id: [u8; 32], size: u64, name: String, mime: String,
-    thumb: Option<Vec<u8>>, caption: String, group_id: Option<[u8; 16]>,
+/// Finalize an optimistic image placeholder: land the compressed bytes on the
+/// row, then send. Called after the sync compress succeeds.
+pub(crate) async fn finish_image(
+    to: [u8; 32], did: [u8; 16], avif: Vec<u8>, width: u32, height: u32,
 ) -> Result<()> {
-    let msg = build_attachment_message(to, file_id, size, &name, &mime, thumb.clone(), &caption, group_id)?;
-    let payload = AppPayload::Attachment {
-        caption,
-        group_id,
-        mime,
-        name,
-        size,
-        // Wire carries a bare Vec; an absent preview flattens to empty.
-        thumb: thumb.unwrap_or_default(),
-        file_id,
-    };
-    let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
-    send_payload(ctx, to, &msg, payload_bytes).await
+    crate::data::media::set_blob(&to, &did, &avif, width, height)?;
+    let msg = Message::get_by_dispatch(&to, &did).ok_or_else(|| anyhow!("image row vanished"))?;
+    // ponytail: payload rebuilt from the just-finalized row via
+    // rebuild_pending_payload instead of threading caption/group_id through —
+    // one small read, and finish + retry share one builder by construction.
+    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
+    send_prepared(to, &msg, payload_bytes).await
+}
+
+/// Finalize an optimistic attachment placeholder: land the content-addressed
+/// file_id on the row, then send. Called after the manifest pass succeeds.
+pub(crate) async fn finish_attachment(to: [u8; 32], did: [u8; 16], file_id: [u8; 32]) -> Result<()> {
+    crate::data::media::set_file_id(&to, &did, &file_id)?;
+    let msg =
+        Message::get_by_dispatch(&to, &did).ok_or_else(|| anyhow!("attachment row vanished"))?;
+    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
+    send_prepared(to, &msg, payload_bytes).await
 }
 
 /// Drive one send attempt for an already-persisted outgoing `msg` row:
@@ -1025,7 +969,7 @@ pub(crate) async fn send_attachment_inner<C: DhtClient>(
 /// [`rebuild_pending_payload`], which re-emits an `Image` for a row that has a
 /// stored media side, else `Text`/`Reply`) so a retry reuses the same dispatch
 /// id and the recipient dedups it, then hands off to [`send_payload`] for the
-/// group-resolve/envelope/wire tail shared with [`send_image_inner`].
+/// group-resolve/envelope/wire tail shared with [`send_prepared`].
 pub async fn attempt_send<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
 ) -> Result<()> {
@@ -1043,22 +987,38 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
     let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
     let media = did.and_then(|d| crate::data::media::get(to, &d).ok().flatten());
     let payload = match media {
-        Some(m) if m.kind == crate::data::media::KIND_IMAGE => AppPayload::Image {
-            caption:  msg.inner.content.clone(),
-            group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
-            mime:     m.mime,
-            width:    m.width,
-            height:   m.height,
-            data:     m.blob.unwrap_or_default(),
+        Some(m) if m.kind == crate::data::media::KIND_IMAGE => {
+            // Empty blob = un-finalized placeholder (compress still running).
+            // Bail so a reconnect retry leaves the row pending; the finish_*
+            // path drives the real send.
+            let data = match m.blob {
+                Some(b) if !b.is_empty() => b,
+                _ => bail!("media not ready"),
+            };
+            AppPayload::Image {
+                caption:  msg.inner.content.clone(),
+                group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
+                mime:     m.mime,
+                width:    m.width,
+                height:   m.height,
+                data,
+            }
         },
-        Some(m) if m.kind == crate::data::media::KIND_ATTACHMENT => AppPayload::Attachment {
-            caption:  msg.inner.content.clone(),
-            group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
-            mime:     m.mime,
-            name:     m.name,
-            size:     m.size,
-            thumb:    m.thumb.unwrap_or_default(),
-            file_id:  m.file_id.as_deref().and_then(|f| f.try_into().ok()).unwrap_or([0u8; 32]),
+        Some(m) if m.kind == crate::data::media::KIND_ATTACHMENT => {
+            // Null file_id = un-finalized placeholder (manifest still hashing).
+            let file_id = match m.file_id.as_deref().and_then(|f| f.try_into().ok()) {
+                Some(f) => f,
+                None => bail!("media not ready"),
+            };
+            AppPayload::Attachment {
+                caption:  msg.inner.content.clone(),
+                group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
+                mime:     m.mime,
+                name:     m.name,
+                size:     m.size,
+                thumb:    m.thumb.unwrap_or_default(),
+                file_id,
+            }
         },
         _ => {
             let reply_to: Option<[u8; 16]> =
@@ -1072,7 +1032,7 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
     payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
 }
 
-/// Shared tail of [`attempt_send`] and [`send_image_inner`]: resolve or
+/// Shared tail of [`attempt_send`] and [`send_prepared`]: resolve or
 /// lazy-create the 1:1 MLS group with `to`, encrypt `payload_bytes` (an
 /// already-serialized `AppPayload`) into an application envelope, and drive
 /// one send attempt (durable outbox enqueue → wire send → ack handling).
@@ -1176,8 +1136,8 @@ async fn send_payload<C: DhtClient>(
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
     // 5. Encrypt the caller-supplied payload into the application envelope. The
-    //    caller (attempt_send / send_image_inner) rebuilds it from the row on
-    //    every retry, so a resend reuses the same dispatch id below.
+    //    caller (attempt_send / finish_image / finish_attachment) rebuilds it
+    //    from the row on every retry, so a resend reuses the same dispatch id below.
     let payload = build_application_envelope_bytes(
         ctx,
         &mut group,
@@ -2080,7 +2040,14 @@ mod tests {
 
         let to = [0x51u8; 32];
         let avif = vec![7u8, 8, 9, 10];
-        let msg = build_image_message(to, &avif, 4, 3, "look at this", None).unwrap();
+        let msg = build_image_message(to, 4, 3, "look at this", None).unwrap();
+        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+
+        // Un-finalized placeholder: a reconnect retry mid-compress must NOT
+        // send an empty-blob Image — it bails and the row stays pending.
+        assert!(rebuild_pending_payload(&to, &msg).is_err(), "placeholder must not rebuild");
+
+        crate::data::media::set_blob(&to, &did, &avif, 4, 3).unwrap();
 
         // The rebuilt payload a resend would encrypt: must be the whole Image.
         let bytes = rebuild_pending_payload(&to, &msg).unwrap();

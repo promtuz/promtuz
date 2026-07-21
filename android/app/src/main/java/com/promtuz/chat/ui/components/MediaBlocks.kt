@@ -80,11 +80,13 @@ fun AttachmentBlock(
     fontScale: Float,
     metaLabel: String,
     peerName: String,
+    outgoing: Boolean,
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
-    // Plain-language transfer line — no P2P/relay jargon. "Waiting" = the sender's offline.
-    val subtitle = when (att.transferState) {
+    // Plain-language transfer line — no P2P/relay jargon. "Waiting" = the sender's
+    // offline. Outgoing shows plain size: retry/waiting states are receiver-side.
+    val subtitle = if (outgoing) formatBytes(att.size) else when (att.transferState) {
         1 -> if (att.transferTotal > 0)
             "${formatBytes(att.size)} · ${att.transferHave * 100 / att.transferTotal}%"
         else formatBytes(att.size)
@@ -119,7 +121,7 @@ fun AttachmentBlock(
                 )
                 Text(subtitle, style = MaterialTheme.typography.labelSmall, color = textColor.copy(alpha = 0.6f))
             }
-            TransferAffordance(att, textColor, onDownload, onOpen)
+            TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
         }
         Caption(att.caption, textColor, fontScale, metaLabel)
     }
@@ -129,9 +131,16 @@ fun AttachmentBlock(
 private fun TransferAffordance(
     att: MessageContent.Attachment,
     textColor: Color,
+    outgoing: Boolean,
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
+    // Outgoing pre-done = still sending (hash/offer in flight) — you never
+    // download your own send, so no glyph and nothing tappable.
+    if (outgoing && att.transferState != 2) {
+        CircularProgressIndicator(Modifier.size(20.dp), color = textColor, strokeWidth = 2.dp)
+        return
+    }
     when (att.transferState) {
         // Downloading — tapping the ring re-drives download(): the in-flight
         // guard no-ops a genuinely-live pull, so a tap only force-resumes a
