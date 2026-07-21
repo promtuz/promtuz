@@ -3,10 +3,20 @@
 //! every platform; the platform owns decode (HEIC/HDR/EXIF) + video/PDF.
 
 use anyhow::{bail, Result};
-use ravif::{Encoder, Img, RGBA8};
+use ravif::{Encoder, Img};
+use rgb::FromSlice;
 
-/// Encode RGBA pixels to AVIF, downscaling/re-quantizing until the output
-/// fits `max_bytes` (256KB for inline `Image`). Returns `(avif_bytes, out_w, out_h)`.
+fn encode_avif(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
+    Ok(Encoder::new()
+        .with_quality(quality)
+        .with_speed(8)
+        .encode_rgba(Img::new(rgba.as_rgba(), w as usize, h as usize))?
+        .avif_file)
+}
+
+/// Encode RGBA pixels to AVIF under `max_bytes` (256KB for inline `Image`).
+/// Encodes once at full size; on overshoot, downscales proportionally to the
+/// overshoot ratio and retries. Returns `(avif_bytes, out_w, out_h)`.
 pub fn compress_image(
     rgba: &[u8],
     width: u32,
@@ -20,47 +30,33 @@ pub fn compress_image(
         bail!("rgba len mismatch");
     }
 
-    let mut w = width;
-    let mut h = height;
-    let mut buf: Vec<RGBA8> = rgba
-        .chunks_exact(4)
-        .map(|p| RGBA8::new(p[0], p[1], p[2], p[3]))
-        .collect();
+    let mut out = encode_avif(rgba, width, height, 60.0)?;
+    if out.len() <= max_bytes {
+        return Ok((out, width, height));
+    }
 
-    // Quality/scale ladder: drop quality first, then halve dimensions, until
-    // the encode fits the budget.
-    for scale_step in 0..4 {
-        if scale_step > 0 {
-            let img = image::RgbaImage::from_raw(
-                w,
-                h,
-                buf.iter().flat_map(|p| [p.r, p.g, p.b, p.a]).collect(),
-            )
-            .expect("buf matches w*h*4");
-            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-            let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
-            w = small.width();
-            h = small.height();
-            buf = small
-                .pixels()
-                .map(|p| RGBA8::new(p[0], p[1], p[2], p[3]))
-                .collect();
-        }
-        for &q in &[70.0f32, 55.0, 40.0, 28.0] {
-            let out = Encoder::new()
-                .with_quality(q)
-                .with_speed(6)
-                .encode_rgba(Img::new(buf.as_slice(), w as usize, h as usize))?;
-            if out.avif_file.len() <= max_bytes {
-                return Ok((out.avif_file, w, h));
-            }
+    // AVIF bytes scale ~linearly with pixel count at fixed quality, so the
+    // overshoot ratio gives the target dimensions directly (0.85 = headroom).
+    // Each retry resizes from the ORIGINAL buffer so resampling loss never
+    // cascades.
+    let orig = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+        .expect("len checked above");
+    let (mut w, mut h) = (width, height);
+    for _ in 0..2 {
+        let s = (0.85 * max_bytes as f64 / out.len() as f64).sqrt();
+        w = ((w as f64 * s).max(64.0).min(width as f64)) as u32;
+        h = ((h as f64 * s).max(64.0).min(height as f64)) as u32;
+        let small = image::imageops::resize(&orig, w, h, image::imageops::FilterType::Triangle);
+        out = encode_avif(small.as_raw(), w, h, 60.0)?;
+        if out.len() <= max_bytes {
+            return Ok((out, w, h));
         }
     }
 
-    // Nothing on the ladder fit. This buffer is inlined into a hard-capped MLS
-    // `Image` frame, so returning an over-budget buffer would be a silent
-    // contract break — error instead. An image too large to inline is meant to
-    // route to the P2P `Attachment` path; the caller propagates this Err.
+    // The buffer inlines into a hard-capped MLS `Image` frame, so returning an
+    // over-budget buffer would be a silent contract break — error instead. An
+    // image too large to inline is meant to route to the P2P `Attachment`
+    // path; the caller propagates this Err.
     bail!("could not compress under {max_bytes} bytes");
 }
 
@@ -74,7 +70,8 @@ pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
         bail!("rgba len mismatch");
     }
 
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).unwrap();
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+        .expect("len checked above");
 
     // Downscale to ≤48px longest side, preserving aspect ratio.
     let scale = 48.0 / width.max(height) as f32;
@@ -86,19 +83,7 @@ pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
     let blurred = image::imageops::blur(&small, 2.0);
 
-    // Convert pixels to RGBA8 for encoding.
-    let px: Vec<RGBA8> = blurred
-        .pixels()
-        .map(|p| RGBA8::new(p[0], p[1], p[2], p[3]))
-        .collect();
-
-    // Encode with modest quality.
-    let out = Encoder::new()
-        .with_quality(50.0)
-        .with_speed(8)
-        .encode_rgba(Img::new(px.as_slice(), tw as usize, th as usize))?;
-
-    Ok(out.avif_file)
+    encode_avif(blurred.as_raw(), tw, th, 50.0)
 }
 
 #[cfg(test)]
@@ -110,8 +95,8 @@ mod tests {
     }
 
     // High-entropy input: AVIF can't crush it to a trivial size, so the
-    // quality/scale ladder is actually forced to run (solid gray fits at q70
-    // on the first try and never exercises the ladder).
+    // downscale retry is actually forced to run (solid gray fits on the first
+    // full-size encode and never exercises it).
     fn noisy_rgba(w: u32, h: u32) -> Vec<u8> {
         let mut v = Vec::with_capacity((w * h * 4) as usize);
         let mut s: u32 = 0x9E37_79B9;
@@ -138,10 +123,8 @@ mod tests {
         assert!(ow <= w && oh <= h);
     }
 
-    // Tight budget on noisy input that a full-res encode can't meet: the ladder
+    // Tight budget on noisy input that a full-res encode can't meet: the retry
     // must downscale to fit, and the output must actually be <= budget (I1).
-    // 256x256 noise is ~72KB at q70; a 15KB budget can only be met after at
-    // least one halving.
     #[test]
     fn compress_engages_ladder_under_tight_budget() {
         let (w, h) = (256, 256);
@@ -152,7 +135,7 @@ mod tests {
         assert!(ow < w || oh < h, "ladder never downscaled: {ow}x{oh}");
     }
 
-    // Impossibly tight budget: no ladder rung (down to 32x32) can fit under
+    // Impossibly tight budget: nothing (down to the 64px floor) fits under
     // 100 bytes of AVIF container overhead, so compress must Err rather than
     // silently hand back an over-budget buffer (I1).
     #[test]

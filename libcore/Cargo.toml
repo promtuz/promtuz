@@ -56,9 +56,12 @@ x509-parser = "0.18.1"
 # Still-image pipeline (FILE_TRANSFER.md): RGBA→AVIF + blurred thumb.
 # `image` decoders off — the platform supplies decoded RGBA pixels.
 image = { version = "0.25", default-features = false }
-# `asm` off: rav1e's SIMD needs nasm, absent on x86 CI hosts (the NDK
-# aarch64 build doesn't use it). Pure-Rust encode, slower but portable.
-ravif = { version = "0.11", default-features = false }
+# `threading` = parallel encode (rayon). Base dep skips `asm` so x86_64
+# (emulator, CI) never needs nasm; aarch64 layers it on below.
+ravif = { version = "0.11", default-features = false, features = ["threading"] }
+# ravif's pixel types; `FromSlice` casts &[u8]→&[RGBA8] copy-free. Already
+# in the tree via ravif — direct line pulls zero new code.
+rgb = "0.8"
 
 # MLS (RFC 9420) — see misc/specs/MLS.md
 openmls = "0.8.1"
@@ -76,6 +79,11 @@ sha2 = "0.11.0"
 # this just makes the line item explicit. No new crate added.
 blake3 = "1.8.5"
 uniffi = { version = "0.31.2", default-features = false, features = ["tokio"] }
+
+# aarch64 (real phones) gets rav1e's NEON asm; it builds with `cc` from the
+# NDK, not nasm (nasm is x86-only). Cargo unions this with the base dep.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+ravif = { version = "0.11", default-features = false, features = ["threading", "asm"] }
 
 # The `mls::group` / `mls::welcome` / `mls::epoch_catchup` test
 # fixtures use openmls's `MlsMessageOut::into_welcome()`, which is gated
