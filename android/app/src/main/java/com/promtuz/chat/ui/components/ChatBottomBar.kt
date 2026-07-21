@@ -127,11 +127,11 @@ private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction
     val chat = LocalChatColors.current
 
     // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let { viewModel.attachPhoto(it) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        if (uris.isNotEmpty()) viewModel.attachPhotos(uris)
     }
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { viewModel.attachFile(it) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) viewModel.attachFiles(uris)
     }
 
     Row(
@@ -159,7 +159,7 @@ private fun ComposerRow(viewModel: ChatVM, input: String, action: ComposerAction
                 listOf(
                     MenuAction("Photo") {
                         photoPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
                         )
                     },
                     MenuAction("File") { filePicker.launch(arrayOf("*/*")) },

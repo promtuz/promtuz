@@ -19,7 +19,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.presentation.viewmodel.ChatVM
@@ -88,10 +87,6 @@ fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
                             MenuAction("Delete Chat", null, destructive = true) {},
                         ),
                     )
-                    // Debug-only: punch a direct P2P link to this contact.
-                    if (BuildConfig.DEBUG) {
-                        add(listOf(MenuAction("P2P connect", null) { viewModel.debugP2pConnect() }))
-                    }
                 },
             )
         },

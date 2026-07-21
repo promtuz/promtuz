@@ -213,6 +213,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                     onQuoteClick = ::jumpToQuoted,
                                     onDownload = viewModel::download,
                                     onOpen = { openAttachment(context, it) },
+                                    peerName = name,
                                     onDoubleTap = when {
                                         !actionable -> null
                                         interaction.doubleTapAction == DoubleTapAction.React ->

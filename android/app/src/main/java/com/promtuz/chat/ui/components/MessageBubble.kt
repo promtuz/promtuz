@@ -91,6 +91,7 @@ fun MessageBubble(
     onDoubleTap: (() -> Unit)? = null,
     onDownload: ((String) -> Unit)? = null,
     onOpen: ((String) -> Unit)? = null,
+    peerName: String = "",
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -132,7 +133,7 @@ fun MessageBubble(
                     content is MessageContent.Attachment ->
                         AttachmentBlock(
                             content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), onDownload, onOpen,
+                            BubbleTextLayouts.metaLabelOf(msg), peerName, onDownload, onOpen,
                         )
                 }
 

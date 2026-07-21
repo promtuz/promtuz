@@ -3,7 +3,6 @@ package com.promtuz.chat.presentation.viewmodel
 import android.app.Application
 import android.net.Uri
 import android.os.SystemClock
-import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
@@ -21,6 +20,7 @@ import com.promtuz.chat.utils.media.resolvePickedFile
 import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
+import kotlin.random.Random
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -64,14 +64,6 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     private val _presence = MutableStateFlow<Presence?>(null)
     val presence: StateFlow<Presence?> = _presence.asStateFlow()
-
-    /** Debug: punch a direct P2P connection to this peer, Toast the result. */
-    fun debugP2pConnect() {
-        viewModelScope.launch {
-            val report = CoreBridge.p2pDebugConnect(peer)
-            Toast.makeText(application, report, Toast.LENGTH_LONG).show()
-        }
-    }
 
     fun init(peerIpk: ByteArray) {
         if (started) return
@@ -233,31 +225,44 @@ class ChatVM(private val application: Application) : ViewModel() {
     fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
         fire { CoreBridge.react(peer, dispatchIdHex.fromHex(), emoji, add) }
 
-    fun sendImage(rgba: ByteArray, width: Int, height: Int, caption: String) =
-        fire { CoreBridge.sendImage(peer, rgba, width, height, caption) }
-
-    fun sendAttachment(
-        sourcePath: String, name: String, mime: String,
-        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int, caption: String,
-    ) = fire { CoreBridge.sendAttachment(peer, sourcePath, name, mime, thumbRgba, thumbW, thumbH, caption) }
-
-    /** Picked photo → downscaled inline image. Decode/RGBA run on IO inside [decodeDownscaled]. */
-    fun attachPhoto(uri: Uri) = fire {
+    /**
+     * Picked media → inline images; videos ride the P2P attachment path (raw for
+     * now). A multi-pick shares one album [group_id]; the caption rides item 0.
+     */
+    fun attachPhotos(uris: List<Uri>) = fire {
         val caption = takeCaption()
-        val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@fire
-        CoreBridge.sendImage(peer, bmp.toRgba(), bmp.width, bmp.height, caption)
+        val gid = albumId(uris.size)
+        val cr = application.contentResolver
+        uris.forEachIndexed { i, uri ->
+            val cap = if (i == 0) caption else ""
+            // ponytail: video sent raw over P2P — transcode + poster frame land later.
+            if (cr.getType(uri)?.startsWith("video/") == true) sendPickedFile(uri, cap, gid)
+            else {
+                val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@forEachIndexed
+                CoreBridge.sendImage(peer, bmp.toRgba(), bmp.width, bmp.height, cap, gid)
+            }
+        }
     }
 
-    /** Picked document → P2P attachment; images get a small preview thumb, everything else null. */
-    fun attachFile(uri: Uri) = fire {
+    /** Picked documents → P2P attachments; a multi-pick shares one album [group_id]. */
+    fun attachFiles(uris: List<Uri>) = fire {
         val caption = takeCaption()
-        val picked = resolvePickedFile(application, uri) ?: return@fire
+        val gid = albumId(uris.size)
+        uris.forEachIndexed { i, uri -> sendPickedFile(uri, if (i == 0) caption else "", gid) }
+    }
+
+    /** Copy a picked uri into cache and offer it as a P2P attachment; image mimes get a preview thumb. */
+    private suspend fun sendPickedFile(uri: Uri, caption: String, groupId: ByteArray?) {
+        val picked = resolvePickedFile(application, uri) ?: return
         val thumb = if (picked.mime.startsWith("image/")) decodeDownscaled(application, uri, THUMB_MAX_EDGE) else null
         CoreBridge.sendAttachment(
             peer, picked.path, picked.name, picked.mime,
-            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0, caption,
+            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0, caption, groupId,
         )
     }
+
+    /** One random 16-byte album id for a multi-pick; a lone item isn't an album. */
+    private fun albumId(count: Int): ByteArray? = if (count > 1) Random.nextBytes(16) else null
 
     /** Snapshot the draft as a caption and clear it (mirrors [send]). */
     private fun takeCaption(): String = input.value.trim().also { input.value = "" }

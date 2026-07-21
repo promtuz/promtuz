@@ -79,13 +79,19 @@ fun AttachmentBlock(
     textColor: Color,
     fontScale: Float,
     metaLabel: String,
+    peerName: String,
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
-    val active = att.transferState == 1
-    val subtitle = if (active && att.transferTotal > 0)
-        "${formatBytes(att.size)} · ${att.transferHave * 100 / att.transferTotal}%"
-    else formatBytes(att.size)
+    // Plain-language transfer line — no P2P/relay jargon. "Waiting" = the sender's offline.
+    val subtitle = when (att.transferState) {
+        1 -> if (att.transferTotal > 0)
+            "${formatBytes(att.size)} · ${att.transferHave * 100 / att.transferTotal}%"
+        else formatBytes(att.size)
+        3 -> "Tap to retry"
+        4 -> if (peerName.isNotBlank()) "Waiting for $peerName…" else "Waiting…"
+        else -> formatBytes(att.size)
+    }
     Column {
         Row(
             Modifier
