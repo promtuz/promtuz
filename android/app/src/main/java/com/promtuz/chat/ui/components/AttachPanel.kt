@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import android.net.Uri
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -69,6 +70,7 @@ fun AttachPanel(
     onHideKeyboard: () -> Unit,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
+    onSendPhotos: (List<Uri>) -> Unit,
 ) {
     val density = LocalDensity.current
     val ime = WindowInsets.ime.getBottom(density)                      // live, system-animated
@@ -126,21 +128,23 @@ fun AttachPanel(
                     .freezeOnExit()
                     .hazeEffect(haze, chatBarHaze()),
             ) {
-                AttachPanelBody(onPickPhotos, onPickFiles)
+                AttachPanelBody(onPickPhotos, onPickFiles, onSendPhotos)
             }
         }
     }
 }
 
 @Composable
-private fun AttachPanelBody(onPickPhotos: () -> Unit, onPickFiles: () -> Unit) {
+private fun AttachPanelBody(
+    onPickPhotos: () -> Unit,
+    onPickFiles: () -> Unit,
+    onSendPhotos: (List<Uri>) -> Unit,
+) {
     var tab by remember { mutableStateOf(0) } // 0 = Photos, 1 = Files
 
     Box(Modifier.fillMaxSize()) {
-        // Shell placeholder content. Each tab centers one launcher button.
-        // ponytail: the inline MediaStore grid replaces the Photos placeholder later.
         Box(Modifier.fillMaxSize().navigationBarsPadding(), contentAlignment = Alignment.Center) {
-            if (tab == 0) PlaceholderAction("Open gallery", onPickPhotos)
+            if (tab == 0) PhotoGrid(onSend = onSendPhotos, onOpenSystemPicker = onPickPhotos)
             else PlaceholderAction("Browse files", onPickFiles)
         }
 

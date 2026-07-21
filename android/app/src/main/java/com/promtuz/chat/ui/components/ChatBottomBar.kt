@@ -121,6 +121,11 @@ fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
                 photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
             onPickFiles = { filePicker.launch(arrayOf("*/*")) },
+            onSendPhotos = { uris ->
+                viewModel.attachPhotos(uris)
+                closingToKeyboard = false
+                attachOpen = false
+            },
         )
     }
 }
