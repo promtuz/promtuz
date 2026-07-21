@@ -39,6 +39,7 @@ use super::disco;
 use crate::quic::peer_config::build_peer_client_cfg;
 use crate::quic::peer_config::build_peer_server_cfg;
 use crate::quic::peer_identity::PeerIdentity;
+use crate::utils::addr_short;
 
 /// An inbound disco poke: the sender's address and the raw sealed bytes.
 pub type Poke = (SocketAddr, Vec<u8>);
@@ -175,8 +176,7 @@ impl AsyncUdpSocket for PunchSocket {
             // the peer under this bridge's token.
             Some((relay, token)) => {
                 let framed = RelayMsg::TurnData { token, payload: transmit.contents }.encode();
-                // TEMP diagnostic: TURN send path (strip once handshake works).
-                log::info!("P2P: TURN send {}B -> relay {}", transmit.contents.len(), relay);
+                log::trace!("P2P: TURN send {}B -> {}", transmit.contents.len(), addr_short(relay));
                 self.io.try_send_to(&framed, relay).map(|_| ())
             },
             None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),

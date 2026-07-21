@@ -1,4 +1,3 @@
-use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -35,8 +34,6 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static IDENTITY_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("identity")).expect("db open failed");
-    info!("DB: IDENTITY_DB CONNECTED");
-
     PRAGMA!(conn, MIGRATIONS);
 
     Mutex::new(conn)

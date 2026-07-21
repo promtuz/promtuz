@@ -19,6 +19,9 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+use crate::utils::addr_short;
+use crate::utils::addrs_short;
+
 /// A peer's connection offer: where to reach them directly, their home relay
 /// for the TURN fallback, and random session secrets — a bridge token and a
 /// disco key (the dialer's win).
@@ -46,7 +49,7 @@ pub fn listen(peer: [u8; 32]) -> mpsc::UnboundedReceiver<Offer> {
     let (tx, rx) = mpsc::unbounded_channel();
     LISTENERS.lock().insert(peer, tx.clone());
     if let Some(buffered) = PENDING.lock().remove(&peer) {
-        log::info!("P2P: draining buffered offer from {}", hex::encode(&peer[..4]));
+        log::info!("P2P[{}]: draining buffered offer", hex::encode(&peer[..4]));
         let _ = tx.send(buffered);
     }
     rx
@@ -61,36 +64,26 @@ pub fn deliver(
     let offer = Offer { candidates, relay, token, disco_key };
     let listener = LISTENERS.lock().get(&from).cloned();
     match listener {
-        Some(tx) if tx.send(offer.clone()).is_ok() => {
-            log::info!(
-                "P2P: delivered offer from {} ({} candidates) to session",
-                hex::encode(&from[..4]),
-                offer.candidates.len()
-            );
-        },
+        // Routed to the waiting session; `quic/server.rs` already logged arrival.
+        Some(tx) if tx.send(offer.clone()).is_ok() => {},
         _ => {
             if matches!(crate::p2p::consent::may_connect(&from), crate::p2p::consent::Decision::No)
             {
-                log::info!("P2P: offer from {} denied by consent", hex::encode(&from[..4]));
+                log::info!("P2P[{}]: offer denied by consent", hex::encode(&from[..4]));
                 return;
             }
-            let listening: Vec<String> =
-                LISTENERS.lock().keys().map(|k| hex::encode(&k[..4])).collect();
             log::info!(
-                "P2P: offer from {} ({} candidates), no session (listening for {:?}) — \
-                 buffering + auto-accepting",
+                "P2P[{}]: offer arrived with no waiting session ({} cands) — auto-accepting",
                 hex::encode(&from[..4]),
-                offer.candidates.len(),
-                listening
+                offer.candidates.len()
             );
             PENDING.lock().insert(from, offer);
             // Auto-accept: consent already checked this offer is from a
             // paired contact, so start a session — it drains the buffered
-            // offer and answers.
+            // offer and answers. connect() logs the terminal outcome.
             crate::RUNTIME.spawn(async move {
-                match crate::p2p::connect(from).await {
-                    Ok(_) => log::info!("P2P: auto-accepted {}", hex::encode(&from[..4])),
-                    Err(e) => log::info!("P2P: auto-accept {} ended: {e}", hex::encode(&from[..4])),
+                if let Err(e) = crate::p2p::connect(from).await {
+                    log::debug!("P2P[{}]: auto-accept ended — {e}", hex::encode(&from[..4]));
                 }
             });
         },
@@ -110,11 +103,11 @@ pub async fn send_offer(
     disco_key: [u8; 32],
 ) -> Result<()> {
     log::info!(
-        "P2P: sending offer to {} ({} candidates: {:?}, relay {:?})",
+        "P2P[{}]: sending offer — {} cands [{}], relay {}",
         hex::encode(&peer[..4]),
         candidates.len(),
-        candidates,
-        relay
+        addrs_short(&candidates),
+        relay.map(addr_short).unwrap_or_else(|| "none".into())
     );
     crate::messaging::send_control(peer, AppPayload::P2p { candidates, relay, token, disco_key })
         .await

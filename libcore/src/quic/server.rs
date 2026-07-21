@@ -50,6 +50,8 @@ use crate::events::messaging::MessageEv;
 use crate::quic::relay_dht_client::RelayDhtClient;
 use crate::ret_err;
 use crate::state::CONNECTION_START_TIME;
+use crate::utils::addr_short;
+use crate::utils::node_short;
 use crate::utils::systime;
 
 /// KP rotation scheduler tick cadence. Each tick the libcore checks
@@ -115,10 +117,8 @@ impl Relay {
     ) -> Result<JoinHandle<ConnectionError>, RelayConnError> {
         let addr = SocketAddr::new(IpAddr::from_str(&self.host)?, self.port);
 
-        info!("connecting to relay({}) at {}", self.id, addr);
+        info!("connecting to relay {} ({})", node_short(&self.id), addr_short(addr));
         ConnectionState::Connecting.emit();
-
-        let connect_start = systime().as_millis() as u64;
 
         let connecting = ENDPOINT.get().unwrap().connect(addr, &self.id)?;
         let conn = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
@@ -127,20 +127,26 @@ impl Relay {
                 ConnectionState::Failed.emit();
                 if is_terminal_for_relay(&err) {
                     warn!(
-                        "relay({}) at {addr} cert/auth failure ({err}) — terminal, will not retry",
-                        self.id
+                        "relay {} ({}) cert/auth failure ({err}) — terminal, will not retry",
+                        node_short(&self.id),
+                        addr_short(addr)
                     );
                     _ = self.record_terminal_failure();
                 } else {
-                    error!("relay({}) at {addr} connect failed: {err}", self.id);
+                    error!(
+                        "relay {} ({}) connect failed: {err}",
+                        node_short(&self.id),
+                        addr_short(addr)
+                    );
                     _ = self.record_failure();
                 }
                 return Err(RelayConnError::Continue);
             },
             Err(_) => {
                 warn!(
-                    "relay({}) at {addr} unreachable — timed out after {}s",
-                    self.id,
+                    "relay {} ({}) unreachable — timed out after {}s",
+                    node_short(&self.id),
+                    addr_short(addr),
                     CONNECT_TIMEOUT.as_secs()
                 );
                 ConnectionState::Failed.emit();
@@ -201,8 +207,7 @@ impl Relay {
             },
         };
 
-        let connect_ms = systime().as_millis() as u64 - connect_start;
-        info!("authenticated with relay({}) in {connect_ms}ms at {timestamp}", self.id);
+        info!("authenticated with relay {}", node_short(&self.id));
         CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
         // Auth is up but the offline backlog (welcomes, deferred sends, queued
         // messages) isn't drained yet — surface that as "Syncing…". `handle`
@@ -293,7 +298,7 @@ impl Relay {
         while conn.close_reason().is_none() {
             let rtt_ms = conn.rtt().as_millis() as u64;
             if let Err(e) = self.record_rtt(rtt_ms) {
-                warn!("relay({}) rtt sample failed: {e}", self.id);
+                warn!("relay {} rtt sample failed: {e}", node_short(&self.id));
             }
             tokio::time::sleep(RTT_SAMPLE_INTERVAL).await;
         }
@@ -331,7 +336,7 @@ impl Relay {
         let (mut tx, mut rx) = match conn.open_bi().await {
             Ok(s) => s,
             Err(e) => {
-                warn!("relay({}) ack_drain: open_bi failed: {e}", self.id);
+                warn!("relay {} ack_drain: open_bi failed: {e}", node_short(&self.id));
                 return;
             },
         };
@@ -359,12 +364,12 @@ impl Relay {
                     )
                     .await
                     {
-                        warn!("relay({}) ack_drain: AckAuth reply failed: {e}", self.id);
+                        warn!("relay {} ack_drain: AckAuth reply failed: {e}", node_short(&self.id));
                     }
                     _ = ack_tx.finish();
                 },
                 Err(e) => {
-                    warn!("relay({}) ack_drain: open_bi for AckAuth failed: {e}", self.id)
+                    warn!("relay {} ack_drain: open_bi for AckAuth failed: {e}", node_short(&self.id))
                 },
             }
         }
@@ -384,7 +389,7 @@ impl Relay {
             *guard = None;
         }
 
-        error!("relay({}) connection lost: {err}", self.id);
+        error!("relay {} connection lost: {err}", node_short(&self.id));
     }
 
     /// Waits for incoming streams. Runs until the connection is lost.
@@ -400,7 +405,7 @@ impl Relay {
         // fails we still proceed with DrainQueue (relay will only be able to
         // serve its own local queue, falling back to natural TTL convergence).
         if let Err(err) = self.send_drain_auth(conn, ipk).await {
-            warn!("relay({}) drain-auth send failed: {err}", self.id);
+            warn!("relay {} drain-auth send failed: {err}", node_short(&self.id));
         }
 
         // Re-dispatch durably-queued outbox rows (enqueued while offline, or
@@ -497,7 +502,7 @@ impl Relay {
                         received += 1;
                         if let Err(e) = process_deliver(msg, self.dht_client.clone()).await {
                             failed = true;
-                            warn!("relay({}) drain: retaining message for retry: {e}", self.id);
+                            warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
                         }
                     },
                     other => debug!("unexpected packet in drain response: {other:?}"),
@@ -505,7 +510,7 @@ impl Relay {
             }
 
             if received > 0 && !failed {
-                info!("relay({}): drained {received} queued message(s)", self.id);
+                info!("relay {}: drained {received} queued message(s)", node_short(&self.id));
                 self.ack_drain(conn, ipk).await;
             }
         }
@@ -517,8 +522,6 @@ impl Relay {
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
         let relay_id = self.id.clone();
-
-        debug!("waiting for incoming streams from relay({})", relay_id);
 
         // Hold the drop guard for the duration of `handle()`. When
         // `handle` returns (connection lost), the guard drops →
@@ -532,7 +535,7 @@ impl Relay {
             let permit = match semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    debug!("relay({}) stream limit reached, dropping stream", relay_id);
+                    debug!("relay {} stream limit reached, dropping stream", node_short(&relay_id));
                     continue;
                 },
             };
@@ -577,7 +580,7 @@ impl Relay {
                             Ok(())
                         },
                     } {
-                        warn!("relay({}) handle err: {err}", relay_id);
+                        warn!("relay {} handle err: {err}", node_short(&relay_id));
                     }
                 }
             });
@@ -845,7 +848,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                     // Candidate offer for a direct connection — hand to the
                     // P2P layer (routed to the waiting session), never stored.
                     info!(
-                        "P2P: received offer from {} ({} candidates)",
+                        "P2P[{}]: received offer — {} cands",
                         hex::encode(&msg.from[..4]),
                         candidates.len()
                     );

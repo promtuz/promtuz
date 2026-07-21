@@ -169,7 +169,7 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
                     crate::utils::systime().as_secs().saturating_sub(p.updated_at)
                         < WAKE_BACKOFF_SECS
                 });
-            log::info!(
+            log::warn!(
                 "transfer: {} unreachable ({e}); holding {}{}",
                 hex::encode(&peer[..4]),
                 hex::encode(&file_id[..4]),

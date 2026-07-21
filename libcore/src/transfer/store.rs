@@ -2,7 +2,6 @@
 //! (`retention`) and what a receiver has partially pulled (`partials`), plus
 //! the on-disk location of the partial bytes.
 
-use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -66,8 +65,6 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static TRANSFERS_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     let mut conn = Connection::open(crate::db::db("transfers")).expect("db open failed");
-    info!("DB: TRANSFERS_DB CONNECTED");
-
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     MIGRATIONS.to_latest(&mut conn).expect("db migration failed");
     // Partials advance as chunks land; the doorbell lets the UI re-read progress.

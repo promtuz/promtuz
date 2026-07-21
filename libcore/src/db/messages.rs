@@ -1,4 +1,3 @@
-use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -132,8 +131,6 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("messages")).expect("db open failed");
-    info!("DB: MESSAGES_DB CONNECTED");
-
     PRAGMA!(conn, MIGRATIONS);
     super::register_change_hook(&conn, &["messages", "reactions", "message_media"]);
 

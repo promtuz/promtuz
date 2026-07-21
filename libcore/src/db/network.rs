@@ -1,6 +1,5 @@
 use anyhow::Result;
 use anyhow::bail;
-use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -106,8 +105,6 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static NETWORK_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("network")).expect("db open failed");
-    info!("DB: NETWORK_DB CONNECTED");
-
     PRAGMA!(conn, MIGRATIONS);
 
     Mutex::new(conn)

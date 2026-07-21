@@ -26,7 +26,6 @@
 //! fixtures can spin up a fresh `:memory:` connection without going
 //! through the on-disk singleton.
 
-use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -186,8 +185,6 @@ pub fn apply_mls_migrations(conn: &mut Connection) {
 /// through separate SQLite connections.
 pub static MLS_DB: Lazy<std::sync::Arc<Mutex<Connection>>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("mls")).expect("db open failed");
-    info!("DB: MLS_DB CONNECTED");
-
     apply_mls_migrations(&mut conn);
 
     std::sync::Arc::new(Mutex::new(conn))

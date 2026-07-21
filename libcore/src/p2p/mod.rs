@@ -43,6 +43,8 @@ use tokio::time::timeout;
 
 use crate::RUNTIME;
 use crate::data::identity::Identity;
+use crate::utils::addr_short;
+use crate::utils::addrs_short;
 use disco::DiscoKey;
 use signal::Offer;
 use socket::Poke;
@@ -106,8 +108,9 @@ static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
 fn endpoint() -> Result<&'static P2pEndpoint> {
     P2P.get_or_try_init(|| {
         let built = socket::build_endpoint()?;
-        let port = built.endpoint.local_addr()?.port();
-        log::info!("P2P: endpoint bound to {:?}", built.endpoint.local_addr());
+        let local = built.endpoint.local_addr()?;
+        let port = local.port();
+        log::info!("P2P: endpoint bound to {}", addr_short(local));
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
         let mut inbox = built.inbox;
@@ -197,7 +200,7 @@ async fn reflexive_probe(
     let deadline = tokio::time::Instant::now() + STUN_TIMEOUT;
     while let Ok(Some((rtx, seen))) = tokio::time::timeout_at(deadline, stun_rx.recv()).await {
         if rtx == tx {
-            log::info!("P2P: reflexive address {seen}");
+            log::info!("P2P: reflexive address {}", addr_short(seen));
             let _ = report.send(Some(seen));
             return;
         }
@@ -314,11 +317,26 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     ep.sessions.lock().remove(&chan);
     signal::stop(peer);
 
-    // Prove the link both ways as part of connecting (dialer pings, acceptor
-    // answers), so one debug tap on either side is self-verifying.
-    let link = result?;
-    link.verify_roundtrip().await?;
-    log::info!("P2P[{}]: link verified — {}", hex::encode(&peer[..4]), link.remote_address());
+    // Single terminal outcome per attempt: warn with the reason on failure,
+    // info with the winning route on success.
+    let (link, route) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("P2P[{}]: connection failed — {e}", hex::encode(&peer[..4]));
+            return Err(e);
+        },
+    };
+    // Prove the link both ways (dialer pings, acceptor answers) so the connect
+    // is self-verifying before we hand it out.
+    if let Err(e) = link.verify_roundtrip().await {
+        log::warn!("P2P[{}]: link verify failed — {e}", hex::encode(&peer[..4]));
+        return Err(e);
+    }
+    log::info!(
+        "P2P[{}]: connected via {route} — {}",
+        hex::encode(&peer[..4]),
+        addr_short(link.remote_address())
+    );
     ep.links.lock().insert(peer, link.clone());
     // Both ends serve pulls for whatever they retain, so a file offered either
     // direction is fetchable over this one link.
@@ -418,7 +436,7 @@ async fn run_session(
     mut poke_rx: mpsc::UnboundedReceiver<Poke>,
     offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
-) -> Result<PeerLink> {
+) -> Result<(PeerLink, &'static str)> {
     // Wait briefly for the one-shot reflexive probe so our first offer can
     // carry the server-reflexive address (it makes a cone-NAT peer punchable
     // instead of forcing the bridge). Immediate once the probe has answered.
@@ -451,11 +469,10 @@ async fn run_session(
 
     let dialer = our_ipk < peer;
     log::info!(
-        "P2P[{}]: {} — {} peer candidates: {:?}",
+        "P2P[{}]: {}, peer offers [{}]",
         hex::encode(&peer[..4]),
         if dialer { "dialer" } else { "acceptor" },
-        peer_cands.len(),
-        peer_cands
+        addrs_short(&peer_cands)
     );
 
     // The shared disco key: the dialer's, over the public IPK-derived channel
@@ -496,19 +513,19 @@ async fn run_session(
         // Dialer: punch, then connect to whichever path opened — the
         // validated direct address, else the TURN bridge's synthetic address.
         let punched = punch::punch(&ep.pokes, &mut poke_rx, key, peer_cands, PUNCH_TIMEOUT).await;
-        let addr = match (punched, turn_synth) {
+        let (addr, route) = match (punched, turn_synth) {
             (Some(a), _) => {
-                log::info!("P2P[{}]: punched, dialing {}", hex::encode(&peer[..4]), a);
-                a
+                log::info!("P2P[{}]: hole punched, dialing {}", hex::encode(&peer[..4]), addr_short(a));
+                (a, "direct")
             },
             (None, Some(s)) => {
-                log::info!("P2P[{}]: punch failed, dialing via TURN", hex::encode(&peer[..4]));
-                s
+                log::info!("P2P[{}]: punch failed, dialing via TURN relay", hex::encode(&peer[..4]));
+                (s, "relay")
             },
-            (None, None) => bail!("hole-punch failed and no relay for TURN"),
+            (None, None) => bail!("punch failed and no relay for TURN"),
         };
         let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
-        Ok(PeerLink { conn, dialer: true, ipk: peer })
+        Ok((PeerLink { conn, dialer: true, ipk: peer }, route))
     } else {
         // Acceptor: run the punch in the background purely to open our NAT
         // (its validation result doesn't matter — the hole is what counts),
@@ -519,16 +536,11 @@ async fn run_session(
             let mut rx = poke_rx;
             let _ = punch::punch(&pokes, &mut rx, key, peer_cands, PUNCH_TIMEOUT).await;
         });
-        log::info!("P2P[{}]: acceptor — waiting for inbound QUIC", hex::encode(&peer[..4]));
+        log::info!("P2P[{}]: acceptor waiting for inbound", hex::encode(&peer[..4]));
         let incoming = timeout(ACCEPT_TIMEOUT, ep.endpoint.accept())
             .await
             .map_err(|_| anyhow!("timed out waiting for inbound connection"))?
             .ok_or_else(|| anyhow!("endpoint closed"))?;
-        log::info!(
-            "P2P[{}]: inbound connection from {}",
-            hex::encode(&peer[..4]),
-            incoming.remote_address()
-        );
         // ponytail: MVP accepts the first inbound. Only this peer knows our
         // punched address (candidates went over E2E MLS) and the TURN token
         // (MLS-derived), and peer TLS gates on a valid IPK cert — but the
@@ -536,6 +548,6 @@ async fn run_session(
         // add when >1 concurrent session is possible.
         let conn = incoming.accept()?.await?;
         engine.abort();
-        Ok(PeerLink { conn, dialer: false, ipk: peer })
+        Ok((PeerLink { conn, dialer: false, ipk: peer }, "inbound"))
     }
 }

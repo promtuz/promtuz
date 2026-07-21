@@ -40,6 +40,7 @@ use crate::platform::EVENTS;
 use crate::platform::SECURE_STORE;
 use crate::platform::SecureStore;
 use crate::quic::server::RelayConnError;
+use crate::utils::node_short;
 
 /// Root CA for the relay/resolver TLS, baked in at build time. Sourced from
 /// the repo's gitignored `.tls/` — the same dev CA store testnet signs with
@@ -191,15 +192,16 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
             match selected {
                 Ok(relay) => {
                     let id = relay.id.clone();
-                    trace!("connecting to relay({id})");
+                    let short = node_short(&id);
+                    trace!("connecting to relay {short}");
                     match relay.connect(ipk).await {
                         Ok(handle) => match handle.await {
-                            Ok(conn_err) => error!("relay({id}) connection closed: {conn_err}"),
-                            Err(join_err) => error!("relay({id}) handle join failed: {join_err}"),
+                            Ok(conn_err) => error!("relay {short} connection closed: {conn_err}"),
+                            Err(join_err) => error!("relay {short} handle join failed: {join_err}"),
                         },
                         Err(RelayConnError::Continue) => {},
                         Err(RelayConnError::Error(err)) => {
-                            error!("relay({id}) connect error: {err}")
+                            error!("relay {short} connect error: {err}")
                         },
                     }
                 },
