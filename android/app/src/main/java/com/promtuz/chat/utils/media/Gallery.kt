@@ -30,14 +30,16 @@ suspend fun loadGallery(context: Context, limit: Int = 500): List<GalleryItem> =
         MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
         MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
     )
-    val sort = "${MediaStore.Files.FileColumns.DATE_ADDED} DESC LIMIT $limit"
+    // No "LIMIT n" in the sort string — MediaStore rejects it as an invalid token on
+    // API 30+ (crash). Cap while reading the cursor instead.
+    val sort = "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
 
     val items = mutableListOf<GalleryItem>()
     context.contentResolver.query(collection, projection, selection, selectionArgs, sort)?.use { cursor ->
         val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
         val typeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
         val durationCol = if (hasDuration) cursor.getColumnIndex(MediaStore.Files.FileColumns.DURATION) else -1
-        while (cursor.moveToNext()) {
+        while (cursor.moveToNext() && items.size < limit) {
             val id = cursor.getLong(idCol)
             val isVideo = cursor.getInt(typeCol) == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
             val duration = if (isVideo && durationCol >= 0) cursor.getLong(durationCol) else 0L
