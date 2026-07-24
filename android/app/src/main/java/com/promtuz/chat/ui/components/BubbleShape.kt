@@ -37,42 +37,52 @@ class BubbleShape(
         val tl = px(topLeft); val tr = px(topRight); val bl = px(bottomLeft); val br = px(bottomRight)
         val ts = px(tailSize)
 
+        // The sender-bottom corner is squared where the tail attaches so the tail's
+        // flat inner edge sits flush against the body.
+        val bodyBl = if (tail == Tail.Left) 0f else bl
+        val bodyBr = if (tail == Tail.Right) 0f else br
+
         val path = Path().apply {
-            when (tail) {
-                null -> addRoundRect(
-                    RoundRect(
-                        0f, 0f, w, h,
-                        topLeftCornerRadius = CornerRadius(tl),
-                        topRightCornerRadius = CornerRadius(tr),
-                        bottomRightCornerRadius = CornerRadius(br),
-                        bottomLeftCornerRadius = CornerRadius(bl),
-                    )
+            addRoundRect(
+                RoundRect(
+                    0f, 0f, w, h,
+                    topLeftCornerRadius = CornerRadius(tl),
+                    topRightCornerRadius = CornerRadius(tr),
+                    bottomRightCornerRadius = CornerRadius(bodyBr),
+                    bottomLeftCornerRadius = CornerRadius(bodyBl),
                 )
-                // Outgoing: straight right edge down to a point at the bottom-right, then a small
-                // concave scoop back onto the bottom edge — the tail flick.
+            )
+            // Tail: a filled flick appended off the sender's bottom corner, protruding
+            // past the body edge. The SVG is authored ~12dp tall; we scale it uniformly
+            // so its height == tailSize and translate it onto the corner.
+            when (tail) {
+                null -> {}
+                // Outgoing — off the bottom-right, curling right.
+                // Path: M0 12.5234 V0 C0 5.89745 6.42368 11.3541 12.2834 12.5234 H0 Z
                 Tail.Right -> {
-                    moveTo(tl, 0f)
-                    lineTo(w - tr, 0f)
-                    quadraticTo(w, 0f, w, tr)
+                    val s = ts / 12.5234f
+                    moveTo(w, h)
+                    lineTo(w, h - ts)
+                    cubicTo(
+                        w, (h - ts) + 5.89745f * s,
+                        w + 6.42368f * s, (h - ts) + 11.3541f * s,
+                        w + 12.2834f * s, h,
+                    )
                     lineTo(w, h)
-                    quadraticTo(w - ts * 0.5f, h - ts * 0.5f, w - ts, h)
-                    lineTo(bl, h)
-                    quadraticTo(0f, h, 0f, h - bl)
-                    lineTo(0f, tl)
-                    quadraticTo(0f, 0f, tl, 0f)
                     close()
                 }
-                // Incoming: mirror — tail off the bottom-left.
+                // Incoming — mirror off the bottom-left, curling left.
+                // Path: M12 13 V0 C12 6.12186 5.72456 11.7862 0 13 H12 Z
                 Tail.Left -> {
-                    moveTo(tl, 0f)
-                    lineTo(w - tr, 0f)
-                    quadraticTo(w, 0f, w, tr)
-                    lineTo(w, h - br)
-                    quadraticTo(w, h, w - br, h)
-                    lineTo(ts, h)
-                    quadraticTo(ts * 0.5f, h - ts * 0.5f, 0f, h)
-                    lineTo(0f, tl)
-                    quadraticTo(0f, 0f, tl, 0f)
+                    val s = ts / 13f
+                    moveTo(0f, h)
+                    lineTo(0f, h - ts)
+                    cubicTo(
+                        0f, (h - ts) + 6.12186f * s,
+                        (5.72456f - 12f) * s, (h - ts) + 11.7862f * s,
+                        -12f * s, h,
+                    )
+                    lineTo(0f, h)
                     close()
                 }
             }

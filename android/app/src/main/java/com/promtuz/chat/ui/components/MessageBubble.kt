@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -51,6 +52,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -62,6 +64,8 @@ import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.stage.ChatMotion
+import com.promtuz.chat.ui.theme.PromtuzTheme
+import android.content.res.Configuration
 
 /**
  * A message bubble as an ordered stack of content blocks (text today; media /
@@ -151,6 +155,12 @@ fun MessageBubble(
                 MetaRow(msg, textColor)
             },
             modifier = Modifier
+                // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
+                // the .clip below. Both clip to the node's rectangular bounds, which would
+                // shear off the tail flicking past the body edge. As a plain draw modifier
+                // here, background paints the whole outline (tail included) into the parent
+                // Box (which never clips); .clip still bounds the child content below.
+                .background(bubbleColor, shape)
                 // edit/delete/reactions change the bubble's size in place — glide from the
                 // tail corner on the shared clock so neighbors (stage) track frame-locked
                 .animateContentSize(
@@ -158,7 +168,6 @@ fun MessageBubble(
                     alignment = if (outgoing) Alignment.BottomEnd else Alignment.BottomStart,
                 )
                 .clip(shape)
-                .background(bubbleColor)
                 .onGloballyPositioned { coords.bubble = it }
                 .then(
                     if (onLongPress == null) Modifier
@@ -166,17 +175,22 @@ fun MessageBubble(
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             if (menuState?.isOpen == true) return@awaitEachGesture
-                            val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            val press =
+                                awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onLongPress(coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero)
+                            onLongPress(
+                                coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero
+                            )
                             if (menuState == null) return@awaitEachGesture
 
                             // Same finger now drives the open menu: drag hovers, release picks.
                             var dragged = false
                             while (true) {
                                 val ev = awaitPointerEvent()
-                                val ch = ev.changes.firstOrNull { it.id == press.id } ?: ev.changes.first()
-                                val root = coords.bubble?.takeIf { it.isAttached }?.localToRoot(ch.position)
+                                val ch = ev.changes.firstOrNull { it.id == press.id }
+                                    ?: ev.changes.first()
+                                val root = coords.bubble?.takeIf { it.isAttached }
+                                    ?.localToRoot(ch.position)
                                 if (!ch.pressed) {
                                     // Commits require an actual drag: a stationary hold-and-lift
                                     // only leaves the menu open, even if an item spawned under
@@ -186,10 +200,12 @@ fun MessageBubble(
                                             haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                                             hit.action.onClick()
                                         }
+
                                         is MenuHit.Reaction -> {
                                             haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                                             menuState.onReact?.invoke(hit.emoji)
                                         }
+
                                         null -> menuState.close()
                                     }
                                     break
@@ -258,7 +274,10 @@ private fun QuoteBlock(quote: Quote, textColor: Color, accent: Color, onClick: (
             .then(onClick?.let { Modifier.clickable(onClick = it) } ?: Modifier)
             .height(IntrinsicSize.Min),
     ) {
-        Box(Modifier.width(3.dp).fillMaxHeight().background(accent))
+        Box(Modifier
+            .width(3.dp)
+            .fillMaxHeight()
+            .background(accent))
         Text(
             quote.text ?: "Message unavailable",
             Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -366,7 +385,10 @@ private fun MetaRow(msg: UiMessage, textColor: Color) {
                 MetaState.Pending ->
                     CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
                 MetaState.Failed ->
-                    Box(Modifier.size(9.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                    Box(Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error))
                 MetaState.Sent ->
                     Text(BubbleTextLayouts.clock(msg.timestampMs), style = metaStyle, color = metaColor)
             }
@@ -381,3 +403,104 @@ private class CoordsHolder {
     var bubble: LayoutCoordinates? = null
 }
 
+
+
+
+// === // === // === // === // === // === // === // === // === // === // === // === // === // === // === //
+
+/**
+ * Sample [UiMessage] factory for previews — only the fields a preview usually
+ * varies are parameters; the rest carry sensible constants. The bubble is a pure
+ * renderer, so no callbacks/menuState are wired here.
+ */
+private fun previewMsg(
+    text: String,
+    outgoing: Boolean,
+    id: String,
+    status: SendStatus = SendStatus.Read,
+    edited: Boolean = false,
+    deleted: Boolean = false,
+    reactions: List<ReactionGroup> = emptyList(),
+    quote: Quote? = null,
+    content: MessageContent = MessageContent.Text(text),
+) = UiMessage(
+    key = id,
+    localId = id,
+    dispatchIdHex = id,
+    content = content,
+    outgoing = outgoing,
+    status = status,
+    edited = edited,
+    deleted = deleted,
+    timestampMs = 1_700_000_000_000L,
+    reactions = reactions,
+    quote = quote,
+)
+
+/** A whole conversation's worth of bubble states, stacked. */
+@Composable
+private fun MessageBubbleGallery() {
+    Column(
+        Modifier
+            .background(MaterialTheme.colorScheme.background)
+            .padding(vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        MessageBubble(msg = previewMsg("Hey! Did the preview land yet?", outgoing = false, id = "1"))
+        MessageBubble(
+            msg = previewMsg(
+                "Just wiring them up now — a full gallery of states so you can eyeball the layout.",
+                outgoing = true, id = "2",
+            ),
+        )
+        MessageBubble(
+            msg = previewMsg(
+                "Nice, this one is a reply.", outgoing = false, id = "3",
+                quote = Quote(dispatchIdHex = "2", text = "Just wiring them up now…", outgoing = true),
+            ),
+        )
+        MessageBubble(
+            msg = previewMsg(
+                "Loved it ❤️", outgoing = true, id = "4", edited = true,
+                reactions = listOf(ReactionGroup("❤️", 2, true), ReactionGroup("🔥", 1, false)),
+            ),
+        )
+        MessageBubble(msg = previewMsg("Sending…", outgoing = true, id = "5", status = SendStatus.Pending))
+        MessageBubble(msg = previewMsg("Didn't go through", outgoing = true, id = "6", status = SendStatus.Failed))
+        MessageBubble(msg = previewMsg("", outgoing = false, id = "7", deleted = true))
+        MessageBubble(
+            msg = previewMsg(
+                "A longer incoming message to check how the bubble wraps across multiple " +
+                    "lines and reserves the trailing meta corner without colliding with text.",
+                outgoing = false, id = "8",
+            ),
+        )
+    }
+}
+
+// === // === // === // === // === // === // === // === // === // === // === // === // === // === // === //
+
+@Preview(name = "Light", showBackground = true)
+@Preview(name = "Dark", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun MessageBubblePreview() {
+    PromtuzTheme { MessageBubbleGallery() }
+}
+
+/** Merged run — top/middle/bottom of a same-sender group; checks the shape flags. */
+@Preview(name = "Merged run", showBackground = true)
+@Composable
+private fun MessageBubbleMergedPreview() {
+    PromtuzTheme {
+        Column(
+            Modifier
+                .background(MaterialTheme.colorScheme.background)
+                .padding(vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            MessageBubble(msg = previewMsg("First in the run", outgoing = true, id = "m1"), mergedBottom = true)
+            MessageBubble(msg = previewMsg("Middle one", outgoing = true, id = "m2"), mergedTop = true, mergedBottom = true)
+            MessageBubble(msg = previewMsg("Last in the run", outgoing = true, id = "m3"), mergedTop = true)
+        }
+    }
+}
