@@ -42,20 +42,14 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.foundation.text.InlineTextContent
-import androidx.compose.ui.text.Placeholder
-import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.foundation.text.appendInlineContent
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
+import kotlin.math.ceil
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
@@ -67,12 +61,27 @@ import com.promtuz.chat.ui.stage.ChatMotion
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import android.content.res.Configuration
 
+/** The bubble's inner inset. The vertical half doubles as the meta's drop budget. */
+private val BubblePadH = 11.dp
+private val BubblePadV = 6.dp
+
+/**
+ * How far the meta sits below the text's last line when it rides beside it, so the
+ * timestamp settles under the baseline rather than reading level with the text.
+ *
+ * This is spent out of [BubblePadV], not added to the bubble's height — the meta
+ * hangs into the existing padding, so the bubble never grows for it. Values past
+ * that budget are clamped: the [clip] to the bubble shape would crop the glyphs.
+ */
+private val MetaBaselineDrop = 3.dp
+
 /**
  * A message bubble as an ordered stack of content blocks (text today; media /
  * reply become sibling blocks with the polymorphic content). Shape/colors/width
  * come from [LocalChatAppearance]. The trailing meta — a sent-time, or a spinner
- * for a not-yet-sent message — is pinned to the bubble's bottom-end corner; a
- * measured inline placeholder keeps that corner glyph-free so text never collides.
+ * for a not-yet-sent message — is pinned to the bubble's bottom-end corner; the
+ * bubble widens to seat it beside the text's last line, or gives it a compact row
+ * of its own when that line has no room.
  * No per-message ticks: delivery state rides the frontier markers.
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
@@ -105,8 +114,10 @@ fun MessageBubble(
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
     val haptic = LocalHapticFeedback.current
     // Plain refs, not snapshot state: positions change every frame during placement
-    // animations and are only ever read inside gesture handlers.
+    // animations and are only ever read inside gesture handlers (and, for the text
+    // layout, inside the measure pass that just wrote it).
     val coords = remember { CoordsHolder() }
+    val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
     // Plain Box, not BoxWithConstraints — that's a nested SubcomposeLayout per
     // bubble, real weight on every bubble birth. The width cap is applied inside
@@ -131,7 +142,7 @@ fun MessageBubble(
                 val content = msg.content
                 when {
                     msg.deleted || content is MessageContent.Text ->
-                        BubbleText(msg, textColor, appearance.type.fontScale)
+                        BubbleText(msg, textColor, appearance.type.fontScale) { coords.text = it }
                     content is MessageContent.Image ->
                         ImageBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
                     content is MessageContent.Attachment ->
@@ -227,13 +238,12 @@ fun MessageBubble(
                         detectTapGestures(onDoubleTap = { onDoubleTap() })
                     }
                 )
-                .padding(horizontal = 11.dp, vertical = 6.dp),
+                .padding(horizontal = BubblePadH, vertical = BubblePadV),
         ) { measurables, constraints ->
             // Children: [quote?] text [reactions?] meta. The quote must span the widest
             // sibling (measured last with that width as its minimum — measurables measure
-            // once); the meta is pinned to the bubble's absolute bottom-end corner — the
-            // text reserves that corner via its invisible trailing placeholder, and a
-            // reactions row shares its line with the meta instead.
+            // once); the meta is pinned to the bubble's absolute bottom-end corner, and the
+            // bubble grows to keep it off the content — see the contentWidth branches below.
             val hasQuote = msg.quote != null
             val hasReactions = msg.reactions.isNotEmpty()
             val cap = (constraints.maxWidth * widthFraction).toInt()
@@ -243,21 +253,51 @@ fun MessageBubble(
             val reactions = if (hasReactions) measurables[++idx].measure(loose) else null
             val meta = measurables[idx + 1].measure(loose)
 
+            // Where the text's own last line ends — populated by BubbleText's onTextLayout
+            // during the measure above. Null for media blocks, which reserve their corner
+            // internally and own their full footprint.
+            val lastLine = coords.text
+                ?.takeIf { it.lineCount > 0 }
+                ?.let { ceil(it.getLineRight(it.lineCount - 1)).toInt() }
+
             val metaGap = 8.dp.roundToPx()
-            val contentWidth = maxOf(
-                text.width,
-                reactions?.let { it.width + metaGap + meta.width } ?: 0,
-            )
+            // The meta rides the text's last line when that line leaves room for it; when it
+            // doesn't, it drops to a row of its own — meta-height, not a full text line, so a
+            // wrapped timestamp doesn't leave a tall empty gutter. Reactions, when present,
+            // share their line with the meta instead and take priority.
+            var metaRow = 0
+            // Riding the last line, the meta would otherwise bottom-align with the text's
+            // line box and read as level with it. This settles it just under the baseline,
+            // spent out of the bubble's own padding so the bubble doesn't grow — see the
+            // height below, which deliberately leaves metaDrop out.
+            var metaDrop = 0
+            val contentWidth = when {
+                hasReactions -> maxOf(text.width, reactions!!.width + metaGap + meta.width)
+                // Media owns its whole footprint and keeps the corner clear itself.
+                !isTextBlock -> text.width
+                // No layout to consult (shouldn't happen — onTextLayout runs in the measure
+                // above): give the meta its own row rather than risk it landing on a glyph.
+                lastLine == null -> { metaRow = meta.height; text.width }
+                lastLine + metaGap + meta.width <= cap -> {
+                    metaDrop = MetaBaselineDrop.coerceAtMost(BubblePadV).roundToPx()
+                    maxOf(text.width, lastLine + metaGap + meta.width)
+                }
+                else -> { metaRow = meta.height; text.width }
+            }
             val quote = if (hasQuote) measurables[0].measure(loose.copy(minWidth = contentWidth)) else null
 
             val width = maxOf(contentWidth, quote?.width ?: 0)
-            val height = (quote?.height ?: 0) + text.height + (reactions?.height ?: 0)
+            // metaDrop is absent by design: it's spent out of the padding, so it moves the
+            // meta without moving the Layout. metaRow can't be — a row of its own needs
+            // real space, and the padding alone can't cover a full meta height.
+            val height =
+                (quote?.height ?: 0) + text.height + metaRow + (reactions?.height ?: 0)
             layout(width, height) {
                 var y = 0
                 quote?.let { it.placeRelative(0, 0); y = it.height }
                 text.placeRelative(0, y)
                 reactions?.placeRelative(0, y + text.height)
-                meta.placeRelative(width - meta.width, height - meta.height)
+                meta.placeRelative(width - meta.width + metaDrop, height - meta.height + metaDrop)
             }
         }
     }
@@ -310,39 +350,29 @@ private fun ReactionChip(rg: ReactionGroup, textColor: Color, accent: Color, onT
 }
 
 /**
- * The message text with an invisible trailing placeholder reserving the meta's
- * final footprint — the timestamp is known at send time, so the flip never
- * re-wraps a line. The meta itself is a sibling pinned to the absolute corner.
+ * The message text, wrapped purely on its own content. It reserves nothing for the
+ * meta: [onLayout] hands the resolved [TextLayoutResult] up to the bubble's Layout
+ * (it fires during this node's measure, so the parent reads it in the same pass),
+ * which then decides whether the meta rides the last line or takes its own row.
  */
 @Composable
-private fun BubbleText(msg: UiMessage, textColor: Color, fontScale: Float) {
+private fun BubbleText(
+    msg: UiMessage,
+    textColor: Color,
+    fontScale: Float,
+    onLayout: (TextLayoutResult) -> Unit,
+) {
     val color = if (msg.deleted) textColor.copy(alpha = 0.6f) else textColor
     val text = BubbleTextLayouts.contentOf(msg)
 
     val base = MaterialTheme.typography.bodyLarge
-    val metaStyle = MaterialTheme.typography.labelSmall
-    val density = LocalDensity.current
-    val measurer = rememberTextMeasurer()
-    val label = BubbleTextLayouts.metaLabelOf(msg)
-    val labelPx = remember(label, metaStyle) { measurer.measure(label, metaStyle).size.width }
-    val metaWidth = with(density) { (labelPx + 8.dp.roundToPx()).toSp() }
-
-    val annotated = buildAnnotatedString {
-        append(text)
-        appendInlineContent("meta")
-    }
-    val inline = mapOf(
-        "meta" to InlineTextContent(
-            Placeholder(metaWidth, 1.2.em, PlaceholderVerticalAlign.TextBottom)
-        ) {}
-    )
     Text(
-        annotated,
+        text,
         Modifier.fadeOnChange(text),
         style = base.copy(fontSize = base.fontSize * fontScale, color = color),
         fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
         color = color,
-        inlineContent = inline,
+        onTextLayout = onLayout,
     )
 }
 
@@ -401,6 +431,9 @@ private enum class MetaState { Pending, Failed, Sent }
 private class CoordsHolder {
     var row: LayoutCoordinates? = null
     var bubble: LayoutCoordinates? = null
+
+    /** Last text layout, written during the text child's measure and read right after it. */
+    var text: TextLayoutResult? = null
 }
 
 
@@ -436,6 +469,33 @@ private fun previewMsg(
     reactions = reactions,
     quote = quote,
 )
+
+/**
+ * The meta's wrap boundary: messages stepping up in length until the last line
+ * stops leaving room for the timestamp and it drops to a row of its own.
+ */
+@Preview(name = "Meta wrap", showBackground = true)
+@Composable
+private fun MessageBubbleMetaWrapPreview() {
+    PromtuzTheme {
+        Column(
+            Modifier
+                .background(MaterialTheme.colorScheme.background)
+                .padding(vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            listOf(
+                "Hi",
+                "Hey! Did the preview",
+                "Hey! Did the preview land",
+                "Hey! Did the preview land yet?",
+                "Hey! Did the preview land yet? Checking the wrap boundary here.",
+            ).forEachIndexed { i, t ->
+                MessageBubble(msg = previewMsg(t, outgoing = i % 2 == 1, id = "w$i"))
+            }
+        }
+    }
+}
 
 /** A whole conversation's worth of bubble states, stacked. */
 @Composable
