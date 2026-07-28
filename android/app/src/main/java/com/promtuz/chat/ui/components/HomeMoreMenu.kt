@@ -13,12 +13,13 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 fun HomeMoreMenu(viewModel: AppVM, modifier: Modifier = Modifier) {
     val groups = remember(viewModel) {
         listOf(
-            listOf(MenuAction("My Profile", R.drawable.i_profile) {}),
-            listOf(MenuAction("Settings", R.drawable.i_settings) { viewModel.navigator.push(Routes.Settings) }),
+            listOf(MenuAction("My Profile", R.drawable.oi_user_circle) {}),
+            listOf(MenuAction("Settings", R.drawable.oi_settings) { viewModel.navigator.push(Routes.Settings) }),
         )
     }
 
     AppDropMenu(
+        iconSize = 20.dp,
         anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp)) },
         groups = groups,
         modifier = modifier,

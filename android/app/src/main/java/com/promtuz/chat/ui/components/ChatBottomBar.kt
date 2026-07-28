@@ -202,8 +202,8 @@ private fun ComposerRow(
             contentAlignment = Alignment.Center,
         ) {
             DrawableIcon(
-                R.drawable.i_link,
-                Modifier.size(22.dp).rotate(attachRot),
+                R.drawable.oi_paperclip,
+                Modifier.size(20.dp).rotate(attachRot),
                 tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
             )
         }

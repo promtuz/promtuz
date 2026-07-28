@@ -46,6 +46,10 @@ class ChatVM(private val application: Application) : ViewModel() {
     private var peer: ByteArray = ByteArray(32)
     private var started = false
 
+    val peerHex: String by lazy {
+        peer.toHex()
+    }
+
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
     val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
 

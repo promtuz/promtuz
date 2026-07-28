@@ -64,6 +64,14 @@ data class MenuAction(
 )
 
 /**
+ * Menu row icon size. Explicit because Material's [androidx.compose.material3.Icon]
+ * only falls back to its own 24dp default when the painter has no intrinsic size —
+ * a vector drawable always reports one, so without this every row would silently
+ * render at whatever its XML happened to declare.
+ */
+val MenuIconSize = 20.dp
+
+/**
  * Our dropdown, so height/shape/spacing are ours instead of M3's forced 48dp / 8dp internals.
  * Owns the anchor because press-drag-select needs one continuous pointer stream: the down that
  * opens the menu is the same one that drags to an item.
@@ -81,6 +89,7 @@ fun AppDropMenu(
     dragSelect: Boolean = true,
     offset: DpOffset = DpOffset(0.dp, 0.dp),
     shape: Shape = RoundedCornerShape(20.dp),
+    iconSize: Dp = MenuIconSize,
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
@@ -186,6 +195,7 @@ fun AppDropMenu(
                         itemHeight = itemHeight,
                         verticalPadding = verticalPadding,
                         shape = shape,
+                        iconSize = iconSize,
                         onPick = { action -> action.onClick(); close() },
                     )
                 }
@@ -208,6 +218,7 @@ fun MenuCard(
     itemHeight: Dp = 48.dp,
     verticalPadding: Dp = 0.dp,
     shape: Shape = RoundedCornerShape(20.dp),
+    iconSize: Dp = MenuIconSize,
     onRowPositioned: ((Int, LayoutCoordinates) -> Unit)? = null,
     onPick: (MenuAction) -> Unit,
 ) {
@@ -227,6 +238,7 @@ fun MenuCard(
                     MenuRow(
                         action,
                         itemHeight,
+                        iconSize,
                         hovered == index,
                         Modifier.let { m ->
                             if (onRowPositioned == null) m
@@ -244,6 +256,7 @@ fun MenuCard(
 private fun MenuRow(
     action: MenuAction,
     itemHeight: Dp,
+    iconSize: Dp,
     highlighted: Boolean,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
@@ -264,7 +277,7 @@ private fun MenuRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        action.icon?.let { DrawableIcon(it, tint = color) }
+        action.icon?.let { DrawableIcon(it, tint = color, size = iconSize) }
         Text(action.label, color = color, style = MaterialTheme.typography.labelLarge)
     }
 }

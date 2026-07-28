@@ -33,6 +33,9 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.appearance.chatBarHaze
+import com.promtuz.chat.ui.util.freezeOnExit
+import dev.chrisbanes.haze.hazeEffect
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -158,6 +161,7 @@ fun HomeContextMenu(state: HomeMenuState) {
                 Layout(
                     content = {
                         MenuCard(
+                            iconSize = 20.dp,
                             groups = anchor.groups,
                             hovered = state.hovered,
                             modifier = Modifier.graphicsLayer {

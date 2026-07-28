@@ -48,6 +48,7 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -55,6 +56,7 @@ import com.promtuz.chat.domain.model.UiMessage
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
 /** What was long-pressed: the message, its row bounds in root space, its merge shape. */
 data class MenuAnchor(
@@ -174,6 +176,7 @@ fun MessageContextMenu(
     state: MessageMenuState,
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
+    iconSize: Dp = MenuIconSize,
     onReact: (String) -> Unit,
 ) {
     val anchor = state.anchor ?: return
@@ -243,7 +246,7 @@ fun MessageContextMenu(
         ) {
             // Pop is handed down as a getter and read only inside graphicsLayer, so
             // animation frames never recompose the stack.
-            MenuStack(state, anchor, quickReactions, actionGroups, { pop.value }, stackOrigin, shift, onReact)
+            MenuStack(state, anchor, quickReactions, actionGroups, iconSize,{ pop.value }, stackOrigin, shift, onReact)
         }
     }
 }
@@ -259,6 +262,7 @@ private fun MenuStack(
     anchor: MenuAnchor,
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
+    iconSize: Dp = MenuIconSize,
     pop: () -> Float,
     origin: Offset,
     shift: MutableFloatState,
@@ -282,6 +286,7 @@ private fun MenuStack(
                 hovered = state.hovered - quickReactions.size,
                 modifier = entrance,
                 itemHeight = 42.dp,
+                iconSize = iconSize,
                 onRowPositioned = { i, coords -> state.rowCoords[i] = coords },
                 onPick = { it.onClick() },
             )
@@ -319,12 +324,12 @@ private fun ReactionStrip(
     state: MessageMenuState,
     msg: UiMessage,
     emojis: List<String>,
-    entrance: Modifier,
+    modifier: Modifier,
     onReact: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     Row(
-        entrance
+        modifier
             .clip(RoundedCornerShape(24.dp))
             .background(colors.surfaceContainerHigh)
             .padding(horizontal = 5.dp, vertical = 3.dp),
@@ -333,7 +338,7 @@ private fun ReactionStrip(
         emojis.forEachIndexed { i, emoji ->
             val chipPop = remember { Animatable(0f) }
             LaunchedEffect(Unit) {
-                delay(40L + 30L * i)
+                delay((40L + 30L * i).milliseconds)
                 chipPop.animateTo(1f, tween(220, easing = Overshoot))
             }
             val mine = msg.reactions.any { it.emoji == emoji && it.mine }

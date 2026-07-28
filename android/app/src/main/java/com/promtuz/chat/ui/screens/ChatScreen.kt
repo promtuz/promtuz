@@ -271,22 +271,23 @@ private fun menuActionsFor(
     val scope = rememberCoroutineScope()
     val main = buildList {
         val actionable = msg.dispatchIdHex != null && !msg.deleted
-        if (actionable) add(MenuAction("Reply", R.drawable.i_reply) {
+        if (actionable) add(MenuAction("Reply", R.drawable.oi_reply) {
             viewModel.beginReply(msg); close()
         })
-        if (!msg.deleted) add(MenuAction("Copy", R.drawable.i_copy) {
+        if (actionable) add(MenuAction("Forward", R.drawable.oi_forward) { close() })
+        if (!msg.deleted) add(MenuAction("Copy", R.drawable.oi_copy) {
             val text = (msg.content as? MessageContent.Text)?.text.orEmpty()
             scope.launch {
                 clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
             }
             close()
         })
-        if (actionable && msg.outgoing) add(MenuAction("Edit", R.drawable.i_edit) {
+        if (actionable && msg.outgoing) add(MenuAction("Edit", R.drawable.oi_edit) {
             viewModel.beginEdit(msg); close()
         })
     }
     val destructive = buildList {
-        if (msg.dispatchIdHex != null) add(MenuAction("Delete", R.drawable.i_delete, destructive = true) {
+        if (msg.dispatchIdHex != null) add(MenuAction("Delete", R.drawable.oi_trash, destructive = true) {
             onDelete(msg); close()
         })
     }

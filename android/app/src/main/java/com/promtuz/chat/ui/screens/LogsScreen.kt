@@ -60,7 +60,7 @@ fun LogsScreen() {
 
     SimpleScreen({ Text("App Logs") }, actions = {
         IconButton({ showExport = true }) {
-            DrawableIcon(R.drawable.i_send, desc = "Export logs")
+            DrawableIcon(R.drawable.oi_export, desc = "Export logs", size = 20.dp)
         }
     }) { padding ->
         LogsContainer(Modifier, padding)

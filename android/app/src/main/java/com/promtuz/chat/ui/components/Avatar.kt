@@ -47,7 +47,7 @@ fun Avatar(
             Modifier
                 .fillMaxSize()
                 .clip(clip)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(0.75f))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(0.5f))
                 .clickable(
                     enabled = true,
                     interactionSource = interactionSource,

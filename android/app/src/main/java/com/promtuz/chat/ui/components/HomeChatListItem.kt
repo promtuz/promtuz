@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.ChatSummary
+import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
 import kotlinx.coroutines.withTimeoutOrNull
@@ -72,11 +73,11 @@ fun HomeChatListItem(
 
     val groups = listOf(
         buildList {
-            add(MenuAction(if (pinned) "Unpin" else "Pin") { onPin() })
-            add(MenuAction(if (muted) "Unmute" else "Mute") { onMute() })
-            if (unread) add(MenuAction("Mark read") { onMarkRead() })
+            add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_thumbtack_angle_slash else R.drawable.oi_thumbtack_angle) { onPin() })
+            add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) { onMute() })
+            if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
-        listOf(MenuAction("Delete chat", destructive = true) { confirmDelete = true }),
+        listOf(MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true }),
     )
 
     Box(modifier) {
