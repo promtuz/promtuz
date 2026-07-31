@@ -297,8 +297,8 @@ impl Message {
         for r in rows {
             n += tx.execute(
                 "INSERT OR IGNORE INTO messages \
-                 (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     &r.id,
                     r.peer_ipk.as_slice(),
@@ -309,11 +309,19 @@ impl Message {
                     &r.dispatch_id,
                     r.edited,
                     r.deleted,
+                    &r.reply_to,
                 ),
             )?;
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Additive twin of [`Self::import_rows`], for symmetry with the other
+    /// tables' `merge_rows`. Messages need no separate SQL: `import_rows` is
+    /// already `INSERT OR IGNORE`, so a row we hold always outranks the blob's.
+    pub fn merge_rows(rows: &[MessageRow]) -> Result<usize> {
+        Self::import_rows(rows)
     }
 
     /// Delete every message with this peer (forget-contact cascade).

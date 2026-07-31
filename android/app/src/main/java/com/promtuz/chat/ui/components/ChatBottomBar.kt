@@ -195,16 +195,14 @@ private fun ComposerRow(
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Paperclip toggles the attach panel (was a drop menu). Subtle rotate + accent tint when open.
-        val attachRot by animateFloatAsState(if (attachOpen) 45f else 0f, tween(200), label = "attachRot")
-        Box(
+       Box(
             Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onToggleAttach),
             contentAlignment = Alignment.Center,
         ) {
             DrawableIcon(
-                R.drawable.oi_paperclip,
-                Modifier.size(20.dp).rotate(attachRot),
-                tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
+                R.drawable.oi_sticker,
+                Modifier.size(22.dp),
+                tint = colors.onSurfaceVariant,
             )
         }
         BasicTextField(
@@ -225,6 +223,21 @@ private fun ComposerRow(
                 inner()
             },
         )
+
+
+        // Paperclip toggles the attach panel (was a drop menu). Subtle rotate + accent tint when open.
+        val attachRot by animateFloatAsState(if (attachOpen) 45f else 0f, tween(200), label = "attachRot")
+        Box(
+            Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onToggleAttach),
+            contentAlignment = Alignment.Center,
+        ) {
+            DrawableIcon(
+                R.drawable.oi_paperclip,
+                Modifier.size(20.dp).rotate(attachRot),
+                tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
+            )
+        }
+
         // The trailing slot is ALWAYS occupied at a fixed size so the pill's
         // height never jumps: mic by default (voice notes soon), send when
         // there's a draft, crossfading in place. Solid accent, no haze — a

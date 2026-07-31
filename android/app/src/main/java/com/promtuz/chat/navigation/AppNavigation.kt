@@ -10,6 +10,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.ui.screens.AboutScreen
+import com.promtuz.chat.ui.screens.BackupRestoreScreen
 import com.promtuz.chat.ui.screens.ChatAppearanceScreen
 import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
@@ -66,6 +67,7 @@ fun AppNavigation(
             entry<Routes.NotificationsSettings> { NotificationsSettingsScreen() }
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }
+            entry<Routes.BackupRestore> { BackupRestoreScreen() }
         },
     )
 }

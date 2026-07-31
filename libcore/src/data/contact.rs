@@ -117,6 +117,24 @@ impl Contact {
         Ok(n)
     }
 
+    /// Additive twin of [`Self::import_rows`] for the Backup & Restore dev
+    /// screen: `INSERT OR IGNORE`, so a contact we already know keeps its live
+    /// name, `added_at` and `mls_group_id`. Returns rows actually inserted.
+    pub fn merge_rows(rows: &[ContactRow]) -> Result<usize> {
+        let mut conn = CONTACTS_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for r in rows {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO contacts (ipk, name, added_at, mls_group_id, status, reject_reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![r.ipk, r.name, r.added_at, r.mls_group_id, r.status, r.reject_reason],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn exists(ipk: &[u8; 32]) -> bool {
         let conn = CONTACTS_DB.lock();
         conn.query_row("SELECT 1 FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |_| Ok(()))

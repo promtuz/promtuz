@@ -10,6 +10,21 @@ import timber.log.Timber
 import java.io.File
 
 /**
+ * What became of the backup blob during an identity restore. The identity and
+ * the history restore through separate mechanisms, so "identity is back" says
+ * nothing about the history — callers must be able to tell the difference and
+ * say so, or a total history loss looks exactly like a clean restore.
+ */
+sealed interface BlobOutcome {
+    data class Imported(val bytes: Long) : BlobOutcome
+
+    /** No blob on disk: Auto Backup never ran, or the OS didn't restore it. */
+    data object Absent : BlobOutcome
+
+    data class Failed(val reason: String) : BlobOutcome
+}
+
+/**
  * Identity recovery, platform side (IDENTITY_RECOVERY.md §7).
  *
  * Channel A = Block Store: the raw isk, escrowed to the platform (E2E to
@@ -67,8 +82,18 @@ object RecoveryStore {
 
         return try {
             CoreBridge.adoptEscrowedSecret(isk, PLACEHOLDER_NAME)
-            importBlobIfPresent(context)
-            Timber.tag("Recovery").i("identity restored via Block Store")
+            // No UI is attached to this path (it runs silently in AppVM.init),
+            // so the log is the only channel — make a lost history shout.
+            when (val outcome = importBlobIfPresent(context)) {
+                is BlobOutcome.Imported -> Timber.tag("Recovery")
+                    .i("identity restored via Block Store; history imported (${outcome.bytes} bytes)")
+
+                BlobOutcome.Absent -> Timber.tag("Recovery")
+                    .e("identity restored via Block Store but NO backup blob on disk — history is EMPTY")
+
+                is BlobOutcome.Failed -> Timber.tag("Recovery")
+                    .e("identity restored via Block Store but the blob FAILED to import (${outcome.reason}) — history is EMPTY")
+            }
             true
         } catch (e: Exception) {
             Timber.tag("Recovery").w(e, "escrowed isk rejected")
@@ -76,22 +101,36 @@ object RecoveryStore {
         }
     }
 
-    /** Channel B restore: typed phrase + prompted name → identity → blob → re-escrow. */
-    suspend fun restoreFromPhrase(context: Context, words: List<String>, name: String) {
+    /**
+     * Channel B restore: typed phrase + prompted name → identity → blob →
+     * re-escrow. Returns what happened to the blob so the caller can report a
+     * history that did not come back; the identity itself is restored either
+     * way (this function throws only if that part fails).
+     */
+    suspend fun restoreFromPhrase(
+        context: Context, words: List<String>, name: String,
+    ): BlobOutcome {
         CoreBridge.restoreFromPhrase(words, name)
-        importBlobIfPresent(context)
+        val outcome = importBlobIfPresent(context)
         escrow(context)
+        return outcome
     }
 
-    /** Feed the Auto-Backup-restored blob to core, if one landed. Best-effort. */
-    private suspend fun importBlobIfPresent(context: Context) {
+    /** Feed the Auto-Backup-restored blob to core, if one landed. */
+    private suspend fun importBlobIfPresent(context: Context): BlobOutcome {
         val file = blobFile(context)
-        if (!file.exists()) return
-        try {
+        if (!file.exists()) {
+            Timber.tag("Recovery").w("no backup blob at ${file.absolutePath}")
+            return BlobOutcome.Absent
+        }
+        return try {
+            val bytes = file.length()
             CoreBridge.backupImport(file.readBytes())
-            Timber.tag("Recovery").i("backup blob imported (${file.length()} bytes)")
+            Timber.tag("Recovery").i("backup blob imported ($bytes bytes)")
+            BlobOutcome.Imported(bytes)
         } catch (e: Exception) {
-            Timber.tag("Recovery").w(e, "backup blob import failed")
+            Timber.tag("Recovery").e(e, "backup blob import failed")
+            BlobOutcome.Failed(e.message ?: e::class.simpleName ?: "unknown error")
         }
     }
 }

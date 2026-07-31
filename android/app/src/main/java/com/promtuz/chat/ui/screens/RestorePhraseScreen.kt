@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -29,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.security.BlobOutcome
 import com.promtuz.chat.security.RecoveryStore
 import kotlinx.coroutines.launch
 
@@ -49,6 +52,10 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
     var name by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+
+    /** Set when the identity came back but the history didn't; blocks the
+     *  silent hand-off into the app so the loss is acknowledged, not missed. */
+    var historyWarning by remember { mutableStateOf<String?>(null) }
 
     // The typed phrase IS the private key — keep it out of screenshots/recents.
     val window = (context as? Activity)?.window
@@ -108,8 +115,20 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
                         busy = true
                         scope.launch {
                             try {
-                                RecoveryStore.restoreFromPhrase(context, words, name.trim())
-                                onRestored()
+                                // The identity is back either way; the history
+                                // is a separate mechanism that can fail on its
+                                // own. Never let that failure read as success.
+                                when (val blob =
+                                    RecoveryStore.restoreFromPhrase(context, words, name.trim())) {
+                                    is BlobOutcome.Imported -> onRestored()
+                                    BlobOutcome.Absent -> historyWarning =
+                                        "Your identity is restored, but no backup file was found on " +
+                                            "this device — chats and contacts did not come back."
+
+                                    is BlobOutcome.Failed -> historyWarning =
+                                        "Your identity is restored, but the backup file could not be " +
+                                            "read (${blob.reason}) — chats and contacts did not come back."
+                                }
                             } catch (e: Exception) {
                                 error = e.message ?: "Restore failed"
                             } finally {
@@ -124,5 +143,18 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
         ) {
             if (busy) CircularProgressIndicator(Modifier.height(18.dp)) else Text("Restore")
         }
+    }
+
+    historyWarning?.let { message ->
+        AlertDialog(
+            // Not dismissible: entering the app on an empty history must be a
+            // deliberate acknowledgement, not a stray tap.
+            onDismissRequest = {},
+            confirmButton = {
+                TextButton({ historyWarning = null; onRestored() }) { Text("Continue anyway") }
+            },
+            title = { Text("Chat history didn't restore") },
+            text = { Text(message) },
+        )
     }
 }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import uniffi.core.BackupMergeReport
 import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
@@ -49,6 +50,7 @@ import uniffi.core.setPresence as ffiSetPresence
 import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
 import uniffi.core.backupExport as ffiBackupExport
 import uniffi.core.backupImport as ffiBackupImport
+import uniffi.core.backupImportMerge as ffiBackupImportMerge
 import uniffi.core.escrowSecret as ffiEscrowSecret
 import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
 import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
@@ -120,6 +122,14 @@ object CoreBridge {
 
     /** Restore a backup blob (after identity restore); idempotent. */
     suspend fun backupImport(blob: ByteArray) = withContext(Dispatchers.IO) { ffiBackupImport(blob) }
+
+    /**
+     * Additive restore: inserts only rows we don't already have, never
+     * replaces or renames. Safe against a live DB — unlike [backupImport],
+     * whose replace semantics assume the fresh install of a reinstall.
+     */
+    suspend fun backupImportMerge(blob: ByteArray): BackupMergeReport =
+        withContext(Dispatchers.IO) { ffiBackupImportMerge(blob) }
 
     suspend fun makeInviteQr(): ByteArray = withContext(Dispatchers.IO) { ffiMakeInviteQr() }
 

@@ -44,4 +44,8 @@ object Routes : NavKey {
 
     @Serializable
     data object Relays : NavKey
+
+    /** Developer: manual snapshot / merge-restore of the encrypted backup blob. */
+    @Serializable
+    data object BackupRestore : NavKey
 }

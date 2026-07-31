@@ -51,3 +51,42 @@ pub fn backup_export() -> Result<Vec<u8>, CoreError> {
 pub fn backup_import(blob: Vec<u8>) -> Result<(), CoreError> {
     Ok(crate::data::backup::import(&blob)?)
 }
+
+/// Per-table account of a [`backup_import_merge`] run, so the caller can
+/// report exactly what a blob carried and what was taken from it.
+#[derive(uniffi::Record)]
+pub struct BackupMergeReport {
+    pub version:           u8,
+    pub blob_bytes:        u64,
+    /// The name sealed in the blob vs. the live one. Reported, never applied.
+    pub backup_name:       String,
+    pub current_name:      String,
+    pub contacts_in_blob:  u32,
+    pub contacts_added:    u32,
+    pub messages_in_blob:  u32,
+    pub messages_added:    u32,
+    pub reactions_in_blob: u32,
+    pub reactions_added:   u32,
+}
+
+/// Additive restore: insert only what we don't already have, never replace,
+/// delete or rename. For the Backup & Restore dev screen, where the DB is
+/// live — unlike [`backup_import`], whose replace semantics are only safe on
+/// the fresh install a reinstall leaves behind. The blob's plaintext is
+/// editable by whoever holds the isk, so a live row always wins a collision.
+#[uniffi::export]
+pub fn backup_import_merge(blob: Vec<u8>) -> Result<BackupMergeReport, CoreError> {
+    let r = crate::data::backup::import_merge(&blob)?;
+    Ok(BackupMergeReport {
+        version:           r.version,
+        blob_bytes:        r.blob_bytes,
+        backup_name:       r.backup_name,
+        current_name:      r.current_name,
+        contacts_in_blob:  r.contacts_in_blob,
+        contacts_added:    r.contacts_added,
+        messages_in_blob:  r.messages_in_blob,
+        messages_added:    r.messages_added,
+        reactions_in_blob: r.reactions_in_blob,
+        reactions_added:   r.reactions_added,
+    })
+}

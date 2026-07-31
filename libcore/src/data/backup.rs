@@ -115,6 +115,58 @@ pub fn import(blob: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// What [`import_merge`] found and what it did with it — one number per
+/// table so the caller can print a full account rather than "ok".
+#[derive(Debug, Default, Clone)]
+pub struct MergeReport {
+    pub version:           u8,
+    pub blob_bytes:        u64,
+    /// Display name sealed in the blob, and the one currently live. Reported
+    /// only — a merge never renames the identity.
+    pub backup_name:       String,
+    pub current_name:      String,
+    pub contacts_in_blob:  u32,
+    pub contacts_added:    u32,
+    pub messages_in_blob:  u32,
+    pub messages_added:    u32,
+    pub reactions_in_blob: u32,
+    pub reactions_added:   u32,
+}
+
+/// Additive restore for the Backup & Restore dev screen: every row the blob
+/// carries that we do NOT already have is inserted; nothing existing is
+/// touched, deleted or renamed.
+///
+/// Distinct from [`import`] on purpose. `import` is the reinstall path, where
+/// the blob IS the source of truth and replacing is correct because there is
+/// nothing live to clobber. Here there is: the blob decrypts under a key the
+/// identity owner holds, so its plaintext is editable by that owner and must
+/// never outrank a live row. Hence `INSERT OR IGNORE` on every table and no
+/// [`Identity::set_name`] — existing state always wins a collision.
+pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
+    let secret = Identity::secret_key_with_manager()?;
+    let payload = decode(&backup_key(&secret), blob)?;
+
+    let contacts_added = Contact::merge_rows(&payload.contacts)?;
+    let messages_added = Message::merge_rows(&payload.messages)?;
+    let reactions_added = Reaction::merge_rows(&payload.reactions)?;
+
+    let report = MergeReport {
+        version: VERSION,
+        blob_bytes: blob.len() as u64,
+        backup_name: payload.name,
+        current_name: Identity::get().map(|i| i.name()).unwrap_or_default(),
+        contacts_in_blob: payload.contacts.len() as u32,
+        contacts_added: contacts_added as u32,
+        messages_in_blob: payload.messages.len() as u32,
+        messages_added: messages_added as u32,
+        reactions_in_blob: payload.reactions.len() as u32,
+        reactions_added: reactions_added as u32,
+    };
+    log::info!("BACKUP: merge {report:?}");
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

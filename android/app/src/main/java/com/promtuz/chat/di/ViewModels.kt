@@ -1,6 +1,7 @@
 package com.promtuz.chat.di
 
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.presentation.viewmodel.BackupRestoreVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ContactsVM
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
@@ -24,4 +25,5 @@ val vmModule = module {
     viewModelOf(::ChatVM)
     viewModelOf(::RelaysVM)
     viewModelOf(::UpdateVM)
+    viewModelOf(::BackupRestoreVM)
 }

@@ -83,6 +83,9 @@ fun SettingsScreen(
             SettingGroup(
                 "Developer", listOf(
                     SettingItem("App Logs", R.drawable.i_logs) { navigate(Routes.Logs) },
+                    SettingItem("Backup & Restore", R.drawable.i_encrypted) {
+                        navigate(Routes.BackupRestore)
+                    },
                 )
             ),
             SettingGroup(

@@ -42,8 +42,23 @@ class BackupWorker(context: Context, params: WorkerParameters) :
         if (!prefs(applicationContext).getBoolean(KEY_DIRTY, false)) return Result.success()
 
         return try {
-            val blob = CoreBridge.backupExport()
             val file = RecoveryStore.blobFile(applicationContext)
+
+            // Never trade a good blob for an empty one. A restore that brings
+            // the identity back but fails to import the history leaves a live
+            // app on an empty DB; the first trip to the background would then
+            // snapshot that emptiness over the very blob that could have
+            // repaired it — and ship it to Drive. An empty address book is
+            // indistinguishable from that state, so refuse the overwrite and
+            // let the existing blob stand. (Cost: a user who genuinely deletes
+            // every contact keeps a stale backup until they add one.)
+            if (file.exists() && file.length() > 0 && CoreBridge.contacts().isEmpty()) {
+                Timber.tag("Backup")
+                    .w("no contacts but a ${file.length()}-byte blob exists — refusing to overwrite it")
+                return Result.success()
+            }
+
+            val blob = CoreBridge.backupExport()
             file.parentFile?.mkdirs()
             // Atomic swap so Auto Backup never ships a half-written blob.
             val tmp = File(file.parentFile, "${file.name}.tmp")

@@ -78,6 +78,24 @@ impl Reaction {
         Ok(n)
     }
 
+    /// Additive twin of [`Self::import_rows`] for the Backup & Restore dev
+    /// screen: `INSERT OR IGNORE`, so a reaction already on a message keeps
+    /// its live timestamp. Returns rows actually inserted.
+    pub fn merge_rows(rows: &[ReactionRow]) -> anyhow::Result<usize> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for r in rows {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (r.peer_ipk.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Drop every reaction in a conversation (forget-contact cascade).
     pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
         let conn = MESSAGES_DB.lock();
