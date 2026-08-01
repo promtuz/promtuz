@@ -19,6 +19,10 @@ keystore.properties
 secrets.properties
 *.jks
 *.keystore
+# The release keystore is PKCS12 and lives here permanently, because debug
+# builds sign with it too (see app/build.gradle.kts, debugSigning).
+*.p12
+*.pkcs12
 
 app/release
 app/debug

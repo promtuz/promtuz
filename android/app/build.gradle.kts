@@ -38,6 +38,35 @@ val promptedSigning = mapOf(
 )
 val hasPromptedSigning = promptedSigning.values.all { !it.isNullOrBlank() }
 
+// Debug signing credentials, chosen as ONE whole source — never merged field
+// by field, which could pair one keystore's path with another's password and
+// fail at signing time with nothing useful to say.
+//
+// The last branch is the interesting one: debug signs with the RELEASE key
+// when one is configured. Same signer means a debug build installs straight
+// over a release build and vice versa, with no uninstall and no data wipe —
+// and UpdateRepository.verifyApk(), which compares signer digests, treats
+// both channels as the same app. Falling through to null leaves AGP's default
+// debug keystore in play, so a machine without the vault still builds.
+val debugSigning: Map<String, String?>? = when {
+    hasPromptedSigning -> promptedSigning
+    localProperties.getProperty("debug.store.file") != null -> mapOf(
+        "storeFile" to localProperties.getProperty("debug.store.file"),
+        "storePassword" to localProperties.getProperty("debug.store.password"),
+        "keyAlias" to localProperties.getProperty("debug.key.alias"),
+        "keyPassword" to localProperties.getProperty("debug.key.password"),
+    )
+    hasReleaseSigning -> keystoreProps.let {
+        mapOf(
+            "storeFile" to it.getProperty("storeFile"),
+            "storePassword" to it.getProperty("storePassword"),
+            "keyAlias" to it.getProperty("keyAlias"),
+            "keyPassword" to it.getProperty("keyPassword"),
+        )
+    }
+    else -> null
+}
+
 // Resolver bootstrap seeds, injected from a gitignored secrets.properties so
 // the OSS repo never commits infra endpoints. Format: <IPK_HEX>::<host[:port]>
 // (port defaults to 40433 in libcore). Empty when absent -> no bundled resolver.
@@ -111,16 +140,19 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            val storePath = promptedSigning["storeFile"] ?: localProperties.getProperty("debug.store.file")
-            if (storePath != null) {
-                storeFile = file(storePath)
-                storePassword = promptedSigning["storePassword"] ?: localProperties.getProperty("debug.store.password")
-                keyAlias = promptedSigning["keyAlias"] ?: localProperties.getProperty("debug.key.alias")
-                keyPassword = promptedSigning["keyPassword"] ?: localProperties.getProperty("debug.key.password")
+            debugSigning?.let {
+                storeFile = rootProject.file(it["storeFile"]!!)
+                storePassword = it["storePassword"]
+                keyAlias = it["keyAlias"]
+                keyPassword = it["keyPassword"]
             }
         }
+        // rootProject.file, not file: keystore.properties is read from the root
+        // project, so a relative storeFile in it must resolve there too — plain
+        // file() would resolve against app/ and miss. Absolute paths (what the
+        // release script exports) pass through either way.
         if (hasPromptedSigning || hasReleaseSigning) create("release") {
-            storeFile = file(promptedSigning["storeFile"] ?: keystoreProps.getProperty("storeFile"))
+            storeFile = rootProject.file(promptedSigning["storeFile"] ?: keystoreProps.getProperty("storeFile"))
             storePassword = promptedSigning["storePassword"] ?: keystoreProps.getProperty("storePassword")
             keyAlias = promptedSigning["keyAlias"] ?: keystoreProps.getProperty("keyAlias")
             keyPassword = promptedSigning["keyPassword"] ?: keystoreProps.getProperty("keyPassword")
