@@ -2,6 +2,9 @@
 /.github
 /.tls
 
+# direnv's cache; .envrc itself is committed
+/.direnv
+
 /misc
 
 target
