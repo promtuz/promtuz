@@ -806,6 +806,7 @@ dependencies = [
  "sha2 0.11.0",
  "sysinfo",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "zeroize",

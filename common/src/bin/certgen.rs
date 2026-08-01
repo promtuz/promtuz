@@ -6,6 +6,9 @@
 use std::error::Error;
 use std::fs;
 use std::io::Read;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process;
 
@@ -15,12 +18,18 @@ use clap::ValueEnum;
 use common::node::capability::CAPABILITY_OID;
 use common::node::capability::NodeCapabilities;
 use common::quic::id::NodeId;
+use rcgen::BasicConstraints;
 use rcgen::CertificateParams;
 use rcgen::CustomExtension;
 use rcgen::DnType;
+use rcgen::IsCa;
 use rcgen::Issuer;
 use rcgen::KeyPair;
 use rcgen::SanType;
+use sha2::Digest;
+use sha2::Sha256;
+use time::Duration;
+use time::OffsetDateTime;
 
 static OUT_DIR: &str = "out";
 
@@ -69,6 +78,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Mint a fresh self-signed root CA as `RootCA.{key,pem}` in the current
+    /// directory — the trust anchor every other subcommand issues under.
+    Init {
+        /// Subject/issuer CN. Leave it at the default so the result is a
+        /// drop-in for the `RootCA.pem` that libcore bakes in and the relay
+        /// .deb ships as `/etc/promtuz/ca.pem`.
+        #[arg(long, default_value = "Promtuz")]
+        cn: String,
+        /// Validity window in days, counted from now.
+        #[arg(long, default_value_t = 3650)]
+        days: i64,
+    },
     /// Generate a new leaf certificate signed by the local CA.
     Gen {
         /// Output file name; defaults to the NodeId derived from the generated key.
@@ -90,11 +111,85 @@ enum Command {
     },
 }
 
+/// Mint the root of trust: a self-signed Ed25519 CA written as
+/// `RootCA.{key,pem}` in the current directory.
+///
+/// Shaped to match the CA it replaces — `CN=Promtuz`, Ed25519, `CA:TRUE` with
+/// an unconstrained path length (leaves are signed directly; there is no
+/// intermediate tier), 10 years by default. That matters because the cert is
+/// not just a file: libcore `include_bytes!`es it and the relay .deb ships it
+/// as `/etc/promtuz/ca.pem`, so a shape change is an app rebuild and a
+/// redeploy.
+///
+/// Refuses to touch an existing key. Overwriting a CA key is unrecoverable and
+/// silently orphans every cert ever issued under it, so moving the old one
+/// aside is left as a deliberate act by the operator.
+fn init_ca(key_path: &str, cert_path: &str, cn: &str, days: i64) -> Result<(), Box<dyn Error>> {
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+
+    let mut params = CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params.distinguished_name.push(DnType::CommonName, cn);
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    // Self-referential AKI, as the CA it replaces carried. webpki builds paths
+    // by issuer DN and signature, so this changes nothing at verification time
+    // — it is here so a `openssl x509 -text` of old and new differ only in the
+    // key, and no one has to wonder whether the shape drifted.
+    params.use_authority_key_identifier_extension = true;
+    params.not_before = OffsetDateTime::now_utc();
+    params.not_after = params.not_before + Duration::days(days);
+
+    let cert = params.self_signed(&key)?;
+
+    // `create_new` + 0600 in one syscall. The exists() check the other
+    // subcommands do would be a race here, and this is the one file in the
+    // project where losing that race destroys the trust root — so let the
+    // filesystem arbitrate, and never let the key exist world-readable, not
+    // even for the instant before a chmod.
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut key_file = opts.open(key_path).map_err(|e| {
+        format!(
+            "could not create {key_path} in {:?}: {e}\n\
+             A CA may already be here — move it aside before minting another.",
+            std::env::current_dir().unwrap_or_default()
+        )
+    })?;
+    key_file.write_all(key.serialize_pem().as_bytes())?;
+    fs::write(cert_path, cert.pem())?;
+
+    let fingerprint = Sha256::digest(cert.der())
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    println!("CA minted in {:?}", std::env::current_dir()?);
+    println!("  {key_path}  (0600 — the secret)");
+    println!("  {cert_path}  (public)");
+    println!("  CN={cn}, valid {days} days");
+    println!("  SHA-256 fingerprint: {fingerprint}");
+    println!();
+    println!("Back up {key_path} NOW — it cannot be regenerated, and without it");
+    println!("no new relay, resolver or gateway can ever be enrolled.");
+    println!("Then rebuild: libcore bakes {cert_path} in, and the relay .deb ships it.");
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     let ca_secret_key = format!("{}.key", CA);
     let ca_certificate = format!("{}.pem", CA);
+
+    // `init` mints the very pair the guard below insists on, so it runs ahead
+    // of it — and never reaches the `match` further down.
+    if let Command::Init { cn, days } = &cli.command {
+        return init_ca(&ca_secret_key, &ca_certificate, cn, *days);
+    }
 
     if !fs::exists(&ca_secret_key)? || !fs::exists(&ca_certificate)? {
         eprintln!(
@@ -113,6 +208,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     match cli.command {
+        Command::Init { .. } => unreachable!("init returns before the CA is loaded"),
+
         Command::Sign { csr_path, caps } => {
             let to_stdout = csr_path.is_none();
 

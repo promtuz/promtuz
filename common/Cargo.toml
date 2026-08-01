@@ -30,7 +30,7 @@ p256 = ["dep:p256"]
 sysutils = ["dep:sysinfo", "tokio"]
 tokio = ["dep:tokio"]
 macros = []
-certgen = ["quic", "crypto", "dep:rcgen", "dep:clap"]
+certgen = ["quic", "crypto", "dep:rcgen", "dep:clap", "dep:time"]
 node = []
 types = []
 # aka relay & resolver
@@ -65,6 +65,8 @@ sha2 = { version = "0.11.0", optional = true }
 zeroize = { workspace = true, optional = true }
 p256 = { version = "0.13.2", optional = true, features = ["pkcs8"] }
 rcgen = { version = "0.14.8", features = ["x509-parser"], optional = true }
+# certgen only, for the CA's validity window. Already in the tree via rcgen.
+time = { version = "0.3", optional = true }
 base64 = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
