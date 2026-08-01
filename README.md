@@ -29,11 +29,13 @@ The general flow: a client asks a resolver for available relays, connects to one
 
 ```
 common/     Shared crate — crypto, wire protocol, QUIC config, identity, DHT/MLS message types
+gateway/    Push gateway — blind APNs/FCM/UnifiedPush wake node
 relay/      Relay node — DHT, client auth, presence + KeyPackage/Welcome replication, store-and-forward
 resolver/   Resolver — relay discovery service
 libcore/    Client library — MLS engine + networking, exposed via uniffi (Kotlin/Swift bindings)
 android/    Android app — Kotlin, Jetpack Compose, Material 3
 ios/        iOS app — Swift, SwiftUI
+web/        Static promtuz.dev assets for pairing links and app-link verification
 tools/      Dev tooling — testnet (e2e harness) + scripts (deb packaging)
 ```
 
