@@ -445,13 +445,13 @@ cmd_mint_apt() {
     local scratch; scratch="$(_scratch)"
     trap "rm -rf '$scratch'" EXIT INT TERM
 
-    # A throwaway GNUPGHOME: the repo key has no business in your personal
-    # keyring, and this way nothing lingers after the export.
+    # A throwaway GNUPGHOME: the repo key has no business in the invoking
+    # user's own keyring, and nothing lingers after the export.
     #
     # Passed per-command rather than exported. An exported GNUPGHOME would
-    # follow us out of this function and into the git commit below, which then
-    # looks for your personal signing key in a keyring that has never heard
-    # of it.
+    # escape this function and reach the git commit below, which would then
+    # look for the committer's signing key in a keyring that has never held
+    # it.
     local gnupg="$scratch/gnupg"
     mkdir -p "$gnupg"; chmod 700 "$gnupg"
 
@@ -584,7 +584,7 @@ cmd_install_ca() {
 #
 # Nothing is written into the scratch dir either. certgen's no-path mode takes
 # the CSR on stdin and emits the certificate on stdout, so the signed result
-# never touches a file we would then have to clean up.
+# never touches a file that would then need cleaning up.
 cmd_ca_sign() {
     _require_vault
     _vault_has RootCA.key.age || _die "no root CA in the vault — run 'keys mint-ca'"
@@ -626,9 +626,9 @@ cmd_ca_sign() {
 $(sed 's/^/    /' "$scratch/err")"
     [[ -n "$cert" ]] || _die "certgen produced no certificate"
 
-    # Prove it chains to our CA before handing it over. A cert that does not
-    # verify leaves the node waiting for enrolment forever with nothing to
-    # point at, and that is a miserable thing to debug remotely.
+    # Prove it chains to the vaulted CA before handing it over. A cert that
+    # does not verify leaves the node waiting for enrolment indefinitely with
+    # no error to point at, which is near-undiagnosable remotely.
     print -r -- "$cert" > "$scratch/out.crt"
     openssl verify -CAfile "$scratch/RootCA.pem" "$scratch/out.crt" >/dev/null 2>&1 \
         || _die "the signed certificate does not verify against the vault's CA"

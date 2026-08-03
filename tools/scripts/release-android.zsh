@@ -30,14 +30,15 @@
 #     client-side, in validateManifest and again against the URL path.
 #   * size must be exact: the download aborts a byte over, rejects a byte under.
 #   * The .sig is a raw 64-byte Ed25519 signature over the manifest bytes AS
-#     SERVED, so we sign the file we upload rather than a regenerated copy.
+#     SERVED, so the file that is uploaded is the file that gets signed,
+#     never a regenerated copy.
 #   * verifyApk compares the downloaded APK's signer against the INSTALLED
 #     app's. A mismatched signer is a dead end for users, not an error.
 #
 # versionCode comes from what is actually published across BOTH channels and
-# every ABI — never from gradle.properties. Those drifted before: the repo said
-# 7 while debug had already shipped 8, because the bump lived in a script that
-# died with its machine. What is live cannot be lost.
+# every ABI — never from gradle.properties, which records only what this
+# checkout last built and can sit behind what was actually published. The live
+# manifests are the one source of truth no local state can contradict.
 
 set -euo pipefail
 
@@ -101,7 +102,7 @@ _need age; _need curl; _need openssl; _need rsync; _need xxd
 
 # Exported, not just assigned: apksigner is a shell wrapper that resolves java
 # from the ENVIRONMENT. A plain assignment leaves it unable to find a runtime,
-# and it then exits 1 with a message that never reaches us.
+# and it then exits 1 with a message that never reaches the caller.
 export JAVA_HOME="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
 [[ -x "$JAVA_HOME/bin/keytool" ]] || _die "no JDK at JAVA_HOME=$JAVA_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
@@ -278,8 +279,8 @@ EXPECTED_SIGNER="${${${ks_line##*SHA256: }//:/}:l}"
 _ok "signer $EXPECTED_SIGNER"
 
 # The public half is what clients verify against, so prepare it once here and
-# check every signature we produce against IT rather than against the private
-# key we just signed with — that is the check which catches a mismatched pair.
+# every signature produced here is checked against IT rather than against the
+# private key that signed it — the check that catches a mismatched pair.
 { printf '302a300506032b6570032100'; cat "$VAULT/update-manifest.pub"; } | xxd -r -p > "$SCRATCH/mpub.der"
 openssl pkey -pubin -inform DER -in "$SCRATCH/mpub.der" -out "$SCRATCH/mpub.pem" 2>/dev/null \
     || _die "vault's update-manifest.pub is not a valid Ed25519 public key"
@@ -404,8 +405,8 @@ for channel in $TARGETS; do
         #
         # The in-app updater never touches this: open() requires the path to
         # start with "promtuz-", so latest.apk is rejected as an invalid update
-        # path. It exists for humans, and it silently rotted for two releases
-        # because nothing in the repo knew it was there.
+        # path. It serves manual downloads only, and nothing else maintains
+        # it — so it goes stale unless updated here, invisibly.
         ssh "$PUBLISH_HOST" "ln -sfn '$APK_NAME' '$dest/latest.apk'" \
             || _die "could not update $dest/latest.apk"
         _ok "$channel/$abi uploaded (latest.apk -> $APK_NAME)"
