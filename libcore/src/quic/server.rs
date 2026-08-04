@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -18,6 +19,7 @@ use common::proto::client_rel::QueryResultP;
 use common::proto::client_rel::SHandshakePacket as SHSP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
@@ -229,7 +231,7 @@ impl Relay {
 
         self.connection = Some(conn.clone());
 
-        // Build the production DHT-RPC dialer once the relay/1 connection
+        // Build the production DHT-RPC dialer once the relay/5 connection
         // is established. The dialer rides this same connection, stored on
         // the `Relay` struct so the JNI surface (`sendMessage`,
         // `handle_deliver`) picks it up via `RELAY.read()`. Failure to
@@ -332,7 +334,9 @@ impl Relay {
     /// must go on a FRESH stream: the relay's dispatcher for this
     /// stream is parked inside `handle_ack_drain` awaiting the parked
     /// oneshot, so it can't read a reply from the same stream.
-    async fn ack_drain(&self, conn: &quinn::Connection, ipk: VerifyingKey) {
+    async fn ack_drain(
+        &self, conn: &quinn::Connection, ipk: VerifyingKey, drained: &HashSet<[u8; 16]>,
+    ) {
         let (mut tx, mut rx) = match conn.open_bi().await {
             Ok(s) => s,
             Err(e) => {
@@ -361,6 +365,7 @@ impl Relay {
                         requester_relay_id,
                         delivered_ids,
                         suggested_timestamp,
+                        drained,
                     )
                     .await
                     {
@@ -415,7 +420,7 @@ impl Relay {
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
-        // Re-use the production peer/1 dialer that `connect()` built
+        // Re-use the production peer/5 dialer that `connect()` built
         // before storing this Relay on the global `RELAY`. The dialer
         // is shared (`Arc<RelayDhtClient>`) so the uniffi surface
         // (`send_message`) and the background tasks below all dispatch
@@ -495,24 +500,36 @@ impl Relay {
             }
             _ = tx.finish();
 
-            let mut received = 0usize;
+            // Every id streamed on this drain. The relay asks us to sign a
+            // deletion authorization over the ids it claims to have delivered;
+            // this is what that claim is checked against.
+            let mut drained: HashSet<[u8; 16]> = HashSet::new();
             let mut failed = false;
             while let Ok(packet) = SRelayPacket::unpack(&mut rx).await {
                 match packet {
                     SRelayPacket::Deliver(msg) => {
-                        received += 1;
-                        if let Err(e) = process_deliver(msg, self.dht_client.clone()).await {
-                            failed = true;
-                            warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
+                        let id = msg.id.0;
+                        match process_deliver(ipk, msg, self.dht_client.clone()).await {
+                            Ok(()) => {
+                                drained.insert(id);
+                            },
+                            Err(e) => {
+                                failed = true;
+                                warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
+                            },
                         }
                     },
                     other => debug!("unexpected packet in drain response: {other:?}"),
                 }
             }
 
-            if received > 0 && !failed {
-                info!("relay {}: drained {received} queued message(s)", node_short(&self.id));
-                self.ack_drain(conn, ipk).await;
+            if !drained.is_empty() && !failed {
+                info!(
+                    "relay {}: drained {} queued message(s)",
+                    node_short(&self.id),
+                    drained.len()
+                );
+                self.ack_drain(conn, ipk, &drained).await;
             }
         }
 
@@ -562,19 +579,11 @@ impl Relay {
                             handle_presence(list);
                             Ok(())
                         },
-                        SRelayPacket::AckAuthRequest {
-                            requester_relay_id,
-                            delivered_ids,
-                            suggested_timestamp,
-                        } => {
-                            handle_ack_auth_request(
-                                &mut send,
-                                ipk,
-                                requester_relay_id,
-                                delivered_ids,
-                                suggested_timestamp,
-                            )
-                            .await
+                        // An ack authorization only ever answers our own
+                        // AckDrain, on the stream we opened for it.
+                        SRelayPacket::AckAuthRequest { .. } => {
+                            debug!("ignoring unsolicited AckAuthRequest");
+                            Ok(())
                         },
                         other => {
                             debug!("unexpected packet from relay: {other:?}");
@@ -609,9 +618,9 @@ impl Relay {
 /// then ack on the stream — the relay's `try_deliver` waits on this
 /// ack before treating the message as delivered.
 async fn handle_deliver(
-    tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
+    tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
-    process_deliver(msg, dht_client).await?;
+    process_deliver(ipk, msg, dht_client).await?;
     CRelayPacket::DeliverAck.send(tx).await?;
     Ok(())
 }
@@ -673,7 +682,32 @@ fn is_welcome_envelope(payload: &[u8]) -> bool {
     )
 }
 
-async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>) -> Result<()> {
+/// The dispatch's arrival time in seconds. `accepted_at_ms` is stamped by the
+/// origin relay and sits outside every signature, so it is only ever a hint
+/// bounded by our own clock — a home cannot date a message into the future to
+/// pin it at the top of a conversation.
+fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
+    (accepted_at_ms / 1_000).min(systime().as_secs())
+}
+
+/// Verify the sender's end-to-end dispatch signature. It covers `to`, `from`,
+/// `id` and the payload, so a relay can neither re-address a captured dispatch
+/// at us nor mint one under a contact's IPK.
+fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
+    let from = VerifyingKey::from_bytes(&msg.from).map_err(|e| anyhow!("bad sender key: {e}"))?;
+    let transcript = dispatch_sig_message(our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload);
+    from.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&msg.sig.0))
+        .map_err(|e| anyhow!("dispatch signature: {e}"))
+}
+
+async fn process_deliver(
+    our_ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
+) -> Result<()> {
+    if let Err(e) = verify_dispatch_sig(&our_ipk, &msg) {
+        warn!("MESSAGE: rejected unsigned/forged dispatch from {}: {e}", hex::encode(&msg.from[..4]));
+        bail!("bad dispatch signature");
+    }
+
     // Already decrypted on an earlier connection? A different home is
     // redelivering. Ack (Ok → relay GCs) but NEVER re-decrypt: the ratchet
     // key is spent and openmls would SecretReuseError. Outer-keyed + pre-
@@ -693,7 +727,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
         bail!("unknown sender");
     }
 
-    // Use the production peer/1 dialer that the connection-time wiring
+    // Use the production peer/5 dialer that the connection-time wiring
     // in `Relay::connect` attached to the global `RELAY`. The receive
     // path's MLS handling
     // (`process_inbound_envelope`) needs a `DhtClient` for completeness
@@ -747,7 +781,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                         AppPayload::Reply { reply_to, content } => (content, Some(reply_to)),
                         _ => unreachable!(),
                     };
-                    let timestamp = msg.accepted_at_ms / 1_000;
+                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
                     match Message::save_incoming(
                         *msg.from, &msg.id.0, &content, timestamp, reply_to,
                     ) {
@@ -857,7 +891,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                 },
                 Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
                     let did = msg.id.0;
-                    let timestamp = msg.accepted_at_ms / 1_000;
+                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
                     let media = crate::data::media::MediaRow {
                         kind: crate::data::media::KIND_IMAGE,
                         group_id: group_id.map(|g| g.to_vec()),
@@ -884,7 +918,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                 },
                 Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
                     let did = msg.id.0;
-                    let timestamp = msg.accepted_at_ms / 1_000;
+                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
                     let media = crate::data::media::MediaRow {
                         kind: crate::data::media::KIND_ATTACHMENT,
                         group_id: group_id.map(|g| g.to_vec()),
@@ -1039,9 +1073,17 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
 /// `delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS`. The home-side
 /// verifier would reject it anyway (`QueueFetchAck::verify` returns
 /// `TooManyIds` past the cap); failing here saves the round trip.
+///
+/// **Scope**: `drained` is the set of ids this connection actually
+/// streamed to us. The signature authorises permanent deletion at every
+/// home, so we only ever produce one for messages we hold — a relay
+/// cannot obtain an authorization for entries it never delivered. The
+/// request is only ever legitimate as the reply to our own `AckDrain`
+/// (`relay/src/quic/handler/client/events/drain.rs`), so an unsolicited
+/// one has an empty `drained` and is refused.
 async fn handle_ack_auth_request(
     tx: &mut SendStream, ipk: VerifyingKey, requester_relay_id: NodeId,
-    delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64,
+    delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64, drained: &HashSet<[u8; 16]>,
 ) -> Result<()> {
     if delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS {
         warn!(
@@ -1049,6 +1091,10 @@ async fn handle_ack_auth_request(
             delivered_ids.len(),
             MAX_FETCH_QUEUE_ACK_IDS
         );
+        return Ok(());
+    }
+    if let Some(stray) = delivered_ids.iter().find(|id| !drained.contains(*id)) {
+        warn!("ACK_AUTH: refusing to sign undelivered id {}", hex::encode(&stray[..4]));
         return Ok(());
     }
     let self_ipk = ipk.to_bytes();
@@ -1073,8 +1119,7 @@ async fn handle_ack_auth_request(
 // ---------------------------------------------------------------------------
 
 /// Build the production [`RelayDhtClient`] from the current connection
-/// state. Unlike the deleted Option-A `Peer1DhtClient`, this dials
-/// nothing — it rides the already-authenticated home `relay/1`
+/// state. Dials nothing — it rides the already-authenticated home `relay/5`
 /// connection. It needs only the connection, our IPK, and the home's
 /// DHT NodeId (learned from the handshake, for welcome fetch/ack
 /// signatures). Signing goes through the global `IdentitySigner`.
@@ -1290,8 +1335,9 @@ mod gate_tests {
     use common::proto::mls_wire::MlsEnvelopeP;
     use common::proto::mls_wire::WelcomeEnvelopeP;
     use common::proto::pack::Packer;
+    use ed25519_dalek::SigningKey;
 
-    use super::is_welcome_envelope;
+    use super::*;
 
     #[test]
     fn welcome_envelope_bypasses_contact_gate() {
@@ -1310,5 +1356,51 @@ mod gate_tests {
         };
         let bytes = MlsEnvelopeP::Welcome(env).ser().expect("ser");
         assert!(is_welcome_envelope(&bytes), "a Welcome envelope must bypass the contact gate");
+    }
+
+    fn signed_deliver(sender: &SigningKey, to: &VerifyingKey, payload: &[u8]) -> DeliverP {
+        use ed25519_dalek::Signer;
+        let from = sender.verifying_key().to_bytes();
+        let id = [7u8; 16];
+        let sig = sender
+            .sign(&dispatch_sig_message(to.as_bytes(), &from, &id, payload))
+            .to_bytes();
+        DeliverP {
+            id:             id.into(),
+            from:           from.into(),
+            payload:        payload.to_vec().into(),
+            sig:            sig.into(),
+            accepted_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn dispatch_sig_binds_sender_recipient_and_payload() {
+        let sender = SigningKey::from_bytes(&[0x11; 32]);
+        let me = SigningKey::from_bytes(&[0x22; 32]).verifying_key();
+        let someone_else = SigningKey::from_bytes(&[0x33; 32]).verifying_key();
+
+        let msg = signed_deliver(&sender, &me, b"envelope");
+        verify_dispatch_sig(&me, &msg).expect("own dispatch verifies");
+
+        // A dispatch addressed to someone else, replayed at us.
+        assert!(verify_dispatch_sig(&someone_else, &msg).is_err());
+
+        // Relay-rewritten payload.
+        let mut tampered = msg.clone();
+        tampered.payload = b"other".to_vec().into();
+        assert!(verify_dispatch_sig(&me, &tampered).is_err());
+
+        // Relay-minted dispatch attributed to a contact.
+        let mut forged = msg.clone();
+        forged.from = SigningKey::from_bytes(&[0x44; 32]).verifying_key().to_bytes().into();
+        assert!(verify_dispatch_sig(&me, &forged).is_err());
+    }
+
+    #[test]
+    fn accepted_at_is_capped_at_the_local_clock() {
+        let now = systime().as_secs();
+        assert_eq!(accepted_at_secs(1_000_000), 1_000);
+        assert_eq!(accepted_at_secs(u64::MAX), now);
     }
 }

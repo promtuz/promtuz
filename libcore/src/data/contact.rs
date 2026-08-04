@@ -1,6 +1,4 @@
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use rusqlite::params;
@@ -59,7 +57,7 @@ impl Contact {
         if crate::data::identity::Identity::public_key().is_ok_and(|k| k.to_bytes() == ipk) {
             return Err(anyhow::anyhow!("cannot add yourself as a contact"));
         }
-        let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let added_at = crate::utils::systime().as_secs();
 
         let conn = CONTACTS_DB.lock();
         let existed = conn
@@ -165,7 +163,7 @@ impl Contact {
         if crate::data::identity::Identity::public_key().is_ok_and(|k| k.to_bytes() == ipk) {
             return Err(anyhow::anyhow!("cannot add yourself as a contact"));
         }
-        let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let added_at = crate::utils::systime().as_secs();
         let conn = CONTACTS_DB.lock();
         conn.execute(
             "INSERT INTO contacts (ipk, name, added_at, mls_group_id, status) \

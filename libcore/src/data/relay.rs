@@ -33,12 +33,36 @@ use crate::utils::systime;
 const FAILURE_THRESHOLD: u32 = 3;
 const BACKOFF_BASE_MS: u64 = 5_000;
 const BACKOFF_MAX_MS: u64 = 30 * 60 * 1_000;
+/// Cert/auth failures sideline a relay for this long. Shorter than
+/// [`BACKOFF_MAX_MS`] because the cause is as likely to be something on the
+/// path answering for the relay as the relay's own cert, and a re-resolve to a
+/// new address clears it outright ([`Relay::refresh`]).
+const BACKOFF_TERMINAL_MS: u64 = 2 * 60 * 1_000;
 const WINDOW_DURATION_MS: u64 = 10 * 60 * 1_000;
 const LATENCY_SAMPLE_LIMIT: i64 = 50;
 const SCORE_WEIGHT_SUCCESS: f64 = 0.6;
 const SCORE_WEIGHT_LATENCY: f64 = 0.4;
 const EXPLORE_PROBABILITY: f64 = 0.2;
 const TOP_N: usize = 3;
+
+/// Resolver upsert behind [`Relay::refresh`]. The `CASE` arms read the stored
+/// row (SQL evaluates every assignment's right side against the pre-update
+/// values), so a relay that moved starts from a clean circuit.
+const REFRESH_UPSERT: &str = "\
+    INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start, pubkey)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    ON CONFLICT(id) DO UPDATE SET
+      circuit_state        = CASE WHEN host <> excluded.host OR port <> excluded.port
+                                  THEN 'closed' ELSE circuit_state END,
+      backoff_until        = CASE WHEN host <> excluded.host OR port <> excluded.port
+                                  THEN NULL ELSE backoff_until END,
+      consecutive_failures = CASE WHEN host <> excluded.host OR port <> excluded.port
+                                  THEN 0 ELSE consecutive_failures END,
+      host                 = excluded.host,
+      port                 = excluded.port,
+      last_seen            = excluded.last_seen,
+      protocol_version     = excluded.protocol_version,
+      pubkey               = excluded.pubkey";
 
 // // // // // // // // // // // // // // // // // //
 
@@ -70,7 +94,7 @@ pub struct Relay {
     /// Contains quinn connection IF connected
     pub connection: Option<Connection>,
     /// Production [`RelayDhtClient`] dialer riding this relay's
-    /// `relay/1` connection. Built once per `connect()` after the
+    /// `relay/5` connection. Built once per `connect()` after the
     /// handshake succeeds; lives for the connection's lifetime. `None` if
     /// the connection isn't established — callers in
     /// `api::messaging::sendMessage` surface a clean error rather than
@@ -79,11 +103,9 @@ pub struct Relay {
     /// [`RelayDhtClient`]: crate::quic::relay_dht_client::RelayDhtClient
     pub dht_client: Option<Arc<crate::quic::relay_dht_client::RelayDhtClient>>,
     /// Relay's NodeKey pubkey as vended by the resolver in
-    /// `RelayDescriptor.pubkey`. Persisted on `Relay::refresh`. Was
-    /// used for per-dial TLS-cert SPKI pinning on the deleted Option-A
-    /// `peer/1` path; now vestigial under Option B (libcore no longer
-    /// dials `peer/1`). Retained pending a cleanup pass that also drops
-    /// the DB column + resolver wire field.
+    /// `RelayDescriptor.pubkey`. Persisted on `Relay::refresh`. Unread —
+    /// nothing in libcore pins a peer cert. TODO: drop with the DB column and
+    /// the resolver wire field.
     pub pubkey:     Option<[u8; 32]>,
     /// The home relay's DHT NodeId, learned from the
     /// `ServerHandshakeResultP::Accept` reply. Connection-scoped (set in
@@ -386,23 +408,16 @@ impl Relay {
 
     /// Upserts relays from a resolver response.
     ///
-    /// Only updates addressing and version — does not touch circuit state or window stats.
+    /// Updates addressing and version, and clears the circuit for a relay that
+    /// moved: the failures were recorded against the old address, so they say
+    /// nothing about the new one. Window stats are left alone.
     pub fn refresh(relays: &[RelayDescriptor]) -> Result<(), RelayError> {
         let conn = NETWORK_DB.lock();
         let now = systime().as_millis() as u64;
 
         // Persist `RelayDescriptor.pubkey` so libcore can pin the
-        // relay's TLS-cert SPKI on peer/1 dials.
-        let mut stmt = conn.prepare(
-            "INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start, pubkey)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-               host             = excluded.host,
-               port             = excluded.port,
-               last_seen        = excluded.last_seen,
-               protocol_version = excluded.protocol_version,
-               pubkey           = excluded.pubkey",
-        )?;
+        // relay's TLS-cert SPKI on peer/5 dials.
+        let mut stmt = conn.prepare(REFRESH_UPSERT)?;
 
         for r in relays {
             stmt.execute(params![
@@ -485,15 +500,14 @@ impl Relay {
 
     /// Records a TLS / cert / auth failure as **terminal** for this relay.
     ///
-    /// Cert errors don't resolve themselves — the relay's cert is broken,
-    /// our verifier rejects it, or someone is MitM-ing. Retrying every
-    /// few seconds is wasted work. Open the circuit immediately with the
-    /// max backoff so `fetch_best` skips this relay until either the
-    /// backoff expires (30m) or the user reconnects after a fresh resolve.
+    /// Cert errors don't resolve themselves within a retry loop — the relay's
+    /// cert is broken, our verifier rejects it, or someone is MitM-ing. Open
+    /// the circuit immediately for [`BACKOFF_TERMINAL_MS`] so `fetch_best`
+    /// skips this relay meanwhile.
     pub fn record_terminal_failure(&self) -> Result<(), RelayError> {
         let conn = NETWORK_DB.lock();
         let now = systime().as_millis() as i64;
-        let backoff = BACKOFF_MAX_MS as i64;
+        let backoff = BACKOFF_TERMINAL_MS as i64;
 
         conn.execute(
             "UPDATE relays SET
@@ -595,3 +609,79 @@ impl Relay {
 }
 
 // // // // // // // // // // // // // // // // // //
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::*;
+
+    /// The `relays` columns [`REFRESH_UPSERT`] touches, against a scratch
+    /// connection — `NETWORK_DB` is a process-global pointed at a real file.
+    fn relays_table() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE relays (
+               id TEXT PRIMARY KEY,
+               host TEXT NOT NULL,
+               port INTEGER NOT NULL,
+               protocol_version INTEGER NOT NULL,
+               circuit_state TEXT NOT NULL DEFAULT 'closed',
+               backoff_until INTEGER,
+               consecutive_failures INTEGER NOT NULL DEFAULT 0,
+               window_start INTEGER NOT NULL,
+               last_seen INTEGER NOT NULL,
+               pubkey BLOB
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn upsert(conn: &Connection, host: &str, port: u16) {
+        conn.execute(REFRESH_UPSERT, params!["r1", host, port, 1, PROTOCOL_VERSION, 1, [0u8; 32]])
+            .unwrap();
+    }
+
+    fn circuit(conn: &Connection) -> (String, Option<i64>, i64) {
+        conn.query_row(
+            "SELECT circuit_state, backoff_until, consecutive_failures FROM relays WHERE id='r1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    fn open_the_circuit(conn: &Connection) {
+        conn.execute(
+            "UPDATE relays SET circuit_state='open', backoff_until=999, consecutive_failures=4
+             WHERE id='r1'",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_clears_the_circuit_for_a_relay_that_moved() {
+        let conn = relays_table();
+        upsert(&conn, "1.1.1.1", 443);
+        open_the_circuit(&conn);
+
+        upsert(&conn, "2.2.2.2", 443);
+        assert_eq!(circuit(&conn), ("closed".into(), None, 0));
+    }
+
+    #[test]
+    fn refresh_keeps_the_circuit_when_the_address_is_unchanged() {
+        let conn = relays_table();
+        upsert(&conn, "1.1.1.1", 443);
+        open_the_circuit(&conn);
+
+        upsert(&conn, "1.1.1.1", 443);
+        assert_eq!(circuit(&conn), ("open".into(), Some(999), 4));
+
+        // A port change is a move too.
+        upsert(&conn, "1.1.1.1", 8443);
+        assert_eq!(circuit(&conn), ("closed".into(), None, 0));
+    }
+}

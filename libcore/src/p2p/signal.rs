@@ -61,6 +61,9 @@ pub fn deliver(
     from: [u8; 32], candidates: Vec<SocketAddr>, relay: Option<SocketAddr>, token: [u8; 16],
     disco_key: [u8; 32],
 ) {
+    let mut candidates: Vec<SocketAddr> =
+        candidates.into_iter().filter(super::punch::is_punchable).collect();
+    candidates.truncate(super::punch::MAX_CANDIDATES);
     let offer = Offer { candidates, relay, token, disco_key };
     let listener = LISTENERS.lock().get(&from).cloned();
     match listener {
@@ -73,16 +76,17 @@ pub fn deliver(
                 return;
             }
             log::info!(
-                "P2P[{}]: offer arrived with no waiting session ({} cands) — auto-accepting",
+                "P2P[{}]: offer arrived with no waiting session ({} cands) — auto-accepting relayed",
                 hex::encode(&from[..4]),
                 offer.candidates.len()
             );
             PENDING.lock().insert(from, offer);
-            // Auto-accept: consent already checked this offer is from a
-            // paired contact, so start a session — it drains the buffered
-            // offer and answers. connect() logs the terminal outcome.
+            // An unsolicited offer earns a session over the peer's own relay
+            // bridge and nothing more — no candidates, no punch, no address of
+            // ours disclosed for the asking.
             crate::RUNTIME.spawn(async move {
-                if let Err(e) = crate::p2p::connect(from).await {
+                let r = crate::p2p::connect_with(from, crate::p2p::Disclosure::RelayOnly).await;
+                if let Err(e) = r {
                     log::debug!("P2P[{}]: auto-accept ended — {e}", hex::encode(&from[..4]));
                 }
             });
@@ -122,9 +126,28 @@ mod tests {
         let peer = [42u8; 32];
         let mut rx = listen(peer);
 
-        let cands: Vec<SocketAddr> = vec!["1.2.3.4:5".parse().unwrap()];
+        let cands: Vec<SocketAddr> = vec!["1.2.3.4:5000".parse().unwrap()];
         deliver(peer, cands.clone(), None, [0; 16], [0; 32]);
         assert_eq!(rx.try_recv().unwrap().candidates, cands);
+        stop(peer);
+    }
+
+    #[test]
+    fn deliver_drops_unroutable_and_caps_candidates() {
+        let peer = [44u8; 32];
+        let mut rx = listen(peer);
+
+        let mut cands: Vec<SocketAddr> = vec![
+            "127.0.0.1:5000".parse().unwrap(),
+            "192.168.1.9:5000".parse().unwrap(),
+            "224.0.0.1:5000".parse().unwrap(),
+        ];
+        cands.extend((0..64u16).map(|i| SocketAddr::from(([9, 9, 9, 9], 5000 + i))));
+        deliver(peer, cands, None, [0; 16], [0; 32]);
+
+        let got = rx.try_recv().unwrap().candidates;
+        assert_eq!(got.len(), super::super::punch::MAX_CANDIDATES);
+        assert!(got.iter().all(|a| a.ip() == "9.9.9.9".parse::<std::net::IpAddr>().unwrap()));
         stop(peer);
     }
 
@@ -136,7 +159,7 @@ mod tests {
         // source before delivering — otherwise the offer never buffers.
         Contact::save_pending(peer, "peer".into()).unwrap();
         Contact::mark_paired(&peer);
-        let cands: Vec<SocketAddr> = vec!["9.9.9.9:9".parse().unwrap()];
+        let cands: Vec<SocketAddr> = vec!["9.9.9.9:9000".parse().unwrap()];
         let relay: SocketAddr = "5.5.5.5:443".parse().unwrap();
         // arrives before anyone listens → buffered, no panic
         deliver(peer, cands.clone(), Some(relay), [7; 16], [9; 32]);

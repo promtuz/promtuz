@@ -43,9 +43,9 @@ use crate::quic::server::RelayConnError;
 use crate::utils::node_short;
 
 /// Root CA for the relay/resolver TLS, baked in at build time. Sourced from
-/// the repo's gitignored `.tls/` — the same dev CA store testnet signs with
-/// (see `testnet/src/certs.rs`), so it's never committed. Deployments build
-/// against their own `.tls/RootCA.pem`.
+/// the repo's gitignored `.tls/` — the dev CA store `certgen init` mints, so
+/// it's never committed. Deployments build against their own
+/// `.tls/RootCA.pem`.
 const ROOT_CA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.tls/RootCA.pem"));
 
 /// One-time initialization. Installs the platform ports, builds the

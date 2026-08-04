@@ -29,7 +29,7 @@ use crate::events::connection::ConnectionState;
 
 /// Process-global handle to the connected sticky-home `Relay`.
 ///
-/// Set by `quic::server::Relay::connect` after the `relay/1` handshake
+/// Set by `quic::server::Relay::connect` after the `relay/5` handshake
 /// succeeds; cleared on disconnect/reconnect. Read by
 /// `messaging::sendMessage` (and the receive path) to obtain the
 /// per-connection [`crate::quic::relay_dht_client::RelayDhtClient`]

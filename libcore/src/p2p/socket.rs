@@ -41,6 +41,11 @@ use crate::quic::peer_config::build_peer_server_cfg;
 use crate::quic::peer_identity::PeerIdentity;
 use crate::utils::addr_short;
 
+/// Handshakes quinn will hold before it starts refusing. A phone runs at most a
+/// couple of concurrent sessions, and [`crate::p2p`] drains `accept()`
+/// continuously, so anything past this is unauthenticated UDP piling up.
+const MAX_INCOMING: usize = 16;
+
 /// An inbound disco poke: the sender's address and the raw sealed bytes.
 pub type Poke = (SocketAddr, Vec<u8>);
 
@@ -298,9 +303,12 @@ pub fn build_endpoint() -> Result<BuiltEndpoint> {
     let mut ep_cfg = EndpointConfig::default();
     ep_cfg.grease_quic_bit(false);
 
+    let mut server_cfg = build_peer_server_cfg(&identity)?;
+    server_cfg.max_incoming(MAX_INCOMING);
+
     let mut endpoint = Endpoint::new_with_abstract_socket(
         ep_cfg,
-        Some(build_peer_server_cfg(&identity)?),
+        Some(server_cfg),
         bound.socket,
         Arc::new(TokioRuntime),
     )?;

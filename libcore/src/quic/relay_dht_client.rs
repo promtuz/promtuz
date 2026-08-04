@@ -1,7 +1,6 @@
-//! Production [`DhtClient`] over the home relay's `client/0` connection.
+//! Production [`DhtClient`] over the home relay's `client/5` connection.
 //!
-//! libcore no longer dials `peer/1` or holds an ephemeral DhtHello
-//! identity. Every DHT operation is a `CRelayPacket` wrapper sent over
+//! Every DHT operation is a `CRelayPacket` wrapper sent over
 //! the *existing* authenticated relay connection; the home relay
 //! verifies the wrapper, originates the real K-home fan-out on our
 //! behalf, and replies with the matching `SRelayPacket`. The phone has
@@ -56,7 +55,7 @@ const HOME_K_MIN: usize = 2;
 
 /// [`DhtClient`] backed by the live home relay connection.
 pub struct RelayDhtClient {
-    /// The authenticated `client/0` connection to our home relay.
+    /// The authenticated `client/5` connection to our home relay.
     conn: Connection,
     /// Our own IPK — every wrapper transcript binds it.
     user_ipk: [u8; 32],

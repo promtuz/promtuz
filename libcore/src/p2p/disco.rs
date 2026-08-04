@@ -11,8 +11,9 @@
 //!   is dropped by quinn when the endpoint sets `grease_quic_bit(false)`.
 //! - `channel` picks which peer session's key opens the packet, with no
 //!   trial decryption.
-//! - the AEAD key is derived per session from the MLS group secret, so a
-//!   poke can't be forged off the group — no separate key exchange.
+//! - the AEAD key is a fresh random per session, carried to the peer inside
+//!   the MLS-sealed candidate offer, so a poke can't be forged by anyone
+//!   outside the group — no separate key exchange.
 
 use std::net::SocketAddr;
 

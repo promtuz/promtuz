@@ -13,6 +13,7 @@
 //! feeds inbound ones from the socket.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -29,6 +30,40 @@ use super::socket::PokeSender;
 /// The first tick fires immediately, so punching starts at once.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Ceiling on the addresses one punch will ever ping — the peer's offer plus
+/// the sources it is heard from. Every candidate is a datagram per tick toward
+/// an address the peer chose, so the fanout is capped rather than trusted.
+pub(super) const MAX_CANDIDATES: usize = 16;
+
+/// Whether a peer-supplied candidate is an address we are willing to send to.
+/// Reserved, local and non-unicast space is never a peer's reachable address,
+/// only a way to aim our pokes at something that isn't the peer.
+pub(super) fn is_punchable(addr: &SocketAddr) -> bool {
+    if addr.port() < 1024 {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            !v4.is_loopback()
+                && !v4.is_private()
+                && !v4.is_link_local()
+                && !v4.is_multicast()
+                && !v4.is_broadcast()
+                && !v4.is_unspecified()
+                && !v4.is_documentation()
+        },
+        IpAddr::V6(v6) => {
+            let hi = v6.segments()[0] & 0xffc0;
+            !v6.is_loopback()
+                && !v6.is_multicast()
+                && !v6.is_unspecified()
+                && hi != 0xfe80
+                && hi != 0xfec0
+                && (v6.segments()[0] & 0xfe00) != 0xfc00
+        },
+    }
+}
+
 /// The punch rule set for one peer. No I/O: every method returns the
 /// pokes the shell should send.
 struct PunchState {
@@ -44,7 +79,8 @@ struct PunchState {
 }
 
 impl PunchState {
-    fn new(key: DiscoKey, candidates: Vec<SocketAddr>) -> Self {
+    fn new(key: DiscoKey, mut candidates: Vec<SocketAddr>) -> Self {
+        candidates.truncate(MAX_CANDIDATES);
         Self { key, candidates, sent: HashMap::new(), validated: None }
     }
 
@@ -59,14 +95,15 @@ impl PunchState {
         match self.key.open(bytes) {
             Some(DiscoMsg::Ping { tx }) => {
                 let mut out = vec![(src, self.key.seal(&DiscoMsg::Pong { tx, seen: src }))];
-                let known = self.candidates.contains(&src);
-                if !known {
+                let learned = !self.candidates.contains(&src)
+                    && self.candidates.len() < MAX_CANDIDATES;
+                if learned {
                     self.candidates.push(src);
                 }
                 // Ping back only the first time we hear from a not-yet-
                 // validated peer; after that the tick re-pings it. Gating
-                // on `known` stops a ping-back storm if Pongs are lost.
-                if self.validated.is_none() && !known {
+                // on `learned` stops a ping-back storm if Pongs are lost.
+                if self.validated.is_none() && learned {
                     out.push((src, self.ping(src)));
                 }
                 out
@@ -195,6 +232,43 @@ mod tests {
         let out = st.on_poke(src, &ping);
         assert_eq!(out.len(), 1);
         assert!(matches!(key().open(&out[0].1), Some(DiscoMsg::Pong { .. })));
+    }
+
+    #[test]
+    fn is_punchable_rejects_local_and_non_unicast() {
+        for bad in [
+            "127.0.0.1:5000",
+            "192.168.1.5:5000",
+            "10.0.0.1:5000",
+            "172.16.0.1:5000",
+            "169.254.1.1:5000",
+            "224.0.0.1:5000",
+            "255.255.255.255:5000",
+            "0.0.0.0:5000",
+            "9.9.9.9:53",
+            "[::1]:5000",
+            "[fe80::1]:5000",
+            "[fc00::1]:5000",
+            "[ff02::1]:5000",
+        ] {
+            assert!(!is_punchable(&bad.parse().unwrap()), "{bad} must be rejected");
+        }
+        for good in ["9.9.9.9:5000", "[2409:4117::1]:5000"] {
+            assert!(is_punchable(&good.parse().unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn candidate_list_is_capped() {
+        let many: Vec<SocketAddr> =
+            (0..1000u16).map(|i| SocketAddr::from(([9, 9, 9, 9], 5000 + i))).collect();
+        let mut st = PunchState::new(key(), many);
+        assert_eq!(st.candidates.len(), MAX_CANDIDATES);
+        assert_eq!(st.tick().len(), MAX_CANDIDATES);
+
+        let extra: SocketAddr = "8.8.8.8:6000".parse().unwrap();
+        st.on_poke(extra, &key().seal(&DiscoMsg::Ping { tx: [2; 8] }));
+        assert_eq!(st.candidates.len(), MAX_CANDIDATES);
     }
 
     #[test]

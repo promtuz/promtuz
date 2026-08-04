@@ -7,6 +7,8 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use common::node::capability::CAPABILITY_OID;
+use common::node::capability::NodeCapabilities;
 use common::proto::RelayId;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_res::ClientRequest;
@@ -24,6 +26,9 @@ use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 use once_cell::sync::Lazy;
 use rusqlite::params;
+use x509_parser::der_parser::Oid;
+use x509_parser::prelude::FromDer;
+use x509_parser::prelude::X509Certificate;
 
 use crate::ENDPOINT;
 use crate::RESOLVER_SEEDS;
@@ -94,7 +99,7 @@ pub async fn set_push_token(token: Vec<u8>) {
 }
 
 /// Register `P → token` with a discovered gateway, if we hold a token. Dials
-/// the gateway *directly* (client/1) so the relay never learns the token, and
+/// the gateway *directly* (client/5) so the relay never learns the token, and
 /// self-signs with `P` so the gateway never learns the IPK. No-op without a
 /// token. Also (re)runs on relay connect.
 pub async fn register_token_at_gateway() -> Result<()> {
@@ -118,12 +123,35 @@ pub async fn register_token_at_gateway() -> Result<()> {
     Ok(())
 }
 
+/// The CA-attested capabilities in a dialed node's leaf cert, if it carries the
+/// extension. The dialed node is the TLS server, so its chain is always
+/// present and was validated against the root CA during the handshake.
+fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
+    let identity = conn.peer_identity()?;
+    let chain = identity.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()?;
+    let (_, cert) = X509Certificate::from_der(chain.first()?.as_ref()).ok()?;
+    let oid = Oid::from(CAPABILITY_OID).ok()?;
+    let ext = cert.extensions().iter().find(|e| e.oid == oid)?;
+    NodeCapabilities::decode(ext.value)
+}
+
 async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Result<()> {
     // ponytail: Fcm-only for now (Android). Pass the provider from the app when
     // iOS / UnifiedPush land.
     let reg = RegisterToken::signed(&PUSH_KEY, PushProvider::Fcm, token);
     let endpoint = ENDPOINT.get().context("endpoint not initialized")?;
     let conn = endpoint.connect(gateway.addr, &gateway.id.to_string())?.await?;
+
+    // The resolver's gateway directory is unauthenticated — the device token
+    // only goes to a node the CA stamped PUSH_GATEWAY (relay/src/dht/push_wake.rs
+    // makes the same check before handing over a pseudonym).
+    let caps = capabilities_from_conn(&conn)
+        .ok_or_else(|| anyhow!("gateway cert carries no capability extension"))?;
+    if !caps.contains(NodeCapabilities::PUSH_GATEWAY) {
+        conn.close(0u32.into(), b"not-a-gateway");
+        return Err(anyhow!("gateway {} lacks PUSH_GATEWAY", gateway.id));
+    }
+
     let (mut tx, _rx) = conn.open_bi().await?;
     tx.write_all(&PushRequest::Register(reg).pack()?).await?;
     tx.finish()?;

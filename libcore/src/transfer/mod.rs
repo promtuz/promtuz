@@ -72,6 +72,21 @@ pub async fn serve_link(link: crate::p2p::PeerLink) {
     serve_streams(link, local).await
 }
 
+/// Whether we offered `file_id` to `peer`. Retention is keyed by content hash
+/// alone, so the outgoing message row is what scopes a pull — and its
+/// `Manifest`/`Gone` answer — to the contact the file was actually sent to.
+fn offered_to(file_id: &[u8; 32], peer: &[u8; 32]) -> bool {
+    let db = crate::db::messages::MESSAGES_DB.lock();
+    db.query_row(
+        "SELECT 1 FROM message_media mm
+           JOIN messages m ON m.peer_ipk = mm.peer_ipk AND m.dispatch_id = mm.dispatch_id
+          WHERE mm.file_id = ?1 AND mm.peer_ipk = ?2 AND m.outgoing = 1 LIMIT 1",
+        rusqlite::params![file_id.as_slice(), peer.as_slice()],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// [`serve_link`] minus the process-global identity, so a test can drive two
 /// in-process endpoints with distinct constructed identities.
 async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
@@ -88,7 +103,9 @@ async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        match store::retention_get(&pull.file_id) {
+        let retained =
+            store::retention_get(&pull.file_id).filter(|_| offered_to(&pull.file_id, &link.ipk));
+        match retained {
             None => {
                 let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
                 let _ = s.finish();
@@ -451,6 +468,25 @@ mod download_resume {
         a
     }
 
+    /// Record the outgoing attachment message that scopes `file_id`'s
+    /// retention to `peer` — what `send_attachment` persists before the offer
+    /// goes out, and what `serve_streams` answers a pull against.
+    fn offer_to(peer: [u8; 32], file_id: [u8; 32]) {
+        let row = crate::data::media::MediaRow {
+            kind:     crate::data::media::KIND_ATTACHMENT,
+            group_id: None,
+            mime:     "application/octet-stream".into(),
+            name:     "f.bin".into(),
+            size:     0,
+            width:    0,
+            height:   0,
+            blob:     None,
+            thumb:    None,
+            file_id:  Some(file_id.to_vec()),
+        };
+        crate::data::media::save_outgoing_with_media(&peer, "", None, &row).unwrap();
+    }
+
     /// Two directly-connected peer endpoints on loopback — the real QUIC
     /// stack minus the punch layer, which a unit test can't drive. Each
     /// link's `ipk` is the peer that side expects on its streams.
@@ -493,6 +529,7 @@ mod download_resume {
         bytes[wire::CHUNK_SIZE..].fill(0xbb);
         std::fs::write(&src, &bytes).unwrap();
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(id_b.ipk, file_id);
 
         // Fresh pull: every chunk lands, verifies, and the partial promotes.
         pull(&link_b, file_id, 300 * 1024, &id_b).await.unwrap();
@@ -510,6 +547,7 @@ mod download_resume {
         bytes2[wire::CHUNK_SIZE..].fill(0x22);
         std::fs::write(&src2, &bytes2).unwrap();
         let (file_id2, _) = prepare_send(src2.to_str().unwrap(), 3600).unwrap();
+        offer_to(id_b.ipk, file_id2);
         let path2 = store::partial_path(&file_id2);
         std::fs::write(&path2, vec![0x99u8; wire::CHUNK_SIZE]).unwrap();
         store::partial_put(&store::Partial {
@@ -560,6 +598,27 @@ mod download_resume {
     }
 
     #[tokio::test]
+    async fn serve_answers_gone_to_a_peer_the_file_was_not_offered_to() {
+        let dir = std::env::temp_dir().join("promtuz-download-resume-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let id_a = paired_identity([71u8; 32]);
+        let id_b = paired_identity([72u8; 32]);
+        let other = paired_identity([73u8; 32]);
+        let (link_a, link_b, _ep_a, _ep_b) = linked_pair(id_b.ipk, id_a.ipk).await;
+        tokio::spawn(serve_streams(link_a, id_a));
+
+        let src = std::env::temp_dir().join("promtuz-dl-scope.bin");
+        std::fs::write(&src, vec![0x55u8; 300 * 1024]).unwrap();
+        let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(other.ipk, file_id);
+
+        assert!(pull(&link_b, file_id, 300 * 1024, &id_b).await.is_err());
+        assert!(store::retention_get(&file_id).is_some(), "still retained for its recipient");
+    }
+
+    #[tokio::test]
     async fn pull_rejects_size_that_belies_the_offer() {
         let dir = std::env::temp_dir().join("promtuz-download-resume-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -573,6 +632,7 @@ mod download_resume {
         let src = std::env::temp_dir().join("promtuz-dl-belie.bin");
         std::fs::write(&src, vec![0x77u8; 300 * 1024]).unwrap();
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(id_b.ipk, file_id);
 
         // The offer lied: claim 1KB while the manifest describes 300KB. The pull
         // must reject before allocating/writing a single .part byte.

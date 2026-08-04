@@ -3,31 +3,24 @@
 //! # What this is
 //!
 //! The MLS rollout introduces three RPC families that run over the
-//! relay-to-relay `peer/1` ALPN: [`KeyPackagePublish`],
+//! relay-to-relay `peer/5` ALPN: [`KeyPackagePublish`],
 //! [`KeyPackageFetch`], [`KeyPackageRefill`], plus the Welcome queue
 //! triplet [`WelcomePublish`], [`WelcomeFetch`], [`WelcomeAck`].
-//! These are *not* part of the existing `relay/1` client surface — the
+//! These are *not* part of the existing `relay/5` client surface — the
 //! relays speak them to each other, and libcore's view today (a
-//! plain client) doesn't natively dial `peer/1` for arbitrary DHT
+//! plain client) doesn't natively dial `peer/5` for arbitrary DHT
 //! traffic.
 //!
-//! Rather than baking a libcore-as-relay shim *now* (substantial
-//! surface — fresh NodeId, DhtHello signing, peer cert pinning) we
-//! ship the **trait** for the dialer here so:
-//!
-//! 1. The send/receive logic in `api/messaging.rs` and the
-//!    `KeyPackageStash` rotation scheduler can be **fully implemented**
-//!    against this trait — testable in-process via a stub.
-//! 2. A concrete production impl can be landed separately (either a
-//!    libcore→peer/1 dialer with an ephemeral NodeKey, or a pivot to
-//!    routing through the existing `relay/1` connection via new
-//!    CRelayPacket variants — the trait shape is agnostic).
+//! The production implementation is
+//! [`super::relay_dht_client::RelayDhtClient`], which routes these over the
+//! home `relay/5` connection. The trait exists so in-process tests can drive a
+//! stub.
 //!
 //! # Why a trait, not a concrete dialer
 //!
 //! The minimum-bar tests demand "lazy-create group on first send"
 //! round-trips in-process (no real network). A concrete dialer that
-//! opens `peer/1` cannot satisfy that. The trait lets a fake
+//! opens `peer/5` cannot satisfy that. The trait lets a fake
 //! implementation drive the in-process test fixture while production
 //! callers wire a real one.
 //!
