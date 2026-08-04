@@ -3,18 +3,19 @@
 # cannot regenerate. A git repo of age-encrypted files, cloned on every machine
 # that needs to sign something.
 #
-#   keys.zsh vault-init [remote]  create the vault (asks for a passphrase), optionally push
-#   keys.zsh clone <remote>       set this machine up against an existing vault
-#   keys.zsh adopt <dir> [remote] take an existing plain-directory vault into git
-#   keys.zsh sync                 pull, then push
-#   keys.zsh mint-ca              root CA          -> vault, and .tls/RootCA.pem into the repo
-#   keys.zsh mint-android         release keystore -> vault
-#   keys.zsh mint-apt             APT repo GPG key -> vault, public .asc alongside
-#   keys.zsh mint-manifest        update-manifest Ed25519 key -> vault, prints the Rust literal
-#   keys.zsh install-ca           put the vault's RootCA.pem into .tls/ for the build
-#   keys.zsh install-android      put the signing keystore into android/ for daily builds
-#   keys.zsh get <item> <dest>    decrypt one item to a path
-#   keys.zsh status               what is present, what is missing, and git state
+#   keys vault-init [remote]  create the vault (asks for a passphrase), optionally push
+#   keys clone <remote>       set this machine up against an existing vault
+#   keys adopt <dir> [remote] take an existing plain-directory vault into git
+#   keys sync                 pull, then push
+#   keys mint-ca              root CA          -> vault, and .tls/RootCA.pem into the repo
+#   keys mint-android         release keystore -> vault
+#   keys mint-apt             APT repo GPG key -> vault, public .asc alongside
+#   keys mint-manifest        update-manifest Ed25519 key -> vault, prints the Rust literal
+#   keys ca-sign <csr> [--cap X]  sign a node CSR with the vaulted root CA
+#   keys install-ca               put the vault's RootCA.pem into .tls/ for the build
+#   keys install-android      put the signing keystore into android/ for daily builds
+#   keys get <item> <dest>    decrypt one item to a path
+#   keys status               what is present, what is missing, and git state
 #
 # ── Why it is shaped like this ────────────────────────────────────────────
 # One human secret exists: the vault passphrase. It protects a single age
@@ -119,7 +120,7 @@ _vault_commit() {
         _ok "pushed to origin"
     else
         _warn "PUSH FAILED — the key exists only on this machine right now."
-        _warn "Fix the remote and run: keys.zsh sync"
+        _warn "Fix the remote and run: keys sync"
     fi
 }
 
@@ -127,7 +128,7 @@ _vault_commit() {
 # prompt of any run happens here.
 _unlock() {
     local scratch="$1"
-    [[ -e "$IDENTITY" ]] || _die "no vault identity at $IDENTITY — run 'keys.zsh vault-init' or 'keys.zsh clone <remote>'"
+    [[ -e "$IDENTITY" ]] || _die "no vault identity at $IDENTITY — run 'keys vault-init' or 'keys clone <remote>'"
     local id="$scratch/identity"
     _info "unlocking the vault…" >&2
     age -d -o "$id" "$IDENTITY" || _die "could not unlock the vault (wrong passphrase?)"
@@ -138,7 +139,7 @@ _unlock() {
 _vault_has() { [[ -e "$VAULT/$1" ]] }
 
 _require_vault() {
-    [[ -e "$RECIPIENT" ]] || _die "no vault at $VAULT — run 'keys.zsh vault-init' or 'keys.zsh clone <remote>'"
+    [[ -e "$RECIPIENT" ]] || _die "no vault at $VAULT — run 'keys vault-init' or 'keys clone <remote>'"
 }
 
 # Encrypt $1 into the vault as $2. Refuses to replace an existing item: an
@@ -248,7 +249,7 @@ EOF
 cmd_clone() {
     _need git git
     local remote="${1:-}"
-    [[ -n "$remote" ]] || _die "usage: keys.zsh clone <remote-url>"
+    [[ -n "$remote" ]] || _die "usage: keys clone <remote-url>"
     [[ -e "$VAULT" ]] && _die "$VAULT already exists"
 
     git clone -q "$remote" "$VAULT"
@@ -263,7 +264,7 @@ cmd_clone() {
 cmd_adopt() {
     _need git git
     local src="${1:-}" remote="${2:-}"
-    [[ -n "$src" ]] || _die "usage: keys.zsh adopt <source-dir> [remote-url]"
+    [[ -n "$src" ]] || _die "usage: keys adopt <source-dir> [remote-url]"
     [[ -d "$src" ]] || _die "no such directory: $src"
     [[ -e "$IDENTITY" ]] && _die "a vault already exists at $VAULT"
     [[ -e "$src/identity.age" ]] || _die "$src has no identity.age — that is not a vault"
@@ -310,7 +311,7 @@ cmd_adopt() {
     print -r -- ""
     _ok "vault adopted at $VAULT"
     _warn "The old copy at $src is untouched. Delete it once you have confirmed"
-    _warn "the new one works — 'keys.zsh status', then a 'keys.zsh get' of one item."
+    _warn "the new one works — 'keys status', then a 'keys get' of one item."
 }
 
 cmd_sync() {
@@ -444,13 +445,13 @@ cmd_mint_apt() {
     local scratch; scratch="$(_scratch)"
     trap "rm -rf '$scratch'" EXIT INT TERM
 
-    # A throwaway GNUPGHOME: the repo key has no business in your personal
-    # keyring, and this way nothing lingers after the export.
+    # A throwaway GNUPGHOME: the repo key has no business in the invoking
+    # user's own keyring, and nothing lingers after the export.
     #
     # Passed per-command rather than exported. An exported GNUPGHOME would
-    # follow us out of this function and into the git commit below, which then
-    # looks for your personal signing key in a keyring that has never heard
-    # of it.
+    # escape this function and reach the git commit below, which would then
+    # look for the committer's signing key in a keyring that has never held
+    # it.
     local gnupg="$scratch/gnupg"
     mkdir -p "$gnupg"; chmod 700 "$gnupg"
 
@@ -552,7 +553,7 @@ cmd_mint_manifest() {
 # CA happens to be sitting in .tls — which after a mint-ca is the OLD one.
 cmd_install_ca() {
     _require_vault
-    _vault_has RootCA.pem || _die "no RootCA.pem in the vault — run 'keys.zsh mint-ca'"
+    _vault_has RootCA.pem || _die "no RootCA.pem in the vault — run 'keys mint-ca'"
 
     mkdir -p "$REPO/.tls"
     if [[ -e "$REPO/.tls/RootCA.pem" ]]; then
@@ -572,6 +573,79 @@ cmd_install_ca() {
     _warn "libcore bakes this in at compile time — rebuild before shipping."
 }
 
+# Sign a node CSR with the vaulted root CA.
+#
+# certgen looks for RootCA.{key,pem} in its working directory, so the CA key
+# has to exist as a file somewhere. Here that somewhere is a 0700 scratch dir
+# an EXIT trap removes — never the repo, never /tmp by hand, and never a copy
+# someone forgets to delete. Of every key in this vault, the CA private key is
+# the one whose stray copy matters most: it mints identities for the whole
+# network.
+#
+# Nothing is written into the scratch dir either. certgen's no-path mode takes
+# the CSR on stdin and emits the certificate on stdout, so the signed result
+# never touches a file that would then need cleaning up.
+cmd_ca_sign() {
+    _require_vault
+    _vault_has RootCA.key.age || _die "no root CA in the vault — run 'keys mint-ca'"
+
+    local csr="" out="" caps=()
+    while (( $# )); do
+        case "$1" in
+            --cap) caps+=(--cap "${2:?}"); shift 2 ;;
+            -o)    out="${2:?}"; shift 2 ;;
+            # Before -*), or the lone dash reads as an unknown flag.
+            -)     csr="-"; shift ;;
+            -*)    _die "unknown option '$1'" ;;
+            *)     csr="$1"; shift ;;
+        esac
+    done
+    [[ -n "$csr" ]] || _die "usage: keys ca-sign <file.csr|-> [--cap <capability>]... [-o out.crt]"
+    [[ "$csr" == "-" || -f "$csr" ]] || _die "no such CSR: $csr"
+
+    local certgen="$REPO/target/release/certgen"
+    [[ -x "$certgen" ]] || {
+        _info "building certgen…" >&2
+        (cd "$REPO" && cargo build --release --bin certgen --features certgen) >&2
+    }
+
+    local scratch; scratch="$(_scratch)"
+    trap "rm -rf '$scratch'" EXIT INT TERM
+    local id; id="$(_unlock "$scratch")"
+
+    age -d -i "$id" -o "$scratch/RootCA.key" "$VAULT/RootCA.key.age"
+    chmod 600 "$scratch/RootCA.key"
+    cp "$VAULT/RootCA.pem" "$scratch/RootCA.pem"
+
+    local src="$csr"
+    [[ "$csr" == "-" ]] && src=/dev/stdin
+
+    local cert
+    cert="$( (cd "$scratch" && "$certgen" sign "${caps[@]}") < "$src" 2>"$scratch/err" )" \
+        || _die "certgen could not sign that CSR:
+$(sed 's/^/    /' "$scratch/err")"
+    [[ -n "$cert" ]] || _die "certgen produced no certificate"
+
+    # Prove it chains to the vaulted CA before handing it over. A cert that
+    # does not verify leaves the node waiting for enrolment indefinitely with
+    # no error to point at, which is near-undiagnosable remotely.
+    print -r -- "$cert" > "$scratch/out.crt"
+    openssl verify -CAfile "$scratch/RootCA.pem" "$scratch/out.crt" >/dev/null 2>&1 \
+        || _die "the signed certificate does not verify against the vault's CA"
+
+    local subject
+    subject="$(openssl x509 -in "$scratch/out.crt" -noout -subject | sed 's/^subject=[ ]*//')"
+
+    if [[ -n "$out" ]]; then
+        cp "$scratch/out.crt" "$out"
+        _ok "signed $subject"
+        _info "-> $out"
+    else
+        print -r -- "$cert"
+        _ok "signed $subject" >&2
+    fi
+}
+
 # Debug builds are signed with the release key so they install over each other
 # without a wipe, which means Gradle needs that key on every ordinary build —
 # Android Studio's Run button included. Prompting for the vault passphrase
@@ -583,7 +657,7 @@ cmd_install_ca() {
 # but anything that can read the working tree can now read the signing key.
 cmd_install_android() {
     _require_vault
-    _vault_has android-release.p12.age || _die "no Android key in the vault — run 'keys.zsh mint-android'"
+    _vault_has android-release.p12.age || _die "no Android key in the vault — run 'keys mint-android'"
 
     local dest="$REPO/android"
     local ks="$dest/android-release.p12" props="$dest/keystore.properties"
@@ -616,7 +690,7 @@ cmd_install_android() {
 
 cmd_get() {
     local item="${1:-}" dest="${2:-}"
-    [[ -n "$item" && -n "$dest" ]] || _die "usage: keys.zsh get <item> <dest>"
+    [[ -n "$item" && -n "$dest" ]] || _die "usage: keys get <item> <dest>"
     _vault_has "$item" || _die "no '$item' in the vault"
 
     if [[ "$item" != *.age ]]; then
@@ -645,7 +719,7 @@ cmd_status() {
         if _git remote get-url origin >/dev/null 2>&1; then
             print -r -- "       origin $(_git remote get-url origin)"
             ahead="$(_git rev-list --count '@{u}..HEAD' 2>/dev/null || print -r -- '?')"
-            [[ "$ahead" == "0" ]] || _warn "$ahead commit(s) not pushed — run 'keys.zsh sync'"
+            [[ "$ahead" == "0" ]] || _warn "$ahead commit(s) not pushed — run 'keys sync'"
         else
             _warn "no remote — this vault exists on THIS MACHINE ONLY"
         fi
@@ -699,10 +773,11 @@ case "${1:-help}" in
     mint-android)  shift; cmd_mint_android "$@" ;;
     mint-apt)      shift; cmd_mint_apt "$@" ;;
     mint-manifest) shift; cmd_mint_manifest "$@" ;;
+    ca-sign)         shift; cmd_ca_sign "$@" ;;
     install-ca)      shift; cmd_install_ca "$@" ;;
     install-android) shift; cmd_install_android "$@" ;;
     get)           shift; cmd_get "$@" ;;
     status)        shift; cmd_status "$@" ;;
     help|-h|--help) cmd_help ;;
-    *) _die "unknown command '$1' — try 'keys.zsh help'" ;;
+    *) _die "unknown command '$1' — try 'keys help'" ;;
 esac

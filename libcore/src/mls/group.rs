@@ -609,12 +609,23 @@ mod tests {
         let alice = Party::new(&provider, 1);
         let mut group = create_group(&provider, &alice, &[0xAA; 32]);
         let proposal = group.leave(&provider, &alice.sig_kp).expect("leave");
-        // openmls 0.8: leave returns a Remove proposal, framed as a
-        // PublicMessage by default — not PrivateMessage.
+        // openmls 0.8 defaults `MlsGroupJoinConfig::wire_format_policy` to
+        // `PURE_CIPHERTEXT_WIRE_FORMAT_POLICY`, so handshake messages — including
+        // this Remove proposal — are framed as PrivateMessage.
+        //
+        // The assertion previously read `PublicMessage` and had been failing on
+        // `main`, which meant `cargo test -p core --lib` was red and no
+        // regression anywhere in the crate could be distinguished from the
+        // pre-existing failure.
+        //
+        // PrivateMessage is also the property we *want* (handshake framing stays
+        // opaque to the relay), but nothing pins it deliberately — it is inherited
+        // from an openmls default. Worth setting `.wire_format_policy(...)`
+        // explicitly on the create/join configs so it cannot drift silently.
         let bytes = mls_message_to_bytes(&proposal).expect("ser");
         assert_eq!(
             mls_message_from_bytes(&bytes).expect("deser").wire_format(),
-            WireFormat::PublicMessage
+            WireFormat::PrivateMessage
         );
     }
 

@@ -1,5 +1,3 @@
-#![cfg(not(doctest))]
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -127,7 +125,7 @@ pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
 ///
 /// ## Example
 ///
-/// ```no_run
+/// ```ignore
 /// let cfg = build_server_cfg(
 ///     Path::new("cert/server.crt"),
 ///     Path::new("cert/server.key"),
