@@ -501,10 +501,8 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
 /// cascade, so a revoked contact's open QUIC connection dies with the pairing.
 /// Best-effort: a no-op if the endpoint was never built or no link is open.
 pub(crate) fn drop_link(peer: &[u8; 32]) {
-    if let Some(ep) = P2P.get() {
-        if let Some(link) = ep.links.lock().remove(peer) {
-            link.conn.close(0u32.into(), b"contact forgotten");
-        }
+    if let Some(ep) = P2P.get() && let Some(link) = ep.links.lock().remove(peer) {
+        link.conn.close(0u32.into(), b"contact forgotten");
     }
 }
 

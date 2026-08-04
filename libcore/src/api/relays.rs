@@ -140,10 +140,10 @@ pub fn forget_relay(id: String) -> Result<(), CoreError> {
 #[uniffi::export]
 pub fn connect_relay(id: String) -> Result<(), CoreError> {
     crate::state::set_preferred_relay(id);
-    if let Some(relay) = crate::state::RELAY.read().as_ref() {
-        if let Some(conn) = &relay.connection {
-            conn.close(quinn::VarInt::from_u32(0), b"user switch relay");
-        }
+    if let Some(relay) = crate::state::RELAY.read().as_ref()
+        && let Some(conn) = &relay.connection
+    {
+        conn.close(quinn::VarInt::from_u32(0), b"user switch relay");
     }
     Ok(())
 }

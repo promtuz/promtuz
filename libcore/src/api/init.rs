@@ -132,10 +132,10 @@ pub fn on_foreground() {
 #[uniffi::export]
 pub fn on_task_removed() {
     TASK_REMOVED.store(true, Ordering::Relaxed);
-    if let Some(relay) = crate::state::RELAY.read().as_ref() {
-        if let Some(conn) = &relay.connection {
-            conn.close(quinn::VarInt::from_u32(0), b"task removed");
-        }
+    if let Some(relay) = crate::state::RELAY.read().as_ref()
+        && let Some(conn) = &relay.connection
+    {
+        conn.close(quinn::VarInt::from_u32(0), b"task removed");
     }
 }
 

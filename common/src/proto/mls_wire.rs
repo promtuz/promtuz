@@ -1365,7 +1365,7 @@ mod tests {
         // Tampered reason → different transcript → sig no longer matches.
         let tampered = pair_decline_signing_input(&from, &inviter, DECLINE_USER_REJECTED, 42);
         assert!(
-            decliner.verifying_key().verify(&tampered, &Signature::from(sig)).is_err(),
+            decliner.verifying_key().verify(&tampered, &sig).is_err(),
             "reason is bound into the transcript"
         );
     }

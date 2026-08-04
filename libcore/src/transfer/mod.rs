@@ -322,7 +322,14 @@ async fn pull(
     store::partial_put(&part)?;
 
     use std::io::{Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).read(true).open(&path)?;
+    // truncate(false) is the resume contract, not a default: bytes already in
+    // this .part have to survive the reopen (we seek past them, just below).
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .truncate(false)
+        .open(&path)?;
     f.seek(SeekFrom::Start(have0 as u64 * manifest.chunk_size as u64))?;
     let mut buf = vec![0u8; manifest.chunk_size as usize];
     for idx in have0 as usize..manifest.chunks.len() {

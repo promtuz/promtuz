@@ -69,6 +69,10 @@ pub fn send_image(
 /// rows, and send the `Attachment` control (the bytes are pulled device-to-device
 /// by `file_id`). Fire-and-forget like [`send_image`] — the `Result` reports only
 /// synchronous input errors; the send outcome arrives via `on_message`.
+// 9 args is an FFI surface, not a Rust API: folding them into a struct would
+// change the generated Kotlin signature and every call site in the app, for
+// no gain on this side of the boundary.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn send_attachment(
     to_ipk: Vec<u8>, source_path: String, name: String, mime: String,
