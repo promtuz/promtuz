@@ -201,7 +201,7 @@ impl Store {
         use common::proto::pack::Packer;
         use common::proto::pack::Unpacker;
 
-        if self.presence_lease.get(&lease.user.0)?.is_some_and(|v| {
+        if self.presence_lease.get(lease.user.0)?.is_some_and(|v| {
             common::proto::dht_p2p::PresenceLease::deser(&v)
                 .ok()
                 .is_some_and(|old| old.version >= lease.version)
@@ -209,7 +209,7 @@ impl Store {
             return Ok(false);
         }
         let Ok(value) = lease.ser() else { return Ok(false) };
-        self.put_sync(&self.presence_lease, &lease.user.0, value)?;
+        self.put_sync(&self.presence_lease, lease.user.0, value)?;
         Ok(true)
     }
 
@@ -235,7 +235,7 @@ impl Store {
         use common::proto::pack::Packer;
 
         let Ok(value) = publish.ser() else { return Ok(()) };
-        self.put_sync(&self.push_pending, &publish.user_ipk.0, value)
+        self.put_sync(&self.push_pending, publish.user_ipk.0, value)
     }
 
     pub fn remove_pending_push(&self, ipk: &[u8; 32]) -> fjall::Result<()> {

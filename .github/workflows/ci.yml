@@ -83,4 +83,11 @@ jobs:
           mkdir -p .tls
           cargo run -p common --bin certgen --features certgen --locked -- init
           mv RootCA.key RootCA.pem .tls/
-      - run: cargo test --workspace --all-targets --locked
+      # --test-threads=1 is not cargo-cult. The suite drives PROMTUZ_DATA_DIR,
+      # a process-global env var, and several tests point it at one shared
+      # directory (libcore/src/transfer/mod.rs:481 and :538 use the same path)
+      # while sibling tests GC that same partial store. Run in parallel those
+      # race each other rather than the code under test. Serial costs nothing
+      # here: the libcore suite runs in under two seconds and the wall clock is
+      # all compilation.
+      - run: cargo test --workspace --all-targets --locked -- --test-threads=1
