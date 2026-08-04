@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::debug;
 use common::quic::CloseReason;
@@ -19,14 +20,18 @@ const ACCEPT_RATE_PER_MIN: u32 = 10;
 /// Short-term burst allowed above the sustained rate (reconnect headroom).
 const ACCEPT_RATE_BURST: u32 = 5;
 
+/// Cadence at which idle limiter keys and expired registrations are reclaimed.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+
 type IpRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
 /// Accepts inbound connections and hands each to [`Handler`], rate-limiting
 /// per source IP before spending CPU on the handshake.
 pub struct Acceptor {
     gateway: Arc<Gateway>,
-    /// The default keyed in-memory store evicts idle IPs automatically, so
-    /// this does not grow unboundedly under churn.
+    /// Keyed on the source IP. The keyed store keeps a bucket per key until
+    /// [`maintain`] prunes it, so a source-address flood costs memory until the
+    /// next sweep.
     limiter: Arc<IpRateLimiter>,
 }
 
@@ -41,6 +46,8 @@ impl Acceptor {
     }
 
     pub async fn run(&self) {
+        tokio::spawn(maintain(self.gateway.clone(), self.limiter.clone()));
+
         while let Some(conn) = self.gateway.endpoint.accept().await {
             let limiter = self.limiter.clone();
             let gateway = self.gateway.clone();
@@ -61,5 +68,16 @@ impl Acceptor {
                 }
             });
         }
+    }
+}
+
+async fn maintain(gateway: Arc<Gateway>, limiter: Arc<IpRateLimiter>) {
+    let mut tick = tokio::time::interval(MAINTENANCE_INTERVAL);
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        limiter.retain_recent();
+        limiter.shrink_to_fit();
+        gateway.registry.sweep();
     }
 }

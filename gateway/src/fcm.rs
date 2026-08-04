@@ -17,6 +17,7 @@ use jsonwebtoken::Header;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
@@ -24,6 +25,14 @@ const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 /// Re-mint the access token this far before its stated expiry, to cover clock
 /// skew and request latency.
 const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_IDLE_CONNS_PER_HOST: usize = 16;
+
+/// Ceiling on outbound requests in flight. A wake beyond it is shed, so
+/// inbound wake volume cannot grow an unbounded egress backlog.
+const MAX_INFLIGHT_SENDS: usize = 64;
 
 /// The fields we need out of a Google service-account JSON.
 #[derive(Deserialize)]
@@ -62,6 +71,7 @@ pub struct FcmSender {
     token_uri:    String,
     encoding_key: EncodingKey,
     cached:       Mutex<Option<CachedToken>>,
+    inflight:     Semaphore,
 }
 
 impl FcmSender {
@@ -71,13 +81,20 @@ impl FcmSender {
             serde_json::from_slice(&raw).context("parsing service-account JSON")?;
         let encoding_key = EncodingKey::from_rsa_pem(sa.private_key.as_bytes())
             .context("service-account private_key is not valid RSA PEM")?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .pool_max_idle_per_host(MAX_IDLE_CONNS_PER_HOST)
+            .build()
+            .context("building the FCM HTTP client")?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             project_id: sa.project_id,
             client_email: sa.client_email,
             token_uri: sa.token_uri,
             encoding_key,
             cached: Mutex::new(None),
+            inflight: Semaphore::new(MAX_INFLIGHT_SENDS),
         })
     }
 
@@ -133,6 +150,7 @@ impl FcmSender {
     /// Wake a device: a high-priority data message carrying the opaque payload
     /// base64'd into one data field, which the device's FCM handler decrypts.
     pub async fn send(&self, device_token: &str, payload: &[u8]) -> Result<()> {
+        let _permit = self.inflight.try_acquire().map_err(|_| anyhow!("FCM dispatch saturated"))?;
         let access = self.access_token().await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
         let body = serde_json::json!({

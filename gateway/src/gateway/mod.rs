@@ -34,8 +34,8 @@ impl Gateway {
     fn get_server_cfg(cfg: &AppConfig) -> Result<ServerConfig> {
         setup_crypto_provider()?;
         use ProtoRole as PR;
-        // Dialers: devices register over `client/1`, home relays wake over
-        // `relay/1`. The gateway itself never dials anyone over QUIC (FCM is
+        // Dialers: devices register over `client/5`, home relays wake over
+        // `relay/5`. The gateway itself never dials anyone over QUIC (FCM is
         // HTTPS), so it needs no ALPN role of its own.
         build_server_cfg(&cfg.network.cert_path, &cfg.network.key_path, &[PR::Client, PR::Relay])
     }
@@ -54,7 +54,7 @@ impl Gateway {
 
     pub fn new(cfg: AppConfig) -> Self {
         let mut endpoint = Self::endpoint(&cfg);
-        // Default client config so the gateway can dial the resolver (`relay/1`)
+        // Default client config so the gateway can dial the resolver (`relay/5`)
         // to register itself.
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
         let client_cfg =

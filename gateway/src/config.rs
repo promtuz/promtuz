@@ -42,6 +42,7 @@ impl AppConfig {
 
         if !path.exists() {
             common::error!("config not found: {}", path.display());
+            common::server::log::flush();
             std::process::exit(1);
         }
 
@@ -50,11 +51,13 @@ impl AppConfig {
                 Ok(conf) => conf,
                 Err(err) => {
                     common::error!("parse config\n{err}");
+                    common::server::log::flush();
                     process::exit(1);
                 },
             },
             Err(_) => {
                 common::error!("Failed to read config");
+                common::server::log::flush();
                 process::exit(1);
             },
         }

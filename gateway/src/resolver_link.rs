@@ -69,7 +69,7 @@ async fn register(
 }
 
 /// Dial resolver seeds in order; first success wins. Uses the endpoint's
-/// default client config (`relay/1`).
+/// default client config (`relay/5`).
 async fn dial_any(endpoint: &Endpoint, seeds: &[NodeSeed]) -> Result<Connection> {
     let mut last: Option<anyhow::Error> = None;
     for seed in seeds {
