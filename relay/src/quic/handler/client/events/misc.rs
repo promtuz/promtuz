@@ -8,6 +8,7 @@ use common::proto::dht_p2p::PushPseudonymPublish;
 use quinn::SendStream;
 
 use crate::quic::handler::client::ClientCtxHandle;
+use crate::quic::handler::client::events::spawn_tied;
 
 pub(super) async fn handle_misc(
     packet: QueryP, ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -33,8 +34,12 @@ pub(super) async fn handle_misc(
 pub(super) async fn handle_register_push(
     pseudonym: [u8; 32], timestamp: u64, sig: [u8; 64], ctx: ClientCtxHandle,
 ) -> Result<()> {
+    if ctx.limits.register_push.check().is_err() {
+        return Ok(());
+    }
+    let ipk = ctx.ipk.to_bytes();
     let publish = PushPseudonymPublish {
-        user_ipk: ctx.ipk.to_bytes().into(),
+        user_ipk: ipk.into(),
         pseudonym: pseudonym.into(),
         timestamp,
         user_sig: sig.into(),
@@ -44,10 +49,11 @@ pub(super) async fn handle_register_push(
     }
     // Keep this relay's local durable record for DHT-disabled deployments;
     // enabled DHT relays fan the exact user-signed record to target homes.
-    ctx.relay.store.put_push_pseudonym(&ctx.ipk.to_bytes(), &pseudonym)?;
-    ctx.relay.push_pseudonyms.write().insert(ctx.ipk.to_bytes(), pseudonym);
+    let store = ctx.relay.store.clone();
+    tokio::task::spawn_blocking(move || store.put_push_pseudonym(&ipk, &pseudonym)).await??;
+    ctx.relay.push_pseudonyms.write().insert(ipk, pseudonym);
     if let Some(dht) = ctx.relay.dht.clone() {
-        tokio::spawn(crate::dht::push_replication::replicate_to_homes(dht, publish));
+        spawn_tied(&ctx.cancel, crate::dht::push_replication::replicate_to_homes(dht, publish));
     }
     debug!("client({}) registered push-pseudonym", ctx.conn.remote_address());
     Ok(())

@@ -8,6 +8,7 @@ use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::activity_sig_message;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -23,12 +24,16 @@ use quinn::SendStream;
 use crate::dht::forward::ForwardSummary;
 use crate::dht::forward::forward_to_homes;
 use crate::quic::handler::client::ClientCtxHandle;
+use crate::quic::handler::client::events::STREAM_OPEN_TIMEOUT;
+use crate::quic::handler::client::events::spawn_tied;
 use crate::quic::handler::client::remove_client_if_same;
 use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
 use crate::util::systime;
 
 const LIVE_DELIVER_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Matches the far-end window in `dht::forward::handle_activity_forward_rpc`.
+const ACTIVITY_MAX_SKEW_MS: u64 = 30_000;
 
 pub(super) async fn handle_forward(
     fwd: DispatchP, ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -141,35 +146,51 @@ pub(super) async fn handle_forward(
     // 5. Local-queue safety net. Pre-sticky-home behaviour preserved
     //    as a fallback so a transient DHT/network hiccup doesn't lose
     //    messages.
-    let dispatch = store_in_rocks(&ctx, recipient, delivery)?;
+    let dispatch = store_in_rocks(&ctx, recipient, delivery).await?;
     SRelayPacket::DispatchAck(dispatch).send(tx).await?;
 
     Ok(())
 }
 
 /// Route an ephemeral signal (presence/typing): deliver to the recipient if
-/// online on THIS relay, else drop — never queue. Fire-and-forget (no reply to
-/// the sender). Sender must be the authenticated session (no from-spoofing);
-/// the recipient's libcore re-verifies `sig` for authenticity.
-///
-/// MVP: same-relay only. Cross-relay (fan to the recipient's online home) is a
-/// follow-up — an offline-or-remote recipient simply doesn't see the signal.
+/// online on THIS relay, else fan out to its homes — never queue.
+/// Fire-and-forget (no reply to the sender). Sender must be the authenticated
+/// session and the signal must carry a fresh, valid signature; a K-way fan-out
+/// is far too expensive to spend on bytes we have not authenticated.
 pub(super) async fn handle_activity(eph: ActivityP, ctx: ClientCtxHandle) -> Result<()> {
     if eph.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
+        return Ok(());
+    }
+    if !activity_is_authentic(&eph, systime().as_millis() as u64) {
         return Ok(());
     }
     let recipient_conn = { ctx.relay.clients.read().get(&*eph.to).cloned() };
     let Some(conn) = recipient_conn else {
         if let Some(dht) = ctx.relay.dht.as_ref().cloned() {
-            tokio::spawn(crate::dht::forward::forward_activity_to_homes(dht, eph));
+            spawn_tied(&ctx.cancel, crate::dht::forward::forward_activity_to_homes(dht, eph));
         }
         return Ok(());
     };
-    if let Ok((mut tx, _rx)) = conn.open_bi().await {
-        let _ = SRelayPacket::Activity(eph).send(&mut tx).await;
-        let _ = tx.finish();
-    }
+    let _ = tokio::time::timeout(STREAM_OPEN_TIMEOUT, async {
+        let (mut tx, _rx) = conn.open_bi().await.ok()?;
+        SRelayPacket::Activity(eph).send(&mut tx).await.ok()?;
+        tx.finish().ok()
+    })
+    .await;
     Ok(())
+}
+
+fn activity_is_authentic(eph: &ActivityP, now_ms: u64) -> bool {
+    if now_ms.abs_diff(eph.timestamp) > ACTIVITY_MAX_SKEW_MS {
+        return false;
+    }
+    (|| {
+        let vk = VerifyingKey::from_bytes(&eph.from).ok()?;
+        let sig = Signature::from_slice(&*eph.sig).ok()?;
+        let msg = activity_sig_message(&eph.to, &eph.from, eph.activity, eph.timestamp);
+        vk.verify_strict(&msg, &sig).ok()
+    })()
+    .is_some()
 }
 
 /// Translate a successful [`ForwardSummary`] into the [`DispatchAckP`]
@@ -202,12 +223,21 @@ fn ack_for_summary(summary: &ForwardSummary, accepted_at_ms: u64) -> DispatchAck
 pub(crate) async fn try_deliver(
     conn: &Connection, delivery: &DeliverP,
 ) -> Result<(), ConnectionError> {
-    let (mut deliver_tx, mut deliver_rx) = conn.open_bi().await?;
+    let (mut deliver_tx, mut deliver_rx) =
+        match tokio::time::timeout(STREAM_OPEN_TIMEOUT, conn.open_bi()).await {
+            Ok(opened) => opened?,
+            Err(_) => return Err(ConnectionError::TimedOut),
+        };
 
-    SRelayPacket::Deliver(delivery.clone())
-        .send(&mut deliver_tx)
-        .await
-        .map_err(|_| ConnectionError::TimedOut)?;
+    match tokio::time::timeout(
+        LIVE_DELIVER_ACK_TIMEOUT,
+        SRelayPacket::Deliver(delivery.clone()).send(&mut deliver_tx),
+    )
+    .await
+    {
+        Ok(Ok(())) => {},
+        _ => return Err(ConnectionError::TimedOut),
+    }
 
     match tokio::time::timeout(LIVE_DELIVER_ACK_TIMEOUT, CRelayPacket::unpack(&mut deliver_rx)).await {
         Ok(Ok(CRelayPacket::DeliverAck)) => Ok(()),
@@ -242,7 +272,7 @@ pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
 /// - `Queued` on success
 /// - `QueueFull` if the recipient already has `MAX_QUEUED_PER_RECIPIENT`
 ///   messages on disk; the message is *not* stored in this case.
-fn store_in_rocks(
+async fn store_in_rocks(
     ctx: &ClientCtxHandle, recipient: Bytes<32>, delivery: DeliverP,
 ) -> Result<DispatchAckP> {
     debug!(
@@ -279,20 +309,26 @@ fn store_in_rocks(
 
     let key = MessageKey::new(&recipient.0, delivery.accepted_at_ms, &delivery.id.0);
 
-    // Durable write: we acknowledge `Queued` to the sender as soon as this
-    // returns, so a crash before the write hits disk would silently lose the
-    // message. `put_sync` fsyncs the journal before we ack.
+    // `Queued` is a durability promise, so the write must be on disk before we
+    // reply — the barrier resolves on the group commit covering it.
     let payload = delivery.ser()?;
     ctx.relay.store.put_sync(&ctx.relay.store.messages, key.as_bytes(), &payload)?;
+    ctx.relay.store.persist_barrier().wait().await?;
 
     Ok(DispatchAckP::Queued { accepted_at_ms: delivery.accepted_at_ms })
 }
 
 #[cfg(test)]
 mod tests {
+    use common::proto::client_rel::ActivityP;
+    use common::proto::client_rel::activity_sig_message;
     use common::quic::id::NodeId;
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
 
+    use super::ACTIVITY_MAX_SKEW_MS;
     use super::ack_for_summary;
+    use super::activity_is_authentic;
     use crate::dht::forward::ForwardSummary;
     use common::proto::client_rel::DispatchAckP;
 
@@ -300,6 +336,53 @@ mod tests {
         let mut b = [0u8; 32];
         b[0] = n;
         NodeId::new(b)
+    }
+
+    fn signed_activity(key: &SigningKey, timestamp: u64) -> ActivityP {
+        let to = [9u8; 32];
+        let from = key.verifying_key().to_bytes();
+        let activity = 1u16;
+        let sig = key.sign(&activity_sig_message(&to, &from, activity, timestamp)).to_bytes();
+        ActivityP {
+            to: to.into(),
+            from: from.into(),
+            activity,
+            timestamp,
+            sig: sig.into(),
+        }
+    }
+
+    #[test]
+    fn activity_is_authentic_accepts_a_fresh_signed_signal() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let now = 1_700_000_000_000u64;
+        assert!(activity_is_authentic(&signed_activity(&key, now), now));
+    }
+
+    #[test]
+    fn activity_is_authentic_rejects_a_forged_signature() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let now = 1_700_000_000_000u64;
+        let mut eph = signed_activity(&key, now);
+        eph.sig = [0u8; 64].into();
+        assert!(!activity_is_authentic(&eph, now));
+    }
+
+    #[test]
+    fn activity_is_authentic_rejects_a_replayed_timestamp() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let now = 1_700_000_000_000u64;
+        let stale = now - ACTIVITY_MAX_SKEW_MS - 1;
+        assert!(!activity_is_authentic(&signed_activity(&key, stale), now));
+    }
+
+    #[test]
+    fn activity_is_authentic_rejects_a_signal_retargeted_at_another_recipient() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let now = 1_700_000_000_000u64;
+        let mut eph = signed_activity(&key, now);
+        eph.to = [8u8; 32].into();
+        assert!(!activity_is_authentic(&eph, now));
     }
 
     /// `any_delivered = true` always wins, even when there are also

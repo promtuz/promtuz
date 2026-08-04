@@ -54,6 +54,7 @@ use common::quic::id::NodeId;
 use common::quic::xor32;
 use common::trace;
 use common::warn;
+use fjall::Keyspace;
 use quinn::SendStream;
 use tokio::sync::oneshot;
 
@@ -65,6 +66,10 @@ use crate::quic::handler::client::RemoteDrainState;
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::storage::MessageKey;
 use crate::util::systime;
+
+/// Serialized payload a single `DrainQueue` ships before it stops and lets the
+/// client re-issue. Keeps peak drain memory to one message, not one queue.
+const DRAIN_MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// Extended fetch result that carries the per-home `delivered_ids`
 /// map and the home descriptors so the post-`AckDrain` flow can issue
@@ -134,29 +139,44 @@ pub(crate) async fn handle_drain_queue_with(
         None => true,
     };
 
-    // 2. Drain local cf_messages. `MessageKey`s of everything streamed
-    //    (from BOTH local keyspaces) are tracked in `delivered_keys` so
-    //    the follow-up `AckDrain` deletes them. The remote-home source
-    //    is GC'd separately via `QueueFetchAck` after the ack lands.
+    // 2. Stream local cf_messages straight to the wire. `MessageKey`s of
+    //    everything read (from BOTH local keyspaces) are tracked in
+    //    `delivered_keys` so the follow-up `AckDrain` deletes them. The
+    //    remote-home source is GC'd separately via `QueueFetchAck` after
+    //    the ack lands.
     let mut delivered_keys: Vec<MessageKey> = Vec::new();
-    let mut deliver_queue: Vec<DeliverP> = Vec::new();
+    let mut batch = DrainBatch::default();
 
-    iterate_cf_messages(&ctx, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
+    stream_keyspace(
+        &ctx.relay.store.messages,
+        &recipient_arr,
+        decode_deliver,
+        tx,
+        &mut batch,
+        &mut delivered_keys,
+    )
+    .await?;
 
-    // 3. If `i_am_home`, also iterate the `dht_queue` keyspace for the
+    // 3. If `i_am_home`, also stream the `dht_queue` keyspace for the
     //    user's prefix. Both keyspaces share the same `MessageKey` shape.
     //    A self-as-home relay's `dht_queue` can hold dispatches that
     //    arrived via either the sender fan-out or the inbound `Forward`
     //    handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
-        let before = deliver_queue.len();
-        iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
+        let dht_ids = stream_keyspace(
+            &dht.store.queue,
+            &recipient_arr,
+            decode_dispatch,
+            tx,
+            &mut batch,
+            &mut delivered_keys,
+        )
+        .await?;
         // The sender fan-out stored these same dispatches at ALL K homes. We
         // GC our own copy on AckDrain, but the other K-1 keep theirs and
         // redeliver them on every reconnect (now client-deduped, but wasted
         // bandwidth). Tell them to GC too — reuse the QueueFetchAck round by
         // seeding `pending_remote_drain` with the other homes + these ids.
-        let dht_ids: Vec<[u8; 16]> = deliver_queue[before..].iter().map(|d| d.id.0).collect();
         if !dht_ids.is_empty() {
             let self_id = dht.node_id;
             let others: Vec<NodeDescriptor> = {
@@ -181,7 +201,10 @@ pub(crate) async fn handle_drain_queue_with(
     let auth_snapshot: Option<DrainAuth> = ctx.drain_auth.lock().clone();
 
     let mut remote_msgs: Vec<DispatchP> = Vec::new();
-    if !i_am_home {
+    let mut remote_per_home: std::collections::HashMap<NodeId, Vec<[u8; 16]>> =
+        std::collections::HashMap::new();
+    let mut remote_homes = Vec::new();
+    if !i_am_home && !batch.is_full() {
         if let (Some(auth), Some(dht)) =
             (auth_snapshot, ctx.relay.dht.as_ref().cloned())
         {
@@ -190,14 +213,8 @@ pub(crate) async fn handle_drain_queue_with(
             let result: RemoteFetchResult =
                 (remote_fetcher)(dht.clone(), recipient_arr, auth, self_id).await;
             remote_msgs = result.messages;
-            // Stash per-home delivered ids + home descriptors for the
-            // post-`AckDrain` `QueueFetchAck` fan-out. Replace any
-            // prior pending state — the latest drain wins.
-            *ctx.pending_remote_drain.lock() = Some(RemoteDrainState {
-                user_ipk: recipient_arr,
-                per_home: result.per_home,
-                homes:    result.homes,
-            });
+            remote_per_home = result.per_home;
+            remote_homes = result.homes;
         } else {
             // Either we have no auth (legacy client) or DHT is
             // disabled. Log and degrade to local-only — same shape
@@ -208,19 +225,40 @@ pub(crate) async fn handle_drain_queue_with(
         }
     }
 
-    // Merge local-CF deliveries with the remote-fetched dispatches,
-    // deduping by `DispatchP.id`. First occurrence wins: the local CFs
-    // (cf_messages before cf_dht_queue) rank ahead of the remote source,
-    // so a message that landed in BOTH — possible when a sender's
-    // local-fallback path coexisted with a home-store path during a
-    // routing transition — ships once, from the local side. See
-    // [`dedupe_deliveries`].
-    let deduped = dedupe_deliveries(deliver_queue, remote_msgs);
-
-    // 5. Stream the unified, deduplicated batch.
-    for deliver in &deduped {
+    // 5. Stream the remote-fetched dispatches. The local keyspaces went out
+    //    first, so a message that landed in BOTH — possible when a sender's
+    //    local-fallback path coexisted with a home-store path during a
+    //    routing transition — ships once, from the local side.
+    let mut delivered_remote: std::collections::HashSet<[u8; 16]> =
+        std::collections::HashSet::new();
+    for dispatch in remote_msgs {
+        if batch.is_full() {
+            break;
+        }
+        let deliver = dispatch_to_deliver(dispatch);
+        if !batch.admit(deliver.id.0, deliver.payload.0.len()) {
+            continue;
+        }
         trace!("DRAIN: sending queued message id={}", hex::encode(deliver.id));
-        SRelayPacket::Deliver(deliver.clone()).send(tx).await?;
+        let id = deliver.id.0;
+        SRelayPacket::Deliver(deliver).send(tx).await?;
+        delivered_remote.insert(id);
+    }
+
+    // The ack transcript may only name ids that reached the wire — the client
+    // refuses to sign for anything it did not receive, and the byte budget
+    // above can cut the stream short. Ids left behind stay queued at their
+    // home and come back on the next drain.
+    if !remote_homes.is_empty() {
+        for ids in remote_per_home.values_mut() {
+            ids.retain(|id| delivered_remote.contains(id));
+        }
+        remote_per_home.retain(|_, ids| !ids.is_empty());
+        *ctx.pending_remote_drain.lock() = Some(RemoteDrainState {
+            user_ipk: recipient_arr,
+            per_home: remote_per_home,
+            homes:    remote_homes,
+        });
     }
 
     // 6. Replace (rather than extend) so a re-drain before ack still
@@ -417,68 +455,86 @@ fn self_is_in_k_closest(dht: &Dht, user_ipk: &[u8; 32]) -> bool {
     self_dist < kth_dist
 }
 
-/// Walk the `messages` keyspace for `recipient`, push every parsed
-/// `DeliverP` onto `out`, and record the corresponding `MessageKey`
-/// onto `keys` (the latter feeds the eventual `AckDrain` cleanup).
-fn iterate_cf_messages(
-    ctx: &ClientCtxHandle, recipient: &[u8; 32], out: &mut Vec<DeliverP>,
-    keys: &mut Vec<MessageKey>,
-) {
-    for guard in ctx.relay.store.messages.prefix(recipient) {
-        let (key_bytes, value) = match guard.into_inner() {
-            Ok(kv) => kv,
-            Err(e) => {
-                warn!("DRAIN: messages iterator error: {e}");
-                break;
-            }
-        };
+/// Running state of one drain: which ids have already gone out and how many
+/// serialized bytes that cost.
+#[derive(Default)]
+struct DrainBatch {
+    seen:  std::collections::HashSet<[u8; 16]>,
+    bytes: usize,
+}
 
-        let Some(key) = MessageKey::parse(&key_bytes) else {
-            warn!("DRAIN: malformed messages key (len={}); skipping", key_bytes.len());
-            continue;
-        };
+impl DrainBatch {
+    fn is_full(&self) -> bool {
+        self.bytes >= DRAIN_MAX_BATCH_BYTES
+    }
 
-        let Ok(deliver) = DeliverP::deser(&value) else {
-            warn!("DRAIN: malformed DeliverP value; skipping");
-            continue;
-        };
-
-        out.push(deliver);
-        keys.push(key);
+    /// `false` when `id` already went out this drain. The caller still tracks
+    /// the key, so both copies of a double-stored dispatch are GC'd on ack.
+    fn admit(&mut self, id: [u8; 16], size: usize) -> bool {
+        if !self.seen.insert(id) {
+            return false;
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        true
     }
 }
 
-/// Walk the `cf_dht_queue` for `recipient_prefix`, push every parsed
-/// `DispatchP` (converted to `DeliverP` via [`dispatch_to_deliver`])
-/// onto `out`, and record its `MessageKey` onto `keys` so the
-/// follow-up `AckDrain` GCs the entry (same contract as
-/// [`iterate_cf_messages`]).
-fn iterate_cf_dht_queue(
-    dht: &Arc<Dht>, recipient: &[u8; 32], out: &mut Vec<DeliverP>,
-    keys: &mut Vec<MessageKey>,
-) {
-    for guard in dht.store.queue.prefix(recipient) {
-        let (key_bytes, value) = match guard.into_inner() {
-            Ok(kv) => kv,
-            Err(e) => {
-                warn!("DRAIN: dht_queue iterator error: {e}");
-                break;
-            }
-        };
+fn decode_deliver(value: &[u8]) -> Option<DeliverP> {
+    DeliverP::deser(value).ok()
+}
 
-        let Some(key) = MessageKey::parse(&key_bytes) else {
-            warn!("DRAIN: malformed dht_queue key (len={}); skipping", key_bytes.len());
+fn decode_dispatch(value: &[u8]) -> Option<DeliverP> {
+    DispatchP::deser(value).ok().map(dispatch_to_deliver)
+}
+
+/// Walk `ks` for `recipient`, sending each decoded entry to the client as it is
+/// read and recording its `MessageKey` onto `keys` for the eventual `AckDrain`
+/// cleanup. Returns the ids actually sent. Stops once `batch` is full; the
+/// untouched remainder stays on disk for the client's next `DrainQueue`.
+///
+/// Keys are collected up front so no keyspace iterator is held across the
+/// `await` that writes to the wire.
+async fn stream_keyspace(
+    ks: &Keyspace, recipient: &[u8; 32], decode: fn(&[u8]) -> Option<DeliverP>,
+    tx: &mut SendStream, batch: &mut DrainBatch, keys: &mut Vec<MessageKey>,
+) -> Result<Vec<[u8; 16]>> {
+    let mut sent: Vec<[u8; 16]> = Vec::new();
+    for key in collect_keys(ks, recipient) {
+        if batch.is_full() {
+            break;
+        }
+        let Ok(Some(value)) = ks.get(key.as_bytes()) else { continue };
+        let Some(deliver) = decode(&value) else {
+            warn!("DRAIN: malformed queue value; skipping");
             continue;
         };
-
-        let Ok(dispatch) = DispatchP::deser(&value) else {
-            warn!("DRAIN: malformed DispatchP value in dht_queue; skipping");
-            continue;
-        };
-
-        out.push(dispatch_to_deliver(dispatch));
         keys.push(key);
+        if !batch.admit(deliver.id.0, value.len()) {
+            continue;
+        }
+        trace!("DRAIN: sending queued message id={}", hex::encode(deliver.id));
+        sent.push(deliver.id.0);
+        SRelayPacket::Deliver(deliver).send(tx).await?;
     }
+    Ok(sent)
+}
+
+fn collect_keys(ks: &Keyspace, recipient: &[u8; 32]) -> Vec<MessageKey> {
+    let mut keys: Vec<MessageKey> = Vec::new();
+    for guard in ks.prefix(recipient) {
+        let key_bytes = match guard.key() {
+            Ok(k) => k,
+            Err(e) => {
+                warn!("DRAIN: queue iterator error: {e}");
+                break;
+            },
+        };
+        match MessageKey::parse(&key_bytes) {
+            Some(key) => keys.push(key),
+            None => warn!("DRAIN: malformed queue key (len={}); skipping", key_bytes.len()),
+        }
+    }
+    keys
 }
 
 /// `DispatchP → DeliverP` field-by-field. Strips the `to` field
@@ -492,29 +548,6 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
         sig:     d.sig,
         accepted_at_ms: d.accepted_at_ms,
     }
-}
-
-/// Merge locally-drained deliveries with remote-fetched dispatches,
-/// deduping by `DispatchP.id` with first-occurrence-wins semantics.
-/// `local` entries (already in cf_messages-then-cf_dht_queue order)
-/// rank ahead of `remote`, so a dispatch present in both is delivered
-/// once, from the local side. Single source of truth for the drain
-/// dedupe — [`handle_drain_queue_with`] delegates here.
-fn dedupe_deliveries(local: Vec<DeliverP>, remote: Vec<DispatchP>) -> Vec<DeliverP> {
-    let mut seen: std::collections::HashSet<[u8; 16]> =
-        std::collections::HashSet::with_capacity(local.len() + remote.len());
-    let mut out: Vec<DeliverP> = Vec::with_capacity(local.len() + remote.len());
-    for d in local {
-        if seen.insert(d.id.0) {
-            out.push(d);
-        }
-    }
-    for d in remote {
-        if seen.insert(d.id.0) {
-            out.push(dispatch_to_deliver(d));
-        }
-    }
-    out
 }
 
 /// Default production [`RemoteFetcher`] — calls
@@ -574,25 +607,11 @@ fn default_remote_fetcher() -> RemoteFetcher {
 
 #[cfg(test)]
 mod tests {
-    //! Integration-style tests that exercise the local-cf and
-    //! remote-fetch combine + dedupe path through `handle_drain_queue_with`.
-    //!
-    //! Constructing a real `ClientContext` requires a `Connection`,
-    //! which only exists once a QUIC handshake has happened. The
-    //! pure logic we need to cover is:
-    //!  - the dedupe across local + remote sources, and
-    //!  - the `dispatch_to_deliver` field-by-field shape.
-    //!
-    //! These two are exercised against fixtures the function-level
-    //! helpers expose without needing the full handler. The handler
-    //! itself is one straight-line pipeline that delegates to those
-    //! helpers; the integration test of the full pipeline is left to
-    //! a future cluster smoke test.
 
-    use common::proto::client_rel::DeliverP;
     use common::proto::client_rel::DispatchP;
 
-    use super::dedupe_deliveries;
+    use super::DRAIN_MAX_BATCH_BYTES;
+    use super::DrainBatch;
     use super::dispatch_to_deliver;
 
     #[test]
@@ -614,51 +633,30 @@ mod tests {
         assert_eq!(deliver.accepted_at_ms, dispatch.accepted_at_ms);
     }
 
-    /// The real cross-source drain dedupe — the guard that stops a
-    /// message present in both a local CF and a remote home from being
-    /// delivered twice. Drives the production [`dedupe_deliveries`]
-    /// reducer directly (not a re-implementation) over a local set and
-    /// a remote set that share one id.
     #[test]
-    fn dedupe_deliveries_collapses_cross_source_dup_keeping_local_first() {
-        let local_deliver = |id: u8, from: u8| DeliverP {
-            id:      [id; 16].into(),
-            from:    [from; 32].into(),
-            payload: vec![id].into(),
-            sig:     [0u8; 64].into(),
-            accepted_at_ms: 1,
-        };
-        let remote_dispatch = |id: u8, from: u8| DispatchP {
-            to:      [9u8; 32].into(),
-            from:    [from; 32].into(),
-            id:      [id; 16].into(),
-            payload: vec![id].into(),
-            sig:     [0u8; 64].into(),
-            accepted_at_ms: 1,
-            wake:    false,
-        };
+    fn drain_batch_admits_an_id_once_across_sources() {
+        let mut batch = DrainBatch::default();
+        assert!(batch.admit([0xAA; 16], 10));
+        assert!(batch.admit([0xBB; 16], 10));
+        assert!(!batch.admit([0xAA; 16], 10));
+        assert_eq!(batch.bytes, 20);
+    }
 
-        // Local drains A, B (from=1); remote returns B, C (from=2). B overlaps.
-        let local = vec![local_deliver(0xAA, 1), local_deliver(0xBB, 1)];
-        let remote = vec![remote_dispatch(0xBB, 2), remote_dispatch(0xCC, 2)];
+    #[test]
+    fn drain_batch_reports_full_once_the_byte_budget_is_spent() {
+        let mut batch = DrainBatch::default();
+        assert!(!batch.is_full());
+        assert!(batch.admit([1u8; 16], DRAIN_MAX_BATCH_BYTES - 1));
+        assert!(!batch.is_full());
+        assert!(batch.admit([2u8; 16], 1));
+        assert!(batch.is_full());
+    }
 
-        let out = dedupe_deliveries(local, remote);
-
-        // Duplicate B collapses to one; order is local-first then the
-        // new remote id, never re-shipping B.
-        let ids: Vec<[u8; 16]> = out.iter().map(|d| d.id.0).collect();
-        assert_eq!(
-            ids,
-            vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
-            "dedupe must keep local order and append only new remote ids"
-        );
-
-        // First occurrence wins: the surviving B is the LOCAL copy
-        // (from=1), not the remote one (from=2).
-        let b = out.iter().find(|d| d.id.0 == [0xBB; 16]).expect("B present");
-        assert_eq!(
-            b.from.0, [1u8; 32],
-            "overlapping id must keep the local copy, not be overwritten by remote"
-        );
+    #[test]
+    fn drain_batch_saturates_rather_than_overflows() {
+        let mut batch = DrainBatch::default();
+        assert!(batch.admit([1u8; 16], usize::MAX));
+        assert!(batch.admit([2u8; 16], usize::MAX));
+        assert_eq!(batch.bytes, usize::MAX);
     }
 }

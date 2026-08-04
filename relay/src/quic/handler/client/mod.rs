@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use common::crypto::PublicKey;
@@ -5,6 +6,12 @@ use common::debug;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::pack::Unpacker;
 use common::warn;
+use governor::Quota;
+use governor::RateLimiter;
+use governor::clock::DefaultClock;
+use governor::state::InMemoryState;
+use governor::state::NotKeyed;
+use governor::state::keyed::DefaultKeyedStateStore;
 use parking_lot::Mutex;
 use quinn::Connection;
 use tokio::sync::Semaphore;
@@ -34,11 +41,59 @@ pub(crate) struct AckAuthPayload {
     pub timestamp: u64,
 }
 
+const SUBSCRIBE_PRESENCE_PER_MIN: u32 = 6;
+const SET_PRESENCE_PER_MIN: u32 = 30;
+const REGISTER_PUSH_PER_MIN: u32 = 4;
+/// Well below the home's `MAX_KP_FETCH_PER_HOUR`, which is keyed on the relay
+/// and would otherwise be spent by whichever co-tenant asks first.
+const FETCH_KEYPACKAGE_PER_TARGET_PER_HOUR: u32 = 10;
+
+type DirectLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+type TargetLimiter = RateLimiter<[u8; 32], DefaultKeyedStateStore<[u8; 32]>, DefaultClock>;
+
+/// Per-connection admission quotas for the client packets whose handling costs
+/// the relay signatures, fsyncs or an outbound fan-out.
+pub(crate) struct ClientLimits {
+    pub subscribe_presence: DirectLimiter,
+    pub set_presence:       DirectLimiter,
+    pub register_push:      DirectLimiter,
+    pub fetch_keypackage:   TargetLimiter,
+}
+
+impl ClientLimits {
+    fn new() -> Self {
+        Self {
+            subscribe_presence: RateLimiter::direct(per_minute(SUBSCRIBE_PRESENCE_PER_MIN)),
+            set_presence:       RateLimiter::direct(per_minute(SET_PRESENCE_PER_MIN)),
+            register_push:      RateLimiter::direct(per_minute(REGISTER_PUSH_PER_MIN)),
+            fetch_keypackage:   RateLimiter::keyed(per_hour(
+                FETCH_KEYPACKAGE_PER_TARGET_PER_HOUR,
+            )),
+        }
+    }
+}
+
+fn per_minute(n: u32) -> Quota {
+    let n = NonZeroU32::new(n).unwrap_or(NonZeroU32::MIN);
+    Quota::per_minute(n).allow_burst(n)
+}
+
+fn per_hour(n: u32) -> Quota {
+    let n = NonZeroU32::new(n).unwrap_or(NonZeroU32::MIN);
+    Quota::per_hour(n).allow_burst(n)
+}
+
 /// Context for client connection
 pub struct ClientContext {
     pub ipk: PublicKey,
     pub relay: RelayRef,
     pub conn: Connection,
+
+    pub limits: ClientLimits,
+
+    /// Cancelled when the process shuts down. Detached fan-out tasks started
+    /// from a packet handler select on it so they cannot outlive the runtime.
+    pub cancel: CancellationToken,
     /// Keys delivered in the most recent `DrainQueue` whose `AckDrain` we are
     /// still waiting for. Cleared *only* on `AckDrain` so that a re-drain
     /// before the ack lands re-sends the same set rather than dropping it.
@@ -164,6 +219,8 @@ impl Handler {
             ipk,
             relay: relay.clone(),
             conn: conn.clone(),
+            limits: ClientLimits::new(),
+            cancel: cancel.clone(),
             pending_drain: Mutex::new(Vec::new()),
             drain_auth: Mutex::new(None),
             ack_auth: Mutex::new(None),
@@ -220,7 +277,7 @@ impl Handler {
         // Presence: record last-seen and notify mutual online contacts. Runs
         // after the eviction above so this IPK no longer reads as online.
         if removed {
-            events::presence::on_disconnect(&relay, &ipk.to_bytes()).await;
+            events::presence::on_disconnect(&relay, &ipk.to_bytes(), &cancel).await;
         }
     }
 }

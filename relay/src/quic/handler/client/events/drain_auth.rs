@@ -85,8 +85,6 @@ pub(crate) enum DrainAuthError {
 pub(crate) fn verify_drain_auth(
     user_ipk: &PublicKey, relay_id: &NodeId, now_ms: u64, timestamp: u64, sig: [u8; 64],
 ) -> Result<DrainAuth, DrainAuthError> {
-    use ed25519_dalek::Verifier;
-
     // 1. Freshness window. Split stale/future like `QueueFetch::verify`
     //    so a clock-drifted client gets distinct telemetry from a
     //    captured-and-replayed packet.
@@ -97,10 +95,12 @@ pub(crate) fn verify_drain_auth(
         return Err(DrainAuthError::FutureTimestamp);
     }
 
-    // 2. Signature verification.
+    // 2. Signature verification. Strict: the buffered pair is forwarded
+    //    verbatim to every home, so a malleated encoding that validated here
+    //    would be rejected there.
     let transcript = queue_fetch_signing_input(user_ipk.as_bytes(), relay_id, timestamp);
     let signature = Signature::from_bytes(&sig);
-    if user_ipk.verify(&transcript, &signature).is_err() {
+    if user_ipk.verify_strict(&transcript, &signature).is_err() {
         return Err(DrainAuthError::BadSig);
     }
 
@@ -120,19 +120,10 @@ pub(crate) async fn handle_drain_auth(
 ) -> anyhow::Result<()> {
     let now_ms = systime().as_millis() as u64;
 
-    // The relay's NodeId for transcript reconstruction. When the DHT
-    // is enabled it's the canonical `dht.node_id`. When disabled,
-    // `verify_drain_auth` is meaningless (the relay can't fan out to
-    // homes anyway), so we skip verification and buffer the auth
-    // unchanged — a future DHT-on upgrade in steady state then
-    // re-validates on first use. This is safe because the buffered
-    // auth is only read by `drain.rs`'s remote fan-out, which is
-    // gated on `dht.is_some()`.
+    // The transcript binds `dht.node_id`, so with the DHT off there is nothing
+    // to verify against — and nothing to spend the auth on either.
     let Some(dht) = ctx.relay.dht.as_ref() else {
-        trace!(
-            "DRAIN_AUTH: stored without verification (DHT disabled on this relay)"
-        );
-        *ctx.drain_auth.lock() = Some(DrainAuth { timestamp, sig });
+        trace!("DRAIN_AUTH: dropped (DHT disabled on this relay)");
         return Ok(());
     };
 

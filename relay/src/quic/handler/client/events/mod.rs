@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::time::Duration;
+
 use anyhow::Result;
 use client_handler::AckAuthPayload;
 use client_handler::ClientCtxHandle;
@@ -5,6 +8,7 @@ use common::proto::client_rel::CRelayPacket;
 use forward::handle_forward;
 use misc::handle_misc;
 use quinn::SendStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::quic::handler::client::events::drain::handle_ack_drain;
 use crate::quic::handler::client::events::drain::handle_drain_queue;
@@ -19,6 +23,42 @@ pub mod forward;
 pub mod misc;
 pub mod mls_relay;
 pub mod presence;
+
+/// Budget for opening an outbound stream to a client or peer. A remote that
+/// grants no stream credit otherwise pins the calling task forever.
+pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Detach `task`, dropping it when `cancel` fires so it cannot outlive the
+/// connection handler that started it.
+pub(crate) fn spawn_tied<F>(cancel: &CancellationToken, task: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let cancel = cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel.cancelled() => {},
+            _ = task => {},
+        }
+    });
+}
+
+/// Drive `tasks` to completion with at most `concurrency` in flight.
+pub(crate) async fn bounded_fanout<F>(tasks: Vec<F>, concurrency: usize)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let mut queued = tasks.into_iter();
+    let mut set = tokio::task::JoinSet::new();
+    for task in queued.by_ref().take(concurrency.max(1)) {
+        set.spawn(task);
+    }
+    while set.join_next().await.is_some() {
+        if let Some(task) = queued.next() {
+            set.spawn(task);
+        }
+    }
+}
 
 pub(super) async fn handle_packet(
     packet: CRelayPacket, ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -47,7 +87,7 @@ pub(super) async fn handle_packet(
         },
 
         // Tier-1 MLS DHT-RPC wrappers. Each handler verifies the
-        // wrapper sig + skew, originates the peer/1 fan-out, and
+        // wrapper sig + skew, originates the peer/5 fan-out, and
         // replies with the matching SRelayPacket (or DhtUnavailable
         // when this relay has DHT disabled).
         PublishKeyPackage { records, timestamp, mode, sig } => {

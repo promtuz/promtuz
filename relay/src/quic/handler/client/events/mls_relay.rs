@@ -1,4 +1,4 @@
-//! Tier-1 MLS wrapper handlers (libcore → home over `client/0`).
+//! Tier-1 MLS wrapper handlers (libcore → home over `client/5`).
 //! Each handler:
 //!
 //! 1. resolves the home's DHT (replies [`SRelayPacket::DhtUnavailable`]
@@ -8,7 +8,7 @@
 //!    user-signed RPCs this *is* the inner Tier-2 user sig that the K
 //!    storage homes will re-verify; for the two gate-only RPCs it's a
 //!    local freshness/attribution gate;
-//! 3. originates the real `peer/1` fan-out via `dht::mls_kp_originate` /
+//! 3. originates the real `peer/5` fan-out via `dht::mls_kp_originate` /
 //!    `dht::mls_welcome_originate`;
 //! 4. replies with the matching [`SRelayPacket`].
 //!
@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 use common::proto::Sender;
+use common::proto::mls_wire::KP_STASH_TARGET;
 use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::MAX_KP_SKEW_MS;
@@ -79,6 +80,12 @@ pub(crate) async fn handle_publish_keypackage(
     ctx: ClientCtxHandle, records: Vec<KeyPackageRecord>, timestamp: u64,
     mode: KpPublishMode, sig: [u8; 64], tx: &mut SendStream,
 ) -> Result<()> {
+    // A batch the homes would reject anyway costs one length compare here
+    // instead of a K-way reflection of the client's upload.
+    if records.len() > KP_STASH_TARGET {
+        trace!("MLS publish-kp: batch over KP_STASH_TARGET rejected");
+        return Ok(());
+    }
     let now_ms = systime().as_millis() as u64;
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
@@ -125,6 +132,12 @@ pub(crate) async fn handle_fetch_keypackage(
         trace!("MLS fetch-kp: wrapper sig/skew rejected");
         return Ok(());
     }
+    // The home's quota is keyed on this relay, so without a per-client gate one
+    // client drains every co-tenant's budget against the same target.
+    if ctx.limits.fetch_keypackage.check_key(&target_ipk).is_err() {
+        trace!("MLS fetch-kp: per-client quota for this target exhausted");
+        return Ok(());
+    }
     let r = kp_originate::originate_fetch(&dht, target_ipk, now_ms).await;
     SRelayPacket::KeyPackageFetched {
         record: r.record,
@@ -153,6 +166,13 @@ pub(crate) async fn handle_publish_welcome(
     ctx: ClientCtxHandle, envelope: WelcomeEnvelopeP, timestamp: u64, sig: [u8; 64],
     tx: &mut SendStream,
 ) -> Result<()> {
+    // The wrapper sig proves "some authenticated client asked to publish this";
+    // this binding is what makes it "this client authored it", so a captured
+    // envelope cannot be replayed to fill the recipient's welcome queue.
+    if envelope.sender_ipk.0 != ctx.ipk.to_bytes() {
+        trace!("MLS publish-welcome: envelope sender is not the publishing client");
+        return Ok(());
+    }
     let now_ms = systime().as_millis() as u64;
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
