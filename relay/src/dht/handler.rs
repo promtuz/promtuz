@@ -1,4 +1,4 @@
-//! Inbound `peer/1` connection dispatcher.
+//! Inbound `peer/5` connection dispatcher.
 //!
 //! Replaces the old `relay/src/quic/handler/peer.rs` no-op stub with a
 //! single funnel into the DHT's RPC handlers. One QUIC connection ⇒ one
@@ -108,13 +108,13 @@ const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 /// freshly-handshaked connection where TLS warmup can dominate.
 const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Drive a single inbound `peer/1` connection through its full lifetime.
+/// Drive a single inbound `peer/5` connection through its full lifetime.
 ///
 /// 1. Best-effort TLS leaf-cert pubkey extraction via
 ///    [`tls_extract::extract_pubkey_from_leaf_der`]. Under the relay's current
 ///    `with_no_client_auth()` server config this typically yields no cert chain at all; preserved
 ///    as a forward-looking cross-check that *if* a cert chain ever lands (e.g. once mTLS is enabled
-///    on `peer/1` per the gap doc'd in `tls_extract.rs`), the cert SPKI agrees with the
+///    on `peer/5` per the gap doc'd in `tls_extract.rs`), the cert SPKI agrees with the
 ///    application-layer hello below.
 /// 2. **Application-layer signed handshake:** wait up to [`HELLO_RECV_TIMEOUT`] for the dialer's
 ///    first uni-stream and decode it as a [`DhtHello`]. Verify with `DhtHello::verify` — on any
@@ -133,7 +133,7 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Forward-compatible TLS pubkey extraction. Under the current
     // `with_no_client_auth()` server config this returns `None`
     // (clients don't present certs); preserved as defense-in-depth
-    // for the day mTLS lands on `peer/1`. If a cert chain *is* present
+    // for the day mTLS lands on `peer/5`. If a cert chain *is* present
     // and cleanly parses we cross-check it against the application-
     // layer hello below: any mismatch is a hard close.
     let extracted_pubkey: Option<[u8; 32]> = {
@@ -192,7 +192,8 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
             addr: conn.remote_address(),
             pubkey: auth.pubkey.into(),
         };
-        let _ = dht.routing.write().insert(desc);
+        let outcome = dht.routing.write().insert(desc);
+        super::lookup::probe_pending_ping(&dht, outcome);
     }
     {
         let mut map = dht.peer_conns.write();
@@ -216,7 +217,7 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
 /// acceptor ([`handle_peer_connection`], where `auth` comes from the
 /// `DhtHello`) and the outbound dialer
 /// ([`crate::dht::lookup::connect_to_peer`], where `auth` comes from the
-/// dial's cert NodeId-binding) so `peer/1` connections are **bidirectional**:
+/// dial's cert NodeId-binding) so `peer/5` connections are **bidirectional**:
 /// the `peer_conns` cache then correctly reuses one connection per pair in
 /// both directions, instead of handing back a connection that only serves
 /// the way it was opened.
@@ -402,10 +403,10 @@ fn verify_hello_with_close_reason(hello: &DhtHello, now_ms: u64) -> Result<(), C
 /// `recv_and_verify_hello` at connection accept time. **Every** stream
 /// on the connection — regardless of which RPC it carries — keys the
 /// rate limiter and refreshes the routing table against this same
-/// authenticated NodeId. RPCs without an in-payload `requester` (Ping,
-/// Store, Tombstone, MerkleSummary, MerkleDiff, FetchRecord) are
-/// covered the same way, rather than falling back to a per-connection
-/// synthetic id and a `[0u8; 32]` placeholder pubkey.
+/// authenticated NodeId. RPCs without an in-payload `requester`
+/// (`FindNode`, the Welcome family) are covered the same way, rather
+/// than falling back to a per-connection synthetic id and a `[0u8; 32]`
+/// placeholder pubkey.
 ///
 /// The per-peer rate-limit check happens **after** the request is
 /// fully parsed — parse-then-check is the
@@ -461,7 +462,8 @@ async fn handle_one_stream(
             pubkey: auth.pubkey.into(),
         };
         // Scoped write guard, never held across `await`.
-        let _ = dht.routing.write().insert(desc);
+        let outcome = dht.routing.write().insert(desc);
+        super::lookup::probe_pending_ping(&dht, outcome);
     }
 
     // Write response.

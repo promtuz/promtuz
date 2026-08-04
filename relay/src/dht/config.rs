@@ -39,6 +39,11 @@ pub const LOOKUP_RPC_TIMEOUT_MS: u64 = 1500;
 /// Maximum hops per iterative lookup.
 pub const LOOKUP_MAX_HOPS: u32 = 8;
 
+/// Ceiling on an iterative walk's candidate shortlist. Peers only ever
+/// contribute descriptors the walk might dial, so the pool is trimmed to
+/// the closest `MAX_LOOKUP_CANDIDATES` after each hop's merge.
+pub const MAX_LOOKUP_CANDIDATES: usize = 64;
+
 // ---------------------------------------------------------------------------
 // Presence record lifetimes
 // ---------------------------------------------------------------------------
@@ -211,50 +216,44 @@ pub const MAX_MIGRATE_PER_SWEEP: usize = 256;
 pub const MAX_CONCURRENT_MIGRATIONS: usize = 8;
 
 // ---------------------------------------------------------------------------
-// Per-peer inbound-RPC rate limits (DoS hardening)
+// Inbound-RPC rate limits (DoS hardening)
 // ---------------------------------------------------------------------------
 //
 // `governor::Quota` is configured `per_second(rate).allow_burst(burst)`.
-// Each RPC-class limiter is keyed on the *requester's* NodeId so a
-// single misbehaving peer can be sanctioned without affecting others.
-//
-// Quota values were picked to leave the legitimate anti-entropy
-// scheduler firing every `ANTI_ENTROPY_INTERVAL_MS = 30_000` ms well
-// below their thresholds:
-//   - Anti-entropy: ~1 MerkleSummary + ~5 MerkleDiffs per round → ~1
-//     RPC/3s per pair, < CHEAP quota by 100x.
-//   - Cold-join: worst-case `FETCH_RECORD_CONCURRENCY = 8` parallel
-//     FetchRecords spread over 1 s. The BULK quota allows 50 in 1 s →
-//     6x headroom.
-//   - Publish: 1 Store per replica per record, K = 3 replicas. Steady
-//     state at 100 publishes/s/relay = 100 Stores/s into K replicas
-//     distributed → ~33/s into the busiest one. The EXPENSIVE quota of
-//     20/s is below this; in steady-state high load the quota would
-//     trip. Tradeoff is acceptable for v1: a publishing relay sees
-//     `RateLimited` from a single overloaded replica and re-tries via
-//     the publish escalation path.
+// Each RPC-class limiter is keyed on the *requester's* NodeId; the
+// global limiter below is unkeyed and bounds the aggregate, because a
+// NodeId costs one Ed25519 keygen to mint and the per-peer quotas alone
+// therefore bound nothing in aggregate.
 
-/// Cheap RPCs (Ping, FindNode, FindValue, MerkleSummary, MerkleDiff):
-/// no on-disk crypto verification and only routing-table reads. Quota
-/// is generous enough to absorb iterative-lookup batches with hedged
-/// retries. Sustained 100 req/s with bursts of 50 means a steady-state
-/// of 50 req/s with one in-flight batch of 50 spikes not getting flagged.
+/// Cheap RPCs (`FindNode`): routing-table reads, no signature
+/// verification and no disk I/O. Quota absorbs iterative-lookup batches
+/// with hedged retries — a K=3 walk with α=3 parallelism and 8 hops is
+/// ~24 RPCs, roughly 40× under one second's allowance.
 pub const RATE_LIMIT_CHEAP_PER_SEC: u32 = 1_000;
 pub const RATE_LIMIT_CHEAP_BURST: u32 = 500;
 
-/// Expensive verify RPCs (Store, Tombstone). Each triggers Ed25519
-/// signature verification and a synced fjall write. Tighter quota
-/// than CHEAP because the per-op cost is ~100 µs of crypto + an fsync;
-/// at 20/s sustained the verify load is 0.2% of one CPU.
+/// Verify-and-write RPCs — the sticky-home family (`Forward`,
+/// `QueueFetch`, `QueueFetchAck`, the presence/live RPCs) and the MLS
+/// KeyPackage family. Each does at least one Ed25519 verify (~100 µs)
+/// plus a synced fjall write or a bounded prefix scan. At 200/s the
+/// verify load is ~2% of one core.
 pub const RATE_LIMIT_EXPENSIVE_PER_SEC: u32 = 200;
 pub const RATE_LIMIT_EXPENSIVE_BURST: u32 = 100;
 
-/// Bulk RPCs (FetchRecord). Each request is bounded by
-/// [`FETCH_RECORD_MAX = 64`] entries; sustained 50 req/s × 64 ipks/req
-/// = 3200 record reads/s, which is well within fjall's hot-path
-/// ceiling and matches the cold-join concurrency budget.
+/// Bulk RPCs — the MLS Welcome family, whose `welcome_blob` reaches
+/// `MAX_WELCOME_BYTES` (256 KiB) and whose fetch returns up to
+/// `MAX_WELCOMES_PER_RECIPIENT` rows per request. Sized between CHEAP
+/// and EXPENSIVE: the crypto cost is lower than a per-record verify but
+/// the bytes-per-RPC is the highest in the DHT family.
 pub const RATE_LIMIT_BULK_PER_SEC: u32 = 500;
 pub const RATE_LIMIT_BULK_BURST: u32 = 250;
+
+/// Aggregate inbound-RPC ceiling across every peer and class. Sits an
+/// order of magnitude above one peer's CHEAP quota so a healthy mesh
+/// never touches it, while capping what an attacker can extract by
+/// minting fresh NodeIds.
+pub const RATE_LIMIT_GLOBAL_PER_SEC: u32 = 10_000;
+pub const RATE_LIMIT_GLOBAL_BURST: u32 = 5_000;
 
 // ---------------------------------------------------------------------------
 // Operator-tunable config (TOML-deserialisable)
@@ -285,6 +284,13 @@ pub struct DhtConfig {
     /// Production deployments should leave it unset.
     #[serde(default)]
     pub bucket_size: Option<usize>,
+
+    /// Permit dialling peers whose advertised address is loopback or in
+    /// an RFC1918/ULA range. Off in production, where a peer-supplied
+    /// address naming an internal host is an SSRF primitive; on for
+    /// single-host test clusters.
+    #[serde(default)]
+    pub allow_local_peer_addrs: bool,
 }
 
 impl DhtConfig {

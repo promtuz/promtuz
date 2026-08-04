@@ -48,7 +48,7 @@ pub struct Metrics {
     /// connection still bump exactly once before the close.
     pub rate_limit_rejections: AtomicU64,
 
-    /// Inbound `peer/1` connection rejected because the post-handshake
+    /// Inbound `peer/5` connection rejected because the post-handshake
     /// TLS-pubkey extraction failed (cert chain absent, malformed
     /// SPKI, self-sig invalid, or `BLAKE3(spki) != claimed_node_id`).
     /// Bumped on the dial-side path in `lookup::connect_to_peer` and
@@ -58,14 +58,14 @@ pub struct Metrics {
     pub cert_pubkey_extraction_failures: AtomicU64,
 
     // --- DHT connection-level handshake ---
-    /// Inbound `peer/1` connection accepted a valid signed `DhtHello`
+    /// Inbound `peer/5` connection accepted a valid signed `DhtHello`
     /// from the dialer. Bumped once per successful application-layer
     /// handshake — pairs with [`Self::peer_conns_opened`] (which only
     /// counts the *outbound* dial side; the inbound side now uses this
     /// counter to track authenticated-and-admitted peers).
     pub dht_hello_accepted: AtomicU64,
 
-    /// Inbound `peer/1` connection rejected because the dialer's
+    /// Inbound `peer/5` connection rejected because the dialer's
     /// `DhtHello` failed verification (bad signature, id-pubkey
     /// mismatch, malformed pubkey, stale/future timestamp, or no
     /// hello arrived within the 5s timeout). Bumped once per

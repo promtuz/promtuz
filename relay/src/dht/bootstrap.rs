@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use common::proto::client_res::RelayDescriptor;
 use common::proto::dht_p2p::NodeDescriptor;
+use common::quic::id::NodeId;
 use thiserror::Error;
 
 use super::Dht;
@@ -146,9 +147,14 @@ pub async fn bootstrap(
     // noisy).
     let mut seen = std::collections::HashSet::with_capacity(xor_near.len() + rtt_near.len());
     let mut to_insert: Vec<NodeDescriptor> = Vec::with_capacity(seen.capacity());
+    let mut unbound = 0usize;
     for rd in xor_near.iter().chain(rtt_near.iter()) {
-        if seen.insert(rd.id) {
-            to_insert.push(node_descriptor_from(rd));
+        if !seen.insert(rd.id) {
+            continue;
+        }
+        match node_descriptor_from(rd) {
+            Some(desc) => to_insert.push(desc),
+            None => unbound += 1,
         }
     }
 
@@ -158,23 +164,32 @@ pub async fn bootstrap(
     let mut refreshed = 0usize;
     let mut deferred = 0usize;
     let mut self_skipped = 0usize;
+    let mut pending: Vec<InsertOutcome> = Vec::new();
     {
         let mut routing = dht.routing.write();
         for desc in to_insert {
             match routing.insert(desc) {
                 InsertOutcome::Inserted => inserted += 1,
                 InsertOutcome::Refreshed => refreshed += 1,
-                InsertOutcome::PendingPing(_) | InsertOutcome::Discarded => deferred += 1,
+                InsertOutcome::Discarded => deferred += 1,
+                outcome @ InsertOutcome::PendingPing(_) => {
+                    deferred += 1;
+                    pending.push(outcome);
+                },
                 InsertOutcome::IsSelf => self_skipped += 1,
             }
         }
     }
+    for outcome in pending {
+        crate::dht::lookup::probe_pending_ping(&dht, outcome);
+    }
 
     crate::dht_log!(
-        "DHT bootstrap: inserted={}, refreshed={}, deferred={}, self={} (xor_near={}, rtt_near={})",
+        "DHT bootstrap: inserted={}, refreshed={}, deferred={}, unbound={}, self={} (xor_near={}, rtt_near={})",
         inserted,
         refreshed,
         deferred,
+        unbound,
         self_skipped,
         xor_near.len(),
         rtt_near.len()
@@ -227,14 +242,25 @@ fn classify_handle_error(err: anyhow::Error) -> BootstrapError {
 }
 
 /// Convert the resolver's [`RelayDescriptor`] into a
-/// [`NodeDescriptor`] suitable for [`super::routing::RoutingTable::insert`].
+/// [`NodeDescriptor`] suitable for [`super::routing::RoutingTable::insert`],
+/// or `None` when the descriptor's own `BLAKE3(pubkey) == id` binding
+/// does not hold.
+///
+/// The resolver is not trusted to name which key owns which NodeId: an
+/// unchecked binding would let it install an attacker-held pubkey
+/// against an honest relay's id, and every later signature check
+/// against that id would then verify the attacker's signatures.
 ///
 /// The two types carry the same information but live in different proto
 /// modules — `RelayDescriptor` is the resolver-facing shape (used in
 /// `client_res.rs`), `NodeDescriptor` is the relay-to-relay DHT shape
-/// (used in `dht_p2p.rs`). The fields are point-by-point equivalent.
-fn node_descriptor_from(rd: &RelayDescriptor) -> NodeDescriptor {
-    NodeDescriptor { id: rd.id, addr: rd.addr, pubkey: rd.pubkey }
+/// (used in `dht_p2p.rs`).
+fn node_descriptor_from(rd: &RelayDescriptor) -> Option<NodeDescriptor> {
+    if NodeId::new(rd.pubkey.0) != rd.id {
+        common::warn!("DHT bootstrap: resolver descriptor for {} is not key-bound; dropping", rd.id);
+        return None;
+    }
+    Some(NodeDescriptor { id: rd.id, addr: rd.addr, pubkey: rd.pubkey })
 }
 
 // `BootstrapState::Cold`, `Warming`, `Walking` have no consumers yet —

@@ -1,13 +1,15 @@
-//! `peer/1` outbound dial config + its TLS verifier.
+//! `peer/5` outbound dial config + its TLS verifier.
 //!
-//! Relay↔relay (`peer/1`) is the **key-as-identity** trust domain, distinct
+//! Relay↔relay (`peer/5`) is the **key-as-identity** trust domain, distinct
 //! from the CA-hierarchical client/resolver/relay-control certs: a relay's
-//! identity *is* its NodeKey, and `NodeId == BLAKE3(NodeKey)`. Because the
-//! NodeKey is deliberately separate from the CA-issued TLS key (`relay/mod`
-//! — a TLS-layer compromise must not become an identity compromise), the
-//! `peer/1` ALPN serves a self-signed cert whose SPKI is the NodeKey (the
-//! ALPN split in `common/src/quic/config.rs`). A CA verifier cannot
-//! validate that cert, so this dialer installs a verifier that:
+//! identity *is* its NodeKey, and `NodeId == BLAKE3(NodeKey)`. One Ed25519
+//! key from `key_path` serves both roles (`relay/mod::RelayKeys`) — it is
+//! what the CA-issued cert certifies *and* what the `peer/5` ALPN presents
+//! in a self-signed cert of its own (the ALPN split in
+//! `common/src/quic/config.rs`). Same SPKI either way; the self-signed half
+//! is what lets a dialer trust the key without holding the root CA or
+//! honouring a validity window. A CA verifier cannot validate that cert, so
+//! this dialer installs a verifier that:
 //!
 //!   * accepts any well-formed Ed25519 identity cert (no CA chain, no
 //!     validity window, no SAN — none apply to a key-as-identity cert), and
@@ -18,8 +20,7 @@
 //! [`super::tls_extract::extract_and_verify_pubkey`] inside
 //! [`super::lookup::connect_to_peer`]: a MITM presenting any other identity
 //! cert fails `BLAKE3(SPKI) == NodeId` and the dial is dropped. Net trust
-//! is SPKI pinning, just deferred past the handshake — the same model
-//! libcore's (now-deleted) `Peer1DhtClient` verifier used.
+//! is SPKI pinning, just deferred past the handshake.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +45,7 @@ use rustls::pki_types::UnixTime;
 
 use super::tls_extract::extract_pubkey_from_leaf_der;
 
-/// Verifier for `peer/1` dials: accept any well-formed Ed25519 identity
+/// Verifier for `peer/5` dials: accept any well-formed Ed25519 identity
 /// cert and verify the handshake signature under its SPKI. CA chain,
 /// validity window, and SAN are intentionally NOT checked — a peer's
 /// identity is its key, pinned to the dialed `NodeId` post-handshake.
@@ -67,7 +68,7 @@ impl ServerCertVerifier for PeerServerCertVerifier {
     fn verify_tls12_signature(
         &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Err(rustls::Error::General("peer/1 requires TLS 1.3".into()))
+        Err(rustls::Error::General("peer/5 requires TLS 1.3".into()))
     }
 
     fn verify_tls13_signature(
@@ -97,7 +98,7 @@ impl ServerCertVerifier for PeerServerCertVerifier {
     }
 }
 
-/// Build the `peer/1` outbound [`quinn::ClientConfig`] — identity-cert
+/// Build the `peer/5` outbound [`quinn::ClientConfig`] — identity-cert
 /// verifier + the `peer` ALPN. Transport settings mirror the private
 /// `common::quic::config::default_client_transport`.
 pub(crate) fn build_peer_client_cfg() -> Result<quinn::ClientConfig> {

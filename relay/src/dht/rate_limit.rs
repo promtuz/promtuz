@@ -1,33 +1,35 @@
-//! Per-peer inbound DHT RPC rate limiters.
+//! Inbound DHT RPC rate limiters.
 //!
-//! Without these, a misbehaving peer can hammer Store/Tombstone or
-//! FetchRecord RPCs without tripping any per-connection or per-RPC
-//! defence. We use three keyed `governor` limiters — one per RPC
-//! class (cheap / expensive / bulk) — each keyed on the *requester*
-//! NodeId. Tripping any of them closes the inbound connection with
-//! `CloseReason::DhtFlood` and bumps a metrics counter.
+//! Without these, a misbehaving peer can hammer the sticky-home or MLS
+//! stash RPCs without tripping any per-connection or per-RPC defence.
+//! Three keyed `governor` limiters — one per RPC cost class (cheap /
+//! expensive / bulk), each keyed on the *requester* NodeId — sit under a
+//! single unkeyed global limiter. Tripping any of them closes the
+//! inbound connection with `CloseReason::DhtFlood` and bumps a metrics
+//! counter.
 //!
 //! ## Why three classes
 //!
-//! The cost of an RPC drives the quota:
+//! The cost of an RPC drives the quota — see the `RATE_LIMIT_*`
+//! constants in `super::config` for the values and their sizing:
 //!
-//! - **Cheap** (`FindNode`, `QueueFetchAck`): zero crypto verification, only routing-table reads.
-//!   100/s sustained, burst 50.
-//! - **Expensive verify** (`Store`, `Tombstone`): each does an Ed25519 verify (~100 µs) + a sync
-//!   fjall write. 20/s sustained, burst 10.
-//! - **Bulk** (`FetchRecord`): bounded by `MAX_FETCH_RECORD_BATCH` per request, so each RPC is
-//!   itself an O(64) read amplification. 50/s sustained, burst 25.
+//! - **Cheap** (`FindNode`): no signature verification, no disk I/O; a routing-table read and a
+//!   bounded descriptor list back.
+//! - **Expensive verify** (`Forward`, `QueueFetch`, `QueueFetchAck`, the presence/live RPCs, the
+//!   MLS KeyPackage family): at least one Ed25519 verify plus a synced fjall write or a bounded
+//!   prefix scan.
+//! - **Bulk** (the MLS Welcome family): the heaviest payloads in the DHT family — `welcome_blob`
+//!   reaches `MAX_WELCOME_BYTES`, and a fetch returns up to `MAX_WELCOMES_PER_RECIPIENT` rows.
 //!
-//! ## Why per-NodeId, not per-IP
+//! ## Why a global limiter on top of the per-NodeId ones
 //!
-//! The acceptor at `relay/src/quic/acceptor.rs` does not — yet — do
-//! per-IP rate limiting (only per-connection concurrency capping).
-//! Per-IP at the QUIC accept layer is the resolver's pattern
-//! (`resolver/src/quic/acceptor.rs`); for relay-to-relay traffic the
-//! `NodeId` is a stronger key because:
-//! - A misbehaving peer cannot evade the limit by reconnecting from a new socket — its NodeId is
-//!   cryptographically fixed (`BLAKE3(spki)`).
-//! - A NAT'd legitimate peer and a misbehaving peer behind the same NAT do not share a quota.
+//! A NodeId is one Ed25519 keygen plus one QUIC handshake, so an
+//! attacker multiplies a per-NodeId quota by however many identities it
+//! cares to mint: the keyed limiters bound *fairness between honest
+//! peers*, not aggregate load. The unkeyed
+//! [`PerPeerLimiters::global`] bucket is what actually bounds this
+//! relay's inbound RPC work. Per-source-IP admission control belongs a
+//! layer lower, in the QUIC acceptor.
 //!
 //! ## Lock contract
 //!
@@ -40,6 +42,8 @@ use common::quic::id::NodeId;
 use governor::Quota;
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
+use governor::state::InMemoryState;
+use governor::state::NotKeyed;
 use governor::state::keyed::DefaultKeyedStateStore;
 
 use super::config::RATE_LIMIT_BULK_BURST;
@@ -48,6 +52,8 @@ use super::config::RATE_LIMIT_CHEAP_BURST;
 use super::config::RATE_LIMIT_CHEAP_PER_SEC;
 use super::config::RATE_LIMIT_EXPENSIVE_BURST;
 use super::config::RATE_LIMIT_EXPENSIVE_PER_SEC;
+use super::config::RATE_LIMIT_GLOBAL_BURST;
+use super::config::RATE_LIMIT_GLOBAL_PER_SEC;
 
 /// Keyed limiter type alias — one entry per NodeId, with automatic
 /// eviction of idle entries (`DefaultKeyedStateStore` handles that
@@ -55,14 +61,17 @@ use super::config::RATE_LIMIT_EXPENSIVE_PER_SEC;
 /// disconnects).
 type NodeLimiter = RateLimiter<NodeId, DefaultKeyedStateStore<NodeId>, DefaultClock>;
 
-/// Three bundled limiters, one per RPC cost class. Cloning a
-/// [`PerPeerLimiters`] is just an `Arc` clone of each inner
-/// `RateLimiter` (governor's `RateLimiter` is internally `Arc`-able).
+/// Unkeyed limiter type alias for the aggregate budget.
+type GlobalLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
+/// Three per-peer limiters, one per RPC cost class, plus the aggregate
+/// budget every inbound RPC also draws from.
 #[derive(Debug)]
 pub(crate) struct PerPeerLimiters {
     pub cheap: NodeLimiter,
     pub expensive: NodeLimiter,
     pub bulk: NodeLimiter,
+    pub global: GlobalLimiter,
 }
 
 impl PerPeerLimiters {
@@ -71,19 +80,26 @@ impl PerPeerLimiters {
             cheap: build_limiter(RATE_LIMIT_CHEAP_PER_SEC, RATE_LIMIT_CHEAP_BURST),
             expensive: build_limiter(RATE_LIMIT_EXPENSIVE_PER_SEC, RATE_LIMIT_EXPENSIVE_BURST),
             bulk: build_limiter(RATE_LIMIT_BULK_PER_SEC, RATE_LIMIT_BULK_BURST),
+            global: RateLimiter::direct(quota(
+                RATE_LIMIT_GLOBAL_PER_SEC,
+                RATE_LIMIT_GLOBAL_BURST,
+            )),
         }
     }
 }
 
-/// Build a single keyed `RateLimiter` with `per_second(rate)` quota
-/// and `allow_burst(burst)`. Constants come from `config.rs`; we use
-/// `NonZeroU32::MIN` (= 1) as a defensive fallback in case a future
-/// edit zeros one of them, mirroring the resolver acceptor pattern.
-fn build_limiter(rate_per_sec: u32, burst: u32) -> NodeLimiter {
+/// `per_second(rate).allow_burst(burst)`. Constants come from
+/// `config.rs`; we use `NonZeroU32::MIN` (= 1) as a defensive fallback
+/// in case a future edit zeros one of them, mirroring the resolver
+/// acceptor pattern.
+fn quota(rate_per_sec: u32, burst: u32) -> Quota {
     let rate = NonZeroU32::new(rate_per_sec).unwrap_or(NonZeroU32::MIN);
     let burst = NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN);
-    let quota = Quota::per_second(rate).allow_burst(burst);
-    RateLimiter::keyed(quota)
+    Quota::per_second(rate).allow_burst(burst)
+}
+
+fn build_limiter(rate_per_sec: u32, burst: u32) -> NodeLimiter {
+    RateLimiter::keyed(quota(rate_per_sec, burst))
 }
 
 /// RPC cost class — one per `DhtRequest` variant. The dispatcher in
@@ -103,19 +119,20 @@ impl RpcClass {
     pub(crate) fn for_request(req: &common::proto::dht_p2p::DhtRequest) -> Self {
         use common::proto::dht_p2p::DhtRequest;
         match req {
-            // `FindNode` is a routing-table read; the sticky-home ack is
-            // a small bounded-id-list verify + delete-by-id.
-            DhtRequest::FindNode(_) | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
+            // `FindNode` is a routing-table read and nothing else.
+            DhtRequest::FindNode(_) => RpcClass::Cheap,
             // Sticky-home: `Forward` does an outer-sig verify plus a
             // disk write (queue) or stream open (deliver).
             // `QueueFetch` does a user-sig verify plus a per-recipient
-            // prefix iterator over `cf_dht_queue`. MLS KeyPackage
+            // prefix iterator over `cf_dht_queue`; `QueueFetchAck` a
+            // user-sig verify plus a delete per acked id. MLS KeyPackage
             // publish / fetch / refill do Ed25519 verifies plus fjall
             // I/O — same cost shape. A separate per-pair
             // `(target_ipk, requester_relay_id)` quota lives inside
             // `mls/kp.rs` for the anti-pinning policy; this per-peer
             // bucket is the coarser first line.
-            DhtRequest::Forward(_)
+            DhtRequest::QueueFetchAck(_)
+            | DhtRequest::Forward(_)
             | DhtRequest::ActivityForward(_)
             | DhtRequest::PresenceConsent(_)
             | DhtRequest::PresenceState(_)
@@ -142,10 +159,11 @@ impl RpcClass {
 }
 
 impl PerPeerLimiters {
-    /// Check the `peer`-keyed limiter for this RPC class. Returns
-    /// `Ok(())` if a token was consumed, `Err(())` if the peer is
-    /// over quota.
+    /// Draw one token from both the aggregate budget and the
+    /// `peer`-keyed limiter for this RPC class. Returns `Err(())` if
+    /// either is exhausted.
     pub(crate) fn check(&self, peer: &NodeId, class: RpcClass) -> Result<(), ()> {
+        self.global.check().map_err(|_| ())?;
         let limiter = match class {
             RpcClass::Cheap => &self.cheap,
             RpcClass::Expensive => &self.expensive,
@@ -169,24 +187,46 @@ mod tests {
     fn per_peer_limiters_classify_rpcs_correctly() {
         use common::proto::dht_p2p::DhtRequest;
         use common::proto::dht_p2p::FindNode;
+        use common::proto::dht_p2p::QueueFetchAck;
 
         let dummy_id = NodeId::from_bytes([0u8; 32]);
         let find_node =
             DhtRequest::FindNode(FindNode { target: [0u8; 32].into(), requester: dummy_id });
-        // FindNode is a routing-table read → Cheap. The signature-heavy
-        // sticky-home / MLS RPCs need signed fixtures to construct, so
-        // their classification is covered by the integration paths; here
-        // we pin the one variant buildable without crypto.
         assert_eq!(RpcClass::for_request(&find_node), RpcClass::Cheap);
+
+        // The ack verifies a user signature and deletes a row per id.
+        let ack = DhtRequest::QueueFetchAck(QueueFetchAck {
+            user_ipk:           [0u8; 32].into(),
+            requester_relay_id: dummy_id,
+            delivered_ids:      vec![[0u8; 16]],
+            timestamp:          0,
+            user_sig:           [0u8; 64].into(),
+        });
+        assert_eq!(RpcClass::for_request(&ack), RpcClass::Expensive);
+    }
+
+    #[test]
+    fn global_budget_denies_a_peer_that_is_under_its_own_quota() {
+        use super::super::config::RATE_LIMIT_GLOBAL_BURST;
+
+        let limiters = PerPeerLimiters::new();
+        // Spread the drain across distinct peers, each staying well
+        // under `RATE_LIMIT_CHEAP_BURST`, so only the global bucket can
+        // be the one that trips.
+        for i in 0..(RATE_LIMIT_GLOBAL_BURST as usize) {
+            let peer = NodeId::from_bytes([(i % 251) as u8; 32]);
+            let _ = limiters.check(&peer, RpcClass::Cheap);
+        }
+        let fresh = id_from_seed(0xC3);
+        let denied = (0..200).filter(|_| limiters.check(&fresh, RpcClass::Cheap).is_err()).count();
+        assert!(denied > 0, "global budget must deny once its burst is drained");
     }
 
     #[test]
     fn limiter_grants_burst_then_denies() {
-        // The `expensive` limiter has a 10-burst — verify we can fire
-        // ~10 in immediate succession and then get denied. Time-based
-        // quotas under `governor` are forgiving in test environments
-        // (real-time wall clock), so we don't measure the steady-state
-        // rate, only the burst behaviour.
+        // Time-based quotas under `governor` are forgiving in test
+        // environments (real-time wall clock), so we don't measure the
+        // steady-state rate, only the burst behaviour.
         let limiters = PerPeerLimiters::new();
         let peer = id_from_seed(7);
 

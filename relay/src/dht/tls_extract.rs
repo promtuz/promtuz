@@ -1,4 +1,4 @@
-//! Post-handshake TLS pubkey extraction for `peer/1` connections.
+//! Post-handshake TLS pubkey extraction for `peer/5` connections.
 //!
 //! ## Purpose
 //!
@@ -22,12 +22,12 @@
 //!
 //! ## Inbound vs outbound
 //!
-//! - **Outbound** (we are the QUIC dialer / peer/1 client): the
+//! - **Outbound** (we are the QUIC dialer / peer/5 client): the
 //!   server's leaf cert is available via `peer_identity()` because
 //!   server cert verification is part of any TLS handshake. This is
 //!   the path used by `lookup::connect_to_peer`.
 //!
-//! - **Inbound** (we are the QUIC server accepting peer/1): the
+//! - **Inbound** (we are the QUIC server accepting peer/5): the
 //!   relay's QUIC server config currently uses `with_no_client_auth()`
 //!   (see `common/src/quic/config.rs::build_server_cfg`), so the
 //!   client (the dialing peer) does NOT present a client cert and
@@ -38,7 +38,7 @@
 //!   the inbound peer's identity is application-layer-derived, not
 //!   cert-pinned).
 //!
-//! Closing the inbound-side gap requires switching `peer/1` server
+//! Closing the inbound-side gap requires switching `peer/5` server
 //! config to mTLS (`with_client_cert_verifier(...)`), which lives in
 //! `common/src/quic/config.rs` — explicitly out of scope for this
 //! dispatch. Documented as a follow-up.

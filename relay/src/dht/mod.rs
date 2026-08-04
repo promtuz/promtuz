@@ -1,4 +1,4 @@
-//! Relay-side peer mesh: Kademlia routing over `peer/1`, hosting the
+//! Relay-side peer mesh: Kademlia routing over `peer/5`, hosting the
 //! sticky-home offline queue ([`forward`]/[`queue_drain`]/[`store`])
 //! and the MLS stash relay ([`mls`]).
 //!
@@ -97,7 +97,7 @@ pub struct Dht {
     /// `FindNode`/`FindValue` responses) to backfill the verified
     /// pubkey before any cert-pinning consumer reads it. This gap is
     /// documented as a follow-up; closing it requires enabling mTLS
-    /// on `peer/1`, which lives in `common/src/quic/config.rs` and
+    /// on `peer/5`, which lives in `common/src/quic/config.rs` and
     /// is out of scope for this dispatch.
     pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
 
@@ -135,7 +135,7 @@ pub struct Dht {
     /// endpoint (they only exercise local-only code paths).
     pub(crate) endpoint: Option<Endpoint>,
 
-    /// `peer/1` ALPN client config — used by `lookup.rs::connect_to_peer`
+    /// `peer/5` ALPN client config — used by `lookup.rs::connect_to_peer`
     /// to dial outbound DHT peer connections. Same `Option` rationale
     /// as [`endpoint`].
     pub(crate) peer_client_cfg: Option<Arc<ClientConfig>>,
@@ -202,6 +202,14 @@ pub struct Dht {
     /// path dials one of these to send a [`WakeRequest`], verifying its
     /// `PUSH_GATEWAY` capability at dial. Empty → no wakes.
     pub(crate) push_gateways: PushGateways,
+
+    /// Latches once [`routing`] has been observed holding `K` or more
+    /// peers. Read by [`routing::self_in_top_k`] to tell "this network
+    /// is smaller than K" apart from "this relay lost sight of a network
+    /// it knows is bigger".
+    ///
+    /// [`routing`]: Self::routing
+    routing_dense: std::sync::atomic::AtomicBool,
 }
 
 /// Shared reference to the relay's connected-clients map. Aliased so
@@ -243,7 +251,18 @@ impl Dht {
             presence_leases: None,
             push_pseudonyms: None,
             push_gateways: Arc::new(RwLock::new(Vec::new())),
+            routing_dense: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// True once this relay has seen its routing table hold at least
+    /// `config::K` peers. See [`routing::self_in_top_k`].
+    pub(crate) fn routing_was_dense(&self) -> bool {
+        self.routing_dense.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_routing_dense(&self) {
+        self.routing_dense.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wire the outbound-dial machinery in. Called by `Relay::new` after

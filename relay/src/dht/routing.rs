@@ -321,11 +321,13 @@ impl RoutingTable {
             // Update mutable state, then rotate to tail.
             let mut entry = bucket.entries.remove(pos);
             entry.last_seen = now;
-            // Address may have shifted (peer roamed networks). Pubkey is
-            // identity-bound so we deliberately do NOT update it here —
-            // a mismatched pubkey for the same id is a sybil signal caught
-            // by the cert-pinning check on first contact.
             entry.addr = descriptor.addr;
+            // Only a pubkey that hashes to the entry's id can be the real
+            // one, so a self-consistent descriptor always wins over a
+            // cached pubkey that never proved its binding.
+            if NodeId::new(descriptor.pubkey.0) == descriptor.id {
+                entry.pubkey = descriptor.pubkey.0;
+            }
             bucket.entries.push(entry);
             return InsertOutcome::Refreshed;
         }
@@ -477,11 +479,18 @@ impl RoutingTable {
         self.buckets.iter().map(|b| b.entries.len()).sum()
     }
 
-    /// Indices of buckets whose `refresh_at` is older than
+    /// Indices of populated buckets whose `refresh_at` is older than
     /// `now - BUCKET_REFRESH_MS`, in ascending order. The caller (the
-    /// periodic refresh scheduler) issues a self-FindNode against a
-    /// random target whose `bucket_for(self, target)` matches each, then
-    /// calls [`Self::mark_refreshed`] on each successful walk.
+    /// periodic refresh scheduler in [`super::sync`]) issues a `FindNode`
+    /// against a random target in each bucket's range — see
+    /// [`random_id_in_bucket`] — then calls [`Self::mark_refreshed`] on
+    /// each successful walk.
+    ///
+    /// Empty buckets are skipped: with `BUCKETS = 256` and a handful of
+    /// peers, nearly every bucket is empty and refreshing them would
+    /// generate walk traffic proportional to the keyspace rather than to
+    /// the table. Discovery for an under-populated table is the
+    /// bootstrap-retry branch's job.
     ///
     /// We deliberately don't update `refresh_at` here — an aborted
     /// refresh would otherwise loop forever, since the scheduler would
@@ -491,6 +500,9 @@ impl RoutingTable {
         let threshold = std::time::Duration::from_millis(super::config::BUCKET_REFRESH_MS);
         let mut out = Vec::new();
         for (idx, bucket) in self.buckets.iter().enumerate() {
+            if bucket.entries.is_empty() {
+                continue;
+            }
             // `Instant::checked_duration_since` returns `None` when the
             // argument is in the future, which can't happen here — every
             // `refresh_at` was set by an earlier `Instant::now()`. Treat
@@ -555,6 +567,33 @@ pub(crate) fn bucket_for(self_id: &NodeId, peer_id: &NodeId) -> Option<usize> {
     }
 }
 
+/// A uniformly-random id `t` satisfying `bucket_for(self_id, t) ==
+/// bucket_idx` — the `FindNode` target the refresh scheduler walks to
+/// re-discover a stale bucket's range.
+///
+/// Returns `None` for an out-of-range `bucket_idx`.
+pub(crate) fn random_id_in_bucket(self_id: &NodeId, bucket_idx: usize) -> Option<NodeId> {
+    use rand::TryRng;
+    use rand::rngs::SysRng;
+
+    if bucket_idx >= BUCKETS {
+        return None;
+    }
+    let mut noise = [0u8; 32];
+    SysRng.try_fill_bytes(&mut noise).ok()?;
+
+    // `bucket_for` is `255 - leading_zeros(self ^ t)`, so t must agree
+    // with self above `first_diff` and differ at it; bits below are free.
+    let first_diff = BUCKETS - 1 - bucket_idx;
+    let mut out = *self_id.as_bytes();
+    out[first_diff / 8] ^= 0x80 >> (first_diff % 8);
+    for bit in (first_diff + 1)..BUCKETS {
+        let mask = 0x80u8 >> (bit % 8);
+        out[bit / 8] = (out[bit / 8] & !mask) | (noise[bit / 8] & mask);
+    }
+    Some(NodeId::from_bytes(out))
+}
+
 /// Byte-wise XOR of two 32-byte ids. Used both by the bucket-index
 /// computation and the `find_closest` distance metric.
 #[inline]
@@ -579,11 +618,13 @@ fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// `handler::self_in_top_k`, `mls::kp::self_is_owner_for_stash`,
 /// `mls::welcome::self_is_owner_for_recipient`).
 ///
-/// **Permissive sparse-table policy**: if the routing table holds
-/// fewer than `K` candidates we return `true` rather than `false`.
-/// A relay that just bootstrapped is allowed to accept stores/publishes
-/// before its routing table is dense — otherwise we couldn't seed
-/// a fresh network. Migration sweeps re-balance later.
+/// **Sparse-table policy**: with fewer than `K` known peers this relay
+/// genuinely occupies one of the K slots, so the answer is `true` — that
+/// is what lets a fresh or genuinely tiny network seed itself. The
+/// exception is a relay that has *previously* seen a table of `K` or
+/// more ([`Dht::routing_was_dense`]): it knows the network is larger
+/// than its current view, so a collapsed table means partition, not
+/// ownership, and it stops claiming the whole keyspace.
 ///
 /// We query for `K + 1` rather than `K` so that a self-equal-distance
 /// entry at the K-th position cannot be tiebroken out and silently
@@ -595,8 +636,9 @@ fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 pub(crate) fn self_in_top_k(dht: &Dht, target: &NodeId) -> bool {
     let candidates = dht.routing.read().find_closest(target, K + 1);
     if candidates.len() < K {
-        return true;
+        return !dht.routing_was_dense();
     }
+    dht.mark_routing_dense();
     let target_bytes = target.as_bytes();
     let self_dist = xor32(dht.node_id.as_bytes(), target_bytes);
     let kth_dist = xor32(candidates[K - 1].id.as_bytes(), target_bytes);
@@ -997,8 +1039,12 @@ mod tests {
     // -------- refresh policy -------------------------------------------
 
     #[test]
-    fn buckets_needing_refresh_returns_stale_indices() {
-        let t = fresh_table(0);
+    fn buckets_needing_refresh_returns_stale_populated_indices() {
+        let mut t = fresh_table(0);
+        let p = id_n(1);
+        t.insert(desc(p));
+        let populated = bucket_for(&t.self_id, &p).unwrap();
+
         // Fresh table — no buckets stale "now".
         assert!(t.buckets_needing_refresh(Instant::now()).is_empty());
 
@@ -1006,8 +1052,112 @@ mod tests {
         // time without sleeping the test thread.
         let far_future = Instant::now()
             + Duration::from_millis(super::super::config::BUCKET_REFRESH_MS + 1_000);
-        let stale = t.buckets_needing_refresh(far_future);
-        assert_eq!(stale.len(), BUCKETS);
+        assert_eq!(t.buckets_needing_refresh(far_future), vec![populated]);
+
+        t.mark_refreshed(populated);
+        assert!(t.buckets_needing_refresh(Instant::now()).is_empty());
     }
 
+    // -------- refresh targets -------------------------------------------
+
+    #[test]
+    fn random_id_in_bucket_lands_in_that_bucket() {
+        let self_id = id_n(3);
+        for bucket in [0usize, 1, 7, 128, 254, BUCKETS - 1] {
+            let target = random_id_in_bucket(&self_id, bucket).expect("in-range bucket");
+            assert_eq!(bucket_for(&self_id, &target), Some(bucket));
+        }
+    }
+
+    #[test]
+    fn random_id_in_bucket_rejects_out_of_range() {
+        assert!(random_id_in_bucket(&id_n(3), BUCKETS).is_none());
+    }
+
+    // -------- pubkey binding --------------------------------------------
+
+    #[test]
+    fn insert_replaces_an_unbound_pubkey_with_a_key_bound_one() {
+        let mut t = fresh_table(0);
+        let pubkey = [9u8; 32];
+        let id = NodeId::new(pubkey);
+
+        let mut unbound = desc(id);
+        unbound.pubkey = [0xEEu8; 32].into();
+        assert_eq!(t.insert(unbound), InsertOutcome::Inserted);
+
+        let mut bound = desc(id);
+        bound.pubkey = pubkey.into();
+        assert_eq!(t.insert(bound), InsertOutcome::Refreshed);
+
+        let bucket = bucket_for(&t.self_id, &id).unwrap();
+        let entry = t.buckets[bucket].entries.iter().find(|e| e.id == id).unwrap();
+        assert_eq!(entry.pubkey, pubkey);
+    }
+
+    #[test]
+    fn insert_keeps_a_key_bound_pubkey_against_an_unbound_claim() {
+        let mut t = fresh_table(0);
+        let pubkey = [9u8; 32];
+        let id = NodeId::new(pubkey);
+
+        let mut bound = desc(id);
+        bound.pubkey = pubkey.into();
+        assert_eq!(t.insert(bound), InsertOutcome::Inserted);
+
+        let mut spoofed = desc(id);
+        spoofed.pubkey = [0xEEu8; 32].into();
+        assert_eq!(t.insert(spoofed), InsertOutcome::Refreshed);
+
+        let bucket = bucket_for(&t.self_id, &id).unwrap();
+        let entry = t.buckets[bucket].entries.iter().find(|e| e.id == id).unwrap();
+        assert_eq!(entry.pubkey, pubkey);
+    }
+
+    // -------- self_in_top_k ---------------------------------------------
+
+    fn fresh_dht(self_id: NodeId) -> std::sync::Arc<Dht> {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("promtuz-routing-test-{pid}-{n}"));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let store = std::sync::Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        std::sync::Arc::new(
+            Dht::new(self_id, signing, crate::dht::DhtConfig::default(), store).expect("dht"),
+        )
+    }
+
+    #[test]
+    fn self_in_top_k_is_permissive_while_the_table_has_never_been_dense() {
+        let dht = fresh_dht(id_n(1));
+        assert!(self_in_top_k(&dht, &id_n(200)));
+    }
+
+    #[test]
+    fn self_in_top_k_stops_claiming_the_keyspace_after_a_dense_table_collapses() {
+        let dht = fresh_dht(id_n(1));
+        let mut cursor = 0u32;
+        let peers: Vec<NodeId> = (0..K)
+            .map(|_| id_in_bucket(&dht.node_id, 255, &mut cursor))
+            .collect();
+        for id in &peers {
+            dht.routing.write().insert(desc(*id));
+        }
+        // Observing K peers latches the density flag.
+        self_in_top_k(&dht, &id_n(200));
+
+        for id in &peers {
+            for _ in 0..PING_FAILURES_BEFORE_EVICTION {
+                dht.routing.write().ping_failed(id);
+            }
+        }
+        assert_eq!(dht.routing.read().total_known(), 0);
+        assert!(!self_in_top_k(&dht, &id_n(200)));
+    }
 }
