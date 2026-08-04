@@ -125,13 +125,24 @@ _vault_commit() {
 }
 
 # Decrypt the age identity into $1 and echo its path. The single passphrase
-# prompt of any run happens here.
+# prompt of any run happens here. A typo costs an attempt; age exits 130 when
+# the prompt is interrupted, so Ctrl-C still aborts immediately.
+#
+# Diagnostics go to stderr — stdout carries the identity path back to the caller.
 _unlock() {
     local scratch="$1"
     [[ -e "$IDENTITY" ]] || _die "no vault identity at $IDENTITY — run 'keys vault-init' or 'keys clone <remote>'"
     local id="$scratch/identity"
+    local tries=3 attempt rc
     _info "unlocking the vault…" >&2
-    age -d -o "$id" "$IDENTITY" || _die "could not unlock the vault (wrong passphrase?)"
+    for attempt in {1..$tries}; do
+        age -d -o "$id" "$IDENTITY"
+        rc=$?
+        (( rc == 0 )) && break
+        (( rc == 130 )) && _die "cancelled"
+        (( attempt == tries )) && _die "could not unlock the vault after $tries attempts"
+        _warn "wrong passphrase — $(( tries - attempt )) attempt(s) left" >&2
+    done
     chmod 600 "$id"
     print -r -- "$id"
 }

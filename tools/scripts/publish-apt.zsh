@@ -58,6 +58,20 @@ _confirm() {
     [[ "$reply" == [yY]* ]] || _die "aborted"
 }
 
+# Retry a mistyped passphrase instead of losing the whole run. age exits 130
+# when its prompt is interrupted, so Ctrl-C still aborts immediately.
+_unlock_vault() {
+    local out="$1" src="$2" tries=3 attempt rc
+    for attempt in {1..$tries}; do
+        age -d -o "$out" "$src"
+        rc=$?
+        (( rc == 0 )) && return 0
+        (( rc == 130 )) && _die "cancelled"
+        (( attempt < tries )) && _warn "wrong passphrase — $(( tries - attempt )) attempt(s) left"
+    done
+    _die "could not unlock the vault after $tries attempts"
+}
+
 while (( $# )); do
     case "$1" in
         --version)    VERSION="${2:?}"; shift 2 ;;
@@ -177,11 +191,17 @@ for crate in $CRATES; do
     ) || _die "$crate failed to build"
 done
 
-for f in "$REPO/target/$TARGET/debian/"*.deb; do
-    [[ -e "$f" ]] || _die "cargo-deb produced no packages"
+# cargo-deb never cleans its output directory, so it still holds every package
+# ever built here. Take only this version's, and insist on one per crate — a
+# bare *.deb would sweep up a previous release, and would also let a crate whose
+# `cargo deb` silently produced nothing pass as built.
+for f in "$REPO/target/$TARGET/debian/"*_"${DEB_VERSION}"_*.deb(N); do
     cp "$f" "$DEBS/"
 done
-_ok "built $(/bin/ls -1 "$DEBS" | wc -l | tr -d ' ') packages"
+built=("$DEBS"/*.deb(N))
+(( $#built == $#CRATES )) \
+    || _die "expected $#CRATES packages at $DEB_VERSION, found $#built"
+_ok "built $#built packages"
 
 # ── verify the packages ──────────────────────────────────────────────────
 _step "Verify packages"
@@ -221,7 +241,7 @@ done
 _step "Repository"
 
 _info "unlocking the vault…"
-age -d -o "$SCRATCH/identity" "$VAULT/identity.age" || _die "could not unlock the vault"
+_unlock_vault "$SCRATCH/identity" "$VAULT/identity.age"
 chmod 600 "$SCRATCH/identity"
 age -d -i "$SCRATCH/identity" -o "$SCRATCH/apt-secret.asc" "$VAULT/apt-signing-secret.asc.age"
 

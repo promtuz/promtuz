@@ -76,6 +76,20 @@ _confirm() {
     [[ "$reply" == [yY]* ]] || _die "aborted"
 }
 
+# Retry a mistyped passphrase instead of losing the whole run. age exits 130
+# when its prompt is interrupted, so Ctrl-C still aborts immediately.
+_unlock_vault() {
+    local out="$1" src="$2" tries=3 attempt rc
+    for attempt in {1..$tries}; do
+        age -d -o "$out" "$src"
+        rc=$?
+        (( rc == 0 )) && return 0
+        (( rc == 130 )) && _die "cancelled"
+        (( attempt < tries )) && _warn "wrong passphrase — $(( tries - attempt )) attempt(s) left"
+    done
+    _die "could not unlock the vault after $tries attempts"
+}
+
 while (( $# )); do
     case "$1" in
         --channel)      CHANNEL="${2:?}"; shift 2 ;;
@@ -253,7 +267,7 @@ STAGE="$SCRATCH/stage"; mkdir -p "$STAGE"
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 
 _info "unlocking the vault…"
-age -d -o "$SCRATCH/identity" "$VAULT/identity.age" || _die "could not unlock the vault"
+_unlock_vault "$SCRATCH/identity" "$VAULT/identity.age"
 chmod 600 "$SCRATCH/identity"
 
 age -d -i "$SCRATCH/identity" -o "$SCRATCH/release.p12"         "$VAULT/android-release.p12.age"
