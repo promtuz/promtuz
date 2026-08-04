@@ -129,7 +129,7 @@ pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
 /// let cfg = build_server_cfg(
 ///     Path::new("cert/server.crt"),
 ///     Path::new("cert/server.key"),
-///     &["resolver/1", "node/1", "client/1"],
+///     &[ProtoRole::Resolver, ProtoRole::Client],
 /// )?;
 /// let endpoint = quinn::Endpoint::server(cfg, "0.0.0.0:4433".parse()?)?;
 /// ```
@@ -160,7 +160,7 @@ pub fn build_server_cfg(
     // TODO(node-mtls): all inbound is no-client-auth, so node identity is
     // authenticated app-layer (signed hellos), not transport, and a server
     // can't read a connecting node's capability cert. mTLS the node ALPNs
-    // (keep client/1 open — phones are pseudonymous) to verify node
+    // (keep client/5 open — phones are pseudonymous) to verify node
     // certs/capabilities directly. See dht/tls_extract.rs.
     let mut tls = RustlsServerConfig::builder()
         .with_no_client_auth()
@@ -186,10 +186,10 @@ pub fn build_server_cfg(
 /// ## ALPN and roles
 /// The **ALPN string defines the role of this outbound connection**:
 ///
-/// - `"relay/1"`     — a relay/node dialing a resolver  
-/// - `"resolver/1"` — a resolver dialing another resolver  
-/// - `"peer/1"`     — a relay/node dialing another relay/node  
-/// - `"client/1"`   — a client dialing a resolver  
+/// - `"relay/5"`     — a relay/node dialing a resolver  
+/// - `"resolver/5"` — a resolver dialing another resolver  
+/// - `"peer/5"`     — a relay/node dialing another relay/node  
+/// - `"client/5"`   — a client dialing a resolver  
 ///
 /// Each outbound QUIC connection must advertise **exactly one** ALPN.
 /// The receiving side uses the negotiated ALPN to route the connection
@@ -214,7 +214,7 @@ pub fn build_server_cfg(
 /// ## Example
 /// ```ignore
 /// let roots = load_root_ca("cert/rootCA.pem")?;
-/// let cfg = build_client_cfg("node/1", &roots)?;
+/// let cfg = build_client_cfg(ProtoRole::Relay, &roots)?;
 /// endpoint.set_default_client_config(cfg);
 ///
 /// let conn = endpoint
@@ -244,20 +244,21 @@ pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn:
 fn _phase8_section_marker() {}
 
 // ===========================================================================
-// NodeKey-as-SPKI cert for the peer/1 ALPN
+// NodeKey-as-SPKI cert for the peer/5 ALPN
 // ===========================================================================
 //
 // The relay's primary TLS cert is CA-issued (by the project's RootCA) so it
-// can present a chain to clients/resolvers that already trust the root. But
-// libcore's `Peer1DhtClient` pins the relay's cert SPKI against the relay's
-// NodeKey pubkey (vended by the resolver via `RelayDescriptor.pubkey`); the
-// CA-issued cert's SPKI is **unrelated** to the NodeKey, so pinning over the
-// CA-issued cert could never fire.
+// can present a chain to clients/resolvers that already trust the root. It
+// certifies the NodeKey, so its SPKI already equals the NodeKey — but it is
+// only usable by a dialer that holds the root and accepts the cert's
+// validity window. A `peer/5` dialer has neither obligation: it pins
+// `BLAKE3(SPKI) == NodeId` and nothing else.
 //
-// Approach: serve a *separate* self-signed Ed25519 cert on the peer/1 ALPN
-// where SPKI = NodeKey. We attach an ALPN-discriminating
-// `ResolvesServerCert` to the rustls server config; the peer/1 ALPN gets the
-// NodeKey-bound cert, every other ALPN keeps the CA-issued cert.
+// Approach: serve a *separate* self-signed Ed25519 cert on the peer/5 ALPN
+// over the same key, so the SPKI a peer pins arrives with no chain to build
+// and no expiry to honour. We attach an ALPN-discriminating
+// `ResolvesServerCert` to the rustls server config; the peer/5 ALPN gets the
+// self-signed cert, every other ALPN keeps the CA-issued one.
 //
 // rustls 0.23's `ClientHello::alpn()` exposes the offered ALPN list during
 // the resolver callback, so this is cleanly supported by quinn 0.11 (which
@@ -272,8 +273,7 @@ fn _phase8_section_marker() {}
 const ED25519_AID_DER: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
 
 /// Build a hand-rolled DER X.509 TBSCertificate carrying `public_key`
-/// in the SPKI. Matches libcore's `peer_config::build_tbs_certificate`
-/// byte-for-byte so post-handshake SPKI extraction is symmetric.
+/// in the SPKI.
 #[cfg(feature = "crypto")]
 fn build_tbs_certificate_for(public_key: &[u8; 32]) -> Vec<u8> {
     let spki = [
@@ -285,17 +285,9 @@ fn build_tbs_certificate_for(public_key: &[u8; 32]) -> Vec<u8> {
     ]
     .concat();
 
-    let serial = &public_key[0..8];
-
-    let validity: &[u8] = &[
-        0x30, 0x1e, 0x17, 0x0d,
-        b'7', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z', 0x17,
-        0x0d, b'5', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
-    ];
-
     let empty_name: &[u8] = &[0x30, 0x00];
     let version: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
-    let serial_der = [&[0x02, serial.len() as u8][..], serial].concat();
+    let serial_der = der_integer(&public_key[0..8]);
     let sig_alg: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70];
 
     let tbs_content = [
@@ -303,13 +295,41 @@ fn build_tbs_certificate_for(public_key: &[u8; 32]) -> Vec<u8> {
         &serial_der,
         sig_alg,
         empty_name,
-        validity,
+        &validity_der(),
         empty_name,
         &spki,
     ]
     .concat();
 
     encode_seq(&tbs_content)
+}
+
+/// DER INTEGER: positive, minimally encoded — the RFC 5280 serialNumber form.
+#[cfg(feature = "crypto")]
+fn der_integer(magnitude: &[u8]) -> Vec<u8> {
+    let start = magnitude.iter().position(|b| *b != 0).unwrap_or(magnitude.len());
+    let significant = &magnitude[start..];
+    let sign_pad: &[u8] =
+        if significant.first().is_none_or(|b| b & 0x80 != 0) { &[0x00] } else { &[] };
+    let body = [sign_pad, significant].concat();
+    [&[0x02, body.len() as u8][..], &body].concat()
+}
+
+/// Validity for a key-as-identity cert: RFC 5280's "no well-defined expiration"
+/// sentinel, which must be GeneralizedTime while notBefore stays UTCTime.
+#[cfg(feature = "crypto")]
+fn validity_der() -> Vec<u8> {
+    const NOT_BEFORE: &[u8] = b"700101000000Z";
+    const NOT_AFTER: &[u8] = b"99991231235959Z";
+    encode_seq(
+        &[
+            &[0x17, NOT_BEFORE.len() as u8][..],
+            NOT_BEFORE,
+            &[0x18, NOT_AFTER.len() as u8][..],
+            NOT_AFTER,
+        ]
+        .concat(),
+    )
 }
 
 /// Wrap signed TBS + sig into the final X.509 Certificate DER.
@@ -335,7 +355,7 @@ fn encode_seq(data: &[u8]) -> Vec<u8> {
 }
 
 /// rustls SigningKey impl backed by an Ed25519 SigningKey — used as the
-/// `cert_resolver`'s key half for the NodeKey-bound peer/1 cert.
+/// `cert_resolver`'s key half for the NodeKey-bound peer/5 cert.
 #[cfg(feature = "crypto")]
 #[derive(Debug)]
 struct Ed25519SigningKey {
@@ -384,8 +404,8 @@ impl rustls::sign::Signer for Ed25519Signer {
 }
 
 /// Build a `CertifiedKey` carrying a self-signed Ed25519 cert whose SPKI
-/// is `signing.verifying_key()` — used by the relay to serve a
-/// NodeKey-bound cert on the peer/1 ALPN so libcore-side pinning can fire.
+/// is `signing.verifying_key()` — what the relay serves on the peer/5
+/// ALPN, where a dialing peer pins `BLAKE3(SPKI) == NodeId`.
 #[cfg(feature = "crypto")]
 pub fn build_self_signed_ed25519_cert(
     signing: ed25519_dalek::SigningKey,
@@ -410,18 +430,18 @@ pub fn build_self_signed_ed25519_cert(
 
 /// ALPN-aware `ResolvesServerCert` used by the relay's QUIC server config.
 ///
-/// Holds two `CertifiedKey`s: one for the peer/1 ALPN (NodeKey-bound,
-/// so libcore can pin SPKI against `RelayDescriptor.pubkey`) and one
-/// for everything else (the CA-issued cert that resolver/relay/client
-/// dialers expect). The split is necessary because libcore's pinning
-/// path checks `presented_spki == claimed_node_key`, which the
-/// CA-issued cert cannot satisfy.
+/// Holds two `CertifiedKey`s over the same NodeKey: a self-signed cert
+/// for the peer/5 ALPN, and the CA-issued cert for everything else
+/// (what resolver/relay/client dialers expect to chain to the root).
+/// A peer dialer validates by SPKI alone, so serving it the chainless,
+/// non-expiring half keeps `peer/5` independent of the PKI's roots and
+/// renewal cycle.
 #[cfg(feature = "crypto")]
 #[derive(Debug)]
 pub struct AlpnAwareCertResolver {
-    /// Cert served when ClientHello carries the `peer/1` ALPN.
+    /// Cert served when ClientHello carries the `peer/5` ALPN.
     pub peer_cert: Arc<CertifiedKey>,
-    /// Cert served for every other ALPN (resolver/1, relay/1, client/1)
+    /// Cert served for every other ALPN (resolver/5, relay/5, client/5)
     /// — typically the CA-issued cert from the operator's PKI.
     pub default_cert: Arc<CertifiedKey>,
 }
@@ -443,12 +463,14 @@ impl ResolvesServerCert for AlpnAwareCertResolver {
 }
 
 /// Variant of [`build_server_cfg`] that wires an [`AlpnAwareCertResolver`]
-/// so the peer/1 ALPN is served a NodeKey-bound self-signed Ed25519 cert
+/// so the peer/5 ALPN is served a NodeKey-bound self-signed Ed25519 cert
 /// while every other ALPN is served the operator's CA-issued cert.
 ///
-/// `node_signing` is the relay's long-term Ed25519 NodeKey (i.e. the same
-/// key whose pubkey is derived as `relay_id`/`node_id` and that the
-/// resolver vends in `RelayDescriptor.pubkey`).
+/// `node_signing` is the relay's long-term Ed25519 NodeKey — the key whose
+/// pubkey is derived as `relay_id`/`node_id` and that the resolver vends in
+/// `RelayDescriptor.pubkey`. It is the same key `key_path` holds and the
+/// same key the cert at `cert_path` certifies, so both certs this builds
+/// carry one SPKI.
 #[cfg(feature = "crypto")]
 pub fn build_server_cfg_with_alpn_split(
     cert_path: &Path,
@@ -495,3 +517,39 @@ pub fn build_server_cfg_with_alpn_split(
     server_cfg.transport_config(Arc::new(default_server_transport()));
     Ok(server_cfg)
 }
+
+#[cfg(all(test, feature = "crypto"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn der_integer_pads_a_high_bit_magnitude() {
+        assert_eq!(der_integer(&[0x80, 0x01]), vec![0x02, 0x03, 0x00, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn der_integer_strips_leading_zeros() {
+        assert_eq!(der_integer(&[0x00, 0x00, 0x2a]), vec![0x02, 0x01, 0x2a]);
+    }
+
+    #[test]
+    fn der_integer_encodes_an_all_zero_magnitude_as_one_byte() {
+        assert_eq!(der_integer(&[0x00; 8]), vec![0x02, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn tbs_serial_stays_positive_and_minimal_for_every_key_prefix() {
+        const SEQ_HEADER_AND_VERSION: usize = 2 + 5;
+        for lead in [0x00u8, 0x7f, 0x80, 0xff] {
+            let mut key = [0x11u8; 32];
+            key[0] = lead;
+            let tbs = build_tbs_certificate_for(&key);
+            let serial = &tbs[SEQ_HEADER_AND_VERSION..];
+            assert_eq!(serial[0], 0x02);
+            let body = &serial[2..2 + serial[1] as usize];
+            assert!(body[0] < 0x80, "serial must be positive");
+            assert!(body.len() == 1 || body[0] != 0 || body[1] >= 0x80, "serial must be minimal");
+        }
+    }
+}
+

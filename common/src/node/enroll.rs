@@ -19,13 +19,47 @@ use rustls::pki_types::UnixTime;
 use crate::quic::config::load_root_ca;
 use crate::quic::id::NodeId;
 
-/// Pull the 32-byte Ed25519 SPKI out of a DER cert. Ed25519 leaf certs carry
-/// exactly one `03 21 00` (33-byte) BIT STRING — the pubkey (the signature is
-/// `03 41 00`). Mirrors the hand-rolled DER in [`crate::quic::config`].
+/// Split one DER tag-length-value off the front of `input`, returning
+/// `(tag, value, remainder)`.
+fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (first as usize, rest)
+    } else {
+        let n = (first & 0x7f) as usize;
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let (bytes, rest) = rest.split_at_checked(n)?;
+        (bytes.iter().fold(0usize, |acc, b| (acc << 8) | *b as usize), rest)
+    };
+    let (value, rest) = rest.split_at_checked(len)?;
+    Some((tag, value, rest))
+}
+
+/// The 32-byte Ed25519 public key from a DER cert's SubjectPublicKeyInfo,
+/// reached by walking the TBSCertificate rather than searching for a byte
+/// pattern, so a decoy elsewhere in the cert cannot be mistaken for it.
 pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
-    let needle = [0x03, 0x21, 0x00];
-    let pos = cert_der.windows(3).position(|w| w == needle)? + 3;
-    cert_der.get(pos..pos + 32)?.try_into().ok()
+    let (0x30, cert, _) = read_tlv(cert_der)? else { return None };
+    let (0x30, tbs, _) = read_tlv(cert)? else { return None };
+
+    let (tag, _, after_version) = read_tlv(tbs)?;
+    let mut rest = if tag == 0xa0 { after_version } else { tbs };
+    // serialNumber, signature, issuer, validity, subject
+    for _ in 0..5 {
+        rest = read_tlv(rest)?.2;
+    }
+
+    let (0x30, spki, _) = read_tlv(rest)? else { return None };
+    let (0x30, algorithm, key) = read_tlv(spki)? else { return None };
+    if algorithm != ED25519_AID {
+        return None;
+    }
+    let (0x03, bits, _) = read_tlv(key)? else { return None };
+    let [0x00, pubkey @ ..] = bits else { return None };
+    pubkey.try_into().ok()
 }
 
 fn first_cert_der(cert_path: &Path) -> anyhow::Result<CertificateDer<'static>> {
@@ -157,6 +191,62 @@ pub fn emit_csr(csr_path: &Path, signing: &SigningKey, node_id: &NodeId) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_cert(issuer: &[u8], key: &[u8; 32]) -> Vec<u8> {
+        let tbs = tlv(
+            0x30,
+            &[
+                &[0xa0, 0x03, 0x02, 0x01, 0x02][..],
+                &[0x02, 0x01, 0x01][..],
+                &tlv(0x30, ED25519_AID),
+                issuer,
+                &[0x30, 0x00][..],
+                &[0x30, 0x00][..],
+                &spki_der(key),
+            ]
+            .concat(),
+        );
+        tlv(
+            0x30,
+            &[&tbs[..], &tlv(0x30, ED25519_AID), &[0x03, 0x41, 0x00][..], &[0u8; 64][..]].concat(),
+        )
+    }
+
+    #[test]
+    fn spki_ignores_a_decoy_bit_string_before_the_real_one() {
+        let decoy = [0xEEu8; 32];
+        let real = [0x11u8; 32];
+        let issuer = tlv(0x30, &[&[0x03, 0x21, 0x00][..], &decoy].concat());
+        assert_eq!(spki_ed25519(&synthetic_cert(&issuer, &real)), Some(real));
+    }
+
+    #[test]
+    fn spki_rejects_a_non_ed25519_algorithm() {
+        let rsa_aid: &[u8] = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+        let key = [0x22u8; 32];
+        let spki = tlv(0x30, &[&tlv(0x30, rsa_aid)[..], &[0x03, 0x21, 0x00][..], &key].concat());
+        let tbs = tlv(
+            0x30,
+            &[
+                &[0xa0, 0x03, 0x02, 0x01, 0x02][..],
+                &[0x02, 0x01, 0x01][..],
+                &tlv(0x30, ED25519_AID),
+                &[0x30, 0x00][..],
+                &[0x30, 0x00][..],
+                &[0x30, 0x00][..],
+                &spki,
+            ]
+            .concat(),
+        );
+        let cert = tlv(0x30, &[&tbs[..], &tlv(0x30, ED25519_AID)].concat());
+        assert_eq!(spki_ed25519(&cert), None);
+    }
+
+    #[test]
+    fn spki_rejects_truncated_der() {
+        let cert = synthetic_cert(&[0x30, 0x00], &[0x33u8; 32]);
+        assert_eq!(spki_ed25519(&cert[..cert.len() - 20]), None);
+    }
 
     #[test]
     fn rejects_missing_cert() {

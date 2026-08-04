@@ -6,7 +6,6 @@ use common::quic::protorole::ProtoRole;
 use ed25519_dalek::Signature as Ed25519Signature;
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
 use quinn::ClientConfig;
 use quinn::ServerConfig;
@@ -161,7 +160,7 @@ fn verify_tls13_ed25519(
     let signature = Ed25519Signature::from_bytes(&sig_arr);
 
     verifying_key
-        .verify(message, &signature)
+        .verify_strict(message, &signature)
         .map_err(|e| rustls::Error::General(format!("Ed25519 handshake signature failed: {e}")))?;
 
     Ok(HandshakeSignatureValid::assertion())
@@ -292,26 +291,11 @@ fn build_tbs_certificate(public_key: &[u8; 32]) -> Vec<u8> {
     ]
     .concat();
 
-    // Serial number (random-ish, using first 8 bytes of pubkey)
-    let serial = &public_key[0..8];
-
-    // Validity: not before = 0 (1970), not after = 2050
-    let validity: &[u8] = &[
-        0x30, 0x1e, // SEQUENCE, 30 bytes
-        0x17, 0x0d, // UTCTime, 13 bytes
-        b'7', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z', 0x17,
-        0x0d, // UTCTime, 13 bytes
-        b'5', b'0', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
-    ];
-
     // Empty issuer and subject (minimal cert)
     let empty_name: &[u8] = &[0x30, 0x00]; // SEQUENCE, 0 bytes
 
     // Version 3 (explicit tag [0])
     let version: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
-
-    // Serial number (INTEGER)
-    let serial_der = [&[0x02, serial.len() as u8][..], serial].concat();
 
     // Signature algorithm (Ed25519)
     let sig_alg: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70];
@@ -319,10 +303,10 @@ fn build_tbs_certificate(public_key: &[u8; 32]) -> Vec<u8> {
     // Assemble TBSCertificate
     let tbs_content = [
         version,
-        &serial_der,
+        &der_integer(&public_key[0..8]),
         sig_alg,
         empty_name, // issuer
-        validity,
+        &validity_der(),
         empty_name, // subject
         &spki,
     ]
@@ -330,6 +314,32 @@ fn build_tbs_certificate(public_key: &[u8; 32]) -> Vec<u8> {
 
     // Wrap in SEQUENCE
     encode_sequence(&tbs_content)
+}
+
+/// DER INTEGER: positive, minimally encoded — the RFC 5280 serialNumber form.
+fn der_integer(magnitude: &[u8]) -> Vec<u8> {
+    let start = magnitude.iter().position(|b| *b != 0).unwrap_or(magnitude.len());
+    let significant = &magnitude[start..];
+    let sign_pad: &[u8] =
+        if significant.first().is_none_or(|b| b & 0x80 != 0) { &[0x00] } else { &[] };
+    let body = [sign_pad, significant].concat();
+    [&[0x02, body.len() as u8][..], &body].concat()
+}
+
+/// Validity for a key-as-identity cert: RFC 5280's "no well-defined expiration"
+/// sentinel, which must be GeneralizedTime while notBefore stays UTCTime.
+fn validity_der() -> Vec<u8> {
+    const NOT_BEFORE: &[u8] = b"700101000000Z";
+    const NOT_AFTER: &[u8] = b"99991231235959Z";
+    encode_sequence(
+        &[
+            &[0x17, NOT_BEFORE.len() as u8][..],
+            NOT_BEFORE,
+            &[0x18, NOT_AFTER.len() as u8][..],
+            NOT_AFTER,
+        ]
+        .concat(),
+    )
 }
 
 /// Build the final certificate DER
@@ -563,7 +573,7 @@ fn verify_self_signature(cert: &X509Certificate<'_>, pubkey_bytes: &[u8; 32]) ->
     let signature = Ed25519Signature::from_bytes(&sig_arr);
 
     verifying_key
-        .verify(tbs_der, &signature)
+        .verify_strict(tbs_der, &signature)
         .map_err(|e| anyhow!("cert self-signature did not verify: {e}"))?;
     Ok(())
 }
@@ -571,6 +581,36 @@ fn verify_self_signature(cert: &X509Certificate<'_>, pubkey_bytes: &[u8; 32]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn der_integer_is_positive_and_minimal_for_every_key_prefix() {
+        for lead in 0u8..=255 {
+            let mut key = [0u8; 32];
+            key[0] = lead;
+            let der = der_integer(&key[0..8]);
+            assert_eq!(der[0], 0x02);
+            let body = &der[2..];
+            assert_eq!(der[1] as usize, body.len());
+            assert_eq!(body[0] & 0x80, 0, "serial must not be negative (lead {lead:#04x})");
+            if body.len() > 1 {
+                assert!(
+                    body[0] != 0x00 || body[1] & 0x80 != 0,
+                    "leading zero must be a sign pad (lead {lead:#04x})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validity_not_before_precedes_not_after() {
+        let der = validity_der();
+        // SEQUENCE { UTCTime "700101000000Z", GeneralizedTime "99991231235959Z" }
+        assert_eq!(der[0], 0x30);
+        assert_eq!(der[2], 0x17, "notBefore must be UTCTime");
+        assert_eq!(&der[4..17], b"700101000000Z");
+        assert_eq!(der[17], 0x18, "notAfter past 2049 must be GeneralizedTime");
+        assert_eq!(&der[19..34], b"99991231235959Z");
+    }
 
     /// Build a minimal Ed25519 self-signed cert using the same hand-rolled DER
     /// builder as production, but signed with an explicit caller-supplied key
