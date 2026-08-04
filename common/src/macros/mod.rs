@@ -7,6 +7,9 @@ macro_rules! graceful {
             Ok(v) => v,
             Err(e) => {
                 $crate::error!("{}: {}", $msg, e);
+                // Logging is async; `exit` runs no destructors, so the record
+                // dies in the queue unless it is drained here.
+                $crate::server::log::flush();
                 std::process::exit(1);
             },
         }
