@@ -348,7 +348,7 @@ mod verify_impl {
         pub fn verify(&self, authenticated_relay: &NodeId, now_ms: u64) -> bool {
             self.who == self.lease.user
                 && self.lease.relay_id == *authenticated_relay
-                && NodeId::new(&self.relay_pubkey.0) == self.lease.relay_id
+                && NodeId::new(self.relay_pubkey.0) == self.lease.relay_id
                 && self.lease.verify(now_ms)
                 && now_ms.abs_diff(self.observed_at_ms) <= PRESENCE_STATE_MAX_SKEW_MS
                 && VerifyingKey::from_bytes(&self.relay_pubkey.0).ok().is_some_and(|key| {
@@ -1280,6 +1280,12 @@ pub enum DhtResponse {
 /// in the future (gossip, capability bits) — keeping the `Request` /
 /// `Response` discriminator at the *outer* level lets new non-RPC variants
 /// slot in without breaking the existing per-variant payload codecs.
+// large_enum_variant: same call as the sibling wire enum in client_rel.rs.
+// This is packed into a Vec before send and dropped right after dispatch, so
+// the inline size gap never sits in memory. Boxing `Request` would thread
+// `.into()`/deref through every construct and match site for no wire-format
+// change (postcard encodes `Box<T>` exactly as `T`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DhtPacket {
     Request(DhtRequest),
