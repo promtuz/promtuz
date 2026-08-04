@@ -59,10 +59,12 @@ use openmls::prelude::MlsMessageBodyIn;
 use openmls::prelude::MlsMessageIn;
 use openmls::prelude::MlsMessageOut;
 use openmls::prelude::StagedWelcome;
+use openmls::prelude::PURE_CIPHERTEXT_WIRE_FORMAT_POLICY;
 
 use super::group::MlsGroupHandle;
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
+use super::MAX_GROUP_MEMBERS;
 
 type Result<T> = std::result::Result<T, MlsGroupError>;
 
@@ -205,13 +207,21 @@ pub fn process_welcome(
     // ---------------------------------------------------------
     // 3. Hand to openmls — it'll look up the matching KP bundle
     //    by its hash_ref and decrypt the joiner secret.
-    //
-    //    Default join config matches openmls's own defaults
-    //    (PrivateMessage out, mixed wire-format on incoming).
     // ---------------------------------------------------------
-    let join_config = MlsGroupJoinConfig::default();
+    let join_config = MlsGroupJoinConfig::builder()
+        .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+        .padding_size(super::MLS_PADDING_SIZE)
+        .build();
     let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
         .map_err(MlsGroupError::from_openmls)?;
+
+    // Checked before `into_group` so an oversized roster never reaches storage.
+    let roster = staged.members().count();
+    if roster > MAX_GROUP_MEMBERS {
+        return Err(MlsGroupError::Internal(format!(
+            "Welcome roster is {roster} members, limit is {MAX_GROUP_MEMBERS}"
+        )));
+    }
 
     let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
     let handle = MlsGroupHandle::wrap(mls_group);
@@ -230,8 +240,7 @@ pub fn process_welcome(
     //
     // We require: at least one member's identity matches
     // `envelope.sender_ipk` AND at least one matches
-    // `envelope.recipient_ipk`. We do NOT bound the total membership
-    // (multi-party Welcomes carry N>=2 members).
+    // `envelope.recipient_ipk`.
     //
     // Sender-/recipient-IPK address checks are done by the caller
     // (`process_welcome_inbound` in `api::messaging`) which knows the

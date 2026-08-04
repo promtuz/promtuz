@@ -21,15 +21,26 @@ pub struct IdentityRow {
 
 from_row!(IdentityRow { id, ipk, enc_isk, created_at, name });
 
-const MIGRATION_ARRAY: &[M] = &[M::up(
-    "CREATE TABLE identity (
+const MIGRATION_ARRAY: &[M] = &[
+    M::up(
+        "CREATE TABLE identity (
             id INTEGER PRIMARY KEY CHECK (id = 0),
             ipk BLOB NOT NULL CHECK(length(ipk) = 32),
             enc_isk BLOB NOT NULL,
             created_at INTEGER NOT NULL,
             name TEXT NOT NULL
         );",
-)];
+    ),
+    // Invite ids already redeemed. Rows are pruned once the invite can no
+    // longer be presented at all, so this stays bounded by the number of
+    // invites minted in one acceptance window.
+    M::up(
+        "CREATE TABLE spent_invite (
+            id           BLOB PRIMARY KEY CHECK(length(id) = 16),
+            unusable_at_ms INTEGER NOT NULL
+        );",
+    ),
+];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static IDENTITY_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {

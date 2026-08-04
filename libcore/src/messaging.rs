@@ -227,11 +227,11 @@ fn build_self_credential(
 }
 
 /// Send `content` to `to`. Builds the production MLS context from the
-/// live relay's peer/1 dialer and hands off to [`send_message_inner`].
+/// live relay's peer/5 dialer and hands off to [`send_message_inner`].
 /// Errors (rather than silently no-op'ing against a non-wired dialer) if
 /// no relay connection is up. Entry point for `api::messaging::send_message`.
 pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> Result<()> {
-    // Pull the production peer/1 dialer from the global `RELAY` (attached
+    // Pull the production peer/5 dialer from the global `RELAY` (attached
     // at connect-time by `Relay::connect`). If no relay connection is
     // live, surface a clean error rather than silently no-op against
     // `NotWiredDhtClient` — otherwise every send would claim success while
@@ -255,7 +255,7 @@ pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> 
         },
         None => {
             error!("MESSAGE: no relay connection / dialer; send aborted");
-            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
+            Err(anyhow!("not connected to a relay (peer/5 dialer not wired); reconnect first"))
         },
     }
 }
@@ -284,7 +284,7 @@ pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Ve
         },
         None => {
             error!("MESSAGE: no relay connection / dialer; media send aborted");
-            Err(anyhow!("not connected to a relay (peer/1 dialer not wired); reconnect first"))
+            Err(anyhow!("not connected to a relay (peer/5 dialer not wired); reconnect first"))
         },
     }
 }
@@ -1512,18 +1512,22 @@ fn process_welcome_inbound<C: DhtClient>(
     // save yet — the save moves after a successful accept so a failed accept
     // leaves no bricked contact (symmetric to the inviter's no-brick fix).
     // Welcomes from existing contacts skip the invite check.
-    let new_contact_name: Option<String> = if Contact::exists(&sender_ipk) {
-        None
+    let (new_contact_name, redeemed_invite) = if Contact::exists(&sender_ipk) {
+        (None, None)
     } else {
-        let invited = env.pairing.as_ref().is_some_and(|p| Identity::verify_invite(&p.invite));
-        if !invited {
+        let Some(pairing) =
+            env.pairing.as_ref().filter(|p| Identity::verify_invite(&p.invite))
+        else {
             warn!(
                 "MLS: dropped Welcome from unknown sender {} (no valid invite)",
                 hex::encode(&sender_ipk[..4])
             );
             bail!("unknown sender and no valid invite");
-        }
-        env.pairing.as_ref().map(|p| p.sender_name.chars().take(32).collect())
+        };
+        (
+            Some(pairing.sender_name.chars().take(32).collect::<String>()),
+            Some(pairing.invite.clone()),
+        )
     };
 
     // Post-gate accept failure = a decline, not a bail: we were invited, we
@@ -1543,6 +1547,9 @@ fn process_welcome_inbound<C: DhtClient>(
         match Contact::save(sender_ipk, name) {
             Ok(_) => info!("IDENTITY: paired with {}", hex::encode(&sender_ipk[..4])),
             Err(e) => warn!("IDENTITY: failed to save paired contact: {e}"),
+        }
+        if let Some(invite) = redeemed_invite {
+            Identity::spend_invite(&invite);
         }
     }
     let _ = Contact::set_mls_group_id(&sender_ipk, &group.group_id());
@@ -1763,6 +1770,13 @@ pub fn process_application_inbound_for<C: DhtClient>(
             Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0 })
         },
         ProcessedMessageContent::StagedCommitMessage(staged) => {
+            let roster = group.member_count() + staged.add_proposals().count();
+            if roster > crate::mls::MAX_GROUP_MEMBERS {
+                return Err(anyhow!(
+                    "commit would take the group to {roster} members, limit is {}",
+                    crate::mls::MAX_GROUP_MEMBERS
+                ));
+            }
             group
                 .merge_staged_commit(ctx.provider, *staged)
                 .map_err(|e| anyhow!("merge_staged_commit: {e}"))?;

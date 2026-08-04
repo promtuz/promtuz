@@ -214,13 +214,28 @@ impl EpochCatchupBuffer {
                 MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
             })?;
 
-        if (count as usize) >= MAX_EPOCH_AHEAD_BUFFER {
+        let bytes: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(length(msg_blob)), 0) FROM mls_epoch_ahead \
+                 WHERE group_id = ?1",
+                params![&group_id[..]],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
+            })?;
+
+        let over_rows = count as usize >= MAX_EPOCH_AHEAD_BUFFER;
+        let over_bytes =
+            bytes as u64 + msg_bytes.len() as u64 > super::MAX_EPOCH_AHEAD_BYTES;
+        if over_rows || over_bytes {
             // Drop newest (i.e. drop the incoming).
             log::warn!(
-                "EpochCatchupBuffer: group_id={} buffer full ({} rows), dropping newest \
+                "EpochCatchupBuffer: group_id={} buffer full ({} rows, {} bytes), dropping newest \
                  (this group may be stuck — consider RequestRejoin)",
                 hex::encode(&group_id[..4]),
-                count
+                count,
+                bytes
             );
             tx.commit()
                 .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;

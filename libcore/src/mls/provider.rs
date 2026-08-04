@@ -56,27 +56,14 @@ impl PromtuzMlsProvider {
         }
     }
 
-    /// Build a provider that points at the on-disk libcore singleton
-    /// (`db("mls")` path). Convenience for production code paths.
-    #[allow(dead_code)] // Consumed by the group lifecycle wiring.
+    /// Build a provider over the process-global MLS connection.
+    ///
+    /// Every production call site goes through here, so they all contend on
+    /// one mutex: two concurrent sends must not mutate MLS state through
+    /// separate connections, or the second reuses a ratchet secret the first
+    /// already consumed.
     pub fn shared() -> Self {
-        // Borrow the static handle's `Arc<Mutex<_>>` via a thin wrapper:
-        // we want a clone-able owning handle, and `Lazy<Mutex<…>>` gives
-        // a `&Mutex<…>`. Promote it by wrapping in an `Arc` over a *new*
-        // mutex would defeat sharing — instead we wrap the *static* in
-        // an Arc-of-reference via a custom guard. Simpler: re-open the
-        // SQLite file. SQLite (with WAL) handles multiple connections
-        // to the same file fine.
-        //
-        // We open a fresh connection here so each `shared()` call gets
-        // its own physical handle — this matches the pattern used by
-        // `IDENTITY_DB`/`MESSAGES_DB` (which are themselves single
-        // connections, but the rest of libcore opens separate ones if
-        // it wants concurrency).
-        let path = crate::db::db("mls");
-        let mut conn = Connection::open(path).expect("open mls db");
-        crate::db::mls::apply_mls_migrations(&mut conn);
-        Self::new(Arc::new(Mutex::new(conn)))
+        Self::new(crate::db::mls::stash_db_handle())
     }
 
     /// Cloneable handle to the storage provider — useful when callers

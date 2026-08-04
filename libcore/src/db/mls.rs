@@ -177,12 +177,11 @@ pub fn apply_mls_migrations(conn: &mut Connection) {
     PRAGMA!(conn, MIGRATIONS);
 }
 
-/// Process-global MLS SQLite connection. All libcore call sites share
-/// this single `Arc<Mutex<Connection>>` — the in-process mutex is
-/// engaged for every read/write, eliminating the connection-open
-/// overhead and closing the inter-handle race window where two
-/// `sendMessage` calls could interleave their MLS state mutations
-/// through separate SQLite connections.
+/// Process-global MLS SQLite connection. Every libcore call site shares
+/// this one `Arc<Mutex<Connection>>`, so the in-process mutex serialises
+/// all MLS state mutation: two concurrent `sendMessage` calls cannot
+/// interleave through separate SQLite connections, and no path pays a
+/// connection open.
 pub static MLS_DB: Lazy<std::sync::Arc<Mutex<Connection>>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("mls")).expect("db open failed");
     apply_mls_migrations(&mut conn);
@@ -190,11 +189,9 @@ pub static MLS_DB: Lazy<std::sync::Arc<Mutex<Connection>>> = Lazy::new(|| {
     std::sync::Arc::new(Mutex::new(conn))
 });
 
-/// Return the process-global MLS DB handle. Returns a clone of the
-/// [`MLS_DB`] static's `Arc` instead of opening a fresh handle each
-/// call. Closes the prior race window where two concurrent dispatches
-/// could mutate MLS state through separate SQLite connections, and
-/// removes the per-`sendMessage` connection-open cost.
+/// Clone of the [`MLS_DB`] static's `Arc` — the only way production code
+/// obtains an MLS connection, so every caller lands on the same handle
+/// and the same mutex.
 ///
 /// Used by the messaging API and the QUIC server for stash +
 /// epoch-ahead buffer construction.

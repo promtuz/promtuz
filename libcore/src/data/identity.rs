@@ -181,22 +181,24 @@ impl Identity {
         Ok(Invite { id: id.into(), expiry_ms, sig: sig.to_bytes().into() })
     }
 
-    /// Verify an inbound invite was minted by *us* (signed under our IPK,
-    /// unexpired). This is the whole anti-spam gate — no server is trusted.
-    /// Used by the welcome gate in `messaging`.
+    /// Verify an inbound invite was minted by *us*, is still redeemable, and
+    /// has not been spent. This is the whole anti-spam gate — no server is
+    /// trusted. Used by the welcome gate in `messaging`.
+    ///
+    /// Callers must [`Self::spend_invite`] on a successful pairing; until then
+    /// the invite stays redeemable, so a failed accept does not burn it.
     pub fn verify_invite(invite: &Invite) -> bool {
         let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else {
             return false;
         };
-        // The ~10-min `expiry_ms` is scan-time freshness UX (surfaced by
-        // `preview_invite`); the ACCEPT gate must tolerate the delivery
-        // channel's latency — a pairing Welcome can legitimately sit in
-        // the home stash up to WELCOME_LIFETIME_MS before we reconnect
-        // and fetch it. Rejecting here on the scan window permanently
-        // killed pairings whose Welcome arrived after 10 minutes.
-        if systime().as_millis() as u64
-            >= invite.expiry_ms.saturating_add(WELCOME_LIFETIME_MS)
-        {
+        // `expiry_ms` is scan-time freshness UX (surfaced by `preview_invite`);
+        // the accept gate must additionally tolerate the delivery channel's
+        // latency, since a pairing Welcome can sit in the home stash for
+        // WELCOME_LIFETIME_MS before we reconnect and fetch it.
+        if systime().as_millis() as u64 >= Self::invite_unusable_at(invite) {
+            return false;
+        }
+        if Self::invite_is_spent(&invite.id.0) {
             return false;
         }
         let Ok(vk) = VerifyingKey::from_bytes(&our_ipk) else {
@@ -204,6 +206,29 @@ impl Identity {
         };
         let msg = invite_signing_input(MLS_WIRE_VERSION, &invite.id.0, invite.expiry_ms);
         vk.verify_strict(&msg, &Signature::from_bytes(&invite.sig.0)).is_ok()
+    }
+
+    /// The instant past which an invite can no longer be presented at all.
+    fn invite_unusable_at(invite: &Invite) -> u64 {
+        invite.expiry_ms.saturating_add(WELCOME_LIFETIME_MS)
+    }
+
+    fn invite_is_spent(id: &[u8; 16]) -> bool {
+        let conn = IDENTITY_DB.lock();
+        conn.query_row("SELECT 1 FROM spent_invite WHERE id = ?1", [&id[..]], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// Burn an invite so it cannot pair a second stranger, and drop rows that
+    /// are past redemption.
+    pub fn spend_invite(invite: &Invite) {
+        let conn = IDENTITY_DB.lock();
+        let now = systime().as_millis() as u64;
+        let _ = conn.execute("DELETE FROM spent_invite WHERE unusable_at_ms <= ?1", [now]);
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO spent_invite(id, unusable_at_ms) VALUES (?1, ?2)",
+            rusqlite::params![&invite.id.0[..], Self::invite_unusable_at(invite)],
+        );
     }
 
     /// Fetches identity public key

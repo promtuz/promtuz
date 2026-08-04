@@ -55,11 +55,24 @@ pub use welcome::{make_welcome_envelope, process_welcome};
 /// before a write is rejected with
 /// [`PromtuzMlsStorageError::BudgetExceeded`].
 ///
-/// The cap protects against a malformed or runaway group (e.g. an
-/// Add chain crossing `MAX_GROUP_SIZE = 256`, which is capped
-/// explicitly elsewhere).
+/// The last line of defence against a runaway Add chain; [`MAX_GROUP_MEMBERS`]
+/// is the one that should reject it first.
 pub const MLS_GROUP_STATE_BUDGET_BYTES: u64 = 1024 * 1024;
+
+/// Ceiling on members in a group, enforced when joining via a Welcome and when
+/// merging a staged commit.
+pub const MAX_GROUP_MEMBERS: usize = 256;
+
+/// Application plaintext is padded up to a multiple of this before sealing, so
+/// ciphertext length reports a bucket rather than the message length. Applied
+/// by the sender; openmls strips it on decrypt, so it needs no wire change.
+pub const MLS_PADDING_SIZE: usize = 256;
 
 /// Per-group cap on application messages held for future epochs.
 #[allow(dead_code)] // messaging.rs caller.
 pub const MAX_EPOCH_AHEAD_BUFFER: usize = 512;
+
+/// Per-group cap on bytes held for future epochs. Binds before
+/// [`MAX_EPOCH_AHEAD_BUFFER`] whenever buffered messages are large.
+#[allow(dead_code)] // messaging.rs caller.
+pub const MAX_EPOCH_AHEAD_BYTES: u64 = 8 * 1024 * 1024;

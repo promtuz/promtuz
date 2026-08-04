@@ -96,6 +96,10 @@ impl MlsGroupHandle {
 
         let create_config = MlsGroupCreateConfig::builder()
             .ciphersuite(PROMTUZ_CIPHERSUITE)
+            // Handshake framing stays opaque to the relay. Pinned rather than
+            // inherited from the openmls default so it cannot drift.
+            .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+            .padding_size(super::MLS_PADDING_SIZE)
             // `use_ratchet_tree_extension(true)` ships the ratchet tree
             // inside the GroupInfo / Welcome rather than out-of-band.
             // Without it joiners would require a separately-conveyed
@@ -350,6 +354,7 @@ pub fn mls_message_from_bytes(bytes: &[u8]) -> Result<MlsMessageIn> {
 mod tests {
     use super::*;
     use crate::db::mls::apply_mls_migrations;
+    use crate::mls::MLS_PADDING_SIZE;
     use openmls::prelude::tls_codec::Deserialize as _;
     use parking_lot::Mutex;
     use rusqlite::Connection;
@@ -600,6 +605,23 @@ mod tests {
         assert_eq!(alice_group.member_count(), 2);
     }
 
+    #[test]
+    fn short_messages_of_different_lengths_seal_to_the_same_size() {
+        let provider = build_provider();
+        let alice = Party::new(&provider, 1);
+        let mut group = create_group(&provider, &alice, &[0xAA; 32]);
+
+        let seal = |g: &mut MlsGroupHandle, body: &[u8]| {
+            let msg = g
+                .create_application_message(&provider, &alice.sig_kp, body)
+                .expect("encrypt");
+            mls_message_to_bytes(&msg).expect("ser").len()
+        };
+
+        assert!(MLS_PADDING_SIZE >= 64);
+        assert_eq!(seal(&mut group, b"ok"), seal(&mut group, &vec![b'x'; 60]));
+    }
+
     // -------------------------------------------------------------
     // Test 6: Leave produces a Remove proposal.
     // -------------------------------------------------------------
@@ -609,19 +631,6 @@ mod tests {
         let alice = Party::new(&provider, 1);
         let mut group = create_group(&provider, &alice, &[0xAA; 32]);
         let proposal = group.leave(&provider, &alice.sig_kp).expect("leave");
-        // openmls 0.8 defaults `MlsGroupJoinConfig::wire_format_policy` to
-        // `PURE_CIPHERTEXT_WIRE_FORMAT_POLICY`, so handshake messages — including
-        // this Remove proposal — are framed as PrivateMessage.
-        //
-        // The assertion previously read `PublicMessage` and had been failing on
-        // `main`, which meant `cargo test -p core --lib` was red and no
-        // regression anywhere in the crate could be distinguished from the
-        // pre-existing failure.
-        //
-        // PrivateMessage is also the property we *want* (handshake framing stays
-        // opaque to the relay), but nothing pins it deliberately — it is inherited
-        // from an openmls default. Worth setting `.wire_format_policy(...)`
-        // explicitly on the create/join configs so it cannot drift silently.
         let bytes = mls_message_to_bytes(&proposal).expect("ser");
         assert_eq!(
             mls_message_from_bytes(&bytes).expect("deser").wire_format(),
