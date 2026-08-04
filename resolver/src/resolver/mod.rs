@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::Result;
 use common::graceful;
@@ -24,7 +27,10 @@ use quinn::Connection;
 use quinn::Endpoint;
 use quinn::ServerConfig;
 
+use crate::resolver::relays::Admission;
 use crate::resolver::relays::RelayEntry;
+use crate::resolver::relays::Slot;
+use crate::resolver::relays::admit;
 use crate::util::config::AppConfig;
 use crate::util::systime;
 
@@ -36,10 +42,9 @@ pub mod rpc;
 /// registry itself takes a (parking_lot) lock when read or written.
 pub type ResolverRef = Arc<Resolver>;
 
-/// Maximum simultaneous registrations. Past this we reject incoming
-/// `RelayHello`s with [`CloseReason::RegistryFull`] — keeps an attacker who
-/// holds valid identity keys from blowing up unbounded memory by churning
-/// registrations from many spoofed-but-real relays.
+/// Maximum simultaneous registrations. Past this, admission falls to
+/// [`admit`], which either displaces an unestablished entry or rejects with
+/// [`CloseReason::RegistryFull`].
 const MAX_RELAYS: usize = 1024;
 
 /// Max simultaneously-registered gateways. Gateways are project infra, so this
@@ -77,6 +82,11 @@ pub struct Resolver {
     /// — the resolver can't see the gateway's capability cert (no client
     /// auth), so a relay verifies `PUSH_GATEWAY` when it dials the gateway.
     gateways: RwLock<HashMap<RelayId, RelayEntry>>,
+
+    /// Bumped on every `relays` membership change; invalidates the packed
+    /// `GetRelays` response cached in [`rpc`].
+    relays_generation: AtomicU64,
+    relays_response: RwLock<Option<(u64, Arc<Vec<u8>>)>>,
 }
 
 impl Resolver {
@@ -126,6 +136,8 @@ impl Resolver {
             endpoint: Arc::new(Self::endpoint(&cfg)),
             relays: RwLock::new(HashMap::new()),
             gateways: RwLock::new(HashMap::new()),
+            relays_generation: AtomicU64::new(0),
+            relays_response: RwLock::new(None),
             cfg,
         }
     }
@@ -141,7 +153,9 @@ impl Resolver {
     /// 3. Verify `timestamp` is within ±`HELLO_MAX_SKEW_MS` of local time
     ///    (replay protection — captured packets stop being usable
     ///    quickly).
-    /// 4. Enforce the `MAX_RELAYS` capacity cap before any mutation.
+    /// 4. Apply [`admit`]: a per-source-address quota plus, at
+    ///    `MAX_RELAYS`, eviction restricted to entries that never sent a
+    ///    heartbeat.
     /// 5. Last-connection-wins: if a live entry already exists for this id,
     ///    close it and let the fresh (signature-proven) registration take
     ///    over. A relay restart/redeploy leaves its old QUIC conn lingering
@@ -186,23 +200,33 @@ impl Resolver {
         // and let this fresh, signature-proven registration replace it. The
         // ptr-guarded watcher (`remove_relay_if_same`) makes the displaced
         // connection's cleanup a no-op, so it can't evict the new entry.
-        if let Some(existing) = relays.get(&relay_id) {
-            if existing.conn.close_reason().is_none() {
+        if let Some(existing) = relays.remove(&relay_id) {
+            let superseded =
+                !Arc::ptr_eq(&existing.conn, &conn) && existing.conn.close_reason().is_none();
+            if superseded {
                 info!("relay({relay_id}) reconnected, superseding prior session");
                 CloseReason::Reconnecting.close(&existing.conn);
             }
-            relays.remove(&relay_id);
         }
 
-        // 4. capacity cap (after pruning a known-stale slot above)
-        if relays.len() >= MAX_RELAYS {
-            warn!(
-                "relay({}) rejected: registry full ({}/{})",
-                conn.remote_address(),
-                relays.len(),
-                MAX_RELAYS
-            );
-            return Err(CloseReason::RegistryFull);
+        // 4. admission (after pruning this id's own slot above)
+        let slots: Vec<Slot> = relays.values().map(RelayEntry::slot).collect();
+        match admit(&slots, conn.remote_address().ip(), MAX_RELAYS, Instant::now()) {
+            Admission::Insert => {},
+            Admission::Evict(victim) => {
+                if let Some(evicted) = relays.remove(&victim) {
+                    CloseReason::RegistryFull.close(&evicted.conn);
+                }
+            },
+            Admission::Reject => {
+                warn!(
+                    "relay({}) rejected: no admissible slot ({}/{})",
+                    conn.remote_address(),
+                    relays.len(),
+                    MAX_RELAYS
+                );
+                return Err(CloseReason::RegistryFull);
+            },
         }
 
         // `RelayEntry::new` stamps `last_heartbeat_at = Instant::now()`
@@ -211,6 +235,7 @@ impl Resolver {
         // `pubkey` is captured here so subsequent `GetBootstrapPeers`
         // responses can include it without re-deriving from cert state.
         relays.insert(relay_id, RelayEntry::new(relay_id, conn, *pubkey));
+        self.relays_generation.fetch_add(1, Ordering::Release);
 
         let hello_ack = LifetimeP::HelloAck { resolver_time: now };
 
@@ -238,6 +263,7 @@ impl Resolver {
             .unwrap_or(false);
         if same {
             relays.remove(&relay_id);
+            self.relays_generation.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -255,10 +281,11 @@ impl Resolver {
     /// so future liveness/load-aware routing logic can't be poisoned by a
     /// peer that knew a registered relay's `relay_id`.
     ///
-    /// Additionally requires that the `relay_id` is currently registered:
-    /// a heartbeat for an unknown relay is meaningless and is rejected.
+    /// Additionally requires that `relay_id` is registered *on this very
+    /// connection*, so a signed heartbeat replayed over any other session
+    /// cannot refresh the entry's liveness.
     pub fn verify_heartbeat(
-        &self, conn: &Connection, packet: &LifetimeP,
+        &self, conn: &Arc<Connection>, packet: &LifetimeP,
     ) -> Result<(), CloseReason> {
         let LifetimeP::RelayHeartbeat { relay_id, pubkey, timestamp, sig, .. } = packet else {
             return Err(CloseReason::PacketMismatch);
@@ -276,24 +303,22 @@ impl Resolver {
             timestamp,
         )?;
 
-        // The signature is valid for *some* relay; require that it's the
-        // one currently using this connection. Holding the read lock only
-        // for the lookup keeps this lock-cheap.
-        //
         // Bumps the entry's `last_heartbeat_at` while the lookup is still
         // in scope: the per-entry `Mutex` lets us update one entry's
         // recency without escalating the outer registry `RwLock` to a
         // write lock (which would serialise every other reader).
         match self.relays.read().get(&relay_id) {
-            None => {
+            Some(entry) if Arc::ptr_eq(&entry.conn, conn) => {
+                entry.touch_heartbeat(std::time::Instant::now())
+            },
+            _ => {
                 warn!(
-                    "relay({}) heartbeat rejected: relay_id {} not registered",
+                    "relay({}) heartbeat rejected: relay_id {} not registered on this connection",
                     conn.remote_address(),
                     relay_id
                 );
                 return Err(CloseReason::PacketMismatch);
             },
-            Some(entry) => entry.touch_heartbeat(std::time::Instant::now()),
         }
 
         Ok(())
@@ -325,17 +350,27 @@ impl Resolver {
         let now = systime().as_millis();
         let mut gateways = self.gateways.write();
 
-        if let Some(existing) = gateways.get(&gateway_id) {
-            if existing.conn.close_reason().is_none() {
+        if let Some(existing) = gateways.remove(&gateway_id) {
+            let superseded =
+                !Arc::ptr_eq(&existing.conn, &conn) && existing.conn.close_reason().is_none();
+            if superseded {
                 info!("gateway({gateway_id}) reconnected, superseding prior session");
                 CloseReason::Reconnecting.close(&existing.conn);
             }
-            gateways.remove(&gateway_id);
         }
 
-        if gateways.len() >= MAX_GATEWAYS {
-            warn!("gateway({}) rejected: registry full", conn.remote_address());
-            return Err(CloseReason::RegistryFull);
+        let slots: Vec<Slot> = gateways.values().map(RelayEntry::slot).collect();
+        match admit(&slots, conn.remote_address().ip(), MAX_GATEWAYS, Instant::now()) {
+            Admission::Insert => {},
+            Admission::Evict(victim) => {
+                if let Some(evicted) = gateways.remove(&victim) {
+                    CloseReason::RegistryFull.close(&evicted.conn);
+                }
+            },
+            Admission::Reject => {
+                warn!("gateway({}) rejected: no admissible slot", conn.remote_address());
+                return Err(CloseReason::RegistryFull);
+            },
         }
 
         gateways.insert(gateway_id, RelayEntry::new(gateway_id, conn, *pubkey));
@@ -425,4 +460,58 @@ fn verify_signed_packet(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
+
+    use super::*;
+
+    struct Hello {
+        relay_id:  RelayId,
+        pubkey:    [u8; 32],
+        timestamp: u128,
+        sig:       [u8; 64],
+    }
+
+    fn signed_hello(timestamp: u128) -> Hello {
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let pubkey = sk.verifying_key().to_bytes();
+        let relay_id = NodeId::new(pubkey);
+        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp);
+        Hello { relay_id, pubkey, timestamp, sig: sk.sign(&msg).to_bytes() }
+    }
+
+    fn verify(h: &Hello) -> Result<(), CloseReason> {
+        let addr = std::net::SocketAddr::from(([203, 0, 113, 1], 4433));
+        let msg = relay_hello_signing_input(&h.relay_id, &h.pubkey, h.timestamp);
+        verify_signed_packet(addr, "hello", &h.relay_id, &h.pubkey, &h.sig, &msg, h.timestamp)
+    }
+
+    #[test]
+    fn accepts_a_fresh_well_signed_hello() {
+        assert!(verify(&signed_hello(systime().as_millis())).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_forged_signature() {
+        let mut h = signed_hello(systime().as_millis());
+        h.sig[0] ^= 0xff;
+        assert!(matches!(verify(&h), Err(CloseReason::BadSignature)));
+    }
+
+    #[test]
+    fn rejects_an_id_that_is_not_the_pubkey_hash() {
+        let mut h = signed_hello(systime().as_millis());
+        h.relay_id = NodeId::new([9u8; 32]);
+        assert!(matches!(verify(&h), Err(CloseReason::BadSignature)));
+    }
+
+    #[test]
+    fn rejects_a_timestamp_outside_the_skew_window() {
+        let stale = systime().as_millis().saturating_sub(HELLO_MAX_SKEW_MS + 1);
+        assert!(matches!(verify(&signed_hello(stale)), Err(CloseReason::StaleTimestamp)));
+    }
 }

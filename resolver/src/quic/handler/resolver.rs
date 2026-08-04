@@ -10,7 +10,7 @@ pub trait HandleResolver {
 
 impl HandleResolver for Handler {
     /// Resolver-to-resolver gossip is not yet implemented. A peer that
-    /// negotiates the `resolver/1` ALPN today gets a polite close with
+    /// negotiates the `resolver/5` ALPN today gets a polite close with
     /// [`CloseReason::UnsupportedRole`] rather than panicking the spawned
     /// task — `tokio::spawn` would otherwise swallow the panic but leak
     /// the connection (no close, no cleanup) and flood stderr with

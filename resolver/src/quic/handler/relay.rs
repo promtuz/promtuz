@@ -5,10 +5,13 @@ use anyhow::anyhow;
 use common::debug;
 use common::error;
 use common::info;
+use common::proto::RelayId;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
+use common::quic::CloseReason;
 use common::warn;
+use parking_lot::Mutex;
 use quinn::Connection;
 
 use crate::quic::handler::Handler;
@@ -40,6 +43,8 @@ impl HandleRelay for Handler {
 /// packets that keep the relay in the registry.
 async fn lifecycle_loop(conn: Arc<Connection>, resolver: ResolverRef) {
     let addr = conn.remote_address();
+    let session = Arc::new(Session::default());
+
     loop {
         let mut recv = match conn.accept_uni().await {
             Ok(recv) => recv,
@@ -51,10 +56,11 @@ async fn lifecycle_loop(conn: Arc<Connection>, resolver: ResolverRef) {
 
         let conn = conn.clone();
         let resolver = resolver.clone();
+        let session = session.clone();
 
         tokio::spawn(async move {
             while let Ok(packet) = ResolverPacket::unpack(&mut recv).await {
-                match handle_packet(conn.clone(), resolver.clone(), packet).await {
+                match handle_packet(conn.clone(), resolver.clone(), &session, packet).await {
                     Ok(()) => {},
                     // Policy-driven close: we already closed the connection
                     // with a `CloseReason`. Don't re-log it as an error.
@@ -65,6 +71,32 @@ async fn lifecycle_loop(conn: Arc<Connection>, resolver: ResolverRef) {
                 }
             }
         });
+    }
+}
+
+/// The one node identity a relay connection may register, shared across that
+/// connection's uni-streams: it bounds a session to a single directory slot
+/// and gates the close-watcher spawn to one per connection.
+#[derive(Default)]
+struct Session(Mutex<Option<RelayId>>);
+
+enum Claim {
+    First,
+    Repeat,
+    Conflict,
+}
+
+impl Session {
+    fn claim(&self, id: RelayId) -> Claim {
+        let mut held = self.0.lock();
+        match *held {
+            None => {
+                *held = Some(id);
+                Claim::First
+            },
+            Some(existing) if existing == id => Claim::Repeat,
+            Some(_) => Claim::Conflict,
+        }
     }
 }
 
@@ -84,22 +116,32 @@ impl From<anyhow::Error> for PacketError {
 }
 
 async fn handle_packet(
-    conn: Arc<Connection>, resolver: ResolverRef, packet: ResolverPacket,
+    conn: Arc<Connection>, resolver: ResolverRef, session: &Session, packet: ResolverPacket,
 ) -> Result<(), PacketError> {
     use ResolverPacket::*;
     match packet {
-        Lifetime(liftime) => handle_lifetime(conn.clone(), resolver.clone(), liftime).await,
+        Lifetime(liftime) => {
+            handle_lifetime(conn.clone(), resolver.clone(), session, liftime).await
+        },
     }
 }
 
 async fn handle_lifetime(
-    conn: Arc<Connection>, resolver: ResolverRef, packet: LifetimeP,
+    conn: Arc<Connection>, resolver: ResolverRef, session: &Session, packet: LifetimeP,
 ) -> Result<(), PacketError> {
     let addr = conn.remote_address();
 
     use LifetimeP::*;
     match packet {
         RelayHello { relay_id, pubkey, timestamp, sig } => {
+            let claim = match session.claim(relay_id) {
+                Claim::Conflict => {
+                    CloseReason::AlreadyConnected.close(&conn);
+                    return Err(PacketError::PolicyClose);
+                },
+                claim => claim,
+            };
+
             // Re-pack into a borrowed view for `register_relay` so we keep
             // a single source of truth for the field layout.
             let hello = RelayHello { relay_id, pubkey, timestamp, sig };
@@ -114,8 +156,9 @@ async fn handle_lifetime(
                 },
             };
 
-            // Now that registration is committed, attach the eviction watcher.
-            resolver.watch_relay(relay_id, conn.clone());
+            if matches!(claim, Claim::First) {
+                resolver.watch_relay(relay_id, conn.clone());
+            }
 
             let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
             hello_ack.send(&mut send).await?;
@@ -138,6 +181,14 @@ async fn handle_lifetime(
             Ok(())
         },
         GatewayHello { gateway_id, pubkey, timestamp, sig } => {
+            let claim = match session.claim(gateway_id) {
+                Claim::Conflict => {
+                    CloseReason::AlreadyConnected.close(&conn);
+                    return Err(PacketError::PolicyClose);
+                },
+                claim => claim,
+            };
+
             let hello = GatewayHello { gateway_id, pubkey, timestamp, sig };
             let hello_ack = match resolver.register_gateway(conn.clone(), &hello) {
                 Ok(ack) => ResolverPacket::Lifetime(ack),
@@ -146,7 +197,10 @@ async fn handle_lifetime(
                     return Err(PacketError::PolicyClose);
                 },
             };
-            resolver.watch_gateway(gateway_id, conn.clone());
+
+            if matches!(claim, Claim::First) {
+                resolver.watch_gateway(gateway_id, conn.clone());
+            }
 
             let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
             hello_ack.send(&mut send).await?;

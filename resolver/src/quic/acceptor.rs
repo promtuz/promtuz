@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::debug;
 use common::quic::CloseReason;
@@ -24,6 +25,13 @@ const ACCEPT_RATE_PER_MIN: u32 = 10;
 /// transient network blip) without classifying the burst as abuse.
 const ACCEPT_RATE_BURST: u32 = 5;
 
+/// Housekeeping interval for the keyed limiter on an otherwise idle endpoint.
+const LIMITER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Accepts between housekeeping passes, so a flood of distinct source
+/// addresses cannot outrun the timer-driven sweep.
+const SWEEP_EVERY_ACCEPTS: usize = 4096;
+
 type IpRateLimiter =
     RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
@@ -31,9 +39,9 @@ type IpRateLimiter =
 pub struct Acceptor {
     /// Clone of endpoint reference from [Resolver]
     endpoint: Arc<Endpoint>,
-    /// Per-source-IP accept-side rate limiter. The default keyed in-memory
-    /// store evicts idle IPs automatically, so this does not grow
-    /// unboundedly under churn.
+    /// Per-source-IP accept-side rate limiter. Keys are the pre-handshake
+    /// source address, so the store only stays bounded because
+    /// [`sweep_limiter`] and the accept-count sweep drop replenished buckets.
     limiter: Arc<IpRateLimiter>,
 }
 
@@ -53,7 +61,17 @@ impl Acceptor {
     }
 
     pub async fn run(&self, resolver: ResolverRef) {
+        tokio::spawn(sweep_limiter(self.limiter.clone()));
+
+        let mut since_sweep = 0usize;
         while let Some(conn) = self.endpoint.accept().await {
+            since_sweep += 1;
+            if since_sweep >= SWEEP_EVERY_ACCEPTS {
+                since_sweep = 0;
+                self.limiter.retain_recent();
+                self.limiter.shrink_to_fit();
+            }
+
             let resolver = resolver.clone();
             let limiter = self.limiter.clone();
 
@@ -80,5 +98,14 @@ impl Acceptor {
                 }
             });
         }
+    }
+}
+
+async fn sweep_limiter(limiter: Arc<IpRateLimiter>) {
+    let mut ticker = tokio::time::interval(LIMITER_SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        limiter.retain_recent();
+        limiter.shrink_to_fit();
     }
 }
