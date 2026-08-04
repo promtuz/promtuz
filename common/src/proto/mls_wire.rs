@@ -324,7 +324,7 @@ pub const WELCOME_ACK_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-ack";
 //      which verify the same signature. The home is a forwarder, not a trust root: a compromised
 //      home cannot forge a KP publish or drain/delete a user's welcome queue.
 //      (FetchWelcomes/AckWelcomes bind the home's own NodeId as `requester_relay_id`, so the phone
-//      learns it from the client/0 handshake before signing.)
+//      learns it from the client/5 handshake before signing.)
 //
 //   2. Gate-only RPCs (FetchKeyPackage, PublishWelcome) carry a wrapper signature over a dedicated
 //      domain that the home verifies locally and does NOT propagate — KeyPackageFetch has no inner
@@ -916,7 +916,7 @@ pub struct KeyPackageFetchResp {
 
 /// Build the canonical signing transcript for an unsigned
 /// [`KeyPackageFetchReq`]. The request is *currently* unsigned (the
-/// `peer/1` `DhtHello` authenticates the requester); this helper
+/// `peer/5` `DhtHello` authenticates the requester); this helper
 /// exists so a future revision that adds a user-layer or relay-layer
 /// signature can drop in without re-deriving the transcript.
 ///
@@ -1026,7 +1026,7 @@ pub fn kp_refill_signing_input(
 /// sender_ipk, recipient_ipk, kp_ref_used, welcome_blob_hash) under
 /// the inviter's IPK. A relay forwarding a Welcome cannot forge it
 /// without holding the inviter's IPK private key. The relay-to-relay
-/// `peer/1` `DhtHello` handshake authenticates the *forwarding*
+/// `peer/5` `DhtHello` handshake authenticates the *forwarding*
 /// relay, not the inviter — same asymmetry as the sticky-home
 /// `Forward` RPC.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

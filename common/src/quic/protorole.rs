@@ -16,7 +16,7 @@ pub enum ProtoRole {
 impl ProtoRole {
     /// Return this role as an ALPN string, including version.
     ///
-    /// Example: `"relay/1"`
+    /// Example: `"relay/5"`
     pub fn alpn(self) -> String {
         match self {
             ProtoRole::Resolver => format!("resolver/{PROTOCOL_VERSION}"),
@@ -62,7 +62,7 @@ impl fmt::Display for ProtoRole {
     }
 }
 
-/// Allows: `"relay/1".parse::<ProtoRole>()?`
+/// Allows: `"relay/5".parse::<ProtoRole>()?`
 impl FromStr for ProtoRole {
     type Err = ();
 

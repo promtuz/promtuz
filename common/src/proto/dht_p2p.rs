@@ -5,8 +5,10 @@
 //!
 //! 1. The [`PresenceRecord`] data type and its dual-signature transcripts (user_sig covering
 //!    `(user_ipk, relay_id, generation)`; relay_sig covering the full record).
-//! 2. The full RPC catalogue: `Ping`/`Pong`, `FindNode`/`Resp`, `FindValue`/`Resp`, `Store`/`Resp`,
-//!    `Tombstone`/`Resp`, `MerkleSummary`/`Resp`, `MerkleDiff`/`Resp`, and `FetchRecord`/`Resp`.
+//! 2. The full RPC catalogue, each a `DhtRequest`/`DhtResponse` pair: `FindNode`; the sticky-home
+//!    family `Forward`, `ActivityForward`, `LiveForward`, `QueueFetch`, `QueueFetchAck`; presence
+//!    (`PresenceConsent`, `PresenceState`, `PresenceLease`); `PushPseudonymPublish`; and the MLS
+//!    families `KeyPackage{Publish,Fetch,Refill}` and `Welcome{Publish,Fetch,Ack}`.
 //! 3. Length-bound constants that downstream handlers check at deserialization / construction time.
 //!
 //! ## Why a `DhtRequest` + `DhtResponse` split (not a single `DhtPacket`)
@@ -51,6 +53,7 @@ use crate::PROTOCOL_VERSION;
 use crate::proto::RelayId;
 use crate::proto::client_rel::ActivityP;
 use crate::proto::client_rel::PresenceState;
+use crate::proto::pack::bounded_vec;
 use crate::types::bytes::Bytes;
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -58,7 +61,7 @@ use crate::types::bytes::Bytes;
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
 /// Domain-separation tag for the connection-level [`DhtHello`] handshake
-/// sent as the very first frame on a fresh `peer/1` connection.
+/// sent as the very first frame on a fresh `peer/5` connection.
 ///
 /// Distinct from every other DHT signing-input tag (`-roam-v1`,
 /// `-presence-v1`, `-tombstone-v1`) so a captured signature for a
@@ -91,16 +94,16 @@ pub const MAX_FIND_NODE_RESULTS: usize = DHT_K;
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
 /// Connection-level signed handshake sent as the **very first frame** on
-/// a freshly-opened `peer/1` (relay-to-relay) connection. The dialing
+/// a freshly-opened `peer/5` (relay-to-relay) connection. The dialing
 /// relay opens a uni-stream, frames a [`DhtHello`] and shuts the stream;
 /// the receiving relay verifies the signature and binds the resulting
 /// [`crate::quic::id::NodeId`] to the connection for the rest of its
 /// lifetime.
 ///
 /// **Why an application-layer hello rather than mTLS?** The relay's
-/// `peer/1` ALPN is currently configured `with_no_client_auth()` because
-/// the same QUIC `Endpoint` also accepts `client/1` connections, and
-/// clients have no certs. mTLS on `peer/1` would require either two
+/// `peer/5` ALPN is currently configured `with_no_client_auth()` because
+/// the same QUIC `Endpoint` also accepts `client/5` connections, and
+/// clients have no certs. mTLS on `peer/5` would require either two
 /// endpoints or a per-ALPN client-auth toggle (neither exists yet in
 /// `quinn`'s public API). An application-layer signed hello mirrors the
 /// existing relay-to-resolver pattern (see
@@ -249,7 +252,7 @@ mod verify_impl {
 
     impl DhtHello {
         /// Validate a [`DhtHello`] received as the first frame on an
-        /// inbound `peer/1` connection. Returns `Ok(())` and binds the
+        /// inbound `peer/5` connection. Returns `Ok(())` and binds the
         /// connection's authenticated [`NodeId`] (callers stash
         /// `self.node_id` post-success) on a clean check.
         ///
@@ -375,7 +378,7 @@ mod verify_impl {
         ///
         /// **Why an external `sender_relay_pubkey` argument** rather
         /// than embedding the pubkey in [`Forward`]: the home relay
-        /// receives every `Forward` over a `peer/1` connection that has
+        /// receives every `Forward` over a `peer/5` connection that has
         /// already passed [`DhtHello`] verification, so the peer's full
         /// Ed25519 identity pubkey is cached on the connection state
         /// keyed by `sender_relay_id`. Pulling it from there saves 32
@@ -559,6 +562,7 @@ pub struct FindNode {
 pub struct FindNodeResp {
     /// Up to `k = MAX_FIND_NODE_RESULTS` closest peers responder knows
     /// of. Length-bound enforced at deserialization.
+    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_FIND_NODE_RESULTS>")]
     pub closer: Vec<NodeDescriptor>,
 }
 
@@ -649,7 +653,7 @@ pub struct Forward {
     pub timestamp:       u64,
     /// Sender-relay's Ed25519 signature over [`forward_signing_input`].
     /// The home relay pulls the verifying pubkey from its routing-table
-    /// entry for `sender_relay_id` (populated by `peer/1`'s `DhtHello`
+    /// entry for `sender_relay_id` (populated by `peer/5`'s `DhtHello`
     /// handshake) and runs `verify_strict`.
     pub sig:             Bytes<64>,
 }
@@ -942,7 +946,8 @@ pub struct QueueFetchResp {
     /// Dispatches drawn from `cf_dht_queue` for the user, oldest first
     /// (the on-disk key is `recipient || ts_be || dispatch_id`, so a
     /// prefix iterator naturally yields chronological order). Bounded
-    /// by [`MAX_FETCH_QUEUE_BATCH`].
+    /// by [`MAX_FETCH_QUEUE_BATCH`], enforced at deserialization.
+    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_FETCH_QUEUE_BATCH>")]
     pub messages:  Vec<crate::proto::client_rel::DispatchP>,
     /// `true` iff the home relay's queue for this user is empty after
     /// this batch. The requesting relay terminates the page-loop when
@@ -1871,5 +1876,50 @@ mod tests {
             Err(QueueFetchAckVerifyError::StaleTimestamp) => {},
             other => panic!("expected StaleTimestamp, got {other:?}"),
         }
+    }
+
+    fn node_descriptor(n: u8) -> NodeDescriptor {
+        NodeDescriptor {
+            id:     NodeId::from_bytes([n; 32]),
+            addr:   "127.0.0.1:4433".parse().unwrap(),
+            pubkey: [n; 32].into(),
+        }
+    }
+
+    #[test]
+    fn find_node_resp_accepts_k_descriptors() {
+        let resp = FindNodeResp {
+            closer: (0..MAX_FIND_NODE_RESULTS as u8).map(node_descriptor).collect(),
+        };
+        let bytes = resp.ser().unwrap();
+        assert_eq!(FindNodeResp::deser(&bytes).unwrap(), resp);
+    }
+
+    #[test]
+    fn find_node_resp_rejects_more_than_k_descriptors() {
+        let resp = FindNodeResp {
+            closer: (0..MAX_FIND_NODE_RESULTS as u8 + 1).map(node_descriptor).collect(),
+        };
+        let bytes = resp.ser().unwrap();
+        assert!(FindNodeResp::deser(&bytes).is_err());
+    }
+
+    #[test]
+    fn queue_fetch_resp_rejects_more_than_a_batch() {
+        let dispatch = crate::proto::client_rel::DispatchP {
+            to:             [1u8; 32].into(),
+            from:           [2u8; 32].into(),
+            id:             [3u8; 16].into(),
+            payload:        crate::types::bytes::ByteVec(vec![0u8; 4]),
+            sig:            [4u8; 64].into(),
+            accepted_at_ms: 1,
+            wake:           false,
+        };
+        let resp = QueueFetchResp {
+            messages:  vec![dispatch; MAX_FETCH_QUEUE_BATCH + 1],
+            exhausted: true,
+        };
+        let bytes = resp.ser().unwrap();
+        assert!(QueueFetchResp::deser(&bytes).is_err());
     }
 }

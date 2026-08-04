@@ -9,11 +9,19 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::proto::pack::bounded_vec;
 use crate::types::bytes::Bytes;
 
 /// Domain tag mixed into the registration signing input so a signature can
 /// never be lifted into another protocol context.
 const REGISTER_DOMAIN: &[u8] = b"promtuz-push-register-v1";
+
+/// An FCM registration token is ~163 bytes, an APNs device token 32, and a
+/// UnifiedPush endpoint a short URL.
+pub const MAX_PUSH_TOKEN_BYTES: usize = 512;
+
+/// FCM's own limit on a data message.
+pub const MAX_WAKE_PAYLOAD_BYTES: usize = 4096;
 
 /// Which platform wake service a token targets. The tag travels with every
 /// registration so the gateway can add APNs / UnifiedPush as new dispatch arms
@@ -58,7 +66,9 @@ pub struct RegisterToken {
     pub pseudonym: Bytes<32>,
     pub provider:  PushProvider,
     /// Opaque platform token (FCM registration token / APNs device token /
-    /// UnifiedPush endpoint URL). Variable length.
+    /// UnifiedPush endpoint URL). Variable length, bounded by
+    /// [`MAX_PUSH_TOKEN_BYTES`].
+    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_PUSH_TOKEN_BYTES>")]
     pub token:     Vec<u8>,
     /// Signature by `P` over `(provider, token)`.
     pub sig:       Bytes<64>,
@@ -70,14 +80,16 @@ pub struct RegisterToken {
 pub struct WakeRequest {
     /// Recipient's push pseudonym `P` (the relay holds `IPK → P`).
     pub pseudonym: Bytes<32>,
-    /// Wake payload: the queued MLS ciphertext envelope (≤ push size limit) or
-    /// a contentless pointer. The gateway forwards it blind.
+    /// Wake payload: the queued MLS ciphertext envelope or a contentless
+    /// pointer, bounded by [`MAX_WAKE_PAYLOAD_BYTES`]. The gateway forwards
+    /// it blind.
+    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_WAKE_PAYLOAD_BYTES>")]
     pub payload:   Vec<u8>,
 }
 
 /// One-RPC-per-bi-stream request the gateway unpacks (mirrors the resolver's
-/// `ClientRequest`). `Register` arrives over `client/1`, `Wake` over
-/// `relay/1`.
+/// `ClientRequest`). `Register` arrives over `client/5`, `Wake` over
+/// `relay/5`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PushRequest {
     Register(RegisterToken),
@@ -102,10 +114,14 @@ impl RegisterToken {
     }
 
     /// Verify the self-signature: `sig` must be a valid signature by
-    /// `pseudonym` (as an Ed25519 pubkey) over this registration. IPK-free.
+    /// `pseudonym` (as an Ed25519 pubkey) over this registration, and the
+    /// token must be within [`MAX_PUSH_TOKEN_BYTES`]. IPK-free.
     pub fn verify(&self) -> bool {
         use ed25519_dalek::Signature;
         use ed25519_dalek::VerifyingKey;
+        if self.token.len() > MAX_PUSH_TOKEN_BYTES {
+            return false;
+        }
         let Ok(vk) = VerifyingKey::from_bytes(&self.pseudonym.0) else {
             return false;
         };
@@ -131,5 +147,38 @@ mod tests {
         let mut reg = RegisterToken::signed(&key, PushProvider::Fcm, b"token-bytes".to_vec());
         reg.token = b"evil-token".to_vec();
         assert!(!reg.verify());
+    }
+
+    #[test]
+    fn oversize_token_fails_verify() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let reg =
+            RegisterToken::signed(&key, PushProvider::Fcm, vec![7u8; MAX_PUSH_TOKEN_BYTES + 1]);
+        assert!(!reg.verify());
+    }
+
+    #[test]
+    fn oversize_token_fails_to_deserialize() {
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let reg =
+            RegisterToken::signed(&key, PushProvider::Fcm, vec![7u8; MAX_PUSH_TOKEN_BYTES + 1]);
+        let bytes = reg.ser().unwrap();
+        assert!(RegisterToken::deser(&bytes).is_err());
+    }
+
+    #[test]
+    fn oversize_wake_payload_fails_to_deserialize() {
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+
+        let wake = WakeRequest {
+            pseudonym: Bytes([1u8; 32]),
+            payload:   vec![0u8; MAX_WAKE_PAYLOAD_BYTES + 1],
+        };
+        let bytes = wake.ser().unwrap();
+        assert!(WakeRequest::deser(&bytes).is_err());
     }
 }

@@ -421,7 +421,7 @@ pub enum CRelayPacket {
     /// phone's signature over the inner
     /// [`crate::proto::mls_wire::welcome_fetch_signing_input`], bound to
     /// `(user_ipk, requester_relay_id = home NodeId, timestamp)` — the
-    /// phone learns its home's NodeId from the client/0 handshake. The
+    /// phone learns its home's NodeId from the client/5 handshake. The
     /// home verifies, then forwards the same sig (with its own NodeId as
     /// `requester_relay_id`) to the K homes. Reply:
     /// [`SRelayPacket::WelcomesFetched`] or
@@ -503,7 +503,7 @@ pub enum SRelayPacket {
     /// signature still works across the K homes within R_r's set.
     ///
     /// `requester_relay_id` is this relay's `BLAKE3(NodeKey)` identity
-    /// — the same id the relay would supply on `peer/1` `DhtHello`s.
+    /// — the same id the relay would supply on `peer/5` `DhtHello`s.
     /// Libcore signs the field's value verbatim into the transcript;
     /// the home cross-checks `requester_relay_id ==
     /// authenticated_peer_id` at the handler layer.

@@ -50,7 +50,7 @@ pub enum ClientRequest {
     /// recency-of-liveness as a proxy for "well-positioned" relays.
     ///
     /// Auth: **none**. This is a public query — any peer holding the
-    /// `client/1` ALPN may issue it. The response is a strict subset of
+    /// `client/5` ALPN may issue it. The response is a strict subset of
     /// the data already exposed by [`ClientRequest::GetRelays`]; the new
     /// RPC just supplies a smarter ranking.
     GetBootstrapPeers {

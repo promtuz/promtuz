@@ -1,5 +1,4 @@
 use std::fmt;
-use std::ops::Deref;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -39,14 +38,6 @@ impl<const N: usize> fmt::Display for BaseId<N> {
 impl<const N: usize> fmt::Debug for BaseId<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
-    }
-}
-
-impl<const N: usize> Deref for BaseId<N> {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        str::from_utf8(self.as_bytes()).unwrap()
     }
 }
 
@@ -206,4 +197,20 @@ impl UserId {
 pub fn derive_user_id(seed: &[u8; 32]) -> UserId {
     let hash = blake3::hash(seed);
     UserId::from_bytes(hash.as_bytes()[..12].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base32_display_round_trips_through_from_str() {
+        let id = NodeId::from_bytes([0xA7; 32]);
+        assert_eq!(id.to_string().parse::<NodeId>().unwrap(), id);
+    }
+
+    #[test]
+    fn from_str_rejects_wrong_length() {
+        assert!("AAAA".parse::<NodeId>().is_err());
+    }
 }

@@ -38,30 +38,30 @@ pub enum CloseReason {
     /// Resolver: registry is at capacity, no more relays can be admitted
     /// until existing ones disconnect.
     RegistryFull,
-    /// Peer ALPN-negotiated a protocol role (e.g. `resolver/1`) for which
+    /// Peer ALPN-negotiated a protocol role (e.g. `resolver/5`) for which
     /// this side has no implementation. Closing politely is preferable to
     /// panicking the spawned per-connection task.
     UnsupportedRole,
     /// Source address has exceeded its accept-side rate-limit quota.
     /// Returned at the acceptor before any per-connection state is created.
     RateLimited,
-    /// DHT (`peer/1`): a record's `user_sig` or `relay_sig` failed to
+    /// DHT (`peer/5`): a record's `user_sig` or `relay_sig` failed to
     /// verify.
     DhtBadSignature,
-    /// DHT (`peer/1`): a record's `not_before` is more than
+    /// DHT (`peer/5`): a record's `not_before` is more than
     /// `PRESENCE_MAX_FUTURE_SKEW_MS` in the future, or `not_after` has
     /// already elapsed at the time of receipt.
     DhtClockSkew,
-    /// DHT (`peer/1`): peer asked us to STORE a record outside our
+    /// DHT (`peer/5`): peer asked us to hold a record outside our
     /// k-closest ownership window and we declined.
     DhtNotOwner,
-    /// DHT (`peer/1`): per-peer rate limit on `Store`/`FetchRecord`
-    /// tripped.
+    /// DHT (`peer/5`): per-peer or aggregate inbound-RPC rate limit
+    /// tripped (see `dht::rate_limit`).
     DhtFlood,
-    /// DHT (`peer/1`): a wire field violated its declared length bound
+    /// DHT (`peer/5`): a wire field violated its declared length bound
     /// (see `dht_p2p`'s `MAX_*` consts).
     DhtMalformedKey,
-    /// DHT (`peer/1`): sticky-home `Forward` / `QueueFetch` /
+    /// DHT (`peer/5`): sticky-home `Forward` / `QueueFetch` /
     /// `QueueFetchAck` RPC was rejected for a hard protocol violation
     /// the wire-format validator surfaced (e.g. bad outer signature on
     /// `Forward`, ack-id list overflow on `QueueFetchAck`). The
