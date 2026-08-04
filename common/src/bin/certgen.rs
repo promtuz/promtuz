@@ -61,6 +61,16 @@ impl Capability {
     }
 }
 
+/// `OpenOptions` for a file that must never exist world-readable, not even for
+/// the instant between creation and a chmod.
+fn private_file() -> fs::OpenOptions {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts
+}
+
 fn fold_caps(caps: &[Capability]) -> NodeCapabilities {
     caps.iter().fold(NodeCapabilities::empty(), |acc, c| acc | c.flag())
 }
@@ -107,9 +117,8 @@ enum Command {
     /// Sign a CSR with the local CA.
     /// Omit the path to read PEM from stdin and print the signed cert to stdout.
     ///
-    /// Only the CSR's public key is used. Every other field — subject, SANs,
-    /// basicConstraints, key usages — is discarded and rebuilt here, so a
-    /// requester cannot influence what the certificate authorises.
+    /// Only the CSR's public key is used; every other field is discarded and
+    /// rebuilt, so a requester cannot influence what the certificate authorises.
     Sign {
         /// Path to PEM-encoded CSR; omit to use stdin/stdout.
         csr_path: Option<PathBuf>,
@@ -123,46 +132,28 @@ enum Command {
     },
 }
 
-/// Mint the root of trust: a self-signed Ed25519 CA written as
-/// `RootCA.{key,pem}` in the current directory.
+/// Mint the root of trust as `RootCA.{key,pem}` in the current directory.
 ///
-/// Shaped to match the CA it replaces — `CN=Promtuz`, Ed25519, `CA:TRUE` with
-/// an unconstrained path length (leaves are signed directly; there is no
-/// intermediate tier), 10 years by default. That matters because the cert is
-/// not just a file: libcore `include_bytes!`es it and the relay .deb ships it
-/// as `/etc/promtuz/ca.pem`, so a shape change is an app rebuild and a
-/// redeploy.
-///
-/// Refuses to touch an existing key. Overwriting a CA key is unrecoverable and
-/// silently orphans every cert ever issued under it, so moving the old one
-/// aside is left as a deliberate act by the operator.
+/// The shape must stay a drop-in for the CA it replaces — libcore
+/// `include_bytes!`es the cert and the relay .deb ships it as
+/// `/etc/promtuz/ca.pem`, so changing it means an app rebuild and a redeploy.
 fn init_ca(key_path: &str, cert_path: &str, cn: &str, days: i64) -> Result<(), Box<dyn Error>> {
     let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
 
     let mut params = CertificateParams::default();
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.distinguished_name.push(DnType::CommonName, cn);
+    // Unconstrained: leaves are signed directly, there is no intermediate tier.
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    // Self-referential AKI, as the CA it replaces carried. webpki builds paths
-    // by issuer DN and signature, so this changes nothing at verification time
-    // — it is here so a `openssl x509 -text` of old and new differ only in the
-    // key, and no one has to wonder whether the shape drifted.
     params.use_authority_key_identifier_extension = true;
     params.not_before = OffsetDateTime::now_utc();
     params.not_after = params.not_before + Duration::days(days);
 
     let cert = params.self_signed(&key)?;
 
-    // `create_new` + 0600 in one syscall. The exists() check the other
-    // subcommands do would be a race here, and this is the one file in the
-    // project where losing that race destroys the trust root — so let the
-    // filesystem arbitrate, and never let the key exist world-readable, not
-    // even for the instant before a chmod.
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    opts.mode(0o600);
-    let mut key_file = opts.open(key_path).map_err(|e| {
+    // `create_new` so the filesystem, not a racy exists() check, arbitrates the
+    // overwrite — this is the one file whose loss orphans every issued cert.
+    let mut key_file = private_file().create_new(true).open(key_path).map_err(|e| {
         format!(
             "could not create {key_path} in {:?}: {e}\n\
              A CA may already be here — move it aside before minting another.",
@@ -236,24 +227,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             };
 
-            // rcgen parses the CSR and verifies its PKCS#10 self-signature (proof
-            // of possession) against the key it exposes as `public_key`.
+            // rcgen verifies the CSR's PKCS#10 self-signature (proof of
+            // possession) against the key it exposes as `public_key`.
             use rcgen::PublicKeyData as _;
             let csr = rcgen::CertificateSigningRequestParams::from_pem(&csr_pem)?;
 
-            // Refuse a CSR that asks to be a CA, loudly, before anything else.
-            //
-            // Strictly this is belt-and-braces: nothing from `csr.params` reaches
-            // the certificate any more (see below). But a CSR requesting CA:TRUE
-            // is not a mistake — it is someone trying to become an issuer under
-            // this root — and silently downgrading it to a leaf would hand that
-            // person a working cert and leave no trace. Fail, name the file, keep
-            // the evidence.
+            // Nothing from `csr.params` reaches the certificate, so this is
+            // belt-and-braces — but a CSR asking for CA:TRUE is someone trying
+            // to become an issuer under this root, and downgrading it silently
+            // would hand them a working cert and leave no trace.
             if !matches!(csr.params.is_ca, IsCa::NoCa | IsCa::ExplicitNoCa) {
-                // Written straight to stderr rather than returned: `main` prints
-                // a `Box<dyn Error>` with `Debug`, which would escape the newlines
-                // into one unreadable line. This is the message that has to stop
-                // an operator mid-paste, so it gets to be legible.
+                // stderr rather than Err: `main` prints `Box<dyn Error>` with
+                // Debug, which escapes the newlines into one unreadable line.
                 eprintln!("REFUSING TO SIGN — this CSR asks to become a certificate authority.");
                 eprintln!();
                 eprintln!("  It requests basicConstraints CA:TRUE. A node certificate is never a CA.");
@@ -268,11 +253,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 process::exit(1);
             }
 
-            // Derive identity ONLY from `public_key` — the exact key rcgen verified
-            // PoP against, and the one `signed_by` embeds as the cert SPKI. Never
-            // byte-scan the raw CSR: the attacker controls the subject/attribute
-            // bytes and could smuggle a second SPKI past a scan, yielding a cert
-            // whose real key is the attacker's but whose CN is a victim's NodeId.
+            // Identity comes only from `public_key` — the key rcgen verified PoP
+            // against and the one `signed_by` embeds as the SPKI. Byte-scanning
+            // the raw CSR would let a requester smuggle a second SPKI past the
+            // scan and get a cert whose CN is a victim's NodeId.
             if csr.public_key.algorithm() != &rcgen::PKCS_ED25519 {
                 return Err("CSR is not Ed25519".into());
             }
@@ -283,23 +267,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map_err(|_| "CSR public key is not a 32-byte Ed25519 key")?;
             let id = NodeId::new(pubkey);
 
-            // Build the certificate from scratch. We deliberately do NOT sign
-            // `csr.params`.
-            //
-            // `CertificateSigningRequestParams::from_pem` parses the requester's
-            // extensions into those params — rcgen 0.14 maps basicConstraints into
-            // `is_ca`, plus keyUsage and extendedKeyUsage. Signing them made every
-            // one of those fields attacker-controlled: a CSR asking for CA:TRUE
-            // was issued an unconstrained CA under this root, and webpki accepts a
-            // chain through it, so the holder could mint a leaf for any NodeId —
-            // including a PUSH_GATEWAY cert, the one capability the code checks.
-            //
-            // Allowlist, never inherit-and-patch: overwriting the fields we happen
-            // to know about leaves every field rcgen learns to parse *next*
-            // silently attacker-controlled. rcgen already notes that
-            // `name_constraints` is "not yet handled" — that is the next one.
-            // Only `public_key`, which carries a verified proof of possession, is
-            // taken from the request.
+            // Built from scratch, never from `csr.params`: rcgen parses the
+            // requester's basicConstraints/keyUsage/extendedKeyUsage into those,
+            // so signing them would let a requester choose what the certificate
+            // authorises. Allowlist rather than overwrite — anything rcgen learns
+            // to parse next (`name_constraints` is next) would otherwise flow
+            // through silently.
             let mut params = CertificateParams::default();
             params.is_ca = IsCa::ExplicitNoCa;
             params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -307,11 +280,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth,
             ];
-            // rcgen's default window is 1975..4096, which is not a validity period
-            // so much as its absence. Bound it. The default is generous because
-            // nothing in the tree renews a cert — the relay reads it once at
-            // startup — so a short window would strand deployments; shorten this
-            // once enrollment can re-run unattended.
+            // Default is generous because nothing in the tree renews a cert; drop
+            // it once enrollment can re-run unattended.
             params.not_before = OffsetDateTime::now_utc();
             params.not_after = params.not_before + Duration::days(days);
             params.distinguished_name = rcgen::DistinguishedName::new();
@@ -344,9 +314,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let out_name = name.unwrap_or(id.to_string());
 
-            // Same explicit shape as the `sign` path — there is no CSR here, so
-            // nothing is attacker-influenced, but a leaf minted by `gen` and one
-            // minted by `sign` should not differ in what they authorise.
+            // Same shape as `sign`: a leaf should authorise the same things
+            // whichever path minted it.
             let mut params = CertificateParams::default();
             params.is_ca = IsCa::ExplicitNoCa;
             params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -369,13 +338,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             let leaf_cert_pem = cert.pem();
             let leaf_key_pem = leaf_key.serialize_pem();
 
-            let key_path = format!("{OUT_DIR}/{out_name}.key");
-            // let csr_path = format!("{OUT_DIR}/{out_name}.csr");
-            let cert_path = format!("{OUT_DIR}/{out_name}.crt");
-
             fs::create_dir_all(OUT_DIR)?;
-            fs::write(cert_path, leaf_cert_pem).unwrap();
-            fs::write(key_path, leaf_key_pem).unwrap();
+            fs::write(format!("{OUT_DIR}/{out_name}.crt"), leaf_cert_pem)?;
+            private_file()
+                .create(true)
+                .truncate(true)
+                .open(format!("{OUT_DIR}/{out_name}.key"))?
+                .write_all(leaf_key_pem.as_bytes())?;
         }
     }
 
