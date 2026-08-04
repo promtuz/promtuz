@@ -10,7 +10,7 @@ There are no "servers" in the traditional sense. The network has three lightweig
 
 **Resolver**: a stateless directory service. Relays and gateways register themselves here so the rest of the network can find them. No database, just an in-memory map of which nodes are currently online. If it dies, they reconnect to another one.
 
-**Relay**: a node in a Kademlia-style DHT. When a client connects and authenticates, its relay publishes a *presence record* ("this user is reachable through me") and replicates it across the DHT. Relays also store-and-forward the MLS handshake material (KeyPackages, Welcomes) and queued ciphertext for users who are briefly offline, and they lend their already-open QUIC port to hole-punch assist (a STUN echo plus a blind TURN bridge). Relays are stateless by design: they can crash, move hosts, or get replaced, and the DHT heals around them.
+**Relay**: a node in a Kademlia-style DHT. When a client connects and authenticates, its relay publishes a *presence record* ("this user is reachable through me") and replicates it across the DHT. Relays also store-and-forward the MLS handshake material (KeyPackages, Welcomes) and queued ciphertext for users who are briefly offline, and they can lend their already-open QUIC port to hole-punch assist (a STUN echo plus a blind TURN bridge), which each operator switches on per relay. Relays are stateless by design: they can crash, move hosts, or get replaced, and the DHT heals around them.
 
 **Gateway**: optional push infrastructure, and the only piece that speaks to a platform vendor. A device mints a random per-install pseudonym `P`, tells its home relay `IPK → P`, and separately tells a gateway `P → device token`. When a message queues for someone offline, their relay asks the gateway to wake `P`. The relay never learns a device token, the gateway never learns an identity, and a dropped wake costs nothing because the message is already durably queued.
 
@@ -23,7 +23,7 @@ Paired contacts can also leave the relay behind. A direct link opens through the
 ## Crypto
 
 - **Identity**: an Ed25519 keypair, nothing more. On Android the private key is wrapped by the Android Keystore (AES-256-GCM) and only unwrapped momentarily for signing, then zeroized. A node's address (`NodeId`) is `BLAKE3(pubkey)`.
-- **Messaging**: [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420) via [openmls](https://github.com/openmls/openmls). This gives forward secrecy and post-compromise security per epoch, and is group-native rather than bolted on. Relays only ever see ciphertext and signed handshake objects.
+- **Messaging**: [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420) via [openmls](https://github.com/openmls/openmls). This gives forward secrecy per message, and is group-native rather than bolted on. Epochs advance when a member is added; nothing issues a periodic key update, so post-compromise recovery is available in the protocol but not driven yet. Relays only ever see ciphertext and signed handshake objects.
 - **Transport**: QUIC with TLS 1.3 (rustls + aws-lc-rs), split across two trust domains:
   - *CA-hierarchical* (`client` / `relay` / `resolver` ALPNs): leaf certs signed by a root CA, verified the usual way with the `NodeId` as the SNI hostname. The CA also stamps a capability bitset (push gateway, blob store, and so on) into a custom extension inside the leaf, so what a node is allowed to offer is attested by the same signature that proves who it is, and cannot be self-asserted.
   - *Key-as-identity* (`peer` ALPN): self-signed Ed25519 certs with no CA, pinned by SPKI to the `NodeId` the dialer expected. Trust is the key itself, not an issuing authority. This is how relays dial each other for DHT RPC, and how two clients talk over a direct link.
@@ -49,10 +49,10 @@ tools/      Dev tooling: uniffi-bindgen, packaging and release scripts
 - Identity generation with hardware-backed key storage, recoverable by 24-word phrase, platform escrow, or an encrypted backup blob
 - Resolver discovery and relay connection with auto-reconnect
 - Challenge-response authentication against relays
-- A Kademlia DHT between relays: routing table, iterative `FindNode`/`FindValue`, presence publication, and Merkle-tree anti-entropy replication so records survive relay churn
+- A Kademlia DHT between relays: routing table with liveness eviction and bucket refresh, iterative `FindNode`, presence publication, and K-closest fan-out replication with a drift sweep that re-homes records as the closest set moves
 - MLS group messaging: KeyPackage publication, Welcome delivery, and application messages
 - **End-to-end message delivery** across two independent relays over real QUIC/TLS, validated cross-continent over the public internet
-- **Direct peer links**: reflexive-address probing, UDP hole punching, and a relay-side TURN bridge for the pairs that cannot punch, gated to paired contacts only
+- **Direct peer links**: reflexive-address probing, UDP hole punching, and a relay-side TURN bridge, opt-in per relay, for the pairs that cannot punch, gated to paired contacts only
 - A real 1:1 chat: replies, edits, deletes (for me or for everyone), emoji reactions, delivered and read receipts, typing activity, and presence
 - Attachments: images encoded to AVIF in libcore and inlined below 256KB, larger files pulled over the direct link with a chunked manifest
 - Offline delivery: queued at the home relay, woken through the gateway under a pseudonym, drained in the background on the device
