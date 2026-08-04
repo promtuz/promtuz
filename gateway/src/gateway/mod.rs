@@ -64,10 +64,8 @@ impl Gateway {
 
         // Load our identity key: for the IPK log line and to sign GatewayHello.
         let signing = secret_from_key(&cfg.network.key_path).ok();
-        if let Some(s) = &signing {
-            if let Ok(key) = NodeKey::new(s.verifying_key()) {
-                info!("initializing gateway with IPK({})", key.key());
-            }
+        if let Some(s) = &signing && let Ok(key) = NodeKey::new(s.verifying_key()) {
+            info!("initializing gateway with IPK({})", key.key());
         }
 
         // Register with the resolver so relays can discover us.

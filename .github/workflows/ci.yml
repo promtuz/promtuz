@@ -61,7 +61,9 @@ jobs:
           mkdir -p .tls
           cargo run -p common --bin certgen --features certgen --locked -- init
           mv RootCA.key RootCA.pem .tls/
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # --keep-going: report every crate's lints in one run instead of stopping
+      # at the first crate that fails, so a lint sweep is one pass not N.
+      - run: cargo clippy --workspace --all-targets --locked --keep-going -- -D warnings
 
   # --all-targets covers the lib, bin and integration test targets but skips
   # doctests, so a doc example that never compiled cannot take the suite down.

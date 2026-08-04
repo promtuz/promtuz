@@ -89,10 +89,10 @@ impl FcmSender {
     /// within [`EXPIRY_MARGIN`] of expiry. A racing double-mint is harmless
     /// (last write wins); no lock is held across the network call.
     async fn access_token(&self) -> Result<String> {
-        if let Some(c) = self.cached.lock().as_ref() {
-            if c.expires_at > SystemTime::now() + EXPIRY_MARGIN {
-                return Ok(c.token.clone());
-            }
+        if let Some(c) = self.cached.lock().as_ref()
+            && c.expires_at > SystemTime::now() + EXPIRY_MARGIN
+        {
+            return Ok(c.token.clone());
         }
 
         let now = SystemTime::now()
