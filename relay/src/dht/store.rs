@@ -32,6 +32,69 @@ const MAX_QUEUED_PER_SENDER: usize = 128;
 /// during one admission scan.
 const SENDER_SCAN_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
+pub(crate) enum QueueAdmission {
+    Insert,
+    /// This exact `(dispatch_id, sender)` is already queued — a retransmit.
+    AlreadyQueued,
+    /// A different sender holds this `dispatch_id` for this recipient.
+    IdTakenByOther,
+    Full,
+    ScanFailed,
+}
+
+/// Admission scan for a queue of [`MessageKey`]-shaped keys: per-recipient cap,
+/// per-sender quota, and duplicate-id rejection.
+///
+/// `sender_of` decodes a row's sender because the home queue stores `DispatchP`
+/// and the local fallback queue stores `DeliverP`. Attribution is byte-budgeted
+/// — past [`SENDER_SCAN_BYTE_BUDGET`] only the per-recipient cap binds, so a
+/// queue of MiB-scale rows is never read whole on an inbound dispatch.
+pub(crate) fn admit_to_queue(
+    ks: &fjall::Keyspace, recipient: &[u8; 32], dispatch_id: &[u8; 16], sender: &[u8; 32],
+    sender_of: impl Fn(&[u8]) -> Option<[u8; 32]>,
+) -> QueueAdmission {
+    let mut total: usize = 0;
+    let mut from_sender: usize = 0;
+    let mut attributed_bytes: usize = 0;
+    let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
+    for guard in ks.prefix(recipient) {
+        // Treat a corrupted iterator as "we can't be sure we're under the
+        // cap" — better to reject than silently overrun.
+        let Ok((key_bytes, value)) = guard.into_inner() else {
+            return QueueAdmission::ScanFailed;
+        };
+        if key_bytes.len() != MessageKey::SIZE {
+            continue;
+        }
+        let attributable = attributed_bytes < SENDER_SCAN_BYTE_BUDGET;
+        let same_sender = attributable && sender_of(&value).is_some_and(|f| f == *sender);
+        if attributable {
+            attributed_bytes += value.len();
+        }
+        if key_bytes[40..56] == *dispatch_id {
+            return if same_sender {
+                QueueAdmission::AlreadyQueued
+            } else {
+                QueueAdmission::IdTakenByOther
+            };
+        }
+        total += 1;
+        if same_sender {
+            from_sender += 1;
+            if from_sender >= MAX_QUEUED_PER_SENDER {
+                break;
+            }
+        }
+        if total >= stop_at {
+            break;
+        }
+    }
+    if total >= MAX_QUEUED_PER_RECIPIENT || from_sender >= MAX_QUEUED_PER_SENDER {
+        return QueueAdmission::Full;
+    }
+    QueueAdmission::Insert
+}
+
 /// Retention for a `dht_queue` row, past which it is swept regardless of
 /// whether the recipient ever drained.
 const QUEUE_ENTRY_TTL_MS: u64 = 7 * 24 * 3_600_000;
@@ -212,46 +275,18 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
-    let mut total: usize = 0;
-    let mut from_sender: usize = 0;
-    let mut attributed_bytes: usize = 0;
-    let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for guard in dht.store.queue.prefix(user_ipk) {
-        // Treat a corrupted iterator as "we can't be sure we're under the
-        // cap" — better to reject than silently overrun.
-        let Ok((key_bytes, value)) = guard.into_inner() else {
+    match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0, |v| {
+        DispatchP::deser(v).ok().map(|d| d.from.0)
+    }) {
+        QueueAdmission::Insert => {},
+        QueueAdmission::AlreadyQueued => return ForwardOutcome::Stored,
+        QueueAdmission::IdTakenByOther | QueueAdmission::ScanFailed => {
             return ForwardOutcome::BadSig;
-        };
-        if key_bytes.len() != MessageKey::SIZE {
-            continue;
-        }
-        // Sender attribution is the only reason this scan reads values, and a
-        // full queue can hold MiB-scale dispatches. Past the budget only the
-        // recipient cap binds — degrading the per-sender quota is preferable to
-        // reading the whole queue on every inbound Forward.
-        let attributable = attributed_bytes < SENDER_SCAN_BYTE_BUDGET;
-        let same_sender = attributable
-            && DispatchP::deser(&value).is_ok_and(|d| d.from.0 == dispatch.from.0);
-        if attributable {
-            attributed_bytes += value.len();
-        }
-        if key_bytes[40..56] == dispatch.id.0 {
-            return if same_sender { ForwardOutcome::Stored } else { ForwardOutcome::BadSig };
-        }
-        total += 1;
-        if same_sender {
-            from_sender += 1;
-            if from_sender >= MAX_QUEUED_PER_SENDER {
-                break;
-            }
-        }
-        if total >= stop_at {
-            break;
-        }
-    }
-    if total >= MAX_QUEUED_PER_RECIPIENT || from_sender >= MAX_QUEUED_PER_SENDER {
-        dht.metrics.inc_dht_queue_full_rejections();
-        return ForwardOutcome::QueueFull;
+        },
+        QueueAdmission::Full => {
+            dht.metrics.inc_dht_queue_full_rejections();
+            return ForwardOutcome::QueueFull;
+        },
     }
 
     let key = MessageKey::new(user_ipk, now_ms, &dispatch.id.0);
@@ -596,6 +631,50 @@ mod tests {
             }
         }
         assert!(!found_overflow, "QueueFull rejection must not write the entry");
+    }
+
+    #[test]
+    /// The local fallback queue stores `DeliverP` and is reached whenever the
+    /// K-home fan-out misses quorum, so it needs the same admission scan.
+    #[test]
+    fn fallback_queue_caps_one_sender_below_the_recipient_cap() {
+        use common::proto::client_rel::DeliverP;
+
+        let relay = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let dht = fresh_dht(NodeId::new(relay.verifying_key().to_bytes()));
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let hog: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
+        let other: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
+        let decode = |v: &[u8]| DeliverP::deser(v).ok().map(|d| d.from.0);
+
+        let row = |from: [u8; 32], id: [u8; 16]| DeliverP {
+            id:             id.into(),
+            from:           from.into(),
+            payload:        b"x".to_vec().into(),
+            sig:            [0u8; 64].into(),
+            accepted_at_ms: 0,
+        };
+
+        for i in 0..MAX_QUEUED_PER_SENDER {
+            let mut id = [0u8; 16];
+            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            assert!(matches!(
+                admit_to_queue(&dht.store.messages, &to_ipk, &id, &hog, decode),
+                QueueAdmission::Insert
+            ));
+            let key = MessageKey::new(&to_ipk, i as u64, &id);
+            dht.store.messages.insert(key.as_bytes(), row(hog, id).ser().unwrap()).unwrap();
+        }
+
+        assert!(matches!(
+            admit_to_queue(&dht.store.messages, &to_ipk, &[0xEE; 16], &hog, decode),
+            QueueAdmission::Full
+        ));
+        assert!(matches!(
+            admit_to_queue(&dht.store.messages, &to_ipk, &[0xEF; 16], &other, decode),
+            QueueAdmission::Insert
+        ));
     }
 
     #[test]

@@ -23,11 +23,12 @@ use quinn::SendStream;
 
 use crate::dht::forward::ForwardSummary;
 use crate::dht::forward::forward_to_homes;
+use crate::dht::store::QueueAdmission;
+use crate::dht::store::admit_to_queue;
 use crate::quic::handler::client::ClientCtxHandle;
 use crate::quic::handler::client::events::STREAM_OPEN_TIMEOUT;
 use crate::quic::handler::client::events::spawn_tied;
 use crate::quic::handler::client::remove_client_if_same;
-use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
 use crate::util::systime;
 
@@ -281,30 +282,23 @@ async fn store_in_rocks(
         hex::encode(&recipient.0[..8])
     );
 
-    // Per-recipient cap (Part B3). fjall's `prefix()` is an exact scan, so
-    // we just count the recipient's keys. Bounded: stop as soon as we hit
-    // `MAX + 1` so we don't walk a million-entry queue on every dispatch.
-    let mut count: usize = 0;
-    let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for guard in ctx.relay.store.messages.prefix(recipient.0) {
-        // Treat a corrupted iterator as "we can't be sure we're under the
-        // cap" — better to reject than silently overrun.
-        if guard.key().is_err() {
+    match admit_to_queue(&ctx.relay.store.messages, &recipient.0, &delivery.id.0, &delivery.from.0, |v| {
+        DeliverP::deser(v).ok().map(|d| d.from.0)
+    }) {
+        QueueAdmission::Insert => {},
+        QueueAdmission::AlreadyQueued => {
+            return Ok(DispatchAckP::Queued { accepted_at_ms: delivery.accepted_at_ms });
+        },
+        QueueAdmission::IdTakenByOther => {
+            return Ok(DispatchAckP::Error { reason: "dispatch id already queued".into() });
+        },
+        QueueAdmission::ScanFailed => {
             return Ok(DispatchAckP::Error { reason: "queue scan failed".into() });
-        }
-        count += 1;
-        if count >= stop_at {
-            break;
-        }
-    }
-    if count >= MAX_QUEUED_PER_RECIPIENT {
-        trace!(
-            "FORWARD: queue full for recipient {} ({} >= {}); rejecting",
-            hex::encode(recipient),
-            count,
-            MAX_QUEUED_PER_RECIPIENT
-        );
-        return Ok(DispatchAckP::QueueFull);
+        },
+        QueueAdmission::Full => {
+            trace!("FORWARD: queue full for recipient {}; rejecting", hex::encode(recipient));
+            return Ok(DispatchAckP::QueueFull);
+        },
     }
 
     let key = MessageKey::new(&recipient.0, delivery.accepted_at_ms, &delivery.id.0);

@@ -1,7 +1,7 @@
 //! The relay's on-disk store: one fjall `Database`, several keyspaces.
 //!
 //! Keyspaces (fjall's column-family equivalent — each its own LSM-tree):
-//! - `messages`       sender-relay local fallback queue (`MessageKey` -> DispatchP).
+//! - `messages`       sender-relay local fallback queue (`MessageKey` -> DeliverP).
 //! - `dht_queue`      home-replica offline queue (`MessageKey`, per-recipient prefix).
 //! - `dht_keypackage` MLS KeyPackage stash (per-IPK prefix).
 //! - `dht_welcome`    MLS Welcome stash (per-recipient prefix).
@@ -58,6 +58,10 @@ const PRESENCE_VERSION_MAX_LEAD_MS: u64 = 60_000;
 /// Consent grants, last-seen stamps and push pseudonyms are all rewritten when
 /// the identity next connects, so this expires quiet identities, not records.
 const IDLE_IDENTITY_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+
+/// How long an undelivered message is held before the sweep drops it. Matches
+/// the Welcome retention window, so a recipient offline past it loses both.
+const QUEUED_MESSAGE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Ceiling on `presence_consent` rows. The keyspace takes writes for any
 /// `(owner, recipient)` pair a DHT peer can sign for, so its size is not a
@@ -145,6 +149,8 @@ impl Store {
 
         let maintenance = Arc::new(Maintenance::default());
         let targets = vec![
+            SweepTarget::new(&messages, queued_message_expired),
+            SweepTarget::new(&queue, queued_message_expired),
             SweepTarget::new(&last_seen, last_seen_expired),
             SweepTarget::new(&presence_consent, presence_consent_expired),
             SweepTarget::new(&presence_state, presence_state_expired),
@@ -238,7 +244,7 @@ impl Store {
         key[..32].copy_from_slice(recipient);
         key[32..].copy_from_slice(contact);
         if self.presence_state.get(key)?.is_some_and(|v| {
-            !presence_state_expired(&v, observed_at_ms)
+            !presence_state_expired(b"", &v, observed_at_ms)
                 && (be_u64(&v, 0).is_some_and(|old| old >= version)
                     || be_u64(&v, 8).is_some_and(|old| old >= observed_at_ms))
         }) {
@@ -264,7 +270,7 @@ impl Store {
         key[..32].copy_from_slice(recipient);
         key[32..].copy_from_slice(contact);
         let value = self.presence_state.get(key).ok().flatten()?;
-        if presence_state_expired(&value, now_ms()) {
+        if presence_state_expired(b"", &value, now_ms()) {
             return None;
         }
         let value = value.as_ref();
@@ -474,7 +480,7 @@ impl PersistBarrier {
     }
 }
 
-type ExpiryFn = fn(&[u8], u64) -> bool;
+type ExpiryFn = fn(&[u8], &[u8], u64) -> bool;
 
 struct SweepTarget {
     ks:      Keyspace,
@@ -550,7 +556,7 @@ fn sweep(target: &mut SweepTarget, now_ms: u64) {
 
     for guard in target.ks.range::<UserKey, _>((start, Bound::Unbounded)) {
         let Ok((key, value)) = guard.into_inner() else { break };
-        if (target.expired)(&value, now_ms) {
+        if (target.expired)(&key, &value, now_ms) {
             expired.push(key.clone());
         }
         scanned += 1;
@@ -566,20 +572,28 @@ fn sweep(target: &mut SweepTarget, now_ms: u64) {
     target.cursor = resume;
 }
 
-fn last_seen_expired(value: &[u8], now_ms: u64) -> bool {
+/// Queue rows carry their acceptance time in the key
+/// (`recipient(32) || ts_be(8) || id(16)`), so this needs no value decode.
+fn queued_message_expired(key: &[u8], _value: &[u8], now_ms: u64) -> bool {
+    be_u64(key, 32).is_none_or(|accepted_at| {
+        now_ms.saturating_sub(accepted_at) > QUEUED_MESSAGE_TTL_MS
+    })
+}
+
+fn last_seen_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 0).is_none_or(|ts| now_ms.saturating_sub(ts) > IDLE_IDENTITY_TTL_MS)
 }
 
-fn presence_consent_expired(value: &[u8], now_ms: u64) -> bool {
+fn presence_consent_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 8).is_none_or(|issued_at| now_ms.saturating_sub(issued_at) > IDLE_IDENTITY_TTL_MS)
 }
 
-fn presence_state_expired(value: &[u8], now_ms: u64) -> bool {
+fn presence_state_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 8)
         .is_none_or(|observed_at| now_ms.saturating_sub(observed_at) > PRESENCE_STATE_TTL_MS)
 }
 
-fn presence_lease_expired(value: &[u8], now_ms: u64) -> bool {
+fn presence_lease_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     use common::proto::pack::Unpacker;
 
     common::proto::dht_p2p::PresenceLease::deser(value)
@@ -588,7 +602,7 @@ fn presence_lease_expired(value: &[u8], now_ms: u64) -> bool {
 }
 
 /// Rows in the older 32-byte shape carry no stamp and are kept.
-fn push_pseudonym_expired(value: &[u8], now_ms: u64) -> bool {
+fn push_pseudonym_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 32)
         .is_some_and(|refreshed_at| now_ms.saturating_sub(refreshed_at) > IDLE_IDENTITY_TTL_MS)
 }
