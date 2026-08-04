@@ -37,9 +37,23 @@ pub struct AppConfig {
     #[serde(default)]
     pub dht: DhtConfig,
 
+    /// Optional P2P hole-punch assist block. Default **disabled**.
+    #[serde(default)]
+    pub assist: AssistConfig,
+
     /// Optional logging block. Absent → info. `PZ_LOG` env overrides.
     #[serde(default)]
     pub log: LogConfig,
+}
+
+/// STUN echo + TURN bridge on the QUIC port (see [`crate::stunturn`]).
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AssistConfig {
+    /// Off by default: bridge tokens are unissued bearer secrets, so an
+    /// enabled relay will forward datagrams for anyone who guesses one.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -61,6 +75,7 @@ impl AppConfig {
 
         if !path.exists() {
             common::error!("config not found: {}", path.display());
+            common::server::log::flush();
             std::process::exit(1);
         }
 
@@ -69,11 +84,13 @@ impl AppConfig {
                 Ok(conf) => conf,
                 Err(err) => {
                     common::error!("Failed to parse config\n{err}");
+                    common::server::log::flush();
                     process::exit(1);
                 },
             }
         } else {
             common::error!("Failed to read config");
+            common::server::log::flush();
             process::exit(1);
         }
     }

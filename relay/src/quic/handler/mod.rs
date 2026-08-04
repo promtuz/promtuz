@@ -2,6 +2,7 @@ pub(crate) mod client;
 pub(crate) mod peer;
 mod resolver;
 
+use common::quic::CloseReason;
 use common::quic::protorole::ProtoRole;
 use common::ret;
 use quinn::Connection;
@@ -26,7 +27,7 @@ impl Handler {
             ProtoRole::Resolver => handler.handle_resolver(relay).await,
             ProtoRole::Client => handler.handle_client(relay, cancel).await,
             ProtoRole::Peer => handler.handle_peer(relay).await,
-            _ => handler.conn.close(0u32.into(), b"UnsupportedALPN"),
+            _ => CloseReason::UnsupportedRole.close(&handler.conn),
         };
     }
 }

@@ -68,9 +68,11 @@ async fn main() -> Result<()> {
     tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
 
     // STUN echo + TURN bridge for P2P hole-punch assist, sharing the QUIC
-    // socket (peeled off by the wrapper in `Relay::endpoint`).
-    let assist = relay.assist.lock().take().expect("assist inbox is taken exactly once");
-    tokio::spawn(stunturn::serve(assist, cancel.clone()));
+    // socket (peeled off by the wrapper in `Relay::endpoint`). Present only
+    // when `[assist] enabled = true`.
+    if let Some(assist) = relay.assist.lock().take() {
+        tokio::spawn(stunturn::serve(assist, cancel.clone()));
+    }
 
     // Capture `client_handle` (Arc-shared, survives reconnects) before
     // `attach()` consumes the link — the DHT bootstrap RPCs need it.
@@ -127,7 +129,7 @@ async fn main() -> Result<()> {
             cancel.cancel();
             shutdown.send(()).ok();
 
-            // Close DHT peers before the endpoint so in-flight `peer/1` RPCs
+            // Close DHT peers before the endpoint so in-flight `peer/5` RPCs
             // see a clean close-reason, not a transport error.
             if let Some(dht) = relay.dht.clone() {
                 dht.shutdown().await;

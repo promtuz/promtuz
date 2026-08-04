@@ -22,11 +22,16 @@ ProtectHome=true
 PrivateTmp=true
 ProtectControlGroups=true
 ProtectKernelTunables=true
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is required for the control socket in RuntimeDirectory.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 StateDirectory=pzrelay
+StateDirectoryMode=0700
 RuntimeDirectory=pzrelay
 RuntimeDirectoryMode=0700
 ConfigurationDirectory=promtuz
+# The store is unencrypted metadata; keep every file the daemon creates
+# unreadable to other local accounts.
+UMask=0077
 ReadWritePaths=/var/lib/pzrelay /etc/promtuz
 
 [Install]

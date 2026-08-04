@@ -30,7 +30,7 @@ use crate::util::config::AppConfig;
 /// The relay's single Ed25519 keypair: identity **and** TLS.
 ///
 /// One key signs application-layer messages (`RelayHello` to the resolver),
-/// derives the public-facing `relay_id`, backs the in-memory `peer/1`
+/// derives the public-facing `relay_id`, backs the in-memory `peer/5`
 /// self-signed cert, and is the key the CA-issued cert certifies. Loaded
 /// from `key_path`; auto-created `0o600` on first boot if absent.
 #[derive(Debug)]
@@ -69,7 +69,8 @@ pub struct Relay {
     pub endpoint: Endpoint,
 
     /// Peeled STUN/TURN assist datagrams + a socket handle for the assist
-    /// task. `main` takes it once to spawn `stunturn::serve`.
+    /// task. `main` takes it once to spawn `stunturn::serve`; `None` unless
+    /// `cfg.assist.enabled`.
     pub assist: Mutex<Option<crate::stunturn::AssistInbox>>,
 
     pub cfg: AppConfig,
@@ -118,42 +119,60 @@ pub struct Relay {
 
 impl Relay {
     /// Build the relay's QUIC endpoint with an ALPN-split server config:
-    /// the peer/1 ALPN gets a NodeKey-bound self-signed Ed25519 cert
+    /// the peer/5 ALPN gets a NodeKey-bound self-signed Ed25519 cert
     /// (so libcore can pin SPKI against `RelayDescriptor.pubkey`),
     /// every other ALPN keeps the operator's CA-issued cert for the
     /// existing trust chain.
-    fn endpoint(cfg: &AppConfig, node_signing: &SigningKey) -> (Endpoint, crate::stunturn::AssistInbox) {
+    fn endpoint(
+        cfg: &AppConfig, node_signing: &SigningKey,
+    ) -> (Endpoint, Option<crate::stunturn::AssistInbox>) {
         use ProtoRole as PR;
 
         graceful!(setup_crypto_provider(), "installing the crypto provider");
 
+        // Only roles `Handler::handle` actually serves — rustls then rejects
+        // anything else at ALPN negotiation.
         let server_cfg = graceful!(
             build_server_cfg_with_alpn_split(
                 &cfg.network.cert_path,
                 &cfg.network.key_path,
                 node_signing.clone(),
-                &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
+                &[PR::Peer, PR::Client],
             ),
             "building the TLS server config"
         );
 
-        // Bind the QUIC socket ourselves and hand quinn a wrapper that peels
-        // off P2P hole-punch assist datagrams (STUN/TURN) — so the one open
-        // UDP port carries both, no extra port or firewall rule.
         let std_sock =
             graceful!(std::net::UdpSocket::bind(cfg.network.bind_addr()), "binding the QUIC socket");
-        let (socket, assist) =
-            graceful!(crate::stunturn::wrap_socket(std_sock), "wrapping the QUIC socket");
 
-        let endpoint = graceful!(
-            Endpoint::new_with_abstract_socket(
-                EndpointConfig::default(),
-                Some(server_cfg),
-                socket,
-                Arc::new(TokioRuntime),
-            ),
-            "starting the QUIC endpoint"
-        );
+        // With assist on, quinn gets a wrapper that peels off P2P hole-punch
+        // datagrams (STUN/TURN) so the one open UDP port carries both.
+        let (endpoint, assist) = if cfg.assist.enabled {
+            let (socket, assist) =
+                graceful!(crate::stunturn::wrap_socket(std_sock), "wrapping the QUIC socket");
+            let endpoint = graceful!(
+                Endpoint::new_with_abstract_socket(
+                    EndpointConfig::default(),
+                    Some(server_cfg),
+                    socket,
+                    Arc::new(TokioRuntime),
+                ),
+                "starting the QUIC endpoint"
+            );
+            (endpoint, Some(assist))
+        } else {
+            let endpoint = graceful!(
+                Endpoint::new(
+                    EndpointConfig::default(),
+                    Some(server_cfg),
+                    std_sock,
+                    Arc::new(TokioRuntime),
+                ),
+                "starting the QUIC endpoint"
+            );
+            (endpoint, None)
+        };
+
         if let Ok(addr) = endpoint.local_addr() {
             info!("relay listening at QUIC({:?})", addr);
         }
@@ -174,12 +193,12 @@ impl Relay {
             build_client_cfg(ProtoRole::Relay, &roots),
             "building the QUIC client config"
         ));
-        // peer/1 is the key-as-identity trust domain (self-signed NodeKey
+        // peer/5 is the key-as-identity trust domain (self-signed NodeKey
         // certs, pinned to the dialed NodeId post-handshake), not the CA
         // hierarchy — so it gets its own verifier, not build_client_cfg.
         let peer_client_cfg = Arc::new(graceful!(
             crate::dht::peer_dial::build_peer_client_cfg(),
-            "building the peer/1 client config"
+            "building the peer/5 client config"
         ));
 
         endpoint.set_default_client_config((*client_cfg).clone());
@@ -205,7 +224,7 @@ impl Relay {
             match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), store.clone()) {
                 Ok(mut d) => {
                     // Wire the outbound-dial machinery so the lookup
-                    // module can open `peer/1` connections to other
+                    // module can open `peer/5` connections to other
                     // relays.
                     d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
                     // Share the connected-clients map so the home-side
@@ -239,7 +258,7 @@ impl Relay {
             store,
             dht,
             endpoint,
-            assist: Mutex::new(Some(assist)),
+            assist: Mutex::new(assist),
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_leases,

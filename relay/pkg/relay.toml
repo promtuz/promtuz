@@ -36,3 +36,9 @@ addr = "resolver.promtuz.dev"
 
 [dht]
 enabled = true
+
+[assist]
+# STUN echo + TURN bridge on the QUIC port. Off: bridge tokens are not issued
+# by the relay, so an enabled relay forwards datagrams for anyone who guesses
+# one, under the relay's own source address.
+enabled = false

@@ -6,7 +6,7 @@ use crate::dht::handler::handle_peer_connection;
 use crate::quic::handler::Handler;
 use crate::relay::RelayRef;
 
-/// Inbound `peer/1` handler — the relay-to-relay surface.
+/// Inbound `peer/5` handler — the relay-to-relay surface.
 ///
 /// When the DHT is enabled, hand the connection off to the DHT's per-
 /// connection driver (`dht::handler::handle_peer_connection`). When it
@@ -24,7 +24,7 @@ impl Handler {
             },
             None => {
                 warn!(
-                    "received peer/1 connection from {remote_addr} but DHT is disabled; closing"
+                    "received peer/5 connection from {remote_addr} but DHT is disabled; closing"
                 );
                 CloseReason::UnsupportedRole.close(&conn);
             },

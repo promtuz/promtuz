@@ -19,6 +19,14 @@
 //! public address that socket maps to, so a cone-NAT peer can be punched
 //! without paying for the bridge.
 //!
+//! Off unless `[assist] enabled = true`: a bridge token is a bearer secret
+//! the relay never issued, so anyone who guesses one can have their traffic
+//! forwarded under the relay's source address.
+//!
+//! TODO: bind each token to the authenticated IPK of a live `client/N`
+//! session and register only relay-issued tokens; until then this stays
+//! opt-in.
+//!
 //! ponytail: the wrapper is naive (no GSO/GRO batching) and one task owns
 //! the bridge table (no lock; bounded by a 30s idle sweep + a hard cap).
 //! Both are fine at small-relay scale; back the socket with
@@ -48,18 +56,26 @@ use tokio_util::sync::CancellationToken;
 /// One peeled assist datagram: source address + raw bytes.
 type Assist = (SocketAddr, Vec<u8>);
 
+/// Assist datagrams buffered for [`serve`]. Assist is best-effort, so a full
+/// inbox sheds rather than applying backpressure to quinn's receive path.
+const INBOX_CAP: usize = 2048;
+
+/// Assist datagrams peeled per `poll_recv` before the poll yields, so a
+/// stream of assist traffic can't monopolise quinn's receive path.
+const MAX_PEEL_PER_POLL: usize = 16;
+
 /// The relay's QUIC socket, wrapped so hole-punch assist datagrams are
 /// split off before quinn sees them.
 #[derive(Debug)]
 pub struct AssistSocket {
     io:    Arc<UdpSocket>,
-    inbox: mpsc::UnboundedSender<Assist>,
+    inbox: mpsc::Sender<Assist>,
 }
 
 /// What [`serve`] needs: the peeled-assist stream, and a handle to send
 /// replies/forwards back out the same socket.
 pub struct AssistInbox {
-    rx:   mpsc::UnboundedReceiver<Assist>,
+    rx:   mpsc::Receiver<Assist>,
     sock: Arc<UdpSocket>,
 }
 
@@ -75,7 +91,7 @@ impl std::fmt::Debug for AssistInbox {
 pub fn wrap_socket(std_sock: std::net::UdpSocket) -> io::Result<(Arc<AssistSocket>, AssistInbox)> {
     std_sock.set_nonblocking(true)?;
     let io = Arc::new(UdpSocket::from_std(std_sock)?);
-    let (inbox, rx) = mpsc::unbounded_channel();
+    let (inbox, rx) = mpsc::channel(INBOX_CAP);
     let sock = Arc::new(AssistSocket { io: io.clone(), inbox });
     Ok((sock, AssistInbox { rx, sock: io }))
 }
@@ -94,7 +110,7 @@ impl AsyncUdpSocket for AssistSocket {
     ) -> Poll<io::Result<usize>> {
         // Peel assist datagrams to the handler; surface the first real QUIC
         // datagram to quinn (or Pending).
-        loop {
+        for _ in 0..MAX_PEEL_PER_POLL {
             let (len, src) = {
                 let mut rb = tokio::io::ReadBuf::new(&mut bufs[0]);
                 match self.io.poll_recv_from(cx, &mut rb) {
@@ -104,12 +120,14 @@ impl AsyncUdpSocket for AssistSocket {
                 }
             };
             if is_assist(&bufs[0][..len]) {
-                let _ = self.inbox.send((src, bufs[0][..len].to_vec()));
+                let _ = self.inbox.try_send((src, bufs[0][..len].to_vec()));
                 continue;
             }
             meta[0] = udp::RecvMeta { addr: src, len, stride: len, ecn: None, dst_ip: None };
             return Poll::Ready(Ok(1));
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -197,24 +215,15 @@ async fn handle(
             let now = Instant::now();
             if let Some(br) = get_or_insert(bridges, token, src, now) {
                 br.other(src, now); // register the source; no data to forward
-                // TEMP diagnostic: which source registers under which token.
-                info!("TURN alloc {} tok {:02x?} (a={}, b={:?})", src, &token[..4], br.a, br.b);
             }
         },
-        Some(RelayMsg::TurnData { token, payload }) => {
+        Some(RelayMsg::TurnData { token, .. }) => {
             let now = Instant::now();
             let dst = get_or_insert(bridges, token, src, now).and_then(|br| br.other(src, now));
-            match dst {
-                // Forward verbatim — the receiver parses the token and hands
-                // the QUIC payload to its own stack.
-                Some(dst) => {
-                    // TEMP diagnostic: strip once TURN handshake works.
-                    info!("TURN fwd {}B {} -> {} tok {:02x?}", payload.len(), src, dst, &token[..4]);
-                    let _ = sock.send_to(pkt, dst).await;
-                },
-                None => {
-                    info!("TURN drop {}B from {} tok {:02x?} (no peer)", payload.len(), src, &token[..4])
-                },
+            // Forward verbatim — the receiver parses the token and hands the
+            // QUIC payload to its own stack.
+            if let Some(dst) = dst {
+                let _ = sock.send_to(pkt, dst).await;
             }
         },
         // StunResp is a reply, never inbound here; junk decodes to None.
