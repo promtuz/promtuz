@@ -3,7 +3,7 @@
 //! specialised to the MLS Welcome queue RPCs.
 //!
 //! A phone delegates a Welcome operation to its home relay over the
-//! `client/0` wrappers; the home originates the real `peer/1` fan-out to
+//! `client/5` wrappers; the home originates the real `peer/5` fan-out to
 //! the recipient's (publish) or the user's own (fetch/ack) K-closest
 //! homes, self-storing if it is itself a home.
 //!
@@ -12,7 +12,7 @@
 //! - **fetch / ack** carry the phone's inner user signature over
 //!   [`welcome_fetch_signing_input`](common::proto::mls_wire::welcome_fetch_signing_input)
 //!   / ack, bound to *this relay's* NodeId as `requester_relay_id` —
-//!   the phone learns that NodeId from the client/0 handshake. Fetch
+//!   the phone learns that NodeId from the client/5 handshake. Fetch
 //!   merges across homes and dedupes by `(group_id, kp_ref_used)`
 //!   because each replica mints its own per-row `welcome_id`.
 

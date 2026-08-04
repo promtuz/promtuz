@@ -13,15 +13,23 @@
 //!    `cf_dht_queue` for entries whose recipient is no longer in this
 //!    relay's K-closest set and `Forward` them to the new homes.
 //!
+//! 3. **Bucket refresh** every [`BUCKET_REFRESH_SCAN_INTERVAL_MS`]: walk
+//!    a `FindNode` into the range of each stale k-bucket, which both
+//!    re-discovers peers and — through the lookup's liveness feedback —
+//!    is what eventually evicts dead entries from an otherwise
+//!    quiescent bucket.
+//!
 //! Cancellation: every `select!` arm includes `cancel.cancelled().await`;
 //! the loop exits cleanly within one cadence-tick of the token firing.
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use common::info;
+use common::quic::id::NodeId;
 use tokio_util::sync::CancellationToken;
 
 use super::Dht;
@@ -35,6 +43,17 @@ use super::config;
 
 /// How often the drift-migration sweep runs over `cf_dht_queue`.
 const EVICT_INTERVAL_MS: u64 = 60_000;
+
+/// How often stale k-buckets are looked for. Well under
+/// [`config::BUCKET_REFRESH_MS`] so a bucket that goes stale is picked
+/// up promptly rather than a refresh period later.
+const BUCKET_REFRESH_SCAN_INTERVAL_MS: u64 = 300_000;
+
+/// Stale buckets refreshed per scan. Each refresh is a full iterative
+/// walk (α=3 parallel dials, up to [`config::LOOKUP_MAX_HOPS`] hops), so
+/// the cap keeps one tick's outbound fan-out in the same regime as
+/// [`config::MAX_CONCURRENT_MIGRATIONS`].
+const MAX_BUCKET_REFRESH_PER_SCAN: usize = 4;
 
 /// Routing-table size below which we re-trigger bootstrap.
 ///
@@ -65,10 +84,12 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
 
     let mut bootstrap_tick = interval(Duration::from_millis(config::ANTI_ENTROPY_INTERVAL_MS));
     let mut drift_tick = interval(Duration::from_millis(EVICT_INTERVAL_MS));
+    let mut refresh_tick = interval(Duration::from_millis(BUCKET_REFRESH_SCAN_INTERVAL_MS));
     // `tokio::time::interval` fires once at construction by default;
     // skip that immediate fire so we don't race the bootstrap path.
     bootstrap_tick.tick().await;
     drift_tick.tick().await;
+    refresh_tick.tick().await;
 
     // Bootstrap-retry state:
     // - `bootstrap_backoff_ms` doubles after each failed retry, capped
@@ -145,6 +166,46 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 // and `MAX_CONCURRENT_MIGRATIONS` (8 in-flight tasks).
                 run_drift_migration_sweep(dht.clone()).await;
             }
+            _ = refresh_tick.tick() => {
+                run_bucket_refresh(dht.clone()).await;
+            }
+        }
+    }
+}
+
+/// Re-walk the ranges of up to [`MAX_BUCKET_REFRESH_PER_SCAN`] stale
+/// k-buckets, marking each refreshed once its walk completes.
+///
+/// A bucket only goes stale when nothing in it has been touched for
+/// [`config::BUCKET_REFRESH_MS`], which is exactly the case where dead
+/// entries accumulate: `find_closest` keeps handing them out but no
+/// traffic ever proves them dead. The walk's per-hop liveness feedback
+/// (`lookup::record_liveness`) advances their failure counters and the
+/// routing table evicts them.
+async fn run_bucket_refresh(dht: Arc<Dht>) {
+    let stale: Vec<usize> = {
+        let routing = dht.routing.read();
+        routing
+            .buckets_needing_refresh(Instant::now())
+            .into_iter()
+            .take(MAX_BUCKET_REFRESH_PER_SCAN)
+            .collect()
+    };
+    if stale.is_empty() {
+        return;
+    }
+
+    for idx in stale {
+        let Some(target) = super::routing::random_id_in_bucket(&dht.node_id, idx) else {
+            continue;
+        };
+        match super::lookup::lookup_node(dht.clone(), target).await {
+            Ok(peers) => {
+                dht.routing.write().mark_refreshed(idx);
+                crate::dht_log!("DHT bucket {idx} refreshed: {} peer(s)", peers.len());
+            },
+            // Leave `refresh_at` alone so the next scan retries.
+            Err(e) => crate::dht_log!("DHT bucket {idx} refresh failed: {e}"),
         }
     }
 }
@@ -209,29 +270,52 @@ pub(crate) async fn run_drift_migration_sweep(dht: Arc<Dht>) {
 }
 
 /// Single-candidate migration step: run the sender-side
-/// `forward_to_homes` fan-out for `dispatch`, and on success
-/// (≥`FORWARD_K_MIN` homes Stored / Delivered) delete the local
-/// `cf_dht_queue` entry. On failure the local entry is preserved for
-/// the next sweep.
+/// `forward_to_homes` fan-out for `dispatch`, and delete the local
+/// `cf_dht_queue` entry only once [`handover_is_durable`] holds. On any
+/// other outcome the local entry is preserved for the next sweep.
 async fn migrate_one(
     dht: Arc<Dht>, key: crate::storage::MessageKey,
     dispatch: common::proto::client_rel::DispatchP, now_ms: u64,
 ) {
     dht.metrics.inc_migrations_attempted();
     match super::forward::forward_to_homes(dht.clone(), dispatch, now_ms).await {
-        Ok(_summary) => {
-            // Success → delete the local entry. Best-effort; a fjall
-            // write error re-tries next sweep, but the message is
-            // already durably stored at the new K-closest, so duplicate
-            // delivery (the only failure mode) is benign.
+        Ok(summary) if handover_is_durable(&dht, &summary) => {
+            // Duplicate delivery is the only failure mode of a fjall
+            // write error here, and the next sweep retries.
             super::store::delete_migrated_entry(&dht, &key);
             dht.metrics.inc_migrations_succeeded();
-        }
+        },
+        Ok(_) => {
+            dht.metrics.inc_migrations_failed();
+            common::warn!(
+                "DHT drift migration: handover not durably attested; keeping local copy"
+            );
+        },
         Err(_e) => {
             dht.metrics.inc_migrations_failed();
-            // Don't delete; next sweep tries again.
-        }
+        },
     }
+}
+
+/// Whether `summary`'s successes justify dropping this relay's only
+/// durable copy of the message.
+///
+/// A `Stored` reply is just a peer's word, so it counts only when it
+/// comes from a peer whose NodeId this relay has itself bound to a
+/// pubkey — an outbound dial pinned `BLAKE3(cert SPKI) == id`, or an
+/// inbound connection presented a signed `DhtHello`. A peer that merely
+/// talked its way into a k-bucket cannot claim custody of a queue and
+/// then drop it.
+fn handover_is_durable(dht: &Dht, summary: &super::forward::ForwardSummary) -> bool {
+    let conns = dht.peer_conns.read();
+    let attested = summary
+        .delivered_at
+        .iter()
+        .chain(summary.stored_at.iter())
+        .filter(|id| **id != dht.node_id)
+        .filter(|id| conns.get(id).is_some_and(|(_, pk)| NodeId::new(*pk) == **id))
+        .count();
+    attested >= config::FORWARD_K_MIN
 }
 
 // ---------------------------------------------------------------------------

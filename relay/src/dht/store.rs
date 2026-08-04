@@ -12,6 +12,7 @@
 
 use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::ForwardOutcome;
+use common::proto::pack::MAX_FRAME_BYTES;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
@@ -21,6 +22,27 @@ use super::Dht;
 use super::config::K;
 use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
+
+/// One sender's share of a recipient's [`MAX_QUEUED_PER_RECIPIENT`] slots.
+/// Kept above `MAX_FETCH_QUEUE_BATCH` so a single busy conversation still
+/// pages normally.
+const MAX_QUEUED_PER_SENDER: usize = 128;
+
+/// Ceiling on queued bytes deserialized to attribute rows to their sender
+/// during one admission scan.
+const SENDER_SCAN_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Retention for a `dht_queue` row, past which it is swept regardless of
+/// whether the recipient ever drained.
+const QUEUE_ENTRY_TTL_MS: u64 = 7 * 24 * 3_600_000;
+
+/// Rows evicted per expiry sweep.
+const MAX_EXPIRE_PER_SWEEP: usize = 1024;
+
+/// Serialized-byte budget for one batch of queued dispatches, leaving framing
+/// headroom under [`MAX_FRAME_BYTES`]. A batch that ignored this would produce
+/// a `QueueFetchResp` the packer refuses, stranding the queue permanently.
+const QUEUE_BATCH_MAX_BYTES: usize = MAX_FRAME_BYTES - 64 * 1024;
 
 /// Planning half of the K-set drift migration.
 ///
@@ -47,6 +69,10 @@ use crate::storage::MessageKey;
 /// migrated — that CF is the local-fallback safety net owned by the
 /// sender's relay. Only `cf_dht_queue` (the home-replica queue) is
 /// subject to drift.
+///
+/// This walk also evicts rows past [`QUEUE_ENTRY_TTL_MS`]: it is the only
+/// periodic full scan of the keyspace, so the expiry sweep rides along with it
+/// rather than duplicating the iteration from the scheduler.
 pub(crate) fn plan_drift_migrations(
     dht: &Dht, max: usize,
 ) -> Vec<(MessageKey, DispatchP)> {
@@ -56,6 +82,8 @@ pub(crate) fn plan_drift_migrations(
     }
 
     let self_id = dht.node_id;
+    let now_ms = crate::util::systime().as_millis() as u64;
+    let mut expired: Vec<Vec<u8>> = Vec::new();
 
     // Cache the per-recipient drift decision so we don't recompute it
     // for every message of the same recipient. The cap is per-sweep,
@@ -78,6 +106,15 @@ pub(crate) fn plan_drift_migrations(
         }
         let mut user_ipk = [0u8; 32];
         user_ipk.copy_from_slice(&key_bytes[0..32]);
+
+        let mut ts_be = [0u8; 8];
+        ts_be.copy_from_slice(&key_bytes[32..40]);
+        if now_ms.saturating_sub(u64::from_be_bytes(ts_be)) > QUEUE_ENTRY_TTL_MS {
+            if expired.len() < MAX_EXPIRE_PER_SWEEP {
+                expired.push(key_bytes.to_vec());
+            }
+            continue;
+        }
 
         let is_drifted = match drifted.get(&user_ipk) {
             Some(b) => *b,
@@ -115,6 +152,10 @@ pub(crate) fn plan_drift_migrations(
             break;
         }
     }
+
+    for key in &expired {
+        let _ = dht.store.queue.remove(key);
+    }
     out
 }
 
@@ -138,17 +179,27 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 /// - The home-side `DhtRequest::Forward` handler, to durably enqueue an
 ///   inbound dispatch for an offline recipient.
 ///
-/// **Cap enforcement.** Mirrors the [`crate::storage::MAX_QUEUED_PER_RECIPIENT`]
-/// check in `relay/src/quic/handler/client/events/forward.rs::store_in_rocks`,
-/// using a bounded exact `prefix()` scan over the `dht_queue` keyspace.
+/// **Cap enforcement.** One bounded exact `prefix()` scan over the `dht_queue`
+/// keyspace enforces three things: the per-recipient
+/// [`crate::storage::MAX_QUEUED_PER_RECIPIENT`] cap, the per-sender
+/// [`MAX_QUEUED_PER_SENDER`] share of it, and single-occupancy of a
+/// `dispatch.id` within the recipient's queue.
+///
+/// `now_ms` is the *home's* clock, never a wire-supplied timestamp: it is the
+/// secondary sort key of [`MessageKey`] and drives the retention sweep, so an
+/// injected dispatch must not be able to place itself at the head of the queue
+/// or outside the sweep's reach.
 ///
 /// Returns:
-/// - [`ForwardOutcome::Stored`] on a successful queue write.
-/// - [`ForwardOutcome::QueueFull`] when the recipient already has
-///   `MAX_QUEUED_PER_RECIPIENT` entries on disk; the dispatch is *not*
+/// - [`ForwardOutcome::Stored`] on a successful queue write, or when this exact
+///   `(from, id)` is already queued (retries are idempotent).
+/// - [`ForwardOutcome::QueueFull`] when the recipient is at
+///   `MAX_QUEUED_PER_RECIPIENT`, or this sender is at
+///   `MAX_QUEUED_PER_SENDER` for this recipient; the dispatch is *not*
 ///   stored.
 /// - [`ForwardOutcome::BadSig`] as a defensive surface for an internal
-///   error (postcard serialisation failure, fjall write failure). The
+///   error (postcard serialisation failure, fjall write failure) and for a
+///   `dispatch.id` already queued under a different sender. The
 ///   on-the-wire semantics of `BadSig` is "we will
 ///   not accept this dispatch" — surfacing infrastructure failures the
 ///   same way avoids a silent message-loss path.
@@ -161,23 +212,44 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
-    // Per-recipient cap. Bounded scan over fjall's exact prefix range: stop
-    // as soon as we've confirmed the user is at-or-over the cap so we don't
-    // walk a million-entry queue on every Forward.
-    let mut count: usize = 0;
+    let mut total: usize = 0;
+    let mut from_sender: usize = 0;
+    let mut attributed_bytes: usize = 0;
     let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
     for guard in dht.store.queue.prefix(user_ipk) {
         // Treat a corrupted iterator as "we can't be sure we're under the
         // cap" — better to reject than silently overrun.
-        if guard.key().is_err() {
+        let Ok((key_bytes, value)) = guard.into_inner() else {
             return ForwardOutcome::BadSig;
+        };
+        if key_bytes.len() != MessageKey::SIZE {
+            continue;
         }
-        count += 1;
-        if count >= stop_at {
+        // Sender attribution is the only reason this scan reads values, and a
+        // full queue can hold MiB-scale dispatches. Past the budget only the
+        // recipient cap binds — degrading the per-sender quota is preferable to
+        // reading the whole queue on every inbound Forward.
+        let attributable = attributed_bytes < SENDER_SCAN_BYTE_BUDGET;
+        let same_sender = attributable
+            && DispatchP::deser(&value).is_ok_and(|d| d.from.0 == dispatch.from.0);
+        if attributable {
+            attributed_bytes += value.len();
+        }
+        if key_bytes[40..56] == dispatch.id.0 {
+            return if same_sender { ForwardOutcome::Stored } else { ForwardOutcome::BadSig };
+        }
+        total += 1;
+        if same_sender {
+            from_sender += 1;
+            if from_sender >= MAX_QUEUED_PER_SENDER {
+                break;
+            }
+        }
+        if total >= stop_at {
             break;
         }
     }
-    if count >= MAX_QUEUED_PER_RECIPIENT {
+    if total >= MAX_QUEUED_PER_RECIPIENT || from_sender >= MAX_QUEUED_PER_SENDER {
         dht.metrics.inc_dht_queue_full_rejections();
         return ForwardOutcome::QueueFull;
     }
@@ -188,8 +260,9 @@ pub(crate) fn enqueue_for_home(
         Err(_) => return ForwardOutcome::BadSig,
     };
 
-    // fsync before returning so the home relay's "Stored" reply is a durable
-    // promise.
+    // Queues the group-commit fsync. `Stored` is a durable promise, so the
+    // caller must await `Store::persist_barrier` before it puts that on the
+    // wire.
     if dht.store.put_sync(&dht.store.queue, key.as_bytes(), &value).is_err() {
         return ForwardOutcome::BadSig;
     }
@@ -226,10 +299,28 @@ pub(crate) fn enqueue_for_home(
 pub(crate) fn lookup_queue_for_user(
     dht: &Dht, user_ipk: &[u8; 32], max: usize,
 ) -> Vec<(MessageKey, DispatchP)> {
+    queue_batch_for_user(dht, user_ipk, max).0
+}
+
+/// [`lookup_queue_for_user`] plus the `exhausted` flag a `QueueFetchResp`
+/// carries: `true` iff the returned batch covers every drainable row for
+/// `user_ipk`.
+///
+/// The batch is bounded by `max` entries *and* by [`QUEUE_BATCH_MAX_BYTES`] of
+/// serialized dispatch. A single row larger than the whole budget can never be
+/// framed into any response, so it is deleted rather than skipped — skipping
+/// would leave it consuming a queue slot forever.
+pub(crate) fn queue_batch_for_user(
+    dht: &Dht, user_ipk: &[u8; 32], max: usize,
+) -> (Vec<(MessageKey, DispatchP)>, bool) {
     let mut out: Vec<(MessageKey, DispatchP)> = Vec::new();
     if max == 0 {
-        return out;
+        return (out, false);
     }
+
+    let mut used: usize = 0;
+    let mut oversize: Vec<Vec<u8>> = Vec::new();
+    let mut exhausted = true;
 
     // fjall's exact prefix scan + the MessageKey layout (recipient || ts_be
     // || dispatch_id) yields this recipient's queue oldest-first.
@@ -239,7 +330,10 @@ pub(crate) fn lookup_queue_for_user(
             // Soft-fail on iterator corruption: return what we collected
             // so the caller still drains *something*. The next sweep
             // re-attempts.
-            Err(_) => break,
+            Err(_) => {
+                exhausted = false;
+                break;
+            }
         };
         let Some(key) = MessageKey::parse(&key_bytes) else {
             // Malformed key (length mismatch, etc.) — skip and continue;
@@ -247,15 +341,33 @@ pub(crate) fn lookup_queue_for_user(
             // drain uses.
             continue;
         };
+        if value.len() > QUEUE_BATCH_MAX_BYTES {
+            oversize.push(key_bytes.to_vec());
+            continue;
+        }
+        if out.len() >= max || used.saturating_add(value.len()) > QUEUE_BATCH_MAX_BYTES {
+            exhausted = false;
+            break;
+        }
         let Ok(dispatch) = DispatchP::deser(&value) else {
             continue;
         };
+        used += value.len();
         out.push((key, dispatch));
-        if out.len() >= max {
-            break;
-        }
     }
-    out
+
+    for key in &oversize {
+        let _ = dht.store.queue.remove(key);
+    }
+    if !oversize.is_empty() {
+        common::warn!(
+            "dht_queue: dropped {} unframeable entr(ies) (> {QUEUE_BATCH_MAX_BYTES} bytes) for {}",
+            oversize.len(),
+            hex::encode(&user_ipk[..4])
+        );
+    }
+
+    (out, exhausted)
 }
 
 /// Delete every `cf_dht_queue` entry for `user_ipk` whose
@@ -373,6 +485,10 @@ mod tests {
     }
 
 
+    fn wall_clock_ms() -> u64 {
+        crate::util::systime().as_millis() as u64
+    }
+
     fn build_dispatch(
         from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
     ) -> DispatchP {
@@ -483,6 +599,59 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_for_home_caps_one_sender_below_the_recipient_cap() {
+        let relay = fresh_signing_key();
+        let hog = fresh_signing_key();
+        let other = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let now = wall_clock_ms();
+
+        for i in 0..MAX_QUEUED_PER_SENDER {
+            let mut id = [0u8; 16];
+            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let dispatch = build_dispatch(&hog, &to_ipk, id, b"hog");
+            assert_eq!(
+                enqueue_for_home(&dht, &to_ipk, &dispatch, now + i as u64),
+                ForwardOutcome::Stored
+            );
+        }
+
+        let overflow = build_dispatch(&hog, &to_ipk, [0xEE; 16], b"hog");
+        assert_eq!(enqueue_for_home(&dht, &to_ipk, &overflow, now), ForwardOutcome::QueueFull);
+
+        let from_other = build_dispatch(&other, &to_ipk, [0xEF; 16], b"legit");
+        assert_eq!(enqueue_for_home(&dht, &to_ipk, &from_other, now), ForwardOutcome::Stored);
+    }
+
+    #[test]
+    fn enqueue_for_home_refuses_a_duplicate_dispatch_id() {
+        let relay = fresh_signing_key();
+        let alice = fresh_signing_key();
+        let mallory = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+        let now = wall_clock_ms();
+
+        let first = build_dispatch(&alice, &to_ipk, [7u8; 16], b"first");
+        assert_eq!(enqueue_for_home(&dht, &to_ipk, &first, now), ForwardOutcome::Stored);
+
+        // A retry of the same dispatch is idempotent, not a second row.
+        assert_eq!(enqueue_for_home(&dht, &to_ipk, &first, now + 500), ForwardOutcome::Stored);
+
+        let squat = build_dispatch(&mallory, &to_ipk, [7u8; 16], b"squat");
+        assert_eq!(enqueue_for_home(&dht, &to_ipk, &squat, now + 900), ForwardOutcome::BadSig);
+
+        let queued = lookup_queue_for_user(&dht, &to_ipk, 8);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1.payload.0, b"first");
+    }
+
+    #[test]
     fn enqueue_for_home_does_not_count_other_recipients_against_cap() {
         // Cap is per-recipient. Filling user A's queue must not cause
         // user B to see `QueueFull`. Catches a regression where the
@@ -570,6 +739,56 @@ mod tests {
     }
 
     #[test]
+    fn queue_batch_stops_at_the_byte_budget() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        let payload = vec![0x5Au8; QUEUE_BATCH_MAX_BYTES * 2 / 3];
+        for i in 0..3u8 {
+            let dispatch = build_dispatch(&from_user, &to_ipk, [i; 16], &payload);
+            enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms() + i as u64);
+        }
+
+        let (batch, exhausted) = queue_batch_for_user(&dht, &to_ipk, 64);
+        assert_eq!(batch.len(), 1, "a second entry would overrun the frame budget");
+        assert!(!exhausted, "the requester must be told to page");
+
+        let encoded: usize = batch.iter().map(|(_, d)| d.ser().expect("ser").len()).sum();
+        assert!(encoded <= QUEUE_BATCH_MAX_BYTES);
+    }
+
+    #[test]
+    fn queue_batch_drops_an_entry_too_large_to_ever_frame() {
+        let relay = fresh_signing_key();
+        let from_user = fresh_signing_key();
+        let to_user = fresh_signing_key();
+        let self_id = NodeId::new(relay.verifying_key().to_bytes());
+        let dht = fresh_dht(self_id);
+        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
+
+        // Sorts ahead of the deliverable entry, so a batch builder that
+        // stopped instead of dropping would never reach the latter.
+        let wedge = MessageKey::new(&to_ipk, 1, &[0u8; 16]);
+        dht.store
+            .queue
+            .insert(wedge.as_bytes(), vec![0u8; QUEUE_BATCH_MAX_BYTES + 1])
+            .expect("put");
+
+        let dispatch = build_dispatch(&from_user, &to_ipk, [3u8; 16], b"deliverable");
+        enqueue_for_home(&dht, &to_ipk, &dispatch, 2);
+
+        let (batch, exhausted) = queue_batch_for_user(&dht, &to_ipk, 64);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.id.0, [3u8; 16]);
+        assert!(exhausted);
+        assert!(dht.store.queue.get(wedge.as_bytes()).expect("get").is_none());
+    }
+
+    #[test]
     fn lookup_queue_for_user_returns_empty_for_unknown_recipient() {
         let relay = fresh_signing_key();
         let self_id = NodeId::new(relay.verifying_key().to_bytes());
@@ -654,7 +873,7 @@ mod tests {
         let from_user = fresh_signing_key();
         let to_ipk: [u8; 32] = [0u8; 32];
         let dispatch = build_dispatch(&from_user, &to_ipk, [9u8; 16], b"drifted");
-        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+        enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms());
 
         let migrations = plan_drift_migrations(&dht, 16);
         assert_eq!(migrations.len(), 1);
@@ -712,7 +931,7 @@ mod tests {
             let mut to_ipk = [0u8; 32];
             to_ipk[31] = 0xA0 | i; // distinct but still "close to 0" target
             let dispatch = build_dispatch(&from_user, &to_ipk, [i; 16], b"cap");
-            enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
+            enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms());
         }
 
         let migrations = plan_drift_migrations(&dht, 3);

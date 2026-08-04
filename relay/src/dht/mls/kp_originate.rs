@@ -3,7 +3,7 @@
 //! specialised to the MLS KeyPackage RPCs.
 //!
 //! A phone delegates a KP operation to its home relay over the
-//! `client/0` wrappers; the home originates the real `peer/1` fan-out to
+//! `client/5` wrappers; the home originates the real `peer/5` fan-out to
 //! the target's K-closest homes, self-storing if it is itself a home.
 //! The phone's *inner* user signature
 //! ([`kp_publish_signing_input`](common::proto::mls_wire::kp_publish_signing_input)

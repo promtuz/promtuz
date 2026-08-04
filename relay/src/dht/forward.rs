@@ -153,7 +153,7 @@ pub(crate) enum ForwardError {
 /// 2. If `self_id` is among the K-closest, locally enqueue the dispatch via
 ///    [`super::store::enqueue_for_home`] and treat the outcome as one of the K acks (mirrors the
 ///    publish-path's `self_should_store` path).
-/// 3. For every remote home, dispatch a `Forward` RPC over `peer/1` in parallel, collecting
+/// 3. For every remote home, dispatch a `Forward` RPC over `peer/5` in parallel, collecting
 ///    outcomes via `tokio::task::JoinSet`.
 /// 4. Wait up to [`FORWARD_TIMEOUT_MS`] total wall-clock for replies.
 /// 5. Tally the `ForwardSummary`; return `Err(InsufficientReplicas)` if the success count is `<
@@ -235,7 +235,14 @@ pub(crate) async fn forward_to_homes(
         {
             ForwardOutcome::Delivered
         } else {
-            super::store::enqueue_for_home(&dht, &user_ipk_bytes, &dispatch, now_ms)
+            let stored = super::store::enqueue_for_home(&dht, &user_ipk_bytes, &dispatch, now_ms);
+            if matches!(stored, ForwardOutcome::Stored)
+                && dht.store.persist_barrier().wait().await.is_err()
+            {
+                ForwardOutcome::BadSig
+            } else {
+                stored
+            }
         };
         match outcome {
             ForwardOutcome::Delivered => summary.delivered_at.push(self_id),
@@ -732,14 +739,14 @@ pub(crate) async fn handle_forward_rpc(dht: &Arc<Dht>, fwd: Forward, now_ms: u64
     }
 
     // 7. Offline (or live delivery failed): durably enqueue.
-    let outcome = super::store::enqueue_for_home(
-        dht,
-        &recipient_ipk,
-        &fwd.dispatch,
-        fwd.dispatch.accepted_at_ms,
-    );
-    if matches!(outcome, ForwardOutcome::Stored) && fwd.dispatch.wake {
-        dht.trigger_wake(&recipient_ipk);
+    let outcome = super::store::enqueue_for_home(dht, &recipient_ipk, &fwd.dispatch, now_ms);
+    if matches!(outcome, ForwardOutcome::Stored) {
+        if dht.store.persist_barrier().wait().await.is_err() {
+            return ForwardResp { outcome: ForwardOutcome::BadSig };
+        }
+        if fwd.dispatch.wake {
+            dht.trigger_wake(&recipient_ipk);
+        }
     }
     ForwardResp { outcome }
 }

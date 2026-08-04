@@ -2,8 +2,8 @@
 //! (`kp_originate`, `welcome_originate`).
 //!
 //! When a phone delegates a KeyPackage / Welcome operation to its home
-//! relay over the `client/0` wrappers, the home relay becomes the
-//! *originator* of the real `peer/1` DHT fan-out — the role libcore's
+//! relay over the `client/5` wrappers, the home relay becomes the
+//! *originator* of the real `peer/5` DHT fan-out — the role libcore's
 //! deleted `Peer1DhtClient` used to play. These helpers are the generic
 //! analogue of `forward.rs`'s `Forward`-specialised
 //! `remote_forward_one` / `remote_forward_parallel`: they work over any

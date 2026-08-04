@@ -3,7 +3,7 @@
 //! When a user reconnects to a relay R_r that is **not** in the user's
 //! K-closest set by XOR distance, R_r cannot serve the queue locally
 //! — the homes hold the queued offline messages. R_r dials the K homes
-//! over `peer/1`, issues `QueueFetch` against each, pages through the
+//! over `peer/5`, issues `QueueFetch` against each, pages through the
 //! response stream, and aggregates the dispatches before handing them to
 //! the regular client-drain protocol in
 //! `quic/handler/client/events/drain.rs`.
@@ -104,7 +104,7 @@ pub(crate) enum QueueDrainError {
 ///    callsite for self's own queue, not this module).
 /// 3. If the filtered set is empty, return `Err(NoHomes)`.
 /// 4. For each home in parallel ([`tokio::task::JoinSet`]):
-///    (a) Open / reuse a `peer/1` connection via
+///    (a) Open / reuse a `peer/5` connection via
 ///    `lookup::connect_to_peer`.
 ///    (b) Send `QueueFetch { user_ipk, requester_relay_id =
 ///    self_relay_id, timestamp = drain_auth.timestamp, user_sig =
@@ -349,9 +349,9 @@ async fn remote_fetch_one(
 ///    first because a mismatch shortcuts the Ed25519 verify.
 /// 2. `QueueFetch::verify(req, now_ms)` — user_sig + skew.
 /// 3. `self_is_in_k_closest_qd` — defensive K-set check.
-/// 4. Read up to `MAX_FETCH_QUEUE_BATCH + 1` entries; the +1 lets us
-///    set `exhausted = false` correctly without a second range query
-///    when the queue extends past the cap.
+/// 4. Read one batch, bounded by `MAX_FETCH_QUEUE_BATCH` entries *and* by a
+///    serialized-byte budget that keeps the response inside `MAX_FRAME_BYTES`;
+///    `exhausted = false` tells the requester to page.
 ///
 pub(crate) async fn handle_queue_fetch_rpc(
     dht: &Arc<Dht>, req: QueueFetch, authenticated_peer_id: NodeId, now_ms: u64,
@@ -378,17 +378,11 @@ pub(crate) async fn handle_queue_fetch_rpc(
         return QueueFetchResp { messages: Vec::new(), exhausted: true };
     }
 
-    // 4. Read up to MAX_FETCH_QUEUE_BATCH + 1 entries; the +1 is the
-    //    lookahead that tells us whether more remain.
-    let probe_max = MAX_FETCH_QUEUE_BATCH + 1;
-    let mut peek = super::store::lookup_queue_for_user(dht, &user_ipk, probe_max);
+    // 4. Read one count- and byte-bounded batch.
+    let (batch, exhausted) =
+        super::store::queue_batch_for_user(dht, &user_ipk, MAX_FETCH_QUEUE_BATCH);
 
-    let exhausted = peek.len() <= MAX_FETCH_QUEUE_BATCH;
-    if peek.len() > MAX_FETCH_QUEUE_BATCH {
-        peek.truncate(MAX_FETCH_QUEUE_BATCH);
-    }
-
-    let messages: Vec<DispatchP> = peek.into_iter().map(|(_k, d)| d).collect();
+    let messages: Vec<DispatchP> = batch.into_iter().map(|(_k, d)| d).collect();
     QueueFetchResp { messages, exhausted }
 }
 

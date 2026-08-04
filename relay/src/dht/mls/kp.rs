@@ -47,14 +47,17 @@
 //!
 //! ## Anti-pinning rate limit
 //!
-//! `MAX_KP_FETCH_PER_HOUR = 60` is enforced per
-//! `(target_ipk, requester_relay_id)` pair via a dedicated
-//! `governor::RateLimiter` (separate from
-//! [`crate::dht::rate_limit::PerPeerLimiters`], which is keyed only on
-//! the requester). A misbehaving relay can drain Bob's stash 60×/hour
-//! at *one* home; spreading across K=3 relays gives 180×/hour
-//! aggregate, which is bounded by the relay PKI tier costs (Sybil
-//! relays must be paid for).
+//! Two dedicated `governor::RateLimiter`s, separate from
+//! [`crate::dht::rate_limit::PerPeerLimiters`] (which is keyed only on
+//! the requester):
+//!
+//! - `MAX_KP_FETCH_PER_HOUR = 60` per `(target_ipk, requester_relay_id)` pair, so one
+//!   misbehaving relay cannot drain Bob's stash without also giving up its legitimate fetches
+//!   against every other target.
+//! - [`MAX_KP_FETCH_PER_TARGET_PER_HOUR`] across every requester for one target. A relay
+//!   identity is one Ed25519 keygen, so the per-pair bucket multiplies by however many
+//!   identities an attacker mints; this per-target bucket is what actually caps stash
+//!   depletion at a single home.
 //!
 //! ## Lock contract
 //!
@@ -158,43 +161,56 @@ pub(crate) type KpFetchKey = ([u8; 32], [u8; 32]);
 type KpFetchLimiter =
     RateLimiter<KpFetchKey, DefaultKeyedStateStore<KpFetchKey>, DefaultClock>;
 
-/// Per-pair fetch limiter wrapper. One global instance lives on
+type KpTargetLimiter =
+    RateLimiter<[u8; 32], DefaultKeyedStateStore<[u8; 32]>, DefaultClock>;
+
+/// Aggregate ceiling on stash depletion for one target, across every
+/// requester. Relay identities are free to mint, so the per-pair quota alone
+/// scales with the number of keypairs an attacker generates; this one does not.
+const MAX_KP_FETCH_PER_TARGET_PER_HOUR: u32 = 120;
+
+/// Fetch limiter wrapper. One global instance lives on
 /// [`Dht::kp_fetch_limiters`].
 ///
-/// Quota is `MAX_KP_FETCH_PER_HOUR` per pair; `governor` requires a
+/// Quota is `MAX_KP_FETCH_PER_HOUR` per pair and
+/// [`MAX_KP_FETCH_PER_TARGET_PER_HOUR`] per target; `governor` requires a
 /// "per second" rate — we synthesise one by dividing per-hour by
 /// 3600. Burst is set equal to the per-hour quota so a bursty client
 /// (e.g. issuing 60 fetches in one second after a long quiet period)
 /// doesn't trip until the burst-bucket is depleted.
 #[derive(Debug)]
 pub(crate) struct KpFetchLimiters {
-    limiter: KpFetchLimiter,
+    per_pair:   KpFetchLimiter,
+    per_target: KpTargetLimiter,
 }
 
 impl KpFetchLimiters {
     pub(crate) fn new() -> Self {
-        // 60 / hour → 60 tokens per 3600 s. governor::Quota does not
-        // accept fractional rates directly; the cleanest expression
-        // is `Quota::with_period(period_per_token).allow_burst(burst)`.
-        let period = std::time::Duration::from_secs(3600 / MAX_KP_FETCH_PER_HOUR as u64);
-        let burst = NonZeroU32::new(MAX_KP_FETCH_PER_HOUR)
-            .unwrap_or(NonZeroU32::MIN);
-        let quota = Quota::with_period(period)
-            .expect("non-zero period per token")
-            .allow_burst(burst);
         Self {
-            limiter: RateLimiter::keyed(quota),
+            per_pair:   RateLimiter::keyed(hourly_quota(MAX_KP_FETCH_PER_HOUR)),
+            per_target: RateLimiter::keyed(hourly_quota(MAX_KP_FETCH_PER_TARGET_PER_HOUR)),
         }
     }
 
-    /// Returns `Ok(())` if a token was consumed for `(target_ipk,
-    /// requester)`, `Err(())` if the per-pair quota is exhausted.
+    /// Returns `Ok(())` if a token was consumed from both the
+    /// `(target_ipk, requester)` and the `target_ipk` bucket, `Err(())` if
+    /// either is exhausted.
     pub(crate) fn check(
         &self, target_ipk: &[u8; 32], requester: &NodeId,
     ) -> Result<(), ()> {
         let key: KpFetchKey = (*target_ipk, *requester.as_bytes());
-        self.limiter.check_key(&key).map_err(|_| ())
+        self.per_pair.check_key(&key).map_err(|_| ())?;
+        self.per_target.check_key(target_ipk).map_err(|_| ())
     }
+}
+
+/// `per_hour` tokens per hour with a burst equal to the hourly allowance.
+/// `governor::Quota` takes no fractional rate, so the period per token is the
+/// natural expression.
+fn hourly_quota(per_hour: u32) -> Quota {
+    let period = std::time::Duration::from_secs(3600 / per_hour.max(1) as u64);
+    let burst = NonZeroU32::new(per_hour).unwrap_or(NonZeroU32::MIN);
+    Quota::with_period(period).expect("non-zero period per token").allow_burst(burst)
 }
 
 // ---------------------------------------------------------------------------
@@ -434,35 +450,40 @@ fn iterate_stash(dht: &Dht, ipk: &[u8; 32]) -> Vec<([u8; STORAGE_KEY_LEN], KeyPa
     out
 }
 
+/// Point in `kp_ref` space that a fetch pops from: the stash record closest to
+/// it by XOR wins.
+///
+/// The one-shot guarantee is per-replica — each of the K homes holds the same
+/// records and answers independently — so a selection that is a fixed byte
+/// order hands two senders the same KeyPackage. Deriving the point from the
+/// requester makes distinct requesters land on distinct records instead.
+fn pop_selector(requester: &NodeId, target_ipk: &[u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(64);
+    buf.extend_from_slice(requester.as_bytes());
+    buf.extend_from_slice(target_ipk);
+    *NodeId::new(&buf).as_bytes()
+}
+
 // ---------------------------------------------------------------------------
 // Static-hash helper for KeyPackageFetch responses
 // ---------------------------------------------------------------------------
 
-/// Compute the "static hash" surface from a record. Defined as
-/// `BLAKE3(target_ipk || credential_ipk || credential_signing_key_bytes)`
-/// — fields the requester can cross-check across K replicas to detect
-/// a malicious home substituting a forged KP.
+/// `BLAKE3(target_ipk || kp_ref || BLAKE3(kp_bytes))` — a value a requester
+/// can compare across K replicas to spot a home that substituted a different
+/// record body for the same `(ipk, kp_ref)`.
 ///
-/// Because the owner-sig transcript folds in `BLAKE3(kp_bytes)`, a
-/// replica that stored tampered `kp_bytes` for an existing
-/// `(ipk, kp_ref)` would have failed publish-time `verify_record`
-/// first — so the cross-replica check is defense-in-depth rather than
-/// the primary forgery gate. We extend the static hash to also bind
-/// `BLAKE3(kp_bytes)` directly: any byte-different `kp_bytes` between
-/// replicas surfaces as a different `static_hash`.
+/// Defense-in-depth only. The forgery gate is `owner_sig`, whose transcript
+/// (`kp_record_signing_input`) already folds in `BLAKE3(kp_bytes)` and is
+/// re-verified against `record.ipk` by the requesting client in
+/// `libcore/src/messaging.rs`.
 ///
-/// We don't parse the openmls TLS-encoded `KeyPackage` to extract the
-/// inner credential's signing-key bytes — that requires the openmls
-/// dependency which the relay deliberately avoids. The
-/// `kp_bytes`-digest binding is the cheapest stand-in: the inner
-/// credential signing-key bytes are a *subset* of `kp_bytes`, so a
-/// substitution that changes them necessarily changes the digest.
+/// The relay deliberately carries no openmls dependency, so it cannot parse
+/// the TLS-encoded `KeyPackage` for the inner credential's signing key; those
+/// bytes are a subset of `kp_bytes`, so the digest moves whenever they do.
 fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
-    // BLAKE3(target_ipk || kp_ref || BLAKE3(kp_bytes)). Same hashing
-    // pattern as `stash_prefix` / sync/merkle.rs — use `NodeId::new`
-    // (BLAKE3 wrapper) so the relay doesn't need a direct `blake3`
-    // dep; nest one BLAKE3 over `kp_bytes` to keep the inner-body
-    // binding cheap on large KPs.
+    // `NodeId::new` is the BLAKE3 wrapper — the relay has no direct blake3
+    // dep. Nesting one hash over `kp_bytes` keeps the binding cheap on large
+    // KPs.
     let kp_bytes_digest = *NodeId::new(&rec.kp_bytes.0).as_bytes();
     let mut buf = Vec::with_capacity(32 + rec.kp_ref.0.len() + 32);
     buf.extend_from_slice(&rec.ipk.0);
@@ -491,7 +512,7 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
 ///    `StaticFieldsConflict` outcome.
 ///
 /// `_authenticated_peer_id` is currently unused — KeyPackagePublish
-/// is owner-authored, and the relay-to-relay `peer/1` connection's
+/// is owner-authored, and the relay-to-relay `peer/5` connection's
 /// authenticated peer id is the *relay forwarding* the publish, not
 /// the owner. The owner authentication lives in `req.sig` (verified
 /// under `req.ipk`). A relay-binding check may be added later if the
@@ -587,7 +608,9 @@ pub(crate) fn handle_keypackage_publish(
 ///
 /// Identical validation ladder to [`handle_keypackage_publish`]
 /// modulo the outer-sig domain — refill uses [`KP_REFILL_DOMAIN`] so
-/// a captured Publish sig cannot be replayed as a Refill.
+/// a captured Publish sig cannot be replayed as a Refill — plus an
+/// aggregate bound: refill is additive, so the *resulting* stash must
+/// still fit `KP_STASH_TARGET`.
 pub(crate) fn handle_keypackage_refill(
     dht: &Arc<Dht>, req: KeyPackageRefillReq, _authenticated_peer_id: NodeId, now_ms: u64,
 ) -> KeyPackageRefillOutcome {
@@ -613,6 +636,16 @@ pub(crate) fn handle_keypackage_refill(
 
     if !self_is_owner_for_stash(dht, &req.ipk.0) {
         return KeyPackageRefillOutcome::NotOwner;
+    }
+
+    let incoming: std::collections::HashSet<Vec<u8>> =
+        req.records.iter().map(|r| r.kp_ref.0.clone()).collect();
+    let retained = iterate_stash(dht, &req.ipk.0)
+        .into_iter()
+        .filter(|(_, rec)| !incoming.contains(&rec.kp_ref.0))
+        .count();
+    if retained.saturating_add(req.records.len()) > KP_STASH_TARGET {
+        return KeyPackageRefillOutcome::TooMany;
     }
 
     for rec in &req.records {
@@ -663,12 +696,9 @@ pub(crate) fn handle_keypackage_refill(
 ///    against cross-relay replay (mirrors the QueueFetch handler).
 /// 2. Skew check on `req.timestamp`.
 /// 3. Self is in K-closest for `stash_prefix(target_ipk)`.
-/// 4. Per-pair rate-limit check on `(target_ipk, requester_relay_id)`
-///    via [`KpFetchLimiters`].
-/// 5. Pop the first non-expired record from the stash (FIFO over
-///    iterator order, which is opaque-deterministic by `kp_ref` byte
-///    order). Delete it from fjall. Return `Found(record,
-///    remaining, static_hash)`.
+/// 4. Rate-limit check via [`KpFetchLimiters`].
+/// 5. Pop one non-expired record, selected by [`pop_selector`]. Delete it
+///    from fjall. Return `Found(record, remaining, static_hash)`.
 ///
 /// Empty stash → `NoStash`. All paths are sync; we touch fjall
 /// directly without any `await`.
@@ -721,21 +751,29 @@ pub(crate) fn handle_keypackage_fetch(
         return KeyPackageFetchOutcome::RateLimited;
     }
 
-    // 5. Pop the first non-expired record. We collect-then-pop so we
+    // 5. Pop one non-expired record. We collect-then-pop so we
     //    can return both the popped record and a `remaining` count.
     let mut stash = iterate_stash(dht, &req.target_ipk.0);
 
     // Filter expired records (silently — the publisher's responsibility
     // to refill before lifetime elapses).
+    let selector = pop_selector(&req.requester_relay_id, &req.target_ipk.0);
     let mut popped: Option<(usize, KeyPackageRecord)> = None;
+    let mut best_distance = [0xffu8; 32];
     let mut to_evict: Vec<[u8; STORAGE_KEY_LEN]> = Vec::new();
     for (idx, (key, rec)) in stash.iter().enumerate() {
         if rec.expires_at_ms <= now_ms {
             to_evict.push(*key);
             continue;
         }
-        popped = Some((idx, rec.clone()));
-        break;
+        let Ok(kp_ref): Result<[u8; KP_REF_LEN], _> = rec.kp_ref.0.as_slice().try_into() else {
+            continue;
+        };
+        let distance = common::quic::xor32(&kp_ref, &selector);
+        if popped.is_none() || distance < best_distance {
+            best_distance = distance;
+            popped = Some((idx, rec.clone()));
+        }
     }
 
     // Best-effort opportunistic eviction of expired records.
@@ -1470,6 +1508,79 @@ mod tests {
 
         let stash = iterate_stash(&dht, &rec_a.ipk.0);
         assert_eq!(stash.len(), 2);
+    }
+
+    #[test]
+    fn refill_past_the_stash_target_is_too_many() {
+        let owner = fresh_signing_key();
+        let dht = fresh_dht(NodeId::new([0u8; 32]));
+        let now = fresh_now();
+        let auth_peer = NodeId::new([0xBB; 32]);
+
+        let record_at = |n: usize| {
+            let mut kp_ref = [0u8; 32];
+            kp_ref[0..8].copy_from_slice(&(n as u64).to_be_bytes());
+            build_record(&owner, kp_ref, vec![n as u8], now + 60_000)
+        };
+
+        let filled: Vec<KeyPackageRecord> = (0..KP_STASH_TARGET).map(record_at).collect();
+        assert_eq!(
+            handle_keypackage_publish(&dht, build_publish(&owner, filled, now), auth_peer, now),
+            KeyPackagePublishOutcome::Stored
+        );
+
+        let extra = vec![record_at(KP_STASH_TARGET)];
+        assert_eq!(
+            handle_keypackage_refill(&dht, build_refill(&owner, extra, now), auth_peer, now),
+            KeyPackageRefillOutcome::TooMany
+        );
+
+        // Re-sending records already on disk is still idempotently accepted.
+        let resend = vec![record_at(0)];
+        assert_eq!(
+            handle_keypackage_refill(&dht, build_refill(&owner, resend, now), auth_peer, now),
+            KeyPackageRefillOutcome::Appended
+        );
+    }
+
+    #[test]
+    fn fetch_selects_a_different_record_per_requester() {
+        // Two replicas hold the same stash. A selection that ignored the
+        // requester would vend the same one-shot KeyPackage to both senders.
+        let owner = fresh_signing_key();
+        let now = fresh_now();
+        let owner_ipk: [u8; 32] = owner.verifying_key().to_bytes();
+        let records: Vec<KeyPackageRecord> = (0..16u8)
+            .map(|i| {
+                let mut kp_ref = [0u8; 32];
+                kp_ref[0] = i;
+                build_record(&owner, kp_ref, vec![i], now + 60_000)
+            })
+            .collect();
+
+        let popped_by = |requester: NodeId| {
+            let dht = fresh_dht(NodeId::new([0u8; 32]));
+            assert_eq!(
+                handle_keypackage_publish(
+                    &dht,
+                    build_publish(&owner, records.clone(), now),
+                    requester,
+                    now
+                ),
+                KeyPackagePublishOutcome::Stored
+            );
+            let req = KeyPackageFetchReq {
+                target_ipk: owner_ipk.into(),
+                requester_relay_id: requester,
+                timestamp: now,
+            };
+            match handle_keypackage_fetch(&dht, req, requester, now) {
+                KeyPackageFetchOutcome::Found(f) => f.record.kp_ref.0,
+                other => panic!("expected Found, got {other:?}"),
+            }
+        };
+
+        assert_ne!(popped_by(NodeId::new([0xA1; 32])), popped_by(NodeId::new([0xB2; 32])));
     }
 
     #[test]

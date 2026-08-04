@@ -91,6 +91,7 @@ use common::proto::mls_wire::WelcomePublishResp;
 use common::proto::mls_wire::welcome_ack_signing_input;
 use common::proto::mls_wire::welcome_envelope_signing_input;
 use common::proto::mls_wire::welcome_fetch_signing_input;
+use common::proto::pack::MAX_FRAME_BYTES;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
@@ -100,8 +101,6 @@ use governor::Quota;
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::state::keyed::DefaultKeyedStateStore;
-use rand::TryRng;
-use rand::rngs::SysRng;
 
 use crate::dht::Dht;
 
@@ -117,6 +116,16 @@ const STORAGE_KEY_LEN: usize = STASH_PREFIX_LEN + WELCOME_ID_LEN;
 /// Distinct from [`crate::dht::rate_limit::PerPeerLimiters`] (the bulk
 /// bucket is generous; this is the welcome-specific bulkhead).
 const MAX_WELCOME_RPC_PER_HOUR: u32 = 240;
+
+/// One inviter's share of a recipient's [`MAX_WELCOMES_PER_RECIPIENT`] slots.
+/// Identities are free to mint, so without this a single one can occupy the
+/// whole queue and block every other inbound invitation.
+const MAX_WELCOMES_PER_SENDER: usize = 4;
+
+/// Serialized-byte budget for one `WelcomeFetchResp`, leaving framing headroom
+/// under [`MAX_FRAME_BYTES`]. Entries beyond the budget stay stored and come
+/// back on the fetch that follows the recipient's ack.
+const WELCOME_FETCH_MAX_BYTES: usize = MAX_FRAME_BYTES - 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Helpers — key construction
@@ -141,6 +150,25 @@ fn storage_key(ipk: &[u8; 32], welcome_id: &[u8; WELCOME_ID_LEN]) -> [u8; STORAG
     k[..STASH_PREFIX_LEN].copy_from_slice(&stash_prefix(ipk));
     k[STASH_PREFIX_LEN..].copy_from_slice(welcome_id);
     k
+}
+
+/// Row id for an envelope: `BLAKE3(recipient || group_id || kp_ref_used ||
+/// BLAKE3(welcome_blob))` truncated to [`WELCOME_ID_LEN`].
+///
+/// Every home derives the same id for the same envelope, so one
+/// `WelcomeAck` clears all K replicas and a republish overwrites its own row
+/// instead of minting a second one.
+fn welcome_id(env: &WelcomeEnvelopeP) -> [u8; WELCOME_ID_LEN] {
+    let blob_digest = *NodeId::new(&env.welcome_blob.0).as_bytes();
+    let mut buf = Vec::with_capacity(128);
+    buf.extend_from_slice(&env.recipient_ipk.0);
+    buf.extend_from_slice(&env.group_id.0);
+    buf.extend_from_slice(&env.kp_ref_used.0);
+    buf.extend_from_slice(&blob_digest);
+
+    let mut id = [0u8; WELCOME_ID_LEN];
+    id.copy_from_slice(&NodeId::new(&buf).as_bytes()[..WELCOME_ID_LEN]);
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -252,14 +280,14 @@ fn verify_welcome_envelope(env: &WelcomeEnvelopeP) -> Result<(), WelcomeVerifyEr
 
 /// Iterate all stored welcome rows for a recipient (in `welcome_id`
 /// byte order — opaque-deterministic, sufficient for "drain in
-/// arrival-ish order"). Returns `(storage_key, envelope, expires_at_ms)`
-/// triples; the expiry is decoded from the trailing 8 bytes of the
+/// arrival-ish order"). Returns `(storage_key, envelope, expires_at_ms,
+/// stored_len)` tuples; the expiry is decoded from the leading 8 bytes of the
 /// stored value (we prepend it to the postcard-encoded envelope at
 /// store time so we can filter expired rows without deserialising the
 /// full envelope first).
 fn iterate_welcomes(
     dht: &Dht, ipk: &[u8; 32],
-) -> Vec<([u8; STORAGE_KEY_LEN], WelcomeEnvelopeP, u64)> {
+) -> Vec<([u8; STORAGE_KEY_LEN], WelcomeEnvelopeP, u64, usize)> {
     let mut out = Vec::new();
     let prefix = stash_prefix(ipk);
     for guard in dht.store.welcome.prefix(prefix) {
@@ -283,29 +311,29 @@ fn iterate_welcomes(
         let Ok(env) = WelcomeEnvelopeP::deser(&value[8..]) else {
             continue;
         };
-        out.push((k, env, expires_at_ms));
+        out.push((k, env, expires_at_ms, value.len()));
     }
     out
 }
 
-/// Count current welcomes for `ipk`, bounded so we don't walk a
-/// pathological queue past the cap. Returns
-/// `(count_under_cap, count_at_or_over_cap)` — a binary signal,
-/// matching the `enqueue_for_home` cap-check pattern.
-fn welcome_count_bounded(dht: &Dht, ipk: &[u8; 32]) -> (usize, bool) {
-    let prefix = stash_prefix(ipk);
-    let mut count: usize = 0;
-    let stop_at = MAX_WELCOMES_PER_RECIPIENT.saturating_add(1);
-    for guard in dht.store.welcome.prefix(prefix) {
-        if guard.key().is_err() {
-            return (count, true);
+/// `true` once the recipient is at [`MAX_WELCOMES_PER_RECIPIENT`] rows or
+/// `sender_ipk` is at [`MAX_WELCOMES_PER_SENDER`] of them. A republish of an id
+/// already on disk overwrites its own row and is never refused.
+fn welcome_queue_full(
+    dht: &Dht, ipk: &[u8; 32], sender_ipk: &[u8; 32], key: &[u8; STORAGE_KEY_LEN],
+) -> bool {
+    let mut total: usize = 0;
+    let mut from_sender: usize = 0;
+    for (k, env, _, _) in iterate_welcomes(dht, ipk) {
+        if k == *key {
+            return false;
         }
-        count += 1;
-        if count >= stop_at {
-            break;
+        total += 1;
+        if env.sender_ipk.0 == *sender_ipk {
+            from_sender += 1;
         }
     }
-    (count, count >= MAX_WELCOMES_PER_RECIPIENT)
+    total >= MAX_WELCOMES_PER_RECIPIENT || from_sender >= MAX_WELCOMES_PER_SENDER
 }
 
 // ---------------------------------------------------------------------------
@@ -377,9 +405,15 @@ pub(crate) fn handle_welcome_publish(
         }
     }
 
-    // 5. Per-recipient cap.
-    let (_, full) = welcome_count_bounded(dht, &req.envelope.recipient_ipk.0);
-    if full {
+    // 5. Per-recipient and per-sender caps.
+    let id = welcome_id(&req.envelope);
+    let key = storage_key(&req.envelope.recipient_ipk.0, &id);
+    if welcome_queue_full(
+        dht,
+        &req.envelope.recipient_ipk.0,
+        &req.envelope.sender_ipk.0,
+        &key,
+    ) {
         common::warn!(
             "MLS welcome_publish: queue full for recipient={}",
             recipient_short
@@ -388,16 +422,6 @@ pub(crate) fn handle_welcome_publish(
     }
 
     // 6. Persist.
-    let mut welcome_id = [0u8; WELCOME_ID_LEN];
-    if let Err(e) = SysRng.try_fill_bytes(&mut welcome_id) {
-        common::error!("MLS welcome_publish: OsRng failed: {e}");
-        // OS RNG genuinely failing is a fatal-class error; surface as
-        // `BadSig` (the catch-all hard-fail outcome on this RPC) so we
-        // don't silently store an envelope under a zero id.
-        return WelcomePublishOutcome::BadSig;
-    }
-    let key = storage_key(&req.envelope.recipient_ipk.0, &welcome_id);
-
     let envelope_bytes = match req.envelope.ser() {
         Ok(b) => b,
         Err(e) => {
@@ -421,7 +445,7 @@ pub(crate) fn handle_welcome_publish(
     common::debug!(
         "MLS welcome_publish: stored welcome for recipient={} id={}",
         recipient_short,
-        hex::encode(welcome_id)
+        hex::encode(id)
     );
     WelcomePublishOutcome::Stored
 }
@@ -490,25 +514,30 @@ pub(crate) fn handle_welcome_fetch(
         return WelcomeFetchOutcome::BadSig;
     }
 
-    // 6. Walk + filter + collect. We also opportunistically evict
+    // 6. Walk + filter + collect, bounded by count and by
+    //    `WELCOME_FETCH_MAX_BYTES`. We also opportunistically evict
     //    expired rows on this pass — same policy as the KP fetch path.
     let entries = iterate_welcomes(dht, &req.user_ipk.0);
     let mut to_evict: Vec<[u8; STORAGE_KEY_LEN]> = Vec::new();
     let mut welcomes: Vec<WelcomeEntry> = Vec::with_capacity(entries.len());
-    for (key, env, expires_at_ms) in entries {
+    let mut used: usize = 0;
+    for (key, env, expires_at_ms, stored_len) in entries {
         if expires_at_ms <= now_ms {
             to_evict.push(key);
             continue;
         }
-        let mut welcome_id = [0u8; WELCOME_ID_LEN];
-        welcome_id.copy_from_slice(&key[STASH_PREFIX_LEN..]);
-        welcomes.push(WelcomeEntry {
-            welcome_id: welcome_id.into(),
-            envelope: env,
-        });
-        if welcomes.len() >= MAX_WELCOMES_PER_RECIPIENT {
+        if welcomes.len() >= MAX_WELCOMES_PER_RECIPIENT
+            || used.saturating_add(stored_len) > WELCOME_FETCH_MAX_BYTES
+        {
             break;
         }
+        let mut id = [0u8; WELCOME_ID_LEN];
+        id.copy_from_slice(&key[STASH_PREFIX_LEN..]);
+        used += stored_len;
+        welcomes.push(WelcomeEntry {
+            welcome_id: id.into(),
+            envelope: env,
+        });
     }
 
     for k in &to_evict {
@@ -856,12 +885,16 @@ mod tests {
         let now = fresh_now();
         let auth_peer = NodeId::new([0xBB; 32]);
 
-        // Publish exactly the cap. Each one consumes a rate-limit
-        // token; we have a generous quota (240/h burst), so 32
-        // publishes is fine.
-        let sender = fresh_signing_key();
-        for _ in 0..MAX_WELCOMES_PER_RECIPIENT {
-            let env = build_envelope(&sender, recipient_ipk, b"x".to_vec());
+        // Publish exactly the cap, spread across enough senders to stay
+        // under MAX_WELCOMES_PER_SENDER. Each one consumes a rate-limit
+        // token; we have a generous quota (240/h burst).
+        let senders: Vec<SigningKey> =
+            (0..MAX_WELCOMES_PER_RECIPIENT / MAX_WELCOMES_PER_SENDER)
+                .map(|_| fresh_signing_key())
+                .collect();
+        for i in 0..MAX_WELCOMES_PER_RECIPIENT {
+            let env =
+                build_envelope(&senders[i % senders.len()], recipient_ipk, vec![i as u8; 8]);
             let req = WelcomePublishReq { envelope: env, timestamp: now };
             assert_eq!(
                 handle_welcome_publish(&dht, req, auth_peer, now),
@@ -869,13 +902,78 @@ mod tests {
             );
         }
 
-        // The (cap+1)th publish must be QueueFull.
-        let env = build_envelope(&sender, recipient_ipk, b"overflow".to_vec());
+        // The (cap+1)th publish must be QueueFull, even from a fresh sender.
+        let env = build_envelope(&fresh_signing_key(), recipient_ipk, b"overflow".to_vec());
         let req = WelcomePublishReq { envelope: env, timestamp: now };
         assert_eq!(
             handle_welcome_publish(&dht, req, auth_peer, now),
             WelcomePublishOutcome::QueueFull
         );
+    }
+
+    #[test]
+    fn one_sender_cannot_occupy_the_whole_recipient_queue() {
+        let recipient = fresh_signing_key();
+        let recipient_ipk: [u8; 32] = recipient.verifying_key().to_bytes();
+        let dht = fresh_dht(NodeId::new([0u8; 32]));
+        let now = fresh_now();
+        let auth_peer = NodeId::new([0xBB; 32]);
+
+        let squatter = fresh_signing_key();
+        for i in 0..MAX_WELCOMES_PER_SENDER {
+            let env = build_envelope(&squatter, recipient_ipk, vec![i as u8; 8]);
+            let req = WelcomePublishReq { envelope: env, timestamp: now };
+            assert_eq!(
+                handle_welcome_publish(&dht, req, auth_peer, now),
+                WelcomePublishOutcome::Stored
+            );
+        }
+
+        let env = build_envelope(&squatter, recipient_ipk, b"one-too-many".to_vec());
+        let req = WelcomePublishReq { envelope: env, timestamp: now };
+        assert_eq!(
+            handle_welcome_publish(&dht, req, auth_peer, now),
+            WelcomePublishOutcome::QueueFull
+        );
+
+        // A different inviter still gets through.
+        let env = build_envelope(&fresh_signing_key(), recipient_ipk, b"other".to_vec());
+        let req = WelcomePublishReq { envelope: env, timestamp: now };
+        assert_eq!(
+            handle_welcome_publish(&dht, req, auth_peer, now),
+            WelcomePublishOutcome::Stored
+        );
+    }
+
+    #[test]
+    fn welcome_id_is_derived_from_the_envelope_so_republish_is_idempotent() {
+        let sender = fresh_signing_key();
+        let recipient = fresh_signing_key();
+        let recipient_ipk: [u8; 32] = recipient.verifying_key().to_bytes();
+        let dht = fresh_dht(NodeId::new([0u8; 32]));
+        let now = fresh_now();
+        let auth_peer = NodeId::new([0xBB; 32]);
+
+        let env = build_envelope(&sender, recipient_ipk, b"same".to_vec());
+        let other = build_envelope(&sender, recipient_ipk, b"different".to_vec());
+        assert_ne!(welcome_id(&env), welcome_id(&other));
+
+        for _ in 0..3 {
+            let req = WelcomePublishReq { envelope: env.clone(), timestamp: now };
+            assert_eq!(
+                handle_welcome_publish(&dht, req, auth_peer, now),
+                WelcomePublishOutcome::Stored
+            );
+        }
+
+        let fetch = build_fetch(&recipient, auth_peer, now);
+        match handle_welcome_fetch(&dht, fetch, auth_peer, now) {
+            WelcomeFetchOutcome::Found(found) => {
+                assert_eq!(found.welcomes.len(), 1, "republish must overwrite its own row");
+                assert_eq!(found.welcomes[0].welcome_id.0, welcome_id(&env));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------

@@ -1,8 +1,8 @@
 //! MLS stash relay — the home-relay side of KeyPackage and Welcome
-//! storage, plus the originate half that fans a phone's `client/0`
-//! wrapper RPC out to the K storage homes over `peer/1`.
+//! storage, plus the originate half that fans a phone's `client/5`
+//! wrapper RPC out to the K storage homes over `peer/5`.
 //!
-//! - [`kp`] / [`welcome`]: inbound `peer/1` handlers + fjall storage
+//! - [`kp`] / [`welcome`]: inbound `peer/5` handlers + fjall storage
 //!   for the two stashes (`dht_keypackage`, `dht_welcome`).
 //! - [`kp_originate`] / [`welcome_originate`]: the home relay acting
 //!   as originator on behalf of an authenticated client.
