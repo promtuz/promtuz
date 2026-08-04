@@ -1,5 +1,8 @@
 /.archive
-/.github
+# Workflows have to be published for Actions to run them; anything else
+# dropped in .github stays local.
+/.github/*
+!/.github/workflows/
 /.tls
 
 # direnv's cache; .envrc itself is committed
