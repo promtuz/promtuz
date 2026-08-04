@@ -52,6 +52,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # libcore include_bytes!()s ../.tls/RootCA.pem at compile time and .tls
+      # is gitignored, so a clean checkout cannot compile libcore at all. Mint
+      # a throwaway one with the project's own tool: nothing here dials a real
+      # relay, so the bytes only have to exist and parse.
+      - name: Mint a dev root CA
+        run: |
+          mkdir -p .tls
+          cargo run -p common --bin certgen --features certgen --locked -- init
+          mv RootCA.key RootCA.pem .tls/
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # --all-targets covers the lib, bin and integration test targets but skips
@@ -65,4 +74,13 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # libcore include_bytes!()s ../.tls/RootCA.pem at compile time and .tls
+      # is gitignored, so a clean checkout cannot compile libcore at all. Mint
+      # a throwaway one with the project's own tool: nothing here dials a real
+      # relay, so the bytes only have to exist and parse.
+      - name: Mint a dev root CA
+        run: |
+          mkdir -p .tls
+          cargo run -p common --bin certgen --features certgen --locked -- init
+          mv RootCA.key RootCA.pem .tls/
       - run: cargo test --workspace --all-targets --locked
