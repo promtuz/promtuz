@@ -1349,7 +1349,6 @@ mod tests {
     /// rejection to grief a pair.
     #[test]
     fn pair_decline_sig_authenticates_the_decliner() {
-        use ed25519_dalek::Signature;
         use ed25519_dalek::Verifier;
         let decliner = fresh_signing_key();
         let inviter: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
