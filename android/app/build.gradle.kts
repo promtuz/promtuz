@@ -86,15 +86,13 @@ val sdkDir = Properties().apply {
     ?: System.getenv("ANDROID_HOME")
     ?: System.getenv("ANDROID_SDK_ROOT")
 
-// GUI-launched Android Studio inherits launchd's bare PATH — no ~/.cargo/bin,
-// no Homebrew (cmake, which aws-lc-sys builds with). Exec resolves the command
-// via the JVM PATH not the task env, so pass cargo absolutely + augment PATH so
-// cargo-ndk's re-spawned toolchain (rustc, cmake) resolves.
+// Gradle's Exec resolves the command name via the JVM's PATH (NOT the task's
+// environment map) — and a GUI-launched Android Studio has launchd's bare PATH
+// without ~/.cargo/bin. So invoke cargo by absolute path; the PATH env is still
+// set below for the rustc/ndk toolchain cargo-ndk re-spawns. (Homebrew: repoint cargoBin.)
 val cargoBin = "${System.getProperty("user.home")}/.cargo/bin"
 val cargo = file("$cargoBin/cargo").takeIf { it.exists() }?.absolutePath ?: "cargo"
-val cargoAugmentedPath =
-    listOf(cargoBin, "/opt/homebrew/bin", "/usr/local/bin", System.getenv("PATH") ?: "")
-        .filter { it.isNotEmpty() }.joinToString(":")
+val cargoAugmentedPath = "$cargoBin:${System.getenv("PATH") ?: ""}"
 
 // Generated uniffi Kotlin bindings land here (see generateUniffiBindings).
 // mkdirs at config time so the Variant API can register it as a source dir.
