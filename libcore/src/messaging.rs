@@ -637,11 +637,15 @@ pub async fn set_presence(idle: bool) -> Result<()> {
     Ok(())
 }
 
-/// Re-send our last-known presence mode. Called on every relay (re)connect
-/// so the relay's active_clients reflects real fg/bg even when no UI is alive
-/// (e.g. a headless push wake-drain). Self-heals a dropped SetPresence.
+/// Re-assert presence on a relay (re)connect, but only when the user is
+/// actually in the app. A fresh connection carries no `active_clients` entry, so
+/// Idle is already the relay's default and announcing it would cost a K-home
+/// publish to say nothing — presence is the user's intent, not the socket's.
 pub async fn reassert_presence() -> Result<()> {
-    set_presence(PRESENCE_IDLE.load(Ordering::Relaxed)).await
+    if PRESENCE_IDLE.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    set_presence(false).await
 }
 
 /// Pairing: fetch `to`'s KeyPackage, build the 1:1 group, and
