@@ -162,8 +162,13 @@ object PushNotifier {
         // Buzz only the peer this reconcile fired for, and only per the configured cadence. Because the
         // alert rides the arriving peer (not a global flag), a silent reconcile racing in first can't
         // swallow it.
+        //
+        // `newest > lastAlerted` is what separates an arrival from a repaint: an unread message stays
+        // unread, so every later reconcile — including a wake-drain in a fresh process — rebuilds the
+        // same set and would otherwise re-buzz for messages already alerted hours ago.
+        val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
-        val alertThisChat = peerHex == alertPeer
+        val alertThisChat = peerHex == alertPeer && newest > ChatPrefs.lastAlerted(peerHex)
         val silent = when (mode) {
             NotifBuzz.EveryMessage, NotifBuzz.FirstOnly -> !alertThisChat
             NotifBuzz.Throttled -> {
@@ -173,11 +178,16 @@ object PushNotifier {
                 !buzz
             }
         }
+        if (!silent) ChatPrefs.setLastAlerted(peerHex, newest)
 
         val chat = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
             .setSmallIcon(R.drawable.i_logo_mono)
             .setColor(BRAND_COLOR)
             .setNumber(n) // unread count → OEM launcher/shade badge (the "2/3" pill)
+            // The sender's send time, not now: a drain after hours offline would
+            // otherwise stamp every queued message with the moment it arrived.
+            .setWhen(newest * 1000)
+            .setShowWhen(true)
             .setGroup(Notifications.GROUP_KEY)
             .setAutoCancel(true)
             .setSilent(silent)

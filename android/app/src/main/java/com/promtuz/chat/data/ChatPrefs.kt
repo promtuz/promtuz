@@ -54,10 +54,22 @@ object ChatPrefs {
     fun togglePin(peerHex: String) { _pinned.value = _pinned.value.toggled(peerHex); persist() }
     fun toggleMute(peerHex: String) { _muted.value = _muted.value.toggled(peerHex); persist() }
 
+    /**
+     * Timestamp (unix seconds) of the newest message this chat has already
+     * alerted for. Persisted rather than held in memory because the case that
+     * needs it is a wake-drain in a fresh process, which starts with an empty
+     * heap and an unread set the user was notified about hours ago.
+     */
+    fun lastAlerted(peerHex: String): Long = prefs.getLong(ALERTED + peerHex, 0L)
+
+    fun setLastAlerted(peerHex: String, tsSecs: Long) =
+        prefs.edit { putLong(ALERTED + peerHex, tsSecs) }
+
     /** Drop all flags for a forgotten contact. */
     fun forget(peerHex: String) {
         _pinned.value = _pinned.value - peerHex
         _muted.value = _muted.value - peerHex
+        prefs.edit { remove(ALERTED + peerHex) }
         persist()
     }
 
@@ -75,6 +87,7 @@ object ChatPrefs {
     private const val NOTIF_PREVIEW = "notif_preview"
     private const val NOTIF_BUZZ = "notif_buzz"
     private const val UPDATE_CHANNEL = "update_channel"
+    private const val ALERTED = "alerted_"
 }
 
 /** New-message alert cadence, persisted via [ChatPrefs.notifBuzz]. */
