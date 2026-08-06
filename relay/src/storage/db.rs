@@ -233,9 +233,14 @@ impl Store {
     /// `observed_at_ms` is verified within `PRESENCE_STATE_MAX_SKEW_MS` of real
     /// time by `RelayPresenceState::verify`, so it doubles as the clock for the
     /// staleness comparison against the stored row.
+    /// `lease_expires_at_ms` is the publisher's declared deadline for this
+    /// claim. It is clamped to our own ceiling, so a lease may only ever
+    /// shorten the window — a relay cannot pin a user online by declaring a
+    /// distant expiry.
     pub fn put_presence_state(
         &self, recipient: &[u8; 32], contact: &[u8; 32],
         state: &common::proto::client_rel::PresenceState, version: u64, observed_at_ms: u64,
+        lease_expires_at_ms: u64,
     ) -> fjall::Result<bool> {
         if version > observed_at_ms.saturating_add(PRESENCE_VERSION_MAX_LEAD_MS) {
             return Ok(false);
@@ -255,11 +260,14 @@ impl Store {
             common::proto::client_rel::PresenceState::Idle { since } => (1, *since),
             common::proto::client_rel::PresenceState::Offline { last_seen } => (2, *last_seen),
         };
-        let mut value = Vec::with_capacity(25);
+        let expires_at_ms = lease_expires_at_ms
+            .min(observed_at_ms.saturating_add(PRESENCE_STATE_TTL_MS));
+        let mut value = Vec::with_capacity(33);
         value.extend_from_slice(&version.to_be_bytes());
         value.extend_from_slice(&observed_at_ms.to_be_bytes());
         value.push(tag);
         value.extend_from_slice(&timestamp.to_be_bytes());
+        value.extend_from_slice(&expires_at_ms.to_be_bytes());
         self.presence_state.insert(key, value)?;
         Ok(true)
     }
@@ -588,9 +596,13 @@ fn presence_consent_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 8).is_none_or(|issued_at| now_ms.saturating_sub(issued_at) > IDLE_IDENTITY_TTL_MS)
 }
 
+/// Presence is a lease: it dies at its stored deadline unless renewed. Rows
+/// written before the deadline was recorded carry only the first 25 bytes, so
+/// they fall back to the fixed ceiling.
 fn presence_state_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
-    be_u64(value, 8)
-        .is_none_or(|observed_at| now_ms.saturating_sub(observed_at) > PRESENCE_STATE_TTL_MS)
+    be_u64(value, 25)
+        .or_else(|| be_u64(value, 8).map(|at| at.saturating_add(PRESENCE_STATE_TTL_MS)))
+        .is_none_or(|deadline| now_ms >= deadline)
 }
 
 fn presence_lease_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
@@ -710,12 +722,55 @@ mod tests {
     }
 
     #[test]
+    fn presence_expires_at_the_lease_deadline() {
+        let store = fresh_store();
+        let t0 = 1_700_000_000_000;
+        let short = t0 + 60_000;
+        assert!(
+            store
+                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, t0, t0, short)
+                .unwrap()
+        );
+        let value = store.presence_state.get([[1u8; 32], [2u8; 32]].concat()).unwrap().unwrap();
+        assert!(!presence_state_expired(b"", &value, short - 1), "live before the deadline");
+        assert!(presence_state_expired(b"", &value, short), "dead at the deadline");
+    }
+
+    #[test]
+    fn a_lease_cannot_outlast_our_own_ceiling() {
+        let store = fresh_store();
+        let t0 = 1_700_000_000_000;
+        assert!(
+            store
+                .put_presence_state(
+                    &[1u8; 32], &[2u8; 32], &PresenceState::Online, t0, t0, u64::MAX
+                )
+                .unwrap()
+        );
+        let value = store.presence_state.get([[1u8; 32], [2u8; 32]].concat()).unwrap().unwrap();
+        assert!(presence_state_expired(b"", &value, t0 + PRESENCE_STATE_TTL_MS));
+    }
+
+    /// Rows predating the stored deadline carry 25 bytes and must still expire.
+    #[test]
+    fn legacy_presence_rows_fall_back_to_the_fixed_ceiling() {
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&1u64.to_be_bytes());
+        legacy.extend_from_slice(&1_000u64.to_be_bytes());
+        legacy.push(0);
+        legacy.extend_from_slice(&0u64.to_be_bytes());
+        assert_eq!(legacy.len(), 25);
+        assert!(!presence_state_expired(b"", &legacy, 1_000 + PRESENCE_STATE_TTL_MS - 1));
+        assert!(presence_state_expired(b"", &legacy, 1_000 + PRESENCE_STATE_TTL_MS));
+    }
+
+    #[test]
     fn presence_state_rejects_version_beyond_observed_lead() {
         let store = fresh_store();
         let now = now_ms();
         assert!(
             !store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, u64::MAX, now)
+                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, u64::MAX, now, now + PRESENCE_STATE_TTL_MS)
                 .unwrap()
         );
         assert_eq!(store.get_presence_state(&[1u8; 32], &[2u8; 32]), None);
@@ -728,12 +783,12 @@ mod tests {
         let high = t0 + PRESENCE_VERSION_MAX_LEAD_MS;
         assert!(
             store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0)
+                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0, t0 + PRESENCE_STATE_TTL_MS)
                 .unwrap()
         );
         assert!(
             !store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0 + 1)
+                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0 + 1, t0 + 1 + PRESENCE_STATE_TTL_MS)
                 .unwrap(),
             "a fresh row still wins on version"
         );
@@ -741,7 +796,7 @@ mod tests {
         let later = t0 + PRESENCE_STATE_TTL_MS + 1;
         assert!(
             store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, 1, later)
+                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, 1, later, later + PRESENCE_STATE_TTL_MS)
                 .unwrap(),
             "a stale row is treated as absent"
         );

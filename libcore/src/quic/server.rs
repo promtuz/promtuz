@@ -83,6 +83,10 @@ const MAX_CONCURRENT_STREAMS: usize = 16;
 /// Cadence for sampling the live connection RTT into the latency graph.
 const RTT_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Below half of `PRESENCE_LEASE_MAX_MS`, so a single missed renewal leaves the
+/// claim standing and only a real departure lets it lapse.
+const PRESENCE_RENEW_INTERVAL: Duration = Duration::from_secs(4 * 60);
+
 /// Classifies a `quinn::ConnectionError` as terminal-for-this-relay
 /// (TLS / cert / auth failure that won't resolve without external
 /// intervention) versus transient (network blip, timeout, peer reset).
@@ -251,17 +255,23 @@ impl Relay {
 
         *RELAY.write() = Some(self);
 
-        // Lease is short-lived by design. Refresh below half-life while this
-        // exact home connection remains live; reconnect also re-registers it.
+        // Presence is a lease: it lapses on its own unless renewed, which is
+        // what makes a crash or a killed process read Offline without anyone
+        // having to say so. Renewed below half-life so one lost round is not a
+        // departure, and only while the user is actually in the app — a wake
+        // drain holds no claim to extend.
         tokio::spawn({
             let conn = conn.clone();
             async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(4 * 60));
+                let mut tick = tokio::time::interval(PRESENCE_RENEW_INTERVAL);
                 tick.tick().await;
                 while conn.close_reason().is_none() {
                     tick.tick().await;
-                    if let Err(e) = crate::messaging::renew_presence_lease().await {
-                        debug!("presence lease renewal failed: {e}");
+                    if !crate::messaging::presence_is_active() {
+                        continue;
+                    }
+                    if let Err(e) = crate::messaging::renew_presence().await {
+                        debug!("presence renewal failed: {e}");
                     }
                 }
             }

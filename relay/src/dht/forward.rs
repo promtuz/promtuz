@@ -464,6 +464,7 @@ pub(crate) async fn handle_presence_state_rpc(
         &record.state,
         record.version,
         record.observed_at_ms,
+        record.lease.expires_at_ms,
     ) else {
         return PresenceReplicationResp { accepted: false };
     };

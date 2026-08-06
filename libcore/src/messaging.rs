@@ -613,11 +613,30 @@ fn next_presence_lease_version(now: u64) -> Result<u64> {
 /// (e.g. a headless push wake-drain) is Idle until the UI foregrounds it.
 static PRESENCE_IDLE: AtomicBool = AtomicBool::new(true);
 
+/// Whether the user is in the app. The renewal loop asks before spending a
+/// lease renewal and a K-home publish on a connection nobody is looking at.
+pub fn presence_is_active() -> bool {
+    !PRESENCE_IDLE.load(Ordering::Relaxed)
+}
+
 /// Tell the relay our activity mode: `idle = true` on backgrounding (sent as
 /// the last packet before the app freezes), `false` on return. Fire-and-forget;
 /// the relay updates the state it reports to our mutual contacts.
 pub async fn set_presence(idle: bool) -> Result<()> {
     PRESENCE_IDLE.store(idle, Ordering::Relaxed);
+    send_presence(idle).await
+}
+
+/// Extend the claim: a fresh lease, then the state republished under it.
+///
+/// Order matters — `forward_to_homes` signs the state against whatever lease the
+/// relay currently holds, and a home rejects a record whose lease has expired.
+pub async fn renew_presence() -> Result<()> {
+    renew_presence_lease().await?;
+    send_presence(false).await
+}
+
+async fn send_presence(idle: bool) -> Result<()> {
     let mode = if idle {
         common::proto::client_rel::PresenceMode::Idle
     } else {
