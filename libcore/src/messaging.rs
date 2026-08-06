@@ -1332,7 +1332,7 @@ pub fn leaf_signer_for_group(
 /// process_inbound_envelope with a `FakeDhtClient` for the `on_consumed`
 /// callback path.
 pub async fn process_inbound_envelope<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], payload: &[u8],
+    ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], payload: &[u8], accepted_at_ms: u64,
 ) -> Result<Option<InboundDecoded>> {
     let envelope =
         MlsEnvelopeP::deser(payload).map_err(|e| anyhow!("postcard deser MlsEnvelopeP: {e}"))?;
@@ -1371,7 +1371,7 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             },
         },
         MlsEnvelopeP::Application(env) => {
-            let decoded = process_application_inbound(ctx, sender_ipk, env)?;
+            let decoded = process_application_inbound(ctx, sender_ipk, env, accepted_at_ms)?;
             if let InboundDecoded::ApplicationNoGroup { group_id } = &decoded {
                 heal_dead_group(ctx, sender_ipk, group_id).await;
             }
@@ -1613,9 +1613,10 @@ pub fn process_welcome_inbound_no_contacts<C: DhtClient>(
 
 fn process_application_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: MlsApplicationEnvelopeP,
+    accepted_at_ms: u64,
 ) -> Result<InboundDecoded> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
-    process_application_inbound_for(ctx, sender_ipk, &our_ipk, env)
+    process_application_inbound_for(ctx, sender_ipk, &our_ipk, env, accepted_at_ms)
 }
 
 /// Persist messages drained from the epoch-ahead buffer. These were
@@ -1633,7 +1634,7 @@ fn persist_drained(
 ) {
     for m in drained {
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
-        let ts = crate::utils::systime().as_secs();
+        let ts = crate::quic::server::accepted_at_secs(m.accepted_at_ms);
         match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Text(content)) => {
                 if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, None) {
@@ -1692,6 +1693,7 @@ fn persist_drained(
 /// without sharing a process-global identity row.
 pub fn process_application_inbound_for<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32], env: MlsApplicationEnvelopeP,
+    accepted_at_ms: u64,
 ) -> Result<InboundDecoded> {
     // 1. Outer envelope sig verifies under sender's IPK.
     let transcript = envelope_signing_input(
@@ -1749,7 +1751,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
         // Buffer for catchup later.
         let dispatch_id = blake3::hash(&env.mls_message.0).as_bytes()[..16].to_vec();
         ctx.buffer
-            .push(&group, env.mls_message.0.clone(), env.epoch, dispatch_id)
+            .push(&group, env.mls_message.0.clone(), env.epoch, dispatch_id, accepted_at_ms)
             .map_err(|e| anyhow!("epoch-ahead buffer push: {e}"))?;
         return Ok(InboundDecoded::ApplicationBuffered);
     }
@@ -2252,7 +2254,7 @@ mod tests {
         let dispatch_id = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
         let outcome = bob
             .buffer
-            .push(&bob_group, mls_bytes, alice_group.epoch(), dispatch_id.clone())
+            .push(&bob_group, mls_bytes, alice_group.epoch(), dispatch_id.clone(), 0)
             .expect("push");
         assert_eq!(outcome, crate::mls::PushOutcome::Inserted);
 
@@ -2424,7 +2426,7 @@ mod tests {
 
         let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env)
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0)
                 .expect("stale envelope returns ApplicationStale, not Err");
 
         match result {
@@ -2485,7 +2487,7 @@ mod tests {
         };
 
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env)
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0)
                 .expect("dead-group envelope must be a typed outcome, not Err");
 
         match result {
@@ -2550,7 +2552,7 @@ mod tests {
 
         let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env);
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0);
         assert!(result.is_err(), "far-future envelope must be rejected");
         let buffered_after = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         assert_eq!(buffered_before, buffered_after, "far-future envelope must not grow the buffer");
@@ -2582,7 +2584,7 @@ mod tests {
         let outer = MlsEnvelopeP::Welcome(env);
         let bytes = outer.ser().expect("ser");
 
-        let r = process_inbound_envelope(&bob.ctx(dht.as_ref()), [0u8; 32], &bytes).await;
+        let r = process_inbound_envelope(&bob.ctx(dht.as_ref()), [0u8; 32], &bytes, 0).await;
         assert!(r.is_err(), "oversize welcome must be rejected at decode");
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");

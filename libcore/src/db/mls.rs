@@ -163,6 +163,16 @@ const MIGRATION_ARRAY: &[M] = &[
         DELETE FROM mls_keypackage_stash;
     "#,
     ),
+    // Origin-relay acceptance time, carried so a message that waits here for its
+    // epoch is still dated when it was sent rather than when it decrypted.
+    //
+    // 0 on rows written before this column existed; readers fall back to
+    // `received_at_ms`, which at least predates the drain.
+    M::up(
+        r#"--sql
+        ALTER TABLE mls_epoch_ahead ADD COLUMN accepted_at_ms INTEGER NOT NULL DEFAULT 0;
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

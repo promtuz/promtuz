@@ -25,6 +25,7 @@
 //!     dispatch_id     BLOB    NOT NULL,
 //!     msg_blob        BLOB    NOT NULL,
 //!     received_at_ms  INTEGER NOT NULL,
+//!     accepted_at_ms  INTEGER NOT NULL DEFAULT 0,
 //!     PRIMARY KEY (group_id, dispatch_id)
 //! );
 //! ```
@@ -142,6 +143,10 @@ pub struct ProcessedApplicationMessage {
     /// Epoch at which the message was encrypted. Always `<=`
     /// `group.epoch()` after a successful drain step.
     pub epoch: u64,
+    /// Origin-relay acceptance time of the dispatch that carried this message,
+    /// so a buffered message is dated when it was sent. Falls back to the
+    /// buffer's own receive time for rows written before it was recorded.
+    pub accepted_at_ms: u64,
 }
 
 #[allow(dead_code)] // messaging.rs caller.
@@ -175,7 +180,7 @@ impl EpochCatchupBuffer {
     ///   already equals [`MAX_EPOCH_AHEAD_BUFFER`].
     pub fn push(
         &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
-        dispatch_id: Vec<u8>,
+        dispatch_id: Vec<u8>, accepted_at_ms: u64,
     ) -> Result<PushOutcome, MlsGroupError> {
         let group_id = group.group_id();
         let now_ms = unix_now_ms();
@@ -244,9 +249,16 @@ impl EpochCatchupBuffer {
 
         tx.execute(
             "INSERT INTO mls_epoch_ahead \
-             (group_id, epoch, dispatch_id, msg_blob, received_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![&group_id[..], msg_epoch as i64, &dispatch_id, &msg_bytes, now_ms as i64],
+             (group_id, epoch, dispatch_id, msg_blob, received_at_ms, accepted_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &group_id[..],
+                msg_epoch as i64,
+                &dispatch_id,
+                &msg_bytes,
+                now_ms as i64,
+                accepted_at_ms as i64
+            ],
         )
         .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
         tx.commit()
@@ -300,10 +312,12 @@ impl EpochCatchupBuffer {
             // Find a candidate row to process: epoch <= current.
             // We pick the *oldest* (lowest received_at_ms) to give
             // commits priority — they're most likely to unblock epoch advance.
-            let candidate: Option<(Vec<u8>, Vec<u8>, u64)> = {
+            let candidate: Option<(Vec<u8>, Vec<u8>, u64, u64)> = {
                 let conn = self.conn.lock();
                 conn.query_row(
-                    "SELECT dispatch_id, msg_blob, epoch FROM mls_epoch_ahead \
+                    "SELECT dispatch_id, msg_blob, epoch, \
+                            COALESCE(NULLIF(accepted_at_ms, 0), received_at_ms) \
+                     FROM mls_epoch_ahead \
                      WHERE group_id = ?1 AND epoch <= ?2 \
                      ORDER BY epoch ASC, received_at_ms ASC LIMIT 1",
                     params![&group_id[..], current_epoch as i64],
@@ -311,13 +325,14 @@ impl EpochCatchupBuffer {
                         let did: Vec<u8> = r.get(0)?;
                         let blob: Vec<u8> = r.get(1)?;
                         let ep: i64 = r.get(2)?;
-                        Ok((did, blob, ep as u64))
+                        let at: i64 = r.get(3)?;
+                        Ok((did, blob, ep as u64, at as u64))
                     },
                 )
                 .ok()
             };
 
-            let Some((dispatch_id, msg_blob, msg_epoch)) = candidate else {
+            let Some((dispatch_id, msg_blob, msg_epoch, accepted_at_ms)) = candidate else {
                 break; // no progressable rows
             };
 
@@ -367,7 +382,12 @@ impl EpochCatchupBuffer {
 
             match group.process_incoming(provider, proto) {
                 Ok(ProcessedMessageContent::ApplicationMessage(app)) => {
-                    output.push(application_to_processed(app, dispatch_id.clone(), msg_epoch));
+                    output.push(application_to_processed(
+                        app,
+                        dispatch_id.clone(),
+                        msg_epoch,
+                        accepted_at_ms,
+                    ));
                     delete_row(&dispatch_id)?;
                 }
                 Ok(ProcessedMessageContent::StagedCommitMessage(staged)) => {
@@ -442,12 +462,13 @@ impl EpochCatchupBuffer {
 /// Bridge an openmls `ApplicationMessage` into our public-facing
 /// struct.
 fn application_to_processed(
-    app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64,
+    app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64, accepted_at_ms: u64,
 ) -> ProcessedApplicationMessage {
     ProcessedApplicationMessage {
         dispatch_id,
         plaintext: app.into_bytes(),
         epoch,
+        accepted_at_ms,
     }
 }
 
@@ -603,8 +624,9 @@ mod tests {
         let bytes = mls_message_to_bytes(&alice_msg).expect("ser");
         let dispatch_id = vec![0xDE, 0xAD, 0xBE, 0xEF];
         // Push at the *current* epoch — the drain will pick it up.
+        let sent_at_ms = 1_700_000_000_000;
         let outcome = buffer
-            .push(&bob_group, bytes, bob_group.epoch(), dispatch_id.clone())
+            .push(&bob_group, bytes, bob_group.epoch(), dispatch_id.clone(), sent_at_ms)
             .expect("push");
         assert_eq!(outcome, PushOutcome::Inserted);
 
@@ -614,6 +636,10 @@ mod tests {
         assert_eq!(drained.len(), 1, "exactly one application drained");
         assert_eq!(drained[0].plaintext, plaintext);
         assert_eq!(drained[0].dispatch_id, dispatch_id);
+        assert_eq!(
+            drained[0].accepted_at_ms, sent_at_ms,
+            "send time survives the buffer — the drain must not date it to now"
+        );
         assert_eq!(buffer.buffered_count(&bob_group.group_id()).unwrap(), 0);
     }
 
@@ -632,7 +658,7 @@ mod tests {
             // Use a non-zero, distinct 4-byte id.
             let id = (i as u32).to_be_bytes().to_vec();
             let outcome = buffer
-                .push(&bob_group, vec![0x42; 16], 999, id)
+                .push(&bob_group, vec![0x42; 16], 999, id, 0)
                 .expect("push");
             assert_eq!(outcome, PushOutcome::Inserted);
         }
@@ -643,7 +669,7 @@ mod tests {
 
         // Push one more — should be Discarded.
         let outcome = buffer
-            .push(&bob_group, vec![0x99; 16], 999, vec![0xFF; 4])
+            .push(&bob_group, vec![0x99; 16], 999, vec![0xFF; 4], 0)
             .expect("push (cap)");
         assert_eq!(outcome, PushOutcome::Discarded);
         assert_eq!(
@@ -665,7 +691,7 @@ mod tests {
         let id = vec![0xBE, 0xEF];
 
         let outcome = buffer
-            .push(&bob_group, vec![0x55; 32], 7, id.clone())
+            .push(&bob_group, vec![0x55; 32], 7, id.clone(), 0)
             .expect("push");
         assert_eq!(outcome, PushOutcome::Inserted);
 
@@ -677,7 +703,7 @@ mod tests {
 
         // Idempotent re-push of the same dispatch_id is Replaced.
         let outcome2 = buffer2
-            .push(&bob_group, vec![0x55; 32], 7, id)
+            .push(&bob_group, vec![0x55; 32], 7, id, 0)
             .expect("push2");
         assert_eq!(outcome2, PushOutcome::Replaced);
         assert_eq!(buffer2.buffered_count(&gid).unwrap(), 1);
@@ -702,6 +728,7 @@ mod tests {
                 b"definitely-not-an-mls-frame".to_vec(),
                 bob_group.epoch(),
                 dispatch_id,
+                0,
             )
             .expect("push");
         assert_eq!(outcome, PushOutcome::Inserted);

@@ -696,7 +696,7 @@ fn is_welcome_envelope(payload: &[u8]) -> bool {
 /// origin relay and sits outside every signature, so it is only ever a hint
 /// bounded by our own clock — a home cannot date a message into the future to
 /// pin it at the top of a conversation.
-fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
+pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
     (accepted_at_ms / 1_000).min(systime().as_secs())
 }
 
@@ -758,7 +758,7 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms).await
         },
         None => {
             let dht = crate::quic::dht_client::NotWiredDhtClient;
@@ -768,7 +768,7 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      &dht,
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms).await
         },
     };
 
@@ -871,7 +871,7 @@ async fn process_deliver(
                 Ok(AppPayload::React { target, emoji, add }) => {
                     // Reactor is the MLS sender (`msg.from`) — attributed to its
                     // own IPK, so this is already group-correct.
-                    let ts = systime().as_secs();
+                    let ts = accepted_at_secs(msg.accepted_at_ms);
                     if crate::data::reaction::Reaction::apply(
                         &msg.from, &target, &msg.from, &emoji, add, ts,
                     ) {
