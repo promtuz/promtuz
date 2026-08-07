@@ -75,18 +75,24 @@ class ChatVM(private val application: Application) : ViewModel() {
         peer = peerIpk
 
         var newestIncoming: String? = null
+        var lastMarkedRead: String? = null
         viewModelScope.launch {
             observeQuery(setOf("messages", "reactions", "message_media", "partials")) { load() }.collect { list ->
                 // Their message just landed — if they were typing, it inherits the
-                // typing bubble (morph), and with this chat on screen it's read:
-                // receipt the high-water mark. Handoff is set BEFORE the list so
-                // one recomposition sees both.
+                // typing bubble (morph). Handoff is set BEFORE the list so one
+                // recomposition sees both.
                 val newest = list.firstOrNull { !it.outgoing }
                 if (newest?.key != newestIncoming) {
                     newestIncoming = newest?.key
                     if (_typing.value && newest != null) typingHandoff.value = newest.key
                     clearTyping()
-                    newest?.dispatchIdHex?.let { did ->
+                }
+                // With this chat on screen it's read: receipt the high-water mark.
+                // Keyed on the dispatch id, not the row — `key` falls back to the
+                // local ULID, so a row can surface before the id the receipt needs.
+                newest?.dispatchIdHex?.let { did ->
+                    if (did != lastMarkedRead) {
+                        lastMarkedRead = did
                         fire { CoreBridge.markRead(peer, did.fromHex()) }
                     }
                 }
