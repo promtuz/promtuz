@@ -13,6 +13,9 @@ pub enum OpType {
     Message = 0,
     Welcome = 1,
     KpPublish = 2,
+    /// MLS control payload (receipt, edit, delete, reaction, pair ack) or a
+    /// PairDecline. Carries no message row — retries are pure side-effect.
+    Control = 3,
 }
 
 impl OpType {
@@ -21,6 +24,7 @@ impl OpType {
             0 => Some(OpType::Message),
             1 => Some(OpType::Welcome),
             2 => Some(OpType::KpPublish),
+            3 => Some(OpType::Control),
             _ => None,
         }
     }

@@ -345,8 +345,8 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
 
 /// Send a control `AppPayload` (Edit/Delete/React/Receipt) into the existing 1:1 group as an
 /// MLS application message. The group must already exist — you're mutating a
-/// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
-/// the relay queues it for an offline peer; if WE are offline it's dropped.
+/// message you already exchanged. Outboxed, so a send that finds us offline is
+/// replayed on reconnect rather than lost.
 pub(crate) async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
     send_control_inner(to, payload, false).await
 }
@@ -359,6 +359,9 @@ pub(crate) async fn send_control_wake(to: [u8; 32], payload: AppPayload) -> Resu
 }
 
 async fn send_control_inner(to: [u8; 32], payload: AppPayload, wake: bool) -> Result<()> {
+    // P2P candidates describe a path that is gone by the next reconnect; every
+    // other control payload is a state edit the peer must eventually see.
+    let outbox = (!matches!(payload, AppPayload::P2p { .. })).then_some(OpType::Control);
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -390,7 +393,7 @@ async fn send_control_inner(to: [u8; 32], payload: AppPayload, wake: bool) -> Re
     )
     .map_err(|e| anyhow!("build envelope: {e}"))?;
 
-    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, wake).await
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, wake, outbox).await
 }
 
 /// Sign a `DispatchP` over `env_bytes` and send it (the relay queues it for an
@@ -398,8 +401,14 @@ async fn send_control_inner(to: [u8; 32], payload: AppPayload, wake: bool) -> Re
 /// PairDecline — both just need an authenticated dispatch of opaque bytes.
 /// `wake` sets the push-wake flag: false for chat-side control, true for the
 /// reverse-wake that must revive an offline sender.
+///
+/// `outbox` names the op type to persist the framed bytes under: the row
+/// outlives a failed attempt and the reconciler re-sends it on the next
+/// reconnect, retiring only on a durable ack. `None` sends once and lets the
+/// payload die with the attempt.
 async fn dispatch_envelope(
     to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey, env_bytes: Vec<u8>, wake: bool,
+    outbox: Option<OpType>,
 ) -> Result<()> {
     let id = crate::data::message::next_dispatch_id();
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
@@ -417,6 +426,9 @@ async fn dispatch_envelope(
         wake,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
+    if let Some(op) = outbox {
+        delivery::enqueue(&id, op, Some(to), &bytes);
+    }
 
     let conn = {
         let relay = RELAY.read();
@@ -424,12 +436,22 @@ async fn dispatch_envelope(
     };
     let Some(conn) = conn else {
         info!("MESSAGE: offline — dispatch to {} not sent", hex::encode(&to[..4]));
-        return Ok(());
+        bail!("offline");
     };
-    if let Ok((mut tx, mut rx)) = conn.open_bi().await {
-        let _ = tx.write_all(&bytes).await;
-        let _ = tx.finish();
-        let _ = SRelayPacket::unpack(&mut rx).await; // drain ack, ignore
+    let (mut tx, mut rx) =
+        conn.open_bi().await.map_err(|e| anyhow!("open dispatch stream: {e}"))?;
+    tx.write_all(&bytes).await.map_err(|e| anyhow!("write dispatch: {e}"))?;
+    tx.finish().map_err(|e| anyhow!("finish dispatch: {e}"))?;
+    let ack = match SRelayPacket::unpack(&mut rx).await {
+        Ok(SRelayPacket::DispatchAck(ack)) => ack,
+        Ok(other) => bail!("unexpected dispatch reply: {other:?}"),
+        Err(e) => bail!("dispatch ack: {e}"),
+    };
+    if delivery::outcome_for_ack(&ack) != LastOutcome::Durable {
+        bail!("relay did not accept dispatch: {ack:?}");
+    }
+    if outbox.is_some() {
+        delivery::retire(&id);
     }
     Ok(())
 }
@@ -454,7 +476,7 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
         sig: Bytes(sig),
     });
     let env_bytes = envelope.ser().map_err(|e| anyhow!("encode decline: {e}"))?;
-    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, false).await
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, false, Some(OpType::Control)).await
 }
 
 /// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits

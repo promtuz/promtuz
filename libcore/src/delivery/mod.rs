@@ -330,6 +330,30 @@ mod tests {
         assert!(matches!(classify(OpType::Message, LastOutcome::Silence, MESSAGE_SILENCE_MAX - 1, 0), Next::KeepRetrying));
     }
 
+    /// `reconcile` decodes with `from_u8(..).unwrap_or(Message)`, so a variant
+    /// missing from the match reconciles as a Message and tries to fail a
+    /// message row that was never written.
+    #[test]
+    fn op_type_round_trips_through_its_discriminant() {
+        for op in [OpType::Message, OpType::Welcome, OpType::KpPublish, OpType::Control] {
+            assert_eq!(OpType::from_u8(op as u8), Some(op));
+        }
+    }
+
+    /// Control ops carry no message row, so the attempt bound that fails a
+    /// message doesn't apply — only the age cutoff retires them.
+    #[test]
+    fn control_retries_past_the_message_attempt_bound() {
+        assert!(matches!(
+            classify(OpType::Control, LastOutcome::Silence, MESSAGE_SILENCE_MAX, 0),
+            Next::KeepRetrying
+        ));
+        assert!(matches!(
+            classify(OpType::Control, LastOutcome::Silence, 0, DEAD_TTL_MS + 1),
+            Next::Dead
+        ));
+    }
+
     #[test]
     fn queued_retires_after_bounded_escalation() {
         assert!(matches!(
