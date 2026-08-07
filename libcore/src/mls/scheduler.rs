@@ -5,7 +5,7 @@
 //! - **On reconnect**: ensure the stash is full
 //!   ([`KeyPackageStash::ensure_stash_full`]) — the relay-side homes
 //!   may have GC'd expired entries while we were offline.
-//! - **On periodic tick** (default 1 hour): check
+//! - **On periodic tick** (`KP_SCHEDULER_TICK_MS`): check
 //!   [`KeyPackageStash::should_refill`] / [`should_rotate`] and act.
 //!
 //! # Why a separate module
@@ -64,10 +64,8 @@ pub enum SchedulerOutcome {
 ///    `KP_STASH_TARGET` records, publishes via
 ///    [`DhtClient::publish_keypackages`].
 /// 2. Else if `should_rotate` (oldest unconsumed KP older than
-///    `KP_SCHEDULED_ROTATION_MS`) → mint a full batch, publish via
-///    Refill domain so a captured Publish sig from a prior cycle
-///    cannot replay. The old (still-in-lifetime) records survive at
-///    the home; this is the *additive* anti-pinning rotation.
+///    `KP_SCHEDULED_ROTATION_MS`) → mint a full batch and publish it as a
+///    snapshot, replacing the previous generation at the home.
 /// 3. Else → NoOp.
 ///
 /// # Errors
@@ -102,15 +100,13 @@ pub async fn run_once<C: DhtClient>(
         if recs.is_empty() {
             return Ok(SchedulerOutcome::NoOp);
         }
-        // Refill domain — additive at the home, distinct from Publish
-        // so a captured Publish sig can't replay. When both "stash
-        // dipped under low-water" AND "rotation cadence elapsed" are
-        // true we go through Publish (the `should_refill` branch above);
-        // the pure-cadence case here is Refill.
-        dht.refill_keypackages(&recs, KpOutcomeFilter::Default)
-            .await
-            .map_err(|e| anyhow!("refill_keypackages: {e}"))?;
-        return Ok(SchedulerOutcome::Rotated { count: recs.len() });
+        // Snapshot Publish, not additive Refill: the home caps a refill at
+        // `retained + incoming <= KP_STASH_TARGET`, which a full rotation batch
+        // can never satisfy. Publishing the new generation also evicts the old
+        // one at the home, so a hoarded KP stops being fetchable.
+        let count = recs.len();
+        publish_kp_batch(dht, &recs).await;
+        return Ok(SchedulerOutcome::Rotated { count });
     }
 
     Ok(SchedulerOutcome::NoOp)
@@ -259,7 +255,7 @@ mod tests {
     /// directly aging the row in the SQLite, then verify the
     /// scheduler mints + dialer-publishes.
     #[tokio::test(flavor = "current_thread")]
-    async fn aged_stash_triggers_rotation_via_refill_domain() {
+    async fn aged_stash_triggers_rotation() {
         let conn = fresh_conn();
         let provider = PromtuzMlsProvider::new(conn.clone());
         let stash = KeyPackageStash::new(conn.clone());
@@ -292,13 +288,20 @@ mod tests {
             other => panic!("expected Rotated, got {other:?}"),
         }
 
-        // The fake recorded a batch via the Refill path. Our fake
-        // doesn't distinguish Publish from Refill — both just append
-        // — but the scheduler's `published_kp_batches` is incremented
-        // by either, so a single batch is recorded.
-        let batches = dht.published_kp_batches.lock();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), KP_STASH_TARGET);
+        {
+            let batches = dht.published_kp_batches.lock();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].len(), KP_STASH_TARGET);
+        }
+
+        // Rotation swept the generation that armed it, so the next tick is quiet
+        // — the 60s scheduler must not re-mint a batch every tick forever.
+        assert!(!stash.should_rotate(now), "rotation must clear its own trigger");
+        assert_eq!(
+            run_once(&provider, &stash, &signer, dht.as_ref(), now).await.expect("run_once"),
+            SchedulerOutcome::NoOp,
+        );
+        assert_eq!(dht.published_kp_batches.lock().len(), 1, "no second publish");
     }
 
     /// **Fake clock determinism**: scheduler with `now_ms_fn` pinned

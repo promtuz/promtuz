@@ -470,12 +470,13 @@ impl KeyPackageStash {
 
     /// Periodic anti-pinning rotation hook.
     ///
-    /// If [`Self::should_rotate`] returns `true`, mints
-    /// [`KP_STASH_TARGET`] fresh KeyPackages. The freshly-minted
-    /// records are returned so the caller can publish them. Old KPs
-    /// remain in the stash until natural expiry — we don't evict them
-    /// proactively because they're still valid for already-in-flight
-    /// adds.
+    /// Mints a fresh [`KP_STASH_TARGET`] batch and drops the bookkeeping rows it
+    /// supersedes, so the stash holds exactly one generation and
+    /// [`Self::should_rotate`] — which reads `MIN(generated_at_ms)` — goes quiet
+    /// until the next cadence. The caller publishes the batch as a full snapshot,
+    /// which evicts the old records relay-side; a peer mid-add is unaffected
+    /// because it holds the KP bytes already and the leaf-key bundle stays in
+    /// openmls storage.
     ///
     /// Returns `Ok(Vec::new())` when no rotation is due.
     pub fn rotate_periodic(
@@ -484,9 +485,32 @@ impl KeyPackageStash {
         if !self.should_rotate(now_ms) {
             return Ok(Vec::new());
         }
+        // Snapshot before minting — the new rows must not be in the sweep.
+        let superseded: Vec<Vec<u8>> = {
+            let conn = self.db.lock();
+            let mut stmt =
+                conn.prepare("SELECT kp_ref FROM mls_keypackage_stash WHERE consumed = 0")?;
+            let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+            rows.flatten().collect()
+        };
+
         let mut out = Vec::with_capacity(KP_STASH_TARGET);
         for _ in 0..KP_STASH_TARGET {
             out.push(self.generate_one(provider, ipk_signer)?);
+        }
+
+        // One transaction: the first sweep after a stalled rotation can face a
+        // very large backlog, and this holds the MLS mutex the decrypt path needs.
+        {
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare("DELETE FROM mls_keypackage_stash WHERE kp_ref = ?1")?;
+                for kp_ref in &superseded {
+                    stmt.execute([kp_ref])?;
+                }
+            }
+            tx.commit()?;
         }
         Ok(out)
     }
@@ -791,7 +815,7 @@ mod tests {
         let signer = fresh_ipk_signer();
 
         // Mint one KP and age it to be rotation-eligible.
-        stash.generate_one(&provider, &signer).expect("gen");
+        let old = stash.generate_one(&provider, &signer).expect("gen");
 
         // Freshly-minted KP → not yet due; rotate_periodic is a no-op.
         let recs_noop = stash
@@ -813,6 +837,24 @@ mod tests {
             .rotate_periodic(&provider, &signer, due)
             .expect("rotate");
         assert_eq!(recs.len(), KP_STASH_TARGET);
+
+        // One generation only: the superseded row is swept, so the table stops
+        // growing and MIN(generated_at_ms) tracks the batch we just minted.
+        let total: i64 = conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM mls_keypackage_stash", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(total as usize, KP_STASH_TARGET);
+        let survived: i64 = conn
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM mls_keypackage_stash WHERE kp_ref = ?1",
+                params![&old.kp_ref.0],
+                |r| r.get(0),
+            )
+            .expect("count old");
+        assert_eq!(survived, 0, "superseded record must not linger");
+        assert!(!stash.should_rotate(due), "rotation must clear its own trigger");
     }
 
     // -----------------------------------------------------------------
