@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +43,11 @@ fun SwipeToReply(
     content: @Composable () -> Unit,
 ) {
     val offsetX = remember { Animatable(0f) }
+    // pointerInput keys on `enabled`, which almost never changes, so the gesture
+    // coroutine outlives the composition that started it and would keep calling
+    // whichever `onReply` it closed over first — replying to a message as it was
+    // several edits ago.
+    val reply by rememberUpdatedState(onReply)
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -92,22 +99,35 @@ fun SwipeToReply(
                         }
 
                         // Claimed: drive the clamp, one haptic at the threshold.
+                        //
+                        // The offset is tracked here rather than read back off the
+                        // Animatable: snapTo is dispatched through `scope.launch`, so
+                        // its value trails the finger by however long that takes to
+                        // run — and a quick flick ends the gesture with the Animatable
+                        // still near zero, which is a commit that never fires. The
+                        // Animatable stays the render source; this is the truth.
                         var vibrated = false
-                        scope.launch { offsetX.snapTo(dx.coerceIn(-clampPx, 0f)) }
+                        var offset = dx.coerceIn(-clampPx, 0f)
+                        scope.launch { offsetX.snapTo(offset) }
                         while (true) {
                             val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                             if (!ch.pressed) break
+                            // Read the delta BEFORE consuming: positionChange()
+                            // reports zero for a change already marked consumed, so
+                            // consuming first silently pins the drag at its claim
+                            // distance and the commit threshold is never reached.
+                            val step = ch.positionChange().x
                             ch.consume()
-                            val next = (offsetX.value + ch.positionChange().x).coerceIn(-clampPx, 0f)
-                            scope.launch { offsetX.snapTo(next) }
-                            if (next <= -commitPx) {
+                            offset = (offset + step).coerceIn(-clampPx, 0f)
+                            scope.launch { offsetX.snapTo(offset) }
+                            if (offset <= -commitPx) {
                                 if (!vibrated) {
                                     vibrated = true
                                     haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
                                 }
                             } else vibrated = false
                         }
-                        if (offsetX.value <= -commitPx) onReply()
+                        if (offset <= -commitPx) reply()
                         scope.launch {
                             offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
                         }
