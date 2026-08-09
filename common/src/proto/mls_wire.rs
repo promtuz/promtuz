@@ -63,7 +63,7 @@ use crate::types::bytes::Bytes;
 /// peer-to-peer only, so a bump is just a client-coordinated redeploy —
 /// cheap by comparison, so it moves independently as `AppPayload` variants
 /// are added.
-pub const MLS_WIRE_VERSION: u16 = 11;
+pub const MLS_WIRE_VERSION: u16 = 12;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
 /// union so receipts/edits/etc. ride the same encrypted channel. The
@@ -143,6 +143,57 @@ pub enum AppPayload {
     /// Reverse-wake: receiver asks an offline sender to come online and serve
     /// `file_id`. A control message — routed, never stored. wake = true.
     FileWant { file_id: [u8; 32] },
+    /// A message, quoting `reply_to` when set. Supersedes Text/Reply/Image/
+    /// Attachment, which fused content with intent and so could only express
+    /// the diagonal — a reply carried a String and nothing else. Appended after
+    /// FileWant so postcard ordinals for older variants hold.
+    Post {
+        reply_to: Option<[u8; 16]>,
+        body:     Body,
+    },
+    /// Replace the body of the message with dispatch_id `target`. Supersedes
+    /// Edit, which could only swap in a new String. Which swaps are legal is a
+    /// client-side policy question (libcore owns it), not wire grammar.
+    Revise {
+        target: [u8; 16],
+        body:   Body,
+    },
+}
+
+/// What a message IS, split from what it's doing so `reply_to` and a revision
+/// target are orthogonal to content. Carries no intent of its own: the same
+/// [`Body`] is valid in a [`AppPayload::Post`] and a [`AppPayload::Revise`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Body {
+    Text(String),
+    /// Inline still image — compressed bytes ride in the frame, offline-safe.
+    Image {
+        caption:  String,
+        group_id: Option<[u8; 16]>,
+        mime:     String,
+        width:    u32,
+        height:   u32,
+        data:     Vec<u8>,
+    },
+    /// P2P attachment: metadata + blurred thumbnail; bytes fetched
+    /// device-to-device by `file_id`.
+    Attachment {
+        caption:  String,
+        group_id: Option<[u8; 16]>,
+        mime:     String,
+        name:     String,
+        size:     u64,
+        thumb:    Vec<u8>,
+        file_id:  [u8; 32],
+    },
+    /// Named by pack + index rather than carrying bytes, so re-sending one
+    /// costs a handful of bytes. Atomic: no caption, and nothing to pair with
+    /// text — which is what keeps it off every other row of the revision
+    /// matrix. Pack distribution is not built yet.
+    Sticker {
+        pack: [u8; 16],
+        id:   u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

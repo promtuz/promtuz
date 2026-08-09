@@ -24,6 +24,7 @@ use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::mls_wire::AppPayload;
+use common::proto::mls_wire::Body;
 use common::proto::mls_wire::ReceiptKind;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
@@ -784,18 +785,36 @@ async fn process_deliver(
             // already paired. Fires for PairAck and any real message alike.
             Contact::mark_paired(&msg.from);
             match AppPayload::deser(&plaintext) {
-                // Reply is Text + the quoted message's dispatch_id.
-                Ok(p @ (AppPayload::Text(..) | AppPayload::Reply { .. })) => {
-                    let (content, reply_to) = match p {
-                        AppPayload::Text(c) => (c, None),
-                        AppPayload::Reply { reply_to, content } => (content, Some(reply_to)),
-                        _ => unreachable!(),
+                // Content of any wire vintage: Post carries the quote target beside
+                // the body, pre-v12 payloads convert to the same pair. One persist
+                // and one receipt regardless of body kind.
+                Ok(p @ (AppPayload::Post { .. }
+                    | AppPayload::Text(..)
+                    | AppPayload::Reply { .. }
+                    | AppPayload::Image { .. }
+                    | AppPayload::Attachment { .. })) => {
+                    let pair = match p {
+                        AppPayload::Post { reply_to, body } => Some((reply_to, body)),
+                        other => crate::messaging::legacy_body(other),
                     };
+                    let Some((reply_to, body)) = pair else {
+                        warn!(
+                            "MESSAGE: content payload with no body from {}",
+                            hex::encode(&msg.from[..4])
+                        );
+                        bail!("bad content payload");
+                    };
+                    let did = msg.id.0;
                     let timestamp = accepted_at_secs(msg.accepted_at_ms);
-                    match Message::save_incoming(
-                        *msg.from, &msg.id.0, &content, timestamp, reply_to,
+                    // Read off before the body moves into the persist.
+                    let auto = match &body {
+                        Body::Attachment { size, file_id, .. } => Some((*size, *file_id)),
+                        _ => None,
+                    };
+                    match crate::messaging::save_inbound_body(
+                        &msg.from, &did, timestamp, reply_to, body,
                     ) {
-                        Ok(Some(saved)) => {
+                        Ok(Some((saved, content))) => {
                             MessageEv::Received {
                                 id: saved.inner.id,
                                 from: *msg.from,
@@ -807,15 +826,25 @@ async fn process_deliver(
                             // Auto-Delivered receipt (high-water-mark = this id).
                             // Spawned so we don't delay the relay's DeliverAck.
                             let from = *msg.from;
-                            let upto = msg.id.0;
                             crate::RUNTIME.spawn(async move {
                                 let _ = crate::messaging::send_receipt(
                                     from,
                                     ReceiptKind::Delivered,
-                                    upto,
+                                    did,
                                 )
                                 .await;
                             });
+                            // Fetch the bytes without a tap only from a paired contact
+                            // over a trusted network; otherwise the UI drives the pull.
+                            // ponytail: on_wifi is hardcoded false until the platform
+                            // feeds real network state — no-op today, correct and ready.
+                            if let Some((size, file_id)) = auto {
+                                if crate::transfer::should_auto_download(&from, size, false) {
+                                    crate::RUNTIME.spawn(async move {
+                                        let _ = crate::transfer::download(file_id).await;
+                                    });
+                                }
+                            }
                         },
                         // Relay redelivered a dispatch_id we already stored: no
                         // re-emit, but still Ok so the caller acks and the relay GCs.
@@ -853,6 +882,26 @@ async fn process_deliver(
                             "MESSAGE: edit for unknown target from {}",
                             hex::encode(&msg.from[..4])
                         ),
+                    }
+                },
+                Ok(AppPayload::Revise { target, body }) => {
+                    // own=false: a peer may only revise messages IT sent us. The
+                    // matrix check lives in apply_revise_body — a refused swap
+                    // errors rather than half-applying.
+                    match crate::messaging::apply_revise_body(&msg.from, &target, body, false) {
+                        Ok(Some((row, content))) => {
+                            info!("MESSAGE: revise from {}", hex::encode(&msg.from[..4]));
+                            MessageEv::Edited { id: row.id, peer: *msg.from, content }.emit();
+                        },
+                        // Out-of-order: target not stored yet. Rare in 1:1
+                        // same-epoch (the original precedes) — drop.
+                        Ok(None) => debug!(
+                            "MESSAGE: revise for unknown target from {}",
+                            hex::encode(&msg.from[..4])
+                        ),
+                        Err(e) => {
+                            warn!("MESSAGE: revise from {} rejected: {e}", hex::encode(&msg.from[..4]))
+                        },
                     }
                 },
                 Ok(AppPayload::Delete { target }) => {
@@ -898,71 +947,6 @@ async fn process_deliver(
                         candidates.len()
                     );
                     crate::p2p::deliver_offer(*msg.from, candidates, relay, token, disco_key);
-                },
-                Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
-                    let did = msg.id.0;
-                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
-                    let media = crate::data::media::MediaRow {
-                        kind: crate::data::media::KIND_IMAGE,
-                        group_id: group_id.map(|g| g.to_vec()),
-                        mime, name: String::new(), size: data.len() as u64, width, height,
-                        blob: Some(data), thumb: None, file_id: None,
-                    };
-                    if let Some(saved) = crate::data::media::save_incoming_with_media(
-                        &msg.from, &did, &caption, timestamp, &media,
-                    )? {
-                        MessageEv::Received {
-                            id: saved.inner.id,
-                            from: *msg.from,
-                            content: caption,
-                            timestamp,
-                        }
-                        .emit();
-                        info!("MESSAGE: received image from {}", hex::encode(&msg.from[..4]));
-                        let from = *msg.from;
-                        let upto = did;
-                        crate::RUNTIME.spawn(async move {
-                            let _ = crate::messaging::send_receipt(from, ReceiptKind::Delivered, upto).await;
-                        });
-                    }
-                },
-                Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
-                    let did = msg.id.0;
-                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
-                    let media = crate::data::media::MediaRow {
-                        kind: crate::data::media::KIND_ATTACHMENT,
-                        group_id: group_id.map(|g| g.to_vec()),
-                        mime, name, size, width: 0, height: 0,
-                        blob: None,
-                        thumb: if thumb.is_empty() { None } else { Some(thumb) },
-                        file_id: Some(file_id.to_vec()),
-                    };
-                    if let Some(saved) = crate::data::media::save_incoming_with_media(
-                        &msg.from, &did, &caption, timestamp, &media,
-                    )? {
-                        MessageEv::Received {
-                            id: saved.inner.id,
-                            from: *msg.from,
-                            content: caption,
-                            timestamp,
-                        }
-                        .emit();
-                        info!("MESSAGE: received attachment from {}", hex::encode(&msg.from[..4]));
-                        let from = *msg.from;
-                        let upto = did;
-                        crate::RUNTIME.spawn(async move {
-                            let _ = crate::messaging::send_receipt(from, ReceiptKind::Delivered, upto).await;
-                        });
-                        // Fetch the bytes without a tap only from a paired contact
-                        // over a trusted network; otherwise the UI drives the pull.
-                        // ponytail: on_wifi is hardcoded false until the platform
-                        // feeds real network state — no-op today, correct and ready.
-                        if crate::transfer::should_auto_download(&from, size, false) {
-                            crate::RUNTIME.spawn(async move {
-                                let _ = crate::transfer::download(file_id).await;
-                            });
-                        }
-                    }
                 },
                 Ok(AppPayload::FileWant { file_id }) => {
                     // Reverse-wake control message — routed, never stored. The push

@@ -50,12 +50,13 @@ pub fn save_tx(
 /// or `None` when the dispatch_id was already stored (redelivery: a clean
 /// no-op that still commits, so the caller acks and the relay GCs).
 pub fn save_incoming_with_media(
-    peer: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64, r: &MediaRow,
+    peer: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64,
+    reply_to: Option<[u8; 16]>, r: &MediaRow,
 ) -> Result<Option<crate::data::message::Message>> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
     let saved = crate::data::message::Message::save_incoming_tx(
-        &tx, *peer, dispatch_id, caption, timestamp, None,
+        &tx, *peer, dispatch_id, caption, timestamp, reply_to,
     )?;
     if saved.is_some() {
         save_tx(&tx, peer, dispatch_id, r)?;
@@ -85,6 +86,45 @@ pub fn save_outgoing_with_media(
     save_tx(&tx, peer, &did, r)?;
     tx.commit()?;
     Ok(msg)
+}
+
+/// Swap a stored message's body in ONE transaction: its text/caption on
+/// `messages` (flagging `edited`) and its media side-row on `message_media` —
+/// replaced when the new body carries media, dropped when it doesn't, so a
+/// revision never leaves a stale picture under fresh text. Same authorship
+/// guard as [`crate::data::message::Message::apply_edit`]: `own = true` for our
+/// own revision, `false` for an inbound peer one, so neither side can revise the
+/// other's messages. `None` when the target is missing, tombstoned, or authored
+/// by the other party.
+pub fn apply_revise(
+    peer: &[u8; 32], dispatch_id: &[u8; 16], content: &str, media: Option<&MediaRow>, own: bool,
+) -> Result<Option<crate::db::messages::MessageRow>> {
+    let mut db = MESSAGES_DB.lock();
+    let tx = db.transaction()?;
+    let n = tx.execute(
+        "UPDATE messages SET content = ?1, edited = 1 \
+         WHERE peer_ipk = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0",
+        rusqlite::params![content, peer.as_slice(), dispatch_id.as_slice(), own],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    match media {
+        Some(r) => save_tx(&tx, peer, dispatch_id, r)?,
+        None => {
+            tx.execute(
+                "DELETE FROM message_media WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+                rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+            )?;
+        },
+    }
+    let row = tx.query_row(
+        "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+        crate::db::messages::MessageRow::from_row,
+    )?;
+    tx.commit()?;
+    Ok(Some(row))
 }
 
 /// Fill an outgoing image's compressed bytes + final size/dims once encoding

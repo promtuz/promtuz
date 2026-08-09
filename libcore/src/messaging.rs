@@ -70,6 +70,7 @@ use common::proto::client_rel::SubscribePresenceP;
 use common::proto::client_rel::activity_sig_message;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::AppPayload;
+use common::proto::mls_wire::Body;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
@@ -293,11 +294,18 @@ pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Ve
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
 pub async fn edit(to: [u8; 32], target: [u8; 16], content: String) -> Result<()> {
-    // own=true: we only edit our own sent messages (outgoing=1).
-    if let Some(row) = Message::apply_edit(&to, &target, &content, true) {
-        MessageEv::Edited { id: row.id, peer: to, content: content.clone() }.emit();
+    revise(to, target, Body::Text(content)).await
+}
+
+/// Replace a prior message's body. Applies locally first — which is also where
+/// the compatibility matrix is enforced, so a refused swap never reaches the
+/// wire — then ships the same body to the peer. `own=true` throughout: we only
+/// revise our own sent messages (outgoing=1).
+pub async fn revise(to: [u8; 32], target: [u8; 16], body: Body) -> Result<()> {
+    if let Some((row, content)) = apply_revise_body(&to, &target, body.clone(), true)? {
+        MessageEv::Edited { id: row.id, peer: to, content }.emit();
     }
-    send_control(to, AppPayload::Edit { target, content }).await
+    send_control(to, AppPayload::Revise { target, body }).await
 }
 
 /// Delete a prior message. `for_everyone` tombstones both sides (sends a
@@ -1022,16 +1030,163 @@ pub async fn attempt_send<C: DhtClient>(
     send_payload(ctx, to, &msg, payload_bytes).await
 }
 
-/// Reconstruct the wire `AppPayload` for a pending outgoing row on (re)send.
-/// A row whose message carries a stored `KIND_IMAGE` media side-row resends as
-/// `Image` (caption + AVIF blob), so a first-send deferred while the peer had
-/// no published KeyPackage doesn't silently downgrade to a bare-caption `Text`.
-/// Everything else — including media kinds not yet re-driven here, whose bytes
-/// live off-row — falls through to `Text`/`Reply` from the row.
-fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
+/// Persist an inbound [`Body`] under `did`, handing back the stored row with the
+/// text to surface (a caption, for media). Single home for the storage shape:
+/// pre-v12 payloads convert through [`legacy_body`] and land here too, so the
+/// wire vintage stops being visible past this point.
+pub(crate) fn save_inbound_body(
+    from: &[u8; 32], did: &[u8; 16], timestamp: u64, reply_to: Option<[u8; 16]>, body: Body,
+) -> Result<Option<(Message, String)>> {
+    let Some((content, media)) = split_body(body) else { return Ok(None) };
+    Ok(match media {
+        None => Message::save_incoming(*from, did, &content, timestamp, reply_to)?
+            .map(|m| (m, content)),
+        Some(r) => {
+            crate::data::media::save_incoming_with_media(from, did, &content, timestamp, reply_to, &r)?
+                .map(|m| (m, content))
+        },
+    })
+}
+
+/// A body as storage holds it: the text to surface (a caption, for media) and
+/// the media side-row it needs, if any. `None` for a sticker — pack
+/// distribution isn't built, so there's nothing to resolve an id against and a
+/// stored row would be unrenderable.
+fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow>)> {
+    use crate::data::media::KIND_ATTACHMENT;
+    use crate::data::media::KIND_IMAGE;
+    use crate::data::media::MediaRow;
+
+    Some(match body {
+        Body::Text(content) => (content, None),
+        Body::Image { caption, group_id, mime, width, height, data } => (
+            caption,
+            Some(MediaRow {
+                kind: KIND_IMAGE,
+                group_id: group_id.map(|g| g.to_vec()),
+                mime,
+                name: String::new(),
+                size: data.len() as u64,
+                width,
+                height,
+                blob: Some(data),
+                thumb: None,
+                file_id: None,
+            }),
+        ),
+        Body::Attachment { caption, group_id, mime, name, size, thumb, file_id } => (
+            caption,
+            Some(MediaRow {
+                kind: KIND_ATTACHMENT,
+                group_id: group_id.map(|g| g.to_vec()),
+                mime,
+                name,
+                size,
+                width: 0,
+                height: 0,
+                blob: None,
+                thumb: (!thumb.is_empty()).then_some(thumb),
+                file_id: Some(file_id.to_vec()),
+            }),
+        ),
+        Body::Sticker { .. } => return None,
+    })
+}
+
+/// Apply a [`AppPayload::Revise`] over its target: refuse the swaps the matrix
+/// disallows, then persist the new body in place. `own = false` on the receive
+/// path — a peer may only revise messages IT sent us. `None` when the target is
+/// unknown, tombstoned, or authored by the other party.
+pub(crate) fn apply_revise_body(
+    peer: &[u8; 32], target: &[u8; 16], body: Body, own: bool,
+) -> Result<Option<(crate::db::messages::MessageRow, String)>> {
+    let current = BodyKind::stored(crate::data::media::get(peer, target)?.map(|m| m.kind));
+    let incoming = BodyKind::of(&body);
+    if !current.revisable_to(incoming) {
+        bail!("revision {current:?} -> {incoming:?} is not permitted");
+    }
+    let Some((content, media)) = split_body(body) else { bail!("sticker revision unsupported") };
+    Ok(crate::data::media::apply_revise(peer, target, &content, media.as_ref(), own)?
+        .map(|row| (row, content)))
+}
+
+/// Pre-v12 content payload → the [`Body`] + quote target it was expressing.
+/// `None` for anything that isn't content (receipts, control, P2P).
+pub(crate) fn legacy_body(p: AppPayload) -> Option<(Option<[u8; 16]>, Body)> {
+    Some(match p {
+        AppPayload::Text(content) => (None, Body::Text(content)),
+        AppPayload::Reply { reply_to, content } => (Some(reply_to), Body::Text(content)),
+        AppPayload::Image { caption, group_id, mime, width, height, data } => {
+            (None, Body::Image { caption, group_id, mime, width, height, data })
+        },
+        AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id } => {
+            (None, Body::Attachment { caption, group_id, mime, name, size, thumb, file_id })
+        },
+        _ => return None,
+    })
+}
+
+/// A body's revision class. Storage keeps a media side-row kind rather than a
+/// [`Body`], so the compatibility rule is expressed over this discriminant and
+/// both sides can name it without materialising bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BodyKind {
+    Text,
+    Image,
+    Attachment,
+    Sticker,
+}
+
+impl BodyKind {
+    pub(crate) fn of(body: &Body) -> Self {
+        match body {
+            Body::Text(..) => Self::Text,
+            Body::Image { .. } => Self::Image,
+            Body::Attachment { .. } => Self::Attachment,
+            Body::Sticker { .. } => Self::Sticker,
+        }
+    }
+
+    /// What a stored message already is: its media side-row kind, or text when
+    /// it has none.
+    pub(crate) fn stored(media_kind: Option<u8>) -> Self {
+        match media_kind {
+            Some(crate::data::media::KIND_IMAGE) => Self::Image,
+            Some(crate::data::media::KIND_ATTACHMENT) => Self::Attachment,
+            _ => Self::Text,
+        }
+    }
+
+    /// Which swaps an [`AppPayload::Revise`] may make. The line that matters is
+    /// how a body reaches the peer: text and image both ride inside the frame
+    /// they already hold, so those interchange freely. An attachment is fetched
+    /// device-to-device by `file_id` — revising into one hands the peer a
+    /// transfer for a message they consider delivered, and revising out of one
+    /// orphans a transfer they may be mid-download on. Stickers are atomic (no
+    /// caption, nothing to pair with text), so they only revise to a sticker.
+    pub(crate) fn revisable_to(self, to: Self) -> bool {
+        matches!(
+            (self, to),
+            (Self::Text | Self::Image, Self::Text | Self::Image)
+                | (Self::Attachment, Self::Attachment)
+                | (Self::Sticker, Self::Sticker)
+        )
+    }
+}
+
+/// Reconstruct the wire [`AppPayload::Post`] for a pending outgoing row on
+/// (re)send. A row carrying a stored `KIND_IMAGE` media side-row resends as
+/// [`Body::Image`] (caption + AVIF blob), so a first-send deferred while the
+/// peer had no published KeyPackage doesn't silently downgrade to a
+/// bare-caption text. Everything else — including media kinds not yet re-driven
+/// here, whose bytes live off-row — falls through to [`Body::Text`]. The quote
+/// target rides the envelope, so it survives on every body kind.
+pub(crate) fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
     let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
     let media = did.and_then(|d| crate::data::media::get(to, &d).ok().flatten());
-    let payload = match media {
+    let reply_to: Option<[u8; 16]> =
+        msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    let body = match media {
         Some(m) if m.kind == crate::data::media::KIND_IMAGE => {
             // Empty blob = un-finalized placeholder (compress still running).
             // Bail so a reconnect retry leaves the row pending; the finish_*
@@ -1040,7 +1195,7 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
                 Some(b) if !b.is_empty() => b,
                 _ => bail!("media not ready"),
             };
-            AppPayload::Image {
+            Body::Image {
                 caption:  msg.inner.content.clone(),
                 group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
                 mime:     m.mime,
@@ -1055,7 +1210,7 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
                 Some(f) => f,
                 None => bail!("media not ready"),
             };
-            AppPayload::Attachment {
+            Body::Attachment {
                 caption:  msg.inner.content.clone(),
                 group_id: m.group_id.as_deref().and_then(|g| g.try_into().ok()),
                 mime:     m.mime,
@@ -1065,16 +1220,9 @@ fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
                 file_id,
             }
         },
-        _ => {
-            let reply_to: Option<[u8; 16]> =
-                msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
-            match reply_to {
-                Some(rt) => AppPayload::Reply { reply_to: rt, content: msg.inner.content.clone() },
-                None => AppPayload::Text(msg.inner.content.clone()),
-            }
-        },
+        _ => Body::Text(msg.inner.content.clone()),
     };
-    payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
+    AppPayload::Post { reply_to, body }.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
 }
 
 /// Shared tail of [`attempt_send`] and [`send_prepared`]: resolve or
@@ -1657,52 +1805,24 @@ fn persist_drained(
     for m in drained {
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
         let ts = crate::quic::server::accepted_at_secs(m.accepted_at_ms);
-        match AppPayload::deser(&m.plaintext) {
-            Ok(AppPayload::Text(content)) => {
-                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, None) {
-                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
-                        .emit();
-                }
-            },
-            Ok(AppPayload::Reply { reply_to, content }) => {
-                if let Ok(Some(saved)) = Message::save_incoming(sender_ipk, &did, &content, ts, Some(reply_to)) {
-                    MessageEv::Received { id: saved.inner.id, from: sender_ipk, content, timestamp: ts }
-                        .emit();
-                }
-            },
-            Ok(AppPayload::Image { caption, group_id, mime, width, height, data }) => {
-                let media = crate::data::media::MediaRow {
-                    kind: crate::data::media::KIND_IMAGE,
-                    group_id: group_id.map(|g| g.to_vec()),
-                    mime, name: String::new(), size: data.len() as u64, width, height,
-                    blob: Some(data), thumb: None, file_id: None,
-                };
-                match crate::data::media::save_incoming_with_media(&sender_ipk, &did, &caption, ts, &media) {
-                    Ok(Some(saved)) => MessageEv::Received {
-                        id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts,
-                    }.emit(),
-                    Ok(None) => {},
-                    Err(e) => warn!("MESSAGE: drained image persist failed: {e}"),
-                }
-            },
-            Ok(AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id }) => {
-                let media = crate::data::media::MediaRow {
-                    kind: crate::data::media::KIND_ATTACHMENT,
-                    group_id: group_id.map(|g| g.to_vec()),
-                    mime, name, size, width: 0, height: 0,
-                    blob: None,
-                    thumb: if thumb.is_empty() { None } else { Some(thumb) },
-                    file_id: Some(file_id.to_vec()),
-                };
-                match crate::data::media::save_incoming_with_media(&sender_ipk, &did, &caption, ts, &media) {
-                    Ok(Some(saved)) => MessageEv::Received {
-                        id: saved.inner.id, from: sender_ipk, content: caption, timestamp: ts,
-                    }.emit(),
-                    Ok(None) => {},
-                    Err(e) => warn!("MESSAGE: drained attachment persist failed: {e}"),
-                }
-            },
-            _ => continue,
+        // Post carries the quote target alongside the body; pre-v12 payloads
+        // reach the same persist through legacy_body.
+        let parsed = match AppPayload::deser(&m.plaintext) {
+            Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(p) => legacy_body(p),
+            Err(_) => None,
+        };
+        let Some((reply_to, body)) = parsed else { continue };
+        match save_inbound_body(&sender_ipk, &did, ts, reply_to, body) {
+            Ok(Some((saved, content))) => MessageEv::Received {
+                id: saved.inner.id,
+                from: sender_ipk,
+                content,
+                timestamp: ts,
+            }
+            .emit(),
+            Ok(None) => {},
+            Err(e) => warn!("MESSAGE: drained persist failed: {e}"),
         }
     }
 }
@@ -2113,21 +2233,97 @@ mod tests {
         // The rebuilt payload a resend would encrypt: must be the whole Image.
         let bytes = rebuild_pending_payload(&to, &msg).unwrap();
         match AppPayload::deser(&bytes).unwrap() {
-            AppPayload::Image { caption, data, width, height, mime, .. } => {
+            AppPayload::Post {
+                reply_to: None,
+                body: Body::Image { caption, data, width, height, mime, .. },
+            } => {
                 assert_eq!(caption, "look at this");
                 assert_eq!(data, avif, "the AVIF blob must ride the resend");
                 assert_eq!((width, height), (4, 3));
                 assert_eq!(mime, "image/avif");
             },
-            other => panic!("deferred image must rebuild as Image, got {other:?}"),
+            other => panic!("deferred image must rebuild as a Post carrying Image, got {other:?}"),
         }
 
         // A plain text row (no media side-row) still rebuilds as Text.
         let tmsg = Message::save_outgoing(to, "hi", None).unwrap();
         let tbytes = rebuild_pending_payload(&to, &tmsg).unwrap();
         assert!(
-            matches!(AppPayload::deser(&tbytes).unwrap(), AppPayload::Text(t) if t == "hi"),
+            matches!(
+                AppPayload::deser(&tbytes).unwrap(),
+                AppPayload::Post { reply_to: None, body: Body::Text(t) } if t == "hi"
+            ),
             "a text row must not be dressed up as media",
+        );
+    }
+
+    /// Every cell of the revision matrix. Text and image both ride inside the
+    /// frame the peer already holds, so those interchange; an attachment is
+    /// fetched device-to-device and a sticker is atomic, so each stays on its
+    /// own diagonal. Exhaustive rather than sampled — the refusals are the
+    /// half that protects an in-flight transfer.
+    #[test]
+    fn revision_matrix_permits_inline_swaps_only() {
+        use BodyKind::Attachment;
+        use BodyKind::Image;
+        use BodyKind::Sticker;
+        use BodyKind::Text;
+
+        let allowed = [
+            (Text, Text),
+            (Text, Image),
+            (Image, Text),
+            (Image, Image),
+            (Attachment, Attachment),
+            (Sticker, Sticker),
+        ];
+        for (from, to) in [Text, Image, Attachment, Sticker]
+            .into_iter()
+            .flat_map(|f| [Text, Image, Attachment, Sticker].into_iter().map(move |t| (f, t)))
+        {
+            let want = allowed.contains(&(from, to));
+            assert_eq!(
+                from.revisable_to(to),
+                want,
+                "{from:?} -> {to:?} should be {}",
+                if want { "allowed" } else { "refused" },
+            );
+        }
+    }
+
+    /// A quote target rides the Post envelope rather than the body, so it
+    /// survives on media. Shares the scratch dir above: `MESSAGES_DB` is
+    /// process-global and initialises once, whichever test reaches it first.
+    #[test]
+    fn a_media_row_rebuilds_as_a_post_that_keeps_its_quote() {
+        let dir = std::env::temp_dir().join("promtuz-deferred-image-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let to = [0x52u8; 32];
+        let quoted = [0x77u8; 16];
+        let media = crate::data::media::MediaRow {
+            kind: crate::data::media::KIND_IMAGE,
+            group_id: None,
+            mime: "image/avif".into(),
+            name: String::new(),
+            size: 3,
+            width: 2,
+            height: 2,
+            blob: Some(vec![1, 2, 3]),
+            thumb: None,
+            file_id: None,
+        };
+        let msg =
+            crate::data::media::save_outgoing_with_media(&to, "cap", Some(quoted), &media).unwrap();
+
+        let bytes = rebuild_pending_payload(&to, &msg).unwrap();
+        assert!(
+            matches!(
+                AppPayload::deser(&bytes).unwrap(),
+                AppPayload::Post { reply_to: Some(rt), body: Body::Image { .. } } if rt == quoted
+            ),
+            "a replying image must rebuild as a Post carrying both the quote and the picture",
         );
     }
 
