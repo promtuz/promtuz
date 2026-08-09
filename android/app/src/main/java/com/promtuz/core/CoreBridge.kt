@@ -54,8 +54,14 @@ import uniffi.core.backupImportMerge as ffiBackupImportMerge
 import uniffi.core.escrowSecret as ffiEscrowSecret
 import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
 import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
-import uniffi.core.sendImage as ffiSendImage
-import uniffi.core.sendAttachment as ffiSendAttachment
+import uniffi.core.StagedRecord
+import uniffi.core.stageImage as ffiStageImage
+import uniffi.core.stageAttachment as ffiStageAttachment
+import uniffi.core.discardStaged as ffiDiscardStaged
+import uniffi.core.clearStaged as ffiClearStaged
+import uniffi.core.stagedItems as ffiStagedItems
+import uniffi.core.sendStaged as ffiSendStaged
+import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
 import com.promtuz.core.adapter.ActivitySignal
@@ -162,21 +168,39 @@ object CoreBridge {
     // — Media (images + attachments). Unsigned FFI dimensions/sizes are taken as Int here
     //   and widened once at the boundary, matching messages()/setActivity().
 
-    /** Compress `rgba` to inline AVIF and send as an Image. Fire-and-forget. */
-    suspend fun sendImage(
-        toIpk: ByteArray, rgba: ByteArray, width: Int, height: Int, caption: String,
-        groupId: ByteArray? = null,
-    ) = withContext(Dispatchers.IO) {
-        ffiSendImage(toIpk, rgba, width.toUInt(), height.toUInt(), caption, groupId)
+    // — Composer staging. Picking media puts it in a buffer and starts the
+    //   expensive pass (AVIF / manifest hash) immediately; the send comes later,
+    //   so the encode overlaps with the caption being typed. State changes ring
+    //   the doorbell under "staging" — read back through [stagedItems].
+
+    /** Buffer a picked photo; the AVIF pass runs off-thread. Returns its id. */
+    suspend fun stageImage(rgba: ByteArray, width: Int, height: Int): ULong =
+        withContext(Dispatchers.IO) { ffiStageImage(rgba, width.toUInt(), height.toUInt()) }
+
+    /** Buffer a picked file; the blur lands before this returns, the hash after. */
+    suspend fun stageAttachment(
+        sourcePath: String, name: String, mime: String,
+        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int,
+    ): ULong = withContext(Dispatchers.IO) {
+        ffiStageAttachment(sourcePath, name, mime, thumbRgba, thumbW.toUInt(), thumbH.toUInt())
     }
 
-    /** Offer a file at `sourcePath` as a P2P Attachment (bytes pulled by file_id). Fire-and-forget. */
-    suspend fun sendAttachment(
-        toIpk: ByteArray, sourcePath: String, name: String, mime: String,
-        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int, caption: String, groupId: ByteArray? = null,
-    ) = withContext(Dispatchers.IO) {
-        ffiSendAttachment(toIpk, sourcePath, name, mime, thumbRgba, thumbW.toUInt(), thumbH.toUInt(), caption, groupId)
-    }
+    /** Drop one buffered item. Safe mid-encode — the running pass discards its result. */
+    suspend fun discardStaged(id: ULong) = withContext(Dispatchers.IO) { ffiDiscardStaged(id) }
+
+    suspend fun clearStaged() = withContext(Dispatchers.IO) { ffiClearStaged() }
+
+    suspend fun stagedItems(): List<StagedRecord> = withContext(Dispatchers.IO) { ffiStagedItems() }
+
+    /** Send the buffer as one album; caption rides the first, `replyTo` rides all. */
+    suspend fun sendStaged(
+        toIpk: ByteArray, ids: List<ULong>, caption: String, replyTo: ByteArray? = null,
+    ) = withContext(Dispatchers.IO) { ffiSendStaged(toIpk, ids, caption, replyTo) }
+
+    /** Replace a message's body with a buffered item — the media half of an edit. */
+    suspend fun reviseWithStaged(
+        peer: ByteArray, dispatchId: ByteArray, stagedId: ULong, caption: String,
+    ) = withContext(Dispatchers.IO) { ffiReviseWithStaged(peer, dispatchId, stagedId, caption) }
 
     /** Start (or resume) the device-to-device pull of an attachment's bytes. */
     suspend fun downloadAttachment(fileId: ByteArray) =

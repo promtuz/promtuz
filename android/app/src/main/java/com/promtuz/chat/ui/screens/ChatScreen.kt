@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -38,6 +40,10 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
@@ -49,6 +55,8 @@ import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
+import com.promtuz.chat.ui.components.ComposerMetrics
+import com.promtuz.chat.ui.components.rememberComposerMetrics
 import com.promtuz.chat.ui.components.DashedHorizontalDivider
 import com.promtuz.chat.ui.components.NotificationPrimer
 import com.promtuz.chat.ui.components.MenuAction
@@ -57,6 +65,7 @@ import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.MessageContextMenu
 import com.promtuz.chat.ui.components.MessageMenuState
 import com.promtuz.chat.ui.components.SwipeToReply
+import com.promtuz.chat.ui.theme.bottomScrim
 import com.promtuz.chat.ui.components.TypingBubble
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import com.promtuz.chat.ui.stage.MessageStage
@@ -108,6 +117,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     // in the list free off-screen; older pages arrive via onNearTop on scroll.
     val rows = remember(messages, mergeWindowMs, typing) { buildChatRows(messages, mergeWindowMs, typing) }
     val stage = rememberMessageStageState()
+    val metrics = rememberComposerMetrics()
 
     // Own sends always land us at the bottom; incoming near the bottom is the
     // stage's built-in follow, and scrolled-up reading holds.
@@ -151,7 +161,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     Box {
         Scaffold(
             topBar = { ChatTopBar(name, viewModel, hazeState) },
-            bottomBar = { ChatBottomBar(viewModel, hazeState) },
+            bottomBar = { ChatBottomBar(viewModel, hazeState, metrics, onJumpTo = ::jumpToQuoted) },
         ) { padding ->
         // Wallpaper + stage are the haze source; the translucent bars sample them.
         // contentPadding (not an outer padding) so messages draw under the bars.
@@ -162,11 +172,19 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                 .hazeSource(hazeState),
         ) {
             val handoff by viewModel.typingHandoff.collectAsState()
+            val density = LocalDensity.current
+            // Scaffold's inset lands a frame behind the composer's reveal, so the bar
+            // publishes its own footprint instead and the stage samples it during
+            // measure — one value, one pass, no drift between bar and messages.
+            val stagePadding = remember(padding, metrics, density) {
+                ComposerPadding(padding.calculateTopPadding(), metrics, density)
+            }
             MessageStage(
                 rows = rows,
                 key = ::rowKey,
                 state = stage,
-                contentPadding = padding,
+                contentPadding = stagePadding,
+                pushBottom = { with(density) { metrics.pushPx.toDp() } },
                 modifier = Modifier.fillMaxSize(),
                 // The incoming message that ended a live typing signal inherits the
                 // typing bubble: same spot, its height, dots out / text in.
@@ -232,6 +250,18 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                     is ChatRow.Typing -> TypingBubble(Modifier.padding(top = layout.groupGap.dp))
                 }
             }
+
+            // Drawn after the stage so it fades the messages, not the wallpaper
+            // behind them, and spans exactly the bar's own live footprint — the
+            // composer's top edge to the bottom of the screen — so it tracks the
+            // composer growing rather than lagging it.
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(with(density) { metrics.bottomPx.toDp() })
+                    .background(bottomScrim()),
+            )
         }
         }
 
@@ -398,3 +428,20 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
 
 private fun sameGroup(a: UiMessage, b: UiMessage, windowMs: Long): Boolean =
     a.outgoing == b.outgoing && abs(a.timestampMs - b.timestampMs) <= windowMs
+
+/**
+ * The stage's insets, with the bottom resolved on each call rather than captured.
+ * [MessageStage] asks during its measure pass, so the composer's live footprint
+ * reaches the walk as a layout read — the messages track the bar frame for frame
+ * without a recomposition between them.
+ */
+private class ComposerPadding(
+    private val top: Dp,
+    private val metrics: ComposerMetrics,
+    private val density: Density,
+) : PaddingValues {
+    override fun calculateTopPadding(): Dp = top
+    override fun calculateBottomPadding(): Dp = with(density) { metrics.bottomPx.toDp() }
+    override fun calculateLeftPadding(layoutDirection: LayoutDirection): Dp = 0.dp
+    override fun calculateRightPadding(layoutDirection: LayoutDirection): Dp = 0.dp
+}

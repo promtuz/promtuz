@@ -173,6 +173,18 @@ fun <T : Any> MessageStage(
     state: MessageStageState,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
+    /**
+     * The share of [contentPadding]'s bottom that DISPLACES content instead of
+     * covering it — the composer's reply/edit block. Growth here rides every row
+     * up with the composer at any scroll position; growth in the rest of the
+     * bottom inset (IME, attach panel, a text field wrapping a line) only holds
+     * a scrolled-up view still and opens the freed space below it.
+     *
+     * A lambda so the read lands in the measure pass: the composer's reveal is an
+     * animation, and sampling it in composition would invalidate every row slot
+     * on every frame of it.
+     */
+    pushBottom: () -> Dp = { 0.dp },
     followThreshold: Dp = 240.dp,
     /**
      * The key of a row removed in the same emission that this new row visually
@@ -255,6 +267,35 @@ fun <T : Any> MessageStage(
         val bottomPad = contentPadding.calculateBottomPadding().roundToPx()
         val anchorY = height - bottomPad
         val buffer = 400
+
+        // Rows sit at anchorY + scroll - stack, so a growing bottom inset drops
+        // anchorY and rides every row up with it. That's what the push share wants;
+        // the rest of the inset instead holds a scrolled-up view where it is, and
+        // scroll += delta is exactly the cancellation (maxScroll grows by the same
+        // delta as innerViewport shrinks, so the room is always there). At the
+        // bottom nothing holds — content tracks the composer. Clamping is left to
+        // the resolve below, which is where maxScroll is finally known.
+        val pushPad = pushBottom().roundToPx()
+        val holdPad = bottomPad - pushPad
+        if (holder.lastHoldPad >= 0) {
+            // Both shares round through Dp independently, so their difference can
+            // drift a pixel between frames; a real inset change never does.
+            val delta = holdPad - holder.lastHoldPad
+            if (kotlin.math.abs(delta) > 1 && state.pinnedKey == null && state.scroll > 2f) {
+                state.scroll = max(0f, state.scroll + delta)
+            }
+        }
+        holder.lastHoldPad = holdPad
+
+        // A pin freezes its row against the hold channel only. The menu lifting a
+        // bubble must not move it, but the action row displaces every row alike —
+        // and the menu's own exit outlives the pick that opened the composer, so
+        // the two overlap. Captured per pin, so one taken with a reply already
+        // staged starts from no displacement.
+        if (state.pinnedKey !== holder.lastPinnedKey) {
+            holder.lastPinnedKey = state.pinnedKey
+            holder.pinnedPush = pushPad
+        }
         val childConstraints = Constraints(maxWidth = width)
 
         val display = holder.displayList
@@ -324,7 +365,8 @@ fun <T : Any> MessageStage(
         // clamped otherwise. Pinned derivation must not read state.scroll or it
         // would self-invalidate every pass.
         val scroll = if (state.pinnedKey != null && pinnedStack >= 0f) {
-            val derived = state.pinnedBottom - anchorY + pinnedStack
+            val derived =
+                state.pinnedBottom - (pushPad - holder.pinnedPush) - anchorY + pinnedStack
             state.scroll = derived
             holder.lastScroll = derived
             derived
@@ -384,6 +426,13 @@ private class StageHolder {
     val render = mutableStateOf<@Composable (Any) -> Unit>({})
     var lastScroll = 0f
     var lastWidthPx = 0
+
+    /** Last frame's hold-share of the bottom inset; -1 until the first pass. */
+    var lastHoldPad = -1
+
+    /** Push-share when the live pin was taken — the pinned row's displacement zero. */
+    var pinnedPush = 0
+    var lastPinnedKey: Any? = null
     var scope: CoroutineScope? = null
     private val warm = HashMap<Any, SubcomposeLayoutState.PrecomposedSlotHandle>()
     private var lastKeys: List<Any>? = null

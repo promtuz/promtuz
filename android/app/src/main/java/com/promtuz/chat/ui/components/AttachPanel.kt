@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -67,6 +68,14 @@ fun AttachPanel(
     open: Boolean,
     closingToKeyboard: Boolean,
     haze: HazeState,
+    metrics: ComposerMetrics,
+    /**
+     * Which sources this composer may pick from. Both while composing fresh;
+     * narrowed during an edit to whatever the target's body can legally become
+     * — offering a tab the core would refuse is worse than not offering it.
+     */
+    allowPhotos: Boolean = true,
+    allowFiles: Boolean = true,
     onHideKeyboard: () -> Unit,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
@@ -115,6 +124,9 @@ fun AttachPanel(
     }
 
     val regionPx = maxOf(ime, (panelH * presence.value).roundToInt(), nav)
+    // The stage reserves this too, and holds its scroll position across it — the
+    // region covers content rather than displacing it.
+    SideEffect { metrics.regionPx = regionPx }
     Box(Modifier.fillMaxWidth().height(with(density) { regionPx.toDp() })) {
         if (presence.value > 0f) {
             // Anchored bottom at the full learned height; the region uncovers it. A
@@ -128,7 +140,7 @@ fun AttachPanel(
                     .freezeOnExit()
                     .hazeEffect(haze, chatBarHaze()),
             ) {
-                AttachPanelBody(onPickPhotos, onPickFiles, onSendPhotos)
+                AttachPanelBody(allowPhotos, allowFiles, onPickPhotos, onPickFiles, onSendPhotos)
             }
         }
     }
@@ -136,11 +148,15 @@ fun AttachPanel(
 
 @Composable
 private fun AttachPanelBody(
+    allowPhotos: Boolean,
+    allowFiles: Boolean,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
     onSendPhotos: (List<Uri>) -> Unit,
 ) {
-    var tab by remember { mutableStateOf(0) } // 0 = Photos, 1 = Files
+    // Open on whichever source is permitted, so a narrowed panel never shows an
+    // empty pane before the user notices the tab they wanted is gone.
+    var tab by remember(allowPhotos) { mutableStateOf(if (allowPhotos) 0 else 1) } // 0 = Photos, 1 = Files
 
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().navigationBarsPadding(), contentAlignment = Alignment.Center) {
@@ -156,8 +172,8 @@ private fun AttachPanelBody(
                 .padding(bottom = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PillTab("Photos", tab == 0) { tab = 0 }
-            PillTab("Files", tab == 1) { tab = 1 }
+            if (allowPhotos) PillTab("Photos", tab == 0) { tab = 0 }
+            if (allowFiles) PillTab("Files", tab == 1) { tab = 1 }
         }
     }
 }

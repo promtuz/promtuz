@@ -1,16 +1,21 @@
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
+import com.promtuz.chat.domain.model.AlbumItem
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
+import com.promtuz.chat.domain.model.StagedMedia
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
@@ -20,7 +25,6 @@ import com.promtuz.chat.utils.media.resolvePickedFile
 import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
-import kotlin.random.Random
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -58,6 +62,18 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     /** Reply/edit staging shown as a chip above the composer; consumed by [send]. */
     val composerAction = MutableStateFlow<ComposerAction?>(null)
+
+    /**
+     * The composer's media buffer, mirrored from libcore's staging registry.
+     * Picking fills it and starts the encode; [send] commits it. While anything
+     * here is still preparing the send is held — libcore refuses a half-encoded
+     * item rather than dispatch a husk.
+     */
+    private val _staged = MutableStateFlow<List<StagedMedia>>(emptyList())
+    val staged: StateFlow<List<StagedMedia>> = _staged.asStateFlow()
+
+    /** Decoded tile per staged id — the client-side preview the core doesn't return. */
+    private val previews = mutableMapOf<ULong, ImageBitmap>()
 
     private val _typing = MutableStateFlow(false)
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
@@ -97,6 +113,33 @@ class ChatVM(private val application: Application) : ViewModel() {
                     }
                 }
                 _messages.value = list
+            }
+        }
+
+        // The buffer is process-wide in libcore, so a chat opening inherits
+        // whatever the last one left. Clear it rather than surface someone
+        // else's pick as this conversation's draft.
+        fire { CoreBridge.clearStaged() }
+        viewModelScope.launch {
+            observeQuery(setOf("staging")) { CoreBridge.stagedItems() }.collect { records ->
+                _staged.value = records.map { r ->
+                    StagedMedia(
+                        id = r.id,
+                        kind = r.kind.toInt(),
+                        state = r.state.toInt(),
+                        name = r.name,
+                        mime = r.mime,
+                        size = r.size.toLong(),
+                        width = r.width.toInt(),
+                        height = r.height.toInt(),
+                        // An image's tile is decoded from the pick at stage time; an
+                        // attachment's is libcore's blurred thumb, keyed per staged id.
+                        preview = previews[r.id]
+                            ?: r.thumb?.let { decodeAvifCached("staged-${r.id}", it) },
+                        error = r.error,
+                    )
+                }
+                previews.keys.retainAll(records.map { it.id }.toSet())
             }
         }
 
@@ -167,7 +210,10 @@ class ChatVM(private val application: Application) : ViewModel() {
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
         // reversed → newest at index 0 → drawn at the bottom under reverseLayout;
         // AVIF decode happens in toUi, so map off the main thread.
-        return withContext(Dispatchers.Default) { rows.asReversed().map { it.toUi(byMsg, byDid, media) } }
+        return withContext(Dispatchers.Default) {
+            val ui = rows.asReversed().map { it.toUi(byMsg, byDid, media) }
+            collapseAlbums(ui) { did -> media[did]?.groupId?.toHex() }
+        }
     }
 
     /**
@@ -190,14 +236,50 @@ class ChatVM(private val application: Application) : ViewModel() {
         }
     }
 
+    /**
+     * Commit the composer: buffered media (with the draft as its caption) if
+     * there is any, plain text otherwise. Held while anything is still encoding
+     * — libcore refuses a half-prepared item, so the UI keeps send disabled
+     * until the buffer settles rather than letting it fail silently.
+     */
     fun send() {
         val text = input.value.trim()
-        if (text.isEmpty()) return
+        val items = _staged.value
+        if (text.isEmpty() && items.isEmpty()) return
+        if (items.any { !it.ready }) return
+
         val action = composerAction.value
         input.value = ""
         composerAction.value = null
+
+        if (items.isNotEmpty()) {
+            val ids = items.map { it.id }
+            when (action) {
+                // A revision targets one message, so only the first pick can land.
+                // The buffer isn't drained by the revise — body_of leaves items in
+                // place so a refused swap doesn't cost the user their pick — so
+                // clear it here, once the body is already on its way.
+                is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { did ->
+                    fire {
+                        CoreBridge.reviseWithStaged(peer, did.fromHex(), ids.first(), text)
+                        CoreBridge.clearStaged()
+                    }
+                }
+                else -> {
+                    val replyTo = (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
+                    fire { CoreBridge.sendStaged(peer, ids, text, replyTo) }
+                }
+            }
+            return
+        }
+
         when (action) {
-            is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { edit(it, text) }
+            // An unchanged edit is dropped, not sent: apply_edit flags `edited = 1`
+            // unconditionally, so firing one would stamp the message for nothing.
+            is ComposerAction.Edit -> {
+                val original = action.msg.editableText().trim()
+                if (text != original) action.msg.dispatchIdHex?.let { edit(it, text) }
+            }
             is ComposerAction.Reply -> fire {
                 CoreBridge.sendMessage(peer, text, action.msg.dispatchIdHex?.fromHex())
             }
@@ -211,7 +293,7 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     fun beginEdit(msg: UiMessage) {
         composerAction.value = ComposerAction.Edit(msg)
-        input.value = (msg.content as? MessageContent.Text)?.text.orEmpty()
+        input.value = msg.editableText()
     }
 
     fun cancelComposerAction() {
@@ -236,46 +318,64 @@ class ChatVM(private val application: Application) : ViewModel() {
         fire { CoreBridge.react(peer, dispatchIdHex.fromHex(), emoji, add) }
 
     /**
-     * Picked media → inline images; videos ride the P2P attachment path (raw for
-     * now). A multi-pick shares one album [group_id]; the caption rides item 0.
+     * Picked media → the composer buffer. The AVIF pass starts now and runs
+     * while the caption is typed; [send] commits what's ready. Videos ride the
+     * P2P attachment path. The album id is minted at commit time, so a pick
+     * added later still joins the same group.
      */
     fun attachPhotos(uris: List<Uri>) = fire {
-        val caption = takeCaption()
-        val gid = albumId(uris.size)
         val cr = application.contentResolver
-        uris.forEachIndexed { i, uri ->
-            val cap = if (i == 0) caption else ""
-            // ponytail: video sent raw over P2P — transcode + poster frame land later.
-            if (cr.getType(uri)?.startsWith("video/") == true) sendPickedFile(uri, cap, gid)
+        uris.forEach { uri ->
+            // ponytail: video staged raw over P2P — transcode + poster frame land later.
+            if (cr.getType(uri)?.startsWith("video/") == true) stagePickedFile(uri)
             else {
-                val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@forEachIndexed
-                CoreBridge.sendImage(peer, bmp.toRgba(), bmp.width, bmp.height, cap, gid)
+                val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@forEach
+                val tile = bmp.tile()
+                rememberPreview(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height), tile)
             }
         }
     }
 
-    /** Picked documents → P2P attachments; a multi-pick shares one album [group_id]. */
-    fun attachFiles(uris: List<Uri>) = fire {
-        val caption = takeCaption()
-        val gid = albumId(uris.size)
-        uris.forEachIndexed { i, uri -> sendPickedFile(uri, if (i == 0) caption else "", gid) }
+    /** Picked documents → the buffer as P2P attachments. */
+    fun attachFiles(uris: List<Uri>) = fire { uris.forEach { stagePickedFile(it) } }
+
+    /** Drop one buffered item; safe mid-encode. */
+    fun unstage(id: ULong) = fire {
+        previews.remove(id)
+        CoreBridge.discardStaged(id)
     }
 
-    /** Copy a picked uri into cache and offer it as a P2P attachment; image mimes get a preview thumb. */
-    private suspend fun sendPickedFile(uri: Uri, caption: String, groupId: ByteArray?) {
+    /** Copy a picked uri into cache and buffer it as a P2P attachment; image mimes get a preview thumb. */
+    private suspend fun stagePickedFile(uri: Uri) {
         val picked = resolvePickedFile(application, uri) ?: return
         val thumb = if (picked.mime.startsWith("image/")) decodeDownscaled(application, uri, THUMB_MAX_EDGE) else null
-        CoreBridge.sendAttachment(
-            peer, picked.path, picked.name, picked.mime,
-            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0, caption, groupId,
+        val id = CoreBridge.stageAttachment(
+            picked.path, picked.name, picked.mime,
+            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0,
         )
+        thumb?.let { rememberPreview(id, it.tile()) }
     }
 
-    /** One random 16-byte album id for a multi-pick; a lone item isn't an album. */
-    private fun albumId(count: Int): ByteArray? = if (count > 1) Random.nextBytes(16) else null
+    /**
+     * Bind the decoded tile to its staged id. Staging rings the doorbell before
+     * this runs, so the first re-read can land without one — patch the emitted
+     * list too rather than leave a blank tile until the encode finishes.
+     */
+    private fun rememberPreview(id: ULong, tile: ImageBitmap) {
+        previews[id] = tile
+        _staged.value = _staged.value.map { if (it.id == id) it.copy(preview = tile) else it }
+    }
 
-    /** Snapshot the draft as a caption and clear it (mirrors [send]). */
-    private fun takeCaption(): String = input.value.trim().also { input.value = "" }
+    /** Downscale a decoded pick to a strip tile — the full-size bitmap is far
+     *  more than a 60dp square needs, and a multi-pick would hold several. */
+    private fun Bitmap.tile(): ImageBitmap {
+        val longest = maxOf(width, height).coerceAtLeast(1)
+        if (longest <= TILE_MAX_EDGE) return asImageBitmap()
+        val k = TILE_MAX_EDGE.toFloat() / longest
+        return Bitmap.createScaledBitmap(
+            this, (width * k).toInt().coerceAtLeast(1), (height * k).toInt().coerceAtLeast(1), true,
+        ).asImageBitmap()
+    }
 
     fun download(fileIdHex: String) = fire { CoreBridge.downloadAttachment(fileIdHex.fromHex()) }
 
@@ -287,12 +387,16 @@ class ChatVM(private val application: Application) : ViewModel() {
         /** Outbound refresh cadence; must stay under the peer's [TYPING_TTL_MS]. */
         const val TYPING_RESEND_MS = 4_000L
 
-        /** Cap the inline photo's longest edge: AVIF-compresses under libcore's 256KB budget
-         *  (bigger silently drops — sendImage bails when it can't hit the budget). */
+        /** Cap the inline photo's longest edge so the AVIF pass lands under libcore's
+         *  256KB budget. Over-budget picks fail in the buffer, where the strip can
+         *  show it, rather than at send time. */
         const val INLINE_MAX_EDGE = 1600
 
         /** Attachment preview thumb; libcore blurs it, so tiny is plenty. */
         const val THUMB_MAX_EDGE = 256
+
+        /** Composer strip tile; a 60dp square needs nothing like the full pick. */
+        const val TILE_MAX_EDGE = 192
 
         /** First load window: a screenful + buffer. loadOlder() pages the rest on scroll. */
         const val INITIAL_LIMIT = 40
@@ -308,6 +412,71 @@ sealed interface ComposerAction {
 
     data class Reply(override val msg: UiMessage) : ComposerAction
     data class Edit(override val msg: UiMessage) : ComposerAction
+}
+
+/**
+ * Fold runs of media sharing a `group_id` into one [MessageContent.Album] row.
+ *
+ * [messages] is newest-first, so a run reads newest→oldest and the album's items
+ * are re-reversed into the order they were picked. The newest member represents
+ * the row — it owns the position the album already occupies, which is what keeps
+ * a late addition from re-sorting the conversation — while the caption is lifted
+ * from whichever member carries it (the first sent).
+ *
+ * A lone member is left exactly as it was: one photo is a photo, not a
+ * one-member album.
+ */
+private fun collapseAlbums(
+    messages: List<UiMessage>, groupOf: (String) -> String?,
+): List<UiMessage> {
+    if (messages.isEmpty()) return messages
+    val out = ArrayList<UiMessage>(messages.size)
+    var i = 0
+    while (i < messages.size) {
+        val head = messages[i]
+        val gid = head.dispatchIdHex?.let(groupOf)
+        if (gid == null) {
+            out.add(head)
+            i++
+            continue
+        }
+        var j = i
+        while (j < messages.size && messages[j].dispatchIdHex?.let(groupOf) == gid) j++
+        val run = messages.subList(i, j)
+        out.add(
+            if (run.size == 1) head
+            else head.copy(
+                content = MessageContent.Album(
+                    caption = run.firstNotNullOfOrNull { m -> m.captionOrNull()?.takeIf(String::isNotEmpty) }
+                        .orEmpty(),
+                    items = run.reversed().map { m ->
+                        AlbumItem(m.dispatchIdHex.orEmpty(), m.content)
+                    },
+                ),
+            )
+        )
+        i = j
+    }
+    return out
+}
+
+/**
+ * What the composer edits for this message: its text, or a media body's caption.
+ * Reading only [MessageContent.Text] here leaves the field empty for a picture,
+ * and committing that empty field wipes the caption it should have loaded.
+ */
+fun UiMessage.editableText(): String = when (val c = content) {
+    is MessageContent.Text -> c.text
+    is MessageContent.Image -> c.caption
+    is MessageContent.Attachment -> c.caption
+    is MessageContent.Album -> c.caption
+}
+
+/** The caption a media message carries, if it is one. */
+private fun UiMessage.captionOrNull(): String? = when (val c = content) {
+    is MessageContent.Image -> c.caption
+    is MessageContent.Attachment -> c.caption
+    else -> null
 }
 
 private fun MessageRecord.toUi(
