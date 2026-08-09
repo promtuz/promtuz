@@ -17,6 +17,7 @@ pub mod p2p;
 pub mod platform;
 pub mod push;
 pub mod quic;
+pub mod staging;
 pub mod state;
 pub mod transfer;
 pub mod utils;
