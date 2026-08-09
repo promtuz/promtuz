@@ -20,6 +20,20 @@ sealed interface MessageContent {
         val height: Int,
     ) : MessageContent
 
+    /**
+     * Several media messages sharing a `group_id`, drawn as one unit.
+     *
+     * Each item stays its own message on the wire and in storage — its own
+     * dispatch id, status and transfer — which is what lets a later pick join an
+     * existing album instead of landing at the bottom as a separate bubble. Only
+     * the rendering is collapsed. The caption rides the first item sent, so it's
+     * lifted here rather than left buried in one member.
+     */
+    data class Album(
+        val caption: String,
+        val items: List<AlbumItem>,
+    ) : MessageContent
+
     /** P2P attachment pulled by [fileIdHex]; [transferState] 0 none/1 active/2 done/3 failed/4 held. */
     data class Attachment(
         val caption: String,
@@ -34,3 +48,7 @@ sealed interface MessageContent {
         val localPath: String?,
     ) : MessageContent
 }
+
+/** One member of an [MessageContent.Album], still addressable by its own id. */
+@Immutable
+data class AlbumItem(val dispatchIdHex: String, val content: MessageContent)

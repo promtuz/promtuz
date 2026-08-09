@@ -14,6 +14,7 @@ object BubbleTextLayouts {
             is MessageContent.Text -> c.text
             is MessageContent.Image -> c.caption
             is MessageContent.Attachment -> c.caption
+            is MessageContent.Album -> c.caption
         }
 
     fun metaLabelOf(msg: UiMessage): String = buildString {

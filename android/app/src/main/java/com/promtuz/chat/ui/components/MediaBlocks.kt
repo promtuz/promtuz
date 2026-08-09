@@ -5,11 +5,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -41,6 +45,9 @@ import java.util.Locale
 
 private val MediaRadius = RoundedCornerShape(14.dp)
 
+/** Hairline between album cells — enough to read as separate photos, not as a grid. */
+private val AlbumGap = 2.dp
+
 /**
  * Inline image. The box reserves the image's aspect-ratio footprint from
  * [width]/[height] so the windowed stage keeps a stable row height whether or
@@ -52,19 +59,73 @@ fun ImageBlock(image: MessageContent.Image, textColor: Color, fontScale: Float, 
     val ratio = (if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f)
         .coerceIn(0.6f, 1.9f)
     Column {
+        // No clip of its own: the picture runs to the bubble's edge and the
+        // bubble's shape does the rounding, so there's one outline, not two.
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(ratio)
-                .clip(MediaRadius)
                 .background(textColor.copy(alpha = 0.10f)),
         ) {
             image.bitmap?.let {
                 Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
         }
-        Caption(image.caption, textColor, fontScale, metaLabel)
+        if (image.caption.isNotEmpty()) Caption(image.caption, textColor, fontScale, metaLabel, inset = true)
     }
+}
+
+/**
+ * An album: its members in a square grid, one visual unit for what are still
+ * separate messages underneath.
+ *
+ * Columns come from the count rather than a fixed grid — two photos side by side
+ * read as a pair, where forcing them into a 3-wide row leaves a hole. Cells are
+ * cropped square so a mixed-orientation pick still tiles evenly.
+ */
+@Composable
+fun AlbumBlock(
+    album: MessageContent.Album, textColor: Color, fontScale: Float, metaLabel: String,
+) {
+    val cols = when {
+        album.items.size <= 2 -> album.items.size.coerceAtLeast(1)
+        album.items.size == 4 -> 2
+        else -> 3
+    }
+    Column {
+        Column(verticalArrangement = Arrangement.spacedBy(AlbumGap)) {
+            album.items.chunked(cols).forEach { row ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(AlbumGap),
+                ) {
+                    row.forEach { item ->
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .aspectRatio(1f)
+                                .background(textColor.copy(alpha = 0.10f)),
+                        ) {
+                            albumBitmap(item.content)?.let {
+                                Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            }
+                        }
+                    }
+                    // A short last row keeps its cells the same size as the rest
+                    // instead of stretching to fill the width.
+                    repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+        if (album.caption.isNotEmpty()) Caption(album.caption, textColor, fontScale, metaLabel, inset = true)
+    }
+}
+
+/** Whatever an album member can draw: an inline image's bitmap, a file's thumb. */
+private fun albumBitmap(content: MessageContent) = when (content) {
+    is MessageContent.Image -> content.bitmap
+    is MessageContent.Attachment -> content.thumb
+    else -> null
 }
 
 /**
@@ -123,7 +184,7 @@ fun AttachmentBlock(
             }
             TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
         }
-        Caption(att.caption, textColor, fontScale, metaLabel)
+        Caption(att.caption, textColor, fontScale, metaLabel, inset = false)
     }
 }
 
@@ -172,7 +233,9 @@ private fun TransferAffordance(
  * last glyph. Renders as a bare reservation strip when the caption is empty.
  */
 @Composable
-private fun Caption(text: String, textColor: Color, fontScale: Float, metaLabel: String) {
+private fun Caption(
+    text: String, textColor: Color, fontScale: Float, metaLabel: String, inset: Boolean,
+) {
     val style = if (text.isEmpty()) MaterialTheme.typography.labelSmall
     else MaterialTheme.typography.bodyLarge.let { it.copy(fontSize = it.fontSize * fontScale) }
     val density = LocalDensity.current
@@ -190,7 +253,10 @@ private fun Caption(text: String, textColor: Color, fontScale: Float, metaLabel:
     )
     Text(
         annotated,
-        Modifier.padding(top = 4.dp),
+        // A bleeding media block waives the bubble's inset, so the caption puts it
+        // back for itself — and the meta lands in the gap the placeholder reserves.
+        if (inset) Modifier.padding(start = BubblePadH, end = BubblePadH, top = 4.dp, bottom = BubblePadV)
+        else Modifier.padding(top = 4.dp),
         style = style,
         color = textColor,
         inlineContent = inline,

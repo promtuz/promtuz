@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,11 +31,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -60,10 +66,15 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.stage.ChatMotion
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import android.content.res.Configuration
+import android.os.Build
 
-/** The bubble's inner inset. The vertical half doubles as the meta's drop budget. */
-private val BubblePadH = 11.dp
-private val BubblePadV = 6.dp
+/**
+ * The bubble's inner inset. The vertical half doubles as the meta's drop budget.
+ * Media bubbles waive it — the picture goes to the bubble's own edge and the
+ * blocks below it re-apply the inset themselves.
+ */
+internal val BubblePadH = 11.dp
+internal val BubblePadV = 6.dp
 
 /**
  * How far the meta sits below the text's last line when it rides beside it, so the
@@ -74,6 +85,19 @@ private val BubblePadV = 6.dp
  * that budget are clamped: the [clip] to the bubble shape would crop the glyphs.
  */
 private val MetaBaselineDrop = 3.dp
+
+/** How hard the patch under an on-picture meta is blurred. Large next to the
+ *  glyphs it backs — the softness IS the effect, not an edge to hide. */
+private val MetaHaloBlur = 22.dp
+
+/**
+ * How far the patch runs past the text. Grown mostly down and toward the end —
+ * the corner the meta occupies — so it spills past the bubble and the bubble's
+ * own clip trims it to the corner radius. That's what keeps it reading as the
+ * picture darkening into its corner rather than a blob floating on top of it.
+ */
+private const val MetaHaloSpreadX = 2.6f
+private const val MetaHaloSpreadY = 3.4f
 
 /**
  * A message bubble as an ordered stack of content blocks (text today; media /
@@ -117,7 +141,26 @@ fun MessageBubble(
     // animations and are only ever read inside gesture handlers (and, for the text
     // layout, inside the measure pass that just wrote it).
     val coords = remember { CoordsHolder() }
+    // pointerInput keys on `menuState`, which is a stable holder, so the gesture
+    // coroutine is started once and closes over whatever `onLongPress` existed
+    // then. A message that later changes shape — a text edited into a picture —
+    // would still open the menu on the body it had at first composition.
+    val longPress by rememberUpdatedState(onLongPress)
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
+
+    // A picture runs to the bubble's own edge — one outline instead of a frame
+    // around a frame — so the bubble waives its inset and the padded blocks
+    // (quote, caption, reactions) each put it back for themselves. An attachment
+    // card is not a picture: it keeps the inset like text.
+    val bleeds = !msg.deleted &&
+        (msg.content is MessageContent.Image || msg.content is MessageContent.Album)
+    val caption = when (val c = msg.content) {
+        is MessageContent.Image -> c.caption
+        is MessageContent.Album -> c.caption
+        else -> ""
+    }
+    // With nothing below it to sit in, the time has to ride the picture itself.
+    val metaOnMedia = bleeds && caption.isEmpty() && msg.reactions.isEmpty()
 
     // Plain Box, not BoxWithConstraints — that's a nested SubcomposeLayout per
     // bubble, real weight on every bubble birth. The width cap is applied inside
@@ -133,7 +176,12 @@ fun MessageBubble(
         Layout(
             content = {
                 msg.quote?.let { q ->
-                    QuoteBlock(q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } })
+                    QuoteBlock(
+                        q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } },
+                        modifier = if (bleeds)
+                            Modifier.padding(start = BubblePadH, end = BubblePadH, top = BubblePadV)
+                        else Modifier,
+                    )
                 }
 
                 // One content child in a fixed slot: the bubble Layout hardcodes child
@@ -145,6 +193,8 @@ fun MessageBubble(
                         BubbleText(msg, textColor, appearance.type.fontScale) { coords.text = it }
                     content is MessageContent.Image ->
                         ImageBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
+                    content is MessageContent.Album ->
+                        AlbumBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
                     content is MessageContent.Attachment ->
                         AttachmentBlock(
                             content, textColor, appearance.type.fontScale,
@@ -154,7 +204,9 @@ fun MessageBubble(
 
                 if (msg.reactions.isNotEmpty()) {
                     Row(
-                        Modifier.padding(top = 4.dp),
+                        if (bleeds) Modifier.padding(
+                            start = BubblePadH, end = BubblePadH, top = 4.dp, bottom = BubblePadV,
+                        ) else Modifier.padding(top = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         msg.reactions.forEach { rg ->
@@ -163,7 +215,7 @@ fun MessageBubble(
                     }
                 }
 
-                MetaRow(msg, textColor)
+                MetaRow(msg, textColor, metaOnMedia)
             },
             modifier = Modifier
                 // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
@@ -189,7 +241,7 @@ fun MessageBubble(
                             val press =
                                 awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onLongPress(
+                            longPress?.invoke(
                                 coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero
                             )
                             if (menuState == null) return@awaitEachGesture
@@ -238,7 +290,10 @@ fun MessageBubble(
                         detectTapGestures(onDoubleTap = { onDoubleTap() })
                     }
                 )
-                .padding(horizontal = BubblePadH, vertical = BubblePadV),
+                .padding(
+                    horizontal = if (bleeds) 0.dp else BubblePadH,
+                    vertical = if (bleeds) 0.dp else BubblePadV,
+                ),
         ) { measurables, constraints ->
             // Children: [quote?] text [reactions?] meta. The quote must span the widest
             // sibling (measured last with that width as its minimum — measurables measure
@@ -297,7 +352,15 @@ fun MessageBubble(
                 quote?.let { it.placeRelative(0, 0); y = it.height }
                 text.placeRelative(0, y)
                 reactions?.placeRelative(0, y + text.height)
-                meta.placeRelative(width - meta.width + metaDrop, height - meta.height + metaDrop)
+                // A bleeding bubble has no outer padding to sit in, so the meta
+                // takes the inset itself — the same one text bubbles get from the
+                // padding, which is what lines the time up across every variant.
+                val metaInsetX = if (bleeds) BubblePadH.roundToPx() else 0
+                val metaInsetY = if (bleeds) BubblePadV.roundToPx() else 0
+                meta.placeRelative(
+                    width - meta.width - metaInsetX + metaDrop,
+                    height - meta.height - metaInsetY + metaDrop,
+                )
             }
         }
     }
@@ -305,9 +368,12 @@ fun MessageBubble(
 
 /** The quoted-message block a reply carries: accent rail + short snippet. */
 @Composable
-private fun QuoteBlock(quote: Quote, textColor: Color, accent: Color, onClick: (() -> Unit)?) {
+private fun QuoteBlock(
+    quote: Quote, textColor: Color, accent: Color, onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        Modifier
+        modifier
             .padding(top = 2.dp, bottom = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(textColor.copy(alpha = 0.08f))
@@ -391,11 +457,18 @@ private fun Modifier.fadeOnChange(value: Any?): Modifier {
     return graphicsLayer { alpha = anim.value }
 }
 
-/** Pending spinner / failed dot / sent time, crossfading inside the corner slot. */
+/**
+ * Pending spinner / failed dot / sent time, crossfading inside the corner slot.
+ *
+ * [onMedia] is the uncaptioned-picture case: the meta lands on the photo, where
+ * `textColor` at 55% would be unreadable over an arbitrary image, so it goes
+ * white against the gradient the media block lays under it. Its position doesn't
+ * change — that's the point of the gradient over a chip.
+ */
 @Composable
-private fun MetaRow(msg: UiMessage, textColor: Color) {
+private fun MetaRow(msg: UiMessage, textColor: Color, onMedia: Boolean = false) {
     val metaStyle = MaterialTheme.typography.labelSmall
-    val metaColor = textColor.copy(alpha = 0.55f)
+    val metaColor = if (onMedia) Color.White else textColor.copy(alpha = 0.55f)
     val edited = msg.edited && !msg.deleted
     val state = when {
         msg.outgoing && msg.status == SendStatus.Pending -> MetaState.Pending
@@ -403,7 +476,9 @@ private fun MetaRow(msg: UiMessage, textColor: Color) {
         else -> MetaState.Sent
     }
 
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Box(contentAlignment = Alignment.Center) {
+        if (onMedia) MetaHalo(Modifier.matchParentSize())
+        Row(verticalAlignment = Alignment.CenterVertically) {
         if (edited) Text(
             "edited",
             style = metaStyle,
@@ -423,6 +498,40 @@ private fun MetaRow(msg: UiMessage, textColor: Color) {
                     Text(BubbleTextLayouts.clock(msg.timestampMs), style = metaStyle, color = metaColor)
             }
         }
+        }
+    }
+}
+
+/**
+ * The patch of dimmed picture an on-media meta sits on.
+ *
+ * A dark shape blurred well past its own bounds, not a drawn ramp: the falloff
+ * comes from the blur, so it reads as the photo darkening under the time rather
+ * than a band laid across it, and it stays local to the glyphs instead of
+ * banding the full width. `Modifier.blur` is a no-op below API 31, so there a
+ * radial ramp stands in — the same shape of falloff, and never a hard edge.
+ */
+@Composable
+private fun MetaHalo(modifier: Modifier) {
+    val shaped = modifier.graphicsLayer {
+        scaleX = MetaHaloSpreadX
+        scaleY = MetaHaloSpreadY
+        // Anchored up-and-start, so the growth runs the other way: into the
+        // bottom-end corner, where the clip is waiting for it.
+        transformOrigin = TransformOrigin(0.12f, 0.1f)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Box(
+            shaped
+                .blur(MetaHaloBlur, BlurredEdgeTreatment.Unbounded)
+                .background(Color.Black.copy(alpha = 0.5f), CircleShape),
+        )
+    } else {
+        Box(
+            shaped.background(
+                Brush.radialGradient(listOf(Color.Black.copy(alpha = 0.4f), Color.Transparent)),
+            ),
+        )
     }
 }
 
