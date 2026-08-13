@@ -71,7 +71,7 @@ pub fn enqueue(id: &[u8], op: OpType, target_ipk: Option<[u8; 32]>, payload: &[u
         .execute(
             "INSERT INTO outbox (id, op_type, target_ipk, payload, created_at, next_attempt)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)
-             ON CONFLICT(id) DO NOTHING",
+             ON CONFLICT(id, COALESCE(target_ipk, X'')) DO NOTHING",
             params![
                 id,
                 op as u8,
@@ -83,8 +83,33 @@ pub fn enqueue(id: &[u8], op: OpType, target_ipk: Option<[u8; 32]>, payload: &[u
         .ok();
 }
 
-pub fn retire(id: &[u8]) {
+/// Retire one member's copy of a dispatch. The rest of the fan-out is
+/// untouched — each member acks on its own schedule.
+pub fn retire(id: &[u8], target: Option<[u8; 32]>) {
+    OUTBOX_DB
+        .lock()
+        .execute(
+            "DELETE FROM outbox WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+            params![id, target.as_ref().map(|t| t.as_slice())],
+        )
+        .ok();
+}
+
+/// Drop every copy of a dispatch, whoever it was addressed to.
+pub fn retire_all(id: &[u8]) {
     OUTBOX_DB.lock().execute("DELETE FROM outbox WHERE id = ?1", params![id]).ok();
+}
+
+/// Is any member's copy of this dispatch still queued? The message stays
+/// "sending" until the fan-out has fully drained.
+pub fn any_pending(id: &[u8]) -> bool {
+    OUTBOX_DB
+        .lock()
+        .query_row("SELECT COUNT(*) FROM outbox WHERE id = ?1 AND state = 0", params![id], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(|n| n > 0)
+        .unwrap_or(false)
 }
 
 /// Drop every queued op targeting this peer (forget-contact cascade).
@@ -119,18 +144,26 @@ pub fn due(now_ms: u64) -> Vec<OutboxRow> {
         .collect()
 }
 
-pub fn record_attempt(id: &[u8], next_attempt: u64) {
+pub fn record_attempt(id: &[u8], target: Option<[u8; 32]>, next_attempt: u64) {
     OUTBOX_DB
         .lock()
         .execute(
-            "UPDATE outbox SET attempts = attempts + 1, next_attempt = ?2 WHERE id = ?1",
-            params![id, ms_i64(next_attempt)],
+            "UPDATE outbox SET attempts = attempts + 1, next_attempt = ?3 \
+             WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+            params![id, target.as_ref().map(|t| t.as_slice()), ms_i64(next_attempt)],
         )
         .ok();
 }
 
-pub fn mark_dead(id: &[u8]) {
-    OUTBOX_DB.lock().execute("UPDATE outbox SET state = 1 WHERE id = ?1", params![id]).ok();
+pub fn mark_dead(id: &[u8], target: Option<[u8; 32]>) {
+    OUTBOX_DB
+        .lock()
+        .execute(
+            "UPDATE outbox SET state = 1 \
+             WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+            params![id, target.as_ref().map(|t| t.as_slice())],
+        )
+        .ok();
 }
 
 // ponytail: calibration knobs — retry cadence and death thresholds, tuned by
@@ -191,12 +224,14 @@ pub async fn reconcile() {
 
     for row in due(now) {
         let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
+        let target: Option<[u8; 32]> =
+            row.target_ipk.as_ref().and_then(|t| t.as_slice().try_into().ok());
         let mut accepted_timestamp = None;
         let outcome = match op {
             OpType::KpPublish => {
                 let Some(dht) = dht_client.clone() else { continue }; // no dht client → retry next reconnect
                 let Ok(recs) = Vec::<KeyPackageRecord>::deser(&row.payload) else {
-                    retire(&row.id); // poison payload can never publish — drop it
+                    retire(&row.id, target); // poison payload can never publish — drop it
                     continue;
                 };
                 match dht.publish_keypackages(&recs, KpOutcomeFilter::Default).await {
@@ -230,13 +265,16 @@ pub async fn reconcile() {
         let age = now.saturating_sub(row.created_at);
         match classify(op, outcome, row.attempts, age) {
             Next::Retire => {
-                retire(&row.id);
+                retire(&row.id, target);
                 // Mirror the live send path onto the message the UI reads: a
                 // row retired on the async path must leave its message `sent`
                 // (Durable/Queued) or `failed` (Terminal), else an
                 // offline-then-delivered message stays pending forever and a
                 // rejected one fails silently. KpPublish has no message row.
-                if matches!(op, OpType::Message) {
+                // Only settle the message once every member's copy has left the
+                // queue — a three-member fan-out that reached one relay is not
+                // a sent message yet.
+                if matches!(op, OpType::Message) && !any_pending(&row.id) {
                     let id = hex::encode(&row.id[..row.id.len().min(4)]);
                     if matches!(outcome, LastOutcome::Terminal) {
                         warn!("MESSAGE: {id} rejected on retry — {outcome:?}");
@@ -251,8 +289,8 @@ pub async fn reconcile() {
                 }
             },
             Next::Dead => {
-                mark_dead(&row.id);
-                if matches!(op, OpType::Message) {
+                mark_dead(&row.id, target);
+                if matches!(op, OpType::Message) && !any_pending(&row.id) {
                     warn!("MESSAGE: {} failed after {} attempts", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
                     mark_message_failed(&row.id, "undeliverable after repeated retries");
                 }
@@ -261,7 +299,7 @@ pub async fn reconcile() {
                 if matches!(op, OpType::Message) {
                     debug!("MESSAGE: {} still pending — {outcome:?} (attempt {})", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
                 }
-                record_attempt(&row.id, now + next_backoff(row.attempts));
+                record_attempt(&row.id, target, now + next_backoff(row.attempts));
             },
         }
     }
@@ -272,8 +310,13 @@ pub async fn reconcile() {
 /// such message (e.g. a non-Message op).
 fn mark_message_sent(dispatch_id: &[u8], timestamp: u64) {
     if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_SENT, Some(timestamp)) {
-        MessageEv::Sent { id: m.id, to: m.peer_ipk, content: m.content, timestamp: m.timestamp }
-            .emit();
+        MessageEv::Sent {
+            id:           m.id,
+            conversation: m.conversation_id,
+            content:      m.content,
+            timestamp:    m.timestamp,
+        }
+        .emit();
     }
 }
 
@@ -282,7 +325,8 @@ fn mark_message_sent(dispatch_id: &[u8], timestamp: u64) {
 /// message doesn't fail silently.
 fn mark_message_failed(dispatch_id: &[u8], reason: &str) {
     if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_FAILED, None) {
-        MessageEv::Failed { id: m.id, to: m.peer_ipk, reason: reason.into() }.emit();
+        MessageEv::Failed { id: m.id, conversation: m.conversation_id, reason: reason.into() }
+            .emit();
     }
 }
 
@@ -387,15 +431,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
         let id = b"kp-stays-pending"; // unique id → robust to the other outbox test's rows
-        retire(id); // clean slate for this id
+        retire(id, None); // clean slate for this id
         enqueue(id, OpType::KpPublish, None, b"records");
-        record_attempt(id, 0); // a failed publish attempt — still due-now
+        record_attempt(id, None, 0); // a failed publish attempt — still due-now
         assert_eq!(
             due(u64::MAX).iter().filter(|r| r.id == id).count(),
             1,
             "KpPublish must stay pending after a failed attempt"
         );
-        retire(id); // cleanup
+        retire(id, None); // cleanup
     }
 
     #[test]
@@ -408,24 +452,55 @@ mod tests {
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
         let id = [1u8; 16];
+        let alice = [2u8; 32];
+        let bob = [3u8; 32];
         let mine = |now: u64| due(now).into_iter().filter(|r| r.id == id).count();
-        retire(&id); // clean slate for this id
-        enqueue(&id, OpType::Message, Some([2u8; 32]), b"payload");
+        retire_all(&id); // clean slate for this id
+        enqueue(&id, OpType::Message, Some(alice), b"payload");
         assert_eq!(mine(u64::MAX), 1);
 
-        // Re-enqueue of the same id is a silent no-op — still one row.
-        enqueue(&id, OpType::Message, Some([2u8; 32]), b"payload");
+        // Re-enqueue of the same (id, target) is a silent no-op — still one row.
+        enqueue(&id, OpType::Message, Some(alice), b"payload");
         assert_eq!(mine(u64::MAX), 1);
 
         // Future backoff excludes the row from due-now.
-        record_attempt(&id, u64::MAX);
+        record_attempt(&id, Some(alice), u64::MAX);
         assert_eq!(mine(0), 0);
 
         // Dead rows never surface.
-        mark_dead(&id);
+        mark_dead(&id, Some(alice));
         assert_eq!(mine(u64::MAX), 0);
 
-        retire(&id);
+        retire_all(&id);
         assert_eq!(mine(u64::MAX), 0);
+    }
+
+    /// The fan-out guarantee: the same dispatch id addressed to two members is
+    /// two independent rows, and retiring one leaves the other queued. Keyed on
+    /// id alone, the second enqueue would have been swallowed and that member
+    /// would never have been retried.
+    #[test]
+    fn a_fan_out_keeps_one_row_per_member() {
+        let dir = std::env::temp_dir().join("promtuz-outbox-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let id = [0x5Au8; 16];
+        let alice = [0xA1u8; 32];
+        let bob = [0xB2u8; 32];
+        let mine = || due(u64::MAX).into_iter().filter(|r| r.id == id).count();
+        retire_all(&id);
+
+        enqueue(&id, OpType::Message, Some(alice), b"copy-a");
+        enqueue(&id, OpType::Message, Some(bob), b"copy-b");
+        assert_eq!(mine(), 2, "one row per recipient");
+
+        retire(&id, Some(alice));
+        assert_eq!(mine(), 1, "retiring Alice's copy leaves Bob's queued");
+        assert!(any_pending(&id), "the fan-out is not drained yet");
+
+        retire(&id, Some(bob));
+        assert!(!any_pending(&id), "drained once every member is retired");
+        retire_all(&id);
     }
 }

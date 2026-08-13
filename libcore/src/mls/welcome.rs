@@ -464,7 +464,8 @@ mod tests {
         let proto = in_msg.try_into_protocol_message().expect("proto");
         let content = bob_group
             .process_incoming(&provider_b, proto)
-            .expect("process app");
+            .expect("process app")
+            .content;
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext);
@@ -482,7 +483,8 @@ mod tests {
         let proto = in_msg.try_into_protocol_message().expect("proto");
         let content = alice_group
             .process_incoming(&provider_a, proto)
-            .expect("alice process");
+            .expect("alice process")
+            .content;
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext_b);

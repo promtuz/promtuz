@@ -79,6 +79,7 @@ use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::PairDeclineP;
 use common::proto::mls_wire::PairingP;
 use common::proto::mls_wire::ReceiptKind;
+use common::proto::mls_wire::SystemEvent;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
 use common::proto::mls_wire::pair_decline_signing_input;
@@ -107,6 +108,7 @@ use parking_lot::Mutex as PlMutex;
 use tokio::sync::Mutex as TokMutex;
 
 use crate::data::contact::Contact;
+use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
 use crate::data::message::Message;
 use crate::data::reaction::Reaction;
@@ -148,13 +150,14 @@ use crate::state::RELAY;
 /// A dedicated cleanup task is overkill given typical contact-graph
 /// sizes (<10^4); revisit if memory profile shows it matters.
 #[allow(clippy::type_complexity)] // The shape is the API; type alias adds a hop without clarity.
-static GROUP_CREATE_LOCKS: Lazy<PlMutex<HashMap<[u8; 32], Arc<TokMutex<()>>>>> =
+static GROUP_CREATE_LOCKS: Lazy<PlMutex<HashMap<Vec<u8>, Arc<TokMutex<()>>>>> =
     Lazy::new(|| PlMutex::new(HashMap::new()));
 
-/// Acquire (or create) the per-recipient `lazy_create_group` lock.
-fn group_create_lock(recipient_ipk: &[u8; 32]) -> Arc<TokMutex<()>> {
+/// Acquire (or create) the `lazy_create_group` lock for one scope — a
+/// conversation id on the send path, a peer IPK on the inbound heal path.
+fn group_create_lock(scope: &[u8]) -> Arc<TokMutex<()>> {
     let mut map = GROUP_CREATE_LOCKS.lock();
-    map.entry(*recipient_ipk).or_insert_with(|| Arc::new(TokMutex::new(()))).clone()
+    map.entry(scope.to_vec()).or_insert_with(|| Arc::new(TokMutex::new(()))).clone()
 }
 
 #[cfg(not(test))]
@@ -168,7 +171,7 @@ const _: () = ();
 /// multi-version `rand_core` workspace minefield). Returns the
 /// 32-byte digest. Unique-by-construction because the random suffix
 /// is sender-private; no other party can independently mint the same id.
-fn mint_group_id(creator_ipk: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn mint_group_id(creator_ipk: &[u8; 32]) -> [u8; 32] {
     use ed25519_dalek::ed25519::signature::rand_core::OsRng;
     use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 
@@ -214,7 +217,7 @@ fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError>
 /// Returns `(SignatureKeyPair, CredentialWithKey)`. The caller persists
 /// the signing keypair in openmls's storage via `.store(provider.storage())`
 /// before invoking `MlsGroup::new_with_group_id`.
-fn build_self_credential(
+pub(crate) fn build_self_credential(
     own_ipk: &[u8; 32],
 ) -> Result<(openmls_basic_credential::SignatureKeyPair, CredentialWithKey), MlsGroupError> {
     let credential = BasicCredential::new(own_ipk.to_vec());
@@ -231,7 +234,9 @@ fn build_self_credential(
 /// live relay's peer/5 dialer and hands off to [`send_message_inner`].
 /// Errors (rather than silently no-op'ing against a non-wired dialer) if
 /// no relay connection is up. Entry point for `api::messaging::send_message`.
-pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> Result<()> {
+pub async fn send(
+    conversation: [u8; 16], content: String, reply_to: Option<[u8; 16]>,
+) -> Result<()> {
     // Pull the production peer/5 dialer from the global `RELAY` (attached
     // at connect-time by `Relay::connect`). If no relay connection is
     // live, surface a clean error rather than silently no-op against
@@ -252,7 +257,7 @@ pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> 
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            send_message_inner(&ctx, to, content, reply_to).await
+            send_message_inner(&ctx, conversation, content, reply_to).await
         },
         None => {
             error!("MESSAGE: no relay connection / dialer; send aborted");
@@ -265,7 +270,9 @@ pub async fn send(to: [u8; 32], content: String, reply_to: Option<[u8; 16]>) -> 
 /// the production `MlsContext` (same dance as [`send`]) and drive
 /// [`send_payload`]. Tail of the optimistic-media path — the row landed
 /// before the heavy prep, so on failure it stays pending rather than lost.
-pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Vec<u8>) -> Result<()> {
+pub(crate) async fn send_prepared(
+    conversation: [u8; 16], msg: &Message, payload_bytes: Vec<u8>,
+) -> Result<()> {
     let dht_client = {
         let guard = RELAY.read();
         guard.as_ref().and_then(|r| r.dht_client.clone())
@@ -281,7 +288,7 @@ pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Ve
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            send_payload(&ctx, to, msg, payload_bytes).await
+            send_payload(&ctx, conversation, msg, payload_bytes).await
         },
         None => {
             error!("MESSAGE: no relay connection / dialer; media send aborted");
@@ -293,115 +300,194 @@ pub(crate) async fn send_prepared(to: [u8; 32], msg: &Message, payload_bytes: Ve
 /// Edit a prior message to `to` and apply the change locally. Best-effort on
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
-pub async fn edit(to: [u8; 32], target: [u8; 16], content: String) -> Result<()> {
-    revise(to, target, Body::Text(content)).await
+pub async fn edit(conversation: [u8; 16], target: [u8; 16], content: String) -> Result<()> {
+    revise(conversation, target, Body::Text(content)).await
 }
 
 /// Replace a prior message's body. Applies locally first — which is also where
 /// the compatibility matrix is enforced, so a refused swap never reaches the
 /// wire — then ships the same body to the peer. `own=true` throughout: we only
 /// revise our own sent messages (outgoing=1).
-pub async fn revise(to: [u8; 32], target: [u8; 16], body: Body) -> Result<()> {
-    if let Some((row, content)) = apply_revise_body(&to, &target, body.clone(), true)? {
-        MessageEv::Edited { id: row.id, peer: to, content }.emit();
+pub async fn revise(conversation: [u8; 16], target: [u8; 16], body: Body) -> Result<()> {
+    if let Some((row, content)) = apply_revise_body(&conversation, &target, body.clone(), true)? {
+        MessageEv::Edited { id: row.id, conversation, content }.emit();
     }
-    send_control(to, AppPayload::Revise { target, body }).await
+    send_control(conversation, AppPayload::Revise { target, body }).await
 }
 
 /// Delete a prior message. `for_everyone` tombstones both sides (sends a
 /// Delete); otherwise it's a local-only removal, no wire signal.
-pub async fn delete(to: [u8; 32], target: [u8; 16], for_everyone: bool) -> Result<()> {
+pub async fn delete(conversation: [u8; 16], target: [u8; 16], for_everyone: bool) -> Result<()> {
     let row = if for_everyone {
         // own=true: delete-for-everyone only tombstones our own sent messages.
-        Message::apply_delete(&to, &target, true)
+        Message::apply_delete(&conversation, &target, true, None)
     } else {
         // Delete-for-me is a local-only hide; any message in our view is fair game.
-        Message::hard_delete(&to, &target)
+        Message::hard_delete(&conversation, &target)
     };
     if let Some(row) = row {
-        MessageEv::Deleted { id: row.id, peer: to }.emit();
+        MessageEv::Deleted { id: row.id, conversation }.emit();
     }
-    if for_everyone { send_control(to, AppPayload::Delete { target }).await } else { Ok(()) }
+    if for_everyone {
+        send_control(conversation, AppPayload::Delete { target }).await
+    } else {
+        Ok(())
+    }
 }
 
 /// Add or remove our own emoji reaction on a prior message, then propagate it.
 /// Applied locally first (reactor = us) so the UI reflects it instantly;
 /// best-effort on the wire like edit/delete.
-pub async fn react(to: [u8; 32], target: [u8; 16], emoji: String, add: bool) -> Result<()> {
+pub async fn react(
+    conversation: [u8; 16], target: [u8; 16], emoji: String, add: bool,
+) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ts = crate::utils::systime().as_secs();
-    if Reaction::apply(&to, &target, &our_ipk, &emoji, add, ts) {
-        ReactionEv { peer: to, dispatch_id: target, reactor: our_ipk, emoji: emoji.clone(), add }
+    if Reaction::apply(&conversation, &target, &our_ipk, &emoji, add, ts) {
+        ReactionEv { conversation, dispatch_id: target, reactor: our_ipk, emoji: emoji.clone(), add }
             .emit();
     }
-    send_control(to, AppPayload::React { target, emoji, add }).await
+    send_control(conversation, AppPayload::React { target, emoji, add }).await
 }
 
 /// Send a read/delivered receipt: tell `to` we've received-or-read their
 /// messages up to `upto` (a 16-byte dispatch_id). High-water-mark — one
 /// receipt supersedes earlier ones. Best-effort, like the other control sends.
-pub async fn send_receipt(to: [u8; 32], kind: ReceiptKind, upto: [u8; 16]) -> Result<()> {
-    send_control(to, AppPayload::Receipt { kind, upto }).await
+pub async fn send_receipt(
+    conversation: [u8; 16], kind: ReceiptKind, upto: [u8; 16],
+) -> Result<()> {
+    send_control(conversation, AppPayload::Receipt { kind, upto }).await
+}
+
+/// Narrate a membership or title change: store it locally so we see it
+/// immediately, then ship it to every member so it orders inline with the
+/// conversation on their side too.
+///
+/// Best-effort on the wire, like the other control sends — a group whose
+/// membership changed is still correct if one member's "X was added" line
+/// never lands; the Commit is what actually moves them.
+pub(crate) async fn announce(conversation: [u8; 16], event: SystemEvent) {
+    use crate::db::messages::SYSTEM_ADDED;
+    use crate::db::messages::SYSTEM_LEFT;
+    use crate::db::messages::SYSTEM_REMOVED;
+    use crate::db::messages::SYSTEM_TITLED;
+
+    let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else { return };
+    let (code, target) = match &event {
+        SystemEvent::Added { who } => (SYSTEM_ADDED, hex::encode(who.0)),
+        SystemEvent::Left { who } => (SYSTEM_LEFT, hex::encode(who.0)),
+        SystemEvent::Removed { who } => (SYSTEM_REMOVED, hex::encode(who.0)),
+        SystemEvent::Titled { title } => (SYSTEM_TITLED, title.clone()),
+    };
+    let did = crate::data::message::next_dispatch_id();
+    let ts = crate::utils::systime().as_secs();
+    match Message::save_system(conversation, our_ipk, &did, code, &target, ts, true) {
+        Ok(Some(row)) => MessageEv::Received {
+            id: row.inner.id,
+            conversation,
+            sender: our_ipk,
+            content: target,
+            timestamp: ts,
+        }
+        .emit(),
+        Ok(None) => {},
+        Err(e) => warn!("GROUP: could not record a system row: {e}"),
+    }
+    if let Err(e) = send_control(conversation, AppPayload::System(event)).await {
+        warn!("GROUP: system event not delivered: {e}");
+    }
 }
 
 /// Proof-of-pair: the invitee's first app message after accepting
 /// a Welcome. Flips the inviter's contact PENDING → PAIRED by simply being a
 /// decryptable inbound message.
 pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
-    send_control(to, AppPayload::PairAck).await
+    let conversation = Conversation::for_peer(&to)?;
+    send_control(conversation, AppPayload::PairAck).await
 }
 
 /// Send a control `AppPayload` (Edit/Delete/React/Receipt) into the existing 1:1 group as an
 /// MLS application message. The group must already exist — you're mutating a
 /// message you already exchanged. Outboxed, so a send that finds us offline is
 /// replayed on reconnect rather than lost.
-pub(crate) async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
-    send_control_inner(to, payload, false).await
+pub(crate) async fn send_control(conversation: [u8; 16], payload: AppPayload) -> Result<()> {
+    send_control_inner(conversation, payload, false).await
 }
 
 /// Reverse-wake variant of [`send_control`]: the same row-less MLS control send,
 /// but flags the `DispatchP` for push-wake so an offline peer is revived. The
 /// attachment reverse-wake uses it to bring an offline sender back online.
-pub(crate) async fn send_control_wake(to: [u8; 32], payload: AppPayload) -> Result<()> {
-    send_control_inner(to, payload, true).await
+pub(crate) async fn send_control_wake(conversation: [u8; 16], payload: AppPayload) -> Result<()> {
+    send_control_inner(conversation, payload, true).await
 }
 
-async fn send_control_inner(to: [u8; 32], payload: AppPayload, wake: bool) -> Result<()> {
+async fn send_control_inner(
+    conversation: [u8; 16], payload: AppPayload, wake: bool,
+) -> Result<()> {
     // P2P candidates describe a path that is gone by the next reconnect; every
-    // other control payload is a state edit the peer must eventually see.
+    // other control payload is a state edit every member must eventually see.
     let outbox = (!matches!(payload, AppPayload::P2p { .. })).then_some(OpType::Control);
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
+    let recipients = Conversation::recipients(&conversation);
+    if recipients.is_empty() {
+        bail!("conversation {} has no members", hex::encode(&conversation[..4]));
+    }
+    let gid = Conversation::group_of(&conversation)
+        .ok_or_else(|| anyhow!("no group for conversation {}", hex::encode(&conversation[..4])))?;
+
     let provider = PromtuzMlsProvider::shared();
-    let gid = Contact::get(&to)
-        .and_then(|c| c.inner.mls_group_id)
-        .ok_or_else(|| anyhow!("no group with {}", hex::encode(&to[..4])))?;
     let mut group = MlsGroupHandle::load(&provider, &gid)
         .map_err(|e| anyhow!("load group: {e}"))?
-        .ok_or_else(|| anyhow!("no local group state for {}", hex::encode(&to[..4])))?;
+        .ok_or_else(|| anyhow!("no local group state for {}", hex::encode(&gid[..4])))?;
     let leaf_kp = leaf_signer_for_group(&provider, &group, &our_ipk)?;
 
     let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
 
-    // build_application_envelope_bytes only touches ctx.provider; a stub dht is fine.
+    // seal_application_message only touches ctx.provider; a stub dht is fine.
     let stash = KeyPackageStash::new(stash_db_handle());
     let buffer = EpochCatchupBuffer::new(stash_db_handle());
     let dht = crate::quic::dht_client::NotWiredDhtClient;
-    let ctx =
-        MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
-    let env_bytes = build_application_envelope_bytes(
-        &ctx,
-        &mut group,
-        &leaf_kp,
-        &our_ipk,
-        &to,
-        &payload_bytes,
-        &ipk_signer,
-    )
-    .map_err(|e| anyhow!("build envelope: {e}"))?;
+    let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
 
-    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes, wake, outbox).await
+    // One seal, one ratchet step, N addressed copies — same discipline as the
+    // message path, and for the same reason.
+    let sealed = seal_application_message(&ctx, &mut group, &leaf_kp, &payload_bytes)
+        .map_err(|e| anyhow!("seal control: {e}"))?;
+
+    let id = crate::data::message::next_dispatch_id();
+    let mut delivered = 0usize;
+    for to in &recipients {
+        let env = sealed
+            .address_to(to, &ipk_signer)
+            .map_err(|e| anyhow!("address control envelope: {e}"))?;
+        let outcome = dispatch_to_member(
+            to,
+            &our_ipk,
+            &ipk_signer,
+            &id,
+            env,
+            outbox.unwrap_or(OpType::Control),
+            wake,
+        )
+        .await;
+        if matches!(outcome, LastOutcome::Durable) {
+            delivered += 1;
+        }
+    }
+    // A control op with no outbox dies with the attempt; drop any row it left.
+    if outbox.is_none() {
+        delivery::retire_all(&id);
+    }
+    if delivered == 0 && !recipients.is_empty() {
+        // Every member is queued rather than delivered — fine when outboxed,
+        // a real failure when not.
+        if outbox.is_none() {
+            bail!("control send reached no member");
+        }
+    }
+    Ok(())
 }
 
 /// Sign a `DispatchP` over `env_bytes` and send it (the relay queues it for an
@@ -459,7 +545,7 @@ async fn dispatch_envelope(
         bail!("relay did not accept dispatch: {ack:?}");
     }
     if outbox.is_some() {
-        delivery::retire(&id);
+        delivery::retire(&id, Some(to));
     }
     Ok(())
 }
@@ -490,31 +576,38 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
 /// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
 /// (`0` = present-idle). Fire-and-forget over the relay, cleartext (not MLS);
 /// dropped if we're offline or the peer isn't online. The relay never queues it.
-pub async fn set_activity(peer: [u8; 32], activity: u16) -> Result<()> {
+pub async fn set_activity(conversation: [u8; 16], activity: u16) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ts = crate::utils::systime().as_millis() as u64;
-    let sig = crate::data::identity::IdentitySigner::sign(&activity_sig_message(
-        &peer, &our_ipk, activity, ts,
-    ))
-    .map_err(|e| anyhow!("sign ephemeral: {e}"))?
-    .to_bytes();
-    let eph = ActivityP {
-        to: Bytes(peer),
-        from: Bytes(our_ipk),
-        activity,
-        timestamp: ts,
-        sig: Bytes(sig),
-    };
-    let bytes = CRelayPacket::Activity(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
 
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
     };
     let Some(conn) = conn else { return Ok(()) };
-    if let Ok((mut tx, _rx)) = conn.open_bi().await {
-        let _ = tx.write_all(&bytes).await;
-        let _ = tx.finish();
+
+    // Ephemeral and per-recipient: the signature binds `to`, so every member
+    // gets their own. Unlike content there is nothing to encrypt and nothing to
+    // outbox — a typing signal that misses its moment is worthless.
+    for peer in Conversation::recipients(&conversation) {
+        let sig = crate::data::identity::IdentitySigner::sign(&activity_sig_message(
+            &peer, &our_ipk, activity, ts,
+        ))
+        .map_err(|e| anyhow!("sign ephemeral: {e}"))?
+        .to_bytes();
+        let eph = ActivityP {
+            to: Bytes(peer),
+            from: Bytes(our_ipk),
+            activity,
+            timestamp: ts,
+            sig: Bytes(sig),
+        };
+        let bytes =
+            CRelayPacket::Activity(eph).pack().map_err(|e| anyhow!("pack ephemeral: {e}"))?;
+        if let Ok((mut tx, _rx)) = conn.open_bi().await {
+            let _ = tx.write_all(&bytes).await;
+            let _ = tx.finish();
+        }
     }
     Ok(())
 }
@@ -770,6 +863,57 @@ pub async fn lazy_create_group<C: DhtClient>(
 /// name) to the published Welcome, so a not-yet-contact recipient can
 /// gate-accept it. The pairing flow (`api::identity::pair_from_qr`) uses
 /// this; ordinary first-sends go through the no-pairing wrapper above.
+/// Fetch and verify `who`'s published KeyPackage, returning it with the
+/// `kp_ref` that names the exact record consumed (the stash needs it to mark
+/// the key spent).
+///
+/// The `owner_sig` re-check is defence in depth: the home should have
+/// validated it already, but a malicious replica could forward a
+/// stale-but-tampered record.
+pub(crate) async fn fetch_verified_keypackage<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, who: &[u8; 32],
+) -> Result<(KeyPackage, [u8; 32])> {
+    // Keep the concrete `DhtClientError` downcastable through the anyhow chain
+    // (do NOT stringify): `send_payload` inspects it to detect a `NoStash`
+    // KP-miss and defer the send instead of hard-failing.
+    let fetched = ctx
+        .dht
+        .fetch_keypackage_for(who)
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("fetch_keypackage_for"))?;
+    {
+        use common::proto::mls_wire::MLS_WIRE_VERSION;
+        use common::proto::mls_wire::kp_record_signing_input;
+        let vk = VerifyingKey::from_bytes(&fetched.record.ipk.0)
+            .map_err(|e| anyhow!("recipient ipk is not valid Ed25519: {e}"))?;
+        if &fetched.record.ipk.0 != who {
+            bail!("fetched KP's owner ipk does not match the member requested");
+        }
+        let sig = Signature::from_bytes(&fetched.record.owner_sig.0);
+        let msg = kp_record_signing_input(
+            MLS_WIRE_VERSION,
+            &fetched.record.ipk.0,
+            &fetched.record.kp_ref.0,
+            &fetched.record.kp_bytes.0,
+            fetched.record.expires_at_ms,
+        );
+        // `verify_strict` rejects non-canonical sigs and small-order R values;
+        // mirrors the relay-side discipline.
+        vk.verify_strict(&msg, &sig).map_err(|e| anyhow!("owner_sig invalid: {e}"))?;
+    }
+    let kp = decode_keypackage_bytes(&fetched.record.kp_bytes.0)
+        .map_err(|e| anyhow!("decode KP: {e}"))?;
+    let kp_ref: [u8; 32] = {
+        let r = kp.hash_ref(ctx.provider.crypto()).map_err(|e| anyhow!("kp hash_ref: {e:?}"))?;
+        let mut out = [0u8; 32];
+        let s = r.as_slice();
+        let copy = s.len().min(32);
+        out[..copy].copy_from_slice(&s[..copy]);
+        out
+    };
+    Ok((kp, kp_ref))
+}
+
 pub async fn lazy_create_group_paired<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
     pairing: Option<PairingP>,
@@ -896,11 +1040,24 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
 /// Exposed as `pub` so the e2e harness can build outgoing envelopes
 /// without going through `send_message_inner` (which fetches IPK via
 /// the global `Identity` table).
-pub fn build_application_envelope_bytes<C: DhtClient>(
+/// One MLS ciphertext, not yet addressed to anybody.
+///
+/// The group encrypts a logical message exactly once; the transport then
+/// unicasts that same ciphertext to each member, re-signing per recipient
+/// because `envelope_signing_input` binds a single `to_ipk`. Encrypting per
+/// recipient instead would advance the sender's ratchet N times per message
+/// and leave every member with N-1 generations they can never account for.
+pub struct SealedMessage {
+    group_id:  [u8; 32],
+    epoch:     u64,
+    mls_bytes: Vec<u8>,
+}
+
+/// Encrypt `plaintext` to the group once, advancing the ratchet one step.
+pub fn seal_application_message<C: DhtClient>(
     ctx: &MlsContext<'_, C>, group: &mut MlsGroupHandle,
-    leaf_signer: &openmls_basic_credential::SignatureKeyPair, our_ipk: &[u8; 32], to: &[u8; 32],
-    plaintext: &[u8], ipk_signer: &SigningKey,
-) -> Result<Vec<u8>, MlsGroupError> {
+    leaf_signer: &openmls_basic_credential::SignatureKeyPair, plaintext: &[u8],
+) -> Result<SealedMessage, MlsGroupError> {
     let mls_msg = group.create_application_message(ctx.provider, leaf_signer, plaintext)?;
     let mls_bytes = mls_msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)?;
 
@@ -912,26 +1069,70 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
         )));
     }
 
-    let group_id = group.group_id();
-    let epoch = group.epoch();
+    Ok(SealedMessage { group_id: group.group_id(), epoch: group.epoch(), mls_bytes })
+}
 
-    use ed25519_dalek::Signer;
-    let transcript = envelope_signing_input(PROTOCOL_VERSION, to, &group_id, epoch, &mls_bytes);
-    let outer_sig = ipk_signer.sign(&transcript);
+impl SealedMessage {
+    /// Wrap an already-produced MLS message — a Commit from a membership
+    /// change — for the same per-recipient fan-out an application message
+    /// gets. Commits ride the Application envelope: its inner discriminator
+    /// is openmls's business, and the receiving side already dispatches a
+    /// `StagedCommitMessage` to `merge_staged_commit`. No new wire type.
+    ///
+    /// `epoch` must be the epoch the Commit was *created* in, i.e. before the
+    /// sender merges it — that is the epoch recipients still hold when it
+    /// arrives.
+    pub fn from_mls_out(
+        msg: &openmls::prelude::MlsMessageOut, group_id: [u8; 32], epoch: u64,
+    ) -> Result<Self, MlsGroupError> {
+        let mls_bytes = msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)?;
+        if mls_bytes.len() > MAX_FRAMED_MLS_BYTES {
+            return Err(MlsGroupError::Internal(format!(
+                "commit {} exceeds MAX_FRAMED_MLS_BYTES = {}",
+                mls_bytes.len(),
+                MAX_FRAMED_MLS_BYTES
+            )));
+        }
+        Ok(SealedMessage { group_id, epoch, mls_bytes })
+    }
 
-    let env = MlsApplicationEnvelopeP {
-        version: MLS_ENVELOPE_VERSION,
-        group_id: group_id.into(),
-        epoch,
-        mls_message: ByteVec(mls_bytes),
-        sender_sig: outer_sig.to_bytes().into(),
-    };
-    let outer = MlsEnvelopeP::Application(env);
-    let bytes =
-        outer.ser().map_err(|e| MlsGroupError::Internal(format!("postcard ser envelope: {e}")))?;
+    /// Wrap the sealed ciphertext in an envelope addressed to one member.
+    /// Cheap — a signature over a transcript, no MLS state touched — so
+    /// calling it once per member is the whole cost of fan-out.
+    pub fn address_to(
+        &self, to: &[u8; 32], ipk_signer: &SigningKey,
+    ) -> Result<Vec<u8>, MlsGroupError> {
+        use ed25519_dalek::Signer;
+        let transcript = envelope_signing_input(
+            PROTOCOL_VERSION,
+            to,
+            &self.group_id,
+            self.epoch,
+            &self.mls_bytes,
+        );
+        let outer_sig = ipk_signer.sign(&transcript);
 
+        let env = MlsApplicationEnvelopeP {
+            version:     MLS_ENVELOPE_VERSION,
+            group_id:    self.group_id.into(),
+            epoch:       self.epoch,
+            mls_message: ByteVec(self.mls_bytes.clone()),
+            sender_sig:  outer_sig.to_bytes().into(),
+        };
+        MlsEnvelopeP::Application(env)
+            .ser()
+            .map_err(|e| MlsGroupError::Internal(format!("postcard ser envelope: {e}")))
+    }
+}
+
+/// Seal and address in one step — the 1:1 shape, and the shape tests use.
+pub fn build_application_envelope_bytes<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, group: &mut MlsGroupHandle,
+    leaf_signer: &openmls_basic_credential::SignatureKeyPair, our_ipk: &[u8; 32], to: &[u8; 32],
+    plaintext: &[u8], ipk_signer: &SigningKey,
+) -> Result<Vec<u8>, MlsGroupError> {
     let _ = our_ipk; // bound only via transcript, not the postcard wire
-    Ok(bytes)
+    seal_application_message(ctx, group, leaf_signer, plaintext)?.address_to(to, ipk_signer)
 }
 
 /// The MLS send path — the replacement for the v2-era shared-key
@@ -940,11 +1141,11 @@ pub fn build_application_envelope_bytes<C: DhtClient>(
 /// Generic over the [`DhtClient`] backend so unit tests inject a
 /// fake; production wires the real dialer.
 pub async fn send_message_inner<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], content: String, reply_to: Option<[u8; 16]>,
+    ctx: &MlsContext<'_, C>, conversation: [u8; 16], content: String, reply_to: Option<[u8; 16]>,
 ) -> Result<()> {
     // 0. Save to local DB first (status = pending), then drive one attempt.
-    let msg = Message::save_outgoing(to, &content, reply_to)?;
-    attempt_send(ctx, to, msg).await
+    let msg = Message::save_outgoing(conversation, &content, reply_to)?;
+    attempt_send(ctx, conversation, msg).await
 }
 
 /// Sync, pure-DB prep for an outgoing image: persist the optimistic caption
@@ -952,9 +1153,9 @@ pub async fn send_message_inner<C: DhtClient>(
 /// hasn't run yet), so the bubble shows the instant the user hits send.
 /// [`finish_image`] lands the bytes and drives the send.
 pub(crate) fn build_image_message(
-    to: [u8; 32], width: u32, height: u32, caption: &str, group_id: Option<[u8; 16]>,
+    conversation: [u8; 16], width: u32, height: u32, caption: &str, group_id: Option<[u8; 16]>,
 ) -> Result<Message> {
-    crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
+    crate::data::media::save_outgoing_with_media(&conversation, caption, None, &crate::data::media::MediaRow {
         kind: crate::data::media::KIND_IMAGE,
         group_id: group_id.map(|g| g.to_vec()),
         mime: "image/avif".into(),
@@ -973,10 +1174,10 @@ pub(crate) fn build_image_message(
 /// mime — null file_id; the manifest hash hasn't run yet). Mirrors
 /// [`build_image_message`]; [`finish_attachment`] lands the file_id and sends.
 pub(crate) fn build_attachment_message(
-    to: [u8; 32], size: u64, name: &str, mime: &str, thumb: Option<Vec<u8>>, caption: &str,
-    group_id: Option<[u8; 16]>,
+    conversation: [u8; 16], size: u64, name: &str, mime: &str, thumb: Option<Vec<u8>>,
+    caption: &str, group_id: Option<[u8; 16]>,
 ) -> Result<Message> {
-    crate::data::media::save_outgoing_with_media(&to, caption, None, &crate::data::media::MediaRow {
+    crate::data::media::save_outgoing_with_media(&conversation, caption, None, &crate::data::media::MediaRow {
         kind: crate::data::media::KIND_ATTACHMENT,
         group_id: group_id.map(|g| g.to_vec()),
         mime: mime.to_string(),
@@ -993,25 +1194,28 @@ pub(crate) fn build_attachment_message(
 /// Finalize an optimistic image placeholder: land the compressed bytes on the
 /// row, then send. Called after the sync compress succeeds.
 pub(crate) async fn finish_image(
-    to: [u8; 32], did: [u8; 16], avif: Vec<u8>, width: u32, height: u32,
+    conversation: [u8; 16], did: [u8; 16], avif: Vec<u8>, width: u32, height: u32,
 ) -> Result<()> {
-    crate::data::media::set_blob(&to, &did, &avif, width, height)?;
-    let msg = Message::get_by_dispatch(&to, &did).ok_or_else(|| anyhow!("image row vanished"))?;
+    crate::data::media::set_blob(&conversation, &did, &avif, width, height)?;
+    let msg = Message::get_by_dispatch(&conversation, &did)
+        .ok_or_else(|| anyhow!("image row vanished"))?;
     // ponytail: payload rebuilt from the just-finalized row via
     // rebuild_pending_payload instead of threading caption/group_id through —
     // one small read, and finish + retry share one builder by construction.
-    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
-    send_prepared(to, &msg, payload_bytes).await
+    let payload_bytes = rebuild_pending_payload(&conversation, &msg)?;
+    send_prepared(conversation, &msg, payload_bytes).await
 }
 
 /// Finalize an optimistic attachment placeholder: land the content-addressed
 /// file_id on the row, then send. Called after the manifest pass succeeds.
-pub(crate) async fn finish_attachment(to: [u8; 32], did: [u8; 16], file_id: [u8; 32]) -> Result<()> {
-    crate::data::media::set_file_id(&to, &did, &file_id)?;
-    let msg =
-        Message::get_by_dispatch(&to, &did).ok_or_else(|| anyhow!("attachment row vanished"))?;
-    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
-    send_prepared(to, &msg, payload_bytes).await
+pub(crate) async fn finish_attachment(
+    conversation: [u8; 16], did: [u8; 16], file_id: [u8; 32],
+) -> Result<()> {
+    crate::data::media::set_file_id(&conversation, &did, &file_id)?;
+    let msg = Message::get_by_dispatch(&conversation, &did)
+        .ok_or_else(|| anyhow!("attachment row vanished"))?;
+    let payload_bytes = rebuild_pending_payload(&conversation, &msg)?;
+    send_prepared(conversation, &msg, payload_bytes).await
 }
 
 /// Drive one send attempt for an already-persisted outgoing `msg` row:
@@ -1024,10 +1228,10 @@ pub(crate) async fn finish_attachment(to: [u8; 32], did: [u8; 16], file_id: [u8;
 /// id and the recipient dedups it, then hands off to [`send_payload`] for the
 /// group-resolve/envelope/wire tail shared with [`send_prepared`].
 pub async fn attempt_send<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
+    ctx: &MlsContext<'_, C>, conversation: [u8; 16], msg: Message,
 ) -> Result<()> {
-    let payload_bytes = rebuild_pending_payload(&to, &msg)?;
-    send_payload(ctx, to, &msg, payload_bytes).await
+    let payload_bytes = rebuild_pending_payload(&conversation, &msg)?;
+    send_payload(ctx, conversation, &msg, payload_bytes).await
 }
 
 /// Persist an inbound [`Body`] under `did`, handing back the stored row with the
@@ -1035,16 +1239,23 @@ pub async fn attempt_send<C: DhtClient>(
 /// pre-v12 payloads convert through [`legacy_body`] and land here too, so the
 /// wire vintage stops being visible past this point.
 pub(crate) fn save_inbound_body(
-    from: &[u8; 32], did: &[u8; 16], timestamp: u64, reply_to: Option<[u8; 16]>, body: Body,
+    conversation: &[u8; 16], sender: &[u8; 32], did: &[u8; 16], timestamp: u64,
+    reply_to: Option<[u8; 16]>, body: Body,
 ) -> Result<Option<(Message, String)>> {
     let Some((content, media)) = split_body(body) else { return Ok(None) };
     Ok(match media {
-        None => Message::save_incoming(*from, did, &content, timestamp, reply_to)?
+        None => Message::save_incoming(*conversation, *sender, did, &content, timestamp, reply_to)?
             .map(|m| (m, content)),
-        Some(r) => {
-            crate::data::media::save_incoming_with_media(from, did, &content, timestamp, reply_to, &r)?
-                .map(|m| (m, content))
-        },
+        Some(r) => crate::data::media::save_incoming_with_media(
+            conversation,
+            sender,
+            did,
+            &content,
+            timestamp,
+            reply_to,
+            &r,
+        )?
+        .map(|m| (m, content)),
     })
 }
 
@@ -1098,15 +1309,15 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
 /// path — a peer may only revise messages IT sent us. `None` when the target is
 /// unknown, tombstoned, or authored by the other party.
 pub(crate) fn apply_revise_body(
-    peer: &[u8; 32], target: &[u8; 16], body: Body, own: bool,
+    conversation: &[u8; 16], target: &[u8; 16], body: Body, own: bool,
 ) -> Result<Option<(crate::db::messages::MessageRow, String)>> {
-    let current = BodyKind::stored(crate::data::media::get(peer, target)?.map(|m| m.kind));
+    let current = BodyKind::stored(crate::data::media::get(conversation, target)?.map(|m| m.kind));
     let incoming = BodyKind::of(&body);
     if !current.revisable_to(incoming) {
         bail!("revision {current:?} -> {incoming:?} is not permitted");
     }
     let Some((content, media)) = split_body(body) else { bail!("sticker revision unsupported") };
-    Ok(crate::data::media::apply_revise(peer, target, &content, media.as_ref(), own)?
+    Ok(crate::data::media::apply_revise(conversation, target, &content, media.as_ref(), own)?
         .map(|row| (row, content)))
 }
 
@@ -1181,9 +1392,11 @@ impl BodyKind {
 /// bare-caption text. Everything else — including media kinds not yet re-driven
 /// here, whose bytes live off-row — falls through to [`Body::Text`]. The quote
 /// target rides the envelope, so it survives on every body kind.
-pub(crate) fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Vec<u8>> {
+pub(crate) fn rebuild_pending_payload(
+    conversation: &[u8; 16], msg: &Message,
+) -> Result<Vec<u8>> {
     let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
-    let media = did.and_then(|d| crate::data::media::get(to, &d).ok().flatten());
+    let media = did.and_then(|d| crate::data::media::get(conversation, &d).ok().flatten());
     let reply_to: Option<[u8; 16]> =
         msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
     let body = match media {
@@ -1231,122 +1444,183 @@ pub(crate) fn rebuild_pending_payload(to: &[u8; 32], msg: &Message) -> Result<Ve
 /// one send attempt (durable outbox enqueue → wire send → ack handling).
 /// `msg` supplies the row identity (`id`/`content`/`dispatch_id`) for
 /// mark_sent/mark_failed/`MessageEv` — the payload itself is opaque here.
+/// Resolve the MLS group backing `conversation`, lazy-creating it on a direct
+/// chat's first send.
+///
+/// Serialized on a per-conversation lock for the whole "check existing →
+/// fetch KP → build group → publish Welcome → bind" critical section, so two
+/// concurrent first-sends can't both lazy-create. The lock never crosses an
+/// `await` outside that section.
+///
+/// A group conversation is never lazy-created: its MLS group is minted
+/// explicitly at creation time, with Welcomes to every founding member.
+async fn group_for_conversation<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, conversation: &[u8; 16], our_ipk: &[u8; 32], ipk_signer: &SigningKey,
+) -> Result<MlsGroupHandle> {
+    let lock = group_create_lock(conversation);
+    let _guard = lock.lock().await;
+
+    // Re-read under the lock — a racing send may have just bound a group.
+    let row = Conversation::get(conversation)
+        .ok_or_else(|| anyhow!("no such conversation {}", hex::encode(&conversation[..4])))?;
+    let bound: Option<[u8; 32]> =
+        row.mls_group_id.as_ref().and_then(|g| g.as_slice().try_into().ok());
+
+    if let Some(gid) = bound {
+        match MlsGroupHandle::load(ctx.provider, &gid) {
+            Ok(Some(g)) => return Ok(g),
+            // The conversation points at a group we no longer hold state for
+            // — openmls storage and SQLite drifted. Re-establish and repoint.
+            // History is keyed on the conversation, so it rides through
+            // untouched; only the pointer moves.
+            Ok(None) => warn!("MESSAGE: conversation's group has no local state; recreating"),
+            Err(e) => bail!("load group: {e}"),
+        }
+    }
+
+    if row.kind == crate::data::conversation::KIND_GROUP {
+        bail!("group conversation has no MLS group; it must be created explicitly");
+    }
+    let peer = Conversation::peer_of(conversation)
+        .ok_or_else(|| anyhow!("direct conversation has no peer to pair with"))?;
+
+    let group = lazy_create_group(ctx, our_ipk, ipk_signer, &peer).await?;
+    Conversation::bind_group(conversation, &group.group_id())?;
+    // Keep the address book's shortcut in step so pairing-era lookups agree.
+    if let Err(e) = Contact::set_mls_group_id(&peer, &group.group_id()) {
+        warn!("MESSAGE: persist mls_group_id failed: {e}");
+    }
+    Ok(group)
+}
+
+/// Sign, frame, enqueue and send one member's copy of an already-sealed
+/// dispatch. Returns the relay's durability verdict; `Silence` covers every
+/// transport failure, which leaves the outbox row for the reconciler.
+pub(crate) async fn dispatch_to_member(
+    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
+    op: OpType, wake: bool,
+) -> LastOutcome {
+    let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&sig_message).to_bytes()
+    };
+    let fwd = DispatchP {
+        to:             Bytes(*to),
+        from:           Bytes(*our_ipk),
+        id:             Bytes(*id),
+        payload:        ByteVec(payload),
+        sig:            Bytes(sig),
+        accepted_at_ms: 0,
+        wake,
+    };
+    // Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the
+    // length-prefixed bytes `send()` writes; the relay's read side is
+    // length-prefixed, so storing raw postcard would desync every frame. Store
+    // framed, send framed, reconciler re-sends framed — all byte-identical.
+    let Ok(bytes) = CRelayPacket::Dispatch(fwd).pack() else {
+        return LastOutcome::Terminal;
+    };
+    delivery::enqueue(id, op, Some(*to), &bytes);
+
+    let conn = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else {
+        info!("MESSAGE: offline — {} queued in outbox", hex::encode(&to[..4]));
+        return LastOutcome::Silence;
+    };
+    let Ok((mut send, mut recv)) = conn.open_bi().await else {
+        debug!("MESSAGE: {} send stream failed to open; left in outbox", hex::encode(&to[..4]));
+        return LastOutcome::Silence;
+    };
+    if send.write_all(&bytes).await.is_err() || send.finish().is_err() {
+        debug!("MESSAGE: {} interrupted mid-send; left in outbox", hex::encode(&to[..4]));
+        return LastOutcome::Silence;
+    }
+    match SRelayPacket::unpack(&mut recv).await {
+        Ok(SRelayPacket::DispatchAck(ack)) => {
+            let outcome = delivery::outcome_for_ack(&ack);
+            if matches!(outcome, LastOutcome::Durable) {
+                delivery::retire(id, Some(*to));
+                LAST_ACCEPTED_AT.lock().insert(*id, delivery::accepted_at_secs(&ack).unwrap_or(0));
+            } else if matches!(outcome, LastOutcome::Terminal) {
+                delivery::retire(id, Some(*to));
+            }
+            outcome
+        },
+        _ => {
+            debug!("MESSAGE: {} no usable relay ack; left in outbox", hex::encode(&to[..4]));
+            LastOutcome::Silence
+        },
+    }
+}
+
+/// Relay acceptance timestamps observed during the current fan-out, keyed by
+/// dispatch id. The message's `sent` timestamp is the first member's ack; the
+/// rest of the fan-out is the same logical send at the same moment.
+static LAST_ACCEPTED_AT: Lazy<PlMutex<HashMap<[u8; 16], u64>>> =
+    Lazy::new(|| PlMutex::new(HashMap::new()));
+
+/// Encrypt an already-persisted message once and unicast it to every member.
+///
+/// The message settles only when the whole fan-out has drained: one member's
+/// relay accepting is not a sent message when two others are still queued.
+/// Any member left unacked stays in the outbox for `delivery::reconcile`.
 async fn send_payload<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, to: [u8; 32], msg: &Message, payload_bytes: Vec<u8>,
+    ctx: &MlsContext<'_, C>, conversation: [u8; 16], msg: &Message, payload_bytes: Vec<u8>,
 ) -> Result<()> {
     let msg_id = msg.inner.id;
     let content = &msg.inner.content;
 
-    // 1. Look up the contact.
-    let contact = match Contact::get(&to) {
-        Some(c) => c,
-        None => {
+    let recipients = Conversation::recipients(&conversation);
+    if recipients.is_empty() {
+        Message::mark_failed(&msg_id);
+        MessageEv::Failed { id: msg_id, conversation, reason: "conversation has no members".into() }
+            .emit();
+        return Err(anyhow!("conversation has no members"));
+    }
+
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    // Decrypt the IPK secret ONCE and reuse the signer for every signature in
+    // this send (one application seal + one DispatchP per member). Each decrypt
+    // is a StrongBox op (~1s); doing it per signature would make a group send
+    // take seconds per member. Zeroized on drop.
+    let ipk_signer: SigningKey = crate::data::identity::secret_key_signing(&our_ipk)?;
+
+    let mut group = match group_for_conversation(ctx, &conversation, &our_ipk, &ipk_signer).await {
+        Ok(g) => g,
+        Err(e) => {
+            // A missing peer KeyPackage is transient (the peer republishes on
+            // its own reconnect). Leave the message PENDING and let
+            // retry_pending_sends re-run on the next reconnect — failing here
+            // permanently is the "can't pair" bug. Safe: the fetch fails
+            // BEFORE any group state is built, so no duplicate group.
+            if e.chain()
+                .any(|c| matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash)))
+            {
+                info!("MESSAGE: recipient has no published KP yet — left pending, will retry");
+                return Ok(());
+            }
             Message::mark_failed(&msg_id);
-            MessageEv::Failed { id: msg_id, to, reason: "recipient not in contacts".into() }.emit();
-            return Err(anyhow!("recipient not in contacts"));
+            MessageEv::Failed { id: msg_id, conversation, reason: e.to_string() }.emit();
+            return Err(e);
         },
     };
 
-    // 2. Identity material we need for both sign + group lazy-create.
-    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
-
-    // Decrypt the IPK secret ONCE and reuse the signer for every
-    // signature in this send (application envelope + outer DispatchP).
-    // Each decrypt is a StrongBox op (~1s); doing it once per send
-    // instead of once per signature is the difference between a snappy
-    // send and a ~3s one. Zeroized on drop.
-    let ipk_signer: SigningKey = crate::data::identity::secret_key_signing(&our_ipk)?;
-
-    // 3. Resolve or lazy-create the implicit 1:1 group.
-    //
-    // Hold a per-recipient `tokio::sync::Mutex` for the entire "check
-    // existing group → fetch KP → build group →
-    // publish Welcome → persist group_id" critical section so two
-    // concurrent first-sends to the same contact do not both
-    // lazy-create. The acquire is cheap when uncontested; the lock
-    // never crosses an `await` outside the critical section.
-    let mut group = {
-        let lock = group_create_lock(&to);
-        let _guard = lock.lock().await;
-        // Re-read the contact after acquiring the lock — the racing
-        // task may have just persisted a fresh `mls_group_id`.
-        let contact_now = Contact::get(&to).unwrap_or(contact);
-        match contact_now.inner.mls_group_id {
-            Some(gid) => match MlsGroupHandle::load(ctx.provider, &gid) {
-                Ok(Some(g)) => g,
-                Ok(None) => {
-                    // The contact references a group_id we no longer have
-                    // local state for — the libcore DB and SQLite drifted.
-                    // Fall back to lazy-create (and overwrite the stale id).
-                    warn!("MESSAGE: contact's mls_group_id has no local state; recreating");
-                    let g = lazy_create_group(ctx, &our_ipk, &ipk_signer, &to).await?;
-                    if let Err(e) = Contact::set_mls_group_id(&to, &g.group_id()) {
-                        warn!("MESSAGE: persist mls_group_id failed: {e}");
-                    }
-                    g
-                },
-                Err(e) => {
-                    Message::mark_failed(&msg_id);
-                    MessageEv::Failed { id: msg_id, to, reason: format!("load group: {e}") }.emit();
-                    return Err(anyhow!("load group: {e}"));
-                },
-            },
-            None => match lazy_create_group(ctx, &our_ipk, &ipk_signer, &to).await {
-                Ok(g) => {
-                    if let Err(e) = Contact::set_mls_group_id(&to, &g.group_id()) {
-                        warn!("MESSAGE: persist mls_group_id failed: {e}");
-                    }
-                    g
-                },
-                Err(e) => {
-                    // A missing peer KeyPackage is transient (the peer
-                    // republishes on its own reconnect). Leave the message
-                    // PENDING and let retry_pending_sends re-run on the next
-                    // reconnect — a permanent failure here is the "can't
-                    // pair" bug. Safe: the fetch fails BEFORE any group
-                    // state is built, so no duplicate group. Every OTHER
-                    // lazy-create failure stays a hard fail.
-                    if e.chain().any(|c| {
-                        matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash))
-                    }) {
-                        info!(
-                            "MESSAGE: {} has no published KP yet — left pending, will retry on reconnect",
-                            hex::encode(&to[..4])
-                        );
-                        return Ok(());
-                    }
-                    Message::mark_failed(&msg_id);
-                    MessageEv::Failed { id: msg_id, to, reason: e.to_string() }.emit();
-                    return Err(e);
-                },
-            },
-        }
-    };
-
-    // 4. The leaf signing key for this member's seat. After lazy-create the founder's signer is
-    //    stored in the openmls storage by the credential lookup; we re-derive a transient one for
-    //    application messages by reading it back.
+    // The leaf signing key for our seat in this group.
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
-    // 5. Encrypt the caller-supplied payload into the application envelope. The
-    //    caller (attempt_send / finish_image / finish_attachment) rebuilds it
-    //    from the row on every retry, so a resend reuses the same dispatch id below.
-    let payload = build_application_envelope_bytes(
-        ctx,
-        &mut group,
-        &leaf_kp,
-        &our_ipk,
-        &to,
-        &payload_bytes,
-        &ipk_signer,
-    )
-    .map_err(|e| {
-        Message::mark_failed(&msg_id);
-        anyhow!("build envelope: {e}")
-    })?;
+    // Encrypt once. The caller (attempt_send / finish_image / finish_attachment)
+    // rebuilds `payload_bytes` from the row on every retry, so a resend reuses
+    // the same dispatch id below and recipients dedup it.
+    let sealed =
+        seal_application_message(ctx, &mut group, &leaf_kp, &payload_bytes).map_err(|e| {
+            Message::mark_failed(&msg_id);
+            anyhow!("seal message: {e}")
+        })?;
 
-    // 6. Outer DispatchP, signed under the sender's IPK.
-    // Reuse the persisted dispatch_id so a retry re-sends the same id and the recipient dedups it.
     let id: [u8; 16] = msg
         .inner
         .dispatch_id
@@ -1354,84 +1628,36 @@ async fn send_payload<C: DhtClient>(
         .expect("save_outgoing always mints a dispatch_id")
         .try_into()
         .expect("dispatch_id is 16 bytes");
-    let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
-    let sig = {
-        use ed25519_dalek::Signer;
-        ipk_signer.sign(&sig_message).to_bytes()
-    };
-    let fwd = DispatchP {
-        to:             Bytes(to),
-        from:           Bytes(our_ipk),
-        id:             Bytes(id),
-        payload:        ByteVec(payload),
-        sig:            Bytes(sig),
-        accepted_at_ms: 0,
-        // New content (text/reply): push-wake an offline peer.
-        wake:           true,
-    };
 
-    // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the length-prefixed
-    //    bytes `send()` writes; the relay's read side is length-prefixed, so storing raw postcard
-    //    would desync every frame. Store framed, send framed, reconciler re-sends framed — all
-    //    byte-identical.
-    let dispatch_bytes =
-        CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
-    delivery::enqueue(&id, OpType::Message, Some(to), &dispatch_bytes);
-
-    // 8. Send via the existing relay channel. Offline / mid-send drops leave the row `pending` and
-    //    return Ok — the reconciler (Task 7) re-sends. Only a durable or terminal ack retires the
-    //    row.
-    let conn = {
-        let relay = RELAY.read();
-        relay.as_ref().and_then(|r| r.connection.clone())
-    };
-    let Some(conn) = conn else {
-        info!("MESSAGE: offline — {} queued in outbox", hex::encode(&to[..4]));
-        return Ok(());
-    };
-
-    let Ok((mut send, mut recv)) = conn.open_bi().await else {
-        debug!("MESSAGE: {} send stream failed to open (connection gone); left in outbox", hex::encode(&to[..4]));
-        return Ok(());
-    };
-    if send.write_all(&dispatch_bytes).await.is_err() || send.finish().is_err() {
-        debug!("MESSAGE: {} interrupted mid-send (transport drop); left in outbox", hex::encode(&to[..4]));
-        return Ok(());
+    let mut terminal = false;
+    for to in &recipients {
+        let payload = sealed
+            .address_to(to, &ipk_signer)
+            .map_err(|e| anyhow!("address envelope to member: {e}"))?;
+        // New content: push-wake an offline member.
+        let outcome =
+            dispatch_to_member(to, &our_ipk, &ipk_signer, &id, payload, OpType::Message, true).await;
+        terminal |= matches!(outcome, LastOutcome::Terminal);
     }
 
-    match SRelayPacket::unpack(&mut recv).await {
-        Ok(SRelayPacket::DispatchAck(ack)) => match delivery::outcome_for_ack(&ack) {
-            LastOutcome::Durable => {
-                delivery::retire(&id);
-                let timestamp =
-                    delivery::accepted_at_secs(&ack).expect("durable dispatch ack has timestamp");
-                Message::mark_sent(&msg_id, timestamp);
-                info!("MESSAGE: {} sent — {ack:?}", hex::encode(&to[..4]));
-                MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp }.emit();
-            },
-            LastOutcome::Terminal => {
-                delivery::retire(&id);
-                Message::mark_failed(&msg_id);
-                warn!("MESSAGE: {} rejected by relay — {ack:?}", hex::encode(&to[..4]));
-                MessageEv::Failed { id: msg_id, to, reason: format!("relay rejected: {ack:?}") }
-                    .emit();
-            },
-            LastOutcome::Queued | LastOutcome::Reachable => {
-                info!(
-                    "MESSAGE: {} accepted non-durably ({ack:?}); left in outbox",
-                    hex::encode(&to[..4])
-                );
-            },
-            LastOutcome::Silence => {},
-        },
-        Ok(_other) => {
-            debug!("MESSAGE: {} unexpected reply to dispatch; left in outbox", hex::encode(&to[..4]));
-        },
-        Err(_) => {
-            debug!("MESSAGE: {} no relay ack (transport drop); left in outbox for retry", hex::encode(&to[..4]));
-        },
+    // Settle only once no member's copy is left queued.
+    if delivery::any_pending(&id) {
+        return Ok(());
     }
-
+    let accepted = LAST_ACCEPTED_AT.lock().remove(&id);
+    match accepted {
+        Some(timestamp) => {
+            Message::mark_sent(&msg_id, timestamp);
+            info!("MESSAGE: {} sent to {} member(s)", hex::encode(&id[..4]), recipients.len());
+            MessageEv::Sent { id: msg_id, conversation, content: content.clone(), timestamp }.emit();
+        },
+        None if terminal => {
+            Message::mark_failed(&msg_id);
+            warn!("MESSAGE: {} rejected by relay", hex::encode(&id[..4]));
+            MessageEv::Failed { id: msg_id, conversation, reason: "relay rejected".into() }.emit();
+        },
+        None => {},
+    }
     Ok(())
 }
 
@@ -1448,20 +1674,23 @@ async fn send_payload<C: DhtClient>(
 /// Re-drives via [`attempt_send`], which rebuilds the row's original payload
 /// (an `Image` row resends its stored picture, not a bare-caption `Text`).
 pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
-    // Snapshot the no-group rows BEFORE attempting any. The first send to a
-    // peer persists its `mls_group_id`, so a live per-row check would skip
-    // every *later* deferred message to that same peer — orphaning it (pending,
-    // but never enqueued to the outbox, so `reconcile` can't send it either).
-    // `attempt_send` handles a now-existing group fine, so attempting all of
-    // this snapshot is safe.
+    // Snapshot the no-group rows BEFORE attempting any. The first send in a
+    // conversation binds its MLS group, so a live per-row check would skip
+    // every *later* deferred message in that same conversation — orphaning it
+    // (pending, but never enqueued to the outbox, so `reconcile` can't send it
+    // either). `attempt_send` handles a now-existing group fine, so attempting
+    // all of this snapshot is safe.
     let deferred: Vec<_> = Message::pending_outgoing()
         .into_iter()
-        .filter(|row| Contact::get(&row.peer_ipk).and_then(|c| c.inner.mls_group_id).is_none())
+        .filter(|row| Conversation::group_of(&row.conversation_id).is_none())
         .collect();
     for row in deferred {
-        let to = row.peer_ipk;
-        if let Err(e) = attempt_send(ctx, to, Message { inner: row }).await {
-            warn!("MESSAGE: retry_pending_sends: {} still failing: {e}", hex::encode(&to[..4]));
+        let conversation = row.conversation_id;
+        if let Err(e) = attempt_send(ctx, conversation, Message { inner: row }).await {
+            warn!(
+                "MESSAGE: retry_pending_sends: {} still failing: {e}",
+                hex::encode(&conversation[..4])
+            );
         }
     }
 }
@@ -1584,7 +1813,9 @@ fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result
         return Ok(());
     }
     Contact::mark_rejected(&sender_ipk, d.reason);
-    Message::mark_all_failed_by_peer(&sender_ipk);
+    if let Ok(conversation) = Conversation::for_peer(&sender_ipk) {
+        Message::mark_all_failed_in(&conversation);
+    }
     warn!("PAIR: {} declined (reason {})", hex::encode(&sender_ipk[..4]), d.reason);
     Ok(())
 }
@@ -1641,12 +1872,14 @@ pub enum InboundDecoded {
     /// Welcome processed; group activated. The caller probably wants
     /// to emit an "added to group" UI event (future work).
     Welcome,
-    /// Application message decrypted. `group_id` is surfaced for
-    /// future UI threading work.
+    /// Application message decrypted. `group_id` names the MLS group it
+    /// arrived in, which the caller resolves to a conversation; `author` is
+    /// the member who wrote it, taken from the authenticated leaf credential
+    /// rather than from whoever handed the envelope to the relay.
     Application {
         plaintext: Vec<u8>,
-        #[allow(dead_code)]
         group_id:  [u8; 32],
+        author:    [u8; 32],
     },
     /// Application message buffered for a future epoch.
     ApplicationBuffered,
@@ -1793,16 +2026,20 @@ fn process_application_inbound<C: DhtClient>(
 /// `let _ =`-discarded before — every catch-up message silently lost
 /// once its epoch became current.
 ///
-/// ponytail: attributes all drained messages to `sender_ipk`, the current
-/// envelope's authenticated sender — correct for 1:1 (one possible peer),
-/// wrong for groups. And `m.dispatch_id` is the buffer's blake3(mls) key
-/// (push site below), not the sender's authoritative DispatchP.id: it
-/// dedups fine but won't sort by send-time, so Part 2 delivery watermarks
-/// must thread the real id to the push before relying on ordering.
+/// Each message attributes to the author on its own MLS leaf credential, so a
+/// message that waited out several epochs is still credited to whoever wrote
+/// it rather than to whoever's arrival unblocked the queue.
+///
+/// ponytail: `m.dispatch_id` is the buffer's blake3(mls) key (push site
+/// below), not the sender's authoritative DispatchP.id: it dedups fine but
+/// won't sort by send-time, so delivery watermarks must thread the real id to
+/// the push before relying on ordering.
 fn persist_drained(
-    drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, sender_ipk: [u8; 32],
+    drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, conversation: [u8; 16],
+    fallback_sender: [u8; 32],
 ) {
     for m in drained {
+        let sender_ipk = m.sender.unwrap_or(fallback_sender);
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
         let ts = crate::quic::server::accepted_at_secs(m.accepted_at_ms);
         // Post carries the quote target alongside the body; pre-v12 payloads
@@ -1813,10 +2050,11 @@ fn persist_drained(
             Err(_) => None,
         };
         let Some((reply_to, body)) = parsed else { continue };
-        match save_inbound_body(&sender_ipk, &did, ts, reply_to, body) {
+        match save_inbound_body(&conversation, &sender_ipk, &did, ts, reply_to, body) {
             Ok(Some((saved, content))) => MessageEv::Received {
                 id: saved.inner.id,
-                from: sender_ipk,
+                conversation,
+                sender: sender_ipk,
                 content,
                 timestamp: ts,
             }
@@ -1925,16 +2163,21 @@ pub fn process_application_inbound_for<C: DhtClient>(
         Err(err) => return Err(anyhow!("process_incoming: {err}")),
     };
 
-    match processed {
+    // The MLS leaf credential is the authority on who wrote this; the outer
+    // envelope sender only proves who put it on the wire. They coincide in a
+    // 1:1 chat and routinely diverge in a group.
+    let author = processed.sender.unwrap_or(sender_ipk);
+    match processed.content {
         ProcessedMessageContent::ApplicationMessage(app) => {
             let plaintext = app.into_bytes();
             // After every successful processing, drain any buffered
             // ahead-of-epoch messages and persist them (not discard).
             persist_drained(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
-                sender_ipk,
+                Conversation::for_group(&env.group_id.0).unwrap_or_default(),
+                author,
             );
-            Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0 })
+            Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0, author })
         },
         ProcessedMessageContent::StagedCommitMessage(staged) => {
             let roster = group.member_count() + staged.add_proposals().count();
@@ -1947,11 +2190,25 @@ pub fn process_application_inbound_for<C: DhtClient>(
             group
                 .merge_staged_commit(ctx.provider, *staged)
                 .map_err(|e| anyhow!("merge_staged_commit: {e}"))?;
+            // The merged commit is the authority on who is in the group now,
+            // so re-read the roster from it rather than trusting the narration
+            // that accompanies it. A member removed here keeps their row,
+            // marked inactive, so their old messages still resolve to a name.
+            if let Some(conversation) = Conversation::for_group(&env.group_id.0) {
+                let roster: Vec<[u8; 32]> = group
+                    .members()
+                    .filter_map(|m| m.credential.serialized_content().try_into().ok())
+                    .collect();
+                if let Err(e) = Conversation::sync_roster(&conversation, &roster) {
+                    warn!("GROUP: could not sync the roster after a commit: {e}");
+                }
+            }
             // After commit-merge, drain any newly-processable buffered
             // messages and persist them (not discard).
             persist_drained(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
-                sender_ipk,
+                Conversation::for_group(&env.group_id.0).unwrap_or_default(),
+                author,
             );
             Ok(InboundDecoded::ApplicationBuffered)
         },
@@ -2219,7 +2476,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let to = [0x51u8; 32];
+        let to = [0x51u8; 16];
         let avif = vec![7u8, 8, 9, 10];
         let msg = build_image_message(to, 4, 3, "look at this", None).unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
@@ -2300,7 +2557,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let to = [0x52u8; 32];
+        let to = [0x52u8; 16];
         let quoted = [0x77u8; 16];
         let media = crate::data::media::MediaRow {
             kind: crate::data::media::KIND_IMAGE,
@@ -2429,7 +2686,12 @@ mod tests {
             openmls::prelude::MlsMessageIn::tls_deserialize_exact(&env_app.mls_message.0).unwrap();
         let proto: ProtocolMessage = in_msg.try_into_protocol_message().unwrap();
         let processed = bob_group.process_incoming(&bob.provider, proto).unwrap();
-        match processed {
+        assert_eq!(
+            processed.sender,
+            Some(alice.ipk),
+            "the leaf credential names the author, not the envelope carrier"
+        );
+        match processed.content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext);
             },

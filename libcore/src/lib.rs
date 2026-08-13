@@ -11,6 +11,7 @@ pub mod db;
 pub mod delivery;
 pub mod events;
 pub mod media;
+pub mod groups;
 pub mod messaging;
 pub mod mls;
 pub mod p2p;

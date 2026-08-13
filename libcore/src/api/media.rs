@@ -2,7 +2,7 @@
 
 use crate::api::messaging::to_did16;
 use crate::api::messaging::to_fid32;
-use crate::api::messaging::to_ipk32;
+use crate::api::messaging::to_conv16;
 use crate::platform::CoreError;
 
 #[derive(uniffi::Record)]
@@ -31,10 +31,10 @@ pub struct MediaRecord {
 /// arrives via `on_message`.
 #[uniffi::export]
 pub fn send_image(
-    to_ipk: Vec<u8>, rgba: Vec<u8>, width: u32, height: u32, caption: String,
+    conversation_id: Vec<u8>, rgba: Vec<u8>, width: u32, height: u32, caption: String,
     group_id: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&to_ipk)?;
+    let to = to_conv16(&conversation_id)?;
     let gid = group_id.as_deref().map(to_did16).transpose()?;
     // Optimistic placeholder row FIRST — the DB change-hook doorbell pops the
     // bubble while the encode below blocks this FFI call.
@@ -71,11 +71,11 @@ pub fn send_image(
 /// synchronous input errors; the send outcome arrives via `on_message`.
 #[uniffi::export]
 pub fn send_attachment(
-    to_ipk: Vec<u8>, source_path: String, name: String, mime: String,
+    conversation_id: Vec<u8>, source_path: String, name: String, mime: String,
     thumb_rgba: Option<Vec<u8>>, thumb_w: u32, thumb_h: u32, caption: String,
     group_id: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&to_ipk)?;
+    let to = to_conv16(&conversation_id)?;
     let gid = group_id.as_deref().map(to_did16).transpose()?;
     let size = std::fs::metadata(&source_path)
         .map_err(|e| anyhow::anyhow!("stat {source_path}: {e}"))?
@@ -131,10 +131,10 @@ pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
 /// `local_path` is only exposed once the download is DONE — until then the
 /// `.part` file holds unverified-tail bytes no platform should open.
 #[uniffi::export]
-pub fn get_media(peer_ipk: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
+pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
     use crate::transfer::store;
-    let peer = to_ipk32(&peer_ipk)?;
-    let rows = crate::data::media::for_peer(&peer)?;
+    let conv = to_conv16(&conversation_id)?;
+    let rows = crate::data::media::for_conversation(&conv)?;
     Ok(rows.into_iter().map(|(did, r)| {
         let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
         let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
@@ -188,12 +188,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let peer = [5u8; 32];
-        let msg = crate::messaging::build_image_message(peer, 8, 8, "hi", None).unwrap();
+        let conv = [5u8; 16];
+        let msg = crate::messaging::build_image_message(conv, 8, 8, "hi", None).unwrap();
         assert_eq!(msg.inner.content, "hi");
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
 
-        let rows = media::for_peer(&peer).unwrap();
+        let rows = media::for_conversation(&conv).unwrap();
         let (got_did, row) = rows.iter().find(|(d, _)| *d == did).expect("placeholder persisted");
         assert_eq!(*got_did, did);
         assert_eq!(row.kind, media::KIND_IMAGE);
@@ -202,9 +202,9 @@ mod tests {
         let rgba = vec![128u8; 8 * 8 * 4];
         let (avif, w, h) = crate::media::compress_image(&rgba, 8, 8, 256 * 1024).unwrap();
         assert!(!avif.is_empty());
-        media::set_blob(&peer, &did, &avif, w, h).unwrap();
+        media::set_blob(&conv, &did, &avif, w, h).unwrap();
 
-        let row = media::get(&peer, &did).unwrap().expect("media row");
+        let row = media::get(&conv, &did).unwrap().expect("media row");
         assert_eq!(row.blob.as_deref(), Some(avif.as_slice()));
         assert_eq!(row.size, avif.len() as u64);
     }
@@ -218,16 +218,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let peer = [9u8; 32];
+        let conv = [9u8; 16];
         let thumb = vec![1u8, 2, 3];
         let msg = crate::messaging::build_attachment_message(
-            peer, 4096, "doc.pdf", "application/pdf", Some(thumb.clone()), "here", None,
+            conv, 4096, "doc.pdf", "application/pdf", Some(thumb.clone()), "here", None,
         )
         .unwrap();
         assert_eq!(msg.inner.content, "here");
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
 
-        let rows = media::for_peer(&peer).unwrap();
+        let rows = media::for_conversation(&conv).unwrap();
         let (_d, row) = rows.iter().find(|(d, _)| *d == did).expect("attachment media row persisted");
         assert_eq!(row.kind, media::KIND_ATTACHMENT);
         assert!(row.file_id.is_none(), "placeholder carries no file_id yet");
@@ -237,8 +237,8 @@ mod tests {
         assert!(row.blob.is_none());
 
         let file_id = [0xabu8; 32];
-        media::set_file_id(&peer, &did, &file_id).unwrap();
-        let row = media::get(&peer, &did).unwrap().expect("media row");
+        media::set_file_id(&conv, &did, &file_id).unwrap();
+        let row = media::get(&conv, &did).unwrap().expect("media row");
         assert_eq!(row.file_id.as_deref(), Some(file_id.as_slice()));
     }
 
@@ -248,16 +248,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let peer = [6u8; 32];
+        let conv = [6u8; 16];
         let rgba = vec![128u8; 8 * 8 * 4];
         let (avif, w, h) = crate::media::compress_image(&rgba, 8, 8, 256 * 1024).unwrap();
         assert!(!avif.is_empty());
 
-        let msg = crate::messaging::build_image_message(peer, w, h, "caption", None).unwrap();
+        let msg = crate::messaging::build_image_message(conv, w, h, "caption", None).unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-        media::set_blob(&peer, &did, &avif, w, h).unwrap();
+        media::set_blob(&conv, &did, &avif, w, h).unwrap();
 
-        let records = super::get_media(peer.to_vec()).unwrap();
+        let records = super::get_media(conv.to_vec()).unwrap();
         let record = records.iter()
             .find(|r| r.dispatch_id == did.to_vec())
             .expect("media record found via FFI");
@@ -279,18 +279,18 @@ mod tests {
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
         use crate::transfer::store;
-        let peer = [7u8; 32];
+        let conv = [7u8; 16];
         let file_id = [0xcdu8; 32];
         let msg = crate::messaging::build_attachment_message(
-            peer, 300 * 1024, "big.zip", "application/zip", None, "mine", None,
+            conv, 300 * 1024, "big.zip", "application/zip", None, "mine", None,
         )
         .unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-        media::set_file_id(&peer, &did, &file_id).unwrap();
+        media::set_file_id(&conv, &did, &file_id).unwrap();
         store::retention_put(&file_id, "/tmp/big.zip", 300 * 1024, 256 * 1024, &[1, 2, 3], u64::MAX)
             .unwrap();
 
-        let records = super::get_media(peer.to_vec()).unwrap();
+        let records = super::get_media(conv.to_vec()).unwrap();
         let record = records.iter().find(|r| r.dispatch_id == did.to_vec()).expect("record found");
         assert_eq!(record.transfer_state, store::DONE);
         assert_eq!(record.local_path.as_deref(), Some("/tmp/big.zip"));

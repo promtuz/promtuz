@@ -72,6 +72,16 @@ pub struct MlsGroupHandle {
     inner: MlsGroup,
 }
 
+/// A decrypted inbound message together with the member who wrote it.
+///
+/// `sender` is the IPK carried in the authenticated MLS leaf credential — the
+/// only authority on authorship inside a group. `None` only if a credential
+/// somehow isn't 32 bytes, which a well-formed member cannot produce.
+pub struct ProcessedInbound {
+    pub sender:  Option<[u8; 32]>,
+    pub content: ProcessedMessageContent,
+}
+
 impl MlsGroupHandle {
     /// Construct a fresh group with the caller as the founding member.
     ///
@@ -224,12 +234,17 @@ impl MlsGroupHandle {
     ///   `store_pending_proposal`.
     pub fn process_incoming(
         &mut self, provider: &PromtuzMlsProvider, message: ProtocolMessage,
-    ) -> Result<ProcessedMessageContent> {
+    ) -> Result<ProcessedInbound> {
         let processed = self
             .inner
             .process_message(provider, message)
             .map_err(MlsGroupError::from_openmls)?;
-        Ok(processed.into_content())
+        // Read the author off the authenticated leaf credential before the
+        // content consumes it. MLS proves which member produced this message;
+        // the outer envelope only proves who handed it to the relay, and in a
+        // group those are routinely different people.
+        let sender: Option<[u8; 32]> = processed.credential().serialized_content().try_into().ok();
+        Ok(ProcessedInbound { sender, content: processed.into_content() })
     }
 
     /// Merge a *staged commit* (the result of processing a peer's
@@ -501,7 +516,7 @@ mod tests {
         // messages frame as PrivateMessage (cleartext-framing guard).
         assert_eq!(on_bob.wire_format(), WireFormat::PrivateMessage);
         let proto = on_bob.try_into_protocol_message().expect("proto");
-        let content = bob_group.process_incoming(&provider_b, proto).expect("process");
+        let content = bob_group.process_incoming(&provider_b, proto).expect("process").content;
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext);
@@ -521,7 +536,8 @@ mod tests {
                 &provider_a,
                 on_alice.try_into_protocol_message().expect("proto"),
             )
-            .expect("alice process");
+            .expect("alice process")
+            .content;
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext_b);

@@ -136,7 +136,7 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
     match dht.publish_keypackages(records, KpOutcomeFilter::Default).await {
         Ok(()) => {
-            crate::delivery::retire(&kp_id);
+            crate::delivery::retire(&kp_id, None);
             KP_PUBLISH_READY.store(true, std::sync::atomic::Ordering::Relaxed);
         },
         Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),

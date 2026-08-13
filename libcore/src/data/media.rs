@@ -1,5 +1,6 @@
 //! Per-message media metadata (Image inline bytes / Attachment thumb + file_id),
-//! keyed by (peer_ipk, dispatch_id). The caption itself lives on messages.content.
+//! keyed by (conversation_id, dispatch_id). The caption itself lives on
+//! messages.content.
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use crate::db::messages::MESSAGES_DB;
@@ -21,21 +22,21 @@ pub struct MediaRow {
     pub file_id: Option<Vec<u8>>,
 }
 
-pub fn save(peer: &[u8; 32], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()> {
+pub fn save(conv: &[u8; 16], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()> {
     let db = MESSAGES_DB.lock();
-    save_tx(&db, peer, dispatch_id, r)
+    save_tx(&db, conv, dispatch_id, r)
 }
 
 /// Transaction-scoped [`save`]: writes the media row against a caller-supplied
 /// connection so it can share one transaction with the caption insert.
 pub fn save_tx(
-    conn: &rusqlite::Connection, peer: &[u8; 32], dispatch_id: &[u8; 16], r: &MediaRow,
+    conn: &rusqlite::Connection, conv: &[u8; 16], dispatch_id: &[u8; 16], r: &MediaRow,
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO message_media
-         (peer_ipk,dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id)
+         (conversation_id,dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice(), r.kind, r.group_id,
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice(), r.kind, r.group_id,
             r.mime, r.name, r.size, r.width, r.height, r.blob, r.thumb, r.file_id],
     )?;
     Ok(())
@@ -50,16 +51,16 @@ pub fn save_tx(
 /// or `None` when the dispatch_id was already stored (redelivery: a clean
 /// no-op that still commits, so the caller acks and the relay GCs).
 pub fn save_incoming_with_media(
-    peer: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64,
+    conv: &[u8; 16], sender: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64,
     reply_to: Option<[u8; 16]>, r: &MediaRow,
 ) -> Result<Option<crate::data::message::Message>> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
     let saved = crate::data::message::Message::save_incoming_tx(
-        &tx, *peer, dispatch_id, caption, timestamp, reply_to,
+        &tx, *conv, *sender, dispatch_id, caption, timestamp, reply_to,
     )?;
     if saved.is_some() {
-        save_tx(&tx, peer, dispatch_id, r)?;
+        save_tx(&tx, conv, dispatch_id, r)?;
     }
     tx.commit()?;
     Ok(saved)
@@ -71,11 +72,11 @@ pub fn save_incoming_with_media(
 /// caption back instead of committing a caption-only orphan with no picture and
 /// no retry. The media row keys off the freshly-minted dispatch_id.
 pub fn save_outgoing_with_media(
-    peer: &[u8; 32], caption: &str, reply_to: Option<[u8; 16]>, r: &MediaRow,
+    conv: &[u8; 16], caption: &str, reply_to: Option<[u8; 16]>, r: &MediaRow,
 ) -> Result<crate::data::message::Message> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
-    let msg = crate::data::message::Message::save_outgoing_tx(&tx, *peer, caption, reply_to)?;
+    let msg = crate::data::message::Message::save_outgoing_tx(&tx, *conv, caption, reply_to)?;
     let did: [u8; 16] = msg
         .inner
         .dispatch_id
@@ -83,7 +84,7 @@ pub fn save_outgoing_with_media(
         .expect("save_outgoing mints a dispatch_id")
         .try_into()
         .expect("dispatch_id is 16 bytes");
-    save_tx(&tx, peer, &did, r)?;
+    save_tx(&tx, conv, &did, r)?;
     tx.commit()?;
     Ok(msg)
 }
@@ -97,30 +98,30 @@ pub fn save_outgoing_with_media(
 /// other's messages. `None` when the target is missing, tombstoned, or authored
 /// by the other party.
 pub fn apply_revise(
-    peer: &[u8; 32], dispatch_id: &[u8; 16], content: &str, media: Option<&MediaRow>, own: bool,
+    conv: &[u8; 16], dispatch_id: &[u8; 16], content: &str, media: Option<&MediaRow>, own: bool,
 ) -> Result<Option<crate::db::messages::MessageRow>> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
     let n = tx.execute(
         "UPDATE messages SET content = ?1, edited = 1 \
-         WHERE peer_ipk = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0",
-        rusqlite::params![content, peer.as_slice(), dispatch_id.as_slice(), own],
+         WHERE conversation_id = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0",
+        rusqlite::params![content, conv.as_slice(), dispatch_id.as_slice(), own],
     )?;
     if n == 0 {
         return Ok(None);
     }
     match media {
-        Some(r) => save_tx(&tx, peer, dispatch_id, r)?,
+        Some(r) => save_tx(&tx, conv, dispatch_id, r)?,
         None => {
             tx.execute(
-                "DELETE FROM message_media WHERE peer_ipk = ?1 AND dispatch_id = ?2",
-                rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+                "DELETE FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
+                rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
             )?;
         },
     }
     let row = tx.query_row(
-        "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+        "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
         crate::db::messages::MessageRow::from_row,
     )?;
     tx.commit()?;
@@ -131,12 +132,12 @@ pub fn apply_revise(
 /// finishes (the placeholder row was inserted with a null blob so the bubble
 /// could show instantly).
 pub fn set_blob(
-    peer: &[u8; 32], dispatch_id: &[u8; 16], blob: &[u8], width: u32, height: u32,
+    conv: &[u8; 16], dispatch_id: &[u8; 16], blob: &[u8], width: u32, height: u32,
 ) -> Result<()> {
     MESSAGES_DB.lock().execute(
         "UPDATE message_media SET blob=?3, size=?4, width=?5, height=?6
-         WHERE peer_ipk=?1 AND dispatch_id=?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice(), blob, blob.len() as u64,
+         WHERE conversation_id=?1 AND dispatch_id=?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice(), blob, blob.len() as u64,
             width, height],
     )?;
     Ok(())
@@ -144,10 +145,10 @@ pub fn set_blob(
 
 /// Fill an outgoing attachment's content-addressed file_id once the manifest
 /// pass finishes (placeholder inserted with a null file_id).
-pub fn set_file_id(peer: &[u8; 32], dispatch_id: &[u8; 16], file_id: &[u8; 32]) -> Result<()> {
+pub fn set_file_id(conv: &[u8; 16], dispatch_id: &[u8; 16], file_id: &[u8; 32]) -> Result<()> {
     MESSAGES_DB.lock().execute(
-        "UPDATE message_media SET file_id=?3 WHERE peer_ipk=?1 AND dispatch_id=?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice(), file_id.as_slice()],
+        "UPDATE message_media SET file_id=?3 WHERE conversation_id=?1 AND dispatch_id=?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice(), file_id.as_slice()],
     )?;
     Ok(())
 }
@@ -155,16 +156,16 @@ pub fn set_file_id(peer: &[u8; 32], dispatch_id: &[u8; 16], file_id: &[u8; 32]) 
 /// Remove an outgoing media message wholesale — caption row + media side-row —
 /// when the heavy prep (compress / manifest) fails before the send ever
 /// started, so no dead placeholder bubble lingers. One transaction.
-pub fn discard_outgoing(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<()> {
+pub fn discard_outgoing(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Result<()> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
     tx.execute(
-        "DELETE FROM message_media WHERE peer_ipk=?1 AND dispatch_id=?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+        "DELETE FROM message_media WHERE conversation_id=?1 AND dispatch_id=?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
     )?;
     tx.execute(
-        "DELETE FROM messages WHERE peer_ipk=?1 AND dispatch_id=?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+        "DELETE FROM messages WHERE conversation_id=?1 AND dispatch_id=?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
     )?;
     tx.commit()?;
     Ok(())
@@ -173,12 +174,12 @@ pub fn discard_outgoing(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<()> {
 /// The media side-row for one message (by peer + dispatch_id), or `None` if
 /// the message carries no media. Lets the send-retry path rebuild the original
 /// media payload instead of downgrading it to bare text.
-pub fn get(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> {
+pub fn get(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> {
     let db = MESSAGES_DB.lock();
     db.query_row(
         "SELECT kind,group_id,mime,name,size,width,height,blob,thumb,file_id
-         FROM message_media WHERE peer_ipk=?1 AND dispatch_id=?2",
-        rusqlite::params![peer.as_slice(), dispatch_id.as_slice()],
+         FROM message_media WHERE conversation_id=?1 AND dispatch_id=?2",
+        rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
         |row| Ok(MediaRow {
             kind: row.get(0)?, group_id: row.get(1)?, mime: row.get(2)?, name: row.get(3)?,
             size: row.get(4)?, width: row.get(5)?, height: row.get(6)?,
@@ -189,17 +190,19 @@ pub fn get(peer: &[u8; 32], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> 
     .map_err(Into::into)
 }
 
-/// The sender to dial for an incoming attachment and the size they advertised
+/// The member to dial for an incoming attachment and the size they advertised
 /// in the offer — the pull rejects a manifest whose `total_size` belies it.
+/// Read off `messages.sender_ipk`, so in a group the file is pulled from
+/// whoever actually sent it rather than from the conversation at large.
 /// Restricted to the INCOMING row (`m.outgoing = 0`): if we both received and
-/// re-sent the same content-addressed file, the outgoing row's peer is our own
+/// re-sent the same content-addressed file, the outgoing row names our own
 /// recipient (who serves `Gone`), not the sender we must pull from.
 pub fn attachment_offer(file_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
     let db = MESSAGES_DB.lock();
     db.query_row(
-        "SELECT mm.peer_ipk, mm.size FROM message_media mm
-           JOIN messages m ON m.peer_ipk = mm.peer_ipk AND m.dispatch_id = mm.dispatch_id
-         WHERE mm.file_id = ?1 AND m.outgoing = 0 LIMIT 1",
+        "SELECT m.sender_ipk, mm.size FROM message_media mm
+           JOIN messages m ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
+         WHERE mm.file_id = ?1 AND m.outgoing = 0 AND m.sender_ipk IS NOT NULL LIMIT 1",
         [file_id.as_slice()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -207,12 +210,12 @@ pub fn attachment_offer(file_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
     .map_err(Into::into)
 }
 
-pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {
+pub fn for_conversation(conv: &[u8; 16]) -> Result<Vec<([u8; 16], MediaRow)>> {
     let db = MESSAGES_DB.lock();
     let mut stmt = db.prepare(
         "SELECT dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id
-         FROM message_media WHERE peer_ipk=?1")?;
-    let rows = stmt.query_map([peer.as_slice()], |row| {
+         FROM message_media WHERE conversation_id=?1")?;
+    let rows = stmt.query_map([conv.as_slice()], |row| {
         let did: Vec<u8> = row.get(0)?;
         let mut d = [0u8; 16]; d.copy_from_slice(&did);
         Ok((d, MediaRow {
@@ -226,6 +229,9 @@ pub fn for_peer(peer: &[u8; 32]) -> Result<Vec<([u8; 16], MediaRow)>> {
 
 #[cfg(test)]
 mod tests {
+    /// Stand-in for the member who authored an inbound test message.
+    const SENDER: [u8; 32] = [0xEE; 32];
+
     use super::*;
 
     #[test]
@@ -238,12 +244,12 @@ mod tests {
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
         // NB: uses the shared MESSAGES_DB; run with --test-threads=1 if the DB is process-global.
-        let peer = [3u8; 32]; let did = [4u8; 16];
+        let conv = [3u8; 16]; let did = [4u8; 16];
         let row = MediaRow { kind: KIND_IMAGE, group_id: Some(vec![1u8;16]),
             mime: "image/avif".into(), name: "".into(), size: 3, width: 4, height: 3,
             blob: Some(vec![9,9,9]), thumb: None, file_id: None };
-        save(&peer, &did, &row).unwrap();
-        let got = for_peer(&peer).unwrap();
+        save(&conv, &did, &row).unwrap();
+        let got = for_conversation(&conv).unwrap();
         assert!(got.iter().any(|(d, r)| *d == did && r.blob == row.blob && r.kind == KIND_IMAGE));
     }
 
@@ -255,16 +261,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let peer = [0x21u8; 32];
+        let conv = [0x21u8; 16];
         let did = [0x22u8; 16];
         let row = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: "".into(), size: 0, width: 4, height: 3,
             blob: None, thumb: None, file_id: None };
-        save(&peer, &did, &row).unwrap();
-        assert!(get(&peer, &did).unwrap().unwrap().blob.is_none());
+        save(&conv, &did, &row).unwrap();
+        assert!(get(&conv, &did).unwrap().unwrap().blob.is_none());
 
-        set_blob(&peer, &did, &[7, 8, 9], 2, 2).unwrap();
-        let got = get(&peer, &did).unwrap().unwrap();
+        set_blob(&conv, &did, &[7, 8, 9], 2, 2).unwrap();
+        let got = get(&conv, &did).unwrap().unwrap();
         assert_eq!(got.blob, Some(vec![7, 8, 9]));
         assert_eq!(got.size, 3);
         assert_eq!((got.width, got.height), (2, 2));
@@ -278,18 +284,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let peer = [0x23u8; 32];
+        let conv = [0x23u8; 16];
         let row = MediaRow { kind: KIND_ATTACHMENT, group_id: None,
             mime: "application/pdf".into(), name: "a.pdf".into(), size: 9,
             width: 0, height: 0, blob: None, thumb: None, file_id: None };
-        let msg = save_outgoing_with_media(&peer, "cap", None, &row).unwrap();
+        let msg = save_outgoing_with_media(&conv, "cap", None, &row).unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-        assert!(get(&peer, &did).unwrap().is_some());
+        assert!(get(&conv, &did).unwrap().is_some());
 
-        discard_outgoing(&peer, &did).unwrap();
-        assert!(get(&peer, &did).unwrap().is_none(), "media side-row gone");
+        discard_outgoing(&conv, &did).unwrap();
+        assert!(get(&conv, &did).unwrap().is_none(), "media side-row gone");
         assert!(
-            crate::data::message::Message::get_by_dispatch(&peer, &did).is_none(),
+            crate::data::message::Message::get_by_dispatch(&conv, &did).is_none(),
             "caption row gone"
         );
     }
@@ -307,7 +313,7 @@ mod tests {
             conn.query_row(sql, [k], |r| r.get(0)).unwrap()
         }
         let mut conn = crate::db::messages::open_in_memory();
-        let peer = [5u8; 32];
+        let conv = [5u8; 16];
 
         // Happy path: both rows land in one committed transaction.
         let did = [6u8; 16];
@@ -316,8 +322,8 @@ mod tests {
             blob: Some(vec![1, 2, 3]), thumb: None, file_id: None };
         {
             let tx = conn.transaction().unwrap();
-            assert!(Message::save_incoming_tx(&tx, peer, &did, "cap", 100, None).unwrap().is_some());
-            save_tx(&tx, &peer, &did, &media).unwrap();
+            assert!(Message::save_incoming_tx(&tx, conv, SENDER, &did, "cap", 100, None).unwrap().is_some());
+            save_tx(&tx, &conv, &did, &media).unwrap();
             tx.commit().unwrap();
         }
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages WHERE dispatch_id=?1", did.as_slice()), 1);
@@ -328,10 +334,10 @@ mod tests {
         let did2 = [7u8; 16];
         {
             let tx = conn.transaction().unwrap();
-            assert!(Message::save_incoming_tx(&tx, peer, &did2, "cap2", 100, None).unwrap().is_some());
+            assert!(Message::save_incoming_tx(&tx, conv, SENDER, &did2, "cap2", 100, None).unwrap().is_some());
             let bad = tx.execute(
-                "INSERT INTO message_media (peer_ipk,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
-                rusqlite::params![peer.as_slice(), did2.as_slice(), "image/avif"],
+                "INSERT INTO message_media (conversation_id,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
+                rusqlite::params![conv.as_slice(), did2.as_slice(), "image/avif"],
             );
             assert!(bad.is_err(), "NULL kind must violate NOT NULL");
             // tx dropped without commit → rollback
@@ -353,7 +359,7 @@ mod tests {
             conn.query_row(sql, [k], |r| r.get(0)).unwrap()
         }
         let mut conn = crate::db::messages::open_in_memory();
-        let peer = [8u8; 32];
+        let conv = [8u8; 16];
         let media = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: String::new(), size: 3, width: 4, height: 3,
             blob: Some(vec![1, 2, 3]), thumb: None, file_id: None };
@@ -361,9 +367,9 @@ mod tests {
         // Happy path: caption + media land in one committed transaction.
         let did: [u8; 16] = {
             let tx = conn.transaction().unwrap();
-            let msg = Message::save_outgoing_tx(&tx, peer, "cap", None).unwrap();
+            let msg = Message::save_outgoing_tx(&tx, conv, "cap", None).unwrap();
             let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
-            save_tx(&tx, &peer, &d, &media).unwrap();
+            save_tx(&tx, &conv, &d, &media).unwrap();
             tx.commit().unwrap();
             d
         };
@@ -374,11 +380,11 @@ mod tests {
         // inserted in the same transaction.
         let did2: [u8; 16] = {
             let tx = conn.transaction().unwrap();
-            let msg = Message::save_outgoing_tx(&tx, peer, "cap2", None).unwrap();
+            let msg = Message::save_outgoing_tx(&tx, conv, "cap2", None).unwrap();
             let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
             let bad = tx.execute(
-                "INSERT INTO message_media (peer_ipk,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
-                rusqlite::params![peer.as_slice(), d.as_slice(), "image/avif"],
+                "INSERT INTO message_media (conversation_id,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",
+                rusqlite::params![conv.as_slice(), d.as_slice(), "image/avif"],
             );
             assert!(bad.is_err(), "NULL kind must violate NOT NULL");
             d // tx dropped without commit → rollback

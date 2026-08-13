@@ -223,7 +223,7 @@ pub fn stage_attachment(
 /// Items leave the buffer as they commit, so a partial failure doesn't re-send
 /// what already went.
 pub async fn commit(
-    to: [u8; 32], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
+    conversation: [u8; 16], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
 ) -> Result<()> {
     if ids.is_empty() {
         bail!("nothing staged");
@@ -252,10 +252,11 @@ pub async fn commit(
     for (i, s) in staged.iter().enumerate() {
         let media = s.media_row(group_id).ok_or_else(|| anyhow!("staged item {} not ready", s.id))?;
         let cap = if i == 0 { caption.as_str() } else { "" };
-        let msg = crate::data::media::save_outgoing_with_media(&to, cap, reply_to, &media)?;
+        let msg =
+            crate::data::media::save_outgoing_with_media(&conversation, cap, reply_to, &media)?;
         discard(s.id);
-        let payload = crate::messaging::rebuild_pending_payload(&to, &msg)?;
-        crate::messaging::send_prepared(to, &msg, payload).await?;
+        let payload = crate::messaging::rebuild_pending_payload(&conversation, &msg)?;
+        crate::messaging::send_prepared(conversation, &msg, payload).await?;
     }
     Ok(())
 }
@@ -381,7 +382,7 @@ mod tests {
         let _g = SERIAL.lock();
         clear();
 
-        let to = [0x60u8; 32];
+        let to = [0x60u8; 16];
         assert!(commit(to, vec![], String::new(), None).await.is_err(), "nothing to send");
 
         let id = insert_ready(KIND_IMAGE);

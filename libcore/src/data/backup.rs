@@ -26,7 +26,12 @@ use crate::db::messages::ReactionRow;
 use crate::db::peers::ContactRow;
 
 const MAGIC: &[u8; 4] = b"PZBK";
-const VERSION: u8 = 1;
+/// 2: the conversation re-key. `MessageRow` and `ReactionRow` are serialized
+/// structurally, so moving them off `peer_ipk` onto `conversation_id` (plus the
+/// new `sender_ipk`) changes the blob's shape. A v1 blob decodes into garbage
+/// rather than failing loudly, so the version gate is what keeps a stale backup
+/// from silently importing conversation ids that were somebody's public key.
+const VERSION: u8 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct BackupPayload {

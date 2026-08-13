@@ -1,6 +1,7 @@
 //! Messaging exports: send + typed read paths (no CBOR).
 
 use crate::data::contact::Contact;
+use crate::data::conversation::Conversation;
 use crate::data::message::Message;
 use crate::db::messages::MessageRow;
 use crate::platform::CoreError;
@@ -9,7 +10,10 @@ use crate::platform::CoreError;
 #[derive(uniffi::Record)]
 pub struct MessageRecord {
     pub id: String,
-    pub peer_ipk: Vec<u8>,
+    /// The chat this belongs to — 16 bytes, stable for the conversation's life.
+    pub conversation_id: Vec<u8>,
+    /// Who wrote it. `None` means us, which is how every outgoing row reads.
+    pub sender_ipk: Option<Vec<u8>>,
     pub content: String,
     pub outgoing: bool,
     pub timestamp: u64,
@@ -23,6 +27,10 @@ pub struct MessageRecord {
     pub deleted: bool,
     /// dispatch_id of the quoted message, when this is a reply.
     pub reply_to: Option<Vec<u8>>,
+    /// 0 for an ordinary message; otherwise a membership/title change, where
+    /// `sender_ipk` is who acted and `content` names the target — a hex IPK
+    /// for the membership events, the new title for a rename.
+    pub system: u8,
 }
 
 /// One emoji reaction, projected for the client. `mine` is `reactor == self`
@@ -39,8 +47,48 @@ pub struct ReactionRecord {
 /// Unread incoming count for one conversation — the home-list badge source.
 #[derive(uniffi::Record)]
 pub struct UnreadCount {
-    pub peer_ipk: Vec<u8>,
+    pub conversation_id: Vec<u8>,
     pub count: u32,
+}
+
+/// A conversation, projected for the client — the home list's row source.
+#[derive(uniffi::Record)]
+pub struct ConversationRecord {
+    pub id: Vec<u8>,
+    /// 0 = direct (a 1:1 chat), 1 = group.
+    pub kind: u8,
+    /// Group name. Empty for a direct chat, which titles itself from its peer.
+    pub title: String,
+    /// Active roster, us included. Two entries for a direct chat.
+    pub members: Vec<Vec<u8>>,
+    /// The other party of a direct chat, resolved core-side so the client
+    /// never needs to hold its own IPK to work out which member isn't it.
+    /// `None` for a group, which has no single counterpart.
+    pub peer: Option<Vec<u8>>,
+    /// The active roster minus ourselves — exactly who a send fans out to.
+    /// Same list the client needs for presence and typing, which are
+    /// per-person and so can never key off the conversation.
+    pub others: Vec<Vec<u8>>,
+    /// Whether *we* may change this group's membership. v1 grants that to the
+    /// creator alone; resolved here because only core knows our own IPK.
+    pub can_manage: bool,
+    /// True once an MLS group backs this conversation — i.e. it can send.
+    pub has_group: bool,
+    pub created_at: u64,
+}
+
+/// One member's standing in a conversation.
+#[derive(uniffi::Record)]
+pub struct MemberRecord {
+    pub ipk: Vec<u8>,
+    /// 0 = member, 1 = admin. v1 mints exactly one admin: the creator.
+    pub role: u8,
+    pub joined_at: u64,
+    /// False once they left or were removed; their old messages still attribute.
+    pub active: bool,
+    /// This row is us. Resolved here for the same reason as `ReactionRecord.mine`:
+    /// the client would otherwise hold its own IPK just to compare against.
+    pub me: bool,
 }
 
 /// An address-book entry, projected for the client.
@@ -62,12 +110,12 @@ pub struct ContactInfo {
 /// IPK length) synchronously.
 #[uniffi::export]
 pub fn send_message(
-    to_ipk: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
+    conversation_id: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&to_ipk)?;
+    let conv = to_conv16(&conversation_id)?;
     let reply = reply_to.as_deref().map(to_did16).transpose()?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::send(to, content, reply).await {
+        if let Err(e) = crate::messaging::send(conv, content, reply).await {
             log::error!("MESSAGE: send failed: {e}");
         }
     });
@@ -77,11 +125,13 @@ pub fn send_message(
 /// Edit a prior message (targets it by its 16-byte `dispatch_id`). Fire-and-
 /// forget; the change is applied locally and surfaces via `on_message(Edited)`.
 #[uniffi::export]
-pub fn edit_message(peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, content: String) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+pub fn edit_message(
+    conversation_id: Vec<u8>, dispatch_id: Vec<u8>, content: String,
+) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::edit(to, target, content).await {
+        if let Err(e) = crate::messaging::edit(conv, target, content).await {
             log::error!("MESSAGE: edit failed: {e}");
         }
     });
@@ -92,10 +142,10 @@ pub fn edit_message(peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, content: String) ->
 /// (0 = present-idle). Fire-and-forget; dropped if we or the peer are offline.
 /// The peer sees it via `on_activity`. Call on typing start/stop (throttled).
 #[uniffi::export]
-pub fn set_activity(peer_ipk: Vec<u8>, activity: u16) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+pub fn set_activity(conversation_id: Vec<u8>, activity: u16) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::set_activity(to, activity).await {
+        if let Err(e) = crate::messaging::set_activity(conv, activity).await {
             log::debug!("MESSAGE: set_activity failed: {e}");
         }
     });
@@ -107,12 +157,12 @@ pub fn set_activity(peer_ipk: Vec<u8>, activity: u16) -> Result<(), CoreError> {
 /// `on_reaction`. A person may stack several distinct emoji on one message.
 #[uniffi::export]
 pub fn react_message(
-    peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, emoji: String, add: bool,
+    conversation_id: Vec<u8>, dispatch_id: Vec<u8>, emoji: String, add: bool,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+    let conv = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::react(to, target, emoji, add).await {
+        if let Err(e) = crate::messaging::react(conv, target, emoji, add).await {
             log::error!("MESSAGE: react failed: {e}");
         }
     });
@@ -122,10 +172,10 @@ pub fn react_message(
 /// All reactions in a conversation, oldest first. The UI groups by
 /// `dispatch_id`; `mine` marks the caller's own.
 #[uniffi::export]
-pub fn reactions_for(peer_ipk: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError> {
-    let peer = to_ipk32(&peer_ipk)?;
+pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
-    Ok(crate::data::reaction::Reaction::for_peer(&peer)
+    Ok(crate::data::reaction::Reaction::for_conversation(&conv)
         .into_iter()
         .map(|r| ReactionRecord {
             mine: me.as_ref().is_some_and(|m| m == &r.reactor),
@@ -142,15 +192,15 @@ pub fn reactions_for(peer_ipk: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError
 /// Sends a Read receipt; the peer sees it as a status bump via `on_message`
 /// (Receipt). Delivered receipts are automatic on message arrival.
 #[uniffi::export]
-pub fn mark_read(peer_ipk: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+pub fn mark_read(conversation_id: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
     let upto = to_did16(&upto_dispatch_id)?;
     // Persist locally first so the home unread count clears the moment the user
-    // reads in-chat (the write rings the reactive doorbell); then tell the peer.
-    Message::set_read_watermark(&to, &upto);
+    // reads in-chat (the write rings the reactive doorbell); then tell the others.
+    Message::set_read_watermark(&conv, &upto);
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send_receipt(
-            to, common::proto::mls_wire::ReceiptKind::Read, upto,
+            conv, common::proto::mls_wire::ReceiptKind::Read, upto,
         )
         .await
         {
@@ -165,13 +215,13 @@ pub fn mark_read(peer_ipk: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), Cor
 /// incoming. For the home-list "Mark read" action, where the caller has no
 /// specific dispatch id in hand.
 #[uniffi::export]
-pub fn mark_conversation_read(peer_ipk: Vec<u8>) -> Result<(), CoreError> {
-    let peer = to_ipk32(&peer_ipk)?;
-    let Some(upto) = Message::newest_incoming_dispatch(&peer) else { return Ok(()) };
-    Message::set_read_watermark(&peer, &upto);
+pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let Some(upto) = Message::newest_incoming_dispatch(&conv) else { return Ok(()) };
+    Message::set_read_watermark(&conv, &upto);
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send_receipt(
-            peer, common::proto::mls_wire::ReceiptKind::Read, upto,
+            conv, common::proto::mls_wire::ReceiptKind::Read, upto,
         )
         .await
         {
@@ -186,7 +236,7 @@ pub fn mark_conversation_read(peer_ipk: Vec<u8>) -> Result<(), CoreError> {
 pub fn unread_counts() -> Vec<UnreadCount> {
     Message::unread_counts()
         .into_iter()
-        .map(|(peer, count)| UnreadCount { peer_ipk: peer.to_vec(), count })
+        .map(|(conv, count)| UnreadCount { conversation_id: conv.to_vec(), count })
         .collect()
 }
 
@@ -241,26 +291,119 @@ pub fn register_push_token(token: Vec<u8>) {
 /// a local-only removal. Surfaces via `on_message(Deleted)`.
 #[uniffi::export]
 pub fn delete_message(
-    peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, for_everyone: bool,
+    conversation_id: Vec<u8>, dispatch_id: Vec<u8>, for_everyone: bool,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+    let conv = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::delete(to, target, for_everyone).await {
+        if let Err(e) = crate::messaging::delete(conv, target, for_everyone).await {
             log::error!("MESSAGE: delete failed: {e}");
         }
     });
     Ok(())
 }
 
-/// Paginated history with `peer_ipk`, oldest-first. `before_id` (a ULID)
+/// Paginated history for a conversation, oldest-first. `before_id` (a ULID)
 /// pages backwards; pass an empty string for the latest page.
 #[uniffi::export]
 pub fn get_messages(
-    peer_ipk: Vec<u8>, limit: u32, before_id: String,
+    conversation_id: Vec<u8>, limit: u32, before_id: String,
 ) -> Result<Vec<MessageRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Ok(Message::get_messages(&conv, limit, &before_id).into_iter().map(Into::into).collect())
+}
+
+/// Every conversation, most recently active first — the home list.
+#[uniffi::export]
+pub fn list_conversations() -> Vec<ConversationRecord> {
+    Conversation::list()
+        .into_iter()
+        .map(conversation_record)
+        .collect()
+}
+
+/// Shared projection so the list and single-fetch reads can't drift.
+fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationRecord {
+    ConversationRecord {
+        members:    Conversation::members(&c.id)
+            .into_iter()
+            .filter(|m| m.active)
+            .map(|m| m.member_ipk.to_vec())
+            .collect(),
+        peer:       Conversation::peer_of(&c.id).map(|p| p.to_vec()),
+        others:     Conversation::recipients(&c.id).into_iter().map(|p| p.to_vec()).collect(),
+        can_manage: crate::data::identity::Identity::get()
+            .is_some_and(|i| Conversation::is_admin(&c.id, &i.ipk())),
+        has_group:  c.mls_group_id.is_some(),
+        id:         c.id.to_vec(),
+        kind:       c.kind,
+        title:      c.title,
+        created_at: c.created_at,
+    }
+}
+
+/// The direct conversation with `peer_ipk`, created if this is the first time
+/// it's been opened. How the contacts list turns a person into a chat.
+#[uniffi::export]
+pub fn conversation_with(peer_ipk: Vec<u8>) -> Result<Vec<u8>, CoreError> {
     let peer = to_ipk32(&peer_ipk)?;
-    Ok(Message::get_messages(&peer, limit, &before_id).into_iter().map(Into::into).collect())
+    Ok(Conversation::for_peer(&peer)?.to_vec())
+}
+
+/// One conversation by id, or `None` if it's gone.
+#[uniffi::export]
+pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Ok(Conversation::get(&conv).map(conversation_record))
+}
+
+/// Full roster including departed members, so historic messages still
+/// attribute to a name.
+#[uniffi::export]
+pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    Ok(Conversation::members(&conv)
+        .into_iter()
+        .map(|m| MemberRecord {
+            me:        me.is_some_and(|k| k == m.member_ipk),
+            ipk:       m.member_ipk.to_vec(),
+            role:      m.role,
+            joined_at: m.joined_at,
+            active:    m.active,
+        })
+        .collect())
+}
+
+/// How many members have read up to `dispatch_id` — the "seen by N" figure.
+#[uniffi::export]
+pub fn seen_by_count(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<u32, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let did = to_did16(&dispatch_id)?;
+    Ok(Message::seen_by_count(&conv, &did))
+}
+
+/// Rename a conversation. Applied locally at once so the UI doesn't wait on
+/// the network; a group's new name is then narrated to its members, who apply
+/// it on receipt. A direct chat's title is ours alone, so it stays local.
+#[uniffi::export]
+pub fn set_conversation_title(
+    conversation_id: Vec<u8>, title: String,
+) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Conversation::set_title(&conv, &title)?;
+    let is_group = Conversation::get(&conv)
+        .is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
+    if is_group {
+        crate::RUNTIME.spawn(async move {
+            crate::messaging::announce(
+                conv,
+                common::proto::mls_wire::SystemEvent::Titled { title },
+            )
+            .await;
+        });
+    }
+    Ok(())
 }
 
 /// One entry per conversation (latest message per peer).
@@ -327,8 +470,11 @@ pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
         }
     }
 
-    Message::delete_by_peer(&ipk);
-    crate::data::reaction::Reaction::delete_by_peer(&ipk);
+    if let Ok(conv) = Conversation::for_peer(&ipk) {
+        if let Err(e) = Conversation::delete(&conv) {
+            log::error!("FORGET: conversation delete failed: {e}");
+        }
+    }
     crate::delivery::forget_target(&ipk);
     // Sever any live direct link so a forgotten contact can't keep talking
     // over an already-open P2P connection.
@@ -352,8 +498,12 @@ pub fn list_contacts_diag() -> Vec<ContactDiag> {
             ContactDiag {
                 paired: c.mls_group_id.is_some(),
                 epoch,
-                message_count: Message::count_by_peer(&c.ipk),
-                last_status: Message::last_status_by_peer(&c.ipk),
+                message_count: Conversation::for_peer(&c.ipk)
+                    .map(|conv| Message::count_in(&conv))
+                    .unwrap_or(0),
+                last_status: Conversation::for_peer(&c.ipk)
+                    .ok()
+                    .and_then(|conv| Message::last_status_in(&conv)),
                 pending_ops: crate::delivery::pending_ops_for(&c.ipk),
                 ipk: c.ipk.to_vec(),
                 name: c.name,
@@ -366,7 +516,8 @@ impl From<MessageRow> for MessageRecord {
     fn from(r: MessageRow) -> Self {
         MessageRecord {
             id: r.id.to_string(),
-            peer_ipk: r.peer_ipk.to_vec(),
+            conversation_id: r.conversation_id.to_vec(),
+            sender_ipk: r.sender_ipk,
             content: r.content,
             outgoing: r.outgoing,
             timestamp: r.timestamp,
@@ -375,6 +526,7 @@ impl From<MessageRow> for MessageRecord {
             edited: r.edited,
             deleted: r.deleted,
             reply_to: r.reply_to,
+            system: r.system,
         }
     }
 }
@@ -382,6 +534,13 @@ impl From<MessageRow> for MessageRecord {
 /// Validate a client-supplied IPK is exactly 32 bytes.
 pub(crate) fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "ipk must be 32 bytes".into() })
+}
+
+/// Validate a client-supplied conversation id is exactly 16 bytes.
+pub(crate) fn to_conv16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
+    bytes
+        .try_into()
+        .map_err(|_| CoreError::Internal { msg: "conversation id must be 16 bytes".into() })
 }
 
 /// Validate a client-supplied dispatch_id is exactly 16 bytes.
@@ -392,4 +551,65 @@ pub(crate) fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
 /// Validate a client-supplied file_id is exactly 32 bytes.
 pub(crate) fn to_fid32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "file_id must be 32 bytes".into() })
+}
+
+// ── Group membership ──────────────────────────────────────────────────────
+//
+// All four need a live relay (a KeyPackage fetch and a Welcome), so unlike a
+// message they report their outcome synchronously rather than outboxing.
+//
+// These are the only `async` exports on the surface, and uniffi polls them on
+// its own executor — no Tokio reactor in scope, so QUIC I/O inside would fail
+// with "there is no reactor running". [`on_runtime`] moves the work onto the
+// global runtime; the JoinHandle we await back is a plain future the runtime
+// wakes, so uniffi's executor is fine holding it.
+
+/// Run `fut` on [`crate::RUNTIME`] and await its result.
+async fn on_runtime<T, F>(fut: F) -> Result<T, CoreError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    crate::RUNTIME
+        .spawn(fut)
+        .await
+        .map_err(|e| CoreError::Internal { msg: format!("group task did not finish: {e}") })?
+        .map_err(CoreError::from)
+}
+
+/// Create a group with `members` and us as its admin. Returns the new
+/// conversation id, ready to send in.
+#[uniffi::export]
+pub async fn create_group(title: String, members: Vec<Vec<u8>>) -> Result<Vec<u8>, CoreError> {
+    let list = members.iter().map(|m| to_ipk32(m)).collect::<Result<Vec<_>, _>>()?;
+    let id = on_runtime(crate::groups::create_group(title, list)).await?;
+    Ok(id.to_vec())
+}
+
+/// Add someone to a group. Admin-only; they get no pre-join history.
+#[uniffi::export]
+pub async fn add_group_member(
+    conversation_id: Vec<u8>, member_ipk: Vec<u8>,
+) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let who = to_ipk32(&member_ipk)?;
+    on_runtime(crate::groups::add_member(conv, who)).await
+}
+
+/// Remove someone from a group, rotating keys afterwards so their device can't
+/// read what follows. Admin-only.
+#[uniffi::export]
+pub async fn remove_group_member(
+    conversation_id: Vec<u8>, member_ipk: Vec<u8>,
+) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let who = to_ipk32(&member_ipk)?;
+    on_runtime(crate::groups::remove_member(conv, who)).await
+}
+
+/// Leave a group. The conversation and its history stay; it just can't send.
+#[uniffi::export]
+pub async fn leave_group(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    on_runtime(crate::groups::leave(conv)).await
 }

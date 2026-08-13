@@ -113,8 +113,15 @@ pub async fn send_offer(
         addrs_short(&candidates),
         relay.map(addr_short).unwrap_or_else(|| "none".into())
     );
-    crate::messaging::send_control(peer, AppPayload::P2p { candidates, relay, token, disco_key })
-        .await
+    // Signalling is inherently point-to-point: a candidate path is between
+    // two devices, so it addresses the direct conversation with that peer
+    // rather than whatever group chat they happen to share with us.
+    let conversation = crate::data::conversation::Conversation::for_peer(&peer)?;
+    crate::messaging::send_control(
+        conversation,
+        AppPayload::P2p { candidates, relay, token, disco_key },
+    )
+    .await
 }
 
 #[cfg(test)]

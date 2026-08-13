@@ -1,4 +1,5 @@
 pub mod contact;
+pub mod conversation;
 pub mod identity;
 pub mod idqr;
 pub mod backup;

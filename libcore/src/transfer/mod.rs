@@ -74,13 +74,18 @@ pub async fn serve_link(link: crate::p2p::PeerLink) {
 
 /// Whether we offered `file_id` to `peer`. Retention is keyed by content hash
 /// alone, so the outgoing message row is what scopes a pull — and its
-/// `Manifest`/`Gone` answer — to the contact the file was actually sent to.
+/// `Manifest`/`Gone` answer — to who the file was actually sent to. In a group
+/// that is every active member of the conversation it was posted in, not one
+/// contact.
 fn offered_to(file_id: &[u8; 32], peer: &[u8; 32]) -> bool {
     let db = crate::db::messages::MESSAGES_DB.lock();
     db.query_row(
         "SELECT 1 FROM message_media mm
-           JOIN messages m ON m.peer_ipk = mm.peer_ipk AND m.dispatch_id = mm.dispatch_id
-          WHERE mm.file_id = ?1 AND mm.peer_ipk = ?2 AND m.outgoing = 1 LIMIT 1",
+           JOIN messages m
+             ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
+           JOIN conversation_members cm ON cm.conversation_id = mm.conversation_id
+          WHERE mm.file_id = ?1 AND cm.member_ipk = ?2 AND cm.active = 1 AND m.outgoing = 1
+          LIMIT 1",
         rusqlite::params![file_id.as_slice(), peer.as_slice()],
         |_| Ok(()),
     )
@@ -193,11 +198,15 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
                 if woke_recently { " (wake suppressed)" } else { ", reverse-waking" },
             );
             if !woke_recently {
-                let _ = crate::messaging::send_control_wake(
-                    peer,
-                    common::proto::mls_wire::AppPayload::FileWant { file_id },
-                )
-                .await;
+                // The reverse-wake targets the one device holding the bytes,
+                // so it goes to our direct conversation with them.
+                if let Ok(conversation) = crate::data::conversation::Conversation::for_peer(&peer) {
+                    let _ = crate::messaging::send_control_wake(
+                        conversation,
+                        common::proto::mls_wire::AppPayload::FileWant { file_id },
+                    )
+                    .await;
+                }
                 hold(&file_id, peer);
             }
             return Ok(());
@@ -484,7 +493,10 @@ mod download_resume {
             thumb:    None,
             file_id:  Some(file_id.to_vec()),
         };
-        crate::data::media::save_outgoing_with_media(&peer, "", None, &row).unwrap();
+        // The media row is conversation-scoped; the peer only names who to
+        // pull from, which lives on the message row.
+        let conv = crate::data::conversation::Conversation::for_peer(&peer).unwrap();
+        crate::data::media::save_outgoing_with_media(&conv, "", None, &row).unwrap();
     }
 
     /// Two directly-connected peer endpoints on loopback — the real QUIC

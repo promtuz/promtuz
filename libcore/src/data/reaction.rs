@@ -14,21 +14,21 @@ impl Reaction {
     /// Apply one reaction change. Returns `true` if the table actually changed
     /// (so callers only emit an event / redraw on a real delta).
     pub fn apply(
-        peer_ipk: &[u8; 32], dispatch_id: &[u8], reactor: &[u8; 32], emoji: &str, add: bool,
+        conversation_id: &[u8; 16], dispatch_id: &[u8], reactor: &[u8; 32], emoji: &str, add: bool,
         timestamp: u64,
     ) -> bool {
         let conn = MESSAGES_DB.lock();
         let n = if add {
             conn.execute(
-                "INSERT OR REPLACE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+                "INSERT OR REPLACE INTO reactions (conversation_id, dispatch_id, reactor, emoji, timestamp) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (peer_ipk.as_slice(), dispatch_id, reactor.as_slice(), emoji, timestamp),
+                (conversation_id.as_slice(), dispatch_id, reactor.as_slice(), emoji, timestamp),
             )
         } else {
             conn.execute(
                 "DELETE FROM reactions \
-                 WHERE peer_ipk = ?1 AND dispatch_id = ?2 AND reactor = ?3 AND emoji = ?4",
-                (peer_ipk.as_slice(), dispatch_id, reactor.as_slice(), emoji),
+                 WHERE conversation_id = ?1 AND dispatch_id = ?2 AND reactor = ?3 AND emoji = ?4",
+                (conversation_id.as_slice(), dispatch_id, reactor.as_slice(), emoji),
             )
         };
         n.unwrap_or(0) > 0
@@ -36,15 +36,15 @@ impl Reaction {
 
     /// All reactions in a conversation, oldest first. The UI groups by
     /// `dispatch_id` and marks `reactor == self` as its own.
-    pub fn for_peer(peer_ipk: &[u8; 32]) -> Vec<ReactionRow> {
+    pub fn for_conversation(conversation_id: &[u8; 16]) -> Vec<ReactionRow> {
         let conn = MESSAGES_DB.lock();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT peer_ipk, dispatch_id, reactor, emoji, timestamp FROM reactions \
-             WHERE peer_ipk = ?1 ORDER BY timestamp ASC",
+            "SELECT conversation_id, dispatch_id, reactor, emoji, timestamp FROM reactions \
+             WHERE conversation_id = ?1 ORDER BY timestamp ASC",
         ) else {
             return Vec::new();
         };
-        stmt.query_map([peer_ipk.as_slice()], ReactionRow::from_row)
+        stmt.query_map([conversation_id.as_slice()], ReactionRow::from_row)
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
     }
@@ -53,7 +53,7 @@ impl Reaction {
     pub fn dump_all() -> Vec<ReactionRow> {
         let conn = MESSAGES_DB.lock();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT peer_ipk, dispatch_id, reactor, emoji, timestamp FROM reactions",
+            "SELECT conversation_id, dispatch_id, reactor, emoji, timestamp FROM reactions",
         ) else {
             return Vec::new();
         };
@@ -69,9 +69,9 @@ impl Reaction {
         let mut n = 0usize;
         for r in rows {
             n += tx.execute(
-                "INSERT OR REPLACE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+                "INSERT OR REPLACE INTO reactions (conversation_id, dispatch_id, reactor, emoji, timestamp) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (r.peer_ipk.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
+                (r.conversation_id.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
             )?;
         }
         tx.commit()?;
@@ -87,9 +87,9 @@ impl Reaction {
         let mut n = 0usize;
         for r in rows {
             n += tx.execute(
-                "INSERT OR IGNORE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+                "INSERT OR IGNORE INTO reactions (conversation_id, dispatch_id, reactor, emoji, timestamp) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                (r.peer_ipk.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
+                (r.conversation_id.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
             )?;
         }
         tx.commit()?;
@@ -97,9 +97,9 @@ impl Reaction {
     }
 
     /// Drop every reaction in a conversation (forget-contact cascade).
-    pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
+    pub fn delete_in(conversation_id: &[u8; 16]) {
         let conn = MESSAGES_DB.lock();
-        conn.execute("DELETE FROM reactions WHERE peer_ipk = ?1", [peer_ipk.as_slice()]).ok();
+        conn.execute("DELETE FROM reactions WHERE conversation_id = ?1", [conversation_id.as_slice()]).ok();
     }
 }
 
@@ -113,9 +113,9 @@ mod tests {
     /// the same pair is idempotent, and a remove deletes exactly one pair.
     fn add(conn: &Connection, msg: &[u8], reactor: &[u8; 32], emoji: &str) -> usize {
         conn.execute(
-            "INSERT OR REPLACE INTO reactions (peer_ipk, dispatch_id, reactor, emoji, timestamp) \
+            "INSERT OR REPLACE INTO reactions (conversation_id, dispatch_id, reactor, emoji, timestamp) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            (&[1u8; 32][..], msg, reactor.as_slice(), emoji, 0u64),
+            (&[1u8; 16][..], msg, reactor.as_slice(), emoji, 0u64),
         )
         .unwrap()
     }
@@ -140,8 +140,8 @@ mod tests {
         assert_eq!(count(&conn, &msg), 3);
 
         conn.execute(
-            "DELETE FROM reactions WHERE peer_ipk = ?1 AND dispatch_id = ?2 AND reactor = ?3 AND emoji = ?4",
-            (&[1u8; 32][..], &msg[..], a.as_slice(), "👍"),
+            "DELETE FROM reactions WHERE conversation_id = ?1 AND dispatch_id = ?2 AND reactor = ?3 AND emoji = ?4",
+            (&[1u8; 16][..], &msg[..], a.as_slice(), "👍"),
         )
         .unwrap();
         assert_eq!(count(&conn, &msg), 2, "remove drops exactly the one pair");

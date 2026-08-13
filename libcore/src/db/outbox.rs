@@ -45,8 +45,9 @@ pub struct OutboxRow {
 
 from_row!(OutboxRow { id, op_type, target_ipk, payload, created_at, attempts, next_attempt });
 
-const MIGRATION_ARRAY: &[M] = &[M::up(
-    r#"--sql
+const MIGRATION_ARRAY: &[M] = &[
+    M::up(
+        r#"--sql
         CREATE TABLE outbox (
           id           BLOB PRIMARY KEY,
           op_type      INTEGER NOT NULL,
@@ -58,7 +59,35 @@ const MIGRATION_ARRAY: &[M] = &[M::up(
           state        INTEGER NOT NULL DEFAULT 0   -- 0 pending | 1 dead
         );
     "#,
-)];
+    ),
+    // Per-member delivery rows. One logical send fans out to every member of a
+    // conversation, and each copy carries the SAME dispatch id — that id is the
+    // message's identity on the receiving side, so replies, edits and reactions
+    // across the group all name the same thing. The row key therefore has to be
+    // (id, target): keyed on id alone, the second member's copy would collide
+    // with the first and a partially-acked fan-out could never retry the rest.
+    M::up(
+        r#"--sql
+        CREATE TABLE outbox_new (
+          id           BLOB NOT NULL,
+          op_type      INTEGER NOT NULL,
+          target_ipk   BLOB,
+          payload      BLOB NOT NULL,
+          created_at   INTEGER NOT NULL,
+          attempts     INTEGER NOT NULL DEFAULT 0,
+          next_attempt INTEGER NOT NULL DEFAULT 0,
+          state        INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO outbox_new SELECT id, op_type, target_ipk, payload, created_at, attempts, next_attempt, state FROM outbox;
+        DROP TABLE outbox;
+        ALTER TABLE outbox_new RENAME TO outbox;
+        -- COALESCE, not the bare column: SQLite treats NULLs as distinct in a
+        -- unique index, so targetless ops (KeyPackage publishes) would other-
+        -- wise duplicate freely instead of deduping on their id.
+        CREATE UNIQUE INDEX idx_outbox_key ON outbox(id, COALESCE(target_ipk, X''));
+    "#,
+    ),
+];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static OUTBOX_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {

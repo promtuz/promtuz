@@ -1,7 +1,7 @@
 //! Composer staging: FFI for the media buffer that sits in front of a send.
 
 use crate::api::messaging::to_did16;
-use crate::api::messaging::to_ipk32;
+use crate::api::messaging::to_conv16;
 use crate::platform::CoreError;
 
 /// A staged item, projected for the client.
@@ -91,9 +91,9 @@ pub fn staged_items() -> Vec<StagedRecord> {
 /// buffer to settle rather than have items silently dropped.
 #[uniffi::export]
 pub fn send_staged(
-    to_ipk: Vec<u8>, ids: Vec<u64>, caption: String, reply_to: Option<Vec<u8>>,
+    conversation_id: Vec<u8>, ids: Vec<u64>, caption: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&to_ipk)?;
+    let to = to_conv16(&conversation_id)?;
     let reply = reply_to.as_deref().map(to_did16).transpose()?;
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::staging::commit(to, ids, caption, reply).await {
@@ -109,9 +109,9 @@ pub fn send_staged(
 /// the buffer either way, so a refusal doesn't cost the user their pick.
 #[uniffi::export]
 pub fn revise_with_staged(
-    peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, staged_id: u64, caption: String,
+    conversation_id: Vec<u8>, dispatch_id: Vec<u8>, staged_id: u64, caption: String,
 ) -> Result<(), CoreError> {
-    let to = to_ipk32(&peer_ipk)?;
+    let to = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
     let body = crate::staging::body_of(staged_id, caption)?;
     crate::RUNTIME.spawn(async move {

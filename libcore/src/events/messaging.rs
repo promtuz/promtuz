@@ -4,11 +4,14 @@ use crate::events::Emittable;
 
 #[derive(Serialize, Debug, Clone)]
 pub enum MessageEv {
-    /// A new message was received and decrypted
+    /// A new message was received and decrypted. `sender` is the member who
+    /// wrote it, which in a group is not the conversation.
     Received {
         id: ULID,
         #[serde(with = "serde_bytes")]
-        from: [u8; 32],
+        conversation: [u8; 16],
+        #[serde(with = "serde_bytes")]
+        sender: [u8; 32],
         content: String,
         timestamp: u64,
     },
@@ -16,7 +19,7 @@ pub enum MessageEv {
     Sent {
         id: ULID,
         #[serde(with = "serde_bytes")]
-        to: [u8; 32],
+        conversation: [u8; 16],
         content: String,
         timestamp: u64,
     },
@@ -24,28 +27,32 @@ pub enum MessageEv {
     Failed {
         id: ULID,
         #[serde(with = "serde_bytes")]
-        to: [u8; 32],
+        conversation: [u8; 16],
         reason: String,
     },
     /// A message's text changed (our edit, or an inbound peer Edit).
     Edited {
         id: ULID,
         #[serde(with = "serde_bytes")]
-        peer: [u8; 32],
+        conversation: [u8; 16],
         content: String,
     },
     /// A message was deleted (tombstoned for-everyone, or removed for-me).
     Deleted {
         id: ULID,
         #[serde(with = "serde_bytes")]
-        peer: [u8; 32],
+        conversation: [u8; 16],
     },
-    /// The peer acknowledged our outgoing messages up to `upto` (a 16-byte
+    /// A member acknowledged our outgoing messages up to `upto` (a 16-byte
     /// dispatch_id) at `status` (Delivered/Read). High-water-mark: the UI
     /// bumps every rendered message with `dispatch_id <= upto` to `status`.
+    /// `member` names who acknowledged — in a group the tick only advances
+    /// once the slowest of them has.
     Receipt {
         #[serde(with = "serde_bytes")]
-        peer: [u8; 32],
+        conversation: [u8; 16],
+        #[serde(with = "serde_bytes")]
+        member: [u8; 32],
         #[serde(with = "serde_bytes")]
         upto: [u8; 16],
         status: u8,
@@ -60,11 +67,14 @@ impl Emittable for MessageEv {
     }
 }
 
-/// A contact's live activity changed — an ephemeral, unstored signal.
+/// A member's live activity changed — an ephemeral, unstored signal.
 /// `activity` is an OR of `common::proto::client_rel::ACTIVITY_*` bits;
 /// `0` = present-but-idle. The UI decides how to render (typing dots, etc.).
+/// Carries the conversation as well as the member, so a group header can
+/// aggregate several people typing at once.
 #[derive(Debug, Clone)]
 pub struct ActivityEv {
+    pub conversation: [u8; 16],
     pub peer: [u8; 32],
     pub activity: u16,
 }
@@ -72,7 +82,7 @@ pub struct ActivityEv {
 impl Emittable for ActivityEv {
     fn emit(self) {
         if let Some(events) = crate::platform::EVENTS.get() {
-            events.on_activity(self.peer.to_vec(), self.activity);
+            events.on_activity(self.conversation.to_vec(), self.peer.to_vec(), self.activity);
         }
     }
 }
@@ -97,7 +107,7 @@ impl Emittable for PresenceEv {
 /// member's reaction carries its own `reactor`.
 #[derive(Debug, Clone)]
 pub struct ReactionEv {
-    pub peer: [u8; 32],
+    pub conversation: [u8; 16],
     pub dispatch_id: [u8; 16],
     pub reactor: [u8; 32],
     pub emoji: String,
@@ -107,7 +117,7 @@ pub struct ReactionEv {
 impl Emittable for ReactionEv {
     fn emit(self) {
         if let Some(events) = crate::platform::EVENTS.get() {
-            events.on_reaction(self.peer.to_vec(), self.dispatch_id.to_vec(), self.reactor.to_vec(), self.emoji, self.add);
+            events.on_reaction(self.conversation.to_vec(), self.dispatch_id.to_vec(), self.reactor.to_vec(), self.emoji, self.add);
         }
     }
 }

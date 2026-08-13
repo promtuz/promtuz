@@ -42,13 +42,13 @@ pub trait CoreEvents: Send + Sync {
     fn on_message(&self, event: MessageEvent);
     /// A contact's live activity (typing/recording/… bitset; 0 = idle/online).
     /// Ephemeral — never stored; drop if the peer isn't in the current view.
-    fn on_activity(&self, peer: Vec<u8>, activity: u16);
+    fn on_activity(&self, conversation: Vec<u8>, peer: Vec<u8>, activity: u16);
     /// A contact's presence changed (online / idle-since / offline-last-seen).
     fn on_presence(&self, peer: Vec<u8>, presence: Presence);
     /// A reaction was added (`add = true`) or removed on a message. `reactor`
-    /// is the author's IPK — compare to self for "mine". `peer` is the
-    /// conversation, `dispatch_id` the reacted message.
-    fn on_reaction(&self, peer: Vec<u8>, dispatch_id: Vec<u8>, reactor: Vec<u8>, emoji: String, add: bool);
+    /// is the author's IPK — compare to self for "mine". `conversation` is the
+    /// chat scope, `dispatch_id` the reacted message.
+    fn on_reaction(&self, conversation: Vec<u8>, dispatch_id: Vec<u8>, reactor: Vec<u8>, emoji: String, add: bool);
     /// A UI-facing DB committed a write — the coarse "re-read" doorbell for the
     /// reactive layer. `tables` names what moved (e.g. `["messages","reactions"]`);
     /// the client re-runs any observed query overlapping them. Content-free —
@@ -66,7 +66,10 @@ pub enum CoreError {
 
 impl From<anyhow::Error> for CoreError {
     fn from(e: anyhow::Error) -> Self {
-        CoreError::Internal { msg: e.to_string() }
+        // `{:#}` joins the whole context chain. Plain `to_string()` prints only
+        // the outermost layer, which is where the call happened rather than
+        // what went wrong — "fetch_keypackage_for" instead of the reason.
+        CoreError::Internal { msg: format!("{e:#}") }
     }
 }
 
@@ -75,36 +78,53 @@ impl From<anyhow::Error> for CoreError {
 /// stays ergonomic and only the wire shape is FFI-constrained.
 #[derive(uniffi::Enum)]
 pub enum MessageEvent {
-    Received { id: String, from: Vec<u8>, content: String, timestamp: u64 },
-    Sent { id: String, to: Vec<u8>, content: String, timestamp: u64 },
-    Failed { id: String, to: Vec<u8>, reason: String },
-    Edited { id: String, peer: Vec<u8>, content: String },
-    Deleted { id: String, peer: Vec<u8> },
-    /// Peer acknowledged our messages up to `upto` (dispatch_id) at `status`
-    /// (3 = delivered, 4 = read). UI bumps all rendered messages ≤ upto.
-    Receipt { peer: Vec<u8>, upto: Vec<u8>, status: u8 },
+    Received { id: String, conversation: Vec<u8>, sender: Vec<u8>, content: String, timestamp: u64 },
+    Sent { id: String, conversation: Vec<u8>, content: String, timestamp: u64 },
+    Failed { id: String, conversation: Vec<u8>, reason: String },
+    Edited { id: String, conversation: Vec<u8>, content: String },
+    Deleted { id: String, conversation: Vec<u8> },
+    /// A member acknowledged our messages up to `upto` (dispatch_id) at
+    /// `status` (3 = delivered, 4 = read). UI bumps all rendered messages
+    /// ≤ upto; in a group the status only advances once every member has.
+    Receipt { conversation: Vec<u8>, member: Vec<u8>, upto: Vec<u8>, status: u8 },
 }
 
 impl From<MessageEv> for MessageEvent {
     fn from(e: MessageEv) -> Self {
         match e {
-            MessageEv::Received { id, from, content, timestamp } => {
-                MessageEvent::Received { id: id.to_string(), from: from.to_vec(), content, timestamp }
+            MessageEv::Received { id, conversation, sender, content, timestamp } => {
+                MessageEvent::Received {
+                    id: id.to_string(),
+                    conversation: conversation.to_vec(),
+                    sender: sender.to_vec(),
+                    content,
+                    timestamp,
+                }
             },
-            MessageEv::Sent { id, to, content, timestamp } => {
-                MessageEvent::Sent { id: id.to_string(), to: to.to_vec(), content, timestamp }
+            MessageEv::Sent { id, conversation, content, timestamp } => {
+                MessageEvent::Sent {
+                    id: id.to_string(),
+                    conversation: conversation.to_vec(),
+                    content,
+                    timestamp,
+                }
             },
-            MessageEv::Failed { id, to, reason } => {
-                MessageEvent::Failed { id: id.to_string(), to: to.to_vec(), reason }
+            MessageEv::Failed { id, conversation, reason } => {
+                MessageEvent::Failed { id: id.to_string(), conversation: conversation.to_vec(), reason }
             },
-            MessageEv::Edited { id, peer, content } => {
-                MessageEvent::Edited { id: id.to_string(), peer: peer.to_vec(), content }
+            MessageEv::Edited { id, conversation, content } => {
+                MessageEvent::Edited { id: id.to_string(), conversation: conversation.to_vec(), content }
             },
-            MessageEv::Deleted { id, peer } => {
-                MessageEvent::Deleted { id: id.to_string(), peer: peer.to_vec() }
+            MessageEv::Deleted { id, conversation } => {
+                MessageEvent::Deleted { id: id.to_string(), conversation: conversation.to_vec() }
             },
-            MessageEv::Receipt { peer, upto, status } => {
-                MessageEvent::Receipt { peer: peer.to_vec(), upto: upto.to_vec(), status }
+            MessageEv::Receipt { conversation, member, upto, status } => {
+                MessageEvent::Receipt {
+                    conversation: conversation.to_vec(),
+                    member: member.to_vec(),
+                    upto: upto.to_vec(),
+                    status,
+                }
             },
         }
     }

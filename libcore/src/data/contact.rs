@@ -71,6 +71,15 @@ impl Contact {
             params![ipk, name, added_at],
         )?;
 
+        // Give every contact its direct conversation up front. The home list
+        // reads conversations, so a contact added but never opened would
+        // otherwise have no row to appear as. Best-effort: a failure here
+        // costs a home-list entry, not the contact.
+        drop(conn);
+        if let Err(e) = crate::data::conversation::Conversation::for_peer(&ipk) {
+            log::warn!("CONTACT: could not open a conversation for a new contact: {e}");
+        }
+
         Ok(if existed { SaveOutcome::Existed } else { SaveOutcome::Created })
     }
 
@@ -171,6 +180,10 @@ impl Contact {
              ON CONFLICT(ipk) DO UPDATE SET name = excluded.name",
             params![ipk, name, added_at, PAIR_STATUS_PENDING],
         )?;
+        drop(conn);
+        if let Err(e) = crate::data::conversation::Conversation::for_peer(&ipk) {
+            log::warn!("CONTACT: could not open a conversation for a pending contact: {e}");
+        }
         Ok(())
     }
 

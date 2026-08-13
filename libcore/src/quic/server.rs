@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ENDPOINT;
 use crate::data::contact::Contact;
+use crate::data::conversation::Conversation;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
 use crate::data::relay::Relay;
@@ -656,7 +657,16 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     if !Contact::exists(&eph.from.0) {
         return;
     }
-    crate::events::messaging::ActivityEv { peer: eph.from.0, activity: eph.activity }.emit();
+    // Typing rides the conversation so a group header can aggregate several
+    // members at once; a peer we share no conversation with has nothing to
+    // show against.
+    let Ok(conversation) = Conversation::for_peer(&eph.from.0) else { return };
+    crate::events::messaging::ActivityEv {
+        conversation,
+        peer: eph.from.0,
+        activity: eph.activity,
+    }
+    .emit();
 }
 
 /// Surface a relay-asserted presence push (snapshot or delta). Relay-trusted
@@ -699,6 +709,21 @@ fn is_welcome_envelope(payload: &[u8]) -> bool {
 /// pin it at the top of a conversation.
 pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
     (accepted_at_ms / 1_000).min(systime().as_secs())
+}
+
+/// The conversation an inbound envelope belongs to.
+///
+/// Resolved from the MLS group it arrived in. When that group isn't bound to a
+/// conversation yet — the peer founded it and we learned of it through their
+/// Welcome — attach it to the direct conversation with the sender and bind the
+/// pointer, so every later message in that group lands in the same chat.
+fn conversation_for_inbound(group_id: &[u8; 32], from: &[u8; 32]) -> anyhow::Result<[u8; 16]> {
+    if let Some(id) = Conversation::for_group(group_id) {
+        return Ok(id);
+    }
+    let id = Conversation::for_peer(from)?;
+    Conversation::bind_group(&id, group_id)?;
+    Ok(id)
 }
 
 /// Verify the sender's end-to-end dispatch signature. It covers `to`, `from`,
@@ -774,7 +799,17 @@ async fn process_deliver(
     };
 
     match result {
-        Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
+        Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id, author })) => {
+            // Which chat this belongs to. The envelope names its MLS group;
+            // the conversation is what history is keyed on, and the two are
+            // deliberately not the same thing — see `data::conversation`.
+            let conv = match conversation_for_inbound(&group_id, &msg.from) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("MESSAGE: cannot resolve conversation for inbound: {e}");
+                    bail!("no conversation for inbound envelope");
+                },
+            };
             // Decrypt succeeded → ratchet advanced. Record now (before the
             // payload sub-match) so any redelivery is caught pre-decrypt,
             // even if a downstream save fails — the ratchet key is spent
@@ -812,12 +847,13 @@ async fn process_deliver(
                         _ => None,
                     };
                     match crate::messaging::save_inbound_body(
-                        &msg.from, &did, timestamp, reply_to, body,
+                        &conv, &author, &did, timestamp, reply_to, body,
                     ) {
                         Ok(Some((saved, content))) => {
                             MessageEv::Received {
                                 id: saved.inner.id,
-                                from: *msg.from,
+                                conversation: conv,
+                                sender: author,
                                 content,
                                 timestamp,
                             }
@@ -828,7 +864,7 @@ async fn process_deliver(
                             let from = *msg.from;
                             crate::RUNTIME.spawn(async move {
                                 let _ = crate::messaging::send_receipt(
-                                    from,
+                                    conv,
                                     ReceiptKind::Delivered,
                                     did,
                                 )
@@ -865,16 +901,22 @@ async fn process_deliver(
                         ReceiptKind::Delivered => crate::data::message::STATUS_DELIVERED,
                         ReceiptKind::Read => crate::data::message::STATUS_READ,
                     };
-                    if Message::mark_receipt_upto(&msg.from, &upto, status) {
-                        MessageEv::Receipt { peer: *msg.from, upto, status }.emit();
+                    // Record this member's watermark; the shared status only
+                    // advances once the slowest member has crossed it, so a
+                    // group tick means everyone, not anyone.
+                    if Message::group_receipt_upto(&conv, &author, &upto, status) {
+                        MessageEv::Receipt { conversation: conv, member: author, upto, status }
+                            .emit();
                     }
                 },
                 Ok(AppPayload::Edit { target, content }) => {
-                    // own=false: a peer may only edit messages IT sent us (outgoing=0).
-                    match Message::apply_edit(&msg.from, &target, &content, false) {
+                    // own=false plus an author check: a member may only edit
+                    // messages IT sent (outgoing=0 AND sender_ipk = them), so
+                    // one member cannot rewrite another's words.
+                    match Message::apply_edit(&conv, &target, &content, false, Some(&author)) {
                         Some(row) => {
                             info!("MESSAGE: edit from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Edited { id: row.id, peer: *msg.from, content }.emit();
+                            MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
                         },
                         // Out-of-order: target not stored yet. Rare in 1:1
                         // same-epoch (the original precedes) — drop.
@@ -888,10 +930,10 @@ async fn process_deliver(
                     // own=false: a peer may only revise messages IT sent us. The
                     // matrix check lives in apply_revise_body — a refused swap
                     // errors rather than half-applying.
-                    match crate::messaging::apply_revise_body(&msg.from, &target, body, false) {
+                    match crate::messaging::apply_revise_body(&conv, &target, body, false) {
                         Ok(Some((row, content))) => {
                             info!("MESSAGE: revise from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Edited { id: row.id, peer: *msg.from, content }.emit();
+                            MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
                         },
                         // Out-of-order: target not stored yet. Rare in 1:1
                         // same-epoch (the original precedes) — drop.
@@ -905,11 +947,12 @@ async fn process_deliver(
                     }
                 },
                 Ok(AppPayload::Delete { target }) => {
-                    // own=false: a peer may only delete messages IT sent us (outgoing=0).
-                    match Message::apply_delete(&msg.from, &target, false) {
+                    // own=false plus an author check: a member may only delete
+                    // messages IT sent, never another member's.
+                    match Message::apply_delete(&conv, &target, false, Some(&author)) {
                         Some(row) => {
                             info!("MESSAGE: delete from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Deleted { id: row.id, peer: *msg.from }.emit();
+                            MessageEv::Deleted { id: row.id, conversation: conv }.emit();
                         },
                         None => debug!(
                             "MESSAGE: delete for unknown target from {}",
@@ -922,16 +965,52 @@ async fn process_deliver(
                     // own IPK, so this is already group-correct.
                     let ts = accepted_at_secs(msg.accepted_at_ms);
                     if crate::data::reaction::Reaction::apply(
-                        &msg.from, &target, &msg.from, &emoji, add, ts,
+                        &conv, &target, &author, &emoji, add, ts,
                     ) {
                         crate::events::messaging::ReactionEv {
-                            peer: *msg.from,
+                            conversation: conv,
                             dispatch_id: target,
-                            reactor: *msg.from,
+                            reactor: author,
                             emoji,
                             add,
                         }
                         .emit();
+                    }
+                },
+                Ok(AppPayload::System(event)) => {
+                    use common::proto::mls_wire::SystemEvent;
+                    use crate::db::messages::SYSTEM_ADDED;
+                    use crate::db::messages::SYSTEM_LEFT;
+                    use crate::db::messages::SYSTEM_REMOVED;
+                    use crate::db::messages::SYSTEM_TITLED;
+
+                    let ts = accepted_at_secs(msg.accepted_at_ms);
+                    let (code, target) = match &event {
+                        SystemEvent::Added { who } => (SYSTEM_ADDED, hex::encode(who.0)),
+                        SystemEvent::Left { who } => (SYSTEM_LEFT, hex::encode(who.0)),
+                        SystemEvent::Removed { who } => (SYSTEM_REMOVED, hex::encode(who.0)),
+                        SystemEvent::Titled { title } => (SYSTEM_TITLED, title.clone()),
+                    };
+                    // A rename has no Commit behind it, so the event itself is
+                    // the change. Membership events only narrate — the Commit
+                    // is what actually moved the roster, and syncing from the
+                    // MLS group after merging it is the authoritative path.
+                    if let SystemEvent::Titled { title } = &event {
+                        if let Err(e) = Conversation::set_title(&conv, title) {
+                            warn!("GROUP: could not apply a title change: {e}");
+                        }
+                    }
+                    match Message::save_system(conv, author, &msg.id.0, code, &target, ts, false) {
+                        Ok(Some(row)) => MessageEv::Received {
+                            id: row.inner.id,
+                            conversation: conv,
+                            sender: author,
+                            content: target,
+                            timestamp: ts,
+                        }
+                        .emit(),
+                        Ok(None) => debug!("GROUP: duplicate system event, already stored"),
+                        Err(e) => warn!("GROUP: could not store a system event: {e}"),
                     }
                 },
                 Ok(AppPayload::PairAck) => {

@@ -147,6 +147,11 @@ pub struct ProcessedApplicationMessage {
     /// so a buffered message is dated when it was sent. Falls back to the
     /// buffer's own receive time for rows written before it was recorded.
     pub accepted_at_ms: u64,
+    /// The member who wrote it, off the authenticated MLS leaf credential.
+    /// Recovered at drain time rather than at buffer time, so a message that
+    /// waited out several epochs still attributes to its real author instead
+    /// of to whoever's envelope happened to unblock the queue.
+    pub sender: Option<[u8; 32]>,
 }
 
 #[allow(dead_code)] // messaging.rs caller.
@@ -380,17 +385,18 @@ impl EpochCatchupBuffer {
                 }
             };
 
-            match group.process_incoming(provider, proto) {
-                Ok(ProcessedMessageContent::ApplicationMessage(app)) => {
+            match group.process_incoming(provider, proto).map(|p| (p.sender, p.content)) {
+                Ok((sender, ProcessedMessageContent::ApplicationMessage(app))) => {
                     output.push(application_to_processed(
                         app,
                         dispatch_id.clone(),
                         msg_epoch,
                         accepted_at_ms,
+                        sender,
                     ));
                     delete_row(&dispatch_id)?;
                 }
-                Ok(ProcessedMessageContent::StagedCommitMessage(staged)) => {
+                Ok((_, ProcessedMessageContent::StagedCommitMessage(staged))) => {
                     match group.merge_staged_commit(provider, *staged) {
                         Ok(()) => {
                             delete_row(&dispatch_id)?;
@@ -407,8 +413,8 @@ impl EpochCatchupBuffer {
                         }
                     }
                 }
-                Ok(ProcessedMessageContent::ProposalMessage(_))
-                | Ok(ProcessedMessageContent::ExternalJoinProposalMessage(_)) => {
+                Ok((_, ProcessedMessageContent::ProposalMessage(_)))
+                | Ok((_, ProcessedMessageContent::ExternalJoinProposalMessage(_))) => {
                     // Proposals from the buffer have no caller; they
                     // should already have been rolled into a commit
                     // by the time they appear here. Drop silently.
@@ -463,12 +469,14 @@ impl EpochCatchupBuffer {
 /// struct.
 fn application_to_processed(
     app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64, accepted_at_ms: u64,
+    sender: Option<[u8; 32]>,
 ) -> ProcessedApplicationMessage {
     ProcessedApplicationMessage {
         dispatch_id,
         plaintext: app.into_bytes(),
         epoch,
         accepted_at_ms,
+        sender,
     }
 }
 
