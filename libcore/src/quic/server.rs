@@ -715,15 +715,17 @@ pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
 ///
 /// Resolved from the MLS group it arrived in. When that group isn't bound to a
 /// conversation yet — the peer founded it and we learned of it through their
-/// Welcome — attach it to the direct conversation with the sender and bind the
-/// pointer, so every later message in that group lands in the same chat.
+/// Welcome — the group's roster decides what to open, so a group whose Welcome
+/// we somehow missed still lands in a group chat instead of a DM.
 fn conversation_for_inbound(group_id: &[u8; 32], from: &[u8; 32]) -> anyhow::Result<[u8; 16]> {
     if let Some(id) = Conversation::for_group(group_id) {
         return Ok(id);
     }
-    let id = Conversation::for_peer(from)?;
-    Conversation::bind_group(&id, group_id)?;
-    Ok(id)
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let group = crate::mls::MlsGroupHandle::load(&provider, group_id)
+        .map_err(|e| anyhow!("load group: {e}"))?
+        .ok_or_else(|| anyhow!("no local state for group {}", hex::encode(&group_id[..4])))?;
+    crate::messaging::home_for_group(&group, from)
 }
 
 /// Verify the sender's end-to-end dispatch signature. It covers `to`, `from`,

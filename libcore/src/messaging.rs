@@ -411,18 +411,27 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
 /// message you already exchanged. Outboxed, so a send that finds us offline is
 /// replayed on reconnect rather than lost.
 pub(crate) async fn send_control(conversation: [u8; 16], payload: AppPayload) -> Result<()> {
-    send_control_inner(conversation, payload, false).await
+    send_control_inner(conversation, payload, false, None).await
+}
+
+/// [`send_control`] addressed to one member instead of the whole roster — for
+/// state only they are missing, like the group's name after they join. MLS
+/// tolerates the generation gap this leaves in the others' view of our ratchet.
+pub(crate) async fn send_control_to(
+    conversation: [u8; 16], payload: AppPayload, to: [u8; 32],
+) -> Result<()> {
+    send_control_inner(conversation, payload, false, Some(to)).await
 }
 
 /// Reverse-wake variant of [`send_control`]: the same row-less MLS control send,
 /// but flags the `DispatchP` for push-wake so an offline peer is revived. The
 /// attachment reverse-wake uses it to bring an offline sender back online.
 pub(crate) async fn send_control_wake(conversation: [u8; 16], payload: AppPayload) -> Result<()> {
-    send_control_inner(conversation, payload, true).await
+    send_control_inner(conversation, payload, true, None).await
 }
 
 async fn send_control_inner(
-    conversation: [u8; 16], payload: AppPayload, wake: bool,
+    conversation: [u8; 16], payload: AppPayload, wake: bool, only: Option<[u8; 32]>,
 ) -> Result<()> {
     // P2P candidates describe a path that is gone by the next reconnect; every
     // other control payload is a state edit every member must eventually see.
@@ -430,7 +439,13 @@ async fn send_control_inner(
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
-    let recipients = Conversation::recipients(&conversation);
+    let mut recipients = Conversation::recipients(&conversation);
+    if let Some(one) = only {
+        recipients.retain(|r| *r == one);
+        if recipients.is_empty() {
+            bail!("{} is not in this conversation", hex::encode(&one[..4]));
+        }
+    }
     if recipients.is_empty() {
         bail!("conversation {} has no members", hex::encode(&conversation[..4]));
     }
@@ -1910,6 +1925,38 @@ enum WelcomeOutcome {
     Rejected(u8),
 }
 
+/// The chat an MLS group belongs to, opening one if this is our first sight of it.
+///
+/// The group's own roster decides which kind of chat it is — a pairing Welcome
+/// builds a group of two, anything larger is a group chat — because no envelope
+/// says so and the roster cannot lie.
+///
+/// A group chat gets a conversation of its own. Filing it under the direct chat
+/// with whoever invited us would put every group message in their DM, and
+/// pointing that contact's `mls_group_id` at the group would leave the DM itself
+/// encrypting into a room full of people.
+pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<[u8; 16]> {
+    let gid = group.group_id();
+    if let Some(id) = Conversation::for_group(&gid) {
+        return Ok(id); // already homed; a redelivered Welcome mints no second one
+    }
+    let roster: Vec<[u8; 32]> = group
+        .members()
+        .filter_map(|m| m.credential.serialized_content().try_into().ok())
+        .collect();
+
+    if roster.len() <= 2 {
+        let id = Conversation::for_peer(from)?;
+        Conversation::bind_group(&id, &gid)?;
+        let _ = Contact::set_mls_group_id(from, &gid);
+        return Ok(id);
+    }
+    let id = Conversation::join_group(from, &roster)?;
+    Conversation::bind_group(&id, &gid)?;
+    info!("GROUP: joined a group of {} as conversation {}", roster.len(), hex::encode(&id[..4]));
+    Ok(id)
+}
+
 fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP,
 ) -> Result<WelcomeOutcome> {
@@ -1978,7 +2025,11 @@ fn process_welcome_inbound<C: DhtClient>(
             Identity::spend_invite(&invite);
         }
     }
-    let _ = Contact::set_mls_group_id(&sender_ipk, &group.group_id());
+    if let Err(e) = home_for_group(&group, &sender_ipk) {
+        // The MLS state is sound; we just have nowhere to show it. Say so
+        // loudly rather than silently filing a group under someone's DM.
+        warn!("MLS: welcomed into a group we could not open a chat for: {e}");
+    }
 
     info!(
         "MLS: welcome from {} activated group {}",

@@ -50,6 +50,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     val chat = LocalChatColors.current
     val members by viewModel.members.collectAsStateWithLifecycle()
     val title by viewModel.groupTitle.collectAsStateWithLifecycle()
+    val displayName by viewModel.displayName.collectAsStateWithLifecycle()
     val canManage by viewModel.canManage.collectAsStateWithLifecycle()
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val work by viewModel.work.collectAsStateWithLifecycle()
@@ -100,7 +101,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
                     }
                 } else {
                     Text(
-                        title.ifEmpty { "Group" },
+                        displayName,
                         style = MaterialTheme.typography.titleLarge,
                         color = colors.onSurface,
                     )

@@ -101,8 +101,13 @@ class GroupVM(app: AppVM) : ViewModel() {
     private val _members = MutableStateFlow<List<UiMember>>(emptyList())
     val members: StateFlow<List<UiMember>> = _members.asStateFlow()
 
+    /** The name actually set, blank until someone sets one — what rename edits. */
     private val _groupTitle = MutableStateFlow("")
     val groupTitle: StateFlow<String> = _groupTitle.asStateFlow()
+
+    /** What to head the screen with; falls back to the members for an unnamed group. */
+    private val _displayName = MutableStateFlow("")
+    val displayName: StateFlow<String> = _displayName.asStateFlow()
 
     /** True when we may add and remove — v1 grants that to the creator alone. */
     private val _canManage = MutableStateFlow(false)
@@ -121,6 +126,7 @@ class GroupVM(app: AppVM) : ViewModel() {
                 Triple(record, roster, names)
             }.collect { (record, roster, names) ->
                 _groupTitle.value = record?.title.orEmpty()
+                _displayName.value = record?.displayName.orEmpty()
                 // Whoever isn't in our address book is still a member — they
                 // just have no name yet, so show the key's head rather than
                 // dropping them from the roster. We are never in our own

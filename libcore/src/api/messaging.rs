@@ -57,8 +57,13 @@ pub struct ConversationRecord {
     pub id: Vec<u8>,
     /// 0 = direct (a 1:1 chat), 1 = group.
     pub kind: u8,
-    /// Group name. Empty for a direct chat, which titles itself from its peer.
+    /// Group name as it was actually set — empty until someone names it, and
+    /// empty for a direct chat. This is what a rename field edits.
     pub title: String,
+    /// What to call this chat on screen. Falls back to the members' names for
+    /// an unnamed group, so a group whose name never arrived still reads as
+    /// the people in it rather than as "Group".
+    pub display_name: String,
     /// Active roster, us included. Two entries for a direct chat.
     pub members: Vec<Vec<u8>>,
     /// The other party of a direct chat, resolved core-side so the client
@@ -324,21 +329,50 @@ pub fn list_conversations() -> Vec<ConversationRecord> {
 
 /// Shared projection so the list and single-fetch reads can't drift.
 fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationRecord {
+    let others = Conversation::recipients(&c.id);
     ConversationRecord {
-        members:    Conversation::members(&c.id)
+        members:      Conversation::members(&c.id)
             .into_iter()
             .filter(|m| m.active)
             .map(|m| m.member_ipk.to_vec())
             .collect(),
-        peer:       Conversation::peer_of(&c.id).map(|p| p.to_vec()),
-        others:     Conversation::recipients(&c.id).into_iter().map(|p| p.to_vec()).collect(),
-        can_manage: crate::data::identity::Identity::get()
+        peer:         Conversation::peer_of(&c.id).map(|p| p.to_vec()),
+        can_manage:   crate::data::identity::Identity::get()
             .is_some_and(|i| Conversation::is_admin(&c.id, &i.ipk())),
-        has_group:  c.mls_group_id.is_some(),
-        id:         c.id.to_vec(),
-        kind:       c.kind,
-        title:      c.title,
-        created_at: c.created_at,
+        has_group:    c.mls_group_id.is_some(),
+        display_name: display_name(&c, &others),
+        others:       others.into_iter().map(|p| p.to_vec()).collect(),
+        id:           c.id.to_vec(),
+        kind:         c.kind,
+        title:        c.title,
+        created_at:   c.created_at,
+    }
+}
+
+/// What to call a conversation on screen.
+///
+/// A group's name can legitimately be missing — we were Welcomed into it before
+/// anyone told us what it's called, or that message was lost — so fall back to
+/// the people in it. That reads as the chat it is instead of as "Group", and it
+/// needs nothing to arrive over the network to be right.
+fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -> String {
+    if !c.title.is_empty() {
+        return c.title.clone();
+    }
+    let mut names: Vec<String> = others
+        .iter()
+        .map(|ipk| {
+            crate::data::contact::Contact::get(ipk)
+                .map(|c| c.inner.name.clone())
+                .unwrap_or_else(|| hex::encode(&ipk[..4]))
+        })
+        .collect();
+    names.sort();
+    match names.len() {
+        0 => String::new(),
+        1..=3 => names.join(", "),
+        // Past three the list stops being a name and starts being a roster.
+        _ => format!("{}, {} and {} more", names[0], names[1], names.len() - 2),
     }
 }
 

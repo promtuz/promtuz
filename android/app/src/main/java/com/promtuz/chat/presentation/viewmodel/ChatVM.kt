@@ -76,6 +76,14 @@ class ChatVM(private val application: Application) : ViewModel() {
     val title: StateFlow<String> = _title.asStateFlow()
 
     /**
+     * The name actually set on the group, blank until someone sets one. The
+     * avatar wants this rather than [title]: an unnamed group draws its
+     * members' initials, and a derived name would hide that it has none.
+     */
+    private val _rawTitle = MutableStateFlow("")
+    val rawTitle: StateFlow<String> = _rawTitle.asStateFlow()
+
+    /**
      * Member IPK hex → display name, for attributing bubbles in a group.
      * Departed members stay in here — their old messages still need a name.
      */
@@ -271,7 +279,8 @@ class ChatVM(private val application: Application) : ViewModel() {
         val contacts = runCatching { CoreBridge.contacts() }.getOrDefault(emptyList())
             .associate { it.ipk.toHex() to it.name }
         _isGroup.value = record?.kind?.toInt() == 1
-        _title.value = record?.title.orEmpty()
+        _title.value = record?.displayName.orEmpty()
+        _rawTitle.value = record?.title.orEmpty()
         others = record?.others.orEmpty()
         // We are never in our own address book, so name that row here or every
         // system line we author reads "Unknown".

@@ -139,7 +139,7 @@ object PushNotifier {
                 // A group titles itself; a 1:1 borrows its peer's contact name.
                 val convs = CoreBridge.listConversations()
                 names = convs.associate { c ->
-                    c.id.toHex() to if (c.kind.toInt() == 1) c.title.ifEmpty { "Group" }
+                    c.id.toHex() to if (c.kind.toInt() == 1) c.displayName
                                     else contacts[c.peer?.toHex()].orEmpty()
                 }
                 groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()

@@ -127,6 +127,34 @@ impl Conversation {
         Ok(id)
     }
 
+    /// Create a group conversation we were Welcomed into, rather than founded.
+    ///
+    /// The roster comes from the MLS group itself — it is the authority on who
+    /// is in it, and it already includes us. `creator` is the member who sent
+    /// the Welcome and is recorded as the admin; the title arrives separately,
+    /// so a group can exist unnamed for a moment.
+    pub fn join_group(creator: &[u8; 32], members: &[[u8; 32]]) -> Result<[u8; 16]> {
+        let conn = MESSAGES_DB.lock();
+        Self::join_group_tx(&conn, creator, members)
+    }
+
+    pub fn join_group_tx(
+        conn: &Connection, creator: &[u8; 32], members: &[[u8; 32]],
+    ) -> Result<[u8; 16]> {
+        let id = mint_conversation_id();
+        let now = systime().as_secs();
+        conn.execute(
+            "INSERT INTO conversations (id, kind, title, mls_group_id, created_at, created_by) \
+             VALUES (?1, ?2, '', NULL, ?3, ?4)",
+            (id.as_slice(), KIND_GROUP, now, creator.as_slice()),
+        )?;
+        Self::put_member(&conn, &id, creator, ROLE_ADMIN)?;
+        for m in members.iter().filter(|m| *m != creator) {
+            Self::put_member(&conn, &id, m, ROLE_MEMBER)?;
+        }
+        Ok(id)
+    }
+
     /// The conversation currently backed by this MLS group, if any.
     pub fn for_group(group_id: &[u8; 32]) -> Option<[u8; 16]> {
         let conn = MESSAGES_DB.lock();
@@ -280,6 +308,10 @@ impl Conversation {
 
     pub fn is_admin(id: &[u8; 16], member: &[u8; 32]) -> bool {
         let conn = MESSAGES_DB.lock();
+        Self::is_admin_tx(&conn, id, member)
+    }
+
+    pub fn is_admin_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> bool {
         conn.query_row(
             "SELECT role FROM conversation_members WHERE conversation_id = ?1 AND member_ipk = ?2",
             (id.as_slice(), member.as_slice()),
@@ -410,6 +442,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept, 1, "history survives the group rotation");
+    }
+
+    /// Being Welcomed into a group must not disturb the direct chat with
+    /// whoever sent the Welcome. Filing the group under their DM — which is
+    /// what happens if the joiner resolves by sender instead of by roster —
+    /// puts every group message in that DM and points it at a group's keys.
+    #[test]
+    fn joining_a_group_leaves_the_inviters_dm_alone() {
+        let conn = open_in_memory();
+        let me = [1u8; 32];
+        let inviter = [2u8; 32];
+        let third = [3u8; 32];
+
+        let dm = direct(&conn, &inviter, me);
+        Conversation::bind_group_tx(&conn, &dm, &[0xAA; 32]).expect("bind the pair");
+
+        let group = Conversation::join_group_tx(&conn, &inviter, &[me, inviter, third])
+            .expect("join");
+        Conversation::bind_group_tx(&conn, &group, &[0xBB; 32]).expect("bind the group");
+
+        assert_ne!(group, dm, "a group is not the inviter's direct chat");
+        assert_eq!(Conversation::for_group_tx(&conn, &[0xAA; 32]), Some(dm), "the DM keeps its group");
+        assert_eq!(Conversation::for_group_tx(&conn, &[0xBB; 32]), Some(group));
+
+        // The inviter is the admin; we are an ordinary member and are in the
+        // roster exactly once despite also being in the MLS member list.
+        assert!(Conversation::is_admin_tx(&conn, &group, &inviter), "the inviter admins it");
+        assert!(!Conversation::is_admin_tx(&conn, &group, &me));
+        assert_eq!(Conversation::recipients_tx(&conn, &group, Some(me)), vec![inviter, third]);
     }
 
     /// A group id backs at most one conversation. When a re-pair adopts a

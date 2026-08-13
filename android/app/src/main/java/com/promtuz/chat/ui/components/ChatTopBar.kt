@@ -55,6 +55,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val isGroup by chatVM.isGroup.collectAsState()
     val memberNames by chatVM.memberNames.collectAsState()
     val memberCount by chatVM.memberCount.collectAsState()
+    val rawTitle by chatVM.rawTitle.collectAsState()
     val typingMembers by chatVM.typingMembers.collectAsState()
 
     val muted by remember { derivedStateOf { chatVM.conversationHex in mutedChats } }
@@ -107,7 +108,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (isGroup) GroupAvatar(title = name, members = memberNames.values.toList(), size = 40.dp)
+                if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp)
                 else Avatar(name, 40.dp)
                 Column {
                     Text(name, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1)

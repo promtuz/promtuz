@@ -242,7 +242,7 @@ class AppVM(
             val contact = c.peer?.let { contactByIpk[it.toList()] }
             ChatSummary(
                 conversationHex = c.id.toHex(),
-                name = if (c.kind.toInt() == 1) c.title.ifEmpty { "Group" }
+                name = if (c.kind.toInt() == 1) c.displayName
                        else contact?.name.orEmpty(),
                 kind = c.kind.toInt(),
                 peerHex = c.peer?.toHex(),

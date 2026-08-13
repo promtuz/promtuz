@@ -17,6 +17,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use common::proto::mls_wire::AppPayload;
+use common::proto::mls_wire::SystemEvent;
 use ed25519_dalek::SigningKey;
 use log::info;
 use log::warn;
@@ -139,6 +141,21 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         let conversation = Conversation::create_group(&title, &members)?;
         Conversation::bind_group(&conversation, &group_id)?;
         info!("GROUP: created \"{title}\" with {} members", members.len() + 1);
+
+        // Tell them what it's called. The Welcome carries the group but not its
+        // name, and this rides a different channel so it can lose the race —
+        // hence the roster-derived fallback on the other side, and no local
+        // system row for a name nobody has seen change.
+        if !title.is_empty() {
+            if let Err(e) = crate::messaging::send_control(
+                conversation,
+                AppPayload::System(SystemEvent::Titled { title }),
+            )
+            .await
+            {
+                warn!("GROUP: new members may not have the group's name yet: {e}");
+            }
+        }
         Ok(conversation)
     })
 }
@@ -186,9 +203,25 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
         Conversation::add_member(&conversation, &who, crate::data::conversation::ROLE_MEMBER)?;
         crate::messaging::announce(
             conversation,
-            common::proto::mls_wire::SystemEvent::Added { who: who.into() },
+            SystemEvent::Added { who: who.into() },
         )
         .await;
+
+        // The joiner alone needs the name — everyone else already has it, and
+        // broadcasting would draw "X named the group" in every member's chat
+        // for a rename that never happened.
+        let title = Conversation::get(&conversation).map(|c| c.title).unwrap_or_default();
+        if !title.is_empty() {
+            if let Err(e) = crate::messaging::send_control_to(
+                conversation,
+                AppPayload::System(SystemEvent::Titled { title }),
+                who,
+            )
+            .await
+            {
+                warn!("GROUP: the new member may not have the group's name yet: {e}");
+            }
+        }
         Ok(())
     })
 }
@@ -240,7 +273,7 @@ pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> 
 
         crate::messaging::announce(
             conversation,
-            common::proto::mls_wire::SystemEvent::Removed { who: who.into() },
+            SystemEvent::Removed { who: who.into() },
         )
         .await;
         Ok(())
@@ -263,7 +296,7 @@ pub async fn leave(conversation: [u8; 16]) -> Result<()> {
         // we can no longer encrypt to it.
         crate::messaging::announce(
             conversation,
-            common::proto::mls_wire::SystemEvent::Left { who: our_ipk.into() },
+            SystemEvent::Left { who: our_ipk.into() },
         )
         .await;
 
