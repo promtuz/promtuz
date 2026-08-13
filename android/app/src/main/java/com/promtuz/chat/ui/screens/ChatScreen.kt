@@ -73,12 +73,16 @@ import com.promtuz.chat.ui.stage.rememberMessageStageState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlin.math.abs
+import androidx.compose.ui.text.style.TextAlign
+import com.promtuz.chat.ui.components.BubbleTextLayouts
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private sealed interface ChatRow {
     data class Msg(val msg: UiMessage, val mergedTop: Boolean, val mergedBottom: Boolean) : ChatRow
     data class Frontier(val label: String) : ChatRow
+    /** A membership or title change — a centred line, not a bubble. */
+    data class System(val msg: UiMessage) : ChatRow
     data object Typing : ChatRow
 }
 
@@ -98,9 +102,14 @@ private fun openAttachment(context: Context, path: String) {
 }
 
 @Composable
-fun ChatScreen(name: String, viewModel: ChatVM) {
+fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val messages by viewModel.messages.collectAsState()
     val typing by viewModel.typing.collectAsState()
+    // A group can be renamed while it's open, and the route's name is a
+    // snapshot from when it was pushed. A 1:1 has no title of its own, so it
+    // keeps the contact name the route carried.
+    val title by viewModel.title.collectAsState()
+    val name = title.ifEmpty { routeName }
     val appearance = LocalChatAppearance.current
     val layout = appearance.layout
     val mergeWindowMs = layout.mergeWindowSecs * 1000L
@@ -247,6 +256,10 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                         }
                     }
                     is ChatRow.Frontier -> FrontierMarker(chatRow.label)
+                    is ChatRow.System -> SystemRow(
+                        chatRow.msg.content as MessageContent.System,
+                        Modifier.padding(top = layout.groupGap.dp),
+                    )
                     is ChatRow.Typing -> TypingBubble(Modifier.padding(top = layout.groupGap.dp))
                 }
             }
@@ -365,9 +378,30 @@ private fun FrontierMarker(label: String, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * A membership or title change: centred, quiet, and deliberately not a bubble —
+ * nobody said it *to* anyone, so it carries no author, no tail and no actions.
+ */
+@Composable
+private fun SystemRow(content: MessageContent.System, modifier: Modifier = Modifier) {
+    val marker = LocalChatColors.current.marker
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            BubbleTextLayouts.systemLine(content),
+            style = MaterialTheme.typography.labelMedium,
+            color = marker.copy(alpha = 0.6f),
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
 private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.Msg -> row.msg.key
     is ChatRow.Frontier -> "frontier:${row.label}"
+    is ChatRow.System -> row.msg.key
     is ChatRow.Typing -> "typing"
 }
 
@@ -421,13 +455,25 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
         val newer = messages.getOrNull(i - 1)
         val mergedTop = older != null && sameGroup(m, older, mergeWindowMs) && !frontierBetween(i + 1)
         val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs) && !frontierBetween(i)
-        rows.add(ChatRow.Msg(m, mergedTop, mergedBottom))
+        rows.add(
+            if (m.content is MessageContent.System) ChatRow.System(m)
+            else ChatRow.Msg(m, mergedTop, mergedBottom)
+        )
     }
     return rows
 }
 
+/**
+ * Whether two messages merge into one bubble run. Sender is part of it, not
+ * just direction: in a group two incoming messages are only the same run if
+ * the same person wrote both, or Alice and Bob would blend together.
+ */
 private fun sameGroup(a: UiMessage, b: UiMessage, windowMs: Long): Boolean =
-    a.outgoing == b.outgoing && abs(a.timestampMs - b.timestampMs) <= windowMs
+    a.outgoing == b.outgoing &&
+        a.senderHex == b.senderHex &&
+        a.content !is MessageContent.System &&
+        b.content !is MessageContent.System &&
+        abs(a.timestampMs - b.timestampMs) <= windowMs
 
 /**
  * The stage's insets, with the bottom resolved on each call rather than captured.

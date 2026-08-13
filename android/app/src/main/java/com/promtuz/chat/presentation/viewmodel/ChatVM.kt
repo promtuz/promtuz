@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.AlbumItem
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.SystemEventKind
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
@@ -47,12 +48,47 @@ import uniffi.core.ReactionRecord
  * is an ephemeral signal, timed out client-side.
  */
 class ChatVM(private val application: Application) : ViewModel() {
-    private var peer: ByteArray = ByteArray(32)
+    /** The chat's scope — a 16-byte conversation id, group or 1:1 alike. */
+    private var conversation: ByteArray = ByteArray(16)
+    /**
+     * Everyone in the chat except us. Presence and typing are per-person, so
+     * they key off this rather than off the conversation: comparing a
+     * conversation id against a peer IPK would simply never match.
+     */
+    private var others: List<ByteArray> = emptyList()
     private var started = false
 
-    val peerHex: String by lazy {
-        peer.toHex()
-    }
+    // Computed, not `by lazy`: the top bar composes before [init] runs and
+    // reads this, and a lazy would memoize the placeholder zeros for the
+    // lifetime of the VM — muting and Group info would both address nothing.
+    val conversationHex: String get() = conversation.toHex()
+
+    /** True once the roster is bigger than a pair — drives per-sender bubbles. */
+    private val _isGroup = MutableStateFlow(false)
+    val isGroup: StateFlow<Boolean> = _isGroup.asStateFlow()
+
+    /**
+     * The group's own name, live. Empty for a 1:1, whose header name is the
+     * contact's. The route carries a name too, but that one is a snapshot from
+     * when the chat was opened — a rename has to land on an open header.
+     */
+    private val _title = MutableStateFlow("")
+    val title: StateFlow<String> = _title.asStateFlow()
+
+    /**
+     * Member IPK hex → display name, for attributing bubbles in a group.
+     * Departed members stay in here — their old messages still need a name.
+     */
+    private val _memberNames = MutableStateFlow<Map<String, String>>(emptyMap())
+    val memberNames: StateFlow<Map<String, String>> = _memberNames.asStateFlow()
+
+    /** How many are in the group *now* — the header's count, so it excludes the departed. */
+    private val _memberCount = MutableStateFlow(0)
+    val memberCount: StateFlow<Int> = _memberCount.asStateFlow()
+
+    /** Who is currently typing, by member hex — a group can have several. */
+    private val _typingMembers = MutableStateFlow<Set<String>>(emptySet())
+    val typingMembers: StateFlow<Set<String>> = _typingMembers.asStateFlow()
 
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
     val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
@@ -85,15 +121,27 @@ class ChatVM(private val application: Application) : ViewModel() {
     private val _presence = MutableStateFlow<Presence?>(null)
     val presence: StateFlow<Presence?> = _presence.asStateFlow()
 
-    fun init(peerIpk: ByteArray) {
+    fun init(conversationId: ByteArray) {
         if (started) return
         started = true
-        peer = peerIpk
+        conversation = conversationId
 
         var newestIncoming: String? = null
         var lastMarkedRead: String? = null
         viewModelScope.launch {
-            observeQuery(setOf("messages", "reactions", "message_media", "partials")) { load() }.collect { list ->
+            // Roster and messages ride one doorbell. Attribution reads the
+            // roster, so resolving them in separate flows would let a message
+            // render before the names it needs — and nothing re-attributes it
+            // afterwards, so "Unknown" would stick until the next write.
+            observeQuery(
+                setOf(
+                    "messages", "reactions", "message_media", "partials",
+                    "conversations", "conversation_members", "contacts",
+                ),
+            ) {
+                resolveRoster()
+                load()
+            }.collect { list ->
                 // Their message just landed — if they were typing, it inherits the
                 // typing bubble (morph). Handoff is set BEFORE the list so one
                 // recomposition sees both.
@@ -109,7 +157,7 @@ class ChatVM(private val application: Application) : ViewModel() {
                 newest?.dispatchIdHex?.let { did ->
                     if (did != lastMarkedRead) {
                         lastMarkedRead = did
-                        fire { CoreBridge.markRead(peer, did.fromHex()) }
+                        fire { CoreBridge.markRead(conversation, did.fromHex()) }
                     }
                 }
                 _messages.value = list
@@ -144,12 +192,21 @@ class ChatVM(private val application: Application) : ViewModel() {
         }
 
         viewModelScope.launch {
-            CoreBridge.activity.filter { it.peer.contentEquals(peer) }.collect { sig ->
+            CoreBridge.activity.filter { it.conversation.contentEquals(conversation) }.collect { sig ->
+                val who = sig.peer.toHex()
                 if (Activity.Typing in Activity.fromBits(sig.bits)) {
+                    _typingMembers.value = _typingMembers.value + who
                     _typing.value = true
                     typingExpiry?.cancel()
-                    typingExpiry = viewModelScope.launch { delay(TYPING_TTL_MS); _typing.value = false }
-                } else clearTyping()
+                    typingExpiry = viewModelScope.launch {
+                        delay(TYPING_TTL_MS)
+                        _typingMembers.value = _typingMembers.value - who
+                        _typing.value = _typingMembers.value.isNotEmpty()
+                    }
+                } else {
+                    _typingMembers.value = _typingMembers.value - who
+                    if (_typingMembers.value.isEmpty()) clearTyping()
+                }
             }
         }
 
@@ -157,11 +214,19 @@ class ChatVM(private val application: Application) : ViewModel() {
         // contacts; a delta may have landed before this chat opened), then
         // track live. Subscription itself is owned by AppVM — not re-expressed
         // here, or the relay's full-set replace would narrow us to one peer.
-        _presence.value = CoreBridge.presenceByPeer.value[peer.toHex()]
+        // A group has no single "last seen", so presence stays null there.
         viewModelScope.launch {
-            CoreBridge.presence.filter { it.peer.contentEquals(peer) }.collect { sig ->
-                _presence.value = sig.presence
+            observeQuery(setOf("conversations", "conversation_members")) {
+                runCatching { CoreBridge.conversation(conversation)?.peer }.getOrNull()
+            }.collect { peer ->
+                if (peer == null) return@collect
+                _presence.value = CoreBridge.presenceByPeer.value[peer.toHex()]
             }
+        }
+        viewModelScope.launch {
+            CoreBridge.presence
+                .filter { sig -> others.any { it.contentEquals(sig.peer) } }
+                .collect { sig -> if (!_isGroup.value) _presence.value = sig.presence }
         }
 
         // Outbound typing: refresh under the peer's TTL while keystrokes flow,
@@ -172,13 +237,13 @@ class ChatVM(private val application: Application) : ViewModel() {
                 if (text.isEmpty()) {
                     if (lastSentAt != 0L) {
                         lastSentAt = 0L
-                        runCatching { CoreBridge.setActivity(peer, 0) }
+                        runCatching { CoreBridge.setActivity(conversation, 0) }
                     }
                 } else {
                     val now = SystemClock.uptimeMillis()
                     if (now - lastSentAt >= TYPING_RESEND_MS) {
                         lastSentAt = now
-                        runCatching { CoreBridge.setActivity(peer, Activity.Typing.bit) }
+                        runCatching { CoreBridge.setActivity(conversation, Activity.Typing.bit) }
                     }
                 }
             }
@@ -199,19 +264,49 @@ class ChatVM(private val application: Application) : ViewModel() {
     private var exhausted = false
     private var loadingOlder = false
 
+    /** Who is in this chat and what to call them — read before every message pass. */
+    private suspend fun resolveRoster() {
+        val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
+        val roster = runCatching { CoreBridge.members(conversation) }.getOrDefault(emptyList())
+        val contacts = runCatching { CoreBridge.contacts() }.getOrDefault(emptyList())
+            .associate { it.ipk.toHex() to it.name }
+        _isGroup.value = record?.kind?.toInt() == 1
+        _title.value = record?.title.orEmpty()
+        others = record?.others.orEmpty()
+        // We are never in our own address book, so name that row here or every
+        // system line we author reads "Unknown".
+        _memberNames.value = roster.associate { m ->
+            val hex = m.ipk.toHex()
+            hex to if (m.me) "You" else contacts[hex] ?: "Unknown"
+        }
+        _memberCount.value = roster.count { it.active }
+    }
+
     private suspend fun load(): List<UiMessage> {
         val want = limit
-        val rows = CoreBridge.messages(peer, want)                   // oldest-first
+        val rows = CoreBridge.messages(conversation, want)                   // oldest-first
         if (rows.size < want) exhausted = true
-        val byMsg = CoreBridge.reactions(peer).groupBy { it.dispatchId.toHex() }
-        val media = CoreBridge.getMedia(peer).associateBy { it.dispatchId.toHex() }
+        val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
+        val media = CoreBridge.getMedia(conversation).associateBy { it.dispatchId.toHex() }
         // Quote resolution: replies name a dispatch_id; snippet comes from the
         // loaded window (null text → "unavailable" shell, e.g. outside window).
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
         // reversed → newest at index 0 → drawn at the bottom under reverseLayout;
         // AVIF decode happens in toUi, so map off the main thread.
         return withContext(Dispatchers.Default) {
-            val ui = rows.asReversed().map { it.toUi(byMsg, byDid, media) }
+            // "Seen by N" is only meaningful for our own messages in a group;
+            // a 1:1 already says it with the delivery tick, so the per-message
+            // count query is skipped entirely there.
+            val seen: Map<String, Int> = if (!_isGroup.value) emptyMap() else
+                rows.filter { it.outgoing && it.dispatchId != null }
+                    .associate { r ->
+                        val did = r.dispatchId!!
+                        did.toHex() to runCatching {
+                            CoreBridge.seenBy(conversation, did)
+                        }.getOrDefault(0)
+                    }
+            val ui = rows.asReversed()
+                .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value, seen) }
             collapseAlbums(ui) { did -> media[did]?.groupId?.toHex() }
         }
     }
@@ -261,13 +356,13 @@ class ChatVM(private val application: Application) : ViewModel() {
                 // clear it here, once the body is already on its way.
                 is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { did ->
                     fire {
-                        CoreBridge.reviseWithStaged(peer, did.fromHex(), ids.first(), text)
+                        CoreBridge.reviseWithStaged(conversation, did.fromHex(), ids.first(), text)
                         CoreBridge.clearStaged()
                     }
                 }
                 else -> {
                     val replyTo = (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
-                    fire { CoreBridge.sendStaged(peer, ids, text, replyTo) }
+                    fire { CoreBridge.sendStaged(conversation, ids, text, replyTo) }
                 }
             }
             return
@@ -281,9 +376,9 @@ class ChatVM(private val application: Application) : ViewModel() {
                 if (text != original) action.msg.dispatchIdHex?.let { edit(it, text) }
             }
             is ComposerAction.Reply -> fire {
-                CoreBridge.sendMessage(peer, text, action.msg.dispatchIdHex?.fromHex())
+                CoreBridge.sendMessage(conversation, text, action.msg.dispatchIdHex?.fromHex())
             }
-            null -> fire { CoreBridge.sendMessage(peer, text) }
+            null -> fire { CoreBridge.sendMessage(conversation, text) }
         }
     }
 
@@ -309,13 +404,13 @@ class ChatVM(private val application: Application) : ViewModel() {
     }
 
     fun edit(dispatchIdHex: String, text: String) =
-        fire { CoreBridge.editMessage(peer, dispatchIdHex.fromHex(), text) }
+        fire { CoreBridge.editMessage(conversation, dispatchIdHex.fromHex(), text) }
 
     fun delete(dispatchIdHex: String, forEveryone: Boolean) =
-        fire { CoreBridge.deleteMessage(peer, dispatchIdHex.fromHex(), forEveryone) }
+        fire { CoreBridge.deleteMessage(conversation, dispatchIdHex.fromHex(), forEveryone) }
 
     fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
-        fire { CoreBridge.react(peer, dispatchIdHex.fromHex(), emoji, add) }
+        fire { CoreBridge.react(conversation, dispatchIdHex.fromHex(), emoji, add) }
 
     /**
      * Picked media → the composer buffer. The AVIF pass starts now and runs
@@ -470,6 +565,8 @@ fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.Image -> c.caption
     is MessageContent.Attachment -> c.caption
     is MessageContent.Album -> c.caption
+    // Not editable — a system row narrates something that already happened.
+    is MessageContent.System -> ""
 }
 
 /** The caption a media message carries, if it is one. */
@@ -483,6 +580,9 @@ private fun MessageRecord.toUi(
     reactionsByMsg: Map<String, List<ReactionRecord>>,
     byDid: Map<String, MessageRecord>,
     mediaByDid: Map<String, MediaRecord>,
+    memberNames: Map<String, String> = emptyMap(),
+    isGroup: Boolean = false,
+    seenBy: Map<String, Int> = emptyMap(),
 ): UiMessage {
     val didHex = dispatchId?.toHex()
     val reactions = didHex?.let { reactionsByMsg[it] }
@@ -497,19 +597,39 @@ private fun MessageRecord.toUi(
             outgoing = quoted?.outgoing ?: false,
         )
     }
-    val payload = didHex?.let { h -> mediaByDid[h]?.toContent(h, content) } ?: MessageContent.Text(content)
+    val senderHex = senderIpk?.toHex()
+    val payload = when {
+        // A system row's `content` carries its target: a member's hex for the
+        // membership events, the new name for a rename.
+        system.toInt() != 0 -> MessageContent.System(
+            event = when (system.toInt()) {
+                1 -> SystemEventKind.Added
+                2 -> SystemEventKind.Left
+                3 -> SystemEventKind.Removed
+                else -> SystemEventKind.Titled
+            },
+            actor = senderHex?.let { memberNames[it] } ?: "Someone",
+            target = if (system.toInt() == 4) content else memberNames[content] ?: "someone",
+        )
+        else -> didHex?.let { h -> mediaByDid[h]?.toContent(h, content) }
+            ?: MessageContent.Text(content)
+    }
     return UiMessage(
         key = didHex ?: id,
         localId = id,
         dispatchIdHex = didHex,
         content = payload,
         outgoing = outgoing,
+        // Only a group needs to say who spoke; a 1:1 has one possible author.
+        senderHex = senderHex.takeIf { isGroup && !outgoing },
+        senderName = senderHex?.takeIf { isGroup && !outgoing }?.let { memberNames[it] },
         status = SendStatus.from(status.toInt()),
         edited = edited,
         deleted = deleted,
         timestampMs = timestamp.toLong() * 1000,
         reactions = reactions,
         quote = quote,
+        seenBy = didHex?.let { seenBy[it] } ?: 0,
     )
 }
 

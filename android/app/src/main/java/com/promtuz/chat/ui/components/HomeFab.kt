@@ -23,6 +23,15 @@ fun HomeFab(appViewModel: AppVM) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         SmallFloatingActionButton({
+            appViewModel.navigator.push(Routes.NewGroup)
+        }) {
+            DrawableIcon(
+                R.drawable.i_user_add,
+                desc = "New group",
+                tint = colors.onPrimaryContainer
+            )
+        }
+        SmallFloatingActionButton({
             appViewModel.navigator.push(Routes.ShareIdentity)
         }) {
             DrawableIcon(

@@ -17,17 +17,17 @@ import kotlinx.coroutines.launch
  */
 class ReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val peer = intent.getByteArrayExtra("peer") ?: return
+        val conversation = intent.getByteArrayExtra("conversation") ?: return
         val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(PushNotifier.KEY_REPLY)?.toString()
             ?: return
         // Resolve the spinner NOW, before the (possibly slow) send. Mark read before send so a
         // post-send reconcile doesn't briefly re-post the now-read chat.
-        PushNotifier.cancelChat(context, peer.toHex())
+        PushNotifier.cancelChat(context, conversation.toHex())
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                CoreBridge.markConversationRead(peer)
-                CoreBridge.sendMessage(peer, text)
+                CoreBridge.markConversationRead(conversation)
+                CoreBridge.sendMessage(conversation, text)
             } finally {
                 pending.finish()
             }

@@ -46,19 +46,22 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     ) {
         item { Spacer(Modifier.height(innerPadding.calculateTopPadding())) }
 
-        itemsIndexed(chats, key = { _, c -> c.peerHex }) { _, chat ->
+        itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
+            // Presence and typing are per-person, so a group — which has no
+            // single counterpart — simply shows neither.
             HomeChatListItem(
                 chat = chat,
-                presence = presence[chat.peerHex],
-                typing = Activity.Typing in Activity.fromBits(activity[chat.peerHex] ?: 0),
-                pinned = chat.peerHex in pinned,
-                muted = chat.peerHex in muted,
+                presence = chat.peerHex?.let { presence[it] },
+                typing = Activity.Typing in
+                    Activity.fromBits(chat.peerHex?.let { activity[it] } ?: 0),
+                pinned = chat.conversationHex in pinned,
+                muted = chat.conversationHex in muted,
                 menuState = menuState,
-                onOpen = { appViewModel.openChat(chat.peerHex, chat.name) },
-                onPin = { ChatPrefs.togglePin(chat.peerHex) },
-                onMute = { ChatPrefs.toggleMute(chat.peerHex) },
-                onMarkRead = { appViewModel.markConversationRead(chat.peerHex) },
-                onDelete = { appViewModel.deleteChat(chat.peerHex) },
+                onOpen = { appViewModel.openChat(chat.conversationHex, chat.name) },
+                onPin = { ChatPrefs.togglePin(chat.conversationHex) },
+                onMute = { ChatPrefs.toggleMute(chat.conversationHex) },
+                onMarkRead = { appViewModel.markConversationRead(chat.conversationHex) },
+                onDelete = { appViewModel.deleteChat(chat) },
                 modifier = Modifier.animateItem(),
             )
         }

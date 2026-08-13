@@ -30,6 +30,12 @@ data class ChatColorScheme(
     val bar: Color,
     /** Frontier marker dashes + labels (alpha applied at use). */
     val marker: Color,
+    /**
+     * Name colours for group senders, picked by hashing the member's key. Not
+     * an identity — just enough separation that a run of messages reads as
+     * several people. Kept off the accent so a name never looks tappable.
+     */
+    val senderPalette: List<Color>,
 )
 
 val LocalChatColors = staticCompositionLocalOf<ChatColorScheme> {
@@ -44,6 +50,22 @@ fun ChatColors.resolve(scheme: ColorScheme) = ChatColorScheme(
     accent = accent.orRole(scheme.primary),
     bar = scheme.surface,
     marker = scheme.onSurfaceVariant,
+    senderPalette = SENDER_PALETTE,
+)
+
+/**
+ * Fixed hues rather than scheme roles: they must stay distinguishable from one
+ * another, which a generated ramp off one seed colour cannot promise. Tuned to
+ * read on both the light and dark incoming bubble.
+ */
+private val SENDER_PALETTE = listOf(
+    Color(0xFF4E8FD9), // blue
+    Color(0xFFCF6E5B), // terracotta
+    Color(0xFF56A177), // green
+    Color(0xFFB07CC6), // violet
+    Color(0xFFD09A3C), // amber
+    Color(0xFF4FA3A8), // teal
+    Color(0xFFD4708F), // rose
 )
 
 private fun Long?.orRole(role: Color): Color = this?.let { Color(it) } ?: role

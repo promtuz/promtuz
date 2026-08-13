@@ -57,7 +57,9 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import kotlin.math.ceil
 import com.promtuz.chat.domain.model.MessageContent
+import androidx.compose.ui.text.font.FontWeight
 import com.promtuz.chat.domain.model.Quote
+import kotlin.math.absoluteValue
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -133,6 +135,9 @@ fun MessageBubble(
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
     val outgoing = msg.outgoing
+    // Name the author only in a group, only on an incoming message, and only
+    // at the head of a run — the rest of the run is visibly the same person.
+    val showSender = msg.senderName != null && !outgoing && !mergedTop
     val shape = rememberBubbleShape(outgoing, mergedTop, mergedBottom, appearance.bubble)
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
@@ -175,6 +180,17 @@ fun MessageBubble(
     ) {
         Layout(
             content = {
+                // Only the first bubble of a run is labelled — repeating the
+                // name down a run of five messages is noise, not information.
+                if (showSender) {
+                    SenderLabel(
+                        msg.senderName ?: "Unknown",
+                        msg.senderHex,
+                        modifier = if (bleeds)
+                            Modifier.padding(start = BubblePadH, end = BubblePadH, top = BubblePadV)
+                        else Modifier,
+                    )
+                }
                 msg.quote?.let { q ->
                     QuoteBlock(
                         q, textColor, chat.accent, onQuoteClick?.let { cb -> { cb(q.dispatchIdHex) } },
@@ -299,11 +315,13 @@ fun MessageBubble(
             // sibling (measured last with that width as its minimum — measurables measure
             // once); the meta is pinned to the bubble's absolute bottom-end corner, and the
             // bubble grows to keep it off the content — see the contentWidth branches below.
+            val hasSender = showSender
             val hasQuote = msg.quote != null
             val hasReactions = msg.reactions.isNotEmpty()
             val cap = (constraints.maxWidth * widthFraction).toInt()
             val loose = Constraints(maxWidth = cap)
-            var idx = if (hasQuote) 1 else 0
+            val leading = (if (hasSender) 1 else 0) + (if (hasQuote) 1 else 0)
+            var idx = leading
             val text = measurables[idx].measure(loose)
             val reactions = if (hasReactions) measurables[++idx].measure(loose) else null
             val meta = measurables[idx + 1].measure(loose)
@@ -339,17 +357,23 @@ fun MessageBubble(
                 }
                 else -> { metaRow = meta.height; text.width }
             }
-            val quote = if (hasQuote) measurables[0].measure(loose.copy(minWidth = contentWidth)) else null
+            // The sender label and the quote both span the widest sibling, so
+            // they measure last with the settled content width as their floor.
+            val sender = if (hasSender) measurables[0].measure(loose) else null
+            val quote = if (hasQuote) {
+                measurables[if (hasSender) 1 else 0].measure(loose.copy(minWidth = contentWidth))
+            } else null
 
-            val width = maxOf(contentWidth, quote?.width ?: 0)
+            val width = maxOf(contentWidth, maxOf(quote?.width ?: 0, sender?.width ?: 0))
             // metaDrop is absent by design: it's spent out of the padding, so it moves the
             // meta without moving the Layout. metaRow can't be — a row of its own needs
             // real space, and the padding alone can't cover a full meta height.
-            val height =
-                (quote?.height ?: 0) + text.height + metaRow + (reactions?.height ?: 0)
+            val height = (sender?.height ?: 0) + (quote?.height ?: 0) + text.height + metaRow +
+                (reactions?.height ?: 0)
             layout(width, height) {
                 var y = 0
-                quote?.let { it.placeRelative(0, 0); y = it.height }
+                sender?.let { it.placeRelative(0, y); y += it.height }
+                quote?.let { it.placeRelative(0, y); y += it.height }
                 text.placeRelative(0, y)
                 reactions?.placeRelative(0, y + text.height)
                 // A bleeding bubble has no outer padding to sit in, so the meta
@@ -672,4 +696,25 @@ private fun MessageBubbleMergedPreview() {
             MessageBubble(msg = previewMsg("Last in the run", outgoing = true, id = "m3"), mergedTop = true)
         }
     }
+}
+/**
+ * The author's name atop the first incoming bubble of a run in a group.
+ * Coloured from a hash of their key, so the same person keeps the same colour
+ * across the conversation without anyone assigning one.
+ */
+@Composable
+private fun SenderLabel(name: String, key: String?, modifier: Modifier = Modifier) {
+    val palette = LocalChatColors.current.senderPalette
+    val color = remember(key, palette) {
+        palette[((key?.hashCode() ?: 0).absoluteValue) % palette.size]
+    }
+    Text(
+        name,
+        modifier = modifier.padding(bottom = 2.dp),
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }

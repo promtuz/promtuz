@@ -56,12 +56,19 @@ object PushNotifier {
     const val KEY_REPLY = "reply_text"
 
     /** Notification-tap extras: which chat to open (hex IPK + display name). */
-    const val EXTRA_PEER = "chat_peer_hex"
-    const val EXTRA_PEER_NAME = "chat_peer_name"
+    const val EXTRA_CONVERSATION = "chat_conversation_hex"
+    const val EXTRA_CONV_NAME = "chat_conversation_name"
 
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Conversation hex → the title to show for it. */
     private var names: Map<String, String> = emptyMap()
+
+    /** Contact hex → their name, for attributing individual lines in a group. */
+    private var senderNames: Map<String, String> = emptyMap()
+
+    /** Conversation hexes that are groups — they attribute lines per sender. */
+    private var groupConvs: Set<String> = emptySet()
 
     /** Gates posting — reconcile still runs foregrounded, but only to clear read chats' notifs. */
     @Volatile
@@ -74,20 +81,20 @@ object PushNotifier {
             override fun onStart(owner: LifecycleOwner) { foreground = true }
             override fun onStop(owner: LifecycleOwner) {
                 foreground = false
-                scope.launch { reconcile(alertPeer = null) } // paint the current unread set on background
+                scope.launch { reconcile(alertConv = null) } // paint the current unread set on background
             }
         })
         // A genuine new inbound: reconcile and buzz that peer — only when we're not already looking.
         scope.launch {
-            CoreEventBus.incoming.collect { msg -> if (!foreground) reconcile(alertPeer = msg.peerHex) }
+            CoreEventBus.incoming.collect { msg -> if (!foreground) reconcile(alertConv = msg.conversationHex) }
         }
         // Any other message write (edit/delete/local-read): silent reconcile — repaint/clear only.
         scope.launch {
-            CoreEventBus.dbChanged.filter { "messages" in it }.debounce(150L).collect { reconcile(alertPeer = null) }
+            CoreEventBus.dbChanged.filter { "messages" in it }.debounce(150L).collect { reconcile(alertConv = null) }
         }
     }
 
-    private suspend fun reconcile(alertPeer: String?) {
+    private suspend fun reconcile(alertConv: String?) {
         if (!::app.isInitialized) return
         if (ActivityCompat.checkSelfPermission(app, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -105,7 +112,7 @@ object PushNotifier {
         }
 
         val counts = runCatching { CoreBridge.unreadCounts() }.getOrDefault(emptyList())
-            .associate { it.peerIpk.toHex() to it.count.toInt() }
+            .associate { it.conversationId.toHex() to it.count.toInt() }
 
         // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
         // clears any notif it already had.
@@ -125,33 +132,42 @@ object PushNotifier {
             return
         }
 
-        if (visible.keys.any { it !in names }) {
-            names = runCatching { CoreBridge.contacts().associate { it.ipk.toHex() to it.name } }
-                .getOrDefault(names)
+        if (visible.keys.any { it !in names } || senderNames.isEmpty()) {
+            runCatching {
+                val contacts = CoreBridge.contacts().associate { it.ipk.toHex() to it.name }
+                senderNames = contacts
+                // A group titles itself; a 1:1 borrows its peer's contact name.
+                val convs = CoreBridge.listConversations()
+                names = convs.associate { c ->
+                    c.id.toHex() to if (c.kind.toInt() == 1) c.title.ifEmpty { "Group" }
+                                    else contacts[c.peer?.toHex()].orEmpty()
+                }
+                groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()
+            }
         }
         // Foregrounded: clear-only, no new shade notifs while you're already looking at the app.
         // ponytail: no 7-dialog cap (limit concurrent chat notifs) — add if noisy.
-        if (!foreground) visible.forEach { (peerHex, n) -> postChat(peerHex, n, alertPeer) }
+        if (!foreground) visible.forEach { (convHex, n) -> postChat(convHex, n, alertConv) }
     }
 
-    private suspend fun postChat(peerHex: String, n: Int, alertPeer: String?) {
-        val peer = peerHex.fromHex()
-        val displayName = names[peerHex] ?: "New message"
+    private suspend fun postChat(convHex: String, n: Int, alertConv: String?) {
+        val conv = convHex.fromHex()
+        val displayName = names[convHex] ?: "New message"
 
         // takeLast(n) of incoming ≈ the unread ones (read is a high-water-mark, so the
         // newest n incoming are exactly the unread), hydrated from the DB (survives process death).
-        val recent = runCatching { CoreBridge.messages(peer, MAX_LINES) }
+        val recent = runCatching { CoreBridge.messages(conv, MAX_LINES) }
             .getOrDefault(emptyList())
             .filter { !it.deleted && !it.outgoing }
             .sortedBy { it.timestamp }
             .takeLast(n)
         // All newest-window rows deleted-for-everyone while count>0: nothing to paint, so clear this
         // chat's own notif (a bare return would strand a stale one reconcile can't repaint or cancel).
-        if (recent.isEmpty()) { nm().cancel(notifId(peerHex)); return }
+        if (recent.isEmpty()) { nm().cancel(notifId(convHex)); return }
 
         val readPI = PendingIntent.getBroadcast(
-            app, -notifId(peerHex),
-            Intent(app, MarkReadReceiver::class.java).putExtra("peer", peer),
+            app, -notifId(convHex),
+            Intent(app, MarkReadReceiver::class.java).putExtra("conversation", conv),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val readAction = NotificationCompat.Action.Builder(R.drawable.i_check, "Mark read", readPI)
@@ -166,19 +182,20 @@ object PushNotifier {
         // `newest > lastAlerted` is what separates an arrival from a repaint: an unread message stays
         // unread, so every later reconcile — including a wake-drain in a fresh process — rebuilds the
         // same set and would otherwise re-buzz for messages already alerted hours ago.
+        val isGroup = groupConvs.contains(convHex)
         val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
-        val alertThisChat = peerHex == alertPeer && newest > ChatPrefs.lastAlerted(peerHex)
+        val alertThisChat = convHex == alertConv && newest > ChatPrefs.lastAlerted(convHex)
         val silent = when (mode) {
             NotifBuzz.EveryMessage, NotifBuzz.FirstOnly -> !alertThisChat
             NotifBuzz.Throttled -> {
                 val now = System.currentTimeMillis()
-                val buzz = alertThisChat && now - (lastBuzz[peerHex] ?: 0L) > BUZZ_THROTTLE_MS
-                if (buzz) lastBuzz[peerHex] = now
+                val buzz = alertThisChat && now - (lastBuzz[convHex] ?: 0L) > BUZZ_THROTTLE_MS
+                if (buzz) lastBuzz[convHex] = now
                 !buzz
             }
         }
-        if (!silent) ChatPrefs.setLastAlerted(peerHex, newest)
+        if (!silent) ChatPrefs.setLastAlerted(convHex, newest)
 
         val chat = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
             .setSmallIcon(R.drawable.i_logo_mono)
@@ -191,17 +208,17 @@ object PushNotifier {
             .setGroup(Notifications.GROUP_KEY)
             .setAutoCancel(true)
             .setSilent(silent)
-            .setContentIntent(openChat(peerHex, displayName)) // peer rides in the extras even when hidden
+            .setContentIntent(openChat(convHex, displayName)) // peer rides in the extras even when hidden
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
             val avatar = letterAvatar(displayName) // no contact photos exist — colored initials, like the app
             val avatarIcon = IconCompat.createWithBitmap(avatar)
             chat.setLargeIcon(avatar)
-            val them = Person.Builder().setName(displayName).setKey(peerHex).setIcon(avatarIcon).build()
+            val them = Person.Builder().setName(displayName).setKey(convHex).setIcon(avatarIcon).build()
 
             // Promote into the system's Conversations section (prominent avatar, heads-up priority):
             // a long-lived dynamic shortcut carrying the Person, tied to the notif by id + LocusId.
-            val shortcut = ShortcutInfoCompat.Builder(app, peerHex)
+            val shortcut = ShortcutInfoCompat.Builder(app, convHex)
                 .setLongLived(true)
                 .setShortLabel(displayName)
                 .setPerson(them)
@@ -209,18 +226,25 @@ object PushNotifier {
                 .setIntent(
                     Intent(app, LauncherActivity::class.java)
                         .setAction(Intent.ACTION_VIEW)
-                        .putExtra(EXTRA_PEER, peerHex)
-                        .putExtra(EXTRA_PEER_NAME, displayName),
+                        .putExtra(EXTRA_CONVERSATION, convHex)
+                        .putExtra(EXTRA_CONV_NAME, displayName),
                 )
                 .build()
             ShortcutManagerCompat.pushDynamicShortcut(app, shortcut)
-            chat.setShortcutInfo(shortcut).setLocusId(LocusIdCompat(peerHex))
+            chat.setShortcutInfo(shortcut).setLocusId(LocusIdCompat(convHex))
 
             val style = NotificationCompat.MessagingStyle(Person.Builder().setName("You").build())
-            recent.forEach { style.addMessage(it.content, it.timestamp.toLong() * 1000, them) }
+                .setConversationTitle(displayName.takeIf { isGroup })
+                .setGroupConversation(isGroup)
+            recent.forEach { m ->
+                val who = m.senderIpk?.toHex()?.let { senderNames[it] }
+                val author = if (!isGroup || who == null) them
+                             else Person.Builder().setName(who).setKey(who).build()
+                style.addMessage(m.content, m.timestamp.toLong() * 1000, author)
+            }
             val replyPI = PendingIntent.getBroadcast(
-                app, notifId(peerHex),
-                Intent(app, ReplyReceiver::class.java).putExtra("peer", peer),
+                app, notifId(convHex),
+                Intent(app, ReplyReceiver::class.java).putExtra("conversation", conv),
                 PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT, // MUTABLE: RemoteInput fills in the reply
             )
             val replyAction = NotificationCompat.Action.Builder(R.drawable.i_reply, "Reply", replyPI)
@@ -235,7 +259,7 @@ object PushNotifier {
         }
         chat.addAction(readAction)
         if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true) // only the first msg per live notif buzzes
-        nm().notify(notifId(peerHex), chat.build())
+        nm().notify(notifId(convHex), chat.build())
 
         nm().notify(
             SUMMARY_ID,
@@ -252,15 +276,15 @@ object PushNotifier {
 
     private fun nm() = app.getSystemService(NotificationManager::class.java)
 
-    private fun openChat(peerHex: String, name: String): PendingIntent {
+    private fun openChat(convHex: String, name: String): PendingIntent {
         val intent = Intent(app, LauncherActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(EXTRA_PEER, peerHex)
-            .putExtra(EXTRA_PEER_NAME, name)
+            .putExtra(EXTRA_CONVERSATION, convHex)
+            .putExtra(EXTRA_CONV_NAME, name)
         // Per-peer request code: extras aren't part of PendingIntent equality, so a shared code (0)
         // would alias every tap onto whichever chat's notification updated last.
         return PendingIntent.getActivity(
-            app, notifId(peerHex), intent,
+            app, notifId(convHex), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
@@ -270,16 +294,16 @@ object PushNotifier {
 
     /** Deterministic per-peer id (so a cold FCM wake updates the same chat's notification instead of
      *  duplicating), kept clear of the reserved summary (1) / drain-FGS (42) ids. */
-    private fun notifId(peerHex: String): Int {
-        val h = peerHex.hashCode() and 0x7FFF_FFFF
+    private fun notifId(convHex: String): Int {
+        val h = convHex.hashCode() and 0x7FFF_FFFF
         return if (h < RESERVED_MAX) h + RESERVED_MAX else h
     }
 
     /** Cancel this chat's notification straight away (reply/read receivers) so the RemoteInput
      *  spinner resolves without waiting on the debounced reconcile. Takes the receiver's context —
      *  the process may be cold, before [start] set [app]. */
-    internal fun cancelChat(context: Context, peerHex: String) =
-        NotificationManagerCompat.from(context).cancel(notifId(peerHex))
+    internal fun cancelChat(context: Context, convHex: String) =
+        NotificationManagerCompat.from(context).cancel(notifId(convHex))
 
     /** Colored initials avatar — contacts carry no photo, so this mirrors the in-app letter avatar
      *  (a distinguishing hue per name beats the system's flat-gray fallback). */

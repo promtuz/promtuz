@@ -17,6 +17,14 @@ data class UiMessage(
     val dispatchIdHex: String?,
     val content: MessageContent,
     val outgoing: Boolean,
+    /**
+     * Who wrote this, as hex — null when it's us. In a group the bubble shows
+     * it above the first message of each run; a 1:1 has one possible author,
+     * so it stays hidden there.
+     */
+    val senderHex: String? = null,
+    /** Resolved display name for [senderHex]; null when it's us or unknown. */
+    val senderName: String? = null,
     val status: SendStatus,
     val edited: Boolean,
     val deleted: Boolean,
@@ -24,6 +32,12 @@ data class UiMessage(
     val reactions: List<ReactionGroup>,
     /** The quoted message, when this is a reply. */
     val quote: Quote? = null,
+    /**
+     * How many other members have read this, for our own messages in a group.
+     * 0 elsewhere: a 1:1 already says the same thing with its delivery tick,
+     * and an incoming message's read state is not ours to report.
+     */
+    val seenBy: Int = 0,
 )
 
 /**

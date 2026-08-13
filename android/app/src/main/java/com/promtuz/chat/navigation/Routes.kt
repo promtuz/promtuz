@@ -10,8 +10,17 @@ object Routes : NavKey {
     @Serializable
     data object Welcome : NavKey
 
+    /** `conversation` is a hex conversation id, not a peer — a group has no peer. */
     @Serializable
-    data class Chat(val user: String, val name: String) : NavKey
+    data class Chat(val conversation: String, val name: String) : NavKey
+
+    /** Pick contacts and name a new group. */
+    @Serializable
+    data object NewGroup : NavKey
+
+    /** A group's member list, with add / remove / leave. */
+    @Serializable
+    data class GroupInfo(val conversation: String) : NavKey
 
     @Serializable
     data object ShareIdentity : NavKey

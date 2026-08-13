@@ -16,12 +16,12 @@ import kotlinx.coroutines.launch
 // ponytail: read-on-another-device dismiss lives in libcore (a read receipt → local mark) — out of scope here.
 class MarkReadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val peer = intent.getByteArrayExtra("peer") ?: return
-        PushNotifier.cancelChat(context, peer.toHex()) // dismiss immediately, before the async mark
+        val conversation = intent.getByteArrayExtra("conversation") ?: return
+        PushNotifier.cancelChat(context, conversation.toHex()) // dismiss immediately, before the async mark
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                CoreBridge.markConversationRead(peer)
+                CoreBridge.markConversationRead(conversation)
             } finally {
                 pending.finish()
             }

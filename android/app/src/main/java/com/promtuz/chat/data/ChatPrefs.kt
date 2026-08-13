@@ -51,8 +51,8 @@ object ChatPrefs {
         _muted.value = prefs.getStringSet(MUTED, emptySet()).orEmpty().toSet()
     }
 
-    fun togglePin(peerHex: String) { _pinned.value = _pinned.value.toggled(peerHex); persist() }
-    fun toggleMute(peerHex: String) { _muted.value = _muted.value.toggled(peerHex); persist() }
+    fun togglePin(convHex: String) { _pinned.value = _pinned.value.toggled(convHex); persist() }
+    fun toggleMute(convHex: String) { _muted.value = _muted.value.toggled(convHex); persist() }
 
     /**
      * Timestamp (unix seconds) of the newest message this chat has already
@@ -60,16 +60,16 @@ object ChatPrefs {
      * needs it is a wake-drain in a fresh process, which starts with an empty
      * heap and an unread set the user was notified about hours ago.
      */
-    fun lastAlerted(peerHex: String): Long = prefs.getLong(ALERTED + peerHex, 0L)
+    fun lastAlerted(convHex: String): Long = prefs.getLong(ALERTED + convHex, 0L)
 
-    fun setLastAlerted(peerHex: String, tsSecs: Long) =
-        prefs.edit { putLong(ALERTED + peerHex, tsSecs) }
+    fun setLastAlerted(convHex: String, tsSecs: Long) =
+        prefs.edit { putLong(ALERTED + convHex, tsSecs) }
 
     /** Drop all flags for a forgotten contact. */
-    fun forget(peerHex: String) {
-        _pinned.value = _pinned.value - peerHex
-        _muted.value = _muted.value - peerHex
-        prefs.edit { remove(ALERTED + peerHex) }
+    fun forget(convHex: String) {
+        _pinned.value = _pinned.value - convHex
+        _muted.value = _muted.value - convHex
+        prefs.edit { remove(ALERTED + convHex) }
         persist()
     }
 

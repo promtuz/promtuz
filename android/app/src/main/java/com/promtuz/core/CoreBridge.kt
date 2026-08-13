@@ -64,6 +64,18 @@ import uniffi.core.sendStaged as ffiSendStaged
 import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
+import uniffi.core.ConversationRecord
+import uniffi.core.MemberRecord
+import uniffi.core.listConversations as ffiListConversations
+import uniffi.core.getConversation as ffiGetConversation
+import uniffi.core.conversationWith as ffiConversationWith
+import uniffi.core.conversationMembers as ffiConversationMembers
+import uniffi.core.seenByCount as ffiSeenByCount
+import uniffi.core.setConversationTitle as ffiSetConversationTitle
+import uniffi.core.createGroup as ffiCreateGroup
+import uniffi.core.addGroupMember as ffiAddGroupMember
+import uniffi.core.removeGroupMember as ffiRemoveGroupMember
+import uniffi.core.leaveGroup as ffiLeaveGroup
 import com.promtuz.core.adapter.ActivitySignal
 import com.promtuz.core.adapter.PresenceSignal
 
@@ -157,13 +169,60 @@ object CoreBridge {
      */
     suspend fun forgetContact(ipk: ByteArray) = withContext(Dispatchers.IO) { ffiForgetContact(ipk) }
 
+    /** Latest message per conversation — the home list's preview line. */
     suspend fun conversations(): List<MessageRecord> = withContext(Dispatchers.IO) { ffiGetConversations() }
 
-    suspend fun messages(peerIpk: ByteArray, limit: Int, beforeId: String = ""): List<MessageRecord> =
-        withContext(Dispatchers.IO) { ffiGetMessages(peerIpk, limit.toUInt(), beforeId) }
+    /** Every conversation with its roster and title — the home list's rows. */
+    suspend fun listConversations(): List<ConversationRecord> =
+        withContext(Dispatchers.IO) { ffiListConversations() }
 
-    suspend fun sendMessage(toIpk: ByteArray, content: String, replyTo: ByteArray? = null) =
-        withContext(Dispatchers.IO) { ffiSendMessage(toIpk, content, replyTo) }
+    /** One conversation by id, or null once it's gone. */
+    suspend fun conversation(id: ByteArray): ConversationRecord? =
+        withContext(Dispatchers.IO) { ffiGetConversation(id) }
+
+    /**
+     * The direct conversation with a contact, created on first open. How a
+     * person in the contacts list becomes a chat.
+     */
+    suspend fun conversationWith(peerIpk: ByteArray): ByteArray =
+        withContext(Dispatchers.IO) { ffiConversationWith(peerIpk) }
+
+    /** Full roster, departed members included so old messages still name someone. */
+    suspend fun members(conversationId: ByteArray): List<MemberRecord> =
+        withContext(Dispatchers.IO) { ffiConversationMembers(conversationId) }
+
+    /** How many members have read up to this message — the "seen by N" figure. */
+    suspend fun seenBy(conversationId: ByteArray, dispatchId: ByteArray): Int =
+        withContext(Dispatchers.IO) { ffiSeenByCount(conversationId, dispatchId).toInt() }
+
+    /** Rename a group locally. v1 does not broadcast the change. */
+    suspend fun setConversationTitle(conversationId: ByteArray, title: String) =
+        withContext(Dispatchers.IO) { ffiSetConversationTitle(conversationId, title) }
+
+    // — Group membership. Each needs a live relay (a KeyPackage fetch and a
+    //   Welcome), so these report failure rather than queueing like a message.
+
+    /** Create a group with us as admin. Returns the new conversation id. */
+    suspend fun createGroup(title: String, members: List<ByteArray>): ByteArray =
+        withContext(Dispatchers.IO) { ffiCreateGroup(title, members) }
+
+    /** Add someone. Admin-only; they see no history from before they joined. */
+    suspend fun addGroupMember(conversationId: ByteArray, memberIpk: ByteArray) =
+        withContext(Dispatchers.IO) { ffiAddGroupMember(conversationId, memberIpk) }
+
+    /** Remove someone, rotating keys so their device can't read what follows. */
+    suspend fun removeGroupMember(conversationId: ByteArray, memberIpk: ByteArray) =
+        withContext(Dispatchers.IO) { ffiRemoveGroupMember(conversationId, memberIpk) }
+
+    /** Leave. The chat and its history stay; it just can't send any more. */
+    suspend fun leaveGroup(conversationId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiLeaveGroup(conversationId) }
+
+    suspend fun messages(conversationId: ByteArray, limit: Int, beforeId: String = ""): List<MessageRecord> =
+        withContext(Dispatchers.IO) { ffiGetMessages(conversationId, limit.toUInt(), beforeId) }
+
+    suspend fun sendMessage(conversationId: ByteArray, content: String, replyTo: ByteArray? = null) =
+        withContext(Dispatchers.IO) { ffiSendMessage(conversationId, content, replyTo) }
 
     // — Media (images + attachments). Unsigned FFI dimensions/sizes are taken as Int here
     //   and widened once at the boundary, matching messages()/setActivity().
@@ -194,51 +253,53 @@ object CoreBridge {
 
     /** Send the buffer as one album; caption rides the first, `replyTo` rides all. */
     suspend fun sendStaged(
-        toIpk: ByteArray, ids: List<ULong>, caption: String, replyTo: ByteArray? = null,
-    ) = withContext(Dispatchers.IO) { ffiSendStaged(toIpk, ids, caption, replyTo) }
+        conversationId: ByteArray, ids: List<ULong>, caption: String, replyTo: ByteArray? = null,
+    ) = withContext(Dispatchers.IO) { ffiSendStaged(conversationId, ids, caption, replyTo) }
 
     /** Replace a message's body with a buffered item — the media half of an edit. */
     suspend fun reviseWithStaged(
-        peer: ByteArray, dispatchId: ByteArray, stagedId: ULong, caption: String,
-    ) = withContext(Dispatchers.IO) { ffiReviseWithStaged(peer, dispatchId, stagedId, caption) }
+        conversationId: ByteArray, dispatchId: ByteArray, stagedId: ULong, caption: String,
+    ) = withContext(Dispatchers.IO) {
+        ffiReviseWithStaged(conversationId, dispatchId, stagedId, caption)
+    }
 
     /** Start (or resume) the device-to-device pull of an attachment's bytes. */
     suspend fun downloadAttachment(fileId: ByteArray) =
         withContext(Dispatchers.IO) { ffiDownloadAttachment(fileId) }
 
-    /** Media rows for a peer (inline blob/thumb + transfer progress in chunks). */
-    suspend fun getMedia(peerIpk: ByteArray): List<MediaRecord> =
-        withContext(Dispatchers.IO) { ffiGetMedia(peerIpk) }
+    /** Media rows for a conversation (inline blob/thumb + transfer progress in chunks). */
+    suspend fun getMedia(conversationId: ByteArray): List<MediaRecord> =
+        withContext(Dispatchers.IO) { ffiGetMedia(conversationId) }
 
-    suspend fun editMessage(peer: ByteArray, dispatchId: ByteArray, content: String) =
-        withContext(Dispatchers.IO) { ffiEditMessage(peer, dispatchId, content) }
+    suspend fun editMessage(conversationId: ByteArray, dispatchId: ByteArray, content: String) =
+        withContext(Dispatchers.IO) { ffiEditMessage(conversationId, dispatchId, content) }
 
     /** Delete for everyone (tombstones both sides) or just locally. */
-    suspend fun deleteMessage(peer: ByteArray, dispatchId: ByteArray, forEveryone: Boolean) =
-        withContext(Dispatchers.IO) { ffiDeleteMessage(peer, dispatchId, forEveryone) }
+    suspend fun deleteMessage(conversationId: ByteArray, dispatchId: ByteArray, forEveryone: Boolean) =
+        withContext(Dispatchers.IO) { ffiDeleteMessage(conversationId, dispatchId, forEveryone) }
 
     /** Add/remove our own `emoji` reaction on a message. */
-    suspend fun react(peer: ByteArray, dispatchId: ByteArray, emoji: String, add: Boolean) =
-        withContext(Dispatchers.IO) { ffiReactMessage(peer, dispatchId, emoji, add) }
+    suspend fun react(conversationId: ByteArray, dispatchId: ByteArray, emoji: String, add: Boolean) =
+        withContext(Dispatchers.IO) { ffiReactMessage(conversationId, dispatchId, emoji, add) }
 
-    suspend fun reactions(peer: ByteArray): List<ReactionRecord> =
-        withContext(Dispatchers.IO) { ffiReactionsFor(peer) }
+    suspend fun reactions(conversationId: ByteArray): List<ReactionRecord> =
+        withContext(Dispatchers.IO) { ffiReactionsFor(conversationId) }
 
-    /** High-water-mark read receipt: mark everything from `peer` up to this dispatch id as read. */
-    suspend fun markRead(peer: ByteArray, uptoDispatchId: ByteArray) =
-        withContext(Dispatchers.IO) { ffiMarkRead(peer, uptoDispatchId) }
+    /** High-water-mark read receipt: mark everything up to this dispatch id as read. */
+    suspend fun markRead(conversationId: ByteArray, uptoDispatchId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiMarkRead(conversationId, uptoDispatchId) }
 
-    /** Mark the whole conversation with `peer` read (home-list action). */
-    suspend fun markConversationRead(peer: ByteArray) =
-        withContext(Dispatchers.IO) { ffiMarkConversationRead(peer) }
+    /** Mark a whole conversation read (home-list action). */
+    suspend fun markConversationRead(conversationId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiMarkConversationRead(conversationId) }
 
-    /** Per-peer unread incoming counts (only peers with unread > 0) for home badges. */
+    /** Per-conversation unread incoming counts (only those with unread > 0) for home badges. */
     suspend fun unreadCounts(): List<UnreadCount> =
         withContext(Dispatchers.IO) { ffiUnreadCounts() }
 
     /** Ephemeral typing/recording signal (OR of Activity bits; 0 = idle). Fire-and-forget. */
-    suspend fun setActivity(peer: ByteArray, activityBits: Int) =
-        withContext(Dispatchers.IO) { ffiSetActivity(peer, activityBits.toUShort()) }
+    suspend fun setActivity(conversationId: ByteArray, activityBits: Int) =
+        withContext(Dispatchers.IO) { ffiSetActivity(conversationId, activityBits.toUShort()) }
 
     /** (Re)subscribe presence interest to these contacts. */
     suspend fun subscribePresence(contacts: List<ByteArray>) =

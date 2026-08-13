@@ -9,6 +9,8 @@ import androidx.navigation3.runtime.entryProvider
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
+import com.promtuz.chat.ui.screens.GroupInfoScreen
+import com.promtuz.chat.ui.screens.NewGroupScreen
 import com.promtuz.chat.ui.screens.AboutScreen
 import com.promtuz.chat.ui.screens.BackupRestoreScreen
 import com.promtuz.chat.ui.screens.ChatAppearanceScreen
@@ -52,11 +54,13 @@ fun AppNavigation(
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
                 val chatVM = koinViewModel<ChatVM>()
-                LaunchedEffect(key.user) {
-                    chatVM.init(key.user.fromHex())
+                LaunchedEffect(key.conversation) {
+                    chatVM.init(key.conversation.fromHex())
                 }
                 ChatScreen(key.name, chatVM)
             }
+            entry<Routes.NewGroup> { NewGroupScreen() }
+            entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
                 ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
             }

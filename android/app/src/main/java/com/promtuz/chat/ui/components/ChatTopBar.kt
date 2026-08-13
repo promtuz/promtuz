@@ -32,7 +32,10 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import org.koin.compose.koinInject
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.util.freezeOnExit
@@ -42,18 +45,38 @@ import dev.chrisbanes.haze.hazeEffect
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
+    val navigator = koinInject<AppVM>().navigator
     val backHandle = LocalOnBackPressedDispatcherOwner.current
     val colors = MaterialTheme.colorScheme
     val chatTheme = LocalChatColors.current
     val typing by chatVM.typing.collectAsState()
     val presence by chatVM.presence.collectAsState()
     val mutedChats by ChatPrefs.muted.collectAsState()
+    val isGroup by chatVM.isGroup.collectAsState()
+    val memberNames by chatVM.memberNames.collectAsState()
+    val memberCount by chatVM.memberCount.collectAsState()
+    val typingMembers by chatVM.typingMembers.collectAsState()
 
-    val muted by remember { derivedStateOf { chatVM.peerHex in mutedChats } }
+    val muted by remember { derivedStateOf { chatVM.conversationHex in mutedChats } }
+
+    // Who's typing, named — a group can have several at once, and "3 people
+    // typing…" reads better than three names past a couple.
+    val typingLine = remember(typingMembers, memberNames) {
+        val names = typingMembers.mapNotNull { memberNames[it] }
+        when {
+            names.isEmpty() -> "typing…"
+            names.size == 1 -> "${names[0]} is typing…"
+            names.size == 2 -> "${names[0]} and ${names[1]} are typing…"
+            else -> "${names.size} people are typing…"
+        }
+    }
 
     // Subtitle cascade: live activity beats presence; silence renders nothing.
+    // A group has no single presence, so it falls back to its member count.
     val (subtitle, subtitleColor) = when {
+        typing && isGroup -> typingLine to chatTheme.accent
         typing -> "typing…" to chatTheme.accent
+        isGroup -> memberTally(memberCount) to colors.onSurfaceVariant
         presence == Presence.Online -> "online" to chatTheme.accent
         presence is Presence.Idle -> {
             val since = (presence as Presence.Idle).sinceMs
@@ -84,7 +107,8 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Avatar(name, 40.dp)
+                if (isGroup) GroupAvatar(title = name, members = memberNames.values.toList(), size = 40.dp)
+                else Avatar(name, 40.dp)
                 Column {
                     Text(name, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1)
                     if (subtitle != null) Text(
@@ -115,11 +139,20 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 iconSize = 20.dp,
                 anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp)) },
                 groups = buildList {
+                    if (isGroup) {
+                        add(
+                            listOf(
+                                MenuAction("Group info", R.drawable.i_contacts) {
+                                    navigator.push(Routes.GroupInfo(chatVM.conversationHex))
+                                },
+                            ),
+                        )
+                    }
                     add(
                         listOf(
                             MenuAction("Search", R.drawable.oi_search) {},
                             MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) {
-                                ChatPrefs.toggleMute(chatVM.peerHex)
+                                ChatPrefs.toggleMute(chatVM.conversationHex)
                             })
                     )
                     add(
@@ -139,3 +172,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 }
+
+/** "1 member" / "4 members" — a group of one is a real state after a removal. */
+fun memberTally(n: Int): String = if (n == 1) "1 member" else "$n members"

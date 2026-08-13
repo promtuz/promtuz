@@ -34,6 +34,14 @@ sealed interface MessageContent {
         val items: List<AlbumItem>,
     ) : MessageContent
 
+    /**
+     * A membership or title change, narrated between the messages it happened
+     * between. Not a bubble — a centred line with no author, no reactions and
+     * nothing to reply to.
+     */
+    data class System(val event: SystemEventKind, val actor: String, val target: String) :
+        MessageContent
+
     /** P2P attachment pulled by [fileIdHex]; [transferState] 0 none/1 active/2 done/3 failed/4 held. */
     data class Attachment(
         val caption: String,
@@ -48,6 +56,9 @@ sealed interface MessageContent {
         val localPath: String?,
     ) : MessageContent
 }
+
+/** What a [MessageContent.System] row is narrating. */
+enum class SystemEventKind { Added, Left, Removed, Titled }
 
 /** One member of an [MessageContent.Album], still addressable by its own id. */
 @Immutable

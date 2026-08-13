@@ -50,11 +50,13 @@ class AppVM(
      *  pinned-first the instant a pin toggles. */
     val chats: StateFlow<List<ChatSummary>> =
         combine(
-            observeQuery(setOf("contacts", "messages")) { loadSummaries() },
+            observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
+                loadSummaries()
+            },
             ChatPrefs.pinned,
         ) { list, pinned ->
             list.sortedWith(
-                compareByDescending<ChatSummary> { it.peerHex in pinned }
+                compareByDescending<ChatSummary> { it.conversationHex in pinned }
                     .thenByDescending { it.timestampMs }
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -150,19 +152,33 @@ class AppVM(
         private const val ACTIVITY_TTL_MS = 6_000L
     }
 
-    fun openChat(peerHex: String, name: String) {
-        navigator.push(Routes.Chat(peerHex, name))
+    fun openChat(conversationHex: String, name: String) {
+        navigator.push(Routes.Chat(conversationHex, name))
+    }
+
+    /** Open a chat with a contact, minting the conversation on first open. */
+    fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {
+        val conv = runCatching { bridge.conversationWith(peerHex.fromHex()) }.getOrNull() ?: return@launch
+        navigator.push(Routes.Chat(conv.toHex(), name))
     }
 
     /** Home-list "Mark read": clear the unread backlog for this conversation. */
-    fun markConversationRead(peerHex: String) = viewModelScope.launch {
-        runCatching { bridge.markConversationRead(peerHex.fromHex()) }
+    fun markConversationRead(conversationHex: String) = viewModelScope.launch {
+        runCatching { bridge.markConversationRead(conversationHex.fromHex()) }
     }
 
-    /** Home-list "Delete chat": forget the contact + all local state, drop its flags. */
-    fun deleteChat(peerHex: String) = viewModelScope.launch {
-        runCatching { bridge.forgetContact(peerHex.fromHex()) }
-        ChatPrefs.forget(peerHex)
+    /**
+     * Home-list "Delete chat". For a 1:1 that means forgetting the contact and
+     * every trace of them; for a group it means leaving, which is a membership
+     * change the other members have to be told about.
+     */
+    fun deleteChat(summary: ChatSummary) = viewModelScope.launch {
+        if (summary.isGroup) {
+            runCatching { bridge.leaveGroup(summary.conversationHex.fromHex()) }
+        } else {
+            summary.peerHex?.let { runCatching { bridge.forgetContact(it.fromHex()) } }
+        }
+        ChatPrefs.forget(summary.conversationHex)
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
@@ -214,19 +230,28 @@ class AppVM(
     }
 
     private suspend fun loadSummaries(): List<ChatSummary> = try {
-        val contacts = bridge.contacts()
-        val convByPeer = bridge.conversations().associateBy { it.peerIpk.toList() }
-        val unread = bridge.unreadCounts().associate { it.peerIpk.toList() to it.count.toInt() }
-        contacts.map { c ->
-            val last = convByPeer[c.ipk.toList()]
+        val contactByIpk = bridge.contacts().associateBy { it.ipk.toList() }
+        val lastByConv = bridge.conversations().associateBy { it.conversationId.toList() }
+        val unread = bridge.unreadCounts().associate { it.conversationId.toList() to it.count.toInt() }
+
+        bridge.listConversations().map { c ->
+            val key = c.id.toList()
+            val last = lastByConv[key]
+            // A direct chat titles itself from the address book. Core resolves
+            // which member is the peer, so the app never needs its own IPK.
+            val contact = c.peer?.let { contactByIpk[it.toList()] }
             ChatSummary(
-                peerHex = c.ipk.toHex(),
-                name = c.name,
+                conversationHex = c.id.toHex(),
+                name = if (c.kind.toInt() == 1) c.title.ifEmpty { "Group" }
+                       else contact?.name.orEmpty(),
+                kind = c.kind.toInt(),
+                peerHex = c.peer?.toHex(),
+                memberCount = c.members.size,
                 lastPreview = last?.content,
-                timestampMs = (last?.timestamp ?: c.addedAt).toLong() * 1000,
-                status = c.status.toInt(),
-                rejectReason = c.rejectReason?.toInt(),
-                unreadCount = unread[c.ipk.toList()] ?: 0,
+                timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
+                status = contact?.status?.toInt() ?: 1,
+                rejectReason = contact?.rejectReason?.toInt(),
+                unreadCount = unread[key] ?: 0,
                 lastOutgoing = last?.outgoing == true,
                 lastDeleted = last?.deleted == true,
                 lastStatus = last?.status?.toInt() ?: 1,

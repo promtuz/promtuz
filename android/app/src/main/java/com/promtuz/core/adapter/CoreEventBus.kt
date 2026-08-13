@@ -15,11 +15,20 @@ import uniffi.core.MessageEvent
 import uniffi.core.ConnectionState as FfiConnectionState
 import uniffi.core.Presence as FfiPresence
 
-/** Ephemeral peer activity — `bits` is an OR of ACTIVITY_* (0 = present-idle). */
-class ActivitySignal(val peer: ByteArray, val bits: Int)
+/**
+ * Ephemeral member activity — `bits` is an OR of ACTIVITY_* (0 = present-idle).
+ * Carries the conversation as well as the person, so a group header can show
+ * several members typing at once.
+ */
+class ActivitySignal(val conversation: ByteArray, val peer: ByteArray, val bits: Int)
 
 /** A newly-delivered incoming message — drives push notifications (a transient projection). */
-class IncomingMessage(val peerHex: String, val content: String, val timestampMs: Long)
+class IncomingMessage(
+    val conversationHex: String,
+    val senderHex: String,
+    val content: String,
+    val timestampMs: Long,
+)
 
 /** Ephemeral presence delta for a contact. */
 class PresenceSignal(val peer: ByteArray, val presence: Presence)
@@ -79,18 +88,26 @@ object CoreEventBus : CoreEvents {
     override fun onMessage(event: MessageEvent) {
         _dbChanged.tryEmit(MESSAGES)
         if (event is MessageEvent.Received) {
-            _incoming.tryEmit(IncomingMessage(event.from.toHex(), event.content, event.timestamp.toLong() * 1000))
+            _incoming.tryEmit(
+                IncomingMessage(
+                    conversationHex = event.conversation.toHex(),
+                    senderHex = event.sender.toHex(),
+                    content = event.content,
+                    timestampMs = event.timestamp.toLong() * 1000,
+                )
+            )
         }
     }
 
     override fun onReaction(
-        peer: ByteArray, dispatchId: ByteArray, reactor: ByteArray, emoji: String, add: Boolean,
+        conversation: ByteArray, dispatchId: ByteArray, reactor: ByteArray, emoji: String,
+        add: Boolean,
     ) {
         _dbChanged.tryEmit(REACTIONS)
     }
 
-    override fun onActivity(peer: ByteArray, activity: UShort) {
-        _activity.tryEmit(ActivitySignal(peer, activity.toInt()))
+    override fun onActivity(conversation: ByteArray, peer: ByteArray, activity: UShort) {
+        _activity.tryEmit(ActivitySignal(conversation, peer, activity.toInt()))
     }
 
     override fun onPresence(peer: ByteArray, presence: FfiPresence) {

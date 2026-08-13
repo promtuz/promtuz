@@ -63,10 +63,10 @@ class LauncherActivity : ComponentActivity() {
 
     /** A message-notification tap carries the chat's peer + name; open that thread once we're set up. */
     private fun consumeChatOpen(intent: Intent) {
-        val peerHex = intent.getStringExtra(PushNotifier.EXTRA_PEER) ?: return
-        val name = intent.getStringExtra(PushNotifier.EXTRA_PEER_NAME).orEmpty()
-        intent.removeExtra(PushNotifier.EXTRA_PEER) // one-shot; survive recreation
-        intent.removeExtra(PushNotifier.EXTRA_PEER_NAME)
-        if (CoreBridge.shouldLaunchApp()) viewModel.openChat(peerHex, name)
+        val convHex = intent.getStringExtra(PushNotifier.EXTRA_CONVERSATION) ?: return
+        val name = intent.getStringExtra(PushNotifier.EXTRA_CONV_NAME).orEmpty()
+        intent.removeExtra(PushNotifier.EXTRA_CONVERSATION) // one-shot; survive recreation
+        intent.removeExtra(PushNotifier.EXTRA_CONV_NAME)
+        if (CoreBridge.shouldLaunchApp()) viewModel.openChat(convHex, name)
     }
 }

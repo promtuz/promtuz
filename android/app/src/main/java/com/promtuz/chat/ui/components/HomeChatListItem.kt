@@ -90,7 +90,7 @@ fun HomeChatListItem(
                 // the chat, a pre-timeout drag lets the list scroll, and a stationary
                 // hold opens the menu — then the SAME finger drags to an item and
                 // releases to pick it (the iconic hold-and-swipe).
-                .pointerInput(chat.peerHex, pinned, muted, unread) {
+                .pointerInput(chat.conversationHex, pinned, muted, unread) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         if (menuState.isOpen) return@awaitEachGesture
@@ -150,7 +150,8 @@ fun HomeChatListItem(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(chat.name, statusColor = presenceColor(presence))
+            if (chat.isGroup) GroupAvatar(title = chat.name, members = emptyList())
+            else Avatar(chat.name, statusColor = presenceColor(presence))
 
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(
