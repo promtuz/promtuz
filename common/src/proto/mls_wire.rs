@@ -54,15 +54,22 @@ use crate::types::bytes::Bytes;
 //===:===:===:===:==:  CONSTANTS  :==:===:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// MLS-layer, peer-facing protocol version. Mixed into every MLS
-/// signing transcript here and gates the app-plaintext format
-/// ([`AppPayload`]).
+/// MLS-layer protocol version, mixed into every signing transcript here.
 ///
-/// Diverges from [`crate::PROTOCOL_VERSION`] (= 5): that constant governs
-/// the relay-auth handshake and is a wider flag day to bump. This one is
-/// peer-to-peer only, so a bump is just a client-coordinated redeploy —
-/// cheap by comparison, so it moves independently as `AppPayload` variants
-/// are added.
+/// Diverges from [`crate::PROTOCOL_VERSION`] (= 5), which governs the
+/// relay-auth handshake.
+///
+/// **Bumping this is a relay flag day, not a client-only one.** The relay
+/// verifies the KeyPackage publish/refill/fetch and Welcome publish/fetch
+/// transcripts against *its own* compiled-in copy of this constant, so a
+/// client that moves ahead of the deployed relay has every DHT call refused
+/// mid-stream — KeyPackages stop publishing, Welcomes stop being delivered,
+/// and the failure reads as a transport error rather than a version one.
+/// Bump only alongside a relay deploy.
+///
+/// It does *not* gate [`AppPayload`]: nothing reads it to accept or reject a
+/// decrypted plaintext. That union stays compatible by ordinal stability —
+/// append new variants, never reorder — so adding one needs no bump here.
 pub const MLS_WIRE_VERSION: u16 = 12;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
@@ -158,6 +165,27 @@ pub enum AppPayload {
         target: [u8; 16],
         body:   Body,
     },
+    /// A membership or title change, narrated inline with the messages it sits
+    /// between. Travels E2E inside the ordinary application envelope rather
+    /// than as a relay concept, so it stays ordered against the conversation
+    /// and stays invisible to the relay. Appended after Revise so postcard
+    /// ordinals for older variants hold.
+    System(SystemEvent),
+}
+
+/// What happened to a group. The *actor* is implicit — the MLS sender of the
+/// payload — so these need only name the target, exactly as [`AppPayload::React`]
+/// leaves the reactor implicit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SystemEvent {
+    /// The sender added `who` to the group.
+    Added { who: Bytes<32> },
+    /// `who` left of their own accord. Sent by the leaver.
+    Left { who: Bytes<32> },
+    /// The sender removed `who`.
+    Removed { who: Bytes<32> },
+    /// The sender renamed the group.
+    Titled { title: String },
 }
 
 /// What a message IS, split from what it's doing so `reply_to` and a revision
