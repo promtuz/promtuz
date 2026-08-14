@@ -990,7 +990,9 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
 
     // 4. Create group with us as founder.
     let mut group =
-        MlsGroupHandle::create(ctx.provider, &leaf_kp, our_ipk, leaf_kp.public(), &group_id)
+        // No meta: a pairing group is a 1:1, and that absence is exactly how
+        // the far side knows not to open a group chat for it.
+        MlsGroupHandle::create(ctx.provider, &leaf_kp, our_ipk, leaf_kp.public(), &group_id, None)
             .map_err(|e| anyhow!("create group: {e}"))?;
 
     // 5. Add the recipient via their KP.
@@ -1927,9 +1929,9 @@ enum WelcomeOutcome {
 
 /// The chat an MLS group belongs to, opening one if this is our first sight of it.
 ///
-/// The group's own roster decides which kind of chat it is — a pairing Welcome
-/// builds a group of two, anything larger is a group chat — because no envelope
-/// says so and the roster cannot lie.
+/// The group context says which kind it is — see [`crate::mls::GroupMeta`]. Its
+/// absence means a pair. The roster can't answer this: a group of two and a 1:1
+/// have the same roster, so sizing it files every two-person group into a DM.
 ///
 /// A group chat gets a conversation of its own. Filing it under the direct chat
 /// with whoever invited us would put every group message in their DM, and
@@ -1940,20 +1942,29 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     if let Some(id) = Conversation::for_group(&gid) {
         return Ok(id); // already homed; a redelivered Welcome mints no second one
     }
-    let roster: Vec<[u8; 32]> = group
-        .members()
-        .filter_map(|m| m.credential.serialized_content().try_into().ok())
-        .collect();
-
-    if roster.len() <= 2 {
+    let Some(meta) = group.group_meta() else {
         let id = Conversation::for_peer(from)?;
         Conversation::bind_group(&id, &gid)?;
         let _ = Contact::set_mls_group_id(from, &gid);
         return Ok(id);
-    }
-    let id = Conversation::join_group(from, &roster)?;
+    };
+    let roster: Vec<[u8; 32]> = group
+        .members()
+        .filter_map(|m| m.credential.serialized_content().try_into().ok())
+        .collect();
+    // The founder from the context, not `from`: on a group re-opened by an
+    // arriving message, `from` is whoever spoke first, not who runs the group.
+    let id = Conversation::join_group(&meta.founder, &roster)?;
     Conversation::bind_group(&id, &gid)?;
-    info!("GROUP: joined a group of {} as conversation {}", roster.len(), hex::encode(&id[..4]));
+    if !meta.title.is_empty() {
+        let _ = Conversation::set_title(&id, &meta.title);
+    }
+    info!(
+        "GROUP: opened \"{}\" ({} members) as conversation {}",
+        meta.title,
+        roster.len(),
+        hex::encode(&id[..4])
+    );
     Ok(id)
 }
 

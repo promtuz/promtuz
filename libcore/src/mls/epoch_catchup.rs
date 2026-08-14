@@ -571,6 +571,7 @@ mod tests {
             &alice.ipk,
             alice.sig_kp.public(),
             &[0xAA; 32],
+            None,
         )
         .expect("create alice group");
         let bob_kp = make_kp(&provider_b, &bob);

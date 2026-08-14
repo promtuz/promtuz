@@ -37,7 +37,7 @@ pub mod welcome;
 #[allow(unused_imports)]
 pub use epoch_catchup::{EpochCatchupBuffer, PushOutcome};
 #[allow(unused_imports)]
-pub use group::{MlsGroupHandle, PROMTUZ_CIPHERSUITE};
+pub use group::{GROUP_META_EXTENSION, GroupMeta, MlsGroupHandle, PROMTUZ_CIPHERSUITE};
 #[allow(unused_imports)]
 pub use keypackage::{KeyPackageStash, KeyPackageStashError};
 #[allow(unused_imports)]

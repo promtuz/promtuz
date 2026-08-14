@@ -46,6 +46,8 @@ use openmls::prelude::tls_codec::Serialize as _;
 use openmls::prelude::*;
 use openmls_traits::signatures::Signer;
 use openmls_traits::OpenMlsProvider;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
@@ -72,6 +74,47 @@ pub struct MlsGroupHandle {
     inner: MlsGroup,
 }
 
+/// Extension type carrying [`GroupMeta`] in the group context.
+///
+/// Private-use range (RFC 9420 §17.3). openmls only demands capability support
+/// for extensions named in `RequiredCapabilities`, so an unknown one in the
+/// context is carried by every implementation without negotiation.
+const PROMTUZ_GROUP_META_EXT: u16 = 0xF100;
+
+/// [`PROMTUZ_GROUP_META_EXT`] as openmls names it. Every KeyPackage must
+/// declare support for this or it cannot be added to a group — RFC 9420
+/// requires a joining leaf to support every extension in the group context.
+pub const GROUP_META_EXTENSION: ExtensionType = ExtensionType::Unknown(PROMTUZ_GROUP_META_EXT);
+
+/// What a group *is*, decided by whoever created it and carried in the MLS
+/// group context.
+///
+/// A group of two and a 1:1 chat are the same shape on the wire — same MLS
+/// group, same envelopes — so nothing observable tells a joiner which one they
+/// were just Welcomed into. Guessing from the roster is wrong the moment a
+/// group has exactly two members. The creator knows, so the creator says.
+///
+/// It lives in the group context rather than in the Welcome envelope for three
+/// reasons: MLS signs the context, so a relay can neither strip it (turning a
+/// group into a DM) nor forge one; it reaches the joiner inside the Welcome, so
+/// there is no message that can arrive before it; and the relay parses none of
+/// it, so this needed no wire version bump and no relay deploy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMeta {
+    /// The group's name when it was founded. Later renames travel as
+    /// `SystemEvent::Titled`; this is only the starting point.
+    pub title:   String,
+    /// Who founded it, and so who administers it.
+    ///
+    /// Carried here rather than inferred from whoever sent us the Welcome: a
+    /// deleted group re-opens on the next message that arrives in it, and the
+    /// sender of that message is whoever happened to speak first. Reading the
+    /// owner from the context means every member agrees on it however they
+    /// came to learn about the group.
+    #[serde(with = "serde_bytes")]
+    pub founder: [u8; 32],
+}
+
 /// A decrypted inbound message together with the member who wrote it.
 ///
 /// `sender` is the IPK carried in the authenticated MLS leaf credential — the
@@ -91,12 +134,13 @@ impl MlsGroupHandle {
     /// 32-byte verifying half (the `Signer` trait can't expose this
     /// directly — see module docs).
     ///
-    /// `group_id` is the 32-byte promtuz group identifier.
+    /// `group_id` is the 32-byte promtuz group identifier. `meta` marks this a
+    /// group chat rather than a 1:1 — see [`GroupMeta`]; `None` builds a pair.
     ///
     /// **Cipher suite is pinned** to [`PROMTUZ_CIPHERSUITE`].
     pub fn create<S: Signer>(
         provider: &PromtuzMlsProvider, signer: &S, own_ipk: &[u8; 32],
-        leaf_signing_public: &[u8], group_id: &[u8; 32],
+        leaf_signing_public: &[u8], group_id: &[u8; 32], meta: Option<&GroupMeta>,
     ) -> Result<Self> {
         let credential = BasicCredential::new(own_ipk.to_vec());
         let credential_with_key = CredentialWithKey {
@@ -104,7 +148,7 @@ impl MlsGroupHandle {
             signature_key: leaf_signing_public.to_vec().into(),
         };
 
-        let create_config = MlsGroupCreateConfig::builder()
+        let mut create_config = MlsGroupCreateConfig::builder()
             .ciphersuite(PROMTUZ_CIPHERSUITE)
             // Handshake framing stays opaque to the relay. Pinned rather than
             // inherited from the openmls default so it cannot drift.
@@ -114,8 +158,28 @@ impl MlsGroupHandle {
             // inside the GroupInfo / Welcome rather than out-of-band.
             // Without it joiners would require a separately-conveyed
             // RatchetTreeIn — we don't have that channel today.
-            .use_ratchet_tree_extension(true)
-            .build();
+            .use_ratchet_tree_extension(true);
+
+        if let Some(meta) = meta {
+            let bytes = postcard::to_allocvec(meta)
+                .map_err(|e| MlsGroupError::Codec(e.to_string()))?;
+            let ext = Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes));
+            let exts = Extensions::single(ext)
+                .map_err(|e| MlsGroupError::Codec(format!("group meta extension: {e}")))?;
+            // The founder's own leaf has to declare the extension too, not just
+            // the leaves it adds — RFC 9420 holds every member to the same bar,
+            // including whoever put the extension there.
+            create_config = create_config
+                .with_group_context_extensions(exts)
+                .capabilities(Capabilities::new(
+                    None,
+                    Some(&[PROMTUZ_CIPHERSUITE]),
+                    Some(&[GROUP_META_EXTENSION]),
+                    None,
+                    None,
+                ));
+        }
+        let create_config = create_config.build();
 
         let mls_group = MlsGroup::new_with_group_id(
             provider,
@@ -291,6 +355,22 @@ impl MlsGroupHandle {
         self.inner.members().count()
     }
 
+    /// What the founder said this group is, or `None` for a 1:1.
+    ///
+    /// Read from the group context, so it is the same answer on every member's
+    /// device and arrives with the Welcome rather than after it. A malformed
+    /// blob reads as `None` — a group we cannot describe is safer treated as a
+    /// pair than trusted from half-decoded bytes.
+    pub fn group_meta(&self) -> Option<GroupMeta> {
+        let exts = self.inner.export_group_context().extensions();
+        exts.iter().find_map(|e| match e {
+            Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes)) => {
+                postcard::from_bytes::<GroupMeta>(bytes).ok()
+            },
+            _ => None,
+        })
+    }
+
     /// Iterate members. Returned items expose `index: LeafNodeIndex`
     /// and `credential: Credential`; the
     /// `BasicCredential::identity` carries each member's IPK bytes.
@@ -437,6 +517,7 @@ mod tests {
             &party.ipk,
             party.sig_kp.public(),
             gid,
+            None,
         )
         .expect("create group")
     }

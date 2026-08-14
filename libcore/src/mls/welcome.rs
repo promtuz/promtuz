@@ -337,7 +337,7 @@ mod tests {
             .leaf_node_capabilities(Capabilities::new(
                 None,
                 Some(&[PROMTUZ_CIPHERSUITE]),
-                None,
+                Some(&[crate::mls::GROUP_META_EXTENSION]),
                 None,
                 None,
             ))
@@ -352,12 +352,20 @@ mod tests {
         provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
         bob: &Party, gid: [u8; 32],
     ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
+        alice_invites_bob_with(provider_a, alice, provider_b, bob, gid, None)
+    }
+
+    fn alice_invites_bob_with(
+        provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
+        bob: &Party, gid: [u8; 32], meta: Option<&crate::mls::GroupMeta>,
+    ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
         let mut alice_group = MlsGroupHandle::create(
             provider_a,
             &alice.sig_kp,
             &alice.ipk,
             alice.sig_kp.public(),
             &gid,
+            meta,
         )
         .expect("create");
         let bob_kp = make_kp(provider_b, bob);
@@ -390,6 +398,43 @@ mod tests {
         )
         .expect("make welcome");
         (env, alice_group)
+    }
+
+    /// The joiner has to learn a group is a *group* from the Welcome itself.
+    /// A two-person group is indistinguishable from a 1:1 by roster, epoch or
+    /// envelope, so the founder's [`GroupMeta`] riding the group context is the
+    /// only thing that tells them apart — and it must survive the join.
+    #[test]
+    fn group_meta_reaches_the_joiner_through_the_welcome() {
+        let provider_a = build_provider();
+        let provider_b = build_provider();
+        let alice = Party::new(&provider_a, 1);
+        let bob = Party::new(&provider_b, 2);
+
+        let meta = crate::mls::GroupMeta { title: "book club".into(), founder: alice.ipk };
+        let (env, alice_group) =
+            alice_invites_bob_with(&provider_a, &alice, &provider_b, &bob, [7u8; 32], Some(&meta));
+        let bob_group = process_welcome(&provider_b, &env).expect("process");
+
+        assert_eq!(bob_group.group_meta(), Some(meta.clone()), "the joiner reads the founder's meta");
+        assert_eq!(alice_group.group_meta(), Some(meta), "and so does the founder");
+        assert_eq!(bob_group.member_count(), 2, "a group of two — the case a roster count gets wrong");
+    }
+
+    /// The absence of meta is what marks a pair, so a pairing Welcome must
+    /// carry none. Otherwise every 1:1 would open as a group chat.
+    #[test]
+    fn a_pairing_welcome_carries_no_group_meta() {
+        let provider_a = build_provider();
+        let provider_b = build_provider();
+        let alice = Party::new(&provider_a, 1);
+        let bob = Party::new(&provider_b, 2);
+
+        let (env, _alice_group) =
+            alice_invites_bob(&provider_a, &alice, &provider_b, &bob, [8u8; 32]);
+        let bob_group = process_welcome(&provider_b, &env).expect("process");
+
+        assert_eq!(bob_group.group_meta(), None);
     }
 
     // -------------------------------------------------------------

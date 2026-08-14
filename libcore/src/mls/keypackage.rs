@@ -101,6 +101,7 @@ use thiserror::Error;
 // `PROMTUZ_CIPHERSUITE` is the single cipher suite used across promtuz.
 // Defined once in `mls::group` and re-exported from `mls::mod`; we
 // import it here to keep this module independent of the rest of `group.rs`.
+use super::group::GROUP_META_EXTENSION;
 use super::group::PROMTUZ_CIPHERSUITE;
 use super::provider::PromtuzMlsProvider;
 use super::types::PromtuzMlsStorageError;
@@ -164,6 +165,27 @@ impl std::fmt::Debug for KeyPackageStash {
             .field("unconsumed_count", &self.count_unconsumed_in_lifetime(now_ms()))
             .finish_non_exhaustive()
     }
+}
+
+/// Whether a stashed KeyPackage's leaf declares the group-metadata extension.
+///
+/// A leaf that doesn't cannot be added to any group — RFC 9420 requires an
+/// added leaf to support every extension in the group context — so a KP minted
+/// before groups carried metadata is dead weight and has to be re-minted. An
+/// undecodable KP counts as not declaring it, on the same "unusable, re-mint"
+/// footing as a bad signature.
+fn declares_group_meta(kp_bytes: &[u8]) -> bool {
+    use openmls::prelude::KeyPackageIn;
+    use openmls::prelude::ProtocolVersion;
+    use openmls::prelude::tls_codec::Deserialize as _;
+
+    let Ok(kp_in) = KeyPackageIn::tls_deserialize_exact(kp_bytes) else { return false };
+    let crypto = PromtuzMlsProvider::shared();
+    let Ok(kp) = kp_in.validate(crypto.crypto(), ProtocolVersion::Mls10) else { return false };
+    kp.leaf_node()
+        .capabilities()
+        .extensions()
+        .contains(&GROUP_META_EXTENSION)
 }
 
 impl KeyPackageStash {
@@ -248,7 +270,11 @@ impl KeyPackageStash {
             .leaf_node_capabilities(Capabilities::new(
                 None, /* protocol versions: openmls picks `Mls10` */
                 Some(&[PROMTUZ_CIPHERSUITE]),
-                None, /* extensions */
+                // A group carries its identity in a group-context extension,
+                // and RFC 9420 refuses to add a leaf that doesn't declare
+                // support for every extension already in the context. Without
+                // this the add fails outright with InsufficientCapabilities.
+                Some(&[GROUP_META_EXTENSION]),
                 None, /* proposals */
                 None, /* credentials */
             ))
@@ -374,7 +400,14 @@ impl KeyPackageStash {
                         rec.expires_at_ms,
                     );
                     let sig = Signature::from_bytes(&rec.owner_sig.0);
-                    vk.verify_strict(&msg, &sig).is_err().then_some(kp_ref)
+                    if vk.verify_strict(&msg, &sig).is_err() {
+                        return Some(kp_ref);
+                    }
+                    // A KP minted before groups carried metadata declares no
+                    // support for the group-context extension, so every attempt
+                    // to add its owner to a group is refused. Unusable, and only
+                    // re-minting fixes it.
+                    (!declares_group_meta(&rec.kp_bytes.0)).then_some(kp_ref)
                 })
                 .collect()
         };

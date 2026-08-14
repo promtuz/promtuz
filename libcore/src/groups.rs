@@ -99,12 +99,17 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
             .map_err(|e| anyhow!("build credential: {e}"))?;
         leaf_kp.store(ctx.provider.storage()).map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
 
+        // The meta is what tells every joiner this is a group and not a pair.
+        // It rides in the MLS group context, so it arrives inside the Welcome
+        // and no relay can strip it.
+        let meta = crate::mls::GroupMeta { title: title.clone(), founder: our_ipk };
         let mut group = MlsGroupHandle::create(
             ctx.provider,
             &leaf_kp,
             &our_ipk,
             leaf_kp.public(),
             &group_id,
+            Some(&meta),
         )
         .map_err(|e| anyhow!("create group: {e}"))?;
 
@@ -141,21 +146,6 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         let conversation = Conversation::create_group(&title, &members)?;
         Conversation::bind_group(&conversation, &group_id)?;
         info!("GROUP: created \"{title}\" with {} members", members.len() + 1);
-
-        // Tell them what it's called. The Welcome carries the group but not its
-        // name, and this rides a different channel so it can lose the race —
-        // hence the roster-derived fallback on the other side, and no local
-        // system row for a name nobody has seen change.
-        if !title.is_empty() {
-            if let Err(e) = crate::messaging::send_control(
-                conversation,
-                AppPayload::System(SystemEvent::Titled { title }),
-            )
-            .await
-            {
-                warn!("GROUP: new members may not have the group's name yet: {e}");
-            }
-        }
         Ok(conversation)
     })
 }

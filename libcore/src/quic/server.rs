@@ -998,7 +998,15 @@ async fn process_deliver(
                     // is what actually moved the roster, and syncing from the
                     // MLS group after merging it is the authoritative path.
                     if let SystemEvent::Titled { title } = &event {
-                        if let Err(e) = Conversation::set_title(&conv, title) {
+                        // Only a group has a shared name. Renaming a direct
+                        // chat from the wire would let a peer relabel a DM,
+                        // and did whenever a group was mis-homed into one.
+                        let is_group = Conversation::get(&conv).is_some_and(|c| {
+                            c.kind == crate::data::conversation::KIND_GROUP
+                        });
+                        if !is_group {
+                            warn!("GROUP: ignored a rename aimed at a direct chat");
+                        } else if let Err(e) = Conversation::set_title(&conv, title) {
                             warn!("GROUP: could not apply a title change: {e}");
                         }
                     }
