@@ -606,13 +606,14 @@ pub async fn set_activity(conversation: [u8; 16], activity: u16) -> Result<()> {
     // outbox — a typing signal that misses its moment is worthless.
     for peer in Conversation::recipients(&conversation) {
         let sig = crate::data::identity::IdentitySigner::sign(&activity_sig_message(
-            &peer, &our_ipk, activity, ts,
+            &peer, &our_ipk, &conversation, activity, ts,
         ))
         .map_err(|e| anyhow!("sign ephemeral: {e}"))?
         .to_bytes();
         let eph = ActivityP {
             to: Bytes(peer),
             from: Bytes(our_ipk),
+            conversation: Bytes(conversation),
             activity,
             timestamp: ts,
             sig: Bytes(sig),

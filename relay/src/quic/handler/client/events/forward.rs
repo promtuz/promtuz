@@ -188,7 +188,8 @@ fn activity_is_authentic(eph: &ActivityP, now_ms: u64) -> bool {
     (|| {
         let vk = VerifyingKey::from_bytes(&eph.from).ok()?;
         let sig = Signature::from_slice(&*eph.sig).ok()?;
-        let msg = activity_sig_message(&eph.to, &eph.from, eph.activity, eph.timestamp);
+        let msg =
+            activity_sig_message(&eph.to, &eph.from, &eph.conversation, eph.activity, eph.timestamp);
         vk.verify_strict(&msg, &sig).ok()
     })()
     .is_some()
@@ -336,10 +337,14 @@ mod tests {
         let to = [9u8; 32];
         let from = key.verifying_key().to_bytes();
         let activity = 1u16;
-        let sig = key.sign(&activity_sig_message(&to, &from, activity, timestamp)).to_bytes();
+        let conversation = [4u8; 16];
+        let sig = key
+            .sign(&activity_sig_message(&to, &from, &conversation, activity, timestamp))
+            .to_bytes();
         ActivityP {
             to: to.into(),
             from: from.into(),
+            conversation: conversation.into(),
             activity,
             timestamp,
             sig: sig.into(),

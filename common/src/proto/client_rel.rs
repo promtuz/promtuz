@@ -170,25 +170,37 @@ pub const ACTIVITY_SIG_DOMAIN: &[u8] = b"promtuz-activity-v1";
 /// `sig` under `from`, so the recipient (and relay) can reject a forged signal.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ActivityP {
-    pub to:        Bytes<32>,
-    pub from:      Bytes<32>,
+    pub to:           Bytes<32>,
+    pub from:         Bytes<32>,
+    /// Which chat this is happening in.
+    ///
+    /// Typing is an act inside a conversation, not a property of a person: the
+    /// same pair can share a DM and any number of groups, and a recipient that
+    /// re-derives the chat from `from` can only ever pick one of them — so
+    /// typing in a group surfaces in the DM instead. The sender is the only
+    /// party that knows which, so the sender says.
+    ///
+    /// Signed, so a relay cannot move a signal from one of the recipient's
+    /// chats to another.
+    pub conversation: Bytes<16>,
     /// OR of `ACTIVITY_*` bits; `0` = present-but-idle.
-    pub activity:  u16,
-    pub timestamp: u64,
-    pub sig:       Bytes<64>,
+    pub activity:     u16,
+    pub timestamp:    u64,
+    pub sig:          Bytes<64>,
 }
 
 /// Canonical bytes signed/verified for an [`ActivityP`].
-/// Layout: `ACTIVITY_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || activity_be ||
-/// timestamp_be`
+/// Layout: `ACTIVITY_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from ||
+/// conversation || activity_be || timestamp_be`
 pub fn activity_sig_message(
-    to: &[u8; 32], from: &[u8; 32], activity: u16, timestamp: u64,
+    to: &[u8; 32], from: &[u8; 32], conversation: &[u8; 16], activity: u16, timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(ACTIVITY_SIG_DOMAIN.len() + 2 + 32 + 32 + 2 + 8);
+    let mut buf = Vec::with_capacity(ACTIVITY_SIG_DOMAIN.len() + 2 + 32 + 32 + 16 + 2 + 8);
     buf.extend_from_slice(ACTIVITY_SIG_DOMAIN);
     buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     buf.extend_from_slice(to);
     buf.extend_from_slice(from);
+    buf.extend_from_slice(conversation);
     buf.extend_from_slice(&activity.to_be_bytes());
     buf.extend_from_slice(&timestamp.to_be_bytes());
     buf
@@ -594,6 +606,23 @@ mod tests {
     use super::Bytes;
     use crate::proto::pack::Packer;
     use crate::proto::pack::Unpacker;
+
+    /// The conversation is inside the transcript, not merely beside it — so a
+    /// relay cannot take a signal from one of the recipient's chats and present
+    /// it as another. Two otherwise-identical signals must sign differently.
+    #[test]
+    fn the_activity_transcript_binds_the_conversation() {
+        use super::activity_sig_message;
+
+        let to = [1u8; 32];
+        let from = [2u8; 32];
+        let dm = [3u8; 16];
+        let group = [4u8; 16];
+
+        let a = activity_sig_message(&to, &from, &dm, 1, 1_700_000_000_000);
+        let b = activity_sig_message(&to, &from, &group, 1, 1_700_000_000_000);
+        assert_ne!(a, b, "moving a signal between chats must invalidate its signature");
+    }
 
     /// Postcard round-trip every Tier-1 wrapper request variant plus the
     /// sticky-home auth packets (`DrainAuth`, `AckAuth`). One catch-all
