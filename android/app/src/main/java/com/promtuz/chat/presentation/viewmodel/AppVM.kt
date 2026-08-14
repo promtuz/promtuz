@@ -64,9 +64,13 @@ class AppVM(
     /** Live presence per contact (hex IPK) for the whole app — home dots + chat header. */
     val presenceByPeer: StateFlow<Map<String, Presence>> get() = bridge.presenceByPeer
 
-    /** Live activity bits per contact (hex IPK), timed out client-side; 0/absent = quiet. */
-    private val _activityByPeer = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val activityByPeer: StateFlow<Map<String, Int>> = _activityByPeer.asStateFlow()
+    /**
+     * Live activity bits per *conversation* (hex id), timed out client-side;
+     * 0/absent = quiet. Keyed on the chat rather than the person: the same
+     * contact can be typing in a group without typing in your DM.
+     */
+    private val _activityByChat = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val activityByChat: StateFlow<Map<String, Int>> = _activityByChat.asStateFlow()
     private val activityExpiry = mutableMapOf<String, Job>()
 
     /** Invite-link confirmation sheet; null when hidden. Driven by deeplinks. */
@@ -97,21 +101,21 @@ class AppVM(
 
         // Typing/recording already reaches us for any contact (relay-routed,
         // surfaced view-agnostically) — it just wasn't collected outside a chat.
-        // Track it app-wide for the home list; time each peer out (an offline
+        // Track it app-wide for the home list; time each chat out (an offline
         // peer never sends "stopped").
         viewModelScope.launch {
             bridge.activity.collect { sig ->
-                val hex = sig.peer.toHex()
+                val hex = sig.conversation.toHex()
                 activityExpiry.remove(hex)?.cancel()
                 if (sig.bits != 0) {
-                    _activityByPeer.value = _activityByPeer.value + (hex to sig.bits)
+                    _activityByChat.value = _activityByChat.value + (hex to sig.bits)
                     activityExpiry[hex] = viewModelScope.launch {
                         delay(ACTIVITY_TTL_MS)
                         activityExpiry.remove(hex)
-                        _activityByPeer.value = _activityByPeer.value - hex
+                        _activityByChat.value = _activityByChat.value - hex
                     }
                 } else {
-                    _activityByPeer.value = _activityByPeer.value - hex
+                    _activityByChat.value = _activityByChat.value - hex
                 }
             }
         }
@@ -172,13 +176,33 @@ class AppVM(
      * every trace of them; for a group it means leaving, which is a membership
      * change the other members have to be told about.
      */
+    /**
+     * Drop a chat from this device. Local only — for a group you are still in,
+     * it comes back the moment someone posts, because the MLS group is
+     * untouched. Leaving is [leaveGroup], deliberately a separate act.
+     *
+     * A direct chat still forgets the contact: there is no membership to keep,
+     * and half-forgetting one is what leaves a phantom row behind.
+     */
     fun deleteChat(summary: ChatSummary) = viewModelScope.launch {
-        if (summary.isGroup) {
-            runCatching { bridge.leaveGroup(summary.conversationHex.fromHex()) }
+        val result = if (summary.isGroup) {
+            runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
         } else {
             summary.peerHex?.let { runCatching { bridge.forgetContact(it.fromHex()) } }
+                ?: Result.success(Unit)
         }
+        result.onFailure { Timber.tag(TAG).e(it, "delete chat failed") }
         ChatPrefs.forget(summary.conversationHex)
+    }
+
+    /** Leave a group, then drop it — the "leave and delete" path off the modal. */
+    fun leaveAndDelete(summary: ChatSummary) = viewModelScope.launch {
+        runCatching { bridge.leaveGroup(summary.conversationHex.fromHex()) }
+            .onFailure { Timber.tag(TAG).e(it, "leave failed; keeping the chat") }
+            .onSuccess {
+                runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
+                ChatPrefs.forget(summary.conversationHex)
+            }
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
@@ -255,6 +279,10 @@ class AppVM(
                 lastOutgoing = last?.outgoing == true,
                 lastDeleted = last?.deleted == true,
                 lastStatus = last?.status?.toInt() ?: 1,
+                amMember = c.amMember,
+                canLeave = c.canLeave,
+                canDelete = c.canDelete,
+                ownerIsStuck = c.ownerIsStuck,
             )
         }.sortedByDescending { it.timestampMs }
     } catch (e: Exception) {

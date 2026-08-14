@@ -26,6 +26,17 @@ data class ChatSummary(
     val lastDeleted: Boolean = false,
     /** Delivery status of our last message: 0 pending,1 sent,2 failed,3 delivered,4 read. */
     val lastStatus: Int = 1,
+    /** We are still in this group. False once we left or were removed. */
+    val amMember: Boolean = true,
+    /** Leaving is offered — a group we are in and haven't stranded. */
+    val canLeave: Boolean = false,
+    /** Deleting is offered. */
+    val canDelete: Boolean = true,
+    /**
+     * We founded this group and others are still in it, so neither leaving nor
+     * deleting is allowed — the group would be left with nobody to manage it.
+     */
+    val ownerIsStuck: Boolean = false,
 ) {
     val isGroup: Boolean get() = kind == 1
 }

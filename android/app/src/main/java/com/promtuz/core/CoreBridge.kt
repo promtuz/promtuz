@@ -76,6 +76,7 @@ import uniffi.core.createGroup as ffiCreateGroup
 import uniffi.core.addGroupMember as ffiAddGroupMember
 import uniffi.core.removeGroupMember as ffiRemoveGroupMember
 import uniffi.core.leaveGroup as ffiLeaveGroup
+import uniffi.core.deleteConversation as ffiDeleteConversation
 import com.promtuz.core.adapter.ActivitySignal
 import com.promtuz.core.adapter.PresenceSignal
 
@@ -186,6 +187,14 @@ object CoreBridge {
      */
     suspend fun conversationWith(peerIpk: ByteArray): ByteArray =
         withContext(Dispatchers.IO) { ffiConversationWith(peerIpk) }
+
+    /**
+     * Drop a conversation and its history from this device. Local only: a group
+     * you are still in re-opens on the next message, because the MLS group is
+     * left alone. Refused for a group you founded while others remain.
+     */
+    suspend fun deleteConversation(conversationId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiDeleteConversation(conversationId) }
 
     /** Full roster, departed members included so old messages still name someone. */
     suspend fun members(conversationId: ByteArray): List<MemberRecord> =

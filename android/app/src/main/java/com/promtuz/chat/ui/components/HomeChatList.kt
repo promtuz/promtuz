@@ -29,7 +29,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     val direction = LocalLayoutDirection.current
     val chats by appViewModel.chats.collectAsState()
     val presence by appViewModel.presenceByPeer.collectAsState()
-    val activity by appViewModel.activityByPeer.collectAsState()
+    val activity by appViewModel.activityByChat.collectAsState()
     val pinned by ChatPrefs.pinned.collectAsState()
     val muted by ChatPrefs.muted.collectAsState()
 
@@ -47,13 +47,13 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         item { Spacer(Modifier.height(innerPadding.calculateTopPadding())) }
 
         itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
-            // Presence and typing are per-person, so a group — which has no
-            // single counterpart — simply shows neither.
+            // Presence is per-person, so a group — which has no single
+            // counterpart — shows none. Typing is per-chat, so a group has it.
             HomeChatListItem(
                 chat = chat,
                 presence = chat.peerHex?.let { presence[it] },
                 typing = Activity.Typing in
-                    Activity.fromBits(chat.peerHex?.let { activity[it] } ?: 0),
+                    Activity.fromBits(activity[chat.conversationHex] ?: 0),
                 pinned = chat.conversationHex in pinned,
                 muted = chat.conversationHex in muted,
                 menuState = menuState,
@@ -62,6 +62,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
                 onMute = { ChatPrefs.toggleMute(chat.conversationHex) },
                 onMarkRead = { appViewModel.markConversationRead(chat.conversationHex) },
                 onDelete = { appViewModel.deleteChat(chat) },
+                onLeaveAndDelete = { appViewModel.leaveAndDelete(chat) },
                 modifier = Modifier.animateItem(),
             )
         }

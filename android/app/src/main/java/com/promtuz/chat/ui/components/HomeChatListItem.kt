@@ -60,6 +60,7 @@ fun HomeChatListItem(
     onMute: () -> Unit,
     onMarkRead: () -> Unit,
     onDelete: () -> Unit,
+    onLeaveAndDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val type = MaterialTheme.typography
@@ -201,8 +202,9 @@ fun HomeChatListItem(
         }
 
         if (confirmDelete) DeleteChatDialog(
-            name = chat.name,
-            onConfirm = { confirmDelete = false; onDelete() },
+            chat = chat,
+            onDelete = { confirmDelete = false; onDelete() },
+            onLeaveAndDelete = { confirmDelete = false; onLeaveAndDelete() },
             onDismiss = { confirmDelete = false },
         )
     }
@@ -267,18 +269,68 @@ private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
     }
 }
 
+/**
+ * Deleting a group and leaving one are different acts, and the dialog says so
+ * rather than quietly picking. Delete is local — the group carries on without
+ * you and the chat returns on the next message — so offering only that would
+ * be a trapdoor for someone who meant to get out.
+ */
 @Composable
-private fun DeleteChatDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun DeleteChatDialog(
+    chat: ChatSummary,
+    onDelete: () -> Unit,
+    onLeaveAndDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val error = MaterialTheme.colorScheme.error
+    if (chat.ownerIsStuck) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("You run this group") },
+            text = {
+                Text(
+                    "\"${chat.name}\" still has ${chat.memberCount - 1} other " +
+                        (if (chat.memberCount == 2) "member" else "members") +
+                        ". Remove them first — leaving now would leave the group with " +
+                        "nobody able to manage it.",
+                )
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Got it") } },
+        )
+        return
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete chat") },
-        text = { Text("Delete your chat with $name? This removes the contact and all messages on this device. This can't be undone.") },
+        title = { Text(if (chat.isGroup) "Delete this group chat?" else "Delete chat") },
+        text = {
+            Text(
+                when {
+                    !chat.isGroup ->
+                        "Delete your chat with ${chat.name}? This removes the contact and " +
+                            "all messages on this device. This can't be undone."
+                    chat.amMember ->
+                        "This clears \"${chat.name}\" from this device but keeps you in it, " +
+                            "so the chat comes back the next time someone posts. Leave the " +
+                            "group to stop receiving it."
+                    else ->
+                        "Delete \"${chat.name}\" and its messages from this device? " +
+                            "You already left, so nothing new will arrive."
+                },
+            )
+        },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text("Delete", color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onDelete) { Text("Delete", color = error) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                if (chat.canLeave) {
+                    TextButton(onClick = onLeaveAndDelete) {
+                        Text("Leave and delete", color = error)
+                    }
+                }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 

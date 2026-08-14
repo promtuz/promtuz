@@ -113,6 +113,17 @@ class GroupVM(app: AppVM) : ViewModel() {
     private val _canManage = MutableStateFlow(false)
     val canManage: StateFlow<Boolean> = _canManage.asStateFlow()
 
+    /** Leaving is offered: we are in the group and wouldn't strand it. */
+    private val _canLeave = MutableStateFlow(false)
+    val canLeave: StateFlow<Boolean> = _canLeave.asStateFlow()
+
+    /**
+     * We founded this group and others are still here, so leaving is refused —
+     * it would leave everyone in a group nobody can manage.
+     */
+    private val _ownerIsStuck = MutableStateFlow(false)
+    val ownerIsStuck: StateFlow<Boolean> = _ownerIsStuck.asStateFlow()
+
     private var conversation: ByteArray = ByteArray(16)
 
     fun load(conversationHex: String) {
@@ -147,6 +158,8 @@ class GroupVM(app: AppVM) : ViewModel() {
                         .thenBy { it.name.lowercase() },
                 )
                 _canManage.value = record?.canManage == true
+                _canLeave.value = record?.canLeave == true
+                _ownerIsStuck.value = record?.ownerIsStuck == true
             }
         }
     }

@@ -362,10 +362,12 @@ impl MlsGroupHandle {
     /// blob reads as `None` — a group we cannot describe is safer treated as a
     /// pair than trusted from half-decoded bytes.
     pub fn group_meta(&self) -> Option<GroupMeta> {
-        let exts = self.inner.export_group_context().extensions();
-        exts.iter().find_map(|e| match e {
+        // `extensions()`, not `export_group_context()` — the latter is gated
+        // behind openmls's `test-utils`, so it compiles under `cargo test` and
+        // vanishes in the build that ships.
+        self.inner.extensions().iter().find_map(|e| match e {
             Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes)) => {
-                postcard::from_bytes::<GroupMeta>(bytes).ok()
+                postcard::from_bytes::<GroupMeta>(bytes.as_slice()).ok()
             },
             _ => None,
         })

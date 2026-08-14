@@ -54,6 +54,8 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     val canManage by viewModel.canManage.collectAsStateWithLifecycle()
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val work by viewModel.work.collectAsStateWithLifecycle()
+    val canLeave by viewModel.canLeave.collectAsStateWithLifecycle()
+    val ownerIsStuck by viewModel.ownerIsStuck.collectAsStateWithLifecycle()
 
     LaunchedEffect(conversationHex) { viewModel.load(conversationHex) }
 
@@ -174,19 +176,30 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
         }
 
         item {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { viewModel.leave() }
-                    .padding(horizontal = 20.dp, vertical = 16.dp),
-                horizontalArrangement = Arrangement.Start,
-            ) {
+            // The founder can't walk out on a group other people are still in,
+            // so say why rather than offering an action that will be refused.
+            if (ownerIsStuck) {
                 Text(
-                    "Leave group",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.error,
+                    "You created this group. Remove everyone else before you can leave it.",
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
                 )
+            } else if (canLeave) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.leave() }
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Start,
+                ) {
+                    Text(
+                        "Leave group",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.error,
+                    )
+                }
             }
             Spacer(Modifier.height(32.dp))
         }

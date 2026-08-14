@@ -276,6 +276,7 @@ pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> 
 pub async fn leave(conversation: [u8; 16]) -> Result<()> {
     let (our_ipk, ipk_signer) = local_signer()?;
     let group_id = require_group(&conversation)?;
+    require_not_stranding_the_group(&conversation, &our_ipk)?;
 
     with_mls!(ctx, {
         let mut group = load_group(ctx.provider, &group_id)?;
@@ -366,6 +367,32 @@ fn no_keys_error(who: &[u8; 32], e: anyhow::Error) -> anyhow::Error {
         // sites, which tell the reader nothing they can act on.
         anyhow!("couldn't reach the network to fetch {name}'s keys ({})", e.root_cause())
     }
+}
+
+/// The creator may not walk out of a group other people are still in.
+///
+/// v1 mints exactly one admin, so their leaving would strand everyone else in
+/// a group nobody can add to, remove from or rename. Enforced here rather than
+/// only in the UI: the FFI is reachable without it, and the group this protects
+/// belongs to the other members as much as to the caller.
+///
+/// The way out is to empty the group first; handing it to another member is the
+/// obvious next step and needs a wire event of its own.
+pub(crate) fn require_not_stranding_the_group(
+    conversation: &[u8; 16], who: &[u8; 32],
+) -> Result<()> {
+    if !Conversation::is_admin(conversation, who) {
+        return Ok(());
+    }
+    let others = Conversation::recipients(conversation).len();
+    if others > 0 {
+        bail!(
+            "you created this group — remove the other {} member{} before leaving it",
+            others,
+            if others == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
 }
 
 /// v1 authority: only the creator adds and removes.

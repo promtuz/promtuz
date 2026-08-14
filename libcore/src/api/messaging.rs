@@ -79,6 +79,20 @@ pub struct ConversationRecord {
     pub can_manage: bool,
     /// True once an MLS group backs this conversation — i.e. it can send.
     pub has_group: bool,
+    /// We are still an active member. False for a group we left or were
+    /// removed from, which keeps its history but can no longer send.
+    pub am_member: bool,
+    /// Leaving is offered. False for a direct chat, which has no membership,
+    /// and for a group we already left — and see [`Self::owner_is_stuck`].
+    pub can_leave: bool,
+    /// Deleting is offered. See [`Self::owner_is_stuck`] for the one case a
+    /// group refuses it.
+    pub can_delete: bool,
+    /// We founded this group and other people are still in it, so both leaving
+    /// and deleting are refused: the group would be left with nobody able to
+    /// manage it. Lifted by removing everyone first — or, later, by handing
+    /// the group to someone else. Carried so the UI can say *why*.
+    pub owner_is_stuck: bool,
     pub created_at: u64,
 }
 
@@ -330,22 +344,32 @@ pub fn list_conversations() -> Vec<ConversationRecord> {
 /// Shared projection so the list and single-fetch reads can't drift.
 fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationRecord {
     let others = Conversation::recipients(&c.id);
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let roster = Conversation::members(&c.id);
+    let is_group = c.kind == crate::data::conversation::KIND_GROUP;
+    let am_member = me.is_some_and(|k| roster.iter().any(|m| m.active && m.member_ipk == k));
+    let can_manage = me.is_some_and(|k| Conversation::is_admin(&c.id, &k));
+    let owner_is_stuck = is_group && can_manage && am_member && !others.is_empty();
+
     ConversationRecord {
-        members:      Conversation::members(&c.id)
-            .into_iter()
+        members: roster
+            .iter()
             .filter(|m| m.active)
             .map(|m| m.member_ipk.to_vec())
             .collect(),
-        peer:         Conversation::peer_of(&c.id).map(|p| p.to_vec()),
-        can_manage:   crate::data::identity::Identity::get()
-            .is_some_and(|i| Conversation::is_admin(&c.id, &i.ipk())),
-        has_group:    c.mls_group_id.is_some(),
-        display_name: display_name(&c, &others),
-        others:       others.into_iter().map(|p| p.to_vec()).collect(),
-        id:           c.id.to_vec(),
-        kind:         c.kind,
-        title:        c.title,
-        created_at:   c.created_at,
+        peer:           Conversation::peer_of(&c.id).map(|p| p.to_vec()),
+        can_manage,
+        has_group:      c.mls_group_id.is_some(),
+        am_member,
+        can_leave:      is_group && am_member && !owner_is_stuck,
+        can_delete:     !owner_is_stuck,
+        owner_is_stuck,
+        display_name:   display_name(&c, &others),
+        others:         others.into_iter().map(|p| p.to_vec()).collect(),
+        id:             c.id.to_vec(),
+        kind:           c.kind,
+        title:          c.title,
+        created_at:     c.created_at,
     }
 }
 
@@ -374,6 +398,58 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
         // Past three the list stops being a name and starts being a roster.
         _ => format!("{}, {} and {} more", names[0], names[1], names.len() - 2),
     }
+}
+
+/// Drop a conversation and its history from this device.
+///
+/// Local only, and deliberately not a membership change: nobody else is told,
+/// and a group you are still in comes back the moment someone posts in it —
+/// the MLS group lives in openmls storage, which this doesn't touch, so the
+/// next message re-opens the chat from the group's own roster and name. That
+/// is also why leaving is a separate action: this one does not take you out.
+///
+/// Once you are no longer a member, nothing can arrive, so the MLS state is
+/// dropped along with it rather than lingering forever.
+///
+/// Refused for a group you founded while others are still in it — see
+/// [`crate::groups::require_not_stranding_the_group`].
+#[uniffi::export]
+pub fn delete_conversation(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let Some(row) = Conversation::get(&conv) else { return Ok(()) };
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+
+    if let Some(me) = me {
+        crate::groups::require_not_stranding_the_group(&conv, &me)?;
+    }
+    let still_a_member = me.is_some_and(|k| {
+        Conversation::members(&conv).iter().any(|m| m.active && m.member_ipk == k)
+    });
+
+    if !still_a_member {
+        if let Some(gid) = Conversation::group_of(&conv) {
+            let provider = crate::mls::PromtuzMlsProvider::shared();
+            match crate::mls::MlsGroupHandle::load(&provider, &gid) {
+                Ok(Some(mut g)) =>
+                    if let Err(e) = g.delete(&provider) {
+                        log::warn!("DELETE: dropping MLS state failed: {e}");
+                    },
+                Ok(None) => {},
+                Err(e) => log::warn!("DELETE: loading MLS state failed: {e}"),
+            }
+            let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
+            if let Err(e) = buffer.purge_group(&gid) {
+                log::warn!("DELETE: epoch buffer purge failed: {e}");
+            }
+        }
+    }
+    Conversation::delete(&conv)?;
+    log::info!(
+        "DELETE: dropped conversation {} ({})",
+        hex::encode(&conv[..4]),
+        if row.kind == crate::data::conversation::KIND_GROUP { "group" } else { "direct" }
+    );
+    Ok(())
 }
 
 /// The direct conversation with `peer_ipk`, created if this is the first time
