@@ -282,6 +282,12 @@ impl Conversation {
     /// resolve to a name.
     pub fn deactivate_member(id: &[u8; 16], member: &[u8; 32]) -> Result<()> {
         let conn = MESSAGES_DB.lock();
+        Self::deactivate_member_tx(&conn, id, member)
+    }
+
+    pub fn deactivate_member_tx(
+        conn: &Connection, id: &[u8; 16], member: &[u8; 32],
+    ) -> Result<()> {
         conn.execute(
             "UPDATE conversation_members SET active = 0 \
              WHERE conversation_id = ?1 AND member_ipk = ?2",
@@ -360,6 +366,31 @@ impl Conversation {
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Whether `who` is in any group we are also in.
+    ///
+    /// Co-membership is a relationship in its own right. A group's whole point
+    /// is that people who have never paired can talk in it, so a sender we
+    /// share a group with is expected mail even when they are nobody in our
+    /// address book — the alternative is a group where two members silently
+    /// cannot hear each other.
+    ///
+    /// Deliberately narrower than "we both exist": it is scoped to *active*
+    /// membership, so leaving a group ends the standing it granted.
+    pub fn shares_a_chat_with(who: &[u8; 32]) -> bool {
+        let Some(me) = Identity::get().map(|i| i.ipk()) else { return false };
+        let conn = MESSAGES_DB.lock();
+        conn.query_row(
+            "SELECT 1 FROM conversation_members mine \
+             JOIN conversation_members theirs \
+               ON theirs.conversation_id = mine.conversation_id \
+             WHERE mine.member_ipk = ?1 AND mine.active = 1 \
+               AND theirs.member_ipk = ?2 AND theirs.active = 1 LIMIT 1",
+            (me.as_slice(), who.as_slice()),
+            |_| Ok(()),
+        )
+        .is_ok()
     }
 
     /// Every conversation and every member row, for the backup snapshot.
@@ -530,6 +561,40 @@ mod tests {
         assert!(Conversation::is_admin_tx(&conn, &group, &inviter), "the inviter admins it");
         assert!(!Conversation::is_admin_tx(&conn, &group, &me));
         assert_eq!(Conversation::recipients_tx(&conn, &group, Some(me)), vec![inviter, third]);
+    }
+
+    /// A group of three where two members have never paired is the ordinary
+    /// case, not an edge one — so co-membership has to grant standing, or each
+    /// of them can hear whoever invited them and not the other.
+    #[test]
+    fn sharing_a_group_is_standing_enough_to_be_heard() {
+        let conn = open_in_memory();
+        let me = [1u8; 32];
+        let stranger = [3u8; 32];
+
+        let shares = |who: &[u8; 32]| {
+            conn.query_row(
+                "SELECT 1 FROM conversation_members mine \
+                 JOIN conversation_members theirs \
+                   ON theirs.conversation_id = mine.conversation_id \
+                 WHERE mine.member_ipk = ?1 AND mine.active = 1 \
+                   AND theirs.member_ipk = ?2 AND theirs.active = 1 LIMIT 1",
+                (me.as_slice(), who.as_slice()),
+                |_| Ok(()),
+            )
+            .is_ok()
+        };
+
+        assert!(!shares(&stranger), "nobody shares anything yet");
+
+        let group = Conversation::join_group_tx(&conn, &[2u8; 32], &[me, [2u8; 32], stranger])
+            .expect("join");
+        assert!(shares(&stranger), "a group we are both in is standing");
+
+        // Leaving ends it: the row survives so old messages still attribute,
+        // but it stops being a licence to reach us.
+        Conversation::deactivate_member_tx(&conn, &group, &stranger).expect("deactivate");
+        assert!(!shares(&stranger), "a member who left keeps no standing");
     }
 
     /// A group id backs at most one conversation. When a re-pair adopts a

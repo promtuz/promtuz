@@ -655,7 +655,9 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     if vk.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&eph.sig.0)).is_err() {
         return;
     }
-    if !Contact::exists(&eph.from.0) {
+    // Same standing as a message: someone in a group with us may show as
+    // typing in it, address book or not.
+    if !Contact::exists(&eph.from.0) && !Conversation::shares_a_chat_with(&eph.from.0) {
         return;
     }
     // The sender named the chat and signed it. Re-deriving it from `from`
@@ -769,9 +771,19 @@ async fn process_deliver(
     // hand off to `api::messaging::process_inbound_envelope` rather
     // than the v2 shared-key decrypt.
     //
-    // Drop Application envelopes from unknown senders. A Welcome from a
-    // stranger is a legit first-pair — let it reach the invite gate downstream.
-    if !is_welcome_envelope(&msg.payload) && !Contact::exists(&msg.from) {
+    // Drop Application envelopes from senders we have no standing with. A
+    // Welcome from a stranger is a legit first-pair — let it reach the invite
+    // gate downstream.
+    //
+    // Sharing a group counts, not just the address book. Otherwise a group of
+    // three where two members have never paired half-works: each can hear
+    // whoever invited them and neither can hear the other, with no error on
+    // either side. Membership changes ride this same path, so the silence
+    // would eventually strand them at an old epoch too.
+    if !is_welcome_envelope(&msg.payload)
+        && !Contact::exists(&msg.from)
+        && !Conversation::shares_a_chat_with(&msg.from)
+    {
         info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
         bail!("unknown sender");
     }
