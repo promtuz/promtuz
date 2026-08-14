@@ -362,6 +362,65 @@ impl Conversation {
         Ok(())
     }
 
+    /// Every conversation and every member row, for the backup snapshot.
+    ///
+    /// Separate from [`Self::list`], which orders for the home screen and is
+    /// free to filter later; a backup has to take the table as it stands.
+    pub fn dump_all() -> (Vec<ConversationRow>, Vec<MemberRow>) {
+        let conn = MESSAGES_DB.lock();
+        let convs = conn
+            .prepare("SELECT * FROM conversations")
+            .and_then(|mut s| {
+                s.query_map([], ConversationRow::from_row).map(|r| r.flatten().collect())
+            })
+            .unwrap_or_default();
+        let members = conn
+            .prepare("SELECT * FROM conversation_members")
+            .and_then(|mut s| s.query_map([], MemberRow::from_row).map(|r| r.flatten().collect()))
+            .unwrap_or_default();
+        (convs, members)
+    }
+
+    /// Restore dumped conversations and rosters. `INSERT OR IGNORE`, so a
+    /// conversation that already exists keeps whatever it has now — a blob is
+    /// a snapshot of the past and must never overwrite the present.
+    pub fn import_rows(convs: &[ConversationRow], members: &[MemberRow]) -> Result<usize> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0usize;
+        for c in convs {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO conversations \
+                 (id, kind, title, mls_group_id, created_at, created_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    c.id.as_slice(),
+                    c.kind,
+                    &c.title,
+                    c.mls_group_id.as_deref(),
+                    c.created_at,
+                    c.created_by.as_deref(),
+                ),
+            )?;
+        }
+        for m in members {
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_members \
+                 (conversation_id, member_ipk, role, joined_at, active) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    m.conversation_id.as_slice(),
+                    m.member_ipk.as_slice(),
+                    m.role,
+                    m.joined_at,
+                    m.active,
+                ),
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Parse a hex conversation id from the FFI boundary.
     pub fn id_from_bytes(bytes: &[u8]) -> Result<[u8; 16]> {
         bytes.try_into().map_err(|_| anyhow!("conversation id must be 16 bytes, got {}", bytes.len()))

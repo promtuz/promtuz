@@ -18,9 +18,13 @@ use serde::Serialize;
 use sha2::Sha256;
 
 use crate::data::contact::Contact;
+use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
+use crate::data::media::MediaBackupRow;
 use crate::data::message::Message;
 use crate::data::reaction::Reaction;
+use crate::db::messages::ConversationRow;
+use crate::db::messages::MemberRow;
 use crate::db::messages::MessageRow;
 use crate::db::messages::ReactionRow;
 use crate::db::peers::ContactRow;
@@ -31,14 +35,50 @@ const MAGIC: &[u8; 4] = b"PZBK";
 /// new `sender_ipk`) changes the blob's shape. A v1 blob decodes into garbage
 /// rather than failing loudly, so the version gate is what keeps a stale backup
 /// from silently importing conversation ids that were somebody's public key.
-const VERSION: u8 = 2;
+///
+/// 3: carries the conversations themselves. v2 saved messages keyed on
+/// conversations it did not save, so a restore produced a full messages table
+/// that nothing could reach — every chat read as empty and the home list was
+/// blank. Media rows and read state travel with them.
+const VERSION: u8 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct BackupPayload {
-    name:      String,
-    contacts:  Vec<ContactRow>,
-    messages:  Vec<MessageRow>,
-    reactions: Vec<ReactionRow>,
+    name:          String,
+    contacts:      Vec<ContactRow>,
+    /// The chats themselves. Without these the messages below are orphans: they
+    /// name a conversation id, and every read starts from the conversation.
+    conversations: Vec<ConversationRow>,
+    /// Rosters. A group with no members can't be shown, and can't be sent to —
+    /// the fan-out list comes from here.
+    members:       Vec<MemberRow>,
+    messages:      Vec<MessageRow>,
+    reactions:     Vec<ReactionRow>,
+    /// Pictures and attachment stubs. The inline image bytes live here, so this
+    /// is what makes a restored photo a photo rather than an empty caption.
+    media:         Vec<MediaBackupRow>,
+    /// How far we had read, and how far each member had. Purely cosmetic, but
+    /// losing it makes every chat in a restored app scream unread.
+    read_state:    Vec<ReadRow>,
+    member_read:   Vec<MemberReadRow>,
+}
+
+/// Our own read watermark for a conversation.
+#[derive(Serialize, Deserialize)]
+pub struct ReadRow {
+    #[serde(with = "serde_bytes")]
+    pub conversation_id:  [u8; 16],
+    pub upto_dispatch_id: Vec<u8>,
+}
+
+/// A member's read watermark — the group tick advances at the slowest of them.
+#[derive(Serialize, Deserialize)]
+pub struct MemberReadRow {
+    #[serde(with = "serde_bytes")]
+    pub conversation_id:  [u8; 16],
+    #[serde(with = "serde_bytes")]
+    pub member_ipk:       [u8; 32],
+    pub upto_dispatch_id: Vec<u8>,
 }
 
 /// `HKDF-SHA256(isk, "promtuz-backup-v1")` — the spec §4 label, verbatim.
@@ -95,11 +135,18 @@ fn decode(key: &[u8; 32], blob: &[u8]) -> Result<BackupPayload> {
 /// (Drive app-folder / iCloud).
 pub fn export() -> Result<Vec<u8>> {
     let identity = Identity::get().ok_or_else(|| anyhow!("no identity"))?;
+    let (conversations, members) = Conversation::dump_all();
+    let (read_state, member_read) = crate::data::message::dump_read_state();
     let payload = BackupPayload {
-        name:      identity.name(),
-        contacts:  Contact::list(),
-        messages:  Message::dump_all(),
+        name: identity.name(),
+        contacts: Contact::list(),
+        conversations,
+        members,
+        messages: Message::dump_all(),
         reactions: Reaction::dump_all(),
+        media: crate::data::media::dump_all(),
+        read_state,
+        member_read,
     };
     let secret = Identity::secret_key_with_manager()?;
     encode(&backup_key(&secret), &payload)
@@ -112,11 +159,18 @@ pub fn import(blob: &[u8]) -> Result<()> {
     let payload = decode(&backup_key(&secret), blob)?;
 
     let contacts = Contact::import_rows(&payload.contacts)?;
+    // Conversations first: everything below hangs off them.
+    let conversations = Conversation::import_rows(&payload.conversations, &payload.members)?;
     let messages = Message::import_rows(&payload.messages)?;
     let reactions = Reaction::import_rows(&payload.reactions)?;
+    let media = crate::data::media::import_rows(&payload.media)?;
+    crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
     Identity::set_name(&payload.name)?;
 
-    log::info!("BACKUP: imported {contacts} contacts, {messages} messages, {reactions} reactions");
+    log::info!(
+        "BACKUP: imported {contacts} contacts, {conversations} conversations, \
+         {messages} messages, {reactions} reactions, {media} media"
+    );
     Ok(())
 }
 
@@ -136,6 +190,12 @@ pub struct MergeReport {
     pub messages_added:    u32,
     pub reactions_in_blob: u32,
     pub reactions_added:   u32,
+    /// The chats themselves. Zero here on a blob older than v3 is the tell
+    /// that its messages will restore into nothing.
+    pub conversations_in_blob: u32,
+    pub conversations_added:   u32,
+    pub media_in_blob:         u32,
+    pub media_added:           u32,
 }
 
 /// Additive restore for the Backup & Restore dev screen: every row the blob
@@ -153,8 +213,11 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let payload = decode(&backup_key(&secret), blob)?;
 
     let contacts_added = Contact::merge_rows(&payload.contacts)?;
+    let conversations_added =
+        Conversation::import_rows(&payload.conversations, &payload.members)?;
     let messages_added = Message::merge_rows(&payload.messages)?;
     let reactions_added = Reaction::merge_rows(&payload.reactions)?;
+    let media_added = crate::data::media::import_rows(&payload.media)?;
 
     let report = MergeReport {
         version: VERSION,
@@ -167,6 +230,10 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
         messages_added: messages_added as u32,
         reactions_in_blob: payload.reactions.len() as u32,
         reactions_added: reactions_added as u32,
+        conversations_in_blob: payload.conversations.len() as u32,
+        conversations_added: conversations_added as u32,
+        media_in_blob: payload.media.len() as u32,
+        media_added: media_added as u32,
     };
     log::info!("BACKUP: merge {report:?}");
     Ok(report)
@@ -187,8 +254,13 @@ mod tests {
                 status:        1,
                 reject_reason: None,
             }],
-            messages:  Vec::new(),
-            reactions: Vec::new(),
+            conversations: Vec::new(),
+            members:       Vec::new(),
+            messages:      Vec::new(),
+            reactions:     Vec::new(),
+            media:         Vec::new(),
+            read_state:    Vec::new(),
+            member_read:   Vec::new(),
         }
     }
 
@@ -200,6 +272,40 @@ mod tests {
         assert_eq!(back.name, "bhuv");
         assert_eq!(back.contacts.len(), 1);
         assert_eq!(back.contacts[0].mls_group_id, Some([9u8; 32]));
+    }
+
+    /// The failure v2 shipped: messages name a conversation, so a blob that
+    /// carries the messages without the conversations restores a full table
+    /// nothing can reach — every chat reads empty and the home list is blank.
+    /// Whatever else changes, these two travel together.
+    #[test]
+    fn a_blob_carrying_messages_carries_their_conversations() {
+        let conv = [0xC1u8; 16];
+        let mut p = payload();
+        p.conversations = vec![ConversationRow {
+            id:           conv,
+            kind:         1,
+            title:        "book club".into(),
+            mls_group_id: Some(vec![0xAA; 32]),
+            created_at:   100,
+            created_by:   Some(vec![3u8; 32]),
+        }];
+        p.members = vec![MemberRow {
+            conversation_id: conv,
+            member_ipk:      [3u8; 32],
+            role:            1,
+            joined_at:       100,
+            active:          true,
+        }];
+
+        let key = backup_key(&[7u8; 32]);
+        let back = decode(&key, &encode(&key, &p).unwrap()).unwrap();
+
+        assert_eq!(back.conversations.len(), 1, "the chat itself must survive the round trip");
+        assert_eq!(back.conversations[0].id, conv);
+        assert_eq!(back.conversations[0].title, "book club");
+        assert_eq!(back.members.len(), 1, "and its roster, or it cannot be shown or sent to");
+        assert_eq!(back.members[0].conversation_id, conv);
     }
 
     #[test]

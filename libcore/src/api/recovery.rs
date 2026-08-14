@@ -67,6 +67,12 @@ pub struct BackupMergeReport {
     pub messages_added:    u32,
     pub reactions_in_blob: u32,
     pub reactions_added:   u32,
+    /// Zero on a blob written before v3, and the tell that its messages have
+    /// no chats to restore into.
+    pub conversations_in_blob: u32,
+    pub conversations_added:   u32,
+    pub media_in_blob:         u32,
+    pub media_added:           u32,
 }
 
 /// Additive restore: insert only what we don't already have, never replace,
@@ -88,5 +94,9 @@ pub fn backup_import_merge(blob: Vec<u8>) -> Result<BackupMergeReport, CoreError
         messages_added:    r.messages_added,
         reactions_in_blob: r.reactions_in_blob,
         reactions_added:   r.reactions_added,
+        conversations_in_blob: r.conversations_in_blob,
+        conversations_added:   r.conversations_added,
+        media_in_blob:         r.media_in_blob,
+        media_added:           r.media_added,
     })
 }

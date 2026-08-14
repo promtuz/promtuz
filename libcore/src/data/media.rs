@@ -393,3 +393,82 @@ mod tests {
             "media failure rolled back the caption — no orphan");
     }
 }
+
+/// One media row with the key it hangs off, for the backup snapshot. `MediaRow`
+/// itself is keyless because every live caller already knows the message it is
+/// asking about; a blob has to carry the key with the value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaBackupRow {
+    #[serde(with = "serde_bytes")]
+    pub conversation_id: [u8; 16],
+    #[serde(with = "serde_bytes")]
+    pub dispatch_id: [u8; 16],
+    pub kind: u8,
+    pub group_id: Option<Vec<u8>>,
+    pub mime: String,
+    pub name: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    /// The inline image itself — capped at 256KB by the compressor, but the
+    /// single largest thing a backup carries.
+    pub blob: Option<Vec<u8>>,
+    pub thumb: Option<Vec<u8>>,
+    pub file_id: Option<Vec<u8>>,
+}
+
+pub fn dump_all() -> Vec<MediaBackupRow> {
+    let conn = MESSAGES_DB.lock();
+    let Ok(mut stmt) = conn.prepare("SELECT * FROM message_media") else { return Vec::new() };
+    stmt.query_map([], |r| {
+        let conv: Vec<u8> = r.get("conversation_id")?;
+        let did: Vec<u8> = r.get("dispatch_id")?;
+        Ok(MediaBackupRow {
+            conversation_id: conv.try_into().unwrap_or([0u8; 16]),
+            dispatch_id: did.try_into().unwrap_or([0u8; 16]),
+            kind: r.get("kind")?,
+            group_id: r.get("group_id")?,
+            mime: r.get("mime")?,
+            name: r.get("name")?,
+            size: r.get("size")?,
+            width: r.get("width")?,
+            height: r.get("height")?,
+            blob: r.get("blob")?,
+            thumb: r.get("thumb")?,
+            file_id: r.get("file_id")?,
+        })
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// Restore dumped media. `INSERT OR IGNORE` — a picture we already hold wins
+/// over the snapshot's copy of it.
+pub fn import_rows(rows: &[MediaBackupRow]) -> Result<usize> {
+    let mut conn = MESSAGES_DB.lock();
+    let tx = conn.transaction()?;
+    let mut n = 0usize;
+    for r in rows {
+        n += tx.execute(
+            "INSERT OR IGNORE INTO message_media \
+             (conversation_id, dispatch_id, kind, group_id, mime, name, size, width, height, blob, thumb, file_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                r.conversation_id.as_slice(),
+                r.dispatch_id.as_slice(),
+                r.kind,
+                r.group_id.as_deref(),
+                r.mime,
+                r.name,
+                r.size,
+                r.width,
+                r.height,
+                r.blob.as_deref(),
+                r.thumb.as_deref(),
+                r.file_id.as_deref(),
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(n)
+}

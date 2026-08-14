@@ -791,3 +791,65 @@ mod tests {
         assert_eq!(slowest(&conn), Some(vec![4u8; 16]), "aggregate tracks the laggard, not the leader");
     }
 }
+
+/// Both read-watermark tables, for the backup snapshot.
+pub fn dump_read_state()
+-> (Vec<crate::data::backup::ReadRow>, Vec<crate::data::backup::MemberReadRow>) {
+    use crate::data::backup::MemberReadRow;
+    use crate::data::backup::ReadRow;
+
+    let conn = MESSAGES_DB.lock();
+    let mine = conn
+        .prepare("SELECT conversation_id, upto_dispatch_id FROM read_state")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                let conv: Vec<u8> = r.get(0)?;
+                Ok(ReadRow {
+                    conversation_id:  conv.try_into().unwrap_or([0u8; 16]),
+                    upto_dispatch_id: r.get(1)?,
+                })
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let theirs = conn
+        .prepare("SELECT conversation_id, member_ipk, upto_dispatch_id FROM member_read_state")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                let conv: Vec<u8> = r.get(0)?;
+                let who: Vec<u8> = r.get(1)?;
+                Ok(MemberReadRow {
+                    conversation_id:  conv.try_into().unwrap_or([0u8; 16]),
+                    member_ipk:       who.try_into().unwrap_or([0u8; 32]),
+                    upto_dispatch_id: r.get(2)?,
+                })
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    (mine, theirs)
+}
+
+/// Restore read watermarks. `INSERT OR IGNORE`: a live watermark is always
+/// further along than a snapshot's, so it must win.
+pub fn import_read_state(
+    mine: &[crate::data::backup::ReadRow], theirs: &[crate::data::backup::MemberReadRow],
+) -> Result<()> {
+    let mut conn = MESSAGES_DB.lock();
+    let tx = conn.transaction()?;
+    for r in mine {
+        tx.execute(
+            "INSERT OR IGNORE INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2)",
+            (r.conversation_id.as_slice(), &r.upto_dispatch_id),
+        )?;
+    }
+    for r in theirs {
+        tx.execute(
+            "INSERT OR IGNORE INTO member_read_state \
+             (conversation_id, member_ipk, upto_dispatch_id) VALUES (?1, ?2, ?3)",
+            (r.conversation_id.as_slice(), r.member_ipk.as_slice(), &r.upto_dispatch_id),
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
