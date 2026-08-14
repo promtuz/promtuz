@@ -108,6 +108,13 @@ pub struct MemberRecord {
     /// This row is us. Resolved here for the same reason as `ReactionRecord.mine`:
     /// the client would otherwise hold its own IPK just to compare against.
     pub me: bool,
+    /// What to call them: the address book first, then what they call
+    /// themselves, then their key's head. Resolved here so every screen agrees
+    /// on the order rather than each re-deriving it.
+    pub name: String,
+    /// The name came from them, not from the address book — worth marking, the
+    /// way a messenger marks a name it cannot vouch for.
+    pub name_is_claimed: bool,
 }
 
 /// An address-book entry, projected for the client.
@@ -383,14 +390,8 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
     if !c.title.is_empty() {
         return c.title.clone();
     }
-    let mut names: Vec<String> = others
-        .iter()
-        .map(|ipk| {
-            crate::data::contact::Contact::get(ipk)
-                .map(|c| c.inner.name.clone())
-                .unwrap_or_else(|| hex::encode(&ipk[..4]))
-        })
-        .collect();
+    let mut names: Vec<String> =
+        others.iter().map(crate::data::peer_name::resolve).collect();
     names.sort();
     match names.len() {
         0 => String::new(),
@@ -476,11 +477,13 @@ pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord
     Ok(Conversation::members(&conv)
         .into_iter()
         .map(|m| MemberRecord {
-            me:        me.is_some_and(|k| k == m.member_ipk),
-            ipk:       m.member_ipk.to_vec(),
-            role:      m.role,
-            joined_at: m.joined_at,
-            active:    m.active,
+            me:              me.is_some_and(|k| k == m.member_ipk),
+            name:            crate::data::peer_name::resolve(&m.member_ipk),
+            name_is_claimed: crate::data::peer_name::is_self_asserted(&m.member_ipk),
+            ipk:             m.member_ipk.to_vec(),
+            role:            m.role,
+            joined_at:       m.joined_at,
+            active:          m.active,
         })
         .collect())
 }

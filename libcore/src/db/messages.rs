@@ -341,6 +341,19 @@ const MIGRATION_ARRAY: &[M] = &[
     // they order, page and dedup exactly like messages do — the only thing
     // that differs is how they render.
     M::up("ALTER TABLE messages ADD COLUMN system INTEGER NOT NULL DEFAULT 0;"),
+    // What a peer calls themselves, as told to a group we share. Keyed on the
+    // person rather than on the conversation: the same someone in two groups is
+    // one someone, and a name learned in either should read the same in both.
+    //
+    // Never a substitute for `contacts.name` — that one the local user chose,
+    // this one its subject asserted. Resolution keeps them in that order.
+    M::up(
+        "CREATE TABLE peer_names ( \
+             ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
+             name       TEXT NOT NULL, \
+             updated_at INTEGER NOT NULL \
+         ) WITHOUT ROWID;",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -353,6 +366,7 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
         "message_media",
         "conversations",
         "conversation_members",
+        "peer_names",
     ]);
 
     Mutex::new(conn)

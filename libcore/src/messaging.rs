@@ -1928,6 +1928,32 @@ enum WelcomeOutcome {
     Rejected(u8),
 }
 
+/// Tell a group what we call ourselves.
+///
+/// Best-effort and fire-and-forget: a missed introduction costs a name, and the
+/// members who never hear it fall back to our key's head. Spawned rather than
+/// awaited because every caller is on a receive path that must not block on a
+/// send.
+pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
+    let Some(name) = Identity::get().map(|i| i.name()).filter(|n| !n.is_empty()) else { return };
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = send_control(conversation, AppPayload::Profile { name }).await {
+            debug!("PROFILE: could not introduce ourselves: {e}");
+        }
+    });
+}
+
+/// Tell one member what we call ourselves — for someone who joined after us,
+/// and so never heard the introduction we made on the way in.
+pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
+    let Some(name) = Identity::get().map(|i| i.name()).filter(|n| !n.is_empty()) else { return };
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = send_control_to(conversation, AppPayload::Profile { name }, who).await {
+            debug!("PROFILE: could not introduce ourselves to a new member: {e}");
+        }
+    });
+}
+
 /// The chat an MLS group belongs to, opening one if this is our first sight of it.
 ///
 /// The group context says which kind it is — see [`crate::mls::GroupMeta`]. Its
@@ -1957,6 +1983,7 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     // arriving message, `from` is whoever spoke first, not who runs the group.
     let id = Conversation::join_group(&meta.founder, &roster)?;
     Conversation::bind_group(&id, &gid)?;
+    introduce_ourselves(id);
     if !meta.title.is_empty() {
         let _ = Conversation::set_title(&id, &meta.title);
     }

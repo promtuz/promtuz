@@ -276,19 +276,15 @@ class ChatVM(private val application: Application) : ViewModel() {
     private suspend fun resolveRoster() {
         val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
         val roster = runCatching { CoreBridge.members(conversation) }.getOrDefault(emptyList())
-        val contacts = runCatching { CoreBridge.contacts() }.getOrDefault(emptyList())
-            .associate { it.ipk.toHex() to it.name }
         _isGroup.value = record?.kind?.toInt() == 1
         _title.value = record?.displayName.orEmpty()
         _rawTitle.value = record?.title.orEmpty()
         others = record?.others.orEmpty()
-        // We are never in our own address book, so name that row here or every
-        // system line we author reads "Unknown". A member we simply haven't
-        // added — which a group makes ordinary — gets their key's head, the
-        // same as the roster shows, rather than a word that names nobody.
+        // Core resolves a member's name — address book, then what they call
+        // themselves, then their key's head — so every screen agrees on the
+        // order. Only "You" is ours to say: we are never in our own contacts.
         _memberNames.value = roster.associate { m ->
-            val hex = m.ipk.toHex()
-            hex to if (m.me) "You" else contacts[hex] ?: hex.take(8)
+            m.ipk.toHex() to if (m.me) "You" else m.name
         }
         _memberCount.value = roster.count { it.active }
     }

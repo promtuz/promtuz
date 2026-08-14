@@ -21,6 +21,8 @@ data class UiMember(
     val admin: Boolean = false,
     val active: Boolean = true,
     val me: Boolean = false,
+    /** They told us this name; we didn't choose it. Worth marking as such. */
+    val claimed: Boolean = false,
 )
 
 /** What a membership call is doing right now, so the UI can hold still. */
@@ -132,21 +134,17 @@ class GroupVM(app: AppVM) : ViewModel() {
             observeQuery(setOf("conversations", "conversation_members", "contacts")) {
                 val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
                 val roster = runCatching { CoreBridge.members(conversation) }.getOrDefault(emptyList())
-                val names = runCatching { CoreBridge.contacts() }.getOrDefault(emptyList())
-                    .associate { it.ipk.toHex() to it.name }
-                Triple(record, roster, names)
-            }.collect { (record, roster, names) ->
+                Pair(record, roster)
+            }.collect { (record, roster) ->
                 _groupTitle.value = record?.title.orEmpty()
                 _displayName.value = record?.displayName.orEmpty()
-                // Whoever isn't in our address book is still a member — they
-                // just have no name yet, so show the key's head rather than
-                // dropping them from the roster. We are never in our own
-                // address book, so name that row ourselves.
+                // Core resolves the name and whether it is theirs to assert;
+                // only "You" is ours to say.
                 _members.value = roster.map { m ->
-                    val hex = m.ipk.toHex()
                     UiMember(
-                        ipkHex = hex,
-                        name = if (m.me) "You" else names[hex] ?: hex.take(8),
+                        ipkHex = m.ipk.toHex(),
+                        name = if (m.me) "You" else m.name,
+                        claimed = !m.me && m.nameIsClaimed,
                         admin = m.role.toInt() == 1,
                         active = m.active,
                         me = m.me,

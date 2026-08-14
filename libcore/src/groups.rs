@@ -146,6 +146,9 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         let conversation = Conversation::create_group(&title, &members)?;
         Conversation::bind_group(&conversation, &group_id)?;
         info!("GROUP: created \"{title}\" with {} members", members.len() + 1);
+        // Members who paired with us know our name; members who only ever
+        // *received* an add from us may not. Cheap to say either way.
+        crate::messaging::introduce_ourselves(conversation);
         Ok(conversation)
     })
 }
@@ -212,6 +215,7 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
                 warn!("GROUP: the new member may not have the group's name yet: {e}");
             }
         }
+        crate::messaging::introduce_ourselves_to(conversation, who);
         Ok(())
     })
 }

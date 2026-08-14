@@ -1033,6 +1033,14 @@ async fn process_deliver(
                             warn!("GROUP: could not apply a title change: {e}");
                         }
                     }
+                    // Someone joined after us, so they never heard the
+                    // introduction we made on our own way in. Say it again,
+                    // to them alone.
+                    if let SystemEvent::Added { who } = &event {
+                        if who.0 != our_ipk.to_bytes() {
+                            crate::messaging::introduce_ourselves_to(conv, who.0);
+                        }
+                    }
                     match Message::save_system(conv, author, &msg.id.0, code, &target, ts, false) {
                         Ok(Some(row)) => MessageEv::Received {
                             id: row.inner.id,
@@ -1044,6 +1052,14 @@ async fn process_deliver(
                         .emit(),
                         Ok(None) => debug!("GROUP: duplicate system event, already stored"),
                         Err(e) => warn!("GROUP: could not store a system event: {e}"),
+                    }
+                },
+                Ok(AppPayload::Profile { name }) => {
+                    // Their claim about themselves, kept apart from the address
+                    // book so it can never overwrite a name we chose. Stored,
+                    // never shown as a message — nobody said anything.
+                    if let Err(e) = crate::data::peer_name::put(&author, &name) {
+                        warn!("PROFILE: could not record a self-asserted name: {e}");
                     }
                 },
                 Ok(AppPayload::PairAck) => {

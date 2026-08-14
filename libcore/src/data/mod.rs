@@ -5,6 +5,7 @@ pub mod idqr;
 pub mod backup;
 pub mod media;
 pub mod message;
+pub mod peer_name;
 pub mod reaction;
 pub mod recovery;
 pub mod relay;

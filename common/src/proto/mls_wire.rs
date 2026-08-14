@@ -171,6 +171,20 @@ pub enum AppPayload {
     /// and stays invisible to the relay. Appended after Revise so postcard
     /// ordinals for older variants hold.
     System(SystemEvent),
+    /// What the sender calls themselves, told to a group they share with us.
+    ///
+    /// A group makes it ordinary to sit in a room with someone you never
+    /// paired with, and there is no other way to learn their name: nobody has
+    /// introduced you, and asking the network would mean publishing names
+    /// beside KeyPackages, where anyone holding an IPK could resolve it to a
+    /// person. Here it reaches group members and nobody else.
+    ///
+    /// Self-asserted, exactly like the name on a scanned QR — it is what they
+    /// claim, never what the local user chose, and must not outrank an address
+    /// book entry. Appended after System so postcard ordinals hold.
+    Profile {
+        name: String,
+    },
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the

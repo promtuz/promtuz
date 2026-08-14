@@ -223,8 +223,11 @@ private fun MemberRow(
             Avatar(name = member.name, size = 42.dp)
         }
         Spacer(Modifier.width(14.dp))
+        // "~" for a name its owner asserted rather than one the user chose —
+        // the group is full of people they never added, and the two should not
+        // read as equally vouched for.
         Text(
-            member.name,
+            if (member.claimed) "~${member.name}" else member.name,
             Modifier.weight(1f),
             style = MaterialTheme.typography.bodyLarge,
             color = colors.onSurface.copy(alpha = dim),
