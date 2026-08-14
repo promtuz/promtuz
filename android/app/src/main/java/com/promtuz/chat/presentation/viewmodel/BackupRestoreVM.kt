@@ -142,6 +142,11 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         )
         line(
             BackupLogLevel.INFO,
+            "  chats      ${r.conversationsAdded} added / ${r.conversationsInBlob} in blob" +
+                skipped(r.conversationsInBlob, r.conversationsAdded),
+        )
+        line(
+            BackupLogLevel.INFO,
             "  messages   ${r.messagesAdded} added / ${r.messagesInBlob} in blob" +
                 skipped(r.messagesInBlob, r.messagesAdded),
         )
@@ -150,6 +155,19 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
             "  reactions  ${r.reactionsAdded} added / ${r.reactionsInBlob} in blob" +
                 skipped(r.reactionsInBlob, r.reactionsAdded),
         )
+        line(
+            BackupLogLevel.INFO,
+            "  media      ${r.mediaAdded} added / ${r.mediaInBlob} in blob" +
+                skipped(r.mediaInBlob, r.mediaAdded),
+        )
+        // Messages name a chat; without the chats they restore into nothing.
+        if (r.messagesInBlob > 0u && r.conversationsInBlob == 0u) {
+            line(
+                BackupLogLevel.WARN,
+                "This blob carries messages but no chats — written before the backup " +
+                    "format learned to include them. Its history cannot be reached.",
+            )
+        }
         if (r.backupName != r.currentName) {
             line(
                 BackupLogLevel.WARN,
