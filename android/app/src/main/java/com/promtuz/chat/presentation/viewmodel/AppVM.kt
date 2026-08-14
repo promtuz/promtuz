@@ -172,11 +172,6 @@ class AppVM(
     }
 
     /**
-     * Home-list "Delete chat". For a 1:1 that means forgetting the contact and
-     * every trace of them; for a group it means leaving, which is a membership
-     * change the other members have to be told about.
-     */
-    /**
      * Drop a chat from this device. Local only — for a group you are still in,
      * it comes back the moment someone posts, because the MLS group is
      * untouched. Leaving is [leaveGroup], deliberately a separate act.

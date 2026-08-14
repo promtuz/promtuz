@@ -66,7 +66,7 @@ fun InviteBottomSheet(vm: AppVM) {
                     Subtitle("They'll confirm when they next open the app.")
                     Button(
                         onClick = {
-                            vm.navigator.push(Routes.Chat(s.ipk.toHex(), s.name))
+                            vm.openChatWith(s.ipk.toHex(), s.name)
                             vm.dismissInvite()
                         },
                         Modifier.fillMaxWidth(),
@@ -91,7 +91,7 @@ fun InviteBottomSheet(vm: AppVM) {
                         Title("You're already connected with ${s.name}")
                         Button(
                             onClick = {
-                                vm.navigator.push(Routes.Chat(s.ipk.toHex(), s.name))
+                                vm.openChatWith(s.ipk.toHex(), s.name)
                                 vm.dismissInvite()
                             },
                             Modifier.fillMaxWidth(),
