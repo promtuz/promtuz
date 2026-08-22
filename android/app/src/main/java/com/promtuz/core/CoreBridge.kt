@@ -77,6 +77,19 @@ import uniffi.core.addGroupMember as ffiAddGroupMember
 import uniffi.core.removeGroupMember as ffiRemoveGroupMember
 import uniffi.core.leaveGroup as ffiLeaveGroup
 import uniffi.core.deleteConversation as ffiDeleteConversation
+import uniffi.core.setConversationPinned as ffiSetConversationPinned
+import uniffi.core.setConversationMuted as ffiSetConversationMuted
+import uniffi.core.setAlertedAt as ffiSetAlertedAt
+import uniffi.core.getPref as ffiGetPref
+import uniffi.core.setPref as ffiSetPref
+import uniffi.core.recentIncoming as ffiRecentIncoming
+import uniffi.core.inviteLink as ffiInviteLink
+import uniffi.core.inviteFromLink as ffiInviteFromLink
+import uniffi.core.timeBucket as ffiTimeBucket
+import uniffi.core.validateUpdateManifest as ffiValidateUpdateManifest
+import uniffi.core.updateIsInstallable as ffiUpdateIsInstallable
+import uniffi.core.TimeBucket
+import uniffi.core.UpdateManifest
 import com.promtuz.core.adapter.ActivitySignal
 import com.promtuz.core.adapter.PresenceSignal
 
@@ -195,6 +208,37 @@ object CoreBridge {
      */
     suspend fun deleteConversation(conversationId: ByteArray) =
         withContext(Dispatchers.IO) { ffiDeleteConversation(conversationId) }
+
+    suspend fun setConversationPinned(id: ByteArray, pinned: Boolean) =
+        withContext(Dispatchers.IO) { ffiSetConversationPinned(id, pinned) }
+
+    suspend fun setConversationMuted(id: ByteArray, muted: Boolean) =
+        withContext(Dispatchers.IO) { ffiSetConversationMuted(id, muted) }
+
+    suspend fun setAlertedAt(id: ByteArray, tsSecs: ULong) =
+        withContext(Dispatchers.IO) { ffiSetAlertedAt(id, tsSecs) }
+
+    /** An app setting, or null if never set. Stored in core so it survives a reinstall. */
+    suspend fun pref(key: String): String? = withContext(Dispatchers.IO) { ffiGetPref(key) }
+
+    suspend fun setPref(key: String, value: String) =
+        withContext(Dispatchers.IO) { ffiSetPref(key, value) }
+
+    /** The lines a notification summarises: newest incoming, undeleted, oldest-first. */
+    suspend fun recentIncoming(id: ByteArray, limit: Int): List<MessageRecord> =
+        withContext(Dispatchers.IO) { ffiRecentIncoming(id, limit.toUInt()) }
+
+    /** The shareable pair link, and its inverse. A URL contract, so core owns both ends. */
+    fun inviteLink(invite: ByteArray): String = ffiInviteLink(invite)
+    fun inviteFromLink(url: String): ByteArray? = ffiInviteFromLink(url)
+
+    /** Which bucket a timestamp falls into; the platform turns it into words. */
+    fun timeBucket(tsMs: Long, nowMs: Long, utcOffsetSecs: Int): TimeBucket =
+        ffiTimeBucket(tsMs.toULong(), nowMs.toULong(), utcOffsetSecs)
+
+    fun validateUpdateManifest(m: UpdateManifest) = ffiValidateUpdateManifest(m)
+    fun updateIsInstallable(offered: Int, installed: Long, switchingChannel: Boolean) =
+        ffiUpdateIsInstallable(offered.toUInt(), installed.toULong(), switchingChannel)
 
     /** Full roster, departed members included so old messages still name someone. */
     suspend fun members(conversationId: ByteArray): List<MemberRecord> =

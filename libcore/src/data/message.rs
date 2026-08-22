@@ -853,3 +853,28 @@ pub fn import_read_state(
     tx.commit()?;
     Ok(())
 }
+
+/// The newest `limit` incoming, undeleted messages in a conversation, returned
+/// oldest-first — the lines a notification shows.
+///
+/// The rule lives here rather than in each platform's notification code: it is
+/// a query about messages, and Android and iOS would otherwise each write their
+/// own filter-and-sort over a full page of rows.
+impl Message {
+    pub fn recent_incoming(conversation_id: &[u8; 16], limit: u32) -> Vec<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT * FROM messages \
+             WHERE conversation_id = ?1 AND outgoing = 0 AND deleted = 0 \
+             ORDER BY id DESC LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<MessageRow> = stmt
+            .query_map((conversation_id.as_slice(), limit), MessageRow::from_row)
+            .map(|r| r.flatten().collect())
+            .unwrap_or_default();
+        rows.reverse();
+        rows
+    }
+}

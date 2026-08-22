@@ -83,6 +83,10 @@ class ChatVM(private val application: Application) : ViewModel() {
     private val _rawTitle = MutableStateFlow("")
     val rawTitle: StateFlow<String> = _rawTitle.asStateFlow()
 
+    /** Notifications silenced for this chat. A conversation flag, so it rides the row. */
+    private val _muted = MutableStateFlow(false)
+    val muted: StateFlow<Boolean> = _muted.asStateFlow()
+
     /**
      * Member IPK hex → display name, for attributing bubbles in a group.
      * Departed members stay in here — their old messages still need a name.
@@ -272,6 +276,8 @@ class ChatVM(private val application: Application) : ViewModel() {
     private var exhausted = false
     private var loadingOlder = false
 
+    fun toggleMute() = com.promtuz.chat.data.ChatPrefs.toggleMute(conversationHex, !_muted.value)
+
     /** Who is in this chat and what to call them — read before every message pass. */
     private suspend fun resolveRoster() {
         val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
@@ -279,6 +285,7 @@ class ChatVM(private val application: Application) : ViewModel() {
         _isGroup.value = record?.kind?.toInt() == 1
         _title.value = record?.displayName.orEmpty()
         _rawTitle.value = record?.title.orEmpty()
+        _muted.value = record?.muted == true
         others = record?.others.orEmpty()
         // Core resolves a member's name — address book, then what they call
         // themselves, then their key's head — so every screen agrees on the
@@ -312,9 +319,11 @@ class ChatVM(private val application: Application) : ViewModel() {
                             CoreBridge.seenBy(conversation, did)
                         }.getOrDefault(0)
                     }
-            val ui = rows.asReversed()
+            // Core already folded runs of pictures sent together into albums;
+            // the head row carries the run and the rest are marked to skip.
+            rows.asReversed()
+                .filterNot { it.inAlbum }
                 .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value, seen) }
-            collapseAlbums(ui) { did -> media[did]?.groupId?.toHex() }
         }
     }
 
@@ -516,51 +525,6 @@ sealed interface ComposerAction {
     data class Edit(override val msg: UiMessage) : ComposerAction
 }
 
-/**
- * Fold runs of media sharing a `group_id` into one [MessageContent.Album] row.
- *
- * [messages] is newest-first, so a run reads newest→oldest and the album's items
- * are re-reversed into the order they were picked. The newest member represents
- * the row — it owns the position the album already occupies, which is what keeps
- * a late addition from re-sorting the conversation — while the caption is lifted
- * from whichever member carries it (the first sent).
- *
- * A lone member is left exactly as it was: one photo is a photo, not a
- * one-member album.
- */
-private fun collapseAlbums(
-    messages: List<UiMessage>, groupOf: (String) -> String?,
-): List<UiMessage> {
-    if (messages.isEmpty()) return messages
-    val out = ArrayList<UiMessage>(messages.size)
-    var i = 0
-    while (i < messages.size) {
-        val head = messages[i]
-        val gid = head.dispatchIdHex?.let(groupOf)
-        if (gid == null) {
-            out.add(head)
-            i++
-            continue
-        }
-        var j = i
-        while (j < messages.size && messages[j].dispatchIdHex?.let(groupOf) == gid) j++
-        val run = messages.subList(i, j)
-        out.add(
-            if (run.size == 1) head
-            else head.copy(
-                content = MessageContent.Album(
-                    caption = run.firstNotNullOfOrNull { m -> m.captionOrNull()?.takeIf(String::isNotEmpty) }
-                        .orEmpty(),
-                    items = run.reversed().map { m ->
-                        AlbumItem(m.dispatchIdHex.orEmpty(), m.content)
-                    },
-                ),
-            )
-        )
-        i = j
-    }
-    return out
-}
 
 /**
  * What the composer edits for this message: its text, or a media body's caption.
@@ -576,12 +540,6 @@ fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.System -> ""
 }
 
-/** The caption a media message carries, if it is one. */
-private fun UiMessage.captionOrNull(): String? = when (val c = content) {
-    is MessageContent.Image -> c.caption
-    is MessageContent.Attachment -> c.caption
-    else -> null
-}
 
 private fun MessageRecord.toUi(
     reactionsByMsg: Map<String, List<ReactionRecord>>,
@@ -617,6 +575,13 @@ private fun MessageRecord.toUi(
             },
             actor = senderHex?.let { memberNames[it] } ?: "Someone",
             target = if (system.toInt() == 4) content else memberNames[content] ?: "someone",
+        )
+        albumItems.size > 1 -> MessageContent.Album(
+            caption = content,
+            items = albumItems.asReversed().map { did ->
+                val h = did.toHex()
+                AlbumItem(h, mediaByDid[h]?.toContent(h, "") ?: MessageContent.Text(""))
+            },
         )
         else -> didHex?.let { h -> mediaByDid[h]?.toContent(h, content) }
             ?: MessageContent.Text(content)

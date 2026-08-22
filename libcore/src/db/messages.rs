@@ -87,6 +87,17 @@ from_row!(ReactionRow { conversation_id, dispatch_id, reactor, emoji, timestamp 
 pub struct ConversationRow {
     #[serde(with = "serde_bytes")]
     pub id: [u8; 16],
+    /// Kept at the top of the home list.
+    #[serde(default)]
+    pub pinned: bool,
+    /// No notifications from this chat.
+    #[serde(default)]
+    pub muted: bool,
+    /// Newest message we already alerted for, in unix seconds. Persisted rather
+    /// than held in memory: the case that needs it is a wake-drain in a fresh
+    /// process, whose heap is empty and whose unread set is hours old.
+    #[serde(default)]
+    pub alerted_at: u64,
     /// 0 = direct (2 members), 1 = group.
     pub kind: u8,
     /// Group name. Empty for a direct chat, which titles itself from the peer.
@@ -99,7 +110,7 @@ pub struct ConversationRow {
     pub created_by: Option<Vec<u8>>,
 }
 
-from_row!(ConversationRow { id, kind, title, mls_group_id, created_at, created_by });
+from_row!(ConversationRow { id, pinned, muted, alerted_at, kind, title, mls_group_id, created_at, created_by });
 
 /// One member's place in a conversation. Both parties of a direct chat get a
 /// row, including us, so the roster reads the same for 1:1 and N.
@@ -347,6 +358,24 @@ const MIGRATION_ARRAY: &[M] = &[
     //
     // Never a substitute for `contacts.name` — that one the local user chose,
     // this one its subject asserted. Resolution keeps them in that order.
+    // Pinned / muted / last-alerted were SharedPreferences, which Auto Backup
+    // does not carry — `backup_rules.xml` ships the blob and nothing else — so
+    // they were quietly lost on every reinstall. They are facts about a
+    // conversation, so they live on it and ride the blob with it.
+    M::up(
+        "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0; \
+         ALTER TABLE conversations ADD COLUMN muted INTEGER NOT NULL DEFAULT 0; \
+         ALTER TABLE conversations ADD COLUMN alerted_at INTEGER NOT NULL DEFAULT 0;",
+    ),
+    // App-wide settings that are the user's, not the device's, so a restore
+    // brings them back. Stringly-typed on purpose: a settings row is read once
+    // by a screen that already knows what it means.
+    M::up(
+        "CREATE TABLE app_prefs ( \
+             key   TEXT PRIMARY KEY, \
+             value TEXT NOT NULL \
+         ) WITHOUT ROWID;",
+    ),
     M::up(
         "CREATE TABLE peer_names ( \
              ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \

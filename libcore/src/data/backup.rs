@@ -61,6 +61,9 @@ struct BackupPayload {
     /// losing it makes every chat in a restored app scream unread.
     read_state:    Vec<ReadRow>,
     member_read:   Vec<MemberReadRow>,
+    /// App-wide settings. They used to sit in platform preferences, which the
+    /// backup rules do not ship, so a reinstall reset them every time.
+    prefs:         Vec<(String, String)>,
 }
 
 /// Our own read watermark for a conversation.
@@ -147,6 +150,7 @@ pub fn export() -> Result<Vec<u8>> {
         media: crate::data::media::dump_all(),
         read_state,
         member_read,
+        prefs: crate::data::app_prefs::dump_all(),
     };
     let secret = Identity::secret_key_with_manager()?;
     encode(&backup_key(&secret), &payload)
@@ -165,6 +169,7 @@ pub fn import(blob: &[u8]) -> Result<()> {
     let reactions = Reaction::import_rows(&payload.reactions)?;
     let media = crate::data::media::import_rows(&payload.media)?;
     crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
+    crate::data::app_prefs::import_rows(&payload.prefs)?;
     Identity::set_name(&payload.name)?;
 
     log::info!(
@@ -218,6 +223,7 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let messages_added = Message::merge_rows(&payload.messages)?;
     let reactions_added = Reaction::merge_rows(&payload.reactions)?;
     let media_added = crate::data::media::import_rows(&payload.media)?;
+    crate::data::app_prefs::import_rows(&payload.prefs)?;
 
     let report = MergeReport {
         version: VERSION,
@@ -261,6 +267,7 @@ mod tests {
             media:         Vec::new(),
             read_state:    Vec::new(),
             member_read:   Vec::new(),
+            prefs:         Vec::new(),
         }
     }
 
@@ -289,6 +296,9 @@ mod tests {
             mls_group_id: Some(vec![0xAA; 32]),
             created_at:   100,
             created_by:   Some(vec![3u8; 32]),
+            pinned:       true,
+            muted:        false,
+            alerted_at:   0,
         }];
         p.members = vec![MemberRow {
             conversation_id: conv,

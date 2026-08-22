@@ -340,7 +340,7 @@ impl Conversation {
             "SELECT c.* FROM conversations c \
              LEFT JOIN (SELECT conversation_id, MAX(id) AS last FROM messages GROUP BY conversation_id) m \
                ON m.conversation_id = c.id \
-             ORDER BY COALESCE(m.last, '') DESC, c.created_at DESC",
+             ORDER BY c.pinned DESC, COALESCE(m.last, '') DESC, c.created_at DESC",
         ) else {
             return Vec::new();
         };
@@ -365,6 +365,31 @@ impl Conversation {
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Flip a per-conversation flag. `column` is a fixed identifier, never
+    /// caller-supplied — SQLite cannot bind a column name.
+    fn set_flag(id: &[u8; 16], column: &'static str, on: bool) -> Result<()> {
+        let conn = MESSAGES_DB.lock();
+        conn.execute(
+            &format!("UPDATE conversations SET {column} = ?2 WHERE id = ?1"),
+            (id.as_slice(), on),
+        )?;
+        Ok(())
+    }
+
+    pub fn set_pinned(id: &[u8; 16], on: bool) -> Result<()> { Self::set_flag(id, "pinned", on) }
+
+    pub fn set_muted(id: &[u8; 16], on: bool) -> Result<()> { Self::set_flag(id, "muted", on) }
+
+    /// Remember the newest message this chat has already alerted for.
+    pub fn set_alerted_at(id: &[u8; 16], ts_secs: u64) -> Result<()> {
+        let conn = MESSAGES_DB.lock();
+        conn.execute(
+            "UPDATE conversations SET alerted_at = ?2 WHERE id = ?1",
+            (id.as_slice(), ts_secs),
+        )?;
         Ok(())
     }
 
@@ -422,8 +447,8 @@ impl Conversation {
         for c in convs {
             n += tx.execute(
                 "INSERT OR IGNORE INTO conversations \
-                 (id, kind, title, mls_group_id, created_at, created_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, kind, title, mls_group_id, created_at, created_by, pinned, muted, alerted_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 (
                     c.id.as_slice(),
                     c.kind,
@@ -431,6 +456,9 @@ impl Conversation {
                     c.mls_group_id.as_deref(),
                     c.created_at,
                     c.created_by.as_deref(),
+                    c.pinned,
+                    c.muted,
+                    c.alerted_at,
                 ),
             )?;
         }

@@ -12,6 +12,7 @@ pub mod identity;
 pub mod init;
 pub mod media;
 pub mod messaging;
+pub mod portable;
 pub mod qr;
 pub mod recovery;
 pub mod relays;

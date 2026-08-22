@@ -26,6 +26,12 @@ data class ChatSummary(
     val lastDeleted: Boolean = false,
     /** Delivery status of our last message: 0 pending,1 sent,2 failed,3 delivered,4 read. */
     val lastStatus: Int = 1,
+    /** Kept at the top of the list. Core sorts by it, so the list doesn't re-sort. */
+    val pinned: Boolean = false,
+    /** No notifications from this chat. */
+    val muted: Boolean = false,
+    /** Newest message already alerted for, unix seconds. */
+    val alertedAt: Long = 0,
     /** We are still in this group. False once we left or were removed. */
     val amMember: Boolean = true,
     /** Leaving is offered — a group we are in and haven't stranded. */

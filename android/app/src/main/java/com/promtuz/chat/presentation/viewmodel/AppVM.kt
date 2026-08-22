@@ -46,19 +46,14 @@ class AppVM(
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
 
-    /** Home chat list — reactive: re-reads on contact/message changes, re-sorts
-     *  pinned-first the instant a pin toggles. */
+    /**
+     * Home chat list — reactive. Core orders it (pinned first, then most recent
+     * activity), so a pin toggle arrives as a row change like anything else and
+     * the list has no ordering rule of its own to keep in sync.
+     */
     val chats: StateFlow<List<ChatSummary>> =
-        combine(
-            observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
-                loadSummaries()
-            },
-            ChatPrefs.pinned,
-        ) { list, pinned ->
-            list.sortedWith(
-                compareByDescending<ChatSummary> { it.conversationHex in pinned }
-                    .thenByDescending { it.timestampMs }
-            )
+        observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
+            loadSummaries()
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Live presence per contact (hex IPK) for the whole app — home dots + chat header. */
@@ -187,7 +182,6 @@ class AppVM(
                 ?: Result.success(Unit)
         }
         result.onFailure { Timber.tag(TAG).e(it, "delete chat failed") }
-        ChatPrefs.forget(summary.conversationHex)
     }
 
     /** Leave a group, then drop it — the "leave and delete" path off the modal. */
@@ -196,8 +190,7 @@ class AppVM(
             .onFailure { Timber.tag(TAG).e(it, "leave failed; keeping the chat") }
             .onSuccess {
                 runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
-                ChatPrefs.forget(summary.conversationHex)
-            }
+                    }
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
@@ -274,6 +267,9 @@ class AppVM(
                 lastOutgoing = last?.outgoing == true,
                 lastDeleted = last?.deleted == true,
                 lastStatus = last?.status?.toInt() ?: 1,
+                pinned = c.pinned,
+                muted = c.muted,
+                alertedAt = c.alertedAt.toLong(),
                 amMember = c.amMember,
                 canLeave = c.canLeave,
                 canDelete = c.canDelete,

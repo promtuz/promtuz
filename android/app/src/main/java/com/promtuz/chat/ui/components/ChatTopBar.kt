@@ -51,14 +51,13 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val chatTheme = LocalChatColors.current
     val typing by chatVM.typing.collectAsState()
     val presence by chatVM.presence.collectAsState()
-    val mutedChats by ChatPrefs.muted.collectAsState()
     val isGroup by chatVM.isGroup.collectAsState()
     val memberNames by chatVM.memberNames.collectAsState()
     val memberCount by chatVM.memberCount.collectAsState()
     val rawTitle by chatVM.rawTitle.collectAsState()
+    val muted by chatVM.muted.collectAsState()
     val typingMembers by chatVM.typingMembers.collectAsState()
 
-    val muted by remember { derivedStateOf { chatVM.conversationHex in mutedChats } }
 
     // Who's typing, named — a group can have several at once, and "3 people
     // typing…" reads better than three names past a couple.
@@ -153,7 +152,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                         listOf(
                             MenuAction("Search", R.drawable.oi_search) {},
                             MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) {
-                                ChatPrefs.toggleMute(chatVM.conversationHex)
+                                chatVM.toggleMute()
                             })
                     )
                     add(

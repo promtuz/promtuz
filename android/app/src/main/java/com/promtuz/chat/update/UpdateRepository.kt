@@ -48,7 +48,16 @@ data class UpdateManifest(
     val sha256: String,
     val size: Long,
     val publishedAt: String,
-)
+) {
+    /** The subset core validates. `publishedAt` is display-only, so it stays here. */
+    fun toCore() = uniffi.core.UpdateManifest(
+        versionCode = versionCode.toUInt(),
+        versionName = versionName,
+        apk = apk,
+        size = size.toULong(),
+        sha256 = sha256,
+    )
+}
 
 class UpdateRepository(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -84,8 +93,10 @@ class UpdateRepository(private val context: Context) {
 
     // Same-versionCode installs are allowed when crossing channels (the binaries
     // differ); the OS rejects downgrades either way.
-    private fun minInstallableCode(): Long =
-        installedVersionCode() + if (channel == nativeChannel) 1 else 0
+    private fun installable(manifest: UpdateManifest): Boolean =
+        CoreBridge.updateIsInstallable(
+            manifest.versionCode, installedVersionCode(), channel != nativeChannel,
+        )
 
     fun check() {
         // A foreground auto-check must not stomp an update the user is already
@@ -107,7 +118,7 @@ class UpdateRepository(private val context: Context) {
                 require(CoreBridge.verifyUpdateManifest(rawManifest, signature)) { "Update signature could not be verified." }
                 val manifest = json.decodeFromString<UpdateManifest>(rawManifest.decodeToString())
                 validateManifest(manifest, abi)
-                if (manifest.versionCode.toLong() >= minInstallableCode()) {
+                if (installable(manifest)) {
                     _state.value = UpdateState.Available(manifest)
                 } else {
                     _state.value = UpdateState.None
@@ -125,7 +136,7 @@ class UpdateRepository(private val context: Context) {
         downloadJob = scope.launch {
             val destination = File(updatesDirectory(), manifest.apk)
             try {
-                require(manifest.versionCode.toLong() >= minInstallableCode()) { "This update is no longer newer than the installed app." }
+                require(installable(manifest)) { "This update is no longer newer than the installed app." }
                 _state.value = UpdateState.Downloading(manifest, 0f)
                 destination.delete()
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -238,11 +249,13 @@ class UpdateRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Check the manifest against the contract before anything is downloaded.
+     * The contract is the server's, not Android's, so core states it — every
+     * field here arrives over the network and the filename names what we fetch.
+     */
     private fun validateManifest(manifest: UpdateManifest, abi: String) {
-        require(manifest.versionCode > 0 && manifest.size > 0) { "Update manifest contains invalid version or size." }
-        require(manifest.versionName.matches(Regex("[A-Za-z0-9][A-Za-z0-9._+-]*"))) { "Update manifest contains invalid version name." }
-        require(manifest.apk == "promtuz-${manifest.versionName}~${manifest.versionCode}.apk") { "Update filename is invalid." }
-        require(manifest.sha256.matches(Regex("[0-9a-f]{64}"))) { "Update manifest contains invalid hash." }
+        CoreBridge.validateUpdateManifest(manifest.toCore())
         require(URL(apkUrl(abi, manifest.apk)).path.endsWith("/${manifest.apk}")) { "Update path is invalid." }
     }
 

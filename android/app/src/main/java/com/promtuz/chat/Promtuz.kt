@@ -74,7 +74,6 @@ class Promtuz : Application() {
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)
-        ChatPrefs.init(this)
 
         // Push: post notifications from delivered messages, and hand libcore the current FCM token
         // (onNewToken won't re-fire if unchanged). registerPushToken stores it and re-registers on

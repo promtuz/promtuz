@@ -5,6 +5,7 @@ pub mod idqr;
 pub mod backup;
 pub mod media;
 pub mod message;
+pub mod app_prefs;
 pub mod peer_name;
 pub mod reaction;
 pub mod recovery;

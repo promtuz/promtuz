@@ -72,6 +72,7 @@ tls_codec = "0.4.2"
 # RFC 9420 §5.2 mandates `KeyPackageRef = SHA-256(tls_encode(KP))[..32]`
 # for cipher suite 0x0003. Direct dep so the KP-ref computation in
 # `mls::keypackage` doesn't have to indirect through `common`.
+base64.workspace = true
 sha2 = "0.11.0"
 # Phase 4: direct dep so the MLS messaging path's `mint_group_id` and
 # the dispatch_id derivation can hash without indirecting through

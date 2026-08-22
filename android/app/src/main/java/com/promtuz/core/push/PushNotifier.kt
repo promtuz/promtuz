@@ -69,6 +69,8 @@ object PushNotifier {
 
     /** Conversation hexes that are groups — they attribute lines per sender. */
     private var groupConvs: Set<String> = emptySet()
+    private var mutedConvs: Set<String> = emptySet()
+    private var alertedAt: Map<String, Long> = emptyMap()
 
     /** Gates posting — reconcile still runs foregrounded, but only to clear read chats' notifs. */
     @Volatile
@@ -116,8 +118,7 @@ object PushNotifier {
 
         // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
         // clears any notif it already had.
-        val muted = ChatPrefs.muted.value
-        val visible = counts.filterKeys { it !in muted }
+        val visible = counts.filterKeys { it !in mutedConvs }
 
         // Dismiss per-chat notifs whose chat is no longer unread (read from any surface) or now muted.
         // Unconditional (runs foregrounded too), so an in-app read or a mute clears the shade. GROUP_KEY
@@ -143,6 +144,8 @@ object PushNotifier {
                                     else contacts[c.peer?.toHex()].orEmpty()
                 }
                 groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()
+                mutedConvs = convs.filter { it.muted }.map { it.id.toHex() }.toSet()
+                alertedAt = convs.associate { it.id.toHex() to it.alertedAt.toLong() }
             }
         }
         // Foregrounded: clear-only, no new shade notifs while you're already looking at the app.
@@ -154,12 +157,11 @@ object PushNotifier {
         val conv = convHex.fromHex()
         val displayName = names[convHex] ?: "New message"
 
-        // takeLast(n) of incoming ≈ the unread ones (read is a high-water-mark, so the
-        // newest n incoming are exactly the unread), hydrated from the DB (survives process death).
-        val recent = runCatching { CoreBridge.messages(conv, MAX_LINES) }
+        // The newest n incoming ≈ the unread ones (read is a high-water-mark). Core
+        // picks and orders them — it is a question about messages, and iOS would
+        // otherwise write the same filter-and-sort over a full page of rows.
+        val recent = runCatching { CoreBridge.recentIncoming(conv, MAX_LINES) }
             .getOrDefault(emptyList())
-            .filter { !it.deleted && !it.outgoing }
-            .sortedBy { it.timestamp }
             .takeLast(n)
         // All newest-window rows deleted-for-everyone while count>0: nothing to paint, so clear this
         // chat's own notif (a bare return would strand a stale one reconcile can't repaint or cancel).
@@ -185,7 +187,7 @@ object PushNotifier {
         val isGroup = groupConvs.contains(convHex)
         val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
-        val alertThisChat = convHex == alertConv && newest > ChatPrefs.lastAlerted(convHex)
+        val alertThisChat = convHex == alertConv && newest > (alertedAt[convHex] ?: 0L)
         val silent = when (mode) {
             NotifBuzz.EveryMessage, NotifBuzz.FirstOnly -> !alertThisChat
             NotifBuzz.Throttled -> {

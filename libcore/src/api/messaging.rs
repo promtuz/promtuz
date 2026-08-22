@@ -31,6 +31,15 @@ pub struct MessageRecord {
     /// `sender_ipk` is who acted and `content` names the target — a hex IPK
     /// for the membership events, the new title for a rename.
     pub system: u8,
+    /// When this row heads an album, the dispatch ids it collapses — itself
+    /// first. Empty otherwise.
+    ///
+    /// Grouping consecutive pictures sent together is a rule about messages,
+    /// not about a platform, so core applies it once instead of Android and
+    /// iOS each walking the rows with their own copy.
+    pub album_items: Vec<Vec<u8>>,
+    /// This row was folded into the album above it — clients skip it.
+    pub in_album: bool,
 }
 
 /// One emoji reaction, projected for the client. `mine` is `reactor == self`
@@ -93,6 +102,13 @@ pub struct ConversationRecord {
     /// manage it. Lifted by removing everyone first — or, later, by handing
     /// the group to someone else. Carried so the UI can say *why*.
     pub owner_is_stuck: bool,
+    /// Kept at the top of the home list. Core sorts by it, so the client
+    /// doesn't re-sort.
+    pub pinned: bool,
+    /// No notifications from this chat.
+    pub muted: bool,
+    /// Newest message already alerted for, unix seconds.
+    pub alerted_at: u64,
     pub created_at: u64,
 }
 
@@ -336,7 +352,47 @@ pub fn get_messages(
     conversation_id: Vec<u8>, limit: u32, before_id: String,
 ) -> Result<Vec<MessageRecord>, CoreError> {
     let conv = to_conv16(&conversation_id)?;
-    Ok(Message::get_messages(&conv, limit, &before_id).into_iter().map(Into::into).collect())
+    let mut rows: Vec<MessageRecord> =
+        Message::get_messages(&conv, limit, &before_id).into_iter().map(Into::into).collect();
+    mark_albums(&conv, &mut rows);
+    Ok(rows)
+}
+
+/// Fold runs of pictures sent together into one album, in place.
+///
+/// A run is consecutive rows sharing a media `group_id`; the first keeps the
+/// run's dispatch ids and the rest are marked to skip. Consecutive because that
+/// is what "sent together" looks like once the rows are in order — two albums
+/// from the same batch separated by a reply are two albums.
+fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
+    let groups: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+        crate::data::media::for_conversation(conversation)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(did, m)| m.group_id.map(|g| (did.to_vec(), g)))
+            .collect();
+    if groups.is_empty() {
+        return;
+    }
+    let group_of = |r: &MessageRecord| r.dispatch_id.as_ref().and_then(|d| groups.get(d)).cloned();
+
+    let mut i = 0;
+    while i < rows.len() {
+        let Some(g) = group_of(&rows[i]) else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + 1;
+        while j < rows.len() && group_of(&rows[j]).as_ref() == Some(&g) {
+            j += 1;
+        }
+        if j - i > 1 {
+            rows[i].album_items =
+                rows[i..j].iter().filter_map(|r| r.dispatch_id.clone()).collect();
+            rows[i + 1..j].iter_mut().for_each(|r| r.in_album = true);
+        }
+        i = j;
+    }
 }
 
 /// Every conversation, most recently active first — the home list.
@@ -372,6 +428,9 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
         can_delete:     !owner_is_stuck,
         owner_is_stuck,
         display_name:   display_name(&c, &others),
+        pinned:         c.pinned,
+        muted:          c.muted,
+        alerted_at:     c.alerted_at,
         others:         others.into_iter().map(|p| p.to_vec()).collect(),
         id:             c.id.to_vec(),
         kind:           c.kind,
@@ -451,6 +510,48 @@ pub fn delete_conversation(conversation_id: Vec<u8>) -> Result<(), CoreError> {
         if row.kind == crate::data::conversation::KIND_GROUP { "group" } else { "direct" }
     );
     Ok(())
+}
+
+/// Pin a conversation to the top of the home list, or unpin it.
+#[uniffi::export]
+pub fn set_conversation_pinned(conversation_id: Vec<u8>, pinned: bool) -> Result<(), CoreError> {
+    Ok(Conversation::set_pinned(&to_conv16(&conversation_id)?, pinned)?)
+}
+
+/// Silence a conversation's notifications, or unsilence it.
+#[uniffi::export]
+pub fn set_conversation_muted(conversation_id: Vec<u8>, muted: bool) -> Result<(), CoreError> {
+    Ok(Conversation::set_muted(&to_conv16(&conversation_id)?, muted)?)
+}
+
+/// Record the newest message this chat has already alerted for.
+#[uniffi::export]
+pub fn set_alerted_at(conversation_id: Vec<u8>, ts_secs: u64) -> Result<(), CoreError> {
+    Ok(Conversation::set_alerted_at(&to_conv16(&conversation_id)?, ts_secs)?)
+}
+
+/// An app-wide setting, or `None` if never set. See [`set_pref`].
+#[uniffi::export]
+pub fn get_pref(key: String) -> Option<String> {
+    crate::data::app_prefs::get(&key)
+}
+
+/// Store an app-wide setting. Kept in core rather than platform preferences so
+/// it survives a reinstall — the backup blob carries it.
+#[uniffi::export]
+pub fn set_pref(key: String, value: String) -> Result<(), CoreError> {
+    Ok(crate::data::app_prefs::set(&key, &value)?)
+}
+
+/// The last `limit` incoming, undeleted messages in a conversation, oldest
+/// first — what a notification summarises. The selection rule lives here so
+/// each platform's shade code doesn't re-derive it.
+#[uniffi::export]
+pub fn recent_incoming(
+    conversation_id: Vec<u8>, limit: u32,
+) -> Result<Vec<MessageRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Ok(Message::recent_incoming(&conv, limit).into_iter().map(Into::into).collect())
 }
 
 /// The direct conversation with `peer_ipk`, created if this is the first time
@@ -640,6 +741,8 @@ impl From<MessageRow> for MessageRecord {
             deleted: r.deleted,
             reply_to: r.reply_to,
             system: r.system,
+            album_items: Vec::new(),
+            in_album: false,
         }
     }
 }

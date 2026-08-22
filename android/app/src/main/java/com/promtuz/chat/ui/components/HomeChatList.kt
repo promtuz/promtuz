@@ -30,8 +30,6 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     val chats by appViewModel.chats.collectAsState()
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByChat.collectAsState()
-    val pinned by ChatPrefs.pinned.collectAsState()
-    val muted by ChatPrefs.muted.collectAsState()
 
     if (chats.isEmpty()) {
         HomeEmpty(innerPadding)
@@ -54,12 +52,12 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
                 presence = chat.peerHex?.let { presence[it] },
                 typing = Activity.Typing in
                     Activity.fromBits(activity[chat.conversationHex] ?: 0),
-                pinned = chat.conversationHex in pinned,
-                muted = chat.conversationHex in muted,
+                pinned = chat.pinned,
+                muted = chat.muted,
                 menuState = menuState,
                 onOpen = { appViewModel.openChat(chat.conversationHex, chat.name) },
-                onPin = { ChatPrefs.togglePin(chat.conversationHex) },
-                onMute = { ChatPrefs.toggleMute(chat.conversationHex) },
+                onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },
+                onMute = { ChatPrefs.toggleMute(chat.conversationHex, !chat.muted) },
                 onMarkRead = { appViewModel.markConversationRead(chat.conversationHex) },
                 onDelete = { appViewModel.deleteChat(chat) },
                 onLeaveAndDelete = { appViewModel.leaveAndDelete(chat) },
