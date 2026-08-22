@@ -34,6 +34,7 @@ import com.promtuz.chat.presentation.viewmodel.GroupVM
 import com.promtuz.chat.presentation.viewmodel.GroupWork
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.Avatar
+import com.promtuz.chat.ui.components.SimpleScreen
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -52,7 +53,8 @@ fun NewGroupScreen(viewModel: GroupVM = koinViewModel()) {
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val work by viewModel.work.collectAsStateWithLifecycle()
 
-    Column(Modifier.fillMaxSize()) {
+    SimpleScreen({ Text("New group") }) { padding ->
+    Column(Modifier.fillMaxSize().padding(padding)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -136,6 +138,7 @@ fun NewGroupScreen(viewModel: GroupVM = koinViewModel()) {
                 }
             }
         }
+    }
     }
 }
 

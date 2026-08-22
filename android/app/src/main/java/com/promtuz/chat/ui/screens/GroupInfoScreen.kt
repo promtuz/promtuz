@@ -35,6 +35,7 @@ import com.promtuz.chat.presentation.viewmodel.UiMember
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.GroupAvatar
+import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.memberTally
 import org.koin.androidx.compose.koinViewModel
 
@@ -69,7 +70,8 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
         candidates.filter { it.ipkHex !in present }
     }
 
-    LazyColumn(Modifier.fillMaxSize()) {
+    SimpleScreen({ Text("Group info") }) { padding ->
+    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
         item {
             Column(
                 Modifier.fillMaxWidth().padding(24.dp),
@@ -203,6 +205,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
             }
             Spacer(Modifier.height(32.dp))
         }
+    }
     }
 }
 

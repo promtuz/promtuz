@@ -5,8 +5,10 @@ import android.content.Context
 import android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import android.hardware.biometrics.BiometricPrompt
+import android.os.Build
 import android.os.CancellationSignal
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -148,6 +150,7 @@ fun RecoveryPhraseScreen() {
 }
 
 /** Framework BiometricPrompt: strong biometric OR device credential. */
+@RequiresApi(Build.VERSION_CODES.R)
 private fun authenticate(context: Context, onSuccess: () -> Unit, onError: (String) -> Unit) {
     val prompt = BiometricPrompt.Builder(context)
         .setTitle("Recovery phrase")
