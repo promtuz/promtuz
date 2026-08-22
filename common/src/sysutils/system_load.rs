@@ -48,12 +48,21 @@ fn memory_usage(sys: &mut System) -> u8 {
     sys.refresh_memory();
 
     let (used, total) = if let Some(l) = sys.cgroup_limits() {
-        (l.rss as f32, l.total_memory as f32)
+        (l.rss, l.total_memory)
     } else {
-        (sys.used_memory() as f32, sys.total_memory() as f32)
+        (sys.used_memory(), sys.total_memory())
     };
 
-    ((used / total) * 100.0) as u8
+    memory_percent(used, total)
+}
+
+fn memory_percent(used: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+
+    let percent = u128::from(used) * 100 / u128::from(total);
+    percent.min(100) as u8
 }
 
 pub async fn system_load() -> SystemLoad {
@@ -63,4 +72,24 @@ pub async fn system_load() -> SystemLoad {
     let ram = memory_usage(&mut sys);
 
     SystemLoad(cpu, ram)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_percent;
+
+    #[test]
+    fn memory_percent_reports_normal_usage() {
+        assert_eq!(memory_percent(512, 1024), 50);
+    }
+
+    #[test]
+    fn memory_percent_clamps_overreported_usage() {
+        assert_eq!(memory_percent(125, 100), 100);
+    }
+
+    #[test]
+    fn memory_percent_handles_zero_total() {
+        assert_eq!(memory_percent(1, 0), 0);
+    }
 }
