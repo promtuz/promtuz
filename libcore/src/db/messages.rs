@@ -358,6 +358,13 @@ const MIGRATION_ARRAY: &[M] = &[
     //
     // Never a substitute for `contacts.name` — that one the local user chose,
     // this one its subject asserted. Resolution keeps them in that order.
+    M::up(
+        "CREATE TABLE peer_names ( \
+             ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
+             name       TEXT NOT NULL, \
+             updated_at INTEGER NOT NULL \
+         ) WITHOUT ROWID;",
+    ),
     // Pinned / muted / last-alerted were SharedPreferences, which Auto Backup
     // does not carry — `backup_rules.xml` ships the blob and nothing else — so
     // they were quietly lost on every reinstall. They are facts about a
@@ -376,14 +383,10 @@ const MIGRATION_ARRAY: &[M] = &[
              value TEXT NOT NULL \
          ) WITHOUT ROWID;",
     ),
-    M::up(
-        "CREATE TABLE peer_names ( \
-             ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
-             name       TEXT NOT NULL, \
-             updated_at INTEGER NOT NULL \
-         ) WITHOUT ROWID;",
-    ),
 ];
+/// A migration's index in the array *is* its schema version, so the array is
+/// append-only: inserting one shifts every later version, and a device already
+/// past that point re-runs the wrong statements. Add at the end, always.
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
