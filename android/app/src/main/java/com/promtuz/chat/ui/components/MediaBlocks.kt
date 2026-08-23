@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
@@ -197,11 +198,14 @@ fun AttachmentBlock(
 
 /**
  * A voice note: play/pause, the sender's waveform with the played part lit,
- * and the clock — remaining while it plays, total otherwise. The meta corner
- * is reserved the way an attachment's is, under the card.
+ * and the clock — remaining while it plays, total otherwise.
+ *
+ * With a [surface] the player is its own pill on the wallpaper, in the
+ * bubble's colour; without one it sits inside a bubble (a reply) as a
+ * quieter inset card.
  */
 @Composable
-fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, fontScale: Float, metaLabel: String) {
+fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = null) {
     val context = LocalContext.current
     val playback by VoicePlayer.state.collectAsState()
     val mine = playback?.takeIf { it.dispatchIdHex == voice.dispatchIdHex }
@@ -210,40 +214,40 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, fontScale: Float, 
     val fraction = if (voice.durationMs > 0) (position.toFloat() / voice.durationMs).coerceIn(0f, 1f) else 0f
     val shown = if (mine != null) (voice.durationMs - position).coerceAtLeast(0) else voice.durationMs
     val secs = (shown + 500) / 1000
-    Column {
-        Row(
+    Row(
+        Modifier
+            .width(VoiceWidth)
+            .clip(RoundedCornerShape(26.dp))
+            .background(surface ?: textColor.copy(alpha = 0.06f))
+            .padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
             Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(textColor.copy(alpha = 0.06f))
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .size(40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(textColor.copy(alpha = if (surface != null) 0.18f else 0.10f))
+                .clickable { VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime) },
+            Alignment.Center,
         ) {
-            Box(
-                Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(textColor.copy(alpha = 0.10f))
-                    .clickable { VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime) },
-                Alignment.Center,
-            ) {
-                DrawableIcon(
-                    if (playing) R.drawable.i_pause else R.drawable.i_play,
-                    Modifier.size(18.dp),
-                    tint = textColor,
-                )
-            }
-            Waveform(voice.waveform, fraction, textColor, Modifier.weight(1f).height(28.dp))
-            Text(
-                "%d:%02d".format(Locale.US, secs / 60, secs % 60),
-                style = MaterialTheme.typography.labelMedium,
-                color = textColor.copy(alpha = 0.8f),
+            DrawableIcon(
+                if (playing) R.drawable.i_pause else R.drawable.i_play,
+                Modifier.size(18.dp),
+                tint = textColor,
             )
         }
-        Caption("", textColor, fontScale, metaLabel, inset = false)
+        Waveform(voice.waveform, fraction, textColor, Modifier.weight(1f).height(28.dp))
+        Text(
+            "%d:%02d".format(Locale.US, secs / 60, secs % 60),
+            style = MaterialTheme.typography.labelMedium,
+            color = textColor.copy(alpha = 0.8f),
+        )
     }
 }
+
+/** A player is a control, not prose: one width, whatever the note's length. */
+private val VoiceWidth = 232.dp
 
 /** Bars from 0–255 loudness samples; a missing waveform draws as a flat line. */
 @Composable

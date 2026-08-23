@@ -153,6 +153,14 @@ fun MessageBubble(
     val longPress by rememberUpdatedState(onLongPress)
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
+    // Some messages are their own surface. A few emoji, or a voice note, stand
+    // on the wallpaper with the time in a pill beneath them — a bubble around
+    // a 40sp emoji or around a player that already has a shape is a frame
+    // around a frame. A quote needs a surface to sit on, so a reply keeps it.
+    val jumboEmoji = !msg.deleted && msg.quote == null &&
+        (msg.content as? MessageContent.Text)?.let { isJumboEmoji(it.text) } == true
+    val bare = jumboEmoji || (!msg.deleted && msg.quote == null && msg.content is MessageContent.Voice)
+
     // A picture runs to the bubble's own edge — one outline instead of a frame
     // around a frame — so the bubble waives its inset and the padded blocks
     // (quote, caption, reactions) each put it back for themselves. An attachment
@@ -206,7 +214,10 @@ fun MessageBubble(
                 val content = msg.content
                 when {
                     msg.deleted || content is MessageContent.Text ->
-                        BubbleText(msg, textColor, appearance.type.fontScale) { coords.text = it }
+                        BubbleText(
+                            msg, textColor,
+                            appearance.type.fontScale * (if (jumboEmoji) JumboEmojiScale else 1f),
+                        ) { coords.text = it }
                     content is MessageContent.Image ->
                         ImageBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
                     content is MessageContent.Album ->
@@ -217,7 +228,7 @@ fun MessageBubble(
                             BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
                         )
                     content is MessageContent.Voice ->
-                        VoiceBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
+                        VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
                 }
 
                 if (msg.reactions.isNotEmpty()) {
@@ -233,7 +244,7 @@ fun MessageBubble(
                     }
                 }
 
-                MetaRow(msg, textColor, metaOnMedia)
+                MetaRow(msg, textColor, metaOnMedia, pill = if (bare) bubbleColor else null)
             },
             modifier = Modifier
                 // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
@@ -241,14 +252,14 @@ fun MessageBubble(
                 // shear off the tail flicking past the body edge. As a plain draw modifier
                 // here, background paints the whole outline (tail included) into the parent
                 // Box (which never clips); .clip still bounds the child content below.
-                .background(bubbleColor, shape)
+                .then(if (bare) Modifier else Modifier.background(bubbleColor, shape))
                 // edit/delete/reactions change the bubble's size in place — glide from the
                 // tail corner on the shared clock so neighbors (stage) track frame-locked
                 .animateContentSize(
                     ChatMotion.spec(),
                     alignment = if (outgoing) Alignment.BottomEnd else Alignment.BottomStart,
                 )
-                .clip(shape)
+                .then(if (bare) Modifier else Modifier.clip(shape))
                 .onGloballyPositioned { coords.bubble = it }
                 .then(
                     if (onLongPress == null) Modifier
@@ -309,8 +320,8 @@ fun MessageBubble(
                     }
                 )
                 .padding(
-                    horizontal = if (bleeds) 0.dp else BubblePadH,
-                    vertical = if (bleeds) 0.dp else BubblePadV,
+                    horizontal = if (bleeds || bare) 0.dp else BubblePadH,
+                    vertical = if (bleeds || bare) 0.dp else BubblePadV,
                 ),
         ) { measurables, constraints ->
             // Children: [quote?] text [reactions?] meta. The quote must span the widest
@@ -347,6 +358,8 @@ fun MessageBubble(
             // height below, which deliberately leaves metaDrop out.
             var metaDrop = 0
             val contentWidth = when {
+                // Nothing to ride: the pill sits under the content, at its end.
+                bare -> { metaRow = meta.height + BarePillGap.roundToPx(); maxOf(text.width, meta.width) }
                 hasReactions -> maxOf(text.width, reactions!!.width + metaGap + meta.width)
                 // Media owns its whole footprint and keeps the corner clear itself.
                 !isTextBlock -> text.width
@@ -372,12 +385,16 @@ fun MessageBubble(
             // real space, and the padding alone can't cover a full meta height.
             val height = (sender?.height ?: 0) + (quote?.height ?: 0) + text.height + metaRow +
                 (reactions?.height ?: 0)
+            // Bare: reactions go under the content and the pill under them.
+            val reactionsY = (sender?.height ?: 0) + (quote?.height ?: 0) + text.height
             layout(width, height) {
                 var y = 0
                 sender?.let { it.placeRelative(0, y); y += it.height }
                 quote?.let { it.placeRelative(0, y); y += it.height }
-                text.placeRelative(0, y)
-                reactions?.placeRelative(0, y + text.height)
+                // Bare content hugs the tail side, like the pill under it.
+                val tx = if (bare && outgoing) width - text.width else 0
+                text.placeRelative(tx, y)
+                reactions?.placeRelative(if (bare && outgoing) width - reactions.width else 0, reactionsY)
                 // A bleeding bubble has no outer padding to sit in, so the meta
                 // takes the inset itself — the same one text bubbles get from the
                 // padding, which is what lines the time up across every variant.
@@ -492,9 +509,11 @@ private fun Modifier.fadeOnChange(value: Any?): Modifier {
  * change — that's the point of the gradient over a chip.
  */
 @Composable
-private fun MetaRow(msg: UiMessage, textColor: Color, onMedia: Boolean = false) {
+private fun MetaRow(
+    msg: UiMessage, textColor: Color, onMedia: Boolean = false, pill: Color? = null,
+) {
     val metaStyle = MaterialTheme.typography.labelSmall
-    val metaColor = if (onMedia) Color.White else textColor.copy(alpha = 0.55f)
+    val metaColor = if (onMedia) Color.White else textColor.copy(alpha = if (pill != null) 0.8f else 0.55f)
     val edited = msg.edited && !msg.deleted
     val state = when {
         msg.outgoing && msg.status == SendStatus.Pending -> MetaState.Pending
@@ -502,7 +521,13 @@ private fun MetaRow(msg: UiMessage, textColor: Color, onMedia: Boolean = false) 
         else -> MetaState.Sent
     }
 
-    Box(contentAlignment = Alignment.Center) {
+    Box(
+        // A standalone message carries its time in a pill of the bubble's
+        // colour, so it still reads as that side's message.
+        if (pill != null) Modifier.clip(CircleShape).background(pill).padding(horizontal = 8.dp, vertical = 3.dp)
+        else Modifier,
+        contentAlignment = Alignment.Center,
+    ) {
         if (onMedia) MetaHalo(Modifier.matchParentSize())
         Row(verticalAlignment = Alignment.CenterVertically) {
         if (edited) Text(
@@ -562,6 +587,27 @@ private fun MetaHalo(modifier: Modifier) {
 }
 
 private enum class MetaState { Pending, Failed, Sent }
+
+/** How much larger a lone emoji draws than body text. */
+private const val JumboEmojiScale = 2.8f
+/** Between bare content and the time pill under it. */
+private val BarePillGap = 4.dp
+private const val JumboEmojiMax = 3
+
+private val EmojiOnly = Regex(
+    "^(?:\\p{So}|\\p{Cn}|[\\uFE0F\\u200D\\u20E3]|[\\x{1F3FB}-\\x{1F3FF}]|[\\x{1F1E6}-\\x{1F1FF}])+$",
+)
+
+/** Up to [JumboEmojiMax] emoji and nothing else — the message that draws big and bare. */
+internal fun isJumboEmoji(text: String): Boolean {
+    val t = text.trim()
+    if (t.isEmpty() || !EmojiOnly.matches(t)) return false
+    val it = java.text.BreakIterator.getCharacterInstance()
+    it.setText(t)
+    var n = 0
+    while (it.next() != java.text.BreakIterator.DONE) if (++n > JumboEmojiMax) return false
+    return n in 1..JumboEmojiMax
+}
 
 private class CoordsHolder {
     var row: LayoutCoordinates? = null
