@@ -1681,28 +1681,27 @@ async fn send_payload<C: DhtClient>(
     Ok(())
 }
 
-/// Re-drive every still-`pending` first-send whose contact has no MLS
-/// group yet — the messages [`attempt_send`] deferred because the peer
-/// had not published a KeyPackage. Run once per reconnect (after the
-/// welcome poll, which may itself have just paired us and unstuck one).
+/// Re-drive every still-`pending` send the outbox knows nothing about — a
+/// first send [`attempt_send`] deferred because the peer had not published a
+/// KeyPackage, or one that failed before it was enqueued (no relay at the
+/// time). Run once per reconnect (after the welcome poll, which may itself
+/// have just paired us and unstuck one).
 ///
-/// A pending row that already HAS a group is in the durable outbox;
-/// `delivery::reconcile` owns it, so we skip it here to avoid a double
-/// send. Per-message errors are logged and swallowed — one peer still
-/// missing its KP must not block retrying the rest.
+/// A pending row with a queued op is `delivery::reconcile`'s; skipping it
+/// avoids a double send. Per-message errors are logged and swallowed — one
+/// peer still missing its KP must not block retrying the rest.
 ///
 /// Re-drives via [`attempt_send`], which rebuilds the row's original payload
 /// (an `Image` row resends its stored picture, not a bare-caption `Text`).
 pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
-    // Snapshot the no-group rows BEFORE attempting any. The first send in a
-    // conversation binds its MLS group, so a live per-row check would skip
-    // every *later* deferred message in that same conversation — orphaning it
-    // (pending, but never enqueued to the outbox, so `reconcile` can't send it
-    // either). `attempt_send` handles a now-existing group fine, so attempting
-    // all of this snapshot is safe.
+    // Ours are the pending rows the outbox holds nothing for: a first send
+    // deferred on a missing KeyPackage, or one that died before it enqueued
+    // — no relay at the time, say. Everything queued belongs to `reconcile`.
+    // Snapshot BEFORE attempting any: the first send in a conversation binds
+    // its MLS group, and `attempt_send` handles a now-existing group fine.
     let deferred: Vec<_> = Message::pending_outgoing()
         .into_iter()
-        .filter(|row| Conversation::group_of(&row.conversation_id).is_none())
+        .filter(|row| !row.dispatch_id.as_deref().is_some_and(delivery::any_pending))
         .collect();
     for row in deferred {
         let conversation = row.conversation_id;
