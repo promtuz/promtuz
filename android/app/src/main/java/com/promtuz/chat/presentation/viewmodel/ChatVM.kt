@@ -107,8 +107,8 @@ class ChatVM(private val application: Application) : ViewModel() {
     val memberCount: StateFlow<Int> = _memberCount.asStateFlow()
 
     /** Who is currently typing, by member hex — a group can have several. */
-    private val _typingMembers = MutableStateFlow<Set<String>>(emptySet())
-    val typingMembers: StateFlow<Set<String>> = _typingMembers.asStateFlow()
+    private val typingActivity = TypingActivity(viewModelScope, TYPING_TTL_MS)
+    val typingMembers: StateFlow<Set<String>> = typingActivity.members
 
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
     val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
@@ -182,9 +182,7 @@ class ChatVM(private val application: Application) : ViewModel() {
     val recording: StateFlow<Recording?> = _recording.asStateFlow()
     private var recordingTicker: Job? = null
 
-    private val _typing = MutableStateFlow(false)
-    val typing: StateFlow<Boolean> = _typing.asStateFlow()
-    private var typingExpiry: Job? = null
+    val typing: StateFlow<Boolean> = typingActivity.typing
 
     /** Key of the incoming message that ended a live typing signal — the morph target. */
     val typingHandoff = MutableStateFlow<String?>(null)
@@ -219,8 +217,13 @@ class ChatVM(private val application: Application) : ViewModel() {
                 val newest = list.firstOrNull { !it.outgoing }
                 if (newest?.key != newestIncoming) {
                     newestIncoming = newest?.key
-                    if (_typing.value && newest != null) typingHandoff.value = newest.key
-                    clearTyping()
+                    val wasTyping = typing.value
+                    if (_isGroup.value) {
+                        newest?.senderHex?.let { typingActivity.update(it, false) }
+                    } else {
+                        typingActivity.clear()
+                    }
+                    if (wasTyping && !typing.value && newest != null) typingHandoff.value = newest.key
                 }
                 // With this chat on screen it's read: receipt the high-water mark.
                 // Keyed on the dispatch id, not the row — `key` falls back to the
@@ -278,20 +281,7 @@ class ChatVM(private val application: Application) : ViewModel() {
 
         viewModelScope.launch {
             CoreBridge.activity.filter { it.conversation.contentEquals(conversation) }.collect { sig ->
-                val who = sig.peer.toHex()
-                if (Activity.Typing in Activity.fromBits(sig.bits)) {
-                    _typingMembers.value = _typingMembers.value + who
-                    _typing.value = true
-                    typingExpiry?.cancel()
-                    typingExpiry = viewModelScope.launch {
-                        delay(TYPING_TTL_MS)
-                        _typingMembers.value = _typingMembers.value - who
-                        _typing.value = _typingMembers.value.isNotEmpty()
-                    }
-                } else {
-                    _typingMembers.value = _typingMembers.value - who
-                    if (_typingMembers.value.isEmpty()) clearTyping()
-                }
+                typingActivity.update(sig.peer.toHex(), Activity.Typing in Activity.fromBits(sig.bits))
             }
         }
 
@@ -333,11 +323,6 @@ class ChatVM(private val application: Application) : ViewModel() {
                 }
             }
         }
-    }
-
-    private fun clearTyping() {
-        typingExpiry?.cancel()
-        _typing.value = false
     }
 
     @Volatile

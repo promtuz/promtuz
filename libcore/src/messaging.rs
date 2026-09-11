@@ -599,6 +599,8 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
 /// dropped if we're offline or the peer isn't online. The relay never queues it.
 pub async fn set_activity(conversation: [u8; 16], activity: u16) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    // Before pairing establishes a group there is no shared chat to address.
+    let Some(group_id) = Conversation::group_of(&conversation) else { return Ok(()) };
     let ts = crate::utils::systime().as_millis() as u64;
 
     let conn = {
@@ -612,14 +614,14 @@ pub async fn set_activity(conversation: [u8; 16], activity: u16) -> Result<()> {
     // outbox — a typing signal that misses its moment is worthless.
     for peer in Conversation::recipients(&conversation) {
         let sig = crate::data::identity::IdentitySigner::sign(&activity_sig_message(
-            &peer, &our_ipk, &conversation, activity, ts,
+            &peer, &our_ipk, &group_id, activity, ts,
         ))
         .map_err(|e| anyhow!("sign ephemeral: {e}"))?
         .to_bytes();
         let eph = ActivityP {
             to: Bytes(peer),
             from: Bytes(our_ipk),
-            conversation: Bytes(conversation),
+            group_id: Bytes(group_id),
             activity,
             timestamp: ts,
             sig: Bytes(sig),

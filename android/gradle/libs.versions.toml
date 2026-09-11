@@ -46,6 +46,7 @@ blockstore = "16.4.0"
 workRuntime = "2.10.5"
 
 [libraries]
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesCore" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraCore" }
 androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "cameraCore" }

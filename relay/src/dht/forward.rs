@@ -349,7 +349,7 @@ pub(crate) async fn handle_activity_forward_rpc(
             &activity_sig_message(
                 &activity.to,
                 &activity.from,
-                &activity.conversation,
+                &activity.group_id,
                 activity.activity,
                 activity.timestamp,
             ),

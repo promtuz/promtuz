@@ -648,7 +648,7 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     let transcript = common::proto::client_rel::activity_sig_message(
         &eph.to.0,
         &eph.from.0,
-        &eph.conversation.0,
+        &eph.group_id.0,
         eph.activity,
         eph.timestamp,
     );
@@ -660,20 +660,11 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     if !Contact::exists(&eph.from.0) && !Conversation::shares_a_chat_with(&eph.from.0) {
         return;
     }
-    // The sender named the chat and signed it. Re-deriving it from `from`
-    // instead would pick their DM every time, so typing in a group surfaced
-    // against the wrong conversation.
-    //
-    // Still checked, not trusted: a signal is only shown for a chat they are
-    // actually in, or a contact could raise a typing indicator in any
-    // conversation whose id they happened to learn.
-    let conversation = eph.conversation.0;
-    if !Conversation::members(&conversation)
-        .iter()
-        .any(|m| m.active && m.member_ipk == eph.from.0)
-    {
+    // Translate the shared wire identity into our own conversation, and only
+    // accept a signal from an active member of that specific chat.
+    let Some(conversation) = Conversation::for_activity(&eph.group_id.0, &eph.from.0) else {
         return;
-    }
+    };
     crate::events::messaging::ActivityEv {
         conversation,
         peer: eph.from.0,

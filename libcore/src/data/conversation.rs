@@ -173,6 +173,25 @@ impl Conversation {
         .and_then(|v| v.try_into().ok())
     }
 
+    /// Resolve a shared activity address, retaining the active-member gate.
+    pub(crate) fn for_activity(group_id: &[u8; 32], sender: &[u8; 32]) -> Option<[u8; 16]> {
+        Self::for_activity_tx(&MESSAGES_DB.lock(), group_id, sender)
+    }
+
+    fn for_activity_tx(
+        conn: &Connection, group_id: &[u8; 32], sender: &[u8; 32],
+    ) -> Option<[u8; 16]> {
+        conn.query_row(
+            "SELECT c.id FROM conversations c \
+             JOIN conversation_members m ON m.conversation_id = c.id \
+             WHERE c.mls_group_id = ?1 AND m.member_ipk = ?2 AND m.active = 1",
+            (group_id.as_slice(), sender.as_slice()),
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .ok()
+        .and_then(|v| v.try_into().ok())
+    }
+
     /// Point `id` at `group_id`, releasing whatever conversation held that
     /// group before. The unique index means a group backs at most one
     /// conversation, so a re-pair that adopts the peer's group has to evict
@@ -542,6 +561,46 @@ mod tests {
 
     fn direct(conn: &Connection, peer: &[u8; 32], me: [u8; 32]) -> [u8; 16] {
         Conversation::for_peer_tx(conn, peer, Some(me)).expect("resolve direct")
+    }
+
+    #[test]
+    fn activity_resolves_shared_groups_to_each_devices_local_chat() {
+        let alice_db = open_in_memory();
+        let bob_db = open_in_memory();
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let charlie = [3u8; 32];
+        let dm_group = [4u8; 32];
+        let shared_group = [5u8; 32];
+        let alice_dm = direct(&alice_db, &bob, alice);
+        let bob_dm = direct(&bob_db, &alice, bob);
+        assert_ne!(alice_dm, bob_dm);
+        Conversation::bind_group_tx(&alice_db, &alice_dm, &dm_group).unwrap();
+        Conversation::bind_group_tx(&bob_db, &bob_dm, &dm_group).unwrap();
+        let alice_chat =
+            Conversation::join_group_tx(&alice_db, &alice, &[alice, bob, charlie]).unwrap();
+        let bob_chat =
+            Conversation::join_group_tx(&bob_db, &alice, &[alice, bob, charlie]).unwrap();
+        assert_ne!(alice_chat, bob_chat);
+        Conversation::bind_group_tx(&alice_db, &alice_chat, &shared_group).unwrap();
+        Conversation::bind_group_tx(&bob_db, &bob_chat, &shared_group).unwrap();
+
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &dm_group, &alice), Some(bob_dm));
+        assert_eq!(Conversation::for_activity_tx(&alice_db, &dm_group, &bob), Some(alice_dm));
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &shared_group, &alice), Some(bob_chat));
+        assert_eq!(Conversation::for_activity_tx(&alice_db, &shared_group, &bob), Some(alice_chat));
+        // A group-only member cannot target a DM or an unknown group.
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &dm_group, &charlie), None);
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &[9u8; 32], &alice), None);
+        bob_db.execute(
+            "UPDATE conversation_members SET active = 0 WHERE conversation_id = ?1 AND member_ipk = ?2",
+            (bob_chat.as_slice(), alice.as_slice()),
+        ).unwrap();
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &shared_group, &alice), None);
+        // Re-pairing invalidates the old shared address without changing the local chat.
+        Conversation::bind_group_tx(&bob_db, &bob_dm, &[6u8; 32]).unwrap();
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &dm_group, &alice), None);
+        assert_eq!(Conversation::for_activity_tx(&bob_db, &[6u8; 32], &alice), Some(bob_dm));
     }
 
     /// `for_peer` is find-or-create: the second call for the same peer must

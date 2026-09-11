@@ -78,3 +78,6 @@ assets = [
 ]
 conf-files = ["/etc/promtuz/relay.toml", "/etc/apt/apt.conf.d/51pzrelay-unattended"]
 maintainer-scripts = "pkg/scripts/"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

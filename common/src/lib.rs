@@ -7,7 +7,8 @@
 /// change fail as an unexplained signature error.
 ///
 /// 6: `ActivityP` carries the conversation it happened in.
-pub static PROTOCOL_VERSION: u16 = 7;
+/// 8: activity addresses the shared MLS group, not a device-local conversation.
+pub static PROTOCOL_VERSION: u16 = 8;
 
 #[cfg(feature = "crypto")]
 pub mod crypto;
