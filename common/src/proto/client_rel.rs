@@ -280,14 +280,14 @@ pub enum DispatchAckP {
     /// `relay::storage::MAX_QUEUED_PER_RECIPIENT`.
     QueueFull,
     /// Recipient was offline locally and the dispatch was successfully
-    /// queued at ≥ K_MIN of the recipient's K-closest "home" relays via
+    /// queued at the required number of the recipient's closest "home" relays via
     /// the sticky-home DHT-forward path. Distinct from [`Self::Queued`]
     /// (which is the local-only fallback) so the sender knows the
     /// dispatch is held by a deterministic K-relay set keyed off the
     /// recipient's IPK rather than only on the originating relay.
     ///
-    /// The dispatch is queued at K_MIN homes; eventual delivery depends on
-    /// the recipient draining one of those homes on reconnect. Sender
+    /// The dispatch is queued at two homes (one in a single-home topology);
+    /// delivery depends on the recipient draining one of those homes on reconnect. Sender
     /// has no further proof of delivery — read receipts are out of scope.
     Forwarded {
         accepted_at_ms: u64,
@@ -546,7 +546,7 @@ pub enum SRelayPacket {
     /// Reply to [`CRelayPacket::PublishKeyPackage`].
     /// `homes_succeeded` is the count of K=3 DHT homes that returned a
     /// success outcome (Stored for Publish, Appended for Refill).
-    /// `quorum_met` ⇔ `homes_succeeded ≥ K_MIN` (= 2).
+    /// `quorum_met` requires one success for a sole selected home, otherwise two.
     KeyPackagePublished {
         homes_succeeded: u8,
         quorum_met:      bool,
@@ -564,8 +564,7 @@ pub enum SRelayPacket {
     },
 
     /// Reply to [`CRelayPacket::PublishWelcome`].
-    /// `quorum_met = true` ⇔ ≥ K_MIN of the recipient's K=3 homes
-    /// stored the envelope.
+    /// `quorum_met` requires one stored copy for a sole selected home, otherwise two.
     WelcomePublished {
         quorum_met: bool,
     },

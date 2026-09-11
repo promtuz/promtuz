@@ -30,30 +30,33 @@ use common::proto::mls_wire::WelcomePublishOutcome;
 use common::proto::mls_wire::WelcomePublishReq;
 use common::quic::id::NodeId;
 
-use crate::dht::Dht;
-use crate::dht::config::FORWARD_K_MIN;
 use super::fanout::closest_homes_with_self;
 use super::fanout::fan_out_collect;
 use super::welcome::handle_welcome_ack;
 use super::welcome::handle_welcome_fetch;
 use super::welcome::handle_welcome_publish;
 use super::welcome::stash_prefix;
+use crate::dht::Dht;
+use crate::dht::config::write_quorum;
 
 /// Originate a Welcome publish to the recipient's K-closest homes.
 /// Authorization rides inside `envelope.sender_sig`; `timestamp` is the
 /// phone's (bound into the per-publish skew check at each home). Returns
-/// whether ≥ [`FORWARD_K_MIN`] homes stored it.
+/// whether the selected homes met their write requirement.
 pub(crate) async fn originate_welcome_publish(
     dht: &Arc<Dht>, envelope: WelcomeEnvelopeP, timestamp: u64, now_ms: u64,
 ) -> bool {
     let target = NodeId::from_bytes(stash_prefix(&envelope.recipient_ipk.0));
     let (peers, self_in_k) = closest_homes_with_self(dht, &target);
+    let required = write_quorum(peers.len() + usize::from(self_in_k));
 
     let mut homes_succeeded: usize = 0;
 
     if self_in_k {
         let req = WelcomePublishReq { envelope: envelope.clone(), timestamp };
-        if handle_welcome_publish(dht, req, dht.node_id, now_ms) == WelcomePublishOutcome::Stored {
+        if handle_welcome_publish(dht, req, dht.node_id, now_ms) == WelcomePublishOutcome::Stored
+            && dht.store.persist_barrier().wait().await.is_ok()
+        {
             homes_succeeded += 1;
         }
     }
@@ -67,7 +70,7 @@ pub(crate) async fn originate_welcome_publish(
         }
     }
 
-    homes_succeeded >= FORWARD_K_MIN
+    homes_succeeded >= required
 }
 
 /// Originate a Welcome drain of the user's own queue. `sig` is the
@@ -237,6 +240,28 @@ mod tests {
     /// recipient (signed against our node_id) returns it; an ack then
     /// deletes it so a second fetch is empty.
     #[tokio::test(flavor = "current_thread")]
+    async fn welcome_failure_is_preserved_for_bad_signature_or_missing_second_ack() {
+        for second_home in [false, true] {
+            let dht = fresh_dht(NodeId::new([0; 32]));
+            let now = 1_700_000_000_000;
+            let sender = fresh_signing_key();
+            let recipient = fresh_signing_key().verifying_key().to_bytes();
+            let mut envelope = build_envelope(&sender, recipient, b"welcome".to_vec());
+            if second_home {
+                let key = fresh_signing_key().verifying_key().to_bytes();
+                dht.routing.write().insert(common::proto::dht_p2p::NodeDescriptor {
+                    id:     NodeId::new(key),
+                    pubkey: key.into(),
+                    addr:   "127.0.0.1:9".parse().unwrap(),
+                });
+            } else {
+                envelope.sender_sig = [0; 64].into();
+            }
+            assert!(!originate_welcome_publish(&dht, envelope, now, now).await);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn self_only_publish_fetch_ack_round_trip() {
         let self_id = NodeId::new([0u8; 32]);
         let dht = fresh_dht(self_id);
@@ -247,8 +272,10 @@ mod tests {
         let recipient_ipk: [u8; 32] = recipient.verifying_key().to_bytes();
 
         let envelope = build_envelope(&sender, recipient_ipk, b"welcome".to_vec());
-        let _quorum = originate_welcome_publish(&dht, envelope, now, now).await;
-        // Lone relay can't meet K_MIN, but the welcome is stored locally.
+        assert!(
+            originate_welcome_publish(&dht, envelope, now, now).await,
+            "the only selected home stored the welcome"
+        );
 
         let sig = sign_fetch(&recipient, &dht.node_id, now);
         let entries = originate_welcome_fetch(&dht, recipient_ipk, now, sig, now).await;

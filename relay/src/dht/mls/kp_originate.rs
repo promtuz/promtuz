@@ -29,8 +29,6 @@ use common::proto::mls_wire::KeyPackageRefillReq;
 use common::proto::mls_wire::KpPublishMode;
 use common::quic::id::NodeId;
 
-use crate::dht::Dht;
-use crate::dht::config::FORWARD_K_MIN;
 use super::fanout::closest_homes_with_self;
 use super::fanout::fan_out_collect;
 use super::fanout::remote_rpc_one;
@@ -38,14 +36,16 @@ use super::kp::handle_keypackage_fetch;
 use super::kp::handle_keypackage_publish;
 use super::kp::handle_keypackage_refill;
 use super::kp::stash_prefix;
+use crate::dht::Dht;
+use crate::dht::config::write_quorum;
 
 /// Outcome of a publish / refill fan-out.
 pub(crate) struct KpPublishQuorum {
     /// Homes (incl. self) that returned a success outcome — `Stored`
     /// for Publish, `Appended` for Refill.
     pub homes_succeeded: u8,
-    /// `homes_succeeded >= FORWARD_K_MIN` (= 2).
-    pub quorum_met: bool,
+    /// The selected homes met the write requirement (one for a sole home, otherwise two).
+    pub quorum_met:      bool,
 }
 
 /// Outcome of a fetch fan-out (any-of-K first success).
@@ -69,6 +69,7 @@ pub(crate) async fn originate_publish(
 ) -> KpPublishQuorum {
     let target = NodeId::from_bytes(stash_prefix(&ipk));
     let (peers, self_in_k) = closest_homes_with_self(dht, &target);
+    let required = write_quorum(peers.len() + usize::from(self_in_k));
 
     let mut homes_succeeded: u8 = 0;
 
@@ -86,7 +87,7 @@ pub(crate) async fn originate_publish(
                 KeyPackageRefillOutcome::Appended
             ),
         };
-        if stored {
+        if stored && dht.store.persist_barrier().wait().await.is_ok() {
             homes_succeeded += 1;
         }
     }
@@ -115,10 +116,7 @@ pub(crate) async fn originate_publish(
         }
     }
 
-    KpPublishQuorum {
-        homes_succeeded,
-        quorum_met: (homes_succeeded as usize) >= FORWARD_K_MIN,
-    }
+    KpPublishQuorum { homes_succeeded, quorum_met: (homes_succeeded as usize) >= required }
 }
 
 /// Originate a KeyPackage fetch for `target_ipk`. Tries self first
@@ -246,9 +244,7 @@ mod tests {
         owner.sign(&msg).to_bytes()
     }
 
-    /// Self-only publish stores the batch (1 of K), and a subsequent
-    /// originate_fetch returns the stored record. Quorum is NOT met with
-    /// a lone relay (FORWARD_K_MIN = 2), which is the correct signal.
+    /// A single relay must report a successful publish, then serve the key.
     #[tokio::test(flavor = "current_thread")]
     async fn self_only_publish_then_fetch_round_trip() {
         let dht = fresh_dht(NodeId::new([0u8; 32]));
@@ -264,11 +260,78 @@ mod tests {
         )
         .await;
         assert_eq!(q.homes_succeeded, 1, "self should self-store");
-        assert!(!q.quorum_met, "a lone relay cannot meet K_MIN = 2");
+        assert!(q.quorum_met, "the only selected home stored the key");
 
         let fetched = originate_fetch(&dht, owner_ipk, now).await;
         assert!(fetched.record.is_some(), "fetch should return the stored KP");
         assert_eq!(fetched.record.unwrap().kp_ref.0, [0x11; 32].to_vec());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn single_relay_refill_succeeds_but_invalid_publish_does_not() {
+        let dht = fresh_dht(NodeId::new([0; 32]));
+        let owner = fresh_signing_key();
+        let ipk = owner.verifying_key().to_bytes();
+        let now = 1_700_000_000_000;
+        let records = vec![build_record(&owner, [1; 32], now)];
+        let bad = originate_publish(
+            &dht,
+            ipk,
+            records.clone(),
+            KpPublishMode::Publish,
+            now,
+            [0; 64],
+            now,
+        )
+        .await;
+        assert!(!bad.quorum_met);
+        assert_eq!(bad.homes_succeeded, 0);
+        assert!(originate_fetch(&dht, ipk, now).await.record.is_none());
+        let sig = sign_publish(&owner, &records, now);
+        assert!(
+            originate_publish(&dht, ipk, records, KpPublishMode::Publish, now, sig, now)
+                .await
+                .quorum_met
+        );
+        let records = vec![build_record(&owner, [2; 32], now)];
+        let digest = kp_publish_records_digest(MLS_WIRE_VERSION, &records);
+        let sig = owner
+            .sign(&common::proto::mls_wire::kp_refill_signing_input(
+                MLS_WIRE_VERSION,
+                &ipk,
+                &digest,
+                1,
+                now,
+            ))
+            .to_bytes();
+        let refill =
+            originate_publish(&dht, ipk, records, KpPublishMode::Refill, now, sig, now).await;
+        assert!(refill.quorum_met);
+        assert_eq!(refill.homes_succeeded, 1);
+        let first = originate_fetch(&dht, ipk, now).await.record.unwrap();
+        let second = originate_fetch(&dht, ipk, now).await.record.unwrap();
+        assert_ne!(first.kp_ref, second.kp_ref);
+        assert!(originate_fetch(&dht, ipk, now).await.record.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreachable_second_home_still_makes_publication_fail() {
+        let dht = fresh_dht(NodeId::new([0; 32]));
+        let key = fresh_signing_key().verifying_key().to_bytes();
+        dht.routing.write().insert(common::proto::dht_p2p::NodeDescriptor {
+            id:     NodeId::new(key),
+            pubkey: key.into(),
+            addr:   "127.0.0.1:9".parse().unwrap(),
+        });
+        let owner = fresh_signing_key();
+        let ipk = owner.verifying_key().to_bytes();
+        let now = 1_700_000_000_000;
+        let records = vec![build_record(&owner, [1; 32], now)];
+        let sig = sign_publish(&owner, &records, now);
+        let result =
+            originate_publish(&dht, ipk, records, KpPublishMode::Publish, now, sig, now).await;
+        assert_eq!(result.homes_succeeded, 1);
+        assert!(!result.quorum_met, "failed RPC cannot turn two selected homes into one");
     }
 
     /// A fetch against a target with no stash returns `None`, not a

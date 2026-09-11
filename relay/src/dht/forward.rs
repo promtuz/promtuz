@@ -24,10 +24,10 @@
 //! routing-table read; we clone descriptors out and release the lock
 //! before any I/O.
 
-use std::sync::Arc;
-use std::time::Duration;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::proto::Sender;
 use common::proto::client_rel::ActivityP;
@@ -64,9 +64,9 @@ use thiserror::Error;
 use tokio::time::timeout;
 
 use super::Dht;
-use super::config::FORWARD_K_MIN;
 use super::config::FORWARD_TIMEOUT_MS;
 use super::config::K;
+use super::config::write_quorum;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -92,16 +92,16 @@ pub(crate) struct ForwardSummary {
     /// All K homes the sender attempted (including self when self is in
     /// the K-closest set). Length is `K` in the steady-state case;
     /// shorter when the routing table holds fewer than K-1 peers.
-    pub homes_tried: Vec<NodeId>,
+    pub homes_tried:          Vec<NodeId>,
     /// Homes that returned [`ForwardOutcome::Delivered`] — recipient was
     /// online there and received the dispatch.
-    pub delivered_at: Vec<NodeId>,
+    pub delivered_at:         Vec<NodeId>,
     /// Homes that returned [`ForwardOutcome::Stored`] — recipient was
     /// offline; the dispatch was durably queued.
-    pub stored_at: Vec<NodeId>,
+    pub stored_at:            Vec<NodeId>,
     /// Homes that returned anything else, paired with the outcome for
     /// diagnostic surface.
-    pub failed_at: Vec<HomeReply>,
+    pub failed_at:            Vec<HomeReply>,
 }
 
 impl ForwardSummary {
@@ -118,9 +118,9 @@ impl ForwardSummary {
         !self.delivered_at.is_empty()
     }
 
-    /// True iff `success_count >= FORWARD_K_MIN`.
+    /// Whether the selected homes met their write requirement.
     pub fn meets_k_min(&self) -> bool {
-        self.success_count() >= FORWARD_K_MIN
+        self.success_count() >= write_quorum(self.homes_tried.len())
     }
 }
 
@@ -135,7 +135,7 @@ pub(crate) enum ForwardError {
     /// cannot proceed.
     #[error("forward: routing table empty for target")]
     NoHomes,
-    /// `success_count < FORWARD_K_MIN`. Carries the gap so the caller
+    /// Fewer successes than the selected homes require. Carries the gap so the caller
     /// can include it in fallback-path log messages.
     #[error("forward: insufficient replicas (wanted {wanted}, got {got})")]
     InsufficientReplicas { wanted: usize, got: usize, summary: Box<ForwardSummary> },
@@ -156,8 +156,7 @@ pub(crate) enum ForwardError {
 /// 3. For every remote home, dispatch a `Forward` RPC over `peer/5` in parallel, collecting
 ///    outcomes via `tokio::task::JoinSet`.
 /// 4. Wait up to [`FORWARD_TIMEOUT_MS`] total wall-clock for replies.
-/// 5. Tally the `ForwardSummary`; return `Err(InsufficientReplicas)` if the success count is `<
-///    FORWARD_K_MIN`.
+/// 5. Tally the `ForwardSummary`; require one success for a sole home, otherwise two.
 ///
 /// **Caller's contract** (typically
 /// `relay/src/quic/handler/client/events/forward.rs::handle_forward`):
@@ -213,17 +212,10 @@ pub(crate) async fn forward_to_homes(
         // explicitly so the caller can fall back to local queue.
         return Err(ForwardError::NoHomes);
     }
-    if descriptors.is_empty() && self_is_in_k {
-        // Lone-relay edge case: we're our own K. Self-store, treat as
-        // 1-of-K success even though K_MIN=2 means we still fall back
-        // to local queue — consistency with the K_MIN contract. The
-        // caller's local-queue safety net catches this.
-    }
-
     // 2. Self-store short-circuit. If self is in the K-closest, we add a self-record to the summary
     //    without dialing ourselves over the network.
     let mut summary = ForwardSummary::default();
-    let mut homes_tried: Vec<NodeId> = Vec::with_capacity(K + 1);
+    let mut homes_tried: Vec<NodeId> = descriptors.iter().map(|peer| peer.id).collect();
 
     if self_is_in_k {
         homes_tried.push(self_id);
@@ -268,7 +260,6 @@ pub(crate) async fn forward_to_homes(
     let remote_replies = remote_forward_parallel(&dht, &descriptors, &forward_pkt).await;
 
     for reply in remote_replies {
-        homes_tried.push(reply.node_id);
         match reply.outcome {
             ForwardOutcome::Delivered => summary.delivered_at.push(reply.node_id),
             ForwardOutcome::Stored => summary.stored_at.push(reply.node_id),
@@ -278,10 +269,11 @@ pub(crate) async fn forward_to_homes(
     summary.homes_tried = homes_tried;
 
     // 5. Quorum decision.
-    if summary.success_count() < FORWARD_K_MIN {
+    let required = write_quorum(summary.homes_tried.len());
+    if !summary.meets_k_min() {
         let got = summary.success_count();
         return Err(ForwardError::InsufficientReplicas {
-            wanted: FORWARD_K_MIN,
+            wanted: required,
             got,
             summary: Box::new(summary),
         });
@@ -1000,15 +992,35 @@ mod tests {
     // forward_to_homes — integration with empty routing table
     // -------------------------------------------------------------------
 
-    /// `forward_to_homes` against an empty routing table on a fresh DHT
-    /// must succeed via the self-store short-circuit (self counts as
-    /// 1-of-K on a cold network) — but with only 1 success and
-    /// `K_MIN = 2`, the tally fails and we return
-    /// `InsufficientReplicas`. This is the canonical lone-relay
-    /// fallback signal: the caller (handle_forward) sees it and stores
-    /// in the local-queue safety net.
     #[tokio::test(flavor = "current_thread")]
-    async fn forward_to_homes_lone_relay_returns_insufficient_replicas_with_self_stored() {
+    async fn forward_keeps_two_home_requirement_when_remote_rpc_fails() {
+        let dht = fresh_dht(NodeId::new([0; 32]));
+        let key = fresh_signing_key().verifying_key().to_bytes();
+        let remote_id = NodeId::new(key);
+        dht.routing.write().insert(NodeDescriptor {
+            id:     remote_id,
+            pubkey: key.into(),
+            addr:   "127.0.0.1:9".parse().unwrap(),
+        });
+        let sender = fresh_signing_key();
+        let to = fresh_signing_key().verifying_key().to_bytes();
+        let dispatch = build_dispatch(&sender, &to, [1; 16], b"offline");
+        let error = forward_to_homes(dht.clone(), dispatch, 1_700_000_000_000).await.unwrap_err();
+        match error {
+            ForwardError::InsufficientReplicas { wanted, got, summary } => {
+                assert_eq!(wanted, 2);
+                assert_eq!(got, 1);
+                assert!(summary.homes_tried.contains(&remote_id));
+                assert!(!summary.meets_k_min());
+            },
+            other => panic!("unexpected failure: {other:?}"),
+        }
+        assert!(dht.store.queue.prefix(to).next().is_some());
+    }
+
+    /// The sole home accepts an offline dispatch without a false replication failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forward_to_homes_lone_relay_accepts_self_stored_dispatch() {
         let mut self_seed = [0u8; 32];
         self_seed[0] = 1;
         let self_id = NodeId::new(self_seed);
@@ -1021,16 +1033,11 @@ mod tests {
 
         let now: u64 = 1_700_000_000_000;
         let res = forward_to_homes(dht.clone(), dispatch, now).await;
-        match res {
-            Err(ForwardError::InsufficientReplicas { wanted, got, summary }) => {
-                assert_eq!(wanted, FORWARD_K_MIN);
-                // Self-store is the sole success.
-                assert_eq!(got, 1);
-                assert_eq!(summary.stored_at, vec![dht.node_id]);
-                assert!(summary.delivered_at.is_empty());
-            },
-            other => panic!("expected InsufficientReplicas, got {other:?}"),
-        }
+        let summary = res.expect("single-home storage is successful");
+        assert_eq!(summary.stored_at, vec![dht.node_id]);
+        assert_eq!(summary.homes_tried, vec![dht.node_id]);
+        assert!(summary.delivered_at.is_empty());
+        assert!(summary.meets_k_min());
 
         // Self-store must have durably written the dispatch into
         // `cf_dht_queue` under the recipient's IPK prefix — regression

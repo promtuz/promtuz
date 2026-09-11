@@ -140,7 +140,16 @@ pub const FORWARD_TIMEOUT_MS: u64 = 1500;
 /// same threshold ensures cross-checked reads on the recipient side have
 /// at least the same redundancy as cross-checked writes on the sender
 /// side. Below this threshold the sender falls back to local queueing.
+/// A sole selected home uses [`write_quorum`] to accept its own durable copy.
 pub const FORWARD_K_MIN: usize = 2;
+
+/// A sole selected home can satisfy a write itself. With multiple homes,
+/// keep the normal replication requirement even if only one replies.
+/// Count homes before issuing RPCs, never successful/reachable responses.
+/// Zero homes must still fail rather than making an empty write successful.
+pub(crate) fn write_quorum(home_count: usize) -> usize {
+    if home_count == 1 { 1 } else { FORWARD_K_MIN }
+}
 
 // ---------------------------------------------------------------------------
 // Sticky-home QueueFetch fan-out
