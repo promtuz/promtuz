@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 class ContactsVM(private val app: AppVM) : ViewModel() {
+    val presence = app.presenceByPeer
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
     private val _error = MutableStateFlow<String?>(null)

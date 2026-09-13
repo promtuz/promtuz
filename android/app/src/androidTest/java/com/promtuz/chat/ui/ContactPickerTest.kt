@@ -16,6 +16,28 @@ import org.junit.Test
 class ContactPickerTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun contactsShowLivePresenceWithoutOpeningAChat() {
+        var presence by mutableStateOf<com.promtuz.chat.domain.model.Presence>(com.promtuz.chat.domain.model.Presence.Online)
+        compose.setContent {
+            PromtuzTheme {
+                com.promtuz.chat.ui.screens.ContactsContent(
+                    com.promtuz.chat.ui.screens.ContactsState(
+                        people = listOf(UiMember("alice", "Alice")), presence = mapOf("alice" to presence)),
+                    com.promtuz.chat.ui.screens.ContactsActions({}, {}, {}, {}, {}, {}, { _, _ -> }, {}, {}),
+                    {}, {},
+                )
+            }
+        }
+        compose.onNodeWithText("online").assertIsDisplayed()
+        compose.runOnIdle { presence = com.promtuz.chat.domain.model.Presence.Idle(System.currentTimeMillis() - 120_000) }
+        compose.onNode(hasText("idle since", substring = true)).assertIsDisplayed()
+        compose.runOnIdle { presence = com.promtuz.chat.domain.model.Presence.LastSeen(System.currentTimeMillis() - 300_000) }
+        compose.onNode(hasText("last seen", substring = true)).assertIsDisplayed()
+        compose.runOnIdle { presence = com.promtuz.chat.domain.model.Presence.Unknown }
+        compose.onNode(hasText("last seen", substring = true)).assertDoesNotExist()
+        compose.onNodeWithText("Alice").assertIsDisplayed()
+    }
+
     @Test fun selectionSurvivesSearchAndCanBeRemovedFromTheSelectedChips() {
         var picked by mutableStateOf(emptySet<String>())
         compose.setContent {
@@ -26,8 +48,8 @@ class ContactPickerTest {
                 ContactPickerHeader("Contacts", searching, query, { query = it }, true,
                     onBack = { searching = false; query = "" }, onSearch = { searching = true })
                 ContactPicker(
-                    listOf(UiMember("alice", "Alice"), UiMember("bob", "Bob")),
-                    query, picked, true, true,
+                    people = listOf(UiMember("alice", "Alice"), UiMember("bob", "Bob")),
+                    query = query, selected = picked, selecting = true, enabled = true,
                     onClick = { picked = if (it.ipkHex in picked) picked - it.ipkHex else picked + it.ipkHex },
                     modifier = Modifier.weight(1f),
                 )
@@ -52,7 +74,7 @@ class ContactPickerTest {
         var enabled by mutableStateOf(true)
         compose.setContent {
             PromtuzTheme(darkTheme = true) {
-                ContactPicker(listOf(UiMember("alice", "Alice")), "", emptySet(), false, enabled,
+                ContactPicker(people = listOf(UiMember("alice", "Alice")), query = "", selected = emptySet(), selecting = false, enabled = enabled,
                     onClick = { opened++ }, onLongClick = { selected++ }, modifier = Modifier.fillMaxSize())
             }
         }

@@ -34,6 +34,7 @@ import com.promtuz.chat.presentation.viewmodel.UiMember
 /** Shared contact rows for starting chats, creating groups and adding members. */
 @Composable
 fun ContactPicker(
+    modifier: Modifier = Modifier,
     people: List<UiMember>,
     query: String,
     selected: Set<String>,
@@ -41,34 +42,39 @@ fun ContactPicker(
     enabled: Boolean,
     onClick: (UiMember) -> Unit,
     onLongClick: (UiMember) -> Unit = onClick,
-    modifier: Modifier = Modifier,
     emptyText: String = "No contacts yet",
-    bottomPadding: Dp = 16.dp,
+    yPadding: Pair<Dp, Dp> = Pair(16.dp, 16.dp),
+    supportingText: @Composable (UiMember) -> Unit = {},
     header: @Composable () -> Unit = {},
 ) {
+    val (topPadding, bottomPadding) = yPadding
     val visible = people.filter { it.name.contains(query.trim(), ignoreCase = true) }
     Column(modifier) {
-        AnimatedVisibility(selecting && selected.isNotEmpty(),
-            enter = fadeIn(ChatMotion.spec()) + expandVertically(ChatMotion.spec()),
-            exit = fadeOut(ChatMotion.spec()) + shrinkVertically(ChatMotion.spec())) {
-            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(people.filter { it.ipkHex in selected }, key = { it.ipkHex }) { person ->
-                    Row(Modifier.animateItem().clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                        .clickable(enabled = enabled) { onClick(person) }
-                        .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(person.name, maxLines = 1, style = MaterialTheme.typography.labelLarge)
-                        Icon(painterResource(R.drawable.i_close), "Deselect ${person.name}", Modifier.size(12.dp))
+        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(top = topPadding, bottom = bottomPadding)) {
+            item {
+                AnimatedVisibility(selecting && selected.isNotEmpty(),
+                    enter = fadeIn(ChatMotion.spec()) + expandVertically(ChatMotion.spec()),
+                    exit = fadeOut(ChatMotion.spec()) + shrinkVertically(ChatMotion.spec())) {
+                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(people.filter { it.ipkHex in selected }, key = { it.ipkHex }) { person ->
+                            Row(Modifier.animateItem().clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                                .clickable(enabled = enabled) { onClick(person) }
+                                .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(person.name, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+                                Icon(painterResource(R.drawable.i_close), "Deselect ${person.name}", Modifier.size(12.dp))
+                            }
+                        }
                     }
                 }
             }
-        }
-        // Keep the collapsing actions outside lazy scroll anchoring. A fling during
-        // their exit must not accumulate offsets against a shrinking first item.
-        header()
-        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = bottomPadding)) {
+
+            item {
+                header()
+            }
+
             if (visible.isEmpty()) item {
                 Text(if (query.isBlank()) emptyText else "No contacts found",
                     Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -79,13 +85,16 @@ fun ContactPicker(
                         .semantics { this.selected = person.ipkHex in selected }
                         .combinedClickable(enabled = enabled, role = if (selecting) Role.Checkbox else Role.Button,
                             onClick = { onClick(person) }, onLongClick = { onLongClick(person) })
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .padding(horizontal = 20.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     SelectableContactAvatar(person.name, selecting, person.ipkHex in selected)
-                    Text(person.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(person.name, style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        supportingText(person)
+                    }
                 }
             }
         }
@@ -101,7 +110,7 @@ private fun SelectableContactAvatar(name: String, selecting: Boolean, selected: 
         ChatMotion.spec(), label = "contact selection fill")
     Box(Modifier.size(48.dp)) {
         Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp) }
-        AnimatedVisibility(selecting, Modifier.align(Alignment.BottomEnd),
+        AnimatedVisibility(selected, Modifier.align(Alignment.BottomEnd),
             enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.4f),
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {
             Box(Modifier.size(20.dp).clip(CircleShape).background(fill).border(2.dp, colors.background, CircleShape),

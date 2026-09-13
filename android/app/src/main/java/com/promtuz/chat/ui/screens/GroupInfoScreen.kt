@@ -207,13 +207,12 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
                     Text("Couldn’t load contacts", Modifier.weight(1f), color = colors.error)
                     TextButton(onClick = actions.loadContacts) { Text("Retry") }
                 }
-                ContactPicker(addable, query, selected, true, !busy,
+                ContactPicker(Modifier.weight(1f), addable, query, selected, true, !busy,
                     onClick = {
                         val last = it.ipkHex in selected && selected.size == 1
                         selected = if (it.ipkHex in selected) selected - it.ipkHex else selected + it.ipkHex
                         if (last) { dismissRequested = true }
-                    },
-                    modifier = Modifier.weight(1f), emptyText = when { contactsLoading || contactsError -> ""; candidates.isEmpty() -> "Add contacts before inviting members"; else -> "All your contacts are already in this group" })
+                    }, emptyText = when { contactsLoading || contactsError -> ""; candidates.isEmpty() -> "Add contacts before inviting members"; else -> "All your contacts are already in this group" })
                 GroupWorkFeedback(work)
                 val picks = addable.filter { it.ipkHex in selected }
                 GroupActionButton(if (picks.size == 1) "Add 1 member" else "Add ${picks.size} members",

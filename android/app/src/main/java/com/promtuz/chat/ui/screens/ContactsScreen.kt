@@ -6,6 +6,7 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.animation.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.painterResource
+import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.stage.ChatMotion
@@ -14,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.promtuz.chat.presentation.viewmodel.*
@@ -34,8 +36,9 @@ fun ContactsScreen(
     val work by group.work.collectAsStateWithLifecycle()
     val opening by viewModel.busy.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+    val presence by viewModel.presence.collectAsStateWithLifecycle()
     ContactsContent(
-        ContactsState(loading, loadError, people, picked, title, work, opening, error),
+        ContactsState(loading, loadError, people, picked, title, work, opening, error, presence),
         ContactsActions(group::clearPicks, group::clearError, group::togglePick, group::loadContacts,
             viewModel::open, viewModel::clearError, viewModel::delete, group::create, group::setTitle),
         onScanned, onShareIdentity,
@@ -51,6 +54,7 @@ internal data class ContactsState(
     val work: GroupWork = GroupWork.Idle,
     val opening: Boolean = false,
     val error: String? = null,
+    val presence: Map<String, Presence> = emptyMap(),
 )
 
 internal data class ContactsActions(
@@ -68,6 +72,8 @@ internal data class ContactsActions(
 @Composable
 internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
     onScanned: (ByteArray) -> Unit, onShareIdentity: () -> Unit) = with(state) {
+    val direction = LocalLayoutDirection.current
+    val presenceNow = rememberPresenceTime()
     val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     // TODO: Reintroduce Contacts search with a dedicated UI and interaction design.
     var selecting by rememberSaveable { mutableStateOf(false) }
@@ -110,7 +116,12 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
             )
         }
     }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).imePadding()) {
+        Box(Modifier.fillMaxSize().padding(
+            start = padding.calculateLeftPadding(direction),
+            end = padding.calculateRightPadding(direction),
+            top = 0.dp,
+            bottom = 0.dp
+        )) {
             Column(Modifier.fillMaxSize()) {
                 if (opening || loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
@@ -118,10 +129,20 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                     Text("Couldn’t load contacts", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = actions.loadContacts) { Text("Retry") }
                 }
-                ContactPicker(people, "", picked, selecting, !busy,
+                ContactPicker(Modifier.weight(1f),
+                    people, "", picked, selecting, !busy,
                     onClick = { if (selecting) toggle(it) else actions.open(it) },
                     onLongClick = ::toggle,
-                    modifier = Modifier.weight(1f), bottomPadding = 88.dp, emptyText = if (loading || loadError) "" else "No contacts yet",
+                    yPadding = Pair(padding.calculateTopPadding() + 4.dp, 88.dp), emptyText = if (loading || loadError) "" else "No contacts yet",
+                    supportingText = { person ->
+                        val status = presence[person.ipkHex]
+                        presenceText(status, presenceNow)?.let { label ->
+                            Text(label, style = MaterialTheme.typography.bodySmall,
+                                color = if (status == Presence.Online) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        }
+                    },
                     header = {
                         AnimatedVisibility(!selecting,
                             enter = fadeIn(ChatMotion.spec()) + expandVertically(ChatMotion.spec()),
@@ -165,12 +186,4 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
         } },
         dismissButton = { TextButton(onClick = { deleting = null }, enabled = !busy) { Text("Cancel") } },
     ) }
-}
-
-/** Bracketed labels reserve icon slots for the user's artwork. */
-@Composable
-private fun ContactActionPlaceholder(label: String) {
-    Box(Modifier.width(48.dp).height(26.dp), contentAlignment = Alignment.Center) {
-        Text(label, style = MaterialTheme.typography.labelSmall)
-    }
 }
