@@ -231,8 +231,9 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = 
                 .clickable { VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime) },
             Alignment.Center,
         ) {
-            DrawableIcon(
-                if (playing) R.drawable.i_pause else R.drawable.i_play,
+            MorphIcon(
+                if (playing) MorphGlyph.Pause else MorphGlyph.Play,
+                if (playing) "Pause voice message" else "Play voice message",
                 Modifier.size(18.dp),
                 tint = textColor,
             )

@@ -1,11 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.animation.*
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.draw.clipToBounds
 import com.promtuz.chat.ui.constants.Tweens
 import androidx.compose.foundation.text.BasicTextField
@@ -49,25 +45,13 @@ fun ContactPickerHeader(
     LaunchedEffect(searching) {
         if (!searching) { keyboard?.hide(); focusManager.clearFocus() }
     }
-    val morph by animateFloatAsState(if (close || searching) 1f else 0f,
-        ChatMotion.spec(), label = "picker back morph")
     Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack, enabled = enabled) {
             val description = if (searching) "Close search" else if (close) "Clear selection" else "Back"
             val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
-            // Interpolate the existing back/close silhouettes with rounded strokes.
-            // The navigation button keeps the same bounds throughout the transition.
-            Canvas(Modifier.size(24.dp).semantics { contentDescription = description }) {
-                fun point(x: Float, y: Float) = Offset(x * size.width / 24f, y * size.height / 24f)
-                fun mix(a: Float, b: Float) = a + (b - a) * morph
-                val stroke = size.width / 12f
-                drawLine(tint, point(mix(5f, 6f), mix(12f, 6f)),
-                    point(mix(12f, 18f), mix(5f, 18f)), stroke, StrokeCap.Round)
-                drawLine(tint, point(mix(5f, 6f), mix(12f, 18f)),
-                    point(mix(12f, 18f), mix(19f, 6f)), stroke, StrokeCap.Round)
-                drawLine(tint.copy(alpha = tint.alpha * (1f - morph)), point(5f, 12f),
-                    point(mix(19f, 5f), 12f), stroke, StrokeCap.Round)
-            }
+            MorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
+                description, Modifier.size(24.dp), tint)
+
         }
         AnimatedContent(searching, Modifier.weight(1f), transitionSpec = {
             (fadeIn(ChatMotion.spec()) + slideInHorizontally(ChatMotion.spec()) { it / 8 }) togetherWith

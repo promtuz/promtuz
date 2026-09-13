@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.components
 
-import android.text.format.DateUtils
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,11 +14,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.animation.core.animateDpAsState
+import com.promtuz.chat.ui.stage.ChatMotion
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -29,6 +29,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -91,9 +93,23 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val searchQuery by chatVM.searchQuery.collectAsState()
     val searching = searchQuery != null
     BackHandler(searching) { chatVM.closeSearch() }
-    if (searching) {
-        SearchBar(chatVM, searchQuery.orEmpty(), haze)
-        return
+    val navigationMorph = rememberMorphIconState(if (searching) MorphGlyph.Close else MorphGlyph.ChevronLeft)
+    // Hoisted above the two toolbar modes so switching layouts retains the motion.
+    val navigationWidth by animateDpAsState(if (searching) 40.dp else 24.dp,
+        ChatMotion.spec(), label = "chat navigation width")
+    val navigationRadius by animateDpAsState(if (searching) 20.dp else 8.dp,
+        ChatMotion.spec(), label = "chat navigation corner")
+    val navigationIcon: @Composable () -> Unit = {
+        Box(
+            Modifier.padding(start = 6.dp).width(navigationWidth).height(40.dp)
+                .clip(RoundedCornerShape(navigationRadius))
+                .clickable {
+                    if (searching) chatVM.closeSearch() else backHandle?.onBackPressedDispatcher?.onBackPressed()
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            MorphIcon(navigationMorph, if (searching) "Close search" else "Back", Modifier.size(24.dp))
+        }
     }
 
     // The summaries come back empty on a transient FFI failure, which hides the
@@ -113,39 +129,21 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         }
     }
 
+    val presenceNow = rememberPresenceTime()
+
     // Subtitle cascade: live activity beats presence; silence renders nothing.
     // A group has no single presence, so it falls back to its member count.
     val (subtitle, subtitleColor) = when {
         typing && isGroup -> typingLine to chatTheme.accent
         typing -> "typing…" to chatTheme.accent
         isGroup -> memberTally(memberCount) to colors.onSurfaceVariant
-        presence == Presence.Online -> "online" to chatTheme.accent
-        presence is Presence.Idle -> {
-            val since = (presence as Presence.Idle).sinceMs
-            val rel = DateUtils.getRelativeTimeSpanString(
-                since,
-                System.currentTimeMillis(),
-                DateUtils.MINUTE_IN_MILLIS
-            )
-            "idle since $rel" to colors.onSurfaceVariant
-        }
-
-        presence is Presence.LastSeen -> {
-            val at = (presence as Presence.LastSeen).atMs
-            val rel = DateUtils.getRelativeTimeSpanString(
-                at,
-                System.currentTimeMillis(),
-                DateUtils.MINUTE_IN_MILLIS
-            )
-            "last seen $rel" to colors.onSurfaceVariant
-        }
-
-        else -> null to colors.onSurfaceVariant
+        else -> presenceText(presence, presenceNow) to
+            if (presence == Presence.Online) chatTheme.accent else colors.onSurfaceVariant
     }
 
     TopAppBar(
         title = {
-            Row(
+            if (searching) SearchField(chatVM, searchQuery.orEmpty()) else Row(
                 modifier = Modifier.clickable(enabled = isGroup) { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -162,25 +160,11 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 }
             }
         },
-        navigationIcon = {
-            Row(Modifier.fillMaxHeight()) {
-                Spacer(Modifier.width(6.dp))
-                DrawableIcon(
-                    R.drawable.i_back_chevron, Modifier
-                        .height(40.dp)
-                        .align(
-                            Alignment.CenterVertically
-                        )
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable {
-                            backHandle?.onBackPressedDispatcher?.onBackPressed()
-                        })
-            }
-        },
+        navigationIcon = navigationIcon,
         actions = {
-            AppDropMenu(
+            if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else AppDropMenu(
                 iconSize = 20.dp,
-                anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp)) },
+                anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
                     if (isGroup) {
                         add(
@@ -262,22 +246,12 @@ fun memberTally(n: Int): String = if (n == 1) "1 member" else "$n members"
  * "up" goes further back — the direction the thumb expects in a chat that
  * grows downward.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SearchBar(chatVM: ChatVM, query: String, haze: HazeState) {
+private fun SearchField(chatVM: ChatVM, query: String) {
     val colors = MaterialTheme.colorScheme
     val chatTheme = LocalChatColors.current
-    val hits by chatVM.hits.collectAsState()
-    val index by chatVM.hitIndex.collectAsState()
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
-    val count = when {
-        query.isBlank() -> ""
-        hits.isEmpty() -> "0"
-        else -> "${index + 1}/${hits.size}"
-    }
-    TopAppBar(
-        title = {
             BasicTextField(
                 value = query,
                 onValueChange = { chatVM.searchQuery.value = it },
@@ -286,7 +260,7 @@ private fun SearchBar(chatVM: ChatVM, query: String, haze: HazeState) {
                 cursorBrush = SolidColor(chatTheme.accent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { chatVM.nextHit() }),
-                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics { contentDescription = "Search messages" },
                 decorationBox = { inner ->
                     Box {
                         if (query.isEmpty()) Text(
@@ -298,17 +272,19 @@ private fun SearchBar(chatVM: ChatVM, query: String, haze: HazeState) {
                     }
                 },
             )
-        },
-        navigationIcon = {
-            Box(
-                Modifier.padding(start = 6.dp).size(40.dp).clip(CircleShape)
-                    .clickable { chatVM.closeSearch() },
-                contentAlignment = Alignment.Center,
-            ) {
-                DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-            }
-        },
-        actions = {
+}
+
+@Composable
+private fun SearchActions(chatVM: ChatVM, query: String) {
+    val colors = MaterialTheme.colorScheme
+    val hits by chatVM.hits.collectAsState()
+    val index by chatVM.hitIndex.collectAsState()
+    val count = when {
+        query.isBlank() -> ""
+        hits.isEmpty() -> "0"
+        else -> "${index + 1}/${hits.size}"
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 count,
                 style = MaterialTheme.typography.labelMedium,
@@ -335,10 +311,5 @@ private fun SearchBar(chatVM: ChatVM, query: String, haze: HazeState) {
                     tint = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.4f),
                 )
             }
-        },
-        modifier = Modifier
-            .freezeOnExit()
-            .hazeEffect(haze, chatBarHaze()),
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-    )
+    }
 }
