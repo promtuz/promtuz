@@ -9,6 +9,10 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.geometry.Size
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,11 +52,22 @@ object ChatMotion {
     fun <T> spec(): TweenSpec<T> = tween(DURATION_MS, easing = Easing)
 }
 
+/** Bubble geometry is recorded by the renderer; row spacing stays owned by the stage. */
+internal class StageBubbleMotion(val progress: () -> Float) {
+    var size = Size.Zero
+    var dotsPhase = 0f
+    var source by mutableStateOf<BubbleSnapshot?>(null)
+    var drawsMorph = false
+}
+
+internal data class BubbleSnapshot(val size: Size, val dotsPhase: Float, val opacity: Float)
+internal val LocalStageBubbleMotion = staticCompositionLocalOf<StageBubbleMotion?> { null }
+
 /**
  * Scroll + anchor state for [MessageStage]. [scroll] is px of history above the
  * newest edge (0 = pinned to the live bottom). While [pin]ned, scroll is derived
- * each frame so the pinned row's screen position is invariant — content changes
- * grow away from it instead of shifting it.
+ * each frame to preserve the row's position within the available scroll range.
+ * Composer growth can displace it; pinnedOffsetY lets the lifted copy follow.
  */
 @Stable
 class MessageStageState {
@@ -62,16 +77,23 @@ class MessageStageState {
 
     internal var maxScroll = 0f
     internal var innerViewport = 1f
-    internal var pinnedKey: Any? = null
+    internal var pinnedKey by mutableStateOf<Any?>(null)
+    internal var currentPush = 0
+    internal var pinnedPushAtStart = 0
     internal var pinnedBottom = 0f
+    /** Actual movement of the pinned row, including viewport clamping. */
+    var pinnedOffsetY by mutableFloatStateOf(0f)
+        internal set
     internal var stackOf: ((Any) -> Float?)? = null
 
     val isAtBottom: Boolean get() = pinnedKey == null && scroll < 2f
 
-    /** Freeze [key]'s bottom edge at [bottomPx] (stage-root px) until [unpin]. */
+    /** Hold [key] at [bottomPx] (stage-root px), subject to viewport limits, until [unpin]. */
     fun pin(key: Any, bottomPx: Float) {
-        pinnedKey = key
+        pinnedOffsetY = 0f
         pinnedBottom = bottomPx
+        pinnedPushAtStart = currentPush
+        pinnedKey = key
     }
 
     fun unpin() {
@@ -98,7 +120,11 @@ fun rememberMessageStageState(): MessageStageState = remember { MessageStageStat
 /** A row's live placement record; heights and enter/exit factors drive the walk. */
 private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
     /** 0→1 entering (room opens), 1→0 exiting (room closes). */
-    val factor = Animatable(initialFactor)
+    var factor = Animatable(initialFactor)
+    var sendTransition: SendTransition? = null
+    var launchDistance = 0f
+    var exitMorphPhase: Float? = null
+    val bubbleMotion = StageBubbleMotion { exitMorphPhase ?: factor.value }
     var measuredH = 0
     var exiting = false
 
@@ -118,7 +144,9 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
      * lambda skips recomposition entirely on unchanged passes.
      */
     val content: @Composable () -> Unit = {
-        rowState.value?.let { holder.render.value(it) }
+        CompositionLocalProvider(LocalStageBubbleMotion provides bubbleMotion) {
+            rowState.value?.let { holder.render.value(it) }
+        }
     }
 
     /**
@@ -128,31 +156,28 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
      */
     var enterFromPx = 0
     var exitBaseH = 0f
+    var exitTravel = 0f
 
     /** Fold pivot for enter/exit (the bubble's tail corner, per row type). */
     var origin = TransformOrigin(0.5f, 1f)
-
-    /**
-     * Reorder glide: when this row's stack position JUMPS (a frontier moving to a
-     * new watermark — not the continuous factor/resize tracking), the delta lands
-     * here and decays to 0 on the shared clock; drawn as a layer translation.
-     */
-    val glide = Animatable(0f)
-    var lastStack = Float.NaN
 
     fun effectiveHeight(): Float {
         val f = factor.value
         return if (exiting) exitBaseH * f else enterFromPx + (measuredH - enterFromPx) * f
     }
 
+    fun travel(): Float = when {
+        exiting -> exitTravel * factor.value
+        enterFromPx > 0 -> 0f
+        else -> launchDistance * (1f - factor.value)
+    }
+
+    /** Only the part above the live bottom edge displaces older rows. */
+    fun occupiedHeight(): Float = (effectiveHeight() - travel()).coerceAtLeast(0f)
+
     /** Key of the next-newer row at removal time — where the exit stays spliced. */
     var afterKey: Any? = null
 }
-
-/** Stack jumps larger than this are reorders (glided); smaller deltas are the
- * continuous factor/resize tracking. ponytail: heuristic ceiling — a very tall
- * row entering could near it; raise if a false glide ever shows. */
-private const val GLIDE_JUMP_PX = 140f
 
 /**
  * The chat's placement engine — a bottom-anchored, windowed, animated column that
@@ -163,7 +188,7 @@ private const val GLIDE_JUMP_PX = 140f
  *   [ChatMotion]; a row resizing mid-list (its content animates its own size)
  *   moves every neighbor in the same measure pass — sync is structural.
  * - **Exits are first-class**: removed rows stay composed, spliced where they
- *   were, and fold away (scaleY toward the bottom) before release.
+ *   were, and scale toward their bottom corner before release.
  * - **Anchor policy**: at the bottom, content growth is absorbed by the walk;
  *   near-bottom (< [followThreshold]) the view glides home; scrolled-up it
  *   holds; a [MessageStageState.pin]ned row never moves on screen.
@@ -198,6 +223,11 @@ fun <T : Any> MessageStage(
     morphFrom: (T) -> Any? = { null },
     /** Transient rows enter even when history is being painted for the first time. */
     animateOnInitialFill: (T) -> Boolean = { false },
+    /** An outgoing send can share the exact clock used to clear its composer. */
+    entranceClock: (T) -> SendTransition? = { null },
+    /** Distance below the composer at birth, captured once for each new row. */
+    enterFromBelow: (T) -> Float = { 0f },
+    horizontalPivotInset: Dp = 0.dp,
     /** Fold pivot per row (a bubble's tail corner); bottom-center default. */
     transformOrigin: (T) -> TransformOrigin = { TransformOrigin(0.5f, 1f) },
     /**
@@ -231,7 +261,7 @@ fun <T : Any> MessageStage(
 
     // Diff rows synchronously (before measure) so removals never blink out for a
     // frame; animations launch on the composition scope so they survive re-diffs.
-    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill) }
+    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill, entranceClock, enterFromBelow) }
 
     val scrollable = rememberScrollableState { delta ->
         if (state.pinnedKey != null) 0f
@@ -299,15 +329,9 @@ fun <T : Any> MessageStage(
         }
         holder.lastHoldPad = holdPad
 
-        // A pin freezes its row against the hold channel only. The menu lifting a
-        // bubble must not move it, but the action row displaces every row alike —
-        // and the menu's own exit outlives the pick that opened the composer, so
-        // the two overlap. Captured per pin, so one taken with a reply already
-        // staged starts from no displacement.
-        if (state.pinnedKey !== holder.lastPinnedKey) {
-            holder.lastPinnedKey = state.pinnedKey
-            holder.pinnedPush = pushPad
-        }
+        // Capture the baseline in pin(), not the first later measure: that measure
+        // may already contain the first frame of reply/edit growth.
+        state.currentPush = pushPad
         val childConstraints = Constraints(maxWidth = width)
 
         val display = holder.displayList
@@ -319,12 +343,14 @@ fun <T : Any> MessageStage(
         val provisionalScroll =
             if (state.pinnedKey != null) holder.lastScroll else state.scroll
 
-        val stacks = FloatArray(display.size)
-        val placeables = arrayOfNulls<Placeable>(display.size)
+        holder.reserve(display.size)
+        val stacks = holder.stacks
+        val placeables = holder.placeables
         var stack = 0f
         var pinnedStack = -1f
 
         for (i in display.indices) {
+            placeables[i] = null
             val item = display[i]
             val k = holder.keyOf(item)
             val e = entities.getOrPut(k) { Entity(k, 1f, holder).also { it.rowState.value = item } }
@@ -340,34 +366,32 @@ fun <T : Any> MessageStage(
                 e.measuredH = p.height
                 placeables[i] = p
             }
-            if (e.pendingEnter) {
+            if (e.pendingEnter && (inBand || e.sendTransition == null)) {
                 e.pendingEnter = false
                 e.motion?.cancel()
-                e.motion = holder.scope?.launch {
+                if (e.sendTransition?.measured() == false) {
+                    // The composer fallback already ran while this row was absent.
+                    // Its late arrival still gets a complete, independent entrance.
+                    e.sendTransition = null
+                    e.factor = Animatable(0f)
+                }
+                if (e.sendTransition == null) e.motion = holder.scope?.launch {
                     if (inBand) e.factor.animateTo(1f, ChatMotion.spec())
                     else e.factor.snapTo(1f)
                 }
             }
 
+            if (!e.exiting && e.factor.value >= 1f && e.bubbleMotion.source != null) {
+                // A completed handoff is an ordinary message from here on. A later
+                // deletion must not run the morph backward and bring dots back.
+                e.bubbleMotion.source = null
+                e.bubbleMotion.drawsMorph = false
+                e.enterFromPx = 0
+            }
             stacks[i] = stack
             if (k == state.pinnedKey) pinnedStack = stack
 
-            // A discontinuous stack jump on a settled, measured row = a reorder
-            // (frontier moving to its new watermark): glide from the old spot
-            // instead of snapping. Continuous factor/resize tracking stays exempt.
-            if (!e.lastStack.isNaN() && !e.exiting && e.measuredH > 0 && e.factor.value >= 1f) {
-                val jump = e.lastStack - stack
-                if (kotlin.math.abs(jump) > GLIDE_JUMP_PX) {
-                    val carried = jump + e.glide.value
-                    holder.scope?.launch {
-                        e.glide.snapTo(carried)
-                        e.glide.animateTo(0f, ChatMotion.spec())
-                    }
-                }
-            }
-            e.lastStack = stack
-
-            stack += if (e.measuredH > 0) e.effectiveHeight()
+            stack += if (e.measuredH > 0) e.occupiedHeight()
             else ESTIMATED_ROW_PX * e.factor.value
         }
 
@@ -379,10 +403,15 @@ fun <T : Any> MessageStage(
         // would self-invalidate every pass.
         val scroll = if (state.pinnedKey != null && pinnedStack >= 0f) {
             val derived =
-                state.pinnedBottom - (pushPad - holder.pinnedPush) - anchorY + pinnedStack
-            state.scroll = derived
-            holder.lastScroll = derived
-            derived
+                state.pinnedBottom - (pushPad - state.pinnedPushAtStart) - anchorY + pinnedStack
+            // A frozen position outside the scroll range cannot survive unpinning.
+            // Apply that limit now so composer/IME growth moves the lifted copy
+            // continuously, rather than jumping when the menu releases the row.
+            val clamped = derived.coerceIn(0f, state.maxScroll)
+            state.pinnedOffsetY = anchorY + clamped - pinnedStack - state.pinnedBottom
+            state.scroll = clamped
+            holder.lastScroll = clamped
+            clamped
         } else {
             val clamped = state.scroll.coerceIn(0f, state.maxScroll)
             if (clamped != state.scroll) state.scroll = clamped
@@ -393,6 +422,7 @@ fun <T : Any> MessageStage(
         // scroll > 0 keeps a bottom-pinned (or short) chat from paging on open.
         if (scroll > 0f && state.maxScroll - scroll < state.innerViewport * 1.5f) onNearTop()
 
+        val pivotInset = horizontalPivotInset.toPx()
         layout(width, height) {
             for (i in display.indices) {
                 val p = placeables[i] ?: continue
@@ -401,16 +431,22 @@ fun <T : Any> MessageStage(
                 val top = bottom - e.measuredH
                 if (bottom < -buffer || top > height + buffer) continue
                 p.placeWithLayer(0, top.roundToInt()) {
-                    // Reorder glide rides the layer, not the layout — animation
-                    // frames re-draw without re-measuring.
-                    translationY = -e.glide.value
                     val f = e.factor.value
-                    // Assign settled values too: a reused layer must not retain
-                    // the scale or alpha from its final animated frame.
-                    scaleY = (e.effectiveHeight() / e.measuredH.coerceAtLeast(1)).coerceIn(0f, 1f)
-                    scaleX = 0.92f + 0.08f * f
-                    alpha = if (e.enterFromPx > 0) 0.5f + 0.5f * f else f
-                    this.transformOrigin = e.origin
+                    val morph = e.bubbleMotion.drawsMorph && e.bubbleMotion.source != null
+                    val morphExitScale = if (e.exiting)
+                        (f / (e.exitMorphPhase ?: 1f).coerceAtLeast(0.0001f)).coerceIn(0f, 1f) else 1f
+                    val scale = if (morph) morphExitScale else
+                        (e.effectiveHeight() / e.measuredH.coerceAtLeast(1)).coerceIn(0f, 1f)
+                    // Position the transformed bounds explicitly. A full-width row's
+                    // right edge is not the bubble's right edge, and moving composer
+                    // insets must not turn a bottom pivot into a top-pivot illusion.
+                    val pivotX = pivotInset + (width - 2f * pivotInset) * e.origin.pivotFractionX
+                    translationX = pivotX * (1f - scale)
+                    translationY = e.measuredH * (1f - scale) + e.travel()
+                    scaleX = scale
+                    scaleY = scale
+                    alpha = if (morph) morphExitScale else if (e.enterFromPx > 0) 1f else f
+                    this.transformOrigin = TransformOrigin(0f, 0f)
                 }
             }
         }
@@ -435,15 +471,24 @@ private class StageHolder {
     val entities = HashMap<Any, Entity>()
     val exiting = mutableStateListOf<Entity>()
     val render = mutableStateOf<@Composable (Any) -> Unit>({})
+    var stacks = FloatArray(0)
+        private set
+    var placeables = arrayOfNulls<Placeable>(0)
+        private set
+
+    fun reserve(count: Int) {
+        if (stacks.size < count) {
+            stacks = FloatArray(maxOf(count, stacks.size * 2, 16))
+            placeables = arrayOfNulls(stacks.size)
+        }
+    }
+
     var lastScroll = 0f
     var lastWidthPx = 0
 
     /** Last frame's hold-share of the bottom inset; -1 until the first pass. */
     var lastHoldPad = -1
 
-    /** Push-share when the live pin was taken — the pinned row's displacement zero. */
-    var pinnedPush = 0
-    var lastPinnedKey: Any? = null
     var scope: CoroutineScope? = null
     private val warm = HashMap<Any, SubcomposeLayoutState.PrecomposedSlotHandle>()
     private var lastKeys: List<Any>? = null
@@ -454,16 +499,15 @@ private class StageHolder {
     private var rows by mutableStateOf<List<Any>>(emptyList())
     private var rawKey: ((Any) -> Any)? = null
 
-    val displayList: List<Any>
-        get() {
-            if (exiting.isEmpty()) return rows
+    val displayList: List<Any> by derivedStateOf {
+            if (exiting.isEmpty()) return@derivedStateOf rows
             val out = ArrayList<Any>(rows.size + exiting.size)
             out.addAll(rows)
             for (e in exiting) {
                 val at = e.afterKey?.let { ak -> out.indexOfFirst { keyOf(it) == ak } } ?: -1
                 out.add(if (at == -1) 0 else at + 1, e)
             }
-            return out
+            out
         }
 
     fun keyOf(item: Any): Any = if (item is Entity) item.key else rawKey!!(item)
@@ -501,7 +545,7 @@ private class StageHolder {
             val k = keyOf(item)
             val e = entities[k]
             if (k == key) return stack
-            stack += if (e == null || e.measuredH == 0) ESTIMATED_ROW_PX.toFloat() else e.effectiveHeight()
+            stack += if (e == null || e.measuredH == 0) ESTIMATED_ROW_PX.toFloat() else e.occupiedHeight()
         }
         return null
     }
@@ -515,6 +559,8 @@ private class StageHolder {
         morphFrom: (T) -> Any?,
         transformOrigin: (T) -> TransformOrigin,
         animateOnInitialFill: (T) -> Boolean,
+        entranceClock: (T) -> SendTransition?,
+        enterFromBelow: (T) -> Float,
     ) {
         rawKey = key as (Any) -> Any
         rows = newRows
@@ -526,11 +572,19 @@ private class StageHolder {
         // Morphs claim their source before removals run: the source vanishes with
         // no exit (its room is inherited by the entering row).
         val morphSources = HashMap<Any, Int>()
+        val bubbleSources = HashMap<Any, BubbleSnapshot>()
+        val claims = HashMap<Any, Any>()
         for (r in newRows) {
             val src = morphFrom(r) ?: continue
             if (key(r) in entities || src in keySet) continue
             val e = entities[src] ?: continue
+            if (src in morphSources) continue // One incoming row can claim a typing surface.
+            claims[key(r)] = src
             morphSources[src] = e.effectiveHeight().roundToInt()
+            val scale = e.factor.value
+            if (e.bubbleMotion.size != Size.Zero) {
+                bubbleSources[src] = BubbleSnapshot(e.bubbleMotion.size * scale, e.bubbleMotion.dotsPhase, scale)
+            }
         }
 
         for (src in morphSources.keys) {
@@ -550,7 +604,15 @@ private class StageHolder {
                 if (e.exiting) continue
                 e.motion?.cancel()
                 e.pendingEnter = false
+                // Exit owns a fresh clock. Reversing the send clock would also
+                // expand the composer again and resurrect its captured text.
+                if (e.sendTransition != null) {
+                    e.factor = Animatable(e.factor.value)
+                    e.sendTransition = null
+                }
+                if (e.bubbleMotion.drawsMorph && e.bubbleMotion.source != null) e.exitMorphPhase = e.factor.value
                 e.exitBaseH = if (e.factor.value > 0f) e.effectiveHeight() / e.factor.value else 0f
+                e.exitTravel = if (e.factor.value > 0f) e.travel() / e.factor.value else 0f
                 e.exiting = true
                 e.afterKey = prev.getOrNull(idx - 1)?.takeIf { it in keySet }
                 exiting.add(e)
@@ -572,8 +634,15 @@ private class StageHolder {
             if (e == null) {
                 val animate = !initialFill || animateOnInitialFill(r) || morphFrom(r) in morphSources
                 e = Entity(k, if (animate) 0f else 1f, this)
-                e.pendingEnter = animate
-                e.enterFromPx = morphFrom(r)?.let { morphSources[it] } ?: 0
+                val sharedClock = entranceClock(r)
+                if (sharedClock != null) {
+                    e.factor = sharedClock.progress
+                    e.sendTransition = sharedClock
+                }
+                e.launchDistance = enterFromBelow(r).coerceAtLeast(0f)
+                e.pendingEnter = animate || sharedClock != null
+                e.enterFromPx = claims[k]?.let { morphSources[it] } ?: 0
+                e.bubbleMotion.source = claims[k]?.let { bubbleSources[it] }
                 entities[k] = e
             } else if (e.exiting) {
                 // Key came back mid-exit (flappy signal): re-enter from where it is.
@@ -581,7 +650,9 @@ private class StageHolder {
                 val f = e.factor.value
                 if (f < 1f) e.enterFromPx = ((e.effectiveHeight() - e.measuredH * f) / (1f - f))
                     .coerceAtLeast(0f).roundToInt()
+                if (f < 1f) e.launchDistance = e.travel() / (1f - f)
                 e.exiting = false
+                e.exitMorphPhase = null
                 exiting.remove(e)
                 e.motion = scope.launch { e.factor.animateTo(1f, ChatMotion.spec()) }
             }

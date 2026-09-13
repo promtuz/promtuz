@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -66,12 +67,17 @@ class ChatBottomBarTest {
         }
     }
 
+    @OptIn(ExperimentalLayoutApi::class)
     @Test fun keyboardAndAttachmentPanelReserveTheirActualHeight() {
         val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as Application
         lateinit var vm: ChatVM
         val metrics = ComposerMetrics()
+        var imeBottom = 0
+        var imeVisible = false
         compose.runOnUiThread { vm = ChatVM(application, GlobalContext.get().get<AppVM>()) }
         compose.setContent {
+            imeVisible = WindowInsets.isImeVisible
+            imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
             PromtuzTheme(darkTheme = true) {
                 Scaffold(bottomBar = {
                     Box(Modifier.testTag("bar")) { ChatBottomBar(vm, remember { HazeState() }, metrics) }
@@ -84,14 +90,76 @@ class ChatBottomBarTest {
             compose.onNodeWithContentDescription("Message input").assertIsDisplayed()
         }
         compose.onNodeWithContentDescription("Message input").performClick()
+        compose.waitUntil(5000) { imeVisible }
+        val keyboardHeight = imeBottom
+        verify()
+        compose.runOnUiThread { vm.composerBusy.value = true }
         compose.waitForIdle()
+        compose.onNodeWithContentDescription("Message input").assertIsFocused()
+        assertTrue("Sending must retain IME", imeVisible)
+        compose.runOnUiThread { vm.composerBusy.value = false }
+        compose.onNode(hasContentDescription("Attach media") and isEnabled()).performClick()
+        compose.waitUntil(5000) { !imeVisible }
         verify()
         compose.onNode(hasContentDescription("Attach media") and isEnabled()).performClick()
-        compose.waitForIdle()
+        compose.waitUntil(5000) { imeVisible && imeBottom >= keyboardHeight }
+        compose.onNodeWithContentDescription("Message input").assertIsFocused()
         verify()
+        compose.onNode(hasContentDescription("Attach media") and isEnabled()).performClick()
+        compose.waitUntil(5000) { !imeVisible }
         compose.onNodeWithContentDescription("Message input").performClick()
         compose.waitForIdle()
         verify()
+    }
+
+    @OptIn(ExperimentalLayoutApi::class)
+    @Test fun editFromLiftedMenuWithKeyboardOpenKeepsComposerSlotsSeparate() {
+        val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as Application
+        lateinit var vm: ChatVM
+        var imeVisible = false
+        var imeHeight = 0
+        val msg = UiMessage("target", "target", "11".repeat(16), MessageContent.Text("dfgsdfgsdfg"),
+            true, status = SendStatus.Sent, edited = false, deleted = false, timestampMs = 0, reactions = emptyList())
+        compose.runOnUiThread {
+            vm = ChatVM(application, GlobalContext.get().get<AppVM>())
+            // Seed presentation state only. No database writes or live peer traffic.
+            val field = ChatVM::class.java.getDeclaredField("_messages").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val messages = field.get(vm) as kotlinx.coroutines.flow.MutableStateFlow<List<UiMessage>>
+            messages.value = listOf(
+                msg.copy(key = "newest", dispatchIdHex = "22".repeat(16), content = MessageContent.Text("hkjh"), timestampMs = 120_000),
+                msg,
+                msg.copy(key = "older", dispatchIdHex = "33".repeat(16), outgoing = false, content = MessageContent.Text("hggv")),
+            )
+        }
+        compose.setContent {
+            imeVisible = WindowInsets.isImeVisible
+            imeHeight = WindowInsets.ime.getBottom(LocalDensity.current)
+            PromtuzTheme(darkTheme = true) {
+                com.promtuz.chat.ui.screens.ChatScreen("Reproduction", vm)
+            }
+        }
+        compose.onNodeWithContentDescription("Message input").performClick()
+        compose.waitUntil(5000) { imeVisible }
+        compose.waitForIdle()
+        assertTrue("Reproduction requires a docked keyboard, not a zero-inset floating IME", imeHeight > 0)
+        compose.onNodeWithText("dfgsdfgsdfg").performTouchInput { longClick() }
+        compose.onNodeWithText("Edit").assertIsDisplayed()
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithText("Edit").performClick()
+        repeat(18) { frame ->
+            compose.mainClock.advanceTimeBy(32)
+            if (frame == 3 || frame == 17) {
+                java.io.File(application.cacheDir, "composer-ime-edit-$frame.png").outputStream().use {
+                    compose.onRoot().captureToImage().asAndroidBitmap()
+                        .compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+        }
+        val field = compose.onNodeWithContentDescription("Message input").fetchSemanticsNode().boundsInRoot
+        val hint = compose.onNodeWithText("Tap to add media").fetchSemanticsNode().boundsInRoot
+        assertTrue("Edit header overlaps input with IME open: $hint / $field", hint.bottom <= field.top + 1)
+        assertTrue("Editing should retain the IME", imeVisible)
     }
 
     @Test fun interruptedReplyEditAndHeightTransitions() {

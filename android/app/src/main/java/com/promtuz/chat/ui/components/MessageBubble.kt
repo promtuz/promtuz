@@ -32,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -108,7 +109,7 @@ private const val MetaHaloSpreadY = 3.4f
  * for a not-yet-sent message — is pinned to the bubble's bottom-end corner; the
  * bubble widens to seat it beside the text's last line, or gives it a compact row
  * of its own when that line has no room.
- * No per-message ticks: delivery state rides the frontier markers.
+ * Delivery ticks will be added separately; the timestamp stays in the meta corner.
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
  * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
@@ -247,12 +248,13 @@ fun MessageBubble(
                 MetaRow(msg, textColor, metaOnMedia, pill = if (bare) bubbleColor else null)
             },
             modifier = Modifier
+                .typingMorphSurface(shape, bubbleColor, textColor, enabled = !bare)
                 // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
                 // the .clip below. Both clip to the node's rectangular bounds, which would
                 // shear off the tail flicking past the body edge. As a plain draw modifier
                 // here, background paints the whole outline (tail included) into the parent
                 // Box (which never clips); .clip still bounds the child content below.
-                .then(if (bare) Modifier else Modifier.background(bubbleColor, shape))
+
                 // edit/delete/reactions change the bubble's size in place — glide from the
                 // tail corner on the shared clock so neighbors (stage) track frame-locked
                 .animateContentSize(
@@ -537,6 +539,17 @@ private fun MetaRow(
             modifier = Modifier.padding(end = 4.dp),
         )
         Box(Modifier.fadeOnChange(state), contentAlignment = Alignment.CenterEnd) {
+            // Reserve the actual timestamp footprint from the first frame. Otherwise
+            // replacing the small spinner starts a separate width animation after
+            // the entrance, and can even move metadata onto another line.
+            Text(
+                BubbleTextLayouts.clock(msg.timestampMs),
+                style = metaStyle,
+                color = metaColor,
+                modifier = if (state == MetaState.Sent) Modifier else Modifier
+                    .graphicsLayer { alpha = 0f }
+                    .clearAndSetSemantics {},
+            )
             when (state) {
                 MetaState.Pending ->
                     CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
@@ -545,8 +558,7 @@ private fun MetaRow(
                         .size(9.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.error))
-                MetaState.Sent ->
-                    Text(BubbleTextLayouts.clock(msg.timestampMs), style = metaStyle, color = metaColor)
+                MetaState.Sent -> Unit
             }
         }
         }

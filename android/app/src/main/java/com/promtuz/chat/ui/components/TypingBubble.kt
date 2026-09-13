@@ -19,6 +19,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.geometry.Size
+import com.promtuz.chat.ui.stage.LocalStageBubbleMotion
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
@@ -32,6 +35,7 @@ import kotlin.math.sin
  */
 @Composable
 fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
+    val motion = LocalStageBubbleMotion.current
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
     val shape = rememberBubbleShape(
@@ -50,6 +54,11 @@ fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
         Row(
             Modifier
                 .align(Alignment.CenterStart)
+                .layout { measurable, constraints ->
+                    val p = measurable.measure(constraints)
+                    motion?.size = Size(p.width.toFloat(), p.height.toFloat())
+                    layout(p.width, p.height) { p.place(0, 0) }
+                }
                 // The tail extends outside the body. Paint it before clipping the dots.
                 .background(chat.incomingBubble, shape)
                 .clip(shape)
@@ -61,6 +70,7 @@ fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
                     Modifier
                         .size(7.dp)
                         .graphicsLayer {
+                            motion?.dotsPhase = phase
                             val t = sin(2f * PI.toFloat() * (phase - i * 0.15f))
                             alpha = 0.35f + 0.4f * (t * 0.5f + 0.5f)
                             val s = 0.8f + 0.2f * (t * 0.5f + 0.5f)

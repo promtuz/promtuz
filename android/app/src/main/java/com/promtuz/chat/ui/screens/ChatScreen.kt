@@ -8,9 +8,6 @@ import java.net.URLConnection
 import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -57,7 +54,6 @@ import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.ComposerMetrics
 import com.promtuz.chat.ui.components.rememberComposerMetrics
-import com.promtuz.chat.ui.components.DashedHorizontalDivider
 import com.promtuz.chat.ui.components.NotificationPrimer
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.MenuAnchor
@@ -80,7 +76,6 @@ import kotlinx.coroutines.launch
 
 private sealed interface ChatRow {
     data class Msg(val msg: UiMessage, val mergedTop: Boolean, val mergedBottom: Boolean) : ChatRow
-    data class Frontier(val label: String) : ChatRow
     /** A membership or title change — a centred line, not a bubble. */
     data class System(val msg: UiMessage) : ChatRow
     data class Typing(val mergedTop: Boolean) : ChatRow
@@ -108,8 +103,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         onPauseOrDispose { viewModel.setChatForeground(false) }
     }
     val messages by viewModel.messages.collectAsState()
-    val typing by viewModel.typing.collectAsState()
-    val typingMembers by viewModel.typingMembers.collectAsState()
+    val typingMembers by viewModel.typingBubbleMembers.collectAsState()
+    val typing = typingMembers.isNotEmpty()
     val isGroup by viewModel.isGroup.collectAsState()
     // A group can be renamed while it's open, and the route's name is a
     // snapshot from when it was pushed. A 1:1 has no title of its own, so it
@@ -144,6 +139,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     }
     val stage = rememberMessageStageState()
     val metrics = rememberComposerMetrics()
+    val sentRevision by viewModel.sentRevision.collectAsState()
 
     // Own sends always land us at the bottom; incoming near the bottom is the
     // stage's built-in follow, and scrolled-up reading holds.
@@ -225,8 +221,17 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 modifier = Modifier.fillMaxSize(),
                 // The incoming message that ended a live typing signal inherits the
                 // typing bubble: same spot, its height, dots out / text in.
-                animateOnInitialFill = { it is ChatRow.Typing },
+                animateOnInitialFill = { it is ChatRow.Typing ||
+                    (it is ChatRow.Msg && (it.msg.key == handoff ||
+                        (it.msg.outgoing && (it.msg.status == SendStatus.Pending || sentRevision > 0)))) },
                 morphFrom = { r -> if (r is ChatRow.Msg && r.msg.key == handoff) "typing" else null },
+                entranceClock = { r ->
+                    if (r is ChatRow.Msg && r.msg.outgoing) {
+                        metrics.sendTransition?.claim()
+                    } else null
+                },
+                enterFromBelow = { r -> if (r is ChatRow.Msg) metrics.composerPx.toFloat() else 0f },
+                horizontalPivotInset = 12.dp,
                 transformOrigin = { r ->
                     when (r) {
                         is ChatRow.Msg -> TransformOrigin(if (r.msg.outgoing) 1f else 0f, 1f)
@@ -238,7 +243,10 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             ) { chatRow ->
                 when (chatRow) {
                     is ChatRow.Msg -> {
-                        val gapAbove = if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp
+                        val gapAbove by androidx.compose.animation.core.animateDpAsState(
+                            if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
+                            com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "message group gap",
+                        )
                         val highlight by animateColorAsState(
                             if (highlightKey == chatRow.msg.key)
                                 MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
@@ -251,7 +259,6 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                 onReply = { viewModel.beginReply(chatRow.msg) },
                                 Modifier
                                     .padding(top = gapAbove)
-                                    .sendEnter(chatRow.msg)
                                     // the context menu re-draws this row lifted; hide the original
                                     .graphicsLayer { alpha = if (menu.anchor?.msg?.key == chatRow.msg.key) 0f else 1f },
                             ) {
@@ -284,7 +291,6 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                             }
                         }
                     }
-                    is ChatRow.Frontier -> FrontierMarker(chatRow.label)
                     is ChatRow.System -> SystemRow(
                         chatRow.msg.content as MessageContent.System,
                         Modifier.padding(top = layout.groupGap.dp),
@@ -314,9 +320,12 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         }
 
         menu.anchor?.let { anchor ->
+            // Follow the actual row, including viewport limits when editing a
+            // multiline message grows the field as well as the action area.
             MessageContextMenu(
                 state = menu,
                 quickReactions = QuickReactions,
+                anchorOffsetY = { stage.pinnedOffsetY },
                 actionGroups = menuActionsFor(anchor.msg, viewModel, onDelete = { confirmDelete = it }) { menu.close() },
                 onReact = { viewModel.toggleReaction(anchor.msg, it); menu.close() },
             )
@@ -392,29 +401,6 @@ private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss
 }
 
 /**
- * A subtle right-aligned frontier line — "everything above is [label]". Deliberately short and
- * right-of-column so it never reads as a (centered) day separator. Delivery state shows here once
- * per tier, not per bubble (receipts are a high-water-mark).
- */
-@Composable
-private fun FrontierMarker(label: String, modifier: Modifier = Modifier) {
-    val marker = LocalChatColors.current.marker
-    Row(
-        modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.End,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        DashedHorizontalDivider(Modifier.weight(1f), color = marker.copy(alpha = 0.25f))
-        Text(
-            label.uppercase(),
-            style = MaterialTheme.typography.labelSmall,
-            color = marker.copy(alpha = 0.5f),
-            modifier = Modifier.padding(start = 6.dp),
-        )
-    }
-}
-
-/**
  * A membership or title change: centred, quiet, and deliberately not a bubble —
  * nobody said it *to* anyone, so it carries no author, no tail and no actions.
  */
@@ -436,64 +422,23 @@ private fun SystemRow(content: MessageContent.System, modifier: Modifier = Modif
 
 private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.Msg -> row.msg.key
-    is ChatRow.Frontier -> "frontier:${row.label}"
     is ChatRow.System -> row.msg.key
     is ChatRow.Typing -> "typing"
 }
 
-/**
- * Own-send entrance: the freshly sent bubble rises from the composer while the
- * stage opens room for it. Runs only for rows first composed while Pending, so
- * scroll-back never replays it.
- */
-@Composable
-private fun Modifier.sendEnter(msg: UiMessage): Modifier {
-    val fresh = remember(msg.key) { msg.outgoing && msg.status == SendStatus.Pending }
-    if (!fresh) return this
-    val progress = remember(msg.key) { Animatable(0f) }
-    LaunchedEffect(msg.key) {
-        progress.animateTo(1f, spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow))
-    }
-    return graphicsLayer {
-        translationY = (1f - progress.value) * 46.dp.toPx()
-        alpha = 0.4f + 0.6f * progress.value
-    }
-}
-
-/**
- * Interleave message rows (with group merge flags) and status-frontier markers. A frontier answers
- * the one question the chat itself can't: "did it reach them / did they see it, given they haven't
- * responded?" — so it only shows when NOTHING incoming is newer than the tier's newest outgoing
- * message (their reply/receipt-by-response makes the marker redundant), and Sent has no marker at
- * all (pending already wears a spinner; everything else on screen is at least sent). A live typing
- * signal appends a [ChatRow.Typing] at the bottom (index 0). A frontier line between two messages
- * severs their merge group: the marker itself is the visual break.
- */
+/** Newest-first messages with contiguous sender grouping and an optional typing row. */
 private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing: Boolean,
     typingMembers: Set<String>, isGroup: Boolean, nowMs: Long): List<ChatRow> {
-    val newestIncoming = messages.indexOfFirst { !it.outgoing }
-    fun frontier(status: SendStatus): Int {
-        val i = messages.indexOfFirst { it.outgoing && it.status == status }
-        return if (i != -1 && (newestIncoming == -1 || i < newestIncoming)) i else -1
-    }
-    val seen = frontier(SendStatus.Read)
-    val delivered = frontier(SendStatus.Delivered)
-
-    val rows = ArrayList<ChatRow>(messages.size + 3)
+    val rows = ArrayList<ChatRow>(messages.size + 1)
     val joinsTyping = typing && typingJoinsMessage(messages.firstOrNull(), typingMembers, isGroup, nowMs, mergeWindowMs)
     if (typing) rows.add(ChatRow.Typing(joinsTyping))
-    fun frontierBetween(older: Int) = older == seen || older == delivered
     for (i in messages.indices) {
-        when (i) {
-            seen -> rows.add(ChatRow.Frontier("Seen"))
-            delivered -> rows.add(ChatRow.Frontier("Delivered"))
-        }
         val m = messages[i]
         val older = messages.getOrNull(i + 1)
         val newer = messages.getOrNull(i - 1)
-        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs) && !frontierBetween(i + 1)
+        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs)
         val mergedBottom = (i == 0 && joinsTyping) ||
-            (newer != null && sameGroup(m, newer, mergeWindowMs) && !frontierBetween(i))
+            (newer != null && sameGroup(m, newer, mergeWindowMs))
         rows.add(
             if (m.content is MessageContent.System) ChatRow.System(m)
             else ChatRow.Msg(m, mergedTop, mergedBottom)

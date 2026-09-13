@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -98,6 +99,7 @@ fun AttachPanel(
     // keyboard moves — so the region never averages two curves.
     val presence = remember { Animatable(0f) }
     val imeLive = rememberUpdatedState(ime)
+    val imeVisible = rememberUpdatedState(WindowInsets.isImeVisible)
     val hide = rememberUpdatedState(onHideKeyboard)
     LaunchedEffect(open, closingToKeyboard) {
         if (open) {
@@ -105,7 +107,9 @@ fun AttachPanel(
                 presence.snapTo(1f)   // present FIRST so panelH holds the region,
                 hide.value()          // THEN hide the keyboard — its exit uncovers the sheet
             } else {
-                presence.animateTo(1f, tween(240))  // no keyboard: slide up
+                // Floating/handwriting keyboards can be visible with zero inset.
+                hide.value()
+                presence.animateTo(1f, tween(240))
             }
         } else if (closingToKeyboard) {
             // Hold the sheet until the keyboard is FULLY up (live ime has reached its
@@ -113,10 +117,11 @@ fun AttachPanel(
             // below where the keyboard now is — that's the end-of-close jump. Timeout
             // guards a keyboard that never actually shows.
             withTimeoutOrNull(600) {
-                snapshotFlow { imeLive.value to imeTargetState.value }
-                    .first { (live, target) -> target > kbdUp && live >= target }
+                snapshotFlow { Triple(imeVisible.value, imeLive.value, imeTargetState.value) }
+                    .first { (visible, live, target) -> visible && (target <= kbdUp || live >= target) }
             }
-            presence.snapTo(0f)
+            if (imeTargetState.value > kbdUp) presence.snapTo(0f)
+            else presence.animateTo(0f, tween(240))
         } else {
             presence.animateTo(0f, tween(240))       // no keyboard: slide down
         }

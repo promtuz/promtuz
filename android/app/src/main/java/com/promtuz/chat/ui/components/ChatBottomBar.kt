@@ -9,6 +9,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -19,6 +20,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -93,6 +100,7 @@ private val SlotGap = 8.dp
  * lines) and the accent send circle. The pill owns the clip, background and blur —
  * a staged action grows this surface rather than stacking a second one above it.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatBottomBar(
     viewModel: ChatVM, haze: HazeState, metrics: ComposerMetrics,
@@ -112,6 +120,25 @@ fun ChatBottomBar(
     // until it covers) vs back/paperclip (no keyboard — slide down). AttachPanel reads it.
     var closingToKeyboard by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val fieldFocus = remember { FocusRequester() }
+    val imeVisible = WindowInsets.isImeVisible
+    var restoreKeyboard by remember { mutableStateOf(false) }
+    val openAttachments = {
+        restoreKeyboard = imeVisible
+        closingToKeyboard = false
+        attachOpen = true
+    }
+    val toggleAttachments = {
+        if (attachOpen) {
+            closingToKeyboard = restoreKeyboard
+            attachOpen = false
+            if (restoreKeyboard) {
+                fieldFocus.requestFocus()
+                keyboard?.show()
+            }
+        } else openAttachments()
+    }
 
     // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
@@ -196,7 +223,7 @@ fun ChatBottomBar(
                             // Editing can't reach the body's media from the field, so
                             // the block's line opens the picker — narrowed to whatever
                             // the target may legally become.
-                            onAddMedia = { if (!busy && action != null) attachOpen = true },
+                            onAddMedia = { if (!busy && action != null) openAttachments() },
                             onJumpTo = { if (action != null) onJumpTo(it) },
                         )
                     }
@@ -209,7 +236,6 @@ fun ChatBottomBar(
                 AnimatedContent(
                     targetState = recording != null,
                     transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
-                    modifier = Modifier.animateContentSize(ChatMotion.spec(), alignment = Alignment.BottomStart),
                     label = "composerOrRecorder",
                 ) { isRecording ->
                     if (isRecording) RecordingRow(
@@ -219,14 +245,9 @@ fun ChatBottomBar(
                     ) else ComposerRow(
                         viewModel, input, action,
                         attachOpen = attachOpen,
-                        onToggleAttach = {
-                            if (attachOpen) {
-                                closingToKeyboard = false // paperclip close → no keyboard, slide down
-                                attachOpen = false
-                            } else {
-                                attachOpen = true // AttachPanel hides the keyboard once it's present (order matters)
-                            }
-                        },
+                        metrics = metrics,
+                        fieldFocus = fieldFocus,
+                        onToggleAttach = toggleAttachments,
                         onFieldFocused = {
                             if (attachOpen) { closingToKeyboard = true; attachOpen = false } // keyboard taking over
                         },
@@ -455,6 +476,8 @@ private fun ComposerRow(
     input: String,
     action: ComposerAction?,
     attachOpen: Boolean,
+    metrics: ComposerMetrics,
+    fieldFocus: FocusRequester,
     onToggleAttach: () -> Unit,
     onFieldFocused: () -> Unit,
     onMic: () -> Unit,
@@ -467,7 +490,12 @@ private fun ComposerRow(
     // staged. Held while anything is still encoding: libcore refuses a
     // half-prepared item, so an enabled button there would fail silently.
     val staged by viewModel.staged.collectAsState()
-    val busy by viewModel.composerBusy.collectAsState()
+    val sending by viewModel.composerBusy.collectAsState()
+    val sentRevision by viewModel.sentRevision.collectAsState()
+    val textExit = rememberComposerTextExit(sentRevision, input) { metrics.sendTransition = it }
+    val sendError by viewModel.composerError.collectAsState()
+    LaunchedEffect(sendError) { if (sendError != null) textExit.reject() }
+    val busy = sending || textExit.capturing
     val editing = action as? ComposerAction.Edit
     val canClearCaption = editing?.msg?.content is MessageContent.Image || editing?.msg?.content is MessageContent.Attachment
     val hasContent = input.isNotBlank() || staged.isNotEmpty()
@@ -501,13 +529,15 @@ private fun ComposerRow(
         }
         BasicTextField(
             value = input,
-            onValueChange = { viewModel.input.value = it },
-            enabled = !busy,
+            onValueChange = { if (!busy) viewModel.input.value = it },
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
             cursorBrush = SolidColor(chat.accent),
             maxLines = 6,
             // Tapping the field to type raises the keyboard, so close the panel it replaces.
             modifier = Modifier.weight(1f)
+                .then(textExit.modifier)
+                .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart)
+                .focusRequester(fieldFocus)
                 .onFocusChanged { if (it.isFocused) onFieldFocused() }
                 .semantics { contentDescription = "Message input" },
             // Floored at the button size and centred within it, so a single line sits
@@ -530,11 +560,6 @@ private fun ComposerRow(
             },
         )
 
-
-        // The paperclip lives here only while the composer is empty; once there's
-        // a draft it has already moved to the leading slot, so this one folds away.
-        // The gap rides inside the animated node, so it collapses with the icon
-        // rather than vanishing in a frame after it.
 
         // Keep the same text width while the attachment affordance changes sides.
         Box(Modifier.padding(start = SlotGap).size(38.dp)
@@ -559,8 +584,12 @@ private fun ComposerRow(
                 .background(if (hasDraft) chat.accent else Color.Transparent)
                 // An edit has a body to replace and a voice note is not one,
                 // so the mic sits out while one is staged; a reply rides along.
+                .semantics { contentDescription = if (hasContent || action is ComposerAction.Edit) "Send message" else "Record voice message" }
                 .clickable(enabled = !busy && (hasDraft || (!hasContent && action !is ComposerAction.Edit))) {
-                    if (hasDraft) viewModel.send() else onMic()
+                    if (hasDraft) {
+                        if (input.isNotEmpty() && action !is ComposerAction.Edit) textExit.submit(viewModel::send)
+                        else viewModel.send()
+                    } else onMic()
                 },
             contentAlignment = Alignment.Center,
         ) {

@@ -177,6 +177,7 @@ fun MessageContextMenu(
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
     iconSize: Dp = MenuIconSize,
+    anchorOffsetY: () -> Float = { 0f },
     onReact: (String) -> Unit,
 ) {
     val anchor = state.anchor ?: return
@@ -227,7 +228,7 @@ fun MessageContextMenu(
                     val s = 1f + 0.03f * pop.value
                     scaleX = s
                     scaleY = s
-                    translationY = shift.floatValue * pop.value
+                    translationY = shift.floatValue * pop.value + anchorOffsetY()
                     transformOrigin = TransformOrigin(if (anchor.msg.outgoing) 1f else 0f, 1f)
                 },
         ) {

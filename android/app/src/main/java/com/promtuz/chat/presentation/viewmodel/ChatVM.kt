@@ -115,11 +115,14 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     private val _typingMembers = MutableStateFlow<Set<String>>(emptySet())
     val typingMembers: StateFlow<Set<String>> = _typingMembers.asStateFlow()
     private val _typing = MutableStateFlow(false)
+    private val typingPresentation = TypingPresentation(viewModelScope)
+    val typingBubbleMembers: StateFlow<Set<String>> = typingPresentation.members
 
     private fun syncTyping() {
         val people = app.conversationActivity.members.value[conversationHex].orEmpty()
         _typingMembers.value = people.filterValues { Activity.Typing in Activity.fromBits(it) }.keys
         _typing.value = _typingMembers.value.isNotEmpty()
+        typingPresentation.update(_typingMembers.value)
     }
 
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
@@ -134,6 +137,8 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     private data class SavedDraft(val text: String, val reply: ComposerAction?)
     private var savedDraft: SavedDraft? = null
     private val editDrafts = mutableMapOf<String, String>()
+    private val _sentRevision = MutableStateFlow(0L)
+    val sentRevision: StateFlow<Long> = _sentRevision.asStateFlow()
     val composerBusy = MutableStateFlow(false)
     val composerError = MutableStateFlow<String?>(null)
     private var pickingMedia = false
@@ -248,12 +253,13 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 if (incomingLoaded && newest != null && newest.key != newestIncoming && newest.key !in previousIncomingKeys) {
                     (newest.senderHex ?: others.singleOrNull()?.toHex())?.let {
                         app.conversationActivity.update(conversationHex, it, 0)
+                        typingPresentation.consume(it)
                     }
                     syncTyping()
                     // An idle signal can beat the message. The stage may still
                     // have an exiting typing row to hand over; it decides whether
                     // that source is present rather than relying on this Boolean.
-                    if (!typing.value) typingHandoff.value = newest.key
+                    if (typingBubbleMembers.value.isEmpty()) typingHandoff.value = newest.key
                 }
                 newestIncoming = newest?.key
                 previousIncomingKeys = list.filterNot { it.outgoing }.mapTo(HashSet()) { it.key }
@@ -469,7 +475,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 }
                 _staged.value = _staged.value.filterNot { media -> items.any { it.id == media.id } }
                 if (editing != null) restoreDraft()
-                else { input.value = ""; composerAction.value = null }
+                else { _sentRevision.value++; input.value = ""; composerAction.value = null }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {

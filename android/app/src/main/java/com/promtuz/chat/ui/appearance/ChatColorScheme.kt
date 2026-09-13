@@ -28,7 +28,7 @@ data class ChatColorScheme(
     val accent: Color,
     /** Translucent top/bottom bar tint base (the haze). */
     val bar: Color,
-    /** Frontier marker dashes + labels (alpha applied at use). */
+    /** System-event labels (alpha applied at use). */
     val marker: Color,
     /**
      * Name colours for group senders, picked by hashing the member's key. Not
