@@ -59,7 +59,7 @@ fun ShareIdentityScreen(
     }
 
     Scaffold(
-        topBar = { BackTopBar("Share Identity") }
+        topBar = { BackTopBar("My QR code") }
     ) { innerPadding ->
         Box(
             Modifier
@@ -85,11 +85,11 @@ fun ShareIdentityScreen(
                         ) {
                             CircularProgressIndicator()
                             Text(
-                                "Getting you discoverable…",
+                                "Preparing your QR code…",
                                 style = MaterialTheme.typography.titleMedium,
                             )
                             Text(
-                                "Publishing your keys so others can add you.",
+                                "Connecting so people can add you.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = colors.onSurfaceVariant,
                                 textAlign = TextAlign.Center,

@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.utils.extensions.fromHex
-import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -12,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 
 /** A person as the group screens show them: name, key, and their standing. */
@@ -28,7 +29,7 @@ data class UiMember(
 /** What a membership call is doing right now, so the UI can hold still. */
 sealed interface GroupWork {
     data object Idle : GroupWork
-    data object Busy : GroupWork
+    data class Busy(val label: String) : GroupWork
     data class Failed(val reason: String) : GroupWork
 }
 
@@ -46,6 +47,37 @@ class GroupVM(app: AppVM) : ViewModel() {
 
     private val _work = MutableStateFlow<GroupWork>(GroupWork.Idle)
     val work: StateFlow<GroupWork> = _work.asStateFlow()
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice = _notice.asStateFlow()
+    fun clearNotice() { _notice.value = null }
+    private val _muted = MutableStateFlow(false)
+    val muted = _muted.asStateFlow()
+    private var rosterJob: Job? = null
+    private val _loading = MutableStateFlow(true)
+    val loading = _loading.asStateFlow()
+    private val _loadError = MutableStateFlow(false)
+    val loadError = _loadError.asStateFlow()
+
+    private fun perform(label: String, failure: String, block: suspend () -> Unit) {
+        if (_work.value is GroupWork.Busy) return
+        _work.value = GroupWork.Busy(label)
+        viewModelScope.launch {
+            try {
+                block()
+                _work.value = GroupWork.Idle
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, label)
+                _work.value = GroupWork.Failed(
+                    if (e is MemberAddFailure) {
+                        val prefix = if (e.added > 0) "${e.added} added. " else ""
+                        prefix + "Couldn’t add ${e.names.joinToString()}. Try again."
+                    } else failure
+                )
+            }
+        }
+    }
 
     // — Create flow —
 
@@ -55,17 +87,39 @@ class GroupVM(app: AppVM) : ViewModel() {
     private val _picked = MutableStateFlow<Set<String>>(emptySet())
     val picked: StateFlow<Set<String>> = _picked.asStateFlow()
 
-    /** Contacts eligible to be added: paired, so they have a KeyPackage to fetch. */
+    /** Address book used by the shared contact picker. */
     private val _candidates = MutableStateFlow<List<UiMember>>(emptyList())
     val candidates: StateFlow<List<UiMember>> = _candidates.asStateFlow()
 
-    init {
-        viewModelScope.launch {
+    private val _contactsLoading = MutableStateFlow(true)
+    val contactsLoading = _contactsLoading.asStateFlow()
+    private val _contactsError = MutableStateFlow(false)
+    val contactsError = _contactsError.asStateFlow()
+    private var contactsJob: Job? = null
+
+    init { loadContacts() }
+
+    fun loadContacts() {
+        contactsJob?.cancel()
+        _contactsLoading.value = true
+        contactsJob = viewModelScope.launch {
             observeQuery(setOf("contacts")) {
-                runCatching { CoreBridge.contacts() }.getOrDefault(emptyList())
-                    .map { UiMember(it.ipk.toHex(), it.name) }
-                    .sortedBy { it.name.lowercase() }
-            }.collect { _candidates.value = it }
+                try {
+                    val people = CoreBridge.contacts().map { UiMember(it.ipk.toHex(), it.name) }
+                        .sortedBy { it.name.lowercase() }
+                    _contactsError.value = false
+                    people
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    Timber.tag(TAG).e(e, "load contacts failed")
+                    _contactsError.value = true
+                    _candidates.value
+                }
+            }.collect {
+                _candidates.value = it
+                _picked.value = _picked.value.intersect(it.map { person -> person.ipkHex }.toSet())
+                _contactsLoading.value = false
+            }
         }
     }
 
@@ -76,27 +130,19 @@ class GroupVM(app: AppVM) : ViewModel() {
                         else _picked.value + ipkHex
     }
 
-    /** Create the group and land the user straight in it. */
-    fun create() = viewModelScope.launch {
-        val members = _picked.value.toList()
-        if (members.isEmpty()) return@launch
-        _work.value = GroupWork.Busy
-        val name = _title.value.trim().ifEmpty { "New group" }
-        runCatching { CoreBridge.createGroup(name, members.map { it.fromHex() }) }
-            .onSuccess { conv ->
-                _work.value = GroupWork.Idle
-                _picked.value = emptySet()
-                _title.value = ""
-                // Drop the setup form off the stack first, so backing out of
-                // the new group lands on the chat list rather than the form.
-                navigator.back()
-                navigator.push(Routes.Chat(conv.toHex(), name))
-            }
-            .onFailure {
-                Timber.tag(TAG).e(it, "create group failed")
-                _work.value = GroupWork.Failed(it.reason("Could not create the group"))
-            }
+    fun create(onCreated: () -> Unit = {}) {
+        val people = _candidates.value.filter { it.ipkHex in _picked.value }.map { it.ipkHex }
+        val name = _title.value.trim()
+        if (people.isEmpty() || name.isEmpty() || name.codePointCount(0, name.length) > 64) return
+        perform("Creating group…", "Couldn’t create the group. Try again.") {
+            val conv = CoreBridge.createGroup(name, people.map { it.fromHex() })
+            onCreated()
+            navigator.back()
+            navigator.push(Routes.Chat(conv.toHex(), name))
+        }
     }
+
+    fun clearPicks() { _picked.value = emptySet() }
 
     // — Member list —
 
@@ -129,15 +175,29 @@ class GroupVM(app: AppVM) : ViewModel() {
     private var conversation: ByteArray = ByteArray(16)
 
     fun load(conversationHex: String) {
+        rosterJob?.cancel()
         conversation = conversationHex.fromHex()
-        viewModelScope.launch {
+        _loading.value = true
+        rosterJob = viewModelScope.launch {
             observeQuery(setOf("conversations", "conversation_members", "contacts")) {
-                val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
-                val roster = runCatching { CoreBridge.members(conversation) }.getOrDefault(emptyList())
-                Pair(record, roster)
-            }.collect { (record, roster) ->
-                _groupTitle.value = record?.title.orEmpty()
-                _displayName.value = record?.displayName.orEmpty()
+                try {
+                    val record = CoreBridge.conversation(conversation) ?: error("Group not found")
+                    val roster = CoreBridge.members(conversation)
+                    _loadError.value = false
+                    Pair(record, roster)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    Timber.tag(TAG).e(e, "load group failed")
+                    _loadError.value = true
+                    null
+                }
+            }.collect { result ->
+                _loading.value = false
+                if (result == null) return@collect
+                val (record, roster) = result
+                _muted.value = record.muted
+                _groupTitle.value = record.title
+                _displayName.value = record.displayName
                 // Core resolves the name and whether it is theirs to assert;
                 // only "You" is ours to say.
                 _members.value = roster.map { m ->
@@ -155,83 +215,76 @@ class GroupVM(app: AppVM) : ViewModel() {
                         .thenByDescending { it.active }
                         .thenBy { it.name.lowercase() },
                 )
-                _canManage.value = record?.canManage == true
-                _canLeave.value = record?.canLeave == true
-                _ownerIsStuck.value = record?.ownerIsStuck == true
+                _canManage.value = record.canManage
+                _canLeave.value = record.canLeave
+                _ownerIsStuck.value = record.ownerIsStuck
             }
         }
     }
 
-    fun addMember(ipkHex: String) = viewModelScope.launch {
-        _work.value = GroupWork.Busy
-        runCatching { CoreBridge.addGroupMember(conversation, ipkHex.fromHex()) }
-            .onSuccess { _work.value = GroupWork.Idle }
-            .onFailure {
-                Timber.tag(TAG).e(it, "add member failed")
-                _work.value = GroupWork.Failed(it.reason("Could not add them"))
+    fun addMembers(people: List<UiMember>, onAdded: (String) -> Unit, onComplete: () -> Unit) {
+        if (people.isEmpty()) return
+        perform("Adding members…", "Couldn’t finish adding members. Try again.") {
+            val failed = mutableListOf<String>()
+            for (person in people) {
+                _work.value = GroupWork.Busy("Adding ${person.name}…")
+                try {
+                    CoreBridge.addGroupMember(conversation, person.ipkHex.fromHex())
+                    onAdded(person.ipkHex)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Timber.tag(TAG).e(e, "add member failed")
+                    failed += person.name
+                }
             }
+            val added = people.size - failed.size
+            if (failed.isEmpty()) {
+                _notice.value = if (added == 1) "Member added" else "$added members added"
+                onComplete()
+            } else {
+                // Keep only unsuccessful selections so retry cannot add someone twice.
+                throw MemberAddFailure(added, failed)
+            }
+        }
     }
 
-    fun removeMember(ipkHex: String) = viewModelScope.launch {
-        _work.value = GroupWork.Busy
-        runCatching { CoreBridge.removeGroupMember(conversation, ipkHex.fromHex()) }
-            .onSuccess { _work.value = GroupWork.Idle }
-            .onFailure {
-                Timber.tag(TAG).e(it, "remove member failed")
-                _work.value = GroupWork.Failed(it.reason("Could not remove them"))
-            }
+    private class MemberAddFailure(val added: Int, val names: List<String>) : Exception()
+
+    fun removeMember(person: UiMember, onComplete: () -> Unit) =
+        perform("Removing ${person.name}…", "Couldn’t remove ${person.name}. Try again.") {
+            CoreBridge.removeGroupMember(conversation, person.ipkHex.fromHex())
+            _notice.value = "${person.name} removed"
+            onComplete()
+        }
+
+    fun rename(value: String, onComplete: () -> Unit) {
+        val name = value.trim()
+        if (name.isEmpty() || name.codePointCount(0, name.length) > 64) return
+        perform("Saving name…", "Couldn’t save the name. Try again.") {
+            CoreBridge.setConversationTitle(conversation, name)
+            _notice.value = "Group name saved"
+            onComplete()
+        }
     }
 
-    fun rename(value: String) = viewModelScope.launch {
-        runCatching { CoreBridge.setConversationTitle(conversation, value.trim()) }
-            .onFailure { Timber.tag(TAG).e(it, "rename failed") }
+    fun setMuted(value: Boolean) =
+        perform("Updating notifications…", "Couldn’t update notifications. Try again.") {
+            CoreBridge.setConversationMuted(conversation, value)
+            _muted.value = value
+        }
+
+    fun leave() = perform("Leaving group…", "Couldn’t leave the group. Try again.") {
+        CoreBridge.leaveGroup(conversation)
+        navigator.reset(Routes.App)
     }
 
-    /** Leave, then step back to the home list — this chat can no longer send. */
-    fun leave() = viewModelScope.launch {
-        _work.value = GroupWork.Busy
-        runCatching { CoreBridge.leaveGroup(conversation) }
-            .onSuccess {
-                _work.value = GroupWork.Idle
-                navigator.reset(Routes.App)
-            }
-            .onFailure {
-                Timber.tag(TAG).e(it, "leave failed")
-                _work.value = GroupWork.Failed(it.reason("Could not leave"))
-            }
+    fun deleteAnyway() = perform("Deleting chat…", "Couldn’t delete the chat. Try again.") {
+        CoreBridge.deleteConversation(conversation, force = true)
+        navigator.reset(Routes.App)
     }
 
-    /**
-     * Take this chat and its keys off the device, then step back to the home
-     * list. The group itself carries on for everyone else.
-     *
-     * The way out for a founder core would otherwise refuse: a group whose keys
-     * are broken can be neither managed nor left, so refusing to delete it only
-     * makes the trap permanent. Nothing detects that brokenness, though — the
-     * only gate is [ownerIsStuck] (founder, others still in), so
-     * every stuck founder is offered this, healthy group or not, and on a
-     * healthy one it leaves everybody in a group nobody can ever add to, remove
-     * from or rename. The dialog is where that gets said; a second call site
-     * owes the user the same warning.
-     *
-     * Local only — nobody is told and everyone else keeps the group.
-     */
-    fun deleteAnyway() = viewModelScope.launch {
-        _work.value = GroupWork.Busy
-        runCatching { CoreBridge.deleteConversation(conversation, force = true) }
-            .onSuccess {
-                _work.value = GroupWork.Idle
-                navigator.reset(Routes.App)
-            }
-            .onFailure {
-                Timber.tag(TAG).e(it, "force delete failed")
-                _work.value = GroupWork.Failed(it.reason("Could not delete this chat"))
-            }
-    }
+    fun clearError() { if (_work.value !is GroupWork.Busy) _work.value = GroupWork.Idle }
 
-    fun clearError() { _work.value = GroupWork.Idle }
-
-    private companion object {
-        const val TAG = "GroupVM"
-    }
+    private companion object { const val TAG = "GroupVM" }
 }

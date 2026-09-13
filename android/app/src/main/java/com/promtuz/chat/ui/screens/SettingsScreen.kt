@@ -1,12 +1,8 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,9 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -31,9 +25,9 @@ import com.promtuz.chat.navigation.goTo
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
 import com.promtuz.chat.ui.activities.ManageSpace
+import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
-import com.promtuz.chat.ui.util.groupedRoundShape
 import org.koin.androidx.compose.koinViewModel
 
 private data class SettingItem(val title: String, val drawableIcon: Int, val onClick: () -> Unit)
@@ -126,47 +120,12 @@ fun SettingsScreen(
                     )
                 }
                 itemsIndexed(settings) { index, setting ->
-                    SettingsGroup(Modifier, setting, index to settings.size)
+                    GroupedActionRow(setting.title, index, settings.size, setting.onClick) {
+                        Icon(painterResource(setting.drawableIcon), null, Modifier.size(26.dp))
+                    }
                 }
             }
         }
     }
 
-}
-
-@Composable
-private fun SettingsGroup(
-    modifier: Modifier = Modifier, setting: SettingItem, groupEntry: Pair<Int, Int>
-) {
-    val (index, groupSize) = groupEntry
-
-    val colors = MaterialTheme.colorScheme
-    val textTheme = MaterialTheme.typography
-
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clip(groupedRoundShape(index, groupSize))
-            .background(colors.surfaceContainerLow)
-            .combinedClickable(
-                onClick = {
-                    setting.onClick.invoke()
-                },
-            )
-            .padding(vertical = 12.dp, horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            painterResource(setting.drawableIcon),
-            setting.title,
-            Modifier.size(26.dp),
-            tint = colors.onSurface
-        )
-        Text(
-            setting.title, style = avgSizeInStyle(
-                textTheme.labelLargeEmphasized, textTheme.bodyLargeEmphasized, 0.75f
-            ), color = colors.onBackground
-        )
-    }
 }

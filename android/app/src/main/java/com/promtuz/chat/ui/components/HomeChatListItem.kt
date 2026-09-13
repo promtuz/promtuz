@@ -240,7 +240,7 @@ private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme):
 
 /** "Couldn't connect" plus the decline reason (DECLINE_* code), when known. */
 private fun declineText(reason: Int?): String = when (reason) {
-    0 -> "Couldn't connect — secure group failed"
+    0 -> "Couldn’t start the chat. Try again."
     1 -> "Couldn't connect — their invite was already used"
     2 -> "Couldn't connect — they declined"
     else -> "Couldn't connect"
@@ -300,18 +300,14 @@ fun DeleteChatDialog(
     if (chat.ownerIsStuck) {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("You run this group") },
+            title = { Text("You’re the group admin") },
             text = {
                 Text(
-                    "\"${chat.name}\" still has ${chat.memberCount - 1} other " +
-                        (if (chat.memberCount == 2) "member" else "members") +
-                        ". Remove them first — leaving now would leave the group with " +
-                        "nobody able to manage it.\n\n" +
-                        "If the group is broken past that, Group info can drop your " +
-                        "own copy of it.",
+                    "You’re the only admin. Remove the other members before leaving. " +
+                        "To delete only your copy, open Group info.",
                 )
             },
-            confirmButton = { TextButton(onClick = onDismiss) { Text("Got it") } },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
         )
         return
     }
@@ -325,12 +321,11 @@ fun DeleteChatDialog(
                         "Delete your chat with ${chat.name}? This removes the contact and " +
                             "all messages on this device. This can't be undone."
                     chat.amMember ->
-                        "Delete \"${chat.name}\" and its messages from this device? You " +
-                            "stop receiving it, and nobody in it is told — they keep " +
-                            "posting to someone who isn't there. Leave to tell them."
+                        "This deletes your messages and group access from this device. " +
+                            "Other members won’t be notified. Choose Leave and delete to leave the group too. " +
+                            "This can’t be undone."
                     else ->
-                        "Delete \"${chat.name}\" and its messages from this device? " +
-                            "You already left, so nothing new will arrive."
+                        "This deletes the group’s messages from this device. This can’t be undone."
                 },
             )
         },

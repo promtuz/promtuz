@@ -289,6 +289,8 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+    // AndroidX Test requires 1.2.0; align the tested app's debug runtime with it.
+    debugImplementation(libs.androidx.concurrent.futures.ktx)
 
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.androidx.navigation3.runtime)

@@ -1,56 +1,29 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.promtuz.chat.presentation.viewmodel.GroupVM
-import com.promtuz.chat.presentation.viewmodel.GroupWork
-import com.promtuz.chat.presentation.viewmodel.UiMember
-import com.promtuz.chat.ui.appearance.LocalChatColors
-import com.promtuz.chat.ui.components.Avatar
-import com.promtuz.chat.ui.components.GroupAvatar
-import com.promtuz.chat.ui.components.SimpleScreen
-import com.promtuz.chat.ui.components.memberTally
+import com.promtuz.chat.presentation.viewmodel.*
+import com.promtuz.chat.ui.components.*
 import org.koin.androidx.compose.koinViewModel
 
-/**
- * A group's roster, with the management actions the local user is allowed.
- *
- * Departed members stay listed, greyed — their old messages still need a name
- * to attribute to, and hiding them would make the history read as anonymous.
- */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel()) {
-    val colors = MaterialTheme.colorScheme
-    val chat = LocalChatColors.current
+    val loading by viewModel.loading.collectAsStateWithLifecycle()
+    val loadError by viewModel.loadError.collectAsStateWithLifecycle()
+    val contactsLoading by viewModel.contactsLoading.collectAsStateWithLifecycle()
+    val contactsError by viewModel.contactsError.collectAsStateWithLifecycle()
     val members by viewModel.members.collectAsStateWithLifecycle()
     val title by viewModel.groupTitle.collectAsStateWithLifecycle()
     val displayName by viewModel.displayName.collectAsStateWithLifecycle()
@@ -59,229 +32,239 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     val work by viewModel.work.collectAsStateWithLifecycle()
     val canLeave by viewModel.canLeave.collectAsStateWithLifecycle()
     val ownerIsStuck by viewModel.ownerIsStuck.collectAsStateWithLifecycle()
-
+    val muted by viewModel.muted.collectAsStateWithLifecycle()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
     LaunchedEffect(conversationHex) { viewModel.load(conversationHex) }
+    GroupInfoContent(
+        GroupInfoState(members, title, displayName, canManage, candidates, work, canLeave,
+            ownerIsStuck, muted, notice, loading, loadError, contactsLoading, contactsError),
+        GroupInfoActions(
+            clearNotice = viewModel::clearNotice,
+            clearError = viewModel::clearError,
+            reload = { viewModel.load(conversationHex) },
+            loadContacts = viewModel::loadContacts,
+            rename = viewModel::rename,
+            setMuted = viewModel::setMuted,
+            addMembers = viewModel::addMembers,
+            removeMember = viewModel::removeMember,
+            leave = { viewModel.leave() },
+            deleteAnyway = { viewModel.deleteAnyway() },
+        ),
+    )
+}
 
-    var draftTitle by remember(title) { mutableStateOf(title) }
-    var adding by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
+internal data class GroupInfoState(
+    val members: List<UiMember>,
+    val title: String,
+    val displayName: String,
+    val canManage: Boolean,
+    val candidates: List<UiMember>,
+    val work: GroupWork = GroupWork.Idle,
+    val canLeave: Boolean = false,
+    val ownerIsStuck: Boolean = false,
+    val muted: Boolean = false,
+    val notice: String? = null,
+    val loading: Boolean = false,
+    val loadError: Boolean = false,
+    val contactsLoading: Boolean = false,
+    val contactsError: Boolean = false,
+)
 
+internal data class GroupInfoActions(
+    val clearNotice: () -> Unit,
+    val clearError: () -> Unit,
+    val reload: () -> Unit,
+    val loadContacts: () -> Unit,
+    val rename: (String, () -> Unit) -> Unit,
+    val setMuted: (Boolean) -> Unit,
+    val addMembers: (List<UiMember>, (String) -> Unit, () -> Unit) -> Unit,
+    val removeMember: (UiMember, () -> Unit) -> Unit,
+    val leave: () -> Unit,
+    val deleteAnyway: () -> Unit,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) = with(state) {
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(notice) { notice?.let { snackbar.showSnackbar(it); actions.clearNotice() } }
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var draft by rememberSaveable { mutableStateOf("") }
+    var adding by rememberSaveable { mutableStateOf(false) }
+    var searching by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var showPast by rememberSaveable { mutableStateOf(false) }
+    var person by remember { mutableStateOf<UiMember?>(null) }
+    var removing by remember { mutableStateOf<UiMember?>(null) }
+    var leaving by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    val busy = work is GroupWork.Busy
+    BackHandler(busy) { }
     val active = members.filter { it.active }
-    // Anyone in the address book who isn't already here.
-    val addable = remember(candidates, members) {
-        val present = members.filter { it.active }.map { it.ipkHex }.toSet()
-        candidates.filter { it.ipkHex !in present }
-    }
+    val past = members.filterNot { it.active }
+    val addable = candidates.filter { c -> active.none { it.ipkHex == c.ipkHex } }
+    val dialogOpen = editing || adding || removing != null || leaving || deleting
+    val colors = MaterialTheme.colorScheme
 
     SimpleScreen({ Text("Group info") }) { padding ->
-    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-        item {
-            Column(
-                Modifier.fillMaxWidth().padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                // Untitled groups fall back to members' initials — other
-                // people's, not ours; our own face says nothing about which
-                // group this is.
-                GroupAvatar(
-                    title = title,
-                    members = active.filterNot { it.me }.map { it.name },
-                    size = 84.dp,
-                )
-                Spacer(Modifier.height(12.dp))
-                if (canManage) {
-                    BasicTextField(
-                        value = draftTitle,
-                        onValueChange = { draftTitle = it },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.titleLarge.copy(color = colors.onSurface),
-                        cursorBrush = SolidColor(chat.accent),
-                        modifier = Modifier.padding(bottom = 2.dp),
-                    )
-                    if (draftTitle.trim() != title) {
-                        Text(
-                            "Save name",
-                            Modifier.clickable { viewModel.rename(draftTitle) }.padding(4.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = chat.accent,
-                        )
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            if (loading || loadError) {
+                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (loading) CircularProgressIndicator()
+                    else {
+                        Text("Couldn’t load the group")
+                        TextButton(onClick = { actions.reload() }) { Text("Retry") }
                     }
-                } else {
-                    Text(
-                        displayName,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = colors.onSurface,
-                    )
                 }
-                Text(
-                    memberTally(active.size),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-        }
-
-        (work as? GroupWork.Failed)?.let {
-            item {
-                Text(
-                    it.reason,
-                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.error,
-                )
-            }
-        }
-
-        if (canManage) {
-            item {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { adding = !adding }
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        if (adding) "Done adding" else "Add members",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = chat.accent,
-                    )
+            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = 88.dp)
+                        Text(displayName.ifBlank { "Group" }, style = MaterialTheme.typography.headlineSmall)
+                        Text(memberTally(active.size), color = colors.onSurfaceVariant)
+                        if (canManage) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
+                            Text("Edit group name")
+                        }
+                    }
                 }
-            }
-            if (adding) {
-                items(addable, key = { "add:${it.ipkHex}" }) { c ->
-                    MemberRow(
-                        member = c,
-                        trailing = "Add",
-                        trailingColor = chat.accent,
-                        onTrailing = { viewModel.addMember(c.ipkHex) },
+                if (!dialogOpen) item { GroupWorkFeedback(work) }
+                item {
+                    ListItem(
+                        headlineContent = { Text("Notifications") },
+                        supportingContent = { Text(if (muted) "Muted" else "On") },
+                        trailingContent = { Switch(checked = !muted, onCheckedChange = { actions.setMuted(!it) }, enabled = !busy) },
                     )
+                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Members", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                        if (canManage) TextButton(onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() }, enabled = !busy) {
+                            Text("Add members")
+                        }
+                    }
                 }
-            }
-        }
-
-        items(members, key = { it.ipkHex }) { m ->
-            // Leaving is its own action at the bottom; never offer it as a
-            // "Remove" on our own row.
-            val removable = m.active && canManage && !m.admin && !m.me
-            MemberRow(
-                member = m,
-                trailing = when {
-                    !m.active -> "Past member"
-                    m.admin -> "Admin"
-                    removable -> "Remove"
-                    else -> null
-                },
-                trailingColor = if (removable) colors.error else colors.onSurfaceVariant,
-                onTrailing = if (removable) {
-                    { viewModel.removeMember(m.ipkHex) }
-                } else null,
-            )
-        }
-
-        item {
-            // The founder can't walk out on a group other people are still in,
-            // so say why rather than offering an action that will be refused.
-            if (ownerIsStuck) {
-                Text(
-                    "You created this group. Remove everyone else before you can leave it.",
-                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-                // Being unable to leave is not a reason to be stuck with the
-                // chat: dropping our copy is ours alone to do.
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { confirmDelete = true }
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    horizontalArrangement = Arrangement.Start,
-                ) {
-                    Text(
-                        "Delete this chat anyway",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.error,
-                    )
+                items(active, key = { it.ipkHex }) { member ->
+                    GroupMemberRow(member, !busy) { person = member }
                 }
-            } else if (canLeave) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { viewModel.leave() }
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    horizontalArrangement = Arrangement.Start,
-                ) {
-                    Text(
-                        "Leave group",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.error,
-                    )
+                if (past.isNotEmpty()) {
+                    item { TextButton(onClick = { showPast = !showPast }, modifier = Modifier.padding(horizontal = 12.dp)) {
+                        Text(if (showPast) "Hide past members" else "Past members (${past.size})")
+                    } }
+                    if (showPast) items(past, key = { "past:${it.ipkHex}" }) { member ->
+                        GroupMemberRow(member, !busy) { person = member }
+                    }
+                }
+                item {
+                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                    if (ownerIsStuck) {
+                        Text("You’re the only admin. To leave, first remove the other members.",
+                            Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = colors.onSurfaceVariant)
+                        TextButton(onClick = { deleting = true; actions.clearError() }, enabled = !busy,
+                            modifier = Modifier.padding(horizontal = 12.dp)) { Text("Delete chat", color = colors.error) }
+                    } else if (canLeave) {
+                        TextButton(onClick = { leaving = true; actions.clearError() }, enabled = !busy,
+                            modifier = Modifier.padding(horizontal = 12.dp)) { Text("Leave group", color = colors.error) }
+                    }
                 }
             }
-            Spacer(Modifier.height(32.dp))
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
         }
     }
+    GroupNameDialog(visible = editing, heading = "Edit group name", value = draft, onValueChange = { draft = it },
+        work = work, confirmLabel = "Save", onConfirm = { actions.rename(draft) { editing = false } },
+        onDismiss = { editing = false; actions.clearError() }, changed = draft.trim() != title)
+    if (adding) {
+        var dismissRequested by remember { mutableStateOf(false) }
+        val currentBusy by rememberUpdatedState(busy)
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+            confirmValueChange = { !currentBusy })
+        LaunchedEffect(dismissRequested, busy) {
+            if (dismissRequested && !busy) {
+                sheetState.hide()
+                adding = false
+                actions.clearError()
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { if (!busy) { adding = false; actions.clearError() } },
+            sheetState = sheetState,
+        ) {
+            Column(Modifier.fillMaxHeight(0.9f)) {
+                fun closePickerMode() {
+                    if (busy) return
+                    if (searching) { searching = false; query = "" }
+                    else { dismissRequested = true }
+                }
+                BackHandler(searching) { closePickerMode() }
+                ContactPickerHeader(title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
+                    searching = searching, query = query, onQuery = { query = it }, close = true,
+                    onBack = ::closePickerMode, onSearch = { searching = true }, enabled = !busy)
+                Text("New members won’t see earlier messages.", Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                if (contactsLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (contactsError) Row(Modifier.padding(horizontal = 16.dp)) {
+                    Text("Couldn’t load contacts", Modifier.weight(1f), color = colors.error)
+                    TextButton(onClick = actions.loadContacts) { Text("Retry") }
+                }
+                ContactPicker(addable, query, selected, true, !busy,
+                    onClick = {
+                        val last = it.ipkHex in selected && selected.size == 1
+                        selected = if (it.ipkHex in selected) selected - it.ipkHex else selected + it.ipkHex
+                        if (last) { dismissRequested = true }
+                    },
+                    modifier = Modifier.weight(1f), emptyText = when { contactsLoading || contactsError -> ""; candidates.isEmpty() -> "Add contacts before inviting members"; else -> "All your contacts are already in this group" })
+                GroupWorkFeedback(work)
+                val picks = addable.filter { it.ipkHex in selected }
+                GroupActionButton(if (picks.size == 1) "Add 1 member" else "Add ${picks.size} members",
+                    onClick = { actions.addMembers(picks, { selected = selected - it }, { dismissRequested = true }) },
+                    enabled = !busy && picks.isNotEmpty(), modifier = Modifier.fillMaxWidth().padding(16.dp))
+            }
+        }
     }
-
-    if (confirmDelete) AlertDialog(
-        onDismissRequest = { confirmDelete = false },
-        title = { Text("Delete this chat?") },
-        text = {
-            Text(
-                "This removes your copy and its messages from this device. Nobody " +
-                    "is told and everyone else keeps the group — but you created " +
-                    "it, so no one will ever be able to add, remove or rename " +
-                    "anyone in it again. This can't be undone.",
-            )
-        },
+    person?.let { member -> GroupDialog(
+        onDismissRequest = { person = null }, title = { Text(member.name) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(when { !member.active -> "Past member"; member.admin -> "Group admin"; else -> "Group member" })
+            if (member.claimed) Text("This name was set by the member.", color = colors.onSurfaceVariant)
+        } },
         confirmButton = {
-            TextButton(onClick = { confirmDelete = false; viewModel.deleteAnyway() }) {
-                Text("Delete", color = colors.error)
-            }
+            if (canManage && member.active && !member.admin && !member.me) TextButton(onClick = {
+                removing = member; person = null; actions.clearError()
+            }) { Text("Remove from group", color = colors.error) }
+            else TextButton(onClick = { person = null }) { Text("Done") }
         },
-        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        dismissButton = { if (canManage && member.active && !member.admin && !member.me) TextButton(onClick = { person = null }) { Text("Cancel") } },
+    ) }
+    removing?.let { member -> GroupConfirmation(
+        "Remove ${member.name}?", "They won’t receive new messages from this group.", "Remove", work,
+        onDismiss = { removing = null; actions.clearError() },
+        onConfirm = { actions.removeMember(member) { removing = null } },
+    ) }
+    GroupConfirmation("Leave group?", "You won’t receive new messages. Your chat history stays on this device.",
+        "Leave", work, { leaving = false; actions.clearError() }, { actions.leave() }, visible = leaving)
+    GroupConfirmation("Delete chat?",
+        "This deletes your messages and group access from this device. Other members keep the group, but no one will be able to manage it. This can’t be undone.",
+        "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
+}
+
+@Composable
+private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Unit) {
+    ListItem(
+        headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        leadingContent = { Avatar(member.name, size = 44.dp) },
+        supportingContent = if (!member.active) {{ Text("Past member") }} else null,
+        trailingContent = if (member.admin && member.active) {{ Text("Admin", color = MaterialTheme.colorScheme.onSurfaceVariant) }} else null,
+        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
     )
 }
 
 @Composable
-private fun MemberRow(
-    member: UiMember,
-    trailing: String?,
-    trailingColor: androidx.compose.ui.graphics.Color,
-    onTrailing: (() -> Unit)?,
-) {
-    val colors = MaterialTheme.colorScheme
-    val dim = if (member.active) 1f else 0.45f
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.background(androidx.compose.ui.graphics.Color.Transparent)) {
-            Avatar(name = member.name, size = 42.dp)
-        }
-        Spacer(Modifier.width(14.dp))
-        // "~" for a name its owner asserted rather than one the user chose —
-        // the group is full of people they never added, and the two should not
-        // read as equally vouched for.
-        Text(
-            if (member.claimed) "~${member.name}" else member.name,
-            Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
-            color = colors.onSurface.copy(alpha = dim),
-        )
-        trailing?.let {
-            Text(
-                it,
-                Modifier
-                    .then(if (onTrailing != null) Modifier.clickable(onClick = onTrailing) else Modifier)
-                    .padding(6.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = trailingColor.copy(alpha = dim),
-            )
-        }
-    }
+private fun GroupConfirmation(title: String, message: String, action: String, work: GroupWork,
+    onDismiss: () -> Unit, onConfirm: () -> Unit, visible: Boolean = true) {
+    val busy = work is GroupWork.Busy
+    GroupDialog(visible = visible, onDismissRequest = { if (!busy) onDismiss() }, title = { Text(title) },
+        text = { Column { Text(message); GroupWorkFeedback(work) } },
+        confirmButton = { TextButton(onClick = onConfirm, enabled = !busy) { Text(action, color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } })
 }

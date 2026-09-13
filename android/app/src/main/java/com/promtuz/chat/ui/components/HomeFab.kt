@@ -1,15 +1,8 @@
 package com.promtuz.chat.ui.components
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.size
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
@@ -18,37 +11,13 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 fun HomeFab(appViewModel: AppVM) {
     val colors = MaterialTheme.colorScheme
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        SmallFloatingActionButton({
-            appViewModel.navigator.push(Routes.NewGroup)
-        }) {
-            DrawableIcon(
-                R.drawable.i_user_add,
-                desc = "New group",
-                tint = colors.onPrimaryContainer
-            )
-        }
-        SmallFloatingActionButton({
-            appViewModel.navigator.push(Routes.ShareIdentity)
-        }) {
-            DrawableIcon(
-                R.drawable.i_qr_code,
-                desc = "QR Code",
-                tint = colors.onPrimaryContainer
-            )
-        }
-        FloatingActionButton({
-            appViewModel.navigator.push(Routes.Contacts)
-        }) {
-            DrawableIcon(
-                R.drawable.i_contacts,
-                Modifier.size(32.dp),
-                desc = "Contacts",
-                tint = colors.onPrimaryContainer,
-            )
-        }
+    FloatingActionButton({
+        appViewModel.navigator.push(Routes.Contacts)
+    }) {
+        DrawableIcon(
+            R.drawable.i_comment_plus,
+            desc = "Contacts",
+            tint = colors.onPrimaryContainer,
+        )
     }
 }

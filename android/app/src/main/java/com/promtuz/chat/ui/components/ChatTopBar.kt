@@ -146,6 +146,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     TopAppBar(
         title = {
             Row(
+                modifier = Modifier.clickable(enabled = isGroup) { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {

@@ -14,10 +14,6 @@ object Routes : NavKey {
     @Serializable
     data class Chat(val conversation: String, val name: String) : NavKey
 
-    /** Pick contacts and name a new group. */
-    @Serializable
-    data object NewGroup : NavKey
-
     /** A group's member list, with add / remove / leave. */
     @Serializable
     data class GroupInfo(val conversation: String) : NavKey
