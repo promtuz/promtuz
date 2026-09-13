@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -106,6 +108,7 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
      * (history backfill above the viewport).
      */
     var pendingEnter = false
+    var motion: Job? = null
 
     /** Row data behind state so an update recomposes exactly this slot. */
     val rowState = mutableStateOf<Any?>(null)
@@ -124,6 +127,7 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
      * enter, so the swap is one continuous bubble instead of a collapse + unfold.
      */
     var enterFromPx = 0
+    var exitBaseH = 0f
 
     /** Fold pivot for enter/exit (the bubble's tail corner, per row type). */
     var origin = TransformOrigin(0.5f, 1f)
@@ -138,7 +142,7 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
 
     fun effectiveHeight(): Float {
         val f = factor.value
-        return if (exiting) measuredH * f else enterFromPx + (measuredH - enterFromPx) * f
+        return if (exiting) exitBaseH * f else enterFromPx + (measuredH - enterFromPx) * f
     }
 
     /** Key of the next-newer row at removal time — where the exit stays spliced. */
@@ -192,6 +196,8 @@ fun <T : Any> MessageStage(
      * without an exit and this row enters from its height — a morph.
      */
     morphFrom: (T) -> Any? = { null },
+    /** Transient rows enter even when history is being painted for the first time. */
+    animateOnInitialFill: (T) -> Boolean = { false },
     /** Fold pivot per row (a bubble's tail corner); bottom-center default. */
     transformOrigin: (T) -> TransformOrigin = { TransformOrigin(0.5f, 1f) },
     /**
@@ -204,6 +210,12 @@ fun <T : Any> MessageStage(
 ) {
     val scope = rememberCoroutineScope()
     val holder = remember { StageHolder() }
+    DisposableEffect(holder, state) {
+        onDispose {
+            holder.disposeWarm()
+            state.stackOf = null
+        }
+    }
     state.stackOf = holder::stackEstimate
     holder.scope = scope
     // Slots read the renderer through state, and each entity owns ONE content
@@ -219,7 +231,7 @@ fun <T : Any> MessageStage(
 
     // Diff rows synchronously (before measure) so removals never blink out for a
     // frame; animations launch on the composition scope so they survive re-diffs.
-    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin) }
+    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill) }
 
     val scrollable = rememberScrollableState { delta ->
         if (state.pinnedKey != null) 0f
@@ -330,7 +342,8 @@ fun <T : Any> MessageStage(
             }
             if (e.pendingEnter) {
                 e.pendingEnter = false
-                holder.scope?.launch {
+                e.motion?.cancel()
+                e.motion = holder.scope?.launch {
                     if (inBand) e.factor.animateTo(1f, ChatMotion.spec())
                     else e.factor.snapTo(1f)
                 }
@@ -392,14 +405,12 @@ fun <T : Any> MessageStage(
                     // frames re-draw without re-measuring.
                     translationY = -e.glide.value
                     val f = e.factor.value
-                    if (f < 1f) {
-                        // Drawn height matches the room the walk opened (a morph
-                        // starts at the vanished row's height, not zero).
-                        scaleY = (e.effectiveHeight() / e.measuredH.coerceAtLeast(1)).coerceIn(0f, 1f)
-                        scaleX = 0.92f + 0.08f * f
-                        alpha = if (e.enterFromPx > 0) 0.5f + 0.5f * f else f
-                        this.transformOrigin = e.origin
-                    }
+                    // Assign settled values too: a reused layer must not retain
+                    // the scale or alpha from its final animated frame.
+                    scaleY = (e.effectiveHeight() / e.measuredH.coerceAtLeast(1)).coerceIn(0f, 1f)
+                    scaleX = 0.92f + 0.08f * f
+                    alpha = if (e.enterFromPx > 0) 0.5f + 0.5f * f else f
+                    this.transformOrigin = e.origin
                 }
             }
         }
@@ -503,6 +514,7 @@ private class StageHolder {
         state: MessageStageState,
         morphFrom: (T) -> Any?,
         transformOrigin: (T) -> TransformOrigin,
+        animateOnInitialFill: (T) -> Boolean,
     ) {
         rawKey = key as (Any) -> Any
         rows = newRows
@@ -516,9 +528,18 @@ private class StageHolder {
         val morphSources = HashMap<Any, Int>()
         for (r in newRows) {
             val src = morphFrom(r) ?: continue
-            if (key(r) in entities) continue
+            if (key(r) in entities || src in keySet) continue
             val e = entities[src] ?: continue
-            morphSources[src] = e.measuredH
+            morphSources[src] = e.effectiveHeight().roundToInt()
+        }
+
+        for (src in morphSources.keys) {
+            entities.remove(src)?.let { e ->
+                e.motion?.cancel()
+                e.pendingEnter = false
+                exiting.remove(e)
+                dropWarm(src)
+            }
         }
 
         // Removals → exit in place (spliced after their old newer-neighbor).
@@ -526,22 +547,18 @@ private class StageHolder {
             for ((idx, k) in prev.withIndex()) {
                 if (k in keySet) continue
                 val e = entities[k] ?: continue
-                if (k in morphSources) {
-                    exiting.remove(e)
-                    entities.remove(k)
-                    dropWarm(k)
-                    continue
-                }
                 if (e.exiting) continue
+                e.motion?.cancel()
+                e.pendingEnter = false
+                e.exitBaseH = if (e.factor.value > 0f) e.effectiveHeight() / e.factor.value else 0f
                 e.exiting = true
-                e.enterFromPx = 0
                 e.afterKey = prev.getOrNull(idx - 1)?.takeIf { it in keySet }
                 exiting.add(e)
                 dropWarm(k)
-                scope.launch {
+                e.motion = scope.launch {
                     e.factor.animateTo(0f, ChatMotion.spec())
                     exiting.remove(e)
-                    if (entities[k] === e) entities.remove(k)
+                    if (e.exiting && entities[k] === e) entities.remove(k)
                 }
             }
         }
@@ -553,15 +570,20 @@ private class StageHolder {
             val k = key(r)
             var e = entities[k]
             if (e == null) {
-                e = Entity(k, if (initialFill) 1f else 0f, this)
-                e.pendingEnter = !initialFill
+                val animate = !initialFill || animateOnInitialFill(r) || morphFrom(r) in morphSources
+                e = Entity(k, if (animate) 0f else 1f, this)
+                e.pendingEnter = animate
                 e.enterFromPx = morphFrom(r)?.let { morphSources[it] } ?: 0
                 entities[k] = e
             } else if (e.exiting) {
                 // Key came back mid-exit (flappy signal): re-enter from where it is.
+                e.motion?.cancel()
+                val f = e.factor.value
+                if (f < 1f) e.enterFromPx = ((e.effectiveHeight() - e.measuredH * f) / (1f - f))
+                    .coerceAtLeast(0f).roundToInt()
                 e.exiting = false
                 exiting.remove(e)
-                scope.launch { e.factor.animateTo(1f, ChatMotion.spec()) }
+                e.motion = scope.launch { e.factor.animateTo(1f, ChatMotion.spec()) }
             }
             e.origin = transformOrigin(r)
             if (e.rowState.value != r) e.rowState.value = r

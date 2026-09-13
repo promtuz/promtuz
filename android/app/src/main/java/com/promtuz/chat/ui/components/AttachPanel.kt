@@ -68,7 +68,6 @@ fun AttachPanel(
     open: Boolean,
     closingToKeyboard: Boolean,
     haze: HazeState,
-    metrics: ComposerMetrics,
     /**
      * Which sources this composer may pick from. Both while composing fresh;
      * narrowed during an edit to whatever the target's body can legally become
@@ -100,7 +99,7 @@ fun AttachPanel(
     val presence = remember { Animatable(0f) }
     val imeLive = rememberUpdatedState(ime)
     val hide = rememberUpdatedState(onHideKeyboard)
-    LaunchedEffect(open) {
+    LaunchedEffect(open, closingToKeyboard) {
         if (open) {
             if (imeLive.value > kbdUp) {
                 presence.snapTo(1f)   // present FIRST so panelH holds the region,
@@ -126,7 +125,6 @@ fun AttachPanel(
     val regionPx = maxOf(ime, (panelH * presence.value).roundToInt(), nav)
     // The stage reserves this too, and holds its scroll position across it — the
     // region covers content rather than displacing it.
-    SideEffect { metrics.regionPx = regionPx }
     Box(Modifier.fillMaxWidth().height(with(density) { regionPx.toDp() })) {
         if (presence.value > 0f) {
             // Anchored bottom at the full learned height; the region uncovers it. A

@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.promtuz.chat.domain.model.acceptsStaged
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.AlbumItem
 import com.promtuz.chat.domain.model.MessageContent
@@ -51,11 +52,11 @@ import uniffi.core.ReactionRecord
  * Reactive chat. [messages] observes the DB — re-read on every commit touching
  * messages/reactions — so send / receive / edit / delete / reaction / receipt all
  * surface as row updates with no hand-patching. [input] is the draft, cleared the
- * instant [send] fires (so the editor empties immediately). Newest message sits at
+ * point the core accepts [send]. Rejected edits retain the draft. Newest message sits at
  * index 0 and the list draws reversed, so new messages land at the bottom. Typing
  * is an ephemeral signal, timed out client-side.
  */
-class ChatVM(private val application: Application) : ViewModel() {
+class ChatVM(private val application: Application, private val app: AppVM) : ViewModel() {
     /** The chat's scope — a 16-byte conversation id, group or 1:1 alike. */
     private var conversation: ByteArray = ByteArray(16)
     /**
@@ -65,6 +66,10 @@ class ChatVM(private val application: Application) : ViewModel() {
      */
     private var others: List<ByteArray> = emptyList()
     private var started = false
+    private val outgoingTyping = OutgoingTyping(viewModelScope, SystemClock::uptimeMillis) { active ->
+        CoreBridge.setActivity(conversation, if (active) Activity.Typing.bit else 0)
+    }
+    fun setChatForeground(value: Boolean) { outgoingTyping.setForeground(value) }
 
     // Computed, not `by lazy`: the top bar composes before [init] runs and
     // reads this, and a lazy would memoize the placeholder zeros for the
@@ -107,8 +112,15 @@ class ChatVM(private val application: Application) : ViewModel() {
     val memberCount: StateFlow<Int> = _memberCount.asStateFlow()
 
     /** Who is currently typing, by member hex — a group can have several. */
-    private val typingActivity = TypingActivity(viewModelScope, TYPING_TTL_MS)
-    val typingMembers: StateFlow<Set<String>> = typingActivity.members
+    private val _typingMembers = MutableStateFlow<Set<String>>(emptySet())
+    val typingMembers: StateFlow<Set<String>> = _typingMembers.asStateFlow()
+    private val _typing = MutableStateFlow(false)
+
+    private fun syncTyping() {
+        val people = app.conversationActivity.members.value[conversationHex].orEmpty()
+        _typingMembers.value = people.filterValues { Activity.Typing in Activity.fromBits(it) }.keys
+        _typing.value = _typingMembers.value.isNotEmpty()
+    }
 
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
     val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
@@ -118,6 +130,21 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     /** Reply/edit staging shown as a chip above the composer; consumed by [send]. */
     val composerAction = MutableStateFlow<ComposerAction?>(null)
+
+    private data class SavedDraft(val text: String, val reply: ComposerAction?)
+    private var savedDraft: SavedDraft? = null
+    private val editDrafts = mutableMapOf<String, String>()
+    val composerBusy = MutableStateFlow(false)
+    val composerError = MutableStateFlow<String?>(null)
+    private var pickingMedia = false
+
+    private fun restoreDraft() {
+        val draft = savedDraft
+        savedDraft = null
+        editDrafts.clear()
+        input.value = draft?.text.orEmpty()
+        composerAction.value = draft?.reply
+    }
 
     /**
      * The composer's media buffer, mirrored from libcore's staging registry.
@@ -182,7 +209,7 @@ class ChatVM(private val application: Application) : ViewModel() {
     val recording: StateFlow<Recording?> = _recording.asStateFlow()
     private var recordingTicker: Job? = null
 
-    val typing: StateFlow<Boolean> = typingActivity.typing
+    val typing: StateFlow<Boolean> = _typing.asStateFlow()
 
     /** Key of the incoming message that ended a live typing signal — the morph target. */
     val typingHandoff = MutableStateFlow<String?>(null)
@@ -194,8 +221,11 @@ class ChatVM(private val application: Application) : ViewModel() {
         if (started) return
         started = true
         conversation = conversationId
+        syncTyping()
 
+        var incomingLoaded = false
         var newestIncoming: String? = null
+        var previousIncomingKeys = emptySet<String>()
         var lastMarkedRead: String? = null
         viewModelScope.launch {
             // Roster and messages ride one doorbell. Attribution reads the
@@ -215,16 +245,19 @@ class ChatVM(private val application: Application) : ViewModel() {
                 // typing bubble (morph). Handoff is set BEFORE the list so one
                 // recomposition sees both.
                 val newest = list.firstOrNull { !it.outgoing }
-                if (newest?.key != newestIncoming) {
-                    newestIncoming = newest?.key
-                    val wasTyping = typing.value
-                    if (_isGroup.value) {
-                        newest?.senderHex?.let { typingActivity.update(it, false) }
-                    } else {
-                        typingActivity.clear()
+                if (incomingLoaded && newest != null && newest.key != newestIncoming && newest.key !in previousIncomingKeys) {
+                    (newest.senderHex ?: others.singleOrNull()?.toHex())?.let {
+                        app.conversationActivity.update(conversationHex, it, 0)
                     }
-                    if (wasTyping && !typing.value && newest != null) typingHandoff.value = newest.key
+                    syncTyping()
+                    // An idle signal can beat the message. The stage may still
+                    // have an exiting typing row to hand over; it decides whether
+                    // that source is present rather than relying on this Boolean.
+                    if (!typing.value) typingHandoff.value = newest.key
                 }
+                newestIncoming = newest?.key
+                previousIncomingKeys = list.filterNot { it.outgoing }.mapTo(HashSet()) { it.key }
+                incomingLoaded = true
                 // With this chat on screen it's read: receipt the high-water mark.
                 // Keyed on the dispatch id, not the row — `key` falls back to the
                 // local ULID, so a row can surface before the id the receipt needs.
@@ -258,31 +291,12 @@ class ChatVM(private val application: Application) : ViewModel() {
         }
         viewModelScope.launch {
             observeQuery(setOf("staging")) { CoreBridge.stagedItems() }.collect { records ->
-                _staged.value = records.map { r ->
-                    StagedMedia(
-                        id = r.id,
-                        kind = r.kind.toInt(),
-                        state = r.state.toInt(),
-                        name = r.name,
-                        mime = r.mime,
-                        size = r.size.toLong(),
-                        width = r.width.toInt(),
-                        height = r.height.toInt(),
-                        // An image's tile is decoded from the pick at stage time; an
-                        // attachment's is libcore's blurred thumb, keyed per staged id.
-                        preview = previews[r.id]
-                            ?: r.thumb?.let { decodeAvifCached("staged-${r.id}", it) },
-                        error = r.error,
-                    )
-                }
-                previews.keys.retainAll(records.map { it.id }.toSet())
+                updateStaged(records)
             }
         }
 
         viewModelScope.launch {
-            CoreBridge.activity.filter { it.conversation.contentEquals(conversation) }.collect { sig ->
-                typingActivity.update(sig.peer.toHex(), Activity.Typing in Activity.fromBits(sig.bits))
-            }
+            app.conversationActivity.members.collect { syncTyping() }
         }
 
         // Seed from the app-wide cache (AppVM subscribes presence for all
@@ -304,22 +318,25 @@ class ChatVM(private val application: Application) : ViewModel() {
                 .collect { sig -> if (!_isGroup.value) _presence.value = sig.presence }
         }
 
-        // Outbound typing: refresh under the peer's TTL while keystrokes flow,
-        // one idle signal when the draft empties (send() clears input → same path).
-        var lastSentAt = 0L
+        viewModelScope.launch { input.collect(outgoingTyping::edited) }
         viewModelScope.launch {
-            input.collect { text ->
-                if (text.isEmpty()) {
-                    if (lastSentAt != 0L) {
-                        lastSentAt = 0L
-                        runCatching { CoreBridge.setActivity(conversation, 0) }
-                    }
-                } else {
-                    val now = SystemClock.uptimeMillis()
-                    if (now - lastSentAt >= TYPING_RESEND_MS) {
-                        lastSentAt = now
-                        runCatching { CoreBridge.setActivity(conversation, Activity.Typing.bit) }
-                    }
+            var previous = emptyMap<String, Presence>()
+            CoreBridge.presenceByPeer.collect { current ->
+                val returned = others.any { peer ->
+                    val key = peer.toHex()
+                    val before = previous[key]
+                    val after = current[key]
+                    (after == Presence.Online && before != Presence.Online) ||
+                        (after is Presence.Idle && before != Presence.Online && before !is Presence.Idle)
+                }
+                previous = current
+                if (returned) outgoingTyping.refresh()
+            }
+        }
+        viewModelScope.launch {
+            CoreBridge.connection.collect { connection ->
+                if (connection == com.promtuz.chat.presentation.state.ConnectionState.Connected) {
+                    outgoingTyping.refresh()
                 }
             }
         }
@@ -412,62 +429,102 @@ class ChatVM(private val application: Application) : ViewModel() {
      * until the buffer settles rather than letting it fail silently.
      */
     fun send() {
+        if (composerBusy.value || pickingMedia) return
         val text = input.value.trim()
         val items = _staged.value
-        if (text.isEmpty() && items.isEmpty()) return
-        if (items.any { !it.ready }) return
-
         val action = composerAction.value
-        input.value = ""
-        composerAction.value = null
-
-        if (items.isNotEmpty()) {
-            val ids = items.map { it.id }
-            when (action) {
-                // A revision targets one message, so only the first pick can land.
-                // The buffer isn't drained by the revise — body_of leaves items in
-                // place so a refused swap doesn't cost the user their pick — so
-                // clear it here, once the body is already on its way.
-                is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { did ->
-                    fire {
-                        CoreBridge.reviseWithStaged(conversation, did.fromHex(), ids.first(), text)
-                        CoreBridge.clearStaged()
-                    }
-                }
-                else -> {
-                    val replyTo = (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
-                    fire { CoreBridge.sendStaged(conversation, ids, text, replyTo) }
-                }
-            }
+        val editing = action as? ComposerAction.Edit
+        val canClearCaption = editing?.msg?.content is MessageContent.Image ||
+            editing?.msg?.content is MessageContent.Attachment
+        if (text.isEmpty() && items.isEmpty() && !canClearCaption) return
+        if (items.any { !it.ready }) return
+        if (editing != null && (items.size > 1 || items.any { !editing.msg.content.acceptsStaged(it.kind) })) {
+            composerError.value = "Choose one compatible replacement for this message."
             return
         }
-
-        when (action) {
-            // An unchanged edit is dropped, not sent: apply_edit flags `edited = 1`
-            // unconditionally, so firing one would stamp the message for nothing.
-            is ComposerAction.Edit -> {
-                val original = action.msg.editableText().trim()
-                if (text != original) action.msg.dispatchIdHex?.let { edit(it, text) }
-            }
-            is ComposerAction.Reply -> fire {
-                CoreBridge.sendMessage(conversation, text, action.msg.dispatchIdHex?.fromHex())
-            }
-            null -> fire { CoreBridge.sendMessage(conversation, text) }
+        val did = editing?.msg?.dispatchIdHex
+        if (editing != null && did == null) {
+            composerError.value = "This message can’t be edited yet."
+            return
+        }
+        if (editing != null && items.isEmpty() && text == editing.msg.editableText().trim()) {
+            restoreDraft()
+            return
+        }
+        composerBusy.value = true
+        composerError.value = null
+        viewModelScope.launch {
+            try {
+                when {
+                    editing != null && items.isNotEmpty() -> {
+                        CoreBridge.reviseWithStaged(conversation, did!!.fromHex(), items.single().id, text)
+                        // Remove only the committed replacement, never an unrelated buffer.
+                        runCatching { CoreBridge.discardStaged(items.single().id) }
+                    }
+                    editing != null -> CoreBridge.editMessage(conversation, did!!.fromHex(), text)
+                    items.isNotEmpty() -> CoreBridge.sendStaged(conversation, items.map { it.id }, text,
+                        (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                    else -> CoreBridge.sendMessage(conversation, text,
+                        (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                }
+                _staged.value = _staged.value.filterNot { media -> items.any { it.id == media.id } }
+                if (editing != null) restoreDraft()
+                else { input.value = ""; composerAction.value = null }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                composerError.value = if (editing != null) "Couldn’t save changes. Try again." else "Couldn’t send. Try again."
+            } finally { composerBusy.value = false }
         }
     }
 
     fun beginReply(msg: UiMessage) {
+        if (composerBusy.value || recording.value != null || pickingMedia) return
+        if (composerAction.value is ComposerAction.Edit) {
+            if (_staged.value.isNotEmpty()) {
+                composerError.value = "Remove the replacement before switching to a reply."
+                return
+            }
+            restoreDraft()
+        }
+        composerError.value = null
         composerAction.value = ComposerAction.Reply(msg)
     }
 
     fun beginEdit(msg: UiMessage) {
+        if (composerBusy.value || recording.value != null || pickingMedia) return
+        if (composerAction.value?.msg?.key == msg.key && composerAction.value is ComposerAction.Edit) return
+        if (_staged.value.isNotEmpty()) {
+            composerError.value = "Send or remove the selected media before editing another message."
+            return
+        }
+        val current = composerAction.value
+        if (current is ComposerAction.Edit) editDrafts[current.msg.key] = input.value
+        else savedDraft = SavedDraft(input.value, current)
+        composerError.value = null
         composerAction.value = ComposerAction.Edit(msg)
-        input.value = msg.editableText()
+        input.value = editDrafts[msg.key] ?: msg.editableText()
     }
 
     fun cancelComposerAction() {
-        if (composerAction.value is ComposerAction.Edit) input.value = ""
-        composerAction.value = null
+        if (composerBusy.value || pickingMedia) return
+        composerError.value = null
+        if (composerAction.value is ComposerAction.Edit) {
+            val replacements = _staged.value.map { it.id }
+            if (replacements.isEmpty()) restoreDraft()
+            else {
+                composerBusy.value = true
+                viewModelScope.launch {
+                    try {
+                        replacements.forEach { CoreBridge.discardStaged(it) }
+                        updateStaged(CoreBridge.stagedItems())
+                        restoreDraft()
+                    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (e: Exception) { composerError.value = "Couldn’t remove the replacement. Try again." }
+                    finally { composerBusy.value = false }
+                }
+            }
+        } else composerAction.value = null
     }
 
     /** Tap on a quick-reaction or an existing chip: mine → remove, else add. */
@@ -492,9 +549,9 @@ class ChatVM(private val application: Application) : ViewModel() {
      * P2P attachment path. The album id is minted at commit time, so a pick
      * added later still joins the same group.
      */
-    fun attachPhotos(uris: List<Uri>) = fire {
+    fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
         val cr = application.contentResolver
-        uris.forEach { uri ->
+        selected.forEach { uri ->
             // ponytail: video staged raw over P2P — transcode + poster frame land later.
             if (cr.getType(uri)?.startsWith("video/") == true) stagePickedFile(uri)
             else {
@@ -506,10 +563,54 @@ class ChatVM(private val application: Application) : ViewModel() {
     }
 
     /** Picked documents → the buffer as P2P attachments. */
-    fun attachFiles(uris: List<Uri>) = fire { uris.forEach { stagePickedFile(it) } }
+    fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected -> selected.forEach { stagePickedFile(it) } }
+
+    private fun prepareMedia(uris: List<Uri>, photos: Boolean, prepare: suspend (List<Uri>) -> Unit) {
+        if (composerBusy.value || pickingMedia || uris.isEmpty()) return
+        val editing = composerAction.value as? ComposerAction.Edit
+        if (editing != null) {
+            val kind = if (photos) com.promtuz.chat.domain.model.STAGED_IMAGE else com.promtuz.chat.domain.model.STAGED_ATTACHMENT
+            if (!editing.msg.content.acceptsStaged(kind) || uris.size != 1 || _staged.value.isNotEmpty() ||
+                (photos && uris.any { application.contentResolver.getType(it)?.startsWith("video/") == true })) {
+                composerError.value = "Choose one compatible replacement for this message."
+                return
+            }
+        }
+        pickingMedia = true
+        composerBusy.value = true
+        composerError.value = null
+        viewModelScope.launch {
+            try { prepare(uris); updateStaged(CoreBridge.stagedItems()) }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { composerError.value = "Couldn’t prepare the media. Try again." }
+            finally { pickingMedia = false; composerBusy.value = false }
+        }
+    }
+
+    private fun updateStaged(records: List<uniffi.core.StagedRecord>) {
+        _staged.value = records.map { r ->
+            StagedMedia(
+                id = r.id,
+                kind = r.kind.toInt(),
+                state = r.state.toInt(),
+                name = r.name,
+                mime = r.mime,
+                size = r.size.toLong(),
+                width = r.width.toInt(),
+                height = r.height.toInt(),
+                // An image's tile is decoded from the pick at stage time; an
+                // attachment's is libcore's blurred thumb, keyed per staged id.
+                preview = previews[r.id]
+                    ?: r.thumb?.let { decodeAvifCached("staged-${r.id}", it) },
+                error = r.error,
+            )
+        }
+        previews.keys.retainAll(records.map { it.id }.toSet())
+    }
 
     /** Drop one buffered item; safe mid-encode. */
     fun unstage(id: ULong) = fire {
+        if (composerBusy.value) return@fire
         previews.remove(id)
         CoreBridge.discardStaged(id)
     }
@@ -519,6 +620,7 @@ class ChatVM(private val application: Application) : ViewModel() {
      * return is the device refusing (another app holds the mic).
      */
     fun startRecording(): Boolean {
+        if (composerBusy.value || pickingMedia || composerAction.value is ComposerAction.Edit || input.value.isNotBlank() || _staged.value.isNotEmpty()) return false
         if (recorder.isRecording) return true
         VoicePlayer.stop()
         if (!recorder.start(onLimit = { finishRecording() })) return false
@@ -594,11 +696,6 @@ class ChatVM(private val application: Application) : ViewModel() {
     private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
 
     private companion object {
-        const val TYPING_TTL_MS = 6_000L
-
-        /** Outbound refresh cadence; must stay under the peer's [TYPING_TTL_MS]. */
-        const val TYPING_RESEND_MS = 4_000L
-
         /** Cap the inline photo's longest edge so the AVIF pass lands under libcore's
          *  256KB budget. Over-budget picks fail in the buffer, where the strip can
          *  show it, rather than at send time. */

@@ -66,9 +66,8 @@ class AppVM(
      * 0/absent = quiet. Keyed on the chat rather than the person: the same
      * contact can be typing in a group without typing in your DM.
      */
-    private val _activityByChat = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val activityByChat: StateFlow<Map<String, Int>> = _activityByChat.asStateFlow()
-    private val activityExpiry = mutableMapOf<String, Job>()
+    internal val conversationActivity = ConversationActivity(viewModelScope, ACTIVITY_TTL_MS)
+    val activityByChat: StateFlow<Map<String, Int>> = conversationActivity.byChat
 
     /** Invite-link confirmation sheet; null when hidden. Driven by deeplinks. */
     private val _invite = MutableStateFlow<InviteSheet?>(null)
@@ -98,22 +97,11 @@ class AppVM(
 
         // Typing/recording already reaches us for any contact (relay-routed,
         // surfaced view-agnostically) — it just wasn't collected outside a chat.
-        // Track it app-wide for the home list; time each chat out (an offline
+        // Track it app-wide for home and chat; time each member out (an offline
         // peer never sends "stopped").
         viewModelScope.launch {
             bridge.activity.collect { sig ->
-                val hex = sig.conversation.toHex()
-                activityExpiry.remove(hex)?.cancel()
-                if (sig.bits != 0) {
-                    _activityByChat.value = _activityByChat.value + (hex to sig.bits)
-                    activityExpiry[hex] = viewModelScope.launch {
-                        delay(ACTIVITY_TTL_MS)
-                        activityExpiry.remove(hex)
-                        _activityByChat.value = _activityByChat.value - hex
-                    }
-                } else {
-                    _activityByChat.value = _activityByChat.value - hex
-                }
+                conversationActivity.update(sig.conversation.toHex(), sig.peer.toHex(), sig.bits)
             }
         }
 
@@ -149,7 +137,7 @@ class AppVM(
         private const val TAG = "AppVM"
         private val log = { Timber.tag(TAG) }
 
-        /** Client-side typing/recording timeout; matches ChatVM's TTL. */
+        /** Shared receive timeout for typing and recording activity. */
         private const val ACTIVITY_TTL_MS = 6_000L
     }
 

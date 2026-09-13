@@ -301,7 +301,19 @@ pub(crate) async fn send_prepared(
 /// the wire — the relay queues it for an offline peer; a mid-send failure while
 /// WE are offline leaves the local edit applied but unpropagated (MVP).
 pub async fn edit(conversation: [u8; 16], target: [u8; 16], content: String) -> Result<()> {
-    revise(conversation, target, Body::Text(content)).await
+    revise(conversation, target, text_edit_body(&conversation, &target, content)?).await
+}
+
+/// Editing the text field changes a caption without changing its media body.
+pub(crate) fn text_edit_body(conversation: &[u8; 16], target: &[u8; 16], text: String) -> Result<Body> {
+    let msg = Message::get_by_dispatch(conversation, target).ok_or_else(|| anyhow!("message not found"))?;
+    let mut body = stored_body(conversation, &msg)?;
+    match &mut body {
+        Body::Text(content) => *content = text,
+        Body::Image { caption, .. } | Body::Attachment { caption, .. } => *caption = text,
+        _ => bail!("this message has no editable text"),
+    }
+    Ok(body)
 }
 
 /// Replace a prior message's body. Applies locally first — which is also where
@@ -1411,10 +1423,14 @@ impl BodyKind {
 pub(crate) fn rebuild_pending_payload(
     conversation: &[u8; 16], msg: &Message,
 ) -> Result<Vec<u8>> {
+    let reply_to = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    let body = stored_body(conversation, msg)?;
+    AppPayload::Post { reply_to, body }.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
+}
+
+fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
     let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
-    let media = did.and_then(|d| crate::data::media::get(conversation, &d).ok().flatten());
-    let reply_to: Option<[u8; 16]> =
-        msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
+    let media = match did { Some(d) => crate::data::media::get(conversation, &d)?, None => None };
     let body = match media {
         Some(m) if m.kind == crate::data::media::KIND_IMAGE => {
             // Empty blob = un-finalized placeholder (compress still running).
@@ -1457,7 +1473,7 @@ pub(crate) fn rebuild_pending_payload(
         },
         _ => Body::Text(msg.inner.content.clone()),
     };
-    AppPayload::Post { reply_to, body }.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
+    Ok(body)
 }
 
 /// Shared tail of [`attempt_send`] and [`send_prepared`]: resolve or
@@ -2683,6 +2699,32 @@ mod tests {
             ),
             "a text row must not be dressed up as media",
         );
+    }
+
+    #[test]
+    fn caption_edits_preserve_media_and_reject_missing_targets() {
+        let dir = std::env::temp_dir().join("promtuz-caption-edit-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let to = [0x79u8; 16];
+        let msg = build_image_message(to, 4, 3, "old caption", None).unwrap();
+        let did = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+        crate::data::media::set_blob(&to, &did, &[7, 8, 9], 4, 3).unwrap();
+        let body = text_edit_body(&to, &did, String::new()).unwrap();
+        assert!(matches!(&body, Body::Image { caption, data, .. } if caption.is_empty() && data == &[7, 8, 9]));
+        apply_revise_body(&to, &did, body, true, None).unwrap().unwrap();
+        let stored = crate::data::media::get(&to, &did).unwrap().unwrap();
+        assert_eq!(stored.blob.unwrap(), vec![7, 8, 9]);
+        assert_eq!(Message::get_by_dispatch(&to, &did).unwrap().inner.content, "");
+        let file = build_attachment_message(to, 12, "notes.txt", "text/plain", None, "old", None).unwrap();
+        let file_did = file.inner.dispatch_id.clone().unwrap().try_into().unwrap();
+        crate::data::media::set_file_id(&to, &file_did, &[3; 32]).unwrap();
+        let body = text_edit_body(&to, &file_did, "new caption".into()).unwrap();
+        assert!(matches!(&body, Body::Attachment { caption, file_id, name, .. }
+            if caption == "new caption" && file_id == &[3; 32] && name == "notes.txt"));
+        apply_revise_body(&to, &file_did, body, true, None).unwrap().unwrap();
+        assert_eq!(crate::data::media::get(&to, &file_did).unwrap().unwrap().file_id.unwrap(), vec![3; 32]);
+        assert!(text_edit_body(&to, &[0; 16], String::new()).is_err());
     }
 
     /// Every cell of the revision matrix. Text and image both ride inside the

@@ -31,12 +31,12 @@ import kotlin.math.sin
  * exit as the real message enters reads as the typing→message hand-off.
  */
 @Composable
-fun TypingBubble(modifier: Modifier = Modifier) {
+fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
     val shape = rememberBubbleShape(
         outgoing = false,
-        mergedTop = false,
+        mergedTop = mergedTop,
         mergedBottom = false,
         style = appearance.bubble,
     )
@@ -50,8 +50,9 @@ fun TypingBubble(modifier: Modifier = Modifier) {
         Row(
             Modifier
                 .align(Alignment.CenterStart)
+                // The tail extends outside the body. Paint it before clipping the dots.
+                .background(chat.incomingBubble, shape)
                 .clip(shape)
-                .background(chat.incomingBubble)
                 .padding(horizontal = 13.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {

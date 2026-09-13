@@ -4,11 +4,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -21,7 +19,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,27 +30,28 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
@@ -102,6 +100,10 @@ fun ChatBottomBar(
 ) {
     val input by viewModel.input.collectAsState()
     val action by viewModel.composerAction.collectAsState()
+    val busy by viewModel.composerBusy.collectAsState()
+    val error by viewModel.composerError.collectAsState()
+    val feedbackContext = LocalContext.current
+    LaunchedEffect(error) { error?.let { Toast.makeText(feedbackContext, it, Toast.LENGTH_LONG).show() } }
 
     // The attach panel swaps with the keyboard, so its open-state and the system
     // pickers live here — both the paperclip toggle and the panel's tabs reach them.
@@ -129,7 +131,7 @@ fun ChatBottomBar(
     val beginRecording = {
         if (!viewModel.startRecording()) {
             Toast.makeText(context, "Microphone is busy", Toast.LENGTH_SHORT).show()
-        }
+        } else { closingToKeyboard = false; attachOpen = false; focusManager.clearFocus() }
     }
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) beginRecording()
@@ -140,6 +142,7 @@ fun ChatBottomBar(
             PackageManager.PERMISSION_GRANTED
         ) beginRecording() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
+    BackHandler(action != null && !attachOpen && recording == null) { viewModel.cancelComposerAction() }
     BackHandler(recording != null) { viewModel.cancelRecording() }
     // Leaving the screen ends the note rather than letting it run on: the
     // platform mutes a backgrounded mic, so what would be recorded is silence,
@@ -149,16 +152,18 @@ fun ChatBottomBar(
     // No .imePadding()/.navigationBarsPadding(): AttachPanel owns the bottom region
     // and reserves the keyboard/nav space itself (see its region formula).
     // The pill's own chrome, which the input row's measured height knows nothing about.
-    val chromePx = with(LocalDensity.current) { ((BarPad + BarMarginV) * 2).roundToPx() }
+    val minimumPill = with(LocalDensity.current) { (38.dp + (BarPad + BarMarginV) * 2).roundToPx() }
+    val actionProgress = remember { Animatable(0f) }
+    val stripProgress = remember { Animatable(0f) }
 
-    Column(Modifier.fillMaxWidth()) {
+    Layout(modifier = Modifier.fillMaxWidth(), content = {
         // Block content is captured (not read live) so the close animation has
         // something to draw after the action nulls.
         var lastAction by remember { mutableStateOf(action) }
         if (action != null) lastAction = action
 
         LaunchedEffect(action != null) {
-            metrics.progress.animateTo(if (action != null) 1f else 0f, ChatMotion.spec())
+            actionProgress.animateTo(if (action != null) 1f else 0f, ChatMotion.spec())
         }
 
         // Same capture-for-exit as the action block: the strip needs tiles to draw
@@ -168,7 +173,7 @@ fun ChatBottomBar(
         if (staged.isNotEmpty()) lastStaged = staged
 
         LaunchedEffect(staged.isEmpty()) {
-            metrics.stripProgress.animateTo(if (staged.isEmpty()) 0f else 1f, ChatMotion.spec())
+            stripProgress.animateTo(if (staged.isEmpty()) 0f else 1f, ChatMotion.spec())
         }
 
         Box(
@@ -182,21 +187,21 @@ fun ChatBottomBar(
                 .hazeEffect(haze, chatBarHaze())
                 .padding(BarPad),
         ) {
-            Column {
-                Reveal(metrics.progress, { metrics.actionH = it }) {
+            ComposerSlots(metrics) {
+                Reveal(actionProgress) {
                     lastAction?.let {
                         ComposerActionBlock(
                             it,
-                            onCancel = viewModel::cancelComposerAction,
+                            onCancel = { if (!busy && action != null) viewModel.cancelComposerAction() },
                             // Editing can't reach the body's media from the field, so
                             // the block's line opens the picker — narrowed to whatever
                             // the target may legally become.
-                            onAddMedia = { attachOpen = true },
-                            onJumpTo = onJumpTo,
+                            onAddMedia = { if (!busy && action != null) attachOpen = true },
+                            onJumpTo = { if (action != null) onJumpTo(it) },
                         )
                     }
                 }
-                Reveal(metrics.stripProgress, { metrics.stripH = it }) {
+                Reveal(stripProgress) {
                     StagedStrip(lastStaged, viewModel::unstage)
                 }
                 // The recorder takes the input row's place, not a row of its own:
@@ -204,7 +209,7 @@ fun ChatBottomBar(
                 AnimatedContent(
                     targetState = recording != null,
                     transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
-                    modifier = Modifier.onSizeChanged { metrics.composerPx = it.height + chromePx },
+                    modifier = Modifier.animateContentSize(ChatMotion.spec(), alignment = Alignment.BottomStart),
                     label = "composerOrRecorder",
                 ) { isRecording ->
                     if (isRecording) RecordingRow(
@@ -238,12 +243,11 @@ fun ChatBottomBar(
             open = attachOpen,
             closingToKeyboard = closingToKeyboard,
             haze = haze,
-            metrics = metrics,
             allowPhotos = editing?.acceptsStaged(STAGED_IMAGE) ?: true,
             allowFiles = editing?.acceptsStaged(STAGED_ATTACHMENT) ?: true,
             onHideKeyboard = { focusManager.clearFocus() },
             onPickPhotos = {
-                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                photoPicker.launch(PickVisualMediaRequest(if (action is ComposerAction.Edit) ActivityResultContracts.PickVisualMedia.ImageOnly else ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
             onPickFiles = { filePicker.launch(arrayOf("*/*")) },
             onSendPhotos = { uris ->
@@ -252,6 +256,38 @@ fun ChatBottomBar(
                 attachOpen = false
             },
         )
+    }) { children, constraints ->
+        // Reserve the keyboard/panel first, but always leave a usable input row.
+        // Read back allocated heights, never the panel's requested inset.
+        val available = constraints.maxHeight
+        val region = children[1].measure(constraints.copy(minHeight = 0,
+            maxHeight = (available - minimumPill).coerceAtLeast(0)))
+        val pill = children[0].measure(constraints.copy(minHeight = 0,
+            maxHeight = (available - region.height).coerceAtLeast(0)))
+        metrics.composerPx = pill.height
+        metrics.regionPx = region.height
+        layout(constraints.maxWidth, pill.height + region.height) {
+            pill.placeRelative(0, 0)
+            region.placeRelative(0, pill.height)
+        }
+    }
+}
+
+/** Input has priority; accessory slots share only the remaining vertical budget. */
+@Composable
+private fun ComposerSlots(metrics: ComposerMetrics, content: @Composable () -> Unit) {
+    Layout(content = content) { children, constraints ->
+        val loose = constraints.copy(minHeight = 0)
+        val minimumRow = 38.dp.roundToPx().coerceAtMost(constraints.maxHeight)
+        val action = children[0].measure(loose.copy(maxHeight = (constraints.maxHeight - minimumRow).coerceAtLeast(0)))
+        val strip = children[1].measure(loose.copy(maxHeight = (constraints.maxHeight - minimumRow - action.height).coerceAtLeast(0)))
+        val row = children[2].measure(loose.copy(maxHeight = (constraints.maxHeight - action.height - strip.height).coerceAtLeast(0)))
+        metrics.accessoryPx = action.height + strip.height
+        layout(constraints.maxWidth, row.height + action.height + strip.height) {
+            action.placeRelative(0, 0)
+            strip.placeRelative(0, action.height)
+            row.placeRelative(0, action.height + strip.height)
+        }
     }
 }
 
@@ -261,13 +297,12 @@ fun ChatBottomBar(
  * uncovered top-down — a reply's label before its snippet — with the fade
  * tracking the same value so the clip line never reads as a cut.
  *
- * Height goes out through [onHeight] rather than being measured by the caller:
- * the stage reads the same metrics this lays out from, so the bar and the
- * messages resolve in one pass instead of a frame apart.
+ * The parent measures the revealed allocation and publishes that actual height
+ * for the message stage, including any constraints on this slot.
  */
 @Composable
 private fun Reveal(
-    progress: Animatable<Float, *>, onHeight: (Int) -> Unit, content: @Composable () -> Unit,
+    progress: Animatable<Float, *>, content: @Composable () -> Unit,
 ) {
     Layout(
         content = content,
@@ -278,7 +313,6 @@ private fun Reveal(
         val p = measurables.firstOrNull()?.measure(constraints)
         if (p == null) layout(0, 0) {}
         else {
-            onHeight(p.height)
             val h = (p.height * progress.value).roundToInt().coerceIn(0, p.height)
             layout(p.width, h) { p.placeRelative(0, 0) }
         }
@@ -405,7 +439,8 @@ private fun ComposerActionBlock(
         // Same circle as the row below, not an IconButton: its 48dp minimum exceeds
         // the label+snippet stack and would set the block's height instead of them.
         Box(
-            Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onCancel),
+            Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onCancel)
+                .semantics { contentDescription = "Cancel action" },
             contentAlignment = Alignment.Center,
         ) {
             DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
@@ -432,21 +467,21 @@ private fun ComposerRow(
     // staged. Held while anything is still encoding: libcore refuses a
     // half-prepared item, so an enabled button there would fail silently.
     val staged by viewModel.staged.collectAsState()
+    val busy by viewModel.composerBusy.collectAsState()
+    val editing = action as? ComposerAction.Edit
+    val canClearCaption = editing?.msg?.content is MessageContent.Image || editing?.msg?.content is MessageContent.Attachment
     val hasContent = input.isNotBlank() || staged.isNotEmpty()
-    val hasDraft = hasContent && staged.all { it.ready }
+    val hasDraft = (hasContent || canClearCaption) && staged.all { it.ready } && !busy
 
     Row(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom,
     ) {
-        // The leading slot never empties — it SWAPS. A sticker is a whole message
-        // of its own, so it can't coexist with a draft; the paperclip can, and
-        // moves over from the trailing side to take the place. Keeping the slot
-        // occupied is also what keeps the row's geometry still: collapsing it
-        // animated the icon away but dropped its spacing in one frame.
+        // Swap the leading affordance without changing the input's width.
         Box(
             Modifier.padding(end = SlotGap).size(38.dp).clip(CircleShape)
-                .clickable(enabled = hasContent) { onToggleAttach() },
+                .clickable(enabled = hasContent && !busy) { onToggleAttach() }
+                .semantics { contentDescription = if (hasContent) "Attach media" else "Stickers" },
             contentAlignment = Alignment.Center,
         ) {
             AnimatedContent(
@@ -467,12 +502,14 @@ private fun ComposerRow(
         BasicTextField(
             value = input,
             onValueChange = { viewModel.input.value = it },
+            enabled = !busy,
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
             cursorBrush = SolidColor(chat.accent),
             maxLines = 6,
             // Tapping the field to type raises the keyboard, so close the panel it replaces.
             modifier = Modifier.weight(1f)
-                .onFocusChanged { if (it.isFocused) onFieldFocused() },
+                .onFocusChanged { if (it.isFocused) onFieldFocused() }
+                .semantics { contentDescription = "Message input" },
             // Floored at the button size and centred within it, so a single line sits
             // level with the icons rather than riding the row's Bottom alignment. Past
             // one line the box grows and Bottom keeps the buttons at the last line.
@@ -498,23 +535,15 @@ private fun ComposerRow(
         // a draft it has already moved to the leading slot, so this one folds away.
         // The gap rides inside the animated node, so it collapses with the icon
         // rather than vanishing in a frame after it.
-        AnimatedVisibility(
-            visible = !hasContent,
-            enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
-            exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec()),
-        ) {
-            val attachRot by animateFloatAsState(if (attachOpen) 45f else 0f, tween(200), label = "attachRot")
-            Box(
-                Modifier.padding(start = SlotGap).size(38.dp).clip(CircleShape)
-                    .clickable(onClick = onToggleAttach),
-                contentAlignment = Alignment.Center,
-            ) {
-                DrawableIcon(
-                    R.drawable.oi_paperclip,
-                    Modifier.size(20.dp).rotate(attachRot),
-                    tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
-                )
-            }
+
+        // Keep the same text width while the attachment affordance changes sides.
+        Box(Modifier.padding(start = SlotGap).size(38.dp)
+            .graphicsLayer { alpha = if (hasContent) 0f else 1f }
+            .clip(CircleShape).clickable(enabled = !hasContent && !busy) { onToggleAttach() }
+            .semantics { contentDescription = "Attach media" },
+            contentAlignment = Alignment.Center) {
+            DrawableIcon(R.drawable.oi_paperclip, Modifier.size(20.dp),
+                tint = if (attachOpen) chat.accent else colors.onSurfaceVariant)
         }
 
         // The trailing slot is ALWAYS occupied at a fixed size so the pill's
@@ -530,7 +559,7 @@ private fun ComposerRow(
                 .background(if (hasDraft) chat.accent else Color.Transparent)
                 // An edit has a body to replace and a voice note is not one,
                 // so the mic sits out while one is staged; a reply rides along.
-                .clickable(enabled = hasDraft || (!hasContent && action !is ComposerAction.Edit)) {
+                .clickable(enabled = !busy && (hasDraft || (!hasContent && action !is ComposerAction.Edit))) {
                     if (hasDraft) viewModel.send() else onMic()
                 },
             contentAlignment = Alignment.Center,
@@ -538,9 +567,10 @@ private fun ComposerRow(
             // Anything drafted shows send, even while it's still encoding and
             // the tap is held: a mic there would promise a recording the slot
             // can't start.
-            AnimatedContent(
+            if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = chat.accent)
+            else AnimatedContent(
                 targetState = when {
-                    action is ComposerAction.Edit && hasContent -> R.drawable.i_edit_check
+                    action is ComposerAction.Edit -> R.drawable.i_edit_check
                     hasContent -> R.drawable.i_send
                     else -> R.drawable.i_mic
                 },

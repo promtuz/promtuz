@@ -165,16 +165,22 @@ pub fn send_message(
     Ok(())
 }
 
-/// Edit a prior message (targets it by its 16-byte `dispatch_id`). Fire-and-
-/// forget; the change is applied locally and surfaces via `on_message(Edited)`.
+/// Edit text or a media caption, preserving its body. Local validation and
+/// persistence finish before returning; propagation to peers is asynchronous.
 #[uniffi::export]
 pub fn edit_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, content: String,
 ) -> Result<(), CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
+    let body = crate::messaging::text_edit_body(&conv, &target, content)?;
+    let applied = crate::messaging::apply_revise_body(&conv, &target, body.clone(), true, None)?;
+    let (row, content) = applied.ok_or_else(|| anyhow::anyhow!("message cannot be edited"))?;
+    use crate::events::Emittable;
+    crate::events::messaging::MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::edit(conv, target, content).await {
+        if let Err(e) = crate::messaging::send_control(conv,
+            common::proto::mls_wire::AppPayload::Revise { target, body }).await {
             log::error!("MESSAGE: edit failed: {e}");
         }
     });

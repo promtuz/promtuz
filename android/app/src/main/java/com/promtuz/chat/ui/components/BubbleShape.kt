@@ -1,9 +1,11 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.getValue
+import com.promtuz.chat.ui.stage.ChatMotion
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
@@ -27,6 +29,7 @@ class BubbleShape(
     private val bottomRight: Dp,
     private val tail: Tail? = null,
     private val tailSize: Dp = 8.dp,
+    private val tailProgress: Float = 1f,
 ) : Shape {
     enum class Tail { Left, Right }
 
@@ -34,58 +37,41 @@ class BubbleShape(
         val w = size.width
         val h = size.height
         fun px(v: Dp) = with(density) { v.toPx() }
-        val tl = px(topLeft); val tr = px(topRight); val bl = px(bottomLeft); val br = px(bottomRight)
-        val ts = px(tailSize)
+        val progress = tailProgress.coerceIn(0f, 1f)
+        val ts = px(tailSize) * progress
+        val tl = px(topLeft).coerceAtMost(h / 2f).coerceAtMost(w / 2f)
+        val tr = px(topRight).coerceAtMost(h / 2f).coerceAtMost(w / 2f)
+        val bl = px(bottomLeft).coerceAtMost(h / 2f).coerceAtMost(w / 2f)
+        val br = px(bottomRight).coerceAtMost(h / 2f).coerceAtMost(w / 2f)
+        val left = if (tail == Tail.Left) bl * (1f - progress) else bl
+        val right = if (tail == Tail.Right) br * (1f - progress) else br
+        val leftTail = if (tail == Tail.Left) ts else 0f
+        val rightTail = if (tail == Tail.Right) ts else 0f
+        val ls = leftTail / 13f
+        val rs = rightTail / 12.5234f
+        val k = 0.5522848f // Cubic approximation of a quarter circle.
 
-        // The sender-bottom corner is squared where the tail attaches so the tail's
-        // flat inner edge sits flush against the body.
-        val bodyBl = if (tail == Tail.Left) 0f else bl
-        val bodyBr = if (tail == Tail.Right) 0f else br
-
+        // One continuous contour: interpolate each sender corner into its tail.
+        // Separate body/tail paths would leave a gap while the corner rounds off.
         val path = Path().apply {
-            addRoundRect(
-                RoundRect(
-                    0f, 0f, w, h,
-                    topLeftCornerRadius = CornerRadius(tl),
-                    topRightCornerRadius = CornerRadius(tr),
-                    bottomRightCornerRadius = CornerRadius(bodyBr),
-                    bottomLeftCornerRadius = CornerRadius(bodyBl),
-                )
+            moveTo(0f, tl)
+            cubicTo(0f, tl * (1f - k), tl * (1f - k), 0f, tl, 0f)
+            lineTo(w - tr, 0f)
+            cubicTo(w - tr * (1f - k), 0f, w, tr * (1f - k), w, tr)
+            lineTo(w, h - right - rightTail)
+            cubicTo(
+                w, h - right - rightTail + k * right + 5.89745f * rs,
+                w - right * (1f - k) + 6.42368f * rs, h - rightTail + 11.3541f * rs,
+                w - right + 12.2834f * rs, h,
             )
-            // Tail: a filled flick appended off the sender's bottom corner, protruding
-            // past the body edge. The SVG is authored ~12dp tall; we scale it uniformly
-            // so its height == tailSize and translate it onto the corner.
-            when (tail) {
-                null -> {}
-                // Outgoing — off the bottom-right, curling right.
-                // Path: M0 12.5234 V0 C0 5.89745 6.42368 11.3541 12.2834 12.5234 H0 Z
-                Tail.Right -> {
-                    val s = ts / 12.5234f
-                    moveTo(w, h)
-                    lineTo(w, h - ts)
-                    cubicTo(
-                        w, (h - ts) + 5.89745f * s,
-                        w + 6.42368f * s, (h - ts) + 11.3541f * s,
-                        w + 12.2834f * s, h,
-                    )
-                    lineTo(w, h)
-                    close()
-                }
-                // Incoming — mirror off the bottom-left, curling left.
-                // Path: M12 13 V0 C12 6.12186 5.72456 11.7862 0 13 H12 Z
-                Tail.Left -> {
-                    val s = ts / 13f
-                    moveTo(0f, h)
-                    lineTo(0f, h - ts)
-                    cubicTo(
-                        0f, (h - ts) + 6.12186f * s,
-                        (5.72456f - 12f) * s, (h - ts) + 11.7862f * s,
-                        -12f * s, h,
-                    )
-                    lineTo(0f, h)
-                    close()
-                }
-            }
+            lineTo(left - 12f * ls, h)
+            cubicTo(
+                left * (1f - k) + (5.72456f - 12f) * ls, h - leftTail + 11.7862f * ls,
+                0f, h - left - leftTail + k * left + 6.12186f * ls,
+                0f, h - left - leftTail,
+            )
+            lineTo(0f, tl)
+            close()
         }
         return Outline.Generic(path)
     }
@@ -97,15 +83,17 @@ fun rememberBubbleShape(
     mergedTop: Boolean,
     mergedBottom: Boolean,
     style: BubbleStyle,
-): BubbleShape = remember(outgoing, mergedTop, mergedBottom, style) {
+): BubbleShape {
     val free = style.cornerRadius.dp
     val near = style.nearCornerRadius.dp
-    val hasTail = style.tail && !mergedBottom
-    val senderTop = if (mergedTop) near else free
-    val senderBottom = if (mergedBottom) near else free // only used when there's no tail
-    val tail = if (hasTail) (if (outgoing) BubbleShape.Tail.Right else BubbleShape.Tail.Left) else null
-    if (outgoing)
-        BubbleShape(free, senderTop, free, senderBottom, tail, style.tailSize.dp)
-    else
-        BubbleShape(senderTop, free, senderBottom, free, tail, style.tailSize.dp)
+    val senderTop by animateDpAsState(if (mergedTop) near else free, ChatMotion.spec(), label = "bubble top corner")
+    val senderBottom by animateDpAsState(if (mergedBottom) near else free, ChatMotion.spec(), label = "bubble bottom corner")
+    val tailProgress by animateFloatAsState(if (style.tail && !mergedBottom) 1f else 0f,
+        ChatMotion.spec(), label = "bubble tail")
+    return remember(outgoing, free, senderTop, senderBottom, tailProgress, style.tailSize) {
+        if (outgoing)
+            BubbleShape(free, senderTop, free, senderBottom, BubbleShape.Tail.Right, style.tailSize.dp, tailProgress)
+        else
+            BubbleShape(senderTop, free, senderBottom, free, BubbleShape.Tail.Left, style.tailSize.dp, tailProgress)
+    }
 }
