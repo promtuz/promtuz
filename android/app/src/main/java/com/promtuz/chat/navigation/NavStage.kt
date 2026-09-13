@@ -126,7 +126,10 @@ fun NavStage(
     val topKey = top.contentKey
     var shownKey by remember { mutableStateOf(topKey) }
     var shownSize by remember { mutableIntStateOf(backStack.size) }
-    val forward = topKey != shownKey && backStack.size > shownSize
+    var shownEntry by remember { mutableStateOf(top) }
+    var replacementBackground by remember { mutableStateOf<NavEntry<NavKey>?>(null) }
+    val forward = topKey != shownKey && backStack.size >= shownSize && backStack.size > 1
+    val replacing = forward && backStack.size == shownSize
     val enter = remember { Animatable(1f) } // 0 = new fully offscreen right, 1 = settled
     var pushing by remember { mutableStateOf(false) }
     // Detached pop ghosts sliding off — declared here (not with the back gesture below) so the
@@ -135,7 +138,9 @@ fun NavStage(
     // Fresh per destination (remember(topKey) auto-resets); the incoming card flips it in onPlaced.
     val placed = remember(topKey) { mutableStateOf(false) }
     LaunchedEffect(topKey) {
-        val isForward = topKey != shownKey && backStack.size > shownSize
+        val isForward = topKey != shownKey && backStack.size >= shownSize && backStack.size > 1
+        replacementBackground = shownEntry.takeIf { isForward && backStack.size == shownSize }
+        shownEntry = top
         shownKey = topKey
         shownSize = backStack.size
         if (isForward) {
@@ -164,6 +169,7 @@ fun NavStage(
                 enter.snapTo(1f)
             } finally {
                 pushing = false
+                replacementBackground = null
             }
         }
     }
@@ -243,7 +249,12 @@ fun NavStage(
         // by Compose, not disposed+recreated (which would reset its scroll/state, and pop a ghost early).
         val layers = buildList {
             val seen = HashSet<Any?>()
-            if ((backActive || showPush) && below != null) { add(Triple(below, Modifier.clip(restShape), false)); seen += below.contentKey }
+            val background = if (showPush) {
+                if (replacing) shownEntry else replacementBackground ?: below
+            } else below
+            if ((backActive || showPush) && background != null) {
+                add(Triple(background, Modifier.clip(restShape), false)); seen += background.contentKey
+            }
             add(Triple(top, frontMod, backActive)); seen += top.contentKey
             // Drop any exiting ghost whose key is already live — every entry shares one
             // SaveableStateHolder, so two with the same contentKey crash ("used multiple times").
