@@ -31,7 +31,11 @@ object Routes : NavKey {
     @Serializable
     data object RestorePhrase : NavKey
 
-    /** Settings: device-auth-gated reveal of the 24-word recovery phrase. */
+    /** Settings: public identity actions and private recovery options. */
+    @Serializable
+    data object IdentityKeys : NavKey
+
+    /** Identity & Keys: device-auth-gated reveal of the 24-word recovery phrase. */
     @Serializable
     data object RecoveryPhrase : NavKey
 

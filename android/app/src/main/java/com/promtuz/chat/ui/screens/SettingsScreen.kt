@@ -49,7 +49,7 @@ fun SettingsScreen(
         listOf(
             SettingGroup(
                 "General", listOf(
-                    SettingItem("Identity & Keys", R.drawable.i_key) { navigate(Routes.RecoveryPhrase) },
+                    SettingItem(context.getString(R.string.identity_keys_title), R.drawable.i_key) { navigate(Routes.IdentityKeys) },
                     SettingItem("Privacy & Security", R.drawable.i_shield_lock) {},
                     // SettingItem("Blocked Users", R.drawable.i_user_blocked) {},
                     SettingItem(

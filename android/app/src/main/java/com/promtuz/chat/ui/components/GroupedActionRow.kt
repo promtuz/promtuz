@@ -24,6 +24,7 @@ fun GroupedActionRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    supportingText: String? = null,
     icon: @Composable () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -38,8 +39,14 @@ fun GroupedActionRow(
         CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
             Box(Modifier.alpha(if (enabled) 1f else 0.38f)) { icon() }
         }
-        Text(title, modifier = Modifier.weight(1f).alpha(if (enabled) 1f else 0.38f),
-            style = avgSizeInStyle(typography.labelLargeEmphasized, typography.bodyLargeEmphasized, 0.75f),
-            color = colors.onBackground)
+        Column(Modifier.weight(1f).alpha(if (enabled) 1f else 0.38f),
+            verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title,
+                style = avgSizeInStyle(typography.labelLargeEmphasized, typography.bodyLargeEmphasized, 0.75f),
+                color = colors.onBackground)
+            supportingText?.let {
+                Text(it, style = typography.bodyMedium, color = colors.onSurfaceVariant)
+            }
+        }
     }
 }

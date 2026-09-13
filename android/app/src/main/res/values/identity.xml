@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="identity_keys_title">Identity &amp; Keys</string>
+    <string name="identity_qr_title">My QR code</string>
+    <string name="identity_qr_body">Share your code or invite link to connect.</string>
+    <string name="recovery_title">Recovery phrase</string>
+    <string name="identity_recovery_body">Restore your identity on another device.</string>
+    <string name="identity_history_note">Recovery restores your identity, not your chat history. Back up chats separately.</string>
+    <string name="recovery_intro_body">Write down these 24 words in order. You’ll need them to restore your identity.</string>
+    <string name="recovery_private_body">Keep your phrase private. Anyone with it can use your identity.</string>
+    <string name="recovery_locked_title">Phrase hidden</string>
+    <string name="recovery_locked_body">Unlock with your screen lock or biometrics to view it.</string>
+    <string name="recovery_reveal">Show recovery phrase</string>
+    <string name="recovery_verifying">Verifying…</string>
+    <string name="recovery_loading">Loading phrase…</string>
+    <string name="recovery_no_lock_title">Set up a screen lock first</string>
+    <string name="recovery_no_lock_body">Add a PIN, pattern, or password in Android settings, then return here.</string>
+    <string name="recovery_open_settings">Open security settings</string>
+    <string name="recovery_settings_unavailable">Couldn’t open security settings. Open Android Settings and set up a screen lock, then return here.</string>
+    <string name="recovery_cancelled">Verification cancelled.</string>
+    <string name="recovery_hidden">Phrase hidden.</string>
+    <string name="recovery_auth_failed">Verification failed. Try again or use your screen lock.</string>
+    <string name="recovery_unavailable">Verification unavailable. Check your device’s screen lock and try again.</string>
+    <string name="recovery_load_failed">Couldn’t load your phrase. Try again.</string>
+    <string name="recovery_hide">Hide phrase</string>
+    <string name="recovery_cancel">Cancel</string>
+    <string name="recovery_use_screen_lock">Use screen lock</string>
+    <string name="recovery_words_label">Recovery words</string>
+    <string name="recovery_word_description">Word %1$d: %2$s</string>
+    <string name="recovery_words_instruction">Read across each row, from left to right.</string>
+    <string name="recovery_auto_hide">Hidden when you leave the app or after 2 minutes.</string>
+    <string name="recovery_auth_title">Reveal recovery phrase</string>
+    <string name="recovery_auth_description">Unlock to view your recovery phrase.</string>
+</resources>

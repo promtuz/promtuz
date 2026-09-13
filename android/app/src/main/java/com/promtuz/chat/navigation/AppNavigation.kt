@@ -19,6 +19,7 @@ import com.promtuz.chat.ui.screens.HomeScreen
 import com.promtuz.chat.ui.screens.LogsScreen
 import com.promtuz.chat.ui.screens.NotificationsSettingsScreen
 import com.promtuz.chat.ui.screens.RecoveryPhraseScreen
+import com.promtuz.chat.ui.screens.IdentityKeysScreen
 import com.promtuz.chat.ui.screens.RelaysScreen
 import com.promtuz.chat.ui.screens.RestorePhraseScreen
 import com.promtuz.chat.ui.screens.SettingsScreen
@@ -49,6 +50,12 @@ fun AppNavigation(
             }
             entry<Routes.RestorePhrase> {
                 RestorePhraseScreen(onRestored = { appViewModel.completeOnboarding() })
+            }
+            entry<Routes.IdentityKeys> {
+                IdentityKeysScreen(
+                    onShareIdentity = { appViewModel.navigator.push(Routes.ShareIdentity) },
+                    onRecoveryPhrase = { appViewModel.navigator.push(Routes.RecoveryPhrase) },
+                )
             }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
