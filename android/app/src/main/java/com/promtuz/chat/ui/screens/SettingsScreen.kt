@@ -25,6 +25,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.FlexibleScreen
+import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
 import org.koin.androidx.compose.koinViewModel
 
@@ -90,13 +91,12 @@ fun SettingsScreen(
     }
     // @formatter:on
 
-    FlexibleScreen(
+    SimpleScreen(
         { Text("Settings") },
-    ) { padding, scrollBehavior ->
+    ) { padding ->
         LazyColumn(
             Modifier
                 .fillMaxSize()
-                .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .padding(
                     start = padding.calculateLeftPadding(direction),
                     end = padding.calculateRightPadding(direction),

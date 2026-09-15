@@ -18,12 +18,12 @@ fun FlexibleScreen(
     Scaffold(
         modifier.fillMaxSize(),
         topBar = {
-            MediumFlexibleTopAppBar(
+            MediumTopAppBar(
                 title = title,
                 modifier = topBarModifier,
                 navigationIcon = { GoBackButton() },
                 colors = topBarColors,
-                scrollBehavior = scrollBehavior
+//                scrollBehavior = scrollBehavior
             )
         },
         content = { content(it, scrollBehavior) }

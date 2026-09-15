@@ -14,13 +14,14 @@ import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.SimpleScreen
 
 @Composable
 fun IdentityKeysScreen(onShareIdentity: () -> Unit, onRecoveryPhrase: () -> Unit) {
     val direction = LocalLayoutDirection.current
-    FlexibleScreen({ Text(stringResource(R.string.identity_keys_title)) }) { padding, scrollBehavior ->
+    SimpleScreen({ Text(stringResource(R.string.identity_keys_title)) }) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection)
+            Modifier.fillMaxSize()
                 .padding(start = padding.calculateLeftPadding(direction), end = padding.calculateRightPadding(direction)),
             contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp,
                 18.dp, padding.calculateBottomPadding() + 32.dp),

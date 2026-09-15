@@ -30,6 +30,7 @@ fun SimpleScreen(
                 modifier = topBarModifier,
                 navigationIcon = { GoBackButton() },
                 colors = topBarColors,
+                scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(),
                 actions = actions
             )
         },

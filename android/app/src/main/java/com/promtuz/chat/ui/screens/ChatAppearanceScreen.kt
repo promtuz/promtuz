@@ -44,6 +44,7 @@ import com.promtuz.chat.ui.appearance.ThemeMode
 import com.promtuz.chat.ui.appearance.Wallpaper
 import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.components.MessageBubble
+import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 
 /**
@@ -55,11 +56,11 @@ import com.promtuz.chat.ui.components.rememberChatWallpaper
 fun ChatAppearanceScreen() {
     val appearance by AppearanceStore.appearance.collectAsState()
 
-    FlexibleScreen({ Text("Chat Appearance") }) { padding, scrollBehavior ->
+    SimpleScreen({ Text("Chat Appearance") }) { padding ->
         Column(
             Modifier
                 .fillMaxSize()
-                .nestedScroll(scrollBehavior.nestedScrollConnection)
+//                .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp)
                 .padding(top = padding.calculateTopPadding() + 12.dp, bottom = 48.dp),

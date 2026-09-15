@@ -20,7 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
-import com.promtuz.chat.ui.components.FlexibleScreen
+import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.UpdateSheet
 import org.koin.androidx.compose.koinViewModel
 
@@ -32,7 +32,7 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
     var showSheet by remember { mutableStateOf(false) }
     var updateChannel by remember { mutableStateOf(updates.channel) }
 
-    FlexibleScreen({ Text("About Promtuz") }) { padding, _ ->
+    SimpleScreen({ Text("About Promtuz") }) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
