@@ -60,6 +60,7 @@ data class MenuAction(
     val label: String,
     @param:DrawableRes val icon: Int? = null,
     val destructive: Boolean = false,
+    val iconPlaceholder: String? = null,
     val onClick: () -> Unit,
 )
 
@@ -278,6 +279,7 @@ private fun MenuRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         action.icon?.let { DrawableIcon(it, tint = color, size = iconSize) }
+            ?: action.iconPlaceholder?.let { Text("[$it]", color = color, style = MaterialTheme.typography.labelSmall) }
         Text(action.label, color = color, style = MaterialTheme.typography.labelLarge)
     }
 }

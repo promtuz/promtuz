@@ -188,6 +188,12 @@ object CoreBridge {
     suspend fun forgetContact(ipk: ByteArray) = withContext(Dispatchers.IO) { ffiForgetContact(ipk) }
 
     /** Latest message per conversation — the home list's preview line. */
+    suspend fun storagePreview(conversation: ByteArray, dispatch: ByteArray) =
+        withContext(Dispatchers.IO) { uniffi.core.storagePreview(conversation, dispatch) }
+    suspend fun storageMedia() = withContext(Dispatchers.IO) { uniffi.core.storageMedia() }
+    suspend fun removeStoredMedia(targets: List<uniffi.core.StorageTarget>) =
+        withContext(Dispatchers.IO) { uniffi.core.removeStoredMedia(targets) }
+
     suspend fun conversations(): List<MessageRecord> = withContext(Dispatchers.IO) { ffiGetConversations() }
 
     /** Every conversation with its roster and title — the home list's rows. */

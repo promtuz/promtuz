@@ -73,6 +73,13 @@ fun AppNavigation(
                 onScanned = { appViewModel.showInvite(it) },
                 onShareIdentity = { appViewModel.navigator.push(Routes.ShareIdentity) },
             ) }
+            entry<Routes.Storage> { com.promtuz.chat.ui.screens.StorageScreen(
+                onOpenBackup = { appViewModel.navigator.push(Routes.BackupRestore) },
+                onOpenChat = { conversation, name -> appViewModel.navigator.push(Routes.StorageChat(conversation, name)) },
+            ) }
+            entry<Routes.StorageChat> { key -> com.promtuz.chat.ui.screens.StorageScreen(
+                conversation = key.conversation, chatName = key.name,
+            ) }
             entry<Routes.Settings> { SettingsScreen(appViewModel) }
             entry<Routes.ChatAppearance> { ChatAppearanceScreen() }
             entry<Routes.About> { AboutScreen() }

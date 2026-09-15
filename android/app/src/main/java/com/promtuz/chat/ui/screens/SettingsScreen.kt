@@ -21,10 +21,8 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
-import com.promtuz.chat.navigation.goTo
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
-import com.promtuz.chat.ui.activities.ManageSpace
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
@@ -54,7 +52,7 @@ fun SettingsScreen(
                     // SettingItem("Blocked Users", R.drawable.i_user_blocked) {},
                     SettingItem(
                         "Storage", R.drawable.i_hard_drive
-                    ) { context.goTo(ManageSpace::class.java) },
+                    ) { navigate(Routes.Storage) },
                     SettingItem("Notifications", R.drawable.i_notifications) {
                         navigate(Routes.NotificationsSettings)
                     },

@@ -27,6 +27,12 @@ object Routes : NavKey {
     @Serializable
     data object Settings : NavKey
 
+    @Serializable
+    data object Storage : NavKey
+
+    @Serializable
+    data class StorageChat(val conversation: String, val name: String) : NavKey
+
     /** Onboarding: restore identity from a typed 24-word phrase. */
     @Serializable
     data object RestorePhrase : NavKey

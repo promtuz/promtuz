@@ -17,6 +17,7 @@ pub mod qr;
 pub mod recovery;
 pub mod relays;
 pub mod staging;
+pub mod storage;
 pub mod update;
 
 use crate::data::identity::Identity;
