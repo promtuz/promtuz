@@ -110,7 +110,6 @@ android {
         versionCode = publishedVersionCode
         versionName = publishedVersionName
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "RESOLVER_SEEDS", "\"$resolverSeedsLiteral\"")
 
@@ -283,14 +282,7 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
-    debugImplementation(libs.androidx.ui.test.manifest)
-    // AndroidX Test requires 1.2.0; align the tested app's debug runtime with it.
-    debugImplementation(libs.androidx.concurrent.futures.ktx)
 
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.androidx.navigation3.runtime)
