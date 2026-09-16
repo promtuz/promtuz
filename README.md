@@ -79,6 +79,8 @@ The infrastructure needs a root CA and node certificates. The `common` crate shi
 
 Deployment packages are built with `tools/scripts/build-deb.sh <crate>`, which links against an old glibc through cargo-zigbuild so the result runs on Debian 10+ and Ubuntu 18.04+. Operator docs live with each node: [relay](relay/README.md), [resolver](resolver/README.md).
 
+For Android releases, announcements, and server packages, see [the release tools](tools/scripts/README.md).
+
 ## License
 
 [AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.en.html).

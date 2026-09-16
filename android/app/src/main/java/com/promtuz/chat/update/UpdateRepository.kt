@@ -16,10 +16,15 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import timber.log.Timber
@@ -28,7 +33,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 
 sealed interface UpdateState {
     data object None : UpdateState
@@ -60,15 +64,19 @@ data class UpdateManifest(
 }
 
 class UpdateRepository(private val context: Context) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val checking = AtomicBoolean(false)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var checkJob: Job? = null
+    private val notificationCheck = Mutex()
+    private val notifier = UpdateNotifier(context)
     private var downloadJob: Job? = null
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
     private val _state = MutableStateFlow<UpdateState>(UpdateState.None)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
-
+    private val _sheetVisible = MutableStateFlow(false)
+    val sheetVisible: StateFlow<Boolean> = _sheetVisible.asStateFlow()
 
     companion object {
+        internal val CHANNELS = listOf("debug", "release")
         private const val TAG = "AppUpdater"
         private val log = { Timber.tag(TAG) }
     }
@@ -78,12 +86,23 @@ class UpdateRepository(private val context: Context) {
     } else {
         "release"
     }
-    val channel: String get() = ChatPrefs.updateChannel ?: nativeChannel
+    val channel: String get() = ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel
+
+    init {
+        notifier.clearIfInstalled(installedVersionCode(), nativeChannel)
+    }
 
     /** Cross-channel switch: drop any in-flight/staged update from the old channel, then re-check. */
     fun switchChannel(newChannel: String) {
+        require(newChannel in CHANNELS)
         if (newChannel == channel) return
         ChatPrefs.updateChannel = newChannel
+        notifier.clear()
+        checkJob?.cancel()
+        checkJob = null
+        downloadJob?.cancel()
+        _state.value = UpdateState.None
+        UpdateWorker.enqueue(context, replace = true)
         scope.launch {
             downloadJob?.cancelAndJoin()
             _state.value = UpdateState.None
@@ -93,10 +112,58 @@ class UpdateRepository(private val context: Context) {
 
     // Same-versionCode installs are allowed when crossing channels (the binaries
     // differ); the OS rejects downgrades either way.
-    private fun installable(manifest: UpdateManifest): Boolean =
+    private fun installable(manifest: UpdateManifest, selectedChannel: String = channel): Boolean =
         CoreBridge.updateIsInstallable(
-            manifest.versionCode, installedVersionCode(), channel != nativeChannel,
+            manifest.versionCode, installedVersionCode(), selectedChannel != nativeChannel,
         )
+
+    fun showSheet(check: Boolean = false) {
+        _sheetVisible.value = true
+        notifier.clear()
+        val manifest = when (val state = _state.value) {
+            is UpdateState.Available -> state.manifest
+            is UpdateState.Downloading -> state.manifest
+            is UpdateState.Ready -> state.manifest
+            is UpdateState.PermissionNeeded -> state.manifest
+            else -> null
+        }
+        if (manifest != null) notifier.markSeen(manifest, channel)
+        if (check) this.check()
+    }
+
+    fun dismissSheet() {
+        _sheetVisible.value = false
+    }
+
+    /** A push is only a hint. The signed manifest decides what we can offer. */
+    internal suspend fun checkAndNotify() = withContext(Dispatchers.IO) {
+        notificationCheck.withLock {
+            val selectedChannel = channel
+            val manifest = availableUpdate(selectedChannel)
+            currentCoroutineContext().ensureActive()
+            withContext(Dispatchers.Main.immediate) notify@{
+                // Channel switches and sheet actions run on main too.
+                if (selectedChannel != channel) return@notify
+                if (manifest == null || _sheetVisible.value || _state.value is UpdateState.Downloading ||
+                    _state.value is UpdateState.Ready || _state.value is UpdateState.PermissionNeeded) {
+                    notifier.clear()
+                } else {
+                    notifier.show(manifest, selectedChannel)
+                }
+            }
+        }
+    }
+
+    private fun availableUpdate(selectedChannel: String): UpdateManifest? {
+        val abi = supportedAbi()
+        val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/manifest.json"
+        val rawManifest = getBytes(url, selectedChannel, 16 * 1024)
+        val signature = getBytes("$url.sig", selectedChannel, 64)
+        require(CoreBridge.verifyUpdateManifest(rawManifest, signature)) { "Update signature could not be verified." }
+        val manifest = json.decodeFromString<UpdateManifest>(rawManifest.decodeToString())
+        validateManifest(manifest, abi, selectedChannel)
+        return manifest.takeIf { installable(it, selectedChannel) }
+    }
 
     fun check() {
         // A foreground auto-check must not stomp an update the user is already
@@ -105,69 +172,81 @@ class UpdateRepository(private val context: Context) {
             is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.PermissionNeeded -> return
             else -> {}
         }
-        if (!checking.compareAndSet(false, true)) return
-        scope.launch {
+        if (checkJob?.isActive == true) return
+        checkJob = scope.launch {
+            val selectedChannel = channel
             try {
                 log().v("Checking for Updates...")
                 _state.value = UpdateState.Checking
-                val abi = supportedAbi()
-                val manifestUrl = manifestUrl(abi)
-                val rawManifest = getBytes(manifestUrl)
-
-                val signature = getBytes("$manifestUrl.sig")
-                require(CoreBridge.verifyUpdateManifest(rawManifest, signature)) { "Update signature could not be verified." }
-                val manifest = json.decodeFromString<UpdateManifest>(rawManifest.decodeToString())
-                validateManifest(manifest, abi)
-                if (installable(manifest)) {
-                    _state.value = UpdateState.Available(manifest)
-                } else {
-                    _state.value = UpdateState.None
+                val manifest = withContext(Dispatchers.IO) { availableUpdate(selectedChannel) }
+                if (selectedChannel == channel) {
+                    _state.value = manifest?.let { UpdateState.Available(it) } ?: UpdateState.None
+                    if (manifest != null && _sheetVisible.value) notifier.markSeen(manifest, selectedChannel)
+                    if (manifest == null || _sheetVisible.value) notifier.clear()
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                _state.value = UpdateState.Error(error.message ?: "Update check failed.")
-            } finally {
-                checking.set(false)
+                if (selectedChannel == channel) {
+                    _state.value = UpdateState.Error(error.message ?: "Update check failed.")
+                }
             }
         }
     }
 
     fun download(manifest: UpdateManifest) {
         if (downloadJob?.isActive == true) return
+        val selectedChannel = channel
+        notifier.clear()
+        notifier.markSeen(manifest, selectedChannel)
         downloadJob = scope.launch {
             val destination = File(updatesDirectory(), manifest.apk)
             try {
                 require(installable(manifest)) { "This update is no longer newer than the installed app." }
                 _state.value = UpdateState.Downloading(manifest, 0f)
-                destination.delete()
-                val digest = MessageDigest.getInstance("SHA-256")
-                val expectedUrl = apkUrl(supportedAbi(), manifest.apk)
-                val connection = open(expectedUrl)
-                connection.inputStream.use { input ->
-                    destination.outputStream().use { output ->
-                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                        var copied = 0L
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            output.write(buffer, 0, count)
-                            digest.update(buffer, 0, count)
-                            copied += count
-                            require(copied <= manifest.size) { "Downloaded update exceeds declared size." }
-                            _state.value = UpdateState.Downloading(manifest, copied.toFloat() / manifest.size)
+                withContext(Dispatchers.IO) {
+                    destination.delete()
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    val expectedUrl = apkUrl(supportedAbi(), manifest.apk, selectedChannel)
+                    val connection = open(expectedUrl, selectedChannel)
+                    try {
+                        connection.inputStream.use { input ->
+                            destination.outputStream().use { output ->
+                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                                var copied = 0L
+                                var lastProgress = 0L
+                                while (true) {
+                                    currentCoroutineContext().ensureActive()
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    output.write(buffer, 0, count)
+                                    digest.update(buffer, 0, count)
+                                    copied += count
+                                    require(copied <= manifest.size) { "Downloaded update exceeds declared size." }
+                                    val now = System.nanoTime()
+                                    if (now - lastProgress >= 50_000_000 || copied == manifest.size) {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            _state.value = UpdateState.Downloading(manifest, copied.toFloat() / manifest.size)
+                                        }
+                                        lastProgress = now
+                                    }
+                                }
+                                require(copied == manifest.size) { "Downloaded update size does not match manifest." }
+                            }
                         }
-                        require(copied == manifest.size) { "Downloaded update size does not match manifest." }
+                    } finally {
+                        connection.disconnect()
                     }
+                    require(digest.digest().toHex() == manifest.sha256) { "Downloaded update hash does not match manifest." }
+                    verifyApk(destination, manifest)
                 }
-                connection.disconnect()
-                require(digest.digest().toHex() == manifest.sha256) { "Downloaded update hash does not match manifest." }
-                verifyApk(destination, manifest)
                 _state.value = UpdateState.Ready(manifest, destination)
             } catch (_: CancellationException) {
                 destination.delete()
-                _state.value = UpdateState.Available(manifest)
+                if (selectedChannel == channel) _state.value = UpdateState.Available(manifest)
             } catch (error: Exception) {
                 destination.delete()
-                _state.value = UpdateState.Error(error.message ?: "Update download failed.")
+                if (selectedChannel == channel) _state.value = UpdateState.Error(error.message ?: "Update download failed.")
             } finally {
                 downloadJob = null
             }
@@ -211,28 +290,36 @@ class UpdateRepository(private val context: Context) {
         else -> error("This device architecture is not supported by Promtuz updates.")
     }
 
-    private fun manifestUrl(abi: String) = "https://apt.promtuz.dev/apk/$channel/$abi/manifest.json"
+    private fun apkUrl(abi: String, filename: String, selectedChannel: String) =
+        "https://apt.promtuz.dev/apk/$selectedChannel/$abi/$filename"
 
-    private fun apkUrl(abi: String, filename: String) =
-        "https://apt.promtuz.dev/apk/$channel/$abi/$filename"
-
-    private fun getBytes(url: String): ByteArray {
-        val connection = open(url)
+    private fun getBytes(url: String, selectedChannel: String, limit: Int): ByteArray {
+        val connection = open(url, selectedChannel)
         return try {
-            connection.inputStream.use { it.readBytes() }
+            connection.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    require(output.size() + count <= limit) { "Update response is too large." }
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
         } finally {
             connection.disconnect()
         }
     }
 
-    private fun open(url: String): HttpURLConnection {
+    private fun open(url: String, selectedChannel: String): HttpURLConnection {
         val parsed = URL(url)
         val abi = supportedAbi()
         val expectedPaths = setOf(
-            "/apk/$channel/$abi/manifest.json",
-            "/apk/$channel/$abi/manifest.json.sig",
+            "/apk/$selectedChannel/$abi/manifest.json",
+            "/apk/$selectedChannel/$abi/manifest.json.sig",
         )
-        val apkPrefix = "/apk/$channel/$abi/promtuz-"
+        val apkPrefix = "/apk/$selectedChannel/$abi/promtuz-"
         require(parsed.protocol == "https" && parsed.host == "apt.promtuz.dev") { "Update server is not trusted." }
         require((parsed.port == -1 || parsed.port == 443) && parsed.userInfo == null && parsed.query == null && parsed.ref == null) {
             "Update URL is invalid."
@@ -242,10 +329,16 @@ class UpdateRepository(private val context: Context) {
         }
         return (parsed.openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false
+            useCaches = false
             connectTimeout = 15_000
             readTimeout = 30_000
             requestMethod = "GET"
-            require(responseCode == HttpURLConnection.HTTP_OK) { "Update server returned HTTP $responseCode." }
+            try {
+                require(responseCode == HttpURLConnection.HTTP_OK) { "Update server returned HTTP $responseCode." }
+            } catch (error: Exception) {
+                disconnect()
+                throw error
+            }
         }
     }
 
@@ -254,9 +347,9 @@ class UpdateRepository(private val context: Context) {
      * The contract is the server's, not Android's, so core states it — every
      * field here arrives over the network and the filename names what we fetch.
      */
-    private fun validateManifest(manifest: UpdateManifest, abi: String) {
+    private fun validateManifest(manifest: UpdateManifest, abi: String, selectedChannel: String) {
         CoreBridge.validateUpdateManifest(manifest.toCore())
-        require(URL(apkUrl(abi, manifest.apk)).path.endsWith("/${manifest.apk}")) { "Update path is invalid." }
+        require(URL(apkUrl(abi, manifest.apk, selectedChannel)).path.endsWith("/${manifest.apk}")) { "Update path is invalid." }
     }
 
     private fun verifyApk(apk: File, manifest: UpdateManifest) {

@@ -6,23 +6,28 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.promtuz.chat.update.UpdateWorker
 
 /**
- * FCM entry point. Wakes are contentless "drain now" data messages — the actual
- * MLS decrypt happens inside libcore during the drain, never here. [onNewToken]
- * hands the token to libcore, which registers `P → token` with a gateway.
+ * Routes contentless message wakes and public release hints to separate jobs.
+ * Both jobs fetch and verify their content before showing a notification.
  */
 class PushService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         PushRegistrationWorker.enqueue(applicationContext, tokenChanged = true)
+        UpdateWorker.enqueue(applicationContext, replace = true)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        enqueueDrain()
+        when (message.data["type"]) {
+            "app_update" -> UpdateWorker.enqueue(applicationContext, replace = true)
+            null -> enqueueDrain()
+        }
     }
 
     override fun onDeletedMessages() {
         enqueueDrain()
+        UpdateWorker.enqueue(applicationContext)
     }
 
     private fun enqueueDrain() {

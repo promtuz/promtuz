@@ -1,44 +1,6 @@
 #!/usr/bin/env zsh
-# Build, sign, and publish an Android release.
-#
-#   release-android.zsh                       prompts for the version, ships debug
-#   release-android.zsh --channel release     stable channel
-#   release-android.zsh --channel both        one versionCode, both channels
-#   release-android.zsh --version-name 0.2.0  skip the prompt
-#   release-android.zsh --no-publish          build + sign + stage, upload nothing
-#   release-android.zsh --dry-run             say what would happen, touch nothing
-#
-# ── Channel convention ───────────────────────────────────────────────────
-# release  stable versionNames only — 0.2.0, never 0.2.0-beta3
-# debug    prereleases, and genuinely debuggable builds
-#
-# Note these are two different axes wearing one name: the client derives its
-# native channel from FLAG_DEBUGGABLE, so "debug" means a debuggable build,
-# not a beta track. A beta track of non-debuggable builds would need a third
-# channel and a change in UpdateRepository. Until then, `--channel both`
-# publishes one versionCode to both — which the client already expects, since
-# minInstallableCode() permits an equal versionCode when crossing channels.
-#
-# ── What this has to get exactly right ───────────────────────────────────
-# The updater is strict, and each of these fails silently for users rather
-# than loudly here:
-#
-#   * The manifest is parsed with ignoreUnknownKeys=false. SIX fields, no
-#     more, no fewer — an extra key and every client rejects the update.
-#   * manifest.apk must equal promtuz-<versionName>~<versionCode>.apk, and
-#     versionName must match [A-Za-z0-9][A-Za-z0-9._+-]* — checked twice
-#     client-side, in validateManifest and again against the URL path.
-#   * size must be exact: the download aborts a byte over, rejects a byte under.
-#   * The .sig is a raw 64-byte Ed25519 signature over the manifest bytes AS
-#     SERVED, so the file that is uploaded is the file that gets signed,
-#     never a regenerated copy.
-#   * verifyApk compares the downloaded APK's signer against the INSTALLED
-#     app's. A mismatched signer is a dead end for users, not an error.
-#
-# versionCode comes from what is actually published across BOTH channels and
-# every ABI — never from gradle.properties, which records only what this
-# checkout last built and can sit behind what was actually published. The live
-# manifests are the one source of truth no local state can contradict.
+# Build, sign, publish, and announce an Android release.
+# See --help or tools/scripts/README.md for setup and retry commands.
 
 set -euo pipefail
 
@@ -58,6 +20,8 @@ VERSION_NAME=""
 VERSION_CODE=""
 PUBLISH=1
 DRY_RUN=0
+NOTIFY=1
+NOTIFY_ONLY=0
 
 _info() { print -r -- "  $*" }
 _ok()   { print -r -- "✓ $*" }
@@ -65,6 +29,28 @@ _warn() { print -r -- "! $*" >&2 }
 _die()  { print -r -- "✗ $*" >&2; exit 1 }
 _step() { print -r -- ""; print -r -- "── $* ──" }
 _need() { command -v "$1" >/dev/null 2>&1 || _die "missing '$1'" }
+
+_usage() {
+    cat <<'EOF'
+Usage: release-android.zsh [options]
+
+  --channel debug|release|both  Target channel (default: debug)
+  --version-name VERSION       Skip the version prompt
+  --version-code CODE          Use an explicit code above published versions
+  --no-publish                 Build, sign, and stage locally
+  --no-notify                  Publish without a release announcement
+  --notify-only                Announce the current live release; skip the build
+  --dry-run                    Print the plan; no network, credentials, or writes
+  -h, --help                   Show this help
+
+Announcements use GOOGLE_APPLICATION_CREDENTIALS (FCM service-account JSON).
+PZ_VAULT, PZ_UPDATE_URL, PZ_PUBLISH_HOST, and PZ_PUBLISH_ROOT override defaults.
+EOF
+}
+
+_value() {
+    [[ -n "$2" && "$2" != --* ]] || _die "$1 needs a value (see --help)"
+}
 
 # Interactive yes/no. Anything but an explicit yes aborts — these gates guard
 # publishing to real users, so silence must never mean consent.
@@ -81,10 +67,13 @@ _confirm() {
 _unlock_vault() {
     local out="$1" src="$2" tries=3 attempt rc
     for attempt in {1..$tries}; do
-        age -d -o "$out" "$src"
-        rc=$?
-        (( rc == 0 )) && return 0
+        if age -d -o "$out" "$src"; then
+            return 0
+        else
+            rc=$?
+        fi
         (( rc == 130 )) && _die "cancelled"
+        rm -f "$out"
         (( attempt < tries )) && _warn "wrong passphrase — $(( tries - attempt )) attempt(s) left"
     done
     _die "could not unlock the vault after $tries attempts"
@@ -92,12 +81,14 @@ _unlock_vault() {
 
 while (( $# )); do
     case "$1" in
-        --channel)      CHANNEL="${2:?}"; shift 2 ;;
-        --version-name) VERSION_NAME="${2:?}"; shift 2 ;;
-        --version-code) VERSION_CODE="${2:?}"; shift 2 ;;
+        --channel)      _value "$1" "${2-}"; CHANNEL="$2"; shift 2 ;;
+        --version-name) _value "$1" "${2-}"; VERSION_NAME="$2"; shift 2 ;;
+        --version-code) _value "$1" "${2-}"; VERSION_CODE="$2"; shift 2 ;;
         --no-publish)   PUBLISH=0; shift ;;
-        --dry-run)      DRY_RUN=1; PUBLISH=0; shift ;;
-        -h|--help)      sed -n '2,20p' "$SCRIPT" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-notify)    NOTIFY=0; shift ;;
+        --notify-only)  NOTIFY_ONLY=1; shift ;;
+        --dry-run)      DRY_RUN=1; shift ;;
+        -h|--help)      _usage; exit 0 ;;
         *)              _die "unknown option '$1'" ;;
     esac
 done
@@ -109,10 +100,49 @@ case "$CHANNEL" in
     *)       _die "channel must be release, debug, or both" ;;
 esac
 
+if [[ -n "$VERSION_CODE" ]]; then
+    [[ "$VERSION_CODE" =~ '^[1-9][0-9]{0,9}$' ]] && (( VERSION_CODE <= 2100000000 )) \
+        || _die "versionCode must be an integer from 1 to 2100000000"
+fi
+if [[ -n "$VERSION_NAME" ]]; then
+    [[ "$VERSION_NAME" =~ '^[A-Za-z0-9][A-Za-z0-9._+-]*$' ]] || _die "invalid versionName '$VERSION_NAME'"
+fi
+
+if (( NOTIFY_ONLY )); then
+    (( NOTIFY && PUBLISH )) || _die "--notify-only cannot be combined with --no-notify or --no-publish"
+    [[ -z "$VERSION_NAME" && -z "$VERSION_CODE" ]] || _die "--notify-only uses the current live version; omit version flags"
+    _need python3
+    notify_args=(--channel "$CHANNEL")
+    (( DRY_RUN )) && notify_args+=(--dry-run)
+    exec python3 "${SCRIPT:h}/notify-android.py" "${notify_args[@]}"
+fi
+
+if (( DRY_RUN )); then
+    _info "channels: ${TARGETS[*]}"
+    _info "version: ${VERSION_NAME:-prompt at release time}"
+    _info "versionCode: ${VERSION_CODE:-next code above local and published versions}"
+    _info "build and sign: ${ABIS[*]}"
+    if (( ! PUBLISH )); then
+        _info "stage locally: $REPO/android/app/build/release-staging (no upload or announcement)"
+    elif (( NOTIFY )); then
+        _info "publish destination: $PUBLISH_HOST:$PUBLISH_ROOT/apk"
+        _info "announce after all live checks pass (GOOGLE_APPLICATION_CREDENTIALS)"
+    else
+        _info "publish destination: $PUBLISH_HOST:$PUBLISH_ROOT/apk"
+        _info "release announcements disabled"
+    fi
+    exit 0
+fi
+
 # ── preflight ────────────────────────────────────────────────────────────
 _step "Preflight"
 
 _need age; _need curl; _need openssl; _need rsync; _need xxd
+if (( PUBLISH && NOTIFY )); then
+    _need python3
+    python3 "${SCRIPT:h}/notify-android.py" --check-credentials \
+        || _die "announcement setup is incomplete; fix it or use --no-notify"
+fi
 
 # Exported, not just assigned: apksigner is a shell wrapper that resolves java
 # from the ENVIRONMENT. A plain assignment leaves it unable to find a runtime,
@@ -253,18 +283,14 @@ print -r -- ""
 _info "version   $VERSION_NAME (versionCode $VERSION_CODE)"
 _info "artefact  $APK_NAME"
 
-if (( DRY_RUN )); then
-    print -r -- ""
-    _ok "dry run — would build $APK_NAME for ${ABIS[*]}, publish to ${TARGETS[*]}"
-    exit 0
-fi
-
 # ── unlock ───────────────────────────────────────────────────────────────
 _step "Unlock"
 
 SCRATCH="$(mktemp -d)"; chmod 700 "$SCRATCH"
 STAGE="$SCRATCH/stage"; mkdir -p "$STAGE"
-trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+trap 'rm -rf "$SCRATCH"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 _info "unlocking the vault…"
 _unlock_vault "$SCRATCH/identity" "$VAULT/identity.age"
@@ -460,9 +486,16 @@ done
 print -r -- ""
 _ok "published $VERSION_NAME (versionCode $VERSION_CODE) to ${TARGETS[*]}"
 
-# After a signing-key rotation the in-app updater is a dead end for everyone
-# still on the old key, so these stable URLs are the distribution channel that
-# actually works. Print them ready to paste.
+notify_failed=0
+if (( NOTIFY )); then
+    _step "Announce release"
+    if ! python3 "${SCRIPT:h}/notify-android.py" --channel "$CHANNEL"; then
+        notify_failed=1
+        _warn "The release is published, but its announcement did not finish."
+        _info "Retry without rebuilding: zsh ${(q)SCRIPT} --notify-only --channel $CHANNEL"
+    fi
+fi
+
 print -r -- ""
 print -r -- "Direct download links (stable, always the newest build):"
 for channel in $TARGETS; do
@@ -476,8 +509,4 @@ print -r -- ""
 _info "commit the bump so the repo matches what shipped:"
 _info "  git add android/gradle.properties && git commit -m 'chore: release $VERSION_NAME'"
 
-print -r -- ""
-_warn "Anyone running a build signed by the OLD key cannot install this. Their"
-_warn "updater rejects it at the signer check — they must uninstall and"
-_warn "reinstall, losing identity and history unless they exported a recovery"
-_warn "phrase and a .pzbk first."
+(( notify_failed == 0 )) || exit 2

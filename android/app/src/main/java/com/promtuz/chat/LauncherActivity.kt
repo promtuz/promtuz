@@ -12,6 +12,9 @@ import com.promtuz.chat.navigation.AppNavigation
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.InviteBottomSheet
+import com.promtuz.chat.ui.components.UpdateSheet
+import com.promtuz.chat.update.UpdateNotifier
+import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
@@ -24,6 +27,7 @@ import org.koin.android.ext.android.inject
  */
 class LauncherActivity : ComponentActivity() {
     private val viewModel: AppVM by inject()
+    private val updates: UpdateRepository by inject()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -32,12 +36,15 @@ class LauncherActivity : ComponentActivity() {
         enableEdgeToEdge()
         consumeInvite(intent)
         consumeChatOpen(intent)
+        consumeUpdateOpen(intent)
 
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
+            val showUpdate by updates.sheetVisible.collectAsState()
             PromtuzTheme(appearance = appearance) {
                 AppNavigation(viewModel)
                 InviteBottomSheet(viewModel)
+                if (showUpdate) UpdateSheet(onDismiss = updates::dismissSheet)
             }
         }
     }
@@ -47,6 +54,13 @@ class LauncherActivity : ComponentActivity() {
         setIntent(intent)
         consumeInvite(intent)
         consumeChatOpen(intent)
+        consumeUpdateOpen(intent)
+    }
+
+    private fun consumeUpdateOpen(intent: Intent) {
+        if (!intent.getBooleanExtra(UpdateNotifier.EXTRA_OPEN_UPDATE, false)) return
+        intent.removeExtra(UpdateNotifier.EXTRA_OPEN_UPDATE)
+        updates.showSheet(check = true)
     }
 
     /**

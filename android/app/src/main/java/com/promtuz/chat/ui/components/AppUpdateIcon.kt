@@ -8,9 +8,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
@@ -27,9 +24,7 @@ fun AppUpdateIcon(modifier: Modifier = Modifier, updates: UpdateVM = koinViewMod
         state is UpdateState.Ready || state is UpdateState.PermissionNeeded
     if (!pending) return
 
-    var showSheet by remember { mutableStateOf(false) }
-
-    IconButton({ showSheet = true }, modifier) {
+    IconButton({ updates.showSheet() }, modifier) {
         val s = state
         if (s is UpdateState.Downloading) {
             CircularProgressIndicator({ s.progress }, Modifier.size(22.dp), strokeWidth = 2.dp)
@@ -37,6 +32,4 @@ fun AppUpdateIcon(modifier: Modifier = Modifier, updates: UpdateVM = koinViewMod
             BadgedBox(badge = { Badge() }) { DrawableIcon(R.drawable.i_download) }
         }
     }
-
-    if (showSheet) UpdateSheet(onDismiss = { showSheet = false })
 }

@@ -93,7 +93,7 @@
             android:exported="false"
             android:label="@string/title_activity_manage_space" />
 
-        <!-- FCM wake receiver: contentless "drain now" data messages (see push/PushService). -->
+        <!-- Message wakes and app-release hints (see push/PushService). -->
         <service
             android:name="com.promtuz.core.push.PushService"
             android:exported="false">

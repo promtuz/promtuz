@@ -63,10 +63,13 @@ _confirm() {
 _unlock_vault() {
     local out="$1" src="$2" tries=3 attempt rc
     for attempt in {1..$tries}; do
-        age -d -o "$out" "$src"
-        rc=$?
-        (( rc == 0 )) && return 0
+        if age -d -o "$out" "$src"; then
+            return 0
+        else
+            rc=$?
+        fi
         (( rc == 130 )) && _die "cancelled"
+        rm -f "$out"
         (( attempt < tries )) && _warn "wrong passphrase — $(( tries - attempt )) attempt(s) left"
     done
     _die "could not unlock the vault after $tries attempts"

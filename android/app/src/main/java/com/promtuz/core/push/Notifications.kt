@@ -8,6 +8,7 @@ import android.content.Context
 object Notifications {
     const val MESSAGES_CHANNEL = "messages"
     const val SYNC_CHANNEL = "sync"
+    const val UPDATES_CHANNEL = "app_updates"
     const val GROUP_KEY = "com.promtuz.chat.MESSAGES"
 
     fun ensureChannels(ctx: Context) {
@@ -19,6 +20,12 @@ object Notifications {
         // where expedited work runs as a foreground service.
         nm.createNotificationChannel(
             NotificationChannel(SYNC_CHANNEL, "Syncing", NotificationManager.IMPORTANCE_MIN)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(UPDATES_CHANNEL, "App updates", NotificationManager.IMPORTANCE_LOW).apply {
+                setSound(null, null)
+                enableVibration(false)
+            }
         )
     }
 }

@@ -12,6 +12,7 @@ import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.update.UpdateRepository
+import com.promtuz.chat.update.UpdateWorker
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
 import com.promtuz.core.CoreBridge
@@ -90,6 +91,7 @@ class Promtuz : Application() {
             androidContext(this@Promtuz)
             modules(appModule, vmModule)
         }.koin.get()
+        UpdateWorker.schedule(this)
 
         // Foreground → nudge core for an instant reconnect and go Active.
         // Background → assert Idle (the last packet before we freeze).

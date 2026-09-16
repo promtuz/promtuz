@@ -21,7 +21,6 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.components.SimpleScreen
-import com.promtuz.chat.ui.components.UpdateSheet
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
@@ -29,7 +28,6 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
     val context = LocalContext.current
     val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
     val channel = if (BuildConfig.DEBUG) "Debug" else "Release"
-    var showSheet by remember { mutableStateOf(false) }
     var updateChannel by remember { mutableStateOf(updates.channel) }
 
     SimpleScreen({ Text("About Promtuz") }) { padding ->
@@ -62,9 +60,7 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
                     }
                 }
             }
-            OutlinedButton(onClick = { updates.check(); showSheet = true }) { Text("Check for updates") }
+            OutlinedButton(onClick = { updates.showSheet(check = true) }) { Text("Check for updates") }
         }
     }
-
-    if (showSheet) UpdateSheet(onDismiss = { showSheet = false })
 }
