@@ -63,4 +63,12 @@ object Routes : NavKey {
     /** Developer: manual snapshot / merge-restore of the encrypted backup blob. */
     @Serializable
     data object BackupRestore : NavKey
+
+    /** Settings: installed sticker packs. */
+    @Serializable
+    data object Stickers : NavKey
+
+    /** Create a pack, or add images to [pack]. */
+    @Serializable
+    data class NewStickerPack(val pack: String? = null) : NavKey
 }

@@ -25,6 +25,8 @@ pub struct MediaRecord {
     pub transfer_have: u32,
     pub transfer_total: u32,
     pub local_path: Option<String>,
+    /// Sticker only: what to hand `sticker_image` for its bytes.
+    pub sticker: Option<crate::api::stickers::StickerRecord>,
 }
 
 /// Compress `rgba` to AVIF (≤256KB) and send it to `to_ipk` as an inline
@@ -145,6 +147,7 @@ pub fn send_voice(
         blob: Some(data),
         thumb: (!waveform.is_empty()).then_some(waveform),
         file_id: None,
+        sticker: None,
     };
     let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
     crate::RUNTIME.spawn(async move {
@@ -213,6 +216,18 @@ pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError
                 None => (store::PENDING, 0, 0, None),
             },
         };
+        let sticker = r.sticker.as_deref().and_then(|b| {
+            use common::proto::pack::Unpacker;
+            let s = common::proto::sticker::StickerRef::deser(b).ok()?;
+            Some(crate::api::stickers::StickerRecord {
+                pack:   s.pack.to_vec(),
+                id:     s.id.to_vec(),
+                token:  s.token.to_vec(),
+                store:  s.store,
+                width:  r.width,
+                height: r.height,
+            })
+        });
         MediaRecord {
             dispatch_id: did.to_vec(),
             kind: r.kind,
@@ -230,6 +245,7 @@ pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError
             transfer_have,
             transfer_total,
             local_path,
+            sticker,
         }
     }).collect())
 }

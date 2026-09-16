@@ -32,6 +32,7 @@ bitflags! {
         const BLOB_STORE        = 1 << 2; // content-addressed encrypted media
         const CALL_RELAY        = 1 << 3; // SFrame / TURN for A/V
         const HIGH_AVAILABILITY = 1 << 4; // tier-1 stable-node SLA
+        const STICKER_STORE     = 1 << 5; // accepts sticker-pack uploads into the project bucket
     }
 }
 

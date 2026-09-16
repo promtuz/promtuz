@@ -17,7 +17,9 @@ import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
 import com.promtuz.chat.ui.screens.HomeScreen
 import com.promtuz.chat.ui.screens.LogsScreen
+import com.promtuz.chat.ui.screens.NewStickerPackScreen
 import com.promtuz.chat.ui.screens.NotificationsSettingsScreen
+import com.promtuz.chat.ui.screens.StickersScreen
 import com.promtuz.chat.ui.screens.RecoveryPhraseScreen
 import com.promtuz.chat.ui.screens.IdentityKeysScreen
 import com.promtuz.chat.ui.screens.RelaysScreen
@@ -87,6 +89,15 @@ fun AppNavigation(
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }
             entry<Routes.BackupRestore> { BackupRestoreScreen() }
+            entry<Routes.Stickers> {
+                StickersScreen(
+                    onCreate = { appViewModel.navigator.push(Routes.NewStickerPack()) },
+                    onAddImages = { pack -> appViewModel.navigator.push(Routes.NewStickerPack(pack)) },
+                )
+            }
+            entry<Routes.NewStickerPack> { key ->
+                NewStickerPackScreen(packHex = key.pack, onDone = { backStack.removeLastOrNull() })
+            }
         },
     )
 }

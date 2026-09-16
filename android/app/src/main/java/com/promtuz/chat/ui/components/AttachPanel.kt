@@ -27,7 +27,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -47,9 +46,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 /**
- * The attach region: an IME-height sheet that SWAPS with the software keyboard.
- * Last child of the composer [Column]; it owns the whole bottom region (why
- * [ChatBottomBar] drops `.imePadding()`/`.navigationBarsPadding()`).
+ * Reserves the composer's keyboard or panel height, including system insets.
  *
  * Jump-free rule: the region height is sourced from ONE animating thing at a
  * time, never a blend. [presence] is SNAPPED (not tweened) whenever the keyboard
@@ -65,21 +62,12 @@ import kotlin.math.roundToInt
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AttachPanel(
+fun ComposerPanel(
     open: Boolean,
     closingToKeyboard: Boolean,
     haze: HazeState,
-    /**
-     * Which sources this composer may pick from. Both while composing fresh;
-     * narrowed during an edit to whatever the target's body can legally become
-     * — offering a tab the core would refuse is worse than not offering it.
-     */
-    allowPhotos: Boolean = true,
-    allowFiles: Boolean = true,
     onHideKeyboard: () -> Unit,
-    onPickPhotos: () -> Unit,
-    onPickFiles: () -> Unit,
-    onSendPhotos: (List<Uri>) -> Unit,
+    content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
     val ime = WindowInsets.ime.getBottom(density)                      // live, system-animated
@@ -143,14 +131,18 @@ fun AttachPanel(
                     .freezeOnExit()
                     .hazeEffect(haze, chatBarHaze()),
             ) {
-                AttachPanelBody(allowPhotos, allowFiles, onPickPhotos, onPickFiles, onSendPhotos)
+                content()
             }
         }
     }
 }
 
+/** The attachments panel: an inline photo grid or the file picker, under floating pill tabs. */
 @Composable
-private fun AttachPanelBody(
+fun AttachPanelBody(
+    /**
+     * During editing, restrict sources to the target message's supported replacements.
+     */
     allowPhotos: Boolean,
     allowFiles: Boolean,
     onPickPhotos: () -> Unit,
@@ -201,8 +193,9 @@ private fun PillTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+/** Centered action for opening a system picker. */
 @Composable
-private fun PlaceholderAction(label: String, onClick: () -> Unit) {
+fun PlaceholderAction(label: String, onClick: () -> Unit) {
     val accent = LocalChatColors.current.accent
     Box(
         Modifier

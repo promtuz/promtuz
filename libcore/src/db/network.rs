@@ -97,6 +97,15 @@ const MIGRATION_ARRAY: &[M] = &[
             );
         "#,
     ),
+    // The resolver's sticker-store directory, cached like the gateways.
+    M::up(
+        r#"--sql
+            CREATE TABLE stores (
+              id       INTEGER PRIMARY KEY,
+              base_url TEXT NOT NULL
+            );
+        "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

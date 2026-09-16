@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -129,6 +128,7 @@ fun MessageBubble(
     onReactionTap: ((String) -> Unit)? = null,
     onQuoteClick: ((String) -> Unit)? = null,
     onDoubleTap: (() -> Unit)? = null,
+    onTap: (() -> Unit)? = null,
     onDownload: ((String) -> Unit)? = null,
     onOpen: ((String) -> Unit)? = null,
     peerName: String = "",
@@ -154,13 +154,11 @@ fun MessageBubble(
     val longPress by rememberUpdatedState(onLongPress)
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
-    // Some messages are their own surface. A few emoji, or a voice note, stand
-    // on the wallpaper with the time in a pill beneath them — a bubble around
-    // a 40sp emoji or around a player that already has a shape is a frame
-    // around a frame. A quote needs a surface to sit on, so a reply keeps it.
+    // Emoji, voice notes and stickers omit the bubble unless a quote needs it.
     val jumboEmoji = !msg.deleted && msg.quote == null &&
         (msg.content as? MessageContent.Text)?.let { isJumboEmoji(it.text) } == true
-    val bare = jumboEmoji || (!msg.deleted && msg.quote == null && msg.content is MessageContent.Voice)
+    val bare = jumboEmoji || (!msg.deleted && msg.quote == null &&
+        (msg.content is MessageContent.Voice || msg.content is MessageContent.Sticker))
 
     // A picture runs to the bubble's own edge — one outline instead of a frame
     // around a frame — so the bubble waives its inset and the padded blocks
@@ -230,6 +228,8 @@ fun MessageBubble(
                         )
                     content is MessageContent.Voice ->
                         VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
+                    content is MessageContent.Sticker ->
+                        StickerBlock(content, textColor)
                 }
 
                 if (msg.reactions.isNotEmpty()) {
@@ -268,9 +268,13 @@ fun MessageBubble(
                     else Modifier.pointerInput(menuState) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            coords.longPressed = false
                             if (menuState?.isOpen == true) return@awaitEachGesture
                             val press =
                                 awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            // The tap detector below sees this same release later and
+                            // must not treat it as a tap on top of the menu.
+                            coords.longPressed = true
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             longPress?.invoke(
                                 coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero
@@ -316,9 +320,14 @@ fun MessageBubble(
                     }
                 )
                 .then(
-                    if (onDoubleTap == null) Modifier
-                    else Modifier.pointerInput(onDoubleTap) {
-                        detectTapGestures(onDoubleTap = { onDoubleTap() })
+                    // One detector for both, so a sticker's tap waits out the
+                    // double-tap window instead of stealing it.
+                    if (onDoubleTap == null && onTap == null) Modifier
+                    else Modifier.pointerInput(onDoubleTap, onTap) {
+                        detectTapGestures(
+                            onDoubleTap = onDoubleTap?.let { cb -> { cb() } },
+                            onTap = onTap?.let { cb -> { if (!coords.longPressed) cb() } },
+                        )
                     }
                 )
                 .padding(
@@ -624,6 +633,9 @@ internal fun isJumboEmoji(text: String): Boolean {
 private class CoordsHolder {
     var row: LayoutCoordinates? = null
     var bubble: LayoutCoordinates? = null
+
+    /** The current gesture opened the menu; its release is not a tap. */
+    var longPressed = false
 
     /** Last text layout, written during the text child's measure and read right after it. */
     var text: TextLayoutResult? = null

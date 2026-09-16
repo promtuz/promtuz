@@ -7,3 +7,8 @@ root_ca_path = "cert/root_ca.pem"
 # [[resolver.seed]]
 # id = "ZD67HOMGMS69YKNO"
 # url = "quic://resolver2:4433"
+
+# Sticker stores. Keep ids stable when moving a store to another URL.
+# [[store]]
+# id = 1
+# base_url = "https://stickers.example.org"

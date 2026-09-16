@@ -18,7 +18,7 @@ use common::proto::dht_p2p::push_pseudonym_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::proto::push::PushProvider;
-use common::proto::push::PushRequest;
+use common::proto::push::GatewayRequest;
 use common::proto::push::RegisterToken;
 use common::types::bytes::Bytes;
 use ed25519_dalek::SigningKey;
@@ -126,7 +126,7 @@ pub async fn register_token_at_gateway() -> Result<()> {
 /// The CA-attested capabilities in a dialed node's leaf cert, if it carries the
 /// extension. The dialed node is the TLS server, so its chain is always
 /// present and was validated against the root CA during the handshake.
-fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
+pub(crate) fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
     let identity = conn.peer_identity()?;
     let chain = identity.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()?;
     let (_, cert) = X509Certificate::from_der(chain.first()?.as_ref()).ok()?;
@@ -153,7 +153,7 @@ async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Resul
     }
 
     let (mut tx, _rx) = conn.open_bi().await?;
-    tx.write_all(&PushRequest::Register(reg).pack()?).await?;
+    tx.write_all(&GatewayRequest::Register(reg).pack()?).await?;
     tx.finish()?;
     // finish() only marks the stream done locally; await the peer's ack or close() drops the unsent
     // op.
@@ -165,10 +165,14 @@ async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Resul
 /// Return a cached gateway if one is stored; else ask a resolver, cache the
 /// result, and return the first. Mirrors the relay cache: the resolver is
 /// dialed only on a miss.
-async fn fetch_gateway() -> Result<GatewayDescriptor> {
+pub(crate) async fn fetch_gateway() -> Result<GatewayDescriptor> {
     if let Some(gateway) = cached_gateway() {
         return Ok(gateway);
     }
+    fetch_gateways().await?.into_iter().next().context("no gateways registered")
+}
+
+pub(crate) async fn fetch_gateways() -> Result<Vec<GatewayDescriptor>> {
     let seeds = RESOLVER_SEEDS.get().context("resolver seeds not set")?;
     let conn = connect_to_any_seed(seeds).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -179,7 +183,7 @@ async fn fetch_gateway() -> Result<GatewayDescriptor> {
     match resp {
         ClientResponse::GetGateways { gateways } => {
             cache_gateways(&gateways);
-            gateways.into_iter().next().context("no gateways registered")
+            Ok(gateways)
         },
         other => Err(anyhow!("GetGateways: unexpected variant {other:?}")),
     }
@@ -211,7 +215,7 @@ fn cache_gateways(gateways: &[GatewayDescriptor]) {
     }
 }
 
-fn evict_gateway(id: &RelayId) {
+pub(crate) fn evict_gateway(id: &RelayId) {
     let conn = NETWORK_DB.lock();
     let _ = conn.execute("DELETE FROM gateways WHERE id = ?1", params![id.to_string()]);
 }

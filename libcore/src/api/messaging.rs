@@ -844,7 +844,7 @@ pub(crate) fn to_fid32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
 // wakes, so uniffi's executor is fine holding it.
 
 /// Run `fut` on [`crate::RUNTIME`] and await its result.
-async fn on_runtime<T, F>(fut: F) -> Result<T, CoreError>
+pub(crate) async fn on_runtime<T, F>(fut: F) -> Result<T, CoreError>
 where
     T: Send + 'static,
     F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
@@ -852,7 +852,7 @@ where
     crate::RUNTIME
         .spawn(fut)
         .await
-        .map_err(|e| CoreError::Internal { msg: format!("group task did not finish: {e}") })?
+        .map_err(|e| CoreError::Internal { msg: format!("core task did not finish: {e}") })?
         .map_err(CoreError::from)
 }
 

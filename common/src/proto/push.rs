@@ -88,12 +88,15 @@ pub struct WakeRequest {
 }
 
 /// One-RPC-per-bi-stream request the gateway unpacks (mirrors the resolver's
-/// `ClientRequest`). `Register` arrives over `client/5`, `Wake` over
-/// `relay/5`.
+/// `ClientRequest`). `Register` and `Store` arrive over `client/N`, `Wake`
+/// over `relay/N`. Only `Store` is answered (with a
+/// [`crate::proto::sticker::StoreResponse`]); the other two are fire-and-forget.
+/// Append variants, never reorder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PushRequest {
+pub enum GatewayRequest {
     Register(RegisterToken),
     Wake(WakeRequest),
+    Store(crate::proto::sticker::StoreRequest),
 }
 
 #[cfg(feature = "crypto")]

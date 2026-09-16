@@ -19,6 +19,7 @@ use common::warn;
 use crate::config::AppConfig;
 use crate::fcm::FcmSender;
 use crate::registry::PushRegistry;
+use crate::store::StickerStore;
 
 /// The push gateway node: a blind QUIC listener that registers `P → token` and
 /// dispatches wake requests to the platform push service.
@@ -32,6 +33,9 @@ pub struct Gateway {
     /// P — its home relay, or anyone who learnt it — gets no more of them
     /// than a relay would ever send.
     pub wakes:    WakeLimiter,
+    /// `None` when no `[store]` is configured — uploads are answered
+    /// `Unavailable`.
+    pub store:    Option<StickerStore>,
 }
 
 pub type WakeLimiter = governor::RateLimiter<
@@ -104,6 +108,14 @@ impl Gateway {
             }
         });
 
+        let store = cfg.store.as_ref().and_then(|s| match StickerStore::from_config(s) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                warn!("sticker store disabled — {e:#}");
+                None
+            },
+        });
+
         let quota = governor::Quota::per_hour(std::num::NonZeroU32::new(MAX_WAKES_PER_P_PER_HOUR).unwrap())
             .allow_burst(std::num::NonZeroU32::new(MAX_WAKE_BURST).unwrap());
         Self {
@@ -111,6 +123,7 @@ impl Gateway {
             registry: PushRegistry::default(),
             fcm,
             wakes: governor::RateLimiter::keyed(quota),
+            store,
         }
     }
 }

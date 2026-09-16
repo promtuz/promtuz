@@ -13,10 +13,8 @@ WorkingDirectory=/etc/promtuz
 Restart=on-failure
 RestartSec=2
 
-# Least-privilege hardening. Stateless (in-memory registry) — no /var/lib. The
-# only writable path is /etc/promtuz: it generates its key, writes a CSR, reads
-# the enrolled cert, and reads the FCM service-account secret. Egress needs
-# AF_INET/AF_INET6 (QUIC to relays/resolver + HTTPS to FCM).
+# Writes keys and CSRs under /etc/promtuz and the sticker ledger under /var/lib/pzgateway.
+# Network access is required for QUIC and HTTPS to FCM and object storage.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -25,7 +23,9 @@ ProtectControlGroups=true
 ProtectKernelTunables=true
 RestrictAddressFamilies=AF_INET AF_INET6
 ConfigurationDirectory=promtuz
-ReadWritePaths=/etc/promtuz
+StateDirectory=pzgateway
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/pzgateway /etc/promtuz
 
 [Install]
 WantedBy=multi-user.target

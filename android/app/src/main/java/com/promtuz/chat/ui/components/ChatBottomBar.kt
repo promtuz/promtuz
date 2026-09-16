@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -79,11 +80,14 @@ import com.promtuz.chat.domain.model.STAGED_IMAGE
 import com.promtuz.chat.domain.model.acceptsStaged
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ComposerAction
+import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.util.freezeOnExit
+import com.promtuz.chat.utils.media.StickerImages
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
+import org.koin.androidx.compose.koinViewModel
 
 /** The bar's own geometry; [ComposerMetrics.composerPx] is built from these. */
 private val BarMarginH = 10.dp
@@ -95,16 +99,19 @@ private val BarRadius = 26.dp
  *  folds away takes its spacing with it instead of dropping it a frame later. */
 private val SlotGap = 8.dp
 
+enum class ComposerPanelKind { Attach, Stickers }
+
 /**
- * Composer: one blurred pill holding the reply/edit reveal, the input (grows to 6
- * lines) and the accent send circle. The pill owns the clip, background and blur —
- * a staged action grows this surface rather than stacking a second one above it.
+ * One blurred surface for the reply/edit preview, multiline input and send button.
+ * Accessory content expands within the same clipped surface.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatBottomBar(
     viewModel: ChatVM, haze: HazeState, metrics: ComposerMetrics,
     onJumpTo: (String) -> Unit = {},
+    onManageStickers: () -> Unit = {},
+    onCreateStickerPack: () -> Unit = {},
 ) {
     val input by viewModel.input.collectAsState()
     val action by viewModel.composerAction.collectAsState()
@@ -113,43 +120,53 @@ fun ChatBottomBar(
     val feedbackContext = LocalContext.current
     LaunchedEffect(error) { error?.let { Toast.makeText(feedbackContext, it, Toast.LENGTH_LONG).show() } }
 
-    // The attach panel swaps with the keyboard, so its open-state and the system
-    // pickers live here — both the paperclip toggle and the panel's tabs reach them.
-    var attachOpen by remember { mutableStateOf(false) }
-    // Which close path we're on: field tapped (keyboard coming — hold the panel
-    // until it covers) vs back/paperclip (no keyboard — slide down). AttachPanel reads it.
+    var openPanel by remember { mutableStateOf<ComposerPanelKind?>(null) }
+    // Retain the closing panel's content until its exit animation finishes.
+    var shownPanel by remember { mutableStateOf(ComposerPanelKind.Attach) }
+    val attachOpen = openPanel == ComposerPanelKind.Attach
+    val stickersOpen = openPanel == ComposerPanelKind.Stickers
+    // Hold the panel until the keyboard covers it when restoring input.
     var closingToKeyboard by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val fieldFocus = remember { FocusRequester() }
     val imeVisible = WindowInsets.isImeVisible
     var restoreKeyboard by remember { mutableStateOf(false) }
-    val openAttachments = {
-        restoreKeyboard = imeVisible
+    val open = { panel: ComposerPanelKind ->
+        if (openPanel == null) restoreKeyboard = imeVisible
         closingToKeyboard = false
-        attachOpen = true
+        shownPanel = panel
+        openPanel = panel
     }
-    val toggleAttachments = {
-        if (attachOpen) {
-            closingToKeyboard = restoreKeyboard
-            attachOpen = false
-            if (restoreKeyboard) {
-                fieldFocus.requestFocus()
-                keyboard?.show()
-            }
-        } else openAttachments()
+    // Preserve the original keyboard state even when switching between panels.
+    val closeRestoring = {
+        closingToKeyboard = restoreKeyboard
+        openPanel = null
+        if (restoreKeyboard) {
+            fieldFocus.requestFocus()
+            keyboard?.show()
+        }
+    }
+    val toggle = { panel: ComposerPanelKind -> if (openPanel == panel) closeRestoring() else open(panel) }
+    val closeFlat = { closingToKeyboard = false; openPanel = null }
+    DisposableEffect(stickersOpen) {
+        viewModel.setChoosingSticker(stickersOpen)
+        onDispose { viewModel.setChoosingSticker(false) }
+    }
+    LaunchedEffect(action) {
+        if (action is ComposerAction.Edit && stickersOpen) closeFlat()
     }
 
     // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-        if (uris.isNotEmpty()) { viewModel.attachPhotos(uris); attachOpen = false }
+        if (uris.isNotEmpty()) { viewModel.attachPhotos(uris); closeFlat() }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) { viewModel.attachFiles(uris); attachOpen = false }
+        if (uris.isNotEmpty()) { viewModel.attachFiles(uris); closeFlat() }
     }
 
     // Back closes the panel before the nav stack.
-    BackHandler(attachOpen) { closingToKeyboard = false; attachOpen = false }
+    BackHandler(openPanel != null) { closeRestoring() }
 
     // Voice notes. The mic is asked for on the first tap rather than up front:
     // a chat that never records never sees the prompt.
@@ -158,7 +175,7 @@ fun ChatBottomBar(
     val beginRecording = {
         if (!viewModel.startRecording()) {
             Toast.makeText(context, "Microphone is busy", Toast.LENGTH_SHORT).show()
-        } else { closingToKeyboard = false; attachOpen = false; focusManager.clearFocus() }
+        } else { closeFlat(); focusManager.clearFocus() }
     }
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) beginRecording()
@@ -169,14 +186,14 @@ fun ChatBottomBar(
             PackageManager.PERMISSION_GRANTED
         ) beginRecording() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
-    BackHandler(action != null && !attachOpen && recording == null) { viewModel.cancelComposerAction() }
+    BackHandler(action != null && openPanel == null && recording == null) { viewModel.cancelComposerAction() }
     BackHandler(recording != null) { viewModel.cancelRecording() }
     // Leaving the screen ends the note rather than letting it run on: the
     // platform mutes a backgrounded mic, so what would be recorded is silence,
     // and the cap would then send that silence with nobody having tapped send.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.cancelRecording() }
 
-    // No .imePadding()/.navigationBarsPadding(): AttachPanel owns the bottom region
+    // No .imePadding()/.navigationBarsPadding(): ComposerPanel owns the bottom region
     // and reserves the keyboard/nav space itself (see its region formula).
     // The pill's own chrome, which the input row's measured height knows nothing about.
     val minimumPill = with(LocalDensity.current) { (38.dp + (BarPad + BarMarginV) * 2).roundToPx() }
@@ -223,7 +240,7 @@ fun ChatBottomBar(
                             // Editing can't reach the body's media from the field, so
                             // the block's line opens the picker — narrowed to whatever
                             // the target may legally become.
-                            onAddMedia = { if (!busy && action != null) openAttachments() },
+                            onAddMedia = { if (!busy && action != null) open(ComposerPanelKind.Attach) },
                             onJumpTo = { if (action != null) onJumpTo(it) },
                         )
                     }
@@ -245,11 +262,13 @@ fun ChatBottomBar(
                     ) else ComposerRow(
                         viewModel, input, action,
                         attachOpen = attachOpen,
+                        stickersOpen = stickersOpen,
                         metrics = metrics,
                         fieldFocus = fieldFocus,
-                        onToggleAttach = toggleAttachments,
+                        onToggleAttach = { toggle(ComposerPanelKind.Attach) },
+                        onToggleStickers = { toggle(ComposerPanelKind.Stickers) },
                         onFieldFocused = {
-                            if (attachOpen) { closingToKeyboard = true; attachOpen = false } // keyboard taking over
+                            if (openPanel != null) { closingToKeyboard = true; openPanel = null } // keyboard taking over
                         },
                         onMic = onMic,
                     )
@@ -260,23 +279,37 @@ fun ChatBottomBar(
         // become — the client half of libcore's revision matrix, so a swap the core
         // would refuse is never on offer.
         val editing = (action as? ComposerAction.Edit)?.msg?.content
-        AttachPanel(
-            open = attachOpen,
+        ComposerPanel(
+            open = openPanel != null,
             closingToKeyboard = closingToKeyboard,
             haze = haze,
-            allowPhotos = editing?.acceptsStaged(STAGED_IMAGE) ?: true,
-            allowFiles = editing?.acceptsStaged(STAGED_ATTACHMENT) ?: true,
             onHideKeyboard = { focusManager.clearFocus() },
-            onPickPhotos = {
-                photoPicker.launch(PickVisualMediaRequest(if (action is ComposerAction.Edit) ActivityResultContracts.PickVisualMedia.ImageOnly else ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-            },
-            onPickFiles = { filePicker.launch(arrayOf("*/*")) },
-            onSendPhotos = { uris ->
-                viewModel.attachPhotos(uris)
-                closingToKeyboard = false
-                attachOpen = false
-            },
-        )
+        ) {
+            when (shownPanel) {
+                ComposerPanelKind.Attach -> AttachPanelBody(
+                    allowPhotos = editing?.acceptsStaged(STAGED_IMAGE) ?: true,
+                    allowFiles = editing?.acceptsStaged(STAGED_ATTACHMENT) ?: true,
+                    onPickPhotos = {
+                        photoPicker.launch(PickVisualMediaRequest(if (action is ComposerAction.Edit) ActivityResultContracts.PickVisualMedia.ImageOnly else ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    },
+                    onPickFiles = { filePicker.launch(arrayOf("*/*")) },
+                    onSendPhotos = { uris -> viewModel.attachPhotos(uris); closeFlat() },
+                )
+                ComposerPanelKind.Stickers -> {
+                    val stickers = koinViewModel<StickersVM>()
+                    val packs by stickers.packs.collectAsState()
+                    val recents by stickers.recents.collectAsState()
+                    LaunchedEffect(Unit) { stickers.refresh() }
+                    StickerPanelBody(
+                        packs = packs,
+                        recents = recents,
+                        onPick = viewModel::sendSticker,
+                        onCreate = { closeFlat(); onCreateStickerPack() },
+                        onManage = { closeFlat(); onManageStickers() },
+                    )
+                }
+            }
+        }
     }) { children, constraints ->
         // Reserve the keyboard/panel first, but always leave a usable input row.
         // Read back allocated heights, never the panel's requested inset.
@@ -364,6 +397,7 @@ private fun ComposerActionBlock(
     val thumb = when (content) {
         is MessageContent.Image -> content.bitmap
         is MessageContent.Attachment -> content.thumb
+        is MessageContent.Sticker -> StickerImages.peek(content.sticker)
         // An album's cover is its first member — the one that carries the caption.
         is MessageContent.Album -> content.items.firstOrNull()?.content?.let {
             when (it) {
@@ -394,6 +428,7 @@ private fun ComposerActionBlock(
         content is MessageContent.Album ->
             content.caption.ifEmpty { "${content.items.size} photos" }
         content is MessageContent.Voice -> "Voice message"
+        content is MessageContent.Sticker -> "Sticker"
         content is MessageContent.Text -> content.text
         else -> ""
     }
@@ -413,11 +448,18 @@ private fun ComposerActionBlock(
                     .background(colors.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
-                if (thumb != null) Image(thumb, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                if (thumb != null) Image(
+                    thumb, null, Modifier.fillMaxSize(),
+                    contentScale = if (content is MessageContent.Sticker) ContentScale.Fit else ContentScale.Crop,
+                )
                 // A file with no preview still needs a mark, or the tile reads as a
                 // failed image rather than a document.
                 else DrawableIcon(
-                    if (content is MessageContent.Voice) R.drawable.i_mic else R.drawable.oi_paperclip,
+                    when (content) {
+                        is MessageContent.Voice -> R.drawable.i_mic
+                        is MessageContent.Sticker -> R.drawable.oi_sticker
+                        else -> R.drawable.oi_paperclip
+                    },
                     Modifier.size(16.dp),
                     tint = colors.onSurfaceVariant,
                 )
@@ -476,9 +518,11 @@ private fun ComposerRow(
     input: String,
     action: ComposerAction?,
     attachOpen: Boolean,
+    stickersOpen: Boolean,
     metrics: ComposerMetrics,
     fieldFocus: FocusRequester,
     onToggleAttach: () -> Unit,
+    onToggleStickers: () -> Unit,
     onFieldFocused: () -> Unit,
     onMic: () -> Unit,
     modifier: Modifier = Modifier,
@@ -505,10 +549,15 @@ private fun ComposerRow(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom,
     ) {
-        // Swap the leading affordance without changing the input's width.
+        // Swap the leading affordance without changing the input's width: the
+        // paperclip while drafting (the trailing one has gone), stickers otherwise.
+        // An edit has a body to replace and a sticker is not one, so the sticker
+        // slot sits out of an edit rather than open a panel whose taps do nothing.
         Box(
             Modifier.padding(end = SlotGap).size(38.dp).clip(CircleShape)
-                .clickable(enabled = hasContent && !busy) { onToggleAttach() }
+                .clickable(enabled = !busy && (hasContent || action !is ComposerAction.Edit)) {
+                    if (hasContent) onToggleAttach() else onToggleStickers()
+                }
                 .semantics { contentDescription = if (hasContent) "Attach media" else "Stickers" },
             contentAlignment = Alignment.Center,
         ) {
@@ -523,7 +572,7 @@ private fun ComposerRow(
                 DrawableIcon(
                     if (drafting) R.drawable.oi_paperclip else R.drawable.oi_sticker,
                     Modifier.size(if (drafting) 20.dp else 22.dp),
-                    tint = if (attachOpen) chat.accent else colors.onSurfaceVariant,
+                    tint = if (if (drafting) attachOpen else stickersOpen) chat.accent else colors.onSurfaceVariant,
                 )
             }
         }

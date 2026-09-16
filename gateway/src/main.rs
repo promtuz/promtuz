@@ -7,6 +7,7 @@ mod gateway;
 mod quic;
 mod registry;
 mod resolver_link;
+mod store;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +37,18 @@ async fn main() -> Result<()> {
     }
 
     let gateway = Arc::new(Gateway::new(cfg));
+    if gateway.store.is_some() {
+        let gateway = gateway.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                tick.tick().await;
+                if let Some(store) = &gateway.store {
+                    store.sweep().await;
+                }
+            }
+        });
+    }
     let acceptor = Acceptor::new(gateway.clone());
 
     tokio::select! {

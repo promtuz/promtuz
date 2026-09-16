@@ -34,3 +34,16 @@ addr = "resolver.promtuz.dev"
 # FCM HTTP v1 service-account JSON. This is a SECRET — it is NOT shipped in the
 # package. Provision it out of band: drop the file here, 0600, owned pzgateway.
 fcm_service_account = "/etc/promtuz/fcm-service-account.json"
+
+# Sticker store. Needs the sticker-store capability on the cert as well:
+#   certgen sign … --cap push-gateway --cap sticker-store
+# Provision R2 credentials separately, as with the FCM service account.
+# [store]
+# id = 1
+# db = "/var/lib/pzgateway/stickers.db"
+# backend = "s3"
+# endpoint = "https://<account>.r2.cloudflarestorage.com"
+# bucket = "promtuz-stickers"
+# region = "auto"
+# access_key = "<r2-access-key-id>"
+# secret_key = "<r2-secret-access-key>"

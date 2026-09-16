@@ -6,11 +6,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +28,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.utils.media.rememberStickerBitmap
 import java.util.Locale
 
 private val MediaRadius = RoundedCornerShape(14.dp)
@@ -249,6 +247,29 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = 
 
 /** A player is a control, not prose: one width, whatever the note's length. */
 private val VoiceWidth = 232.dp
+
+/** Reserve the sticker's dimensions while downloading to keep chat layout stable. */
+@Composable
+fun StickerBlock(sticker: MessageContent.Sticker, textColor: Color) {
+    val ref = sticker.sticker
+    val ratio = (if (ref.width > 0 && ref.height > 0) ref.width.toFloat() / ref.height else 1f)
+        .coerceIn(0.5f, 2f)
+    val width = if (ratio >= 1f) StickerBox else StickerBox * ratio
+    val height = width / ratio
+    val bitmap = rememberStickerBitmap(ref)
+    Box(
+        Modifier
+            .size(width, height)
+            .clip(RoundedCornerShape(10.dp))
+            .then(if (bitmap == null) Modifier.background(textColor.copy(alpha = 0.08f)) else Modifier),
+        Alignment.Center,
+    ) {
+        bitmap?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+    }
+}
+
+/** The longest edge a sticker draws at; the other edge follows its aspect. */
+private val StickerBox = 160.dp
 
 /** Bars from 0–255 loudness samples; a missing waveform draws as a flat line. */
 @Composable

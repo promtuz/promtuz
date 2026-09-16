@@ -1169,6 +1169,7 @@ pub(crate) fn build_image_message(
         thumb: None,
         file_id: None,
         duration_ms: 0,
+        sticker: None,
     })
 }
 
@@ -1192,6 +1193,7 @@ pub(crate) fn build_attachment_message(
         thumb,
         file_id: None,
         duration_ms: 0,
+        sticker: None,
     })
 }
 
@@ -1246,7 +1248,7 @@ pub(crate) fn save_inbound_body(
     conversation: &[u8; 16], sender: &[u8; 32], did: &[u8; 16], timestamp: u64,
     reply_to: Option<[u8; 16]>, body: Body,
 ) -> Result<Option<(Message, String)>> {
-    let Some((content, media)) = split_body(body) else { return Ok(None) };
+    let (content, media) = split_body(body);
     Ok(match media {
         None => Message::save_incoming(*conversation, *sender, did, &content, timestamp, reply_to)?
             .map(|m| (m, content)),
@@ -1264,16 +1266,16 @@ pub(crate) fn save_inbound_body(
 }
 
 /// A body as storage holds it: the text to surface (a caption, for media) and
-/// the media side-row it needs, if any. `None` for a sticker — pack
-/// distribution isn't built, so there's nothing to resolve an id against and a
-/// stored row would be unrenderable.
-fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow>)> {
+/// the media side-row it needs, if any. A sticker stores its reference and
+/// nothing else — the picture is fetched by it and cached under the pack.
+fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
     use crate::data::media::KIND_ATTACHMENT;
     use crate::data::media::KIND_IMAGE;
+    use crate::data::media::KIND_STICKER;
     use crate::data::media::KIND_VOICE;
     use crate::data::media::MediaRow;
 
-    Some(match body {
+    match body {
         Body::Text(content) => (content, None),
         Body::Image { caption, group_id, mime, width, height, data } => (
             caption,
@@ -1289,6 +1291,7 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
                 thumb: None,
                 file_id: None,
                 duration_ms: 0,
+                sticker: None,
             }),
         ),
         Body::Attachment { caption, group_id, mime, name, size, thumb, file_id } => (
@@ -1305,6 +1308,7 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
                 thumb: (!thumb.is_empty()).then_some(thumb),
                 file_id: Some(file_id.to_vec()),
                 duration_ms: 0,
+                sticker: None,
             }),
         ),
         Body::Voice { mime, duration_ms, waveform, data } => (
@@ -1321,10 +1325,31 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
                 blob: Some(data),
                 thumb: (!waveform.is_empty()).then_some(waveform),
                 file_id: None,
+                sticker: None,
             }),
         ),
-        Body::Sticker { .. } => return None,
-    })
+        Body::Sticker { pack, id, token, store, width, height } => {
+            use common::proto::pack::Packer;
+            let r = common::proto::sticker::StickerRef { pack, id, token, store };
+            (
+                String::new(),
+                Some(MediaRow {
+                    kind: KIND_STICKER,
+                    group_id: None,
+                    mime: "image/avif".into(),
+                    name: String::new(),
+                    size: 0,
+                    width: width as u32,
+                    height: height as u32,
+                    duration_ms: 0,
+                    blob: None,
+                    thumb: None,
+                    file_id: None,
+                    sticker: r.ser().ok(),
+                }),
+            )
+        },
+    }
 }
 
 /// Apply a [`AppPayload::Revise`] over its target: refuse the swaps the matrix
@@ -1339,7 +1364,7 @@ pub(crate) fn apply_revise_body(
     if !current.revisable_to(incoming) {
         bail!("revision {current:?} -> {incoming:?} is not permitted");
     }
-    let Some((content, media)) = split_body(body) else { bail!("sticker revision unsupported") };
+    let (content, media) = split_body(body);
     Ok(crate::data::media::apply_revise(conversation, target, &content, media.as_ref(), own, author)?
         .map(|row| (row, content)))
 }
@@ -1390,6 +1415,7 @@ impl BodyKind {
             Some(crate::data::media::KIND_IMAGE) => Self::Image,
             Some(crate::data::media::KIND_ATTACHMENT) => Self::Attachment,
             Some(crate::data::media::KIND_VOICE) => Self::Voice,
+            Some(crate::data::media::KIND_STICKER) => Self::Sticker,
             _ => Self::Text,
         }
     }
@@ -1454,6 +1480,22 @@ fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
             duration_ms: m.duration_ms,
             waveform:    m.thumb.unwrap_or_default(),
             data:        m.blob.unwrap_or_default(),
+        },
+        Some(m) if m.kind == crate::data::media::KIND_STICKER => {
+            use common::proto::pack::Unpacker;
+            let r = m
+                .sticker
+                .as_deref()
+                .and_then(|b| common::proto::sticker::StickerRef::deser(b).ok())
+                .ok_or_else(|| anyhow!("sticker row carries no reference"))?;
+            Body::Sticker {
+                pack:   r.pack,
+                id:     r.id,
+                token:  r.token,
+                store:  r.store,
+                width:  m.width.min(u16::MAX as u32) as u16,
+                height: m.height.min(u16::MAX as u32) as u16,
+            }
         },
         Some(m) if m.kind == crate::data::media::KIND_ATTACHMENT => {
             // Null file_id = un-finalized placeholder (manifest still hashing).
@@ -2637,7 +2679,7 @@ mod tests {
             waveform:    vec![1, 9, 200, 42],
             data:        vec![0x4f, 0x67, 0x67, 0x53],
         };
-        let (content, media) = split_body(body.clone()).unwrap();
+        let (content, media) = split_body(body.clone());
         assert!(content.is_empty(), "a voice note has no caption");
         let media = media.unwrap();
         assert_eq!(media.kind, crate::data::media::KIND_VOICE);
@@ -2785,6 +2827,7 @@ mod tests {
             thumb: None,
             file_id: None,
             duration_ms: 0,
+            sticker: None,
         };
         let msg =
             crate::data::media::save_outgoing_with_media(&to, "cap", Some(quoted), &media).unwrap();

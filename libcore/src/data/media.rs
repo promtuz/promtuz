@@ -8,6 +8,7 @@ use crate::db::messages::MESSAGES_DB;
 pub const KIND_IMAGE: u8 = 1;
 pub const KIND_ATTACHMENT: u8 = 2;
 pub const KIND_VOICE: u8 = 3;
+pub const KIND_STICKER: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaRow {
@@ -25,6 +26,8 @@ pub struct MediaRow {
     /// attachment, the loudness waveform for a voice note.
     pub thumb: Option<Vec<u8>>,
     pub file_id: Option<Vec<u8>>,
+    /// Serialized `StickerRef` for sending and downloading. Image bytes live in the cache.
+    pub sticker: Option<Vec<u8>>,
 }
 
 /// Have the transfer store forget attachments whose media rows are now
@@ -94,10 +97,11 @@ pub fn save_tx(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO message_media
-         (conversation_id,dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+         (conversation_id,dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms,sticker)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         rusqlite::params![conv.as_slice(), dispatch_id.as_slice(), r.kind, r.group_id,
-            r.mime, r.name, r.size, r.width, r.height, r.blob, r.thumb, r.file_id, r.duration_ms],
+            r.mime, r.name, r.size, r.width, r.height, r.blob, r.thumb, r.file_id, r.duration_ms,
+            r.sticker],
     )?;
     Ok(())
 }
@@ -237,13 +241,14 @@ pub fn discard_outgoing(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Result<()> {
 pub fn get(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> {
     let db = MESSAGES_DB.lock();
     db.query_row(
-        "SELECT kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms
+        "SELECT kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms,sticker
          FROM message_media WHERE conversation_id=?1 AND dispatch_id=?2",
         rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
         |row| Ok(MediaRow {
             kind: row.get(0)?, group_id: row.get(1)?, mime: row.get(2)?, name: row.get(3)?,
             size: row.get(4)?, width: row.get(5)?, height: row.get(6)?,
             blob: row.get(7)?, thumb: row.get(8)?, file_id: row.get(9)?, duration_ms: row.get(10)?,
+            sticker: row.get(11)?,
         }),
     )
     .optional()
@@ -273,7 +278,7 @@ pub fn attachment_offer(file_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
 pub fn for_conversation(conv: &[u8; 16]) -> Result<Vec<([u8; 16], MediaRow)>> {
     let db = MESSAGES_DB.lock();
     let mut stmt = db.prepare(
-        "SELECT dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms
+        "SELECT dispatch_id,kind,group_id,mime,name,size,width,height,blob,thumb,file_id,duration_ms,sticker
          FROM message_media WHERE conversation_id=?1")?;
     let rows = stmt.query_map([conv.as_slice()], |row| {
         let did: Vec<u8> = row.get(0)?;
@@ -282,9 +287,58 @@ pub fn for_conversation(conv: &[u8; 16]) -> Result<Vec<([u8; 16], MediaRow)>> {
             kind: row.get(1)?, group_id: row.get(2)?, mime: row.get(3)?, name: row.get(4)?,
             size: row.get(5)?, width: row.get(6)?, height: row.get(7)?,
             blob: row.get(8)?, thumb: row.get(9)?, file_id: row.get(10)?, duration_ms: row.get(11)?,
+            sticker: row.get(12)?,
         }))
     })?.collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// A sticker row's reference, keyed the way the backup carries it. Lives
+/// beside [`MediaBackupRow`] rather than in it: that row's postcard layout is
+/// what every existing blob holds, so the reference travels as a separate
+/// list appended after the payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StickerRefBackup {
+    pub conversation_id: [u8; 16],
+    pub dispatch_id:     [u8; 16],
+    pub sticker:         Vec<u8>,
+}
+
+pub fn dump_sticker_refs() -> Vec<StickerRefBackup> {
+    let conn = MESSAGES_DB.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, dispatch_id, sticker FROM message_media WHERE sticker IS NOT NULL",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| {
+        let conv: Vec<u8> = r.get(0)?;
+        let did: Vec<u8> = r.get(1)?;
+        Ok(StickerRefBackup {
+            conversation_id: conv.try_into().unwrap_or([0u8; 16]),
+            dispatch_id:     did.try_into().unwrap_or([0u8; 16]),
+            sticker:         r.get(2)?,
+        })
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// Put restored sticker rows' references back. Only rows still missing one
+/// change, so a live reference is never overwritten by the snapshot's.
+pub fn import_sticker_refs(rows: &[StickerRefBackup]) -> Result<usize> {
+    let mut conn = MESSAGES_DB.lock();
+    let tx = conn.transaction()?;
+    let mut n = 0usize;
+    for r in rows {
+        n += tx.execute(
+            "UPDATE message_media SET sticker = ?3 \
+             WHERE conversation_id = ?1 AND dispatch_id = ?2 AND sticker IS NULL",
+            rusqlite::params![r.conversation_id.as_slice(), r.dispatch_id.as_slice(), r.sticker],
+        )?;
+    }
+    tx.commit()?;
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -307,7 +361,7 @@ mod tests {
         let conv = [3u8; 16]; let did = [4u8; 16];
         let row = MediaRow { kind: KIND_IMAGE, group_id: Some(vec![1u8;16]),
             mime: "image/avif".into(), name: "".into(), size: 3, width: 4, height: 3,
-            blob: Some(vec![9,9,9]), thumb: None, file_id: None , duration_ms: 0};
+            blob: Some(vec![9,9,9]), thumb: None, file_id: None , duration_ms: 0, sticker: None};
         save(&conv, &did, &row).unwrap();
         let got = for_conversation(&conv).unwrap();
         assert!(got.iter().any(|(d, r)| *d == did && r.blob == row.blob && r.kind == KIND_IMAGE));
@@ -325,7 +379,7 @@ mod tests {
         let did = [0x22u8; 16];
         let row = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: "".into(), size: 0, width: 4, height: 3,
-            blob: None, thumb: None, file_id: None , duration_ms: 0};
+            blob: None, thumb: None, file_id: None , duration_ms: 0, sticker: None};
         save(&conv, &did, &row).unwrap();
         assert!(get(&conv, &did).unwrap().unwrap().blob.is_none());
 
@@ -347,7 +401,7 @@ mod tests {
         let conv = [0x31u8; 16];
         let row = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: "".into(), size: 3, width: 4, height: 3,
-            blob: Some(vec![9, 9, 9]), thumb: None, file_id: None , duration_ms: 0};
+            blob: Some(vec![9, 9, 9]), thumb: None, file_id: None , duration_ms: 0, sticker: None};
         let msg = save_outgoing_with_media(&conv, "", None, &row).unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.as_deref().unwrap().try_into().unwrap();
         assert!(get(&conv, &did).unwrap().is_some());
@@ -368,7 +422,7 @@ mod tests {
         let conv = [0x23u8; 16];
         let row = MediaRow { kind: KIND_ATTACHMENT, group_id: None,
             mime: "application/pdf".into(), name: "a.pdf".into(), size: 9,
-            width: 0, height: 0, blob: None, thumb: None, file_id: None , duration_ms: 0};
+            width: 0, height: 0, blob: None, thumb: None, file_id: None , duration_ms: 0, sticker: None};
         let msg = save_outgoing_with_media(&conv, "cap", None, &row).unwrap();
         let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
         assert!(get(&conv, &did).unwrap().is_some());
@@ -400,7 +454,7 @@ mod tests {
         let did = [6u8; 16];
         let media = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: String::new(), size: 3, width: 1, height: 1,
-            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None , duration_ms: 0};
+            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None , duration_ms: 0, sticker: None};
         {
             let tx = conn.transaction().unwrap();
             assert!(Message::save_incoming_tx(&tx, conv, SENDER, &did, "cap", 100, None).unwrap().is_some());
@@ -443,7 +497,7 @@ mod tests {
         let conv = [8u8; 16];
         let media = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
             name: String::new(), size: 3, width: 4, height: 3,
-            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None , duration_ms: 0};
+            blob: Some(vec![1, 2, 3]), thumb: None, file_id: None , duration_ms: 0, sticker: None};
 
         // Happy path: caption + media land in one committed transaction.
         let did: [u8; 16] = {

@@ -16,7 +16,7 @@ use common::debug;
 use common::node::capability::NodeCapabilities;
 use common::proto::client_res::GatewayDescriptor;
 use common::proto::pack::Packer;
-use common::proto::push::PushRequest;
+use common::proto::push::GatewayRequest;
 use common::proto::push::WakeRequest;
 use common::types::bytes::Bytes;
 use governor::Quota;
@@ -128,7 +128,7 @@ async fn send_wake(
     }
 
     let (mut send, _recv) = conn.open_bi().await?;
-    let req = PushRequest::Wake(WakeRequest { pseudonym: Bytes(pseudonym), payload: Vec::new() });
+    let req = GatewayRequest::Wake(WakeRequest { pseudonym: Bytes(pseudonym), payload: Vec::new() });
     send.write_all(&req.pack()?).await?;
     send.finish()?;
     // finish() only marks the stream done locally; close() would drop the

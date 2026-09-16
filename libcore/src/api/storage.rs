@@ -137,7 +137,7 @@ mod tests {
         crate::transfer::store::retention_put(&fid, file.to_str().unwrap(), 4096, 1024, &[], u64::MAX / 2).unwrap();
         let row = MediaRow { kind: media::KIND_ATTACHMENT, group_id: None, mime: "application/octet-stream".into(),
             name: "shared.bin".into(), size: 4096, width: 0, height: 0, duration_ms: 0,
-            blob: None, thumb: Some(vec![1; 8]), file_id: Some(fid.to_vec()) };
+            blob: None, thumb: Some(vec![1; 8]), file_id: Some(fid.to_vec()), sticker: None };
         media::save_incoming_with_media(&conv, &sender, &[1; 16], "caption", 10, None, &row).unwrap();
         media::save_incoming_with_media(&other, &sender, &[2; 16], "other caption", 11, None, &row).unwrap();
         let photo = MediaRow { kind: media::KIND_IMAGE, blob: Some(vec![9; 1024]), thumb: None,

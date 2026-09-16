@@ -65,6 +65,20 @@ import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
 import uniffi.core.sendVoice as ffiSendVoice
+import uniffi.core.StickerPackPreview
+import uniffi.core.StickerPackRecord
+import uniffi.core.StickerRecord
+import uniffi.core.StickerSource
+import uniffi.core.stickerPacks as ffiStickerPacks
+import uniffi.core.recentStickers as ffiRecentStickers
+import uniffi.core.stickerImage as ffiStickerImage
+import uniffi.core.stickerPackPreview as ffiStickerPackPreview
+import uniffi.core.installStickerPack as ffiInstallStickerPack
+import uniffi.core.removeStickerPack as ffiRemoveStickerPack
+import uniffi.core.createStickerPack as ffiCreateStickerPack
+import uniffi.core.addToStickerPack as ffiAddToStickerPack
+import uniffi.core.sendSticker as ffiSendSticker
+import uniffi.core.refreshStickerPacks as ffiRefreshStickerPacks
 import uniffi.core.searchMessages as ffiSearchMessages
 import uniffi.core.SearchHit
 import uniffi.core.ConversationRecord
@@ -351,6 +365,42 @@ object CoreBridge {
     /** Media rows for a conversation (inline blob/thumb + transfer progress in chunks). */
     suspend fun getMedia(conversationId: ByteArray): List<MediaRecord> =
         withContext(Dispatchers.IO) { ffiGetMedia(conversationId) }
+
+    suspend fun stickerCacheBytes(): Long = withContext(Dispatchers.IO) { uniffi.core.stickerCacheBytes().toLong() }
+
+    suspend fun clearStickerCache() = uniffi.core.clearStickerCache()
+
+    // Core backs up pack references and caches downloaded images separately.
+
+    /** Installed packs in picker order. */
+    suspend fun stickerPacks(): List<StickerPackRecord> = withContext(Dispatchers.IO) { ffiStickerPacks() }
+
+    /** Most recently sent first, from kept packs. */
+    suspend fun recentStickers(limit: Int): List<StickerRecord> =
+        withContext(Dispatchers.IO) { ffiRecentStickers(limit.toUInt()) }
+
+    /** The sticker's AVIF bytes, fetched on first use. */
+    suspend fun stickerImage(sticker: StickerRecord): ByteArray = ffiStickerImage(sticker)
+
+    /** The pack behind a sticker, verified and read; nothing is kept. */
+    suspend fun stickerPackPreview(sticker: StickerRecord): StickerPackPreview = ffiStickerPackPreview(sticker)
+
+    suspend fun installStickerPack(sticker: StickerRecord) = ffiInstallStickerPack(sticker)
+
+    suspend fun removeStickerPack(pack: ByteArray) = withContext(Dispatchers.IO) { ffiRemoveStickerPack(pack) }
+
+    /** Publish a new pack. Returns its id once the store holds every object. */
+    suspend fun createStickerPack(name: String, images: List<StickerSource>): ByteArray =
+        ffiCreateStickerPack(name, images)
+
+    suspend fun addToStickerPack(pack: ByteArray, images: List<StickerSource>) = ffiAddToStickerPack(pack, images)
+
+    /** Save the outgoing sticker and schedule delivery. */
+    suspend fun sendSticker(conversationId: ByteArray, sticker: StickerRecord, replyTo: ByteArray? = null) =
+        withContext(Dispatchers.IO) { ffiSendSticker(conversationId, sticker, replyTo) }
+
+    /** Look for appends to kept packs; core rate-limits per pack. */
+    fun refreshStickerPacks() = ffiRefreshStickerPacks()
 
     suspend fun editMessage(conversationId: ByteArray, dispatchId: ByteArray, content: String) =
         withContext(Dispatchers.IO) { ffiEditMessage(conversationId, dispatchId, content) }

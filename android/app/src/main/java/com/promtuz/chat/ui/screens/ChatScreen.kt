@@ -45,8 +45,15 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
+import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiMessage
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.presentation.viewmodel.StickersVM
+import com.promtuz.chat.ui.components.StickerPackSheet
+import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import com.promtuz.chat.ui.appearance.DoubleTapAction
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
@@ -154,6 +161,10 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
 
     val menu = remember { MessageMenuState() }
     var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
+    // A tapped sticker opens the pack it came from.
+    var packSheet by remember { mutableStateOf<StickerRef?>(null) }
+    val appVM = koinInject<AppVM>()
+    val stickersVM = koinViewModel<StickersVM>()
     menu.onReact = { emoji ->
         menu.anchor?.let { viewModel.toggleReaction(it.msg, emoji) }
         menu.close()
@@ -194,7 +205,13 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     Box {
         Scaffold(
             topBar = { ChatTopBar(name, viewModel, hazeState) },
-            bottomBar = { ChatBottomBar(viewModel, hazeState, metrics, onJumpTo = ::jumpToQuoted) },
+            bottomBar = {
+                ChatBottomBar(
+                    viewModel, hazeState, metrics, onJumpTo = ::jumpToQuoted,
+                    onManageStickers = { appVM.navigator.push(Routes.Stickers) },
+                    onCreateStickerPack = { appVM.navigator.push(Routes.NewStickerPack()) },
+                )
+            },
         ) { padding ->
         // Wallpaper + stage are the haze source; the translucent bars sample them.
         // contentPadding (not an outer padding) so messages draw under the bars.
@@ -276,6 +293,9 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                     onQuoteClick = ::jumpToQuoted,
                                     onDownload = viewModel::download,
                                     onOpen = { openAttachment(context, it) },
+                                    onTap = (chatRow.msg.content as? MessageContent.Sticker)?.let { s ->
+                                        { packSheet = s.sticker }
+                                    },
                                     peerName = name,
                                     onDoubleTap = when {
                                         !actionable -> null
@@ -331,6 +351,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             )
         }
 
+        packSheet?.let { ref ->
+            StickerPackSheet(
+                ref = ref,
+                viewModel = stickersVM,
+                onDismiss = { packSheet = null },
+                onAddImages = { pack -> packSheet = null; appVM.navigator.push(Routes.NewStickerPack(pack)) },
+            )
+        }
+
         confirmDelete?.let { msg ->
             DeleteConfirmDialog(
                 msg = msg,
@@ -362,15 +391,18 @@ private fun menuActionsFor(
             viewModel.beginReply(msg); close()
         })
         if (actionable) add(MenuAction("Forward", R.drawable.oi_forward) { close() })
-        if (!msg.deleted) add(MenuAction("Copy", R.drawable.oi_copy) {
-            val text = (msg.content as? MessageContent.Text)?.text.orEmpty()
-            scope.launch {
-                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
-            }
-            close()
-        })
-        // A voice note has no text to edit and nothing to swap in for it.
-        if (actionable && msg.outgoing && msg.content !is MessageContent.Voice) add(MenuAction("Edit", R.drawable.oi_edit) {
+        // Only prose copies: a voice note or a sticker has no text to put on the clipboard.
+        if (!msg.deleted && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
+            add(MenuAction("Copy", R.drawable.oi_copy) {
+                val text = (msg.content as? MessageContent.Text)?.text.orEmpty()
+                scope.launch {
+                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
+                }
+                close()
+            })
+        // A voice note or a sticker has no text to edit and nothing to swap in for it.
+        if (actionable && msg.outgoing && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
+            add(MenuAction("Edit", R.drawable.oi_edit) {
             viewModel.beginEdit(msg); close()
         })
     }

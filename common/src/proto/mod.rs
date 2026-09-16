@@ -20,6 +20,7 @@ pub mod peer;
 pub mod push;
 #[cfg(feature = "server")]
 pub mod relay_res;
+pub mod sticker;
 
 pub type RelayId = NodeId;
 pub type ResolverId = NodeId;

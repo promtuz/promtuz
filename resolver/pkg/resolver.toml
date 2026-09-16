@@ -19,3 +19,8 @@ root_ca_path = "/etc/promtuz/ca.pem"
 [log]
 # trace|debug|info|warn|error ; the PZ_LOG env var overrides this.
 level = "info"
+
+# Sticker stores. Keep ids stable when moving a store to another URL.
+# [[store]]
+# id = 1
+# base_url = "https://s1.promtuz.app"

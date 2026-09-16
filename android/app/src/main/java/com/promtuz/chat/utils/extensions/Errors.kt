@@ -13,6 +13,7 @@ import uniffi.core.CoreException
 fun Throwable.reason(fallback: String): String {
     val text = when (this) {
         is CoreException.Internal -> msg
+        is CoreException.Refused -> msg
         else -> message
     }
     return text?.trim()?.takeIf { it.isNotEmpty() } ?: fallback

@@ -62,10 +62,28 @@ pub trait CoreEvents: Send + Sync {
 pub enum CoreError {
     #[error("{msg}")]
     Internal { msg: String },
+    /// A failure with a message suitable for display to the user.
+    #[error("{msg}")]
+    Refused { msg: String },
 }
+
+/// Preserve a user-facing message through anyhow as [`CoreError::Refused`].
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 impl From<anyhow::Error> for CoreError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(r) = e.downcast_ref::<Refused>() {
+            return CoreError::Refused { msg: r.0.clone() };
+        }
         // `{:#}` joins the whole context chain. Plain `to_string()` prints only
         // the outermost layer, which is where the call happened rather than
         // what went wrong — "fetch_keypackage_for" instead of the reason.

@@ -25,3 +25,24 @@ addr = "resolver.promtuz.app:40433"
 # Service accounts → Generate new private key). Holds the sender credential;
 # keep it off community nodes. Omit to run without FCM dispatch.
 fcm_service_account = "/etc/promtuz/fcm-service-account.json"
+
+# Sticker uploads. The certificate must carry the
+# sticker-store capability: `certgen sign gateway.csr --cap push-gateway --cap sticker-store`.
+# Omit the section to refuse uploads.
+[store]
+# Must match the resolver's `[[store]]` row whose bucket this writes into.
+id = 1
+# Local SQLite ledger. Stored manifests also identify each pack's owner.
+db = "/var/lib/pzgateway/stickers.db"
+# R2 via the S3 API. The bucket is served read-only to clients from the
+# resolver's base_url (a public bucket or a custom domain, listing off).
+backend = "s3"
+endpoint = "https://<account>.r2.cloudflarestorage.com"
+bucket = "promtuz-stickers"
+region = "auto"
+access_key = "<r2-access-key-id>"
+secret_key = "<r2-secret-access-key>"
+# Local run instead: write to a directory and serve it with any static server
+# (`python3 -m http.server 8080 -d /tmp/pzstore`), base_url = that server.
+# backend = "fs"
+# dir = "/tmp/pzstore"

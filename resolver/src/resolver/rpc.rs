@@ -9,6 +9,7 @@ use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
 use common::proto::client_res::MAX_BOOTSTRAP_RESULTS;
 use common::proto::client_res::RelayDescriptor;
+use common::proto::client_res::StoreDescriptor;
 use common::proto::pack::Packer;
 use common::quic::xor32;
 
@@ -31,6 +32,18 @@ impl HandleRPC for Resolver {
             ClientRequest::GetGateways() => {
                 let gateways = self.snapshot_gateways().iter().map(|g| g.to_descriptor()).collect();
                 Ok(Arc::new(ClientResponse::GetGateways { gateways }.pack()?))
+            },
+            ClientRequest::GetStores() => {
+                let stores = self
+                    .cfg
+                    .store
+                    .iter()
+                    .map(|s| StoreDescriptor {
+                        id:       s.id,
+                        base_url: s.base_url.trim_end_matches('/').to_string(),
+                    })
+                    .collect();
+                Ok(Arc::new(ClientResponse::GetStores { stores }.pack()?))
             },
         }
     }

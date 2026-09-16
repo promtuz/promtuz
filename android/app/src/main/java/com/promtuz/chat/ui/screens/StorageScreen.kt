@@ -73,6 +73,7 @@ internal fun StorageManager(
     var tab by rememberSaveable { mutableIntStateOf(if (chat == null) 0 else 1) }
     var confirmItems by remember { mutableStateOf<List<StorageMediaItem>?>(null) }
     var confirmCopies by remember { mutableStateOf(false) }
+    var confirmStickers by remember { mutableStateOf(false) }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes)
 
     fun refresh(action: (suspend () -> String)? = null) = model.refresh(action)
@@ -209,21 +210,28 @@ internal fun StorageManager(
                 }
             }
             if (chat == null) {
-                val hasCopies = (usage?.shared ?: 0) > 0
-                val actionCount = (if (hasCopies) 1 else 0) + (if (onOpenBackup != null) 1 else 0)
-                if (hasCopies) item("copies") {
-                    GroupedActionRow("Clear shared copies", 0, actionCount, { confirmCopies = true },
-                        modifier = Modifier.padding(top = 16.dp), enabled = !busy,
-                        supportingText = size(usage!!.shared)) {
-                        DrawableIcon(R.drawable.oi_trash, size = 26.dp)
-                    }
+                val actions = buildList<Pair<String, @Composable (Int, Int) -> Unit>> {
+                    if ((usage?.stickers ?: 0) > 0) add("sticker-cache" to { index, count ->
+                        GroupedActionRow("Clear sticker cache", index, count, { confirmStickers = true },
+                            enabled = !busy, supportingText = size(usage!!.stickers)) {
+                            DrawableIcon(R.drawable.oi_sticker, size = 26.dp)
+                        }
+                    })
+                    if ((usage?.shared ?: 0) > 0) add("copies" to { index, count ->
+                        GroupedActionRow("Clear shared copies", index, count, { confirmCopies = true },
+                            enabled = !busy, supportingText = size(usage!!.shared)) {
+                            DrawableIcon(R.drawable.oi_trash, size = 26.dp)
+                        }
+                    })
+                    if (onOpenBackup != null) add("backup" to { index, count ->
+                        GroupedActionRow("Backup & restore", index, count, onOpenBackup) {
+                            DrawableIcon(R.drawable.i_encrypted, size = 26.dp)
+                        }
+                    })
                 }
-                if (onOpenBackup != null) item("backup") {
-                    GroupedActionRow("Backup & restore", if (hasCopies) 1 else 0, actionCount, onOpenBackup,
-                        modifier = Modifier.padding(top = if (hasCopies) 0.dp else 16.dp)) {
-                        DrawableIcon(R.drawable.i_encrypted, size = 26.dp)
-                    }
-                }
+                if (actions.isNotEmpty()) item("actions-space") { Spacer(Modifier.height(16.dp)) }
+                actions.forEachIndexed { index, (key, action) -> item(key) { action(index, actions.size) } }
+
             }
             error?.let { message -> item("error") { Text(message, color = MaterialTheme.colorScheme.error) } }
         }
@@ -243,6 +251,14 @@ internal fun StorageManager(
             }
         }) { Text("Delete from this device", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { confirmItems = null }) { Text("Cancel") } })
+    GroupDialog(visible = confirmStickers, onDismissRequest = { confirmStickers = false },
+        title = { Text("Clear sticker cache?") },
+        text = { Text("Messages and sticker packs will stay. Sticker images will download again when needed.") },
+        confirmButton = { TextButton(onClick = { confirmStickers = false; refresh {
+            source.clearStickerCache()
+            "Sticker cache cleared"
+        } }) { Text("Clear cache") } },
+        dismissButton = { TextButton(onClick = { confirmStickers = false }) { Text("Cancel") } })
     GroupDialog(visible = confirmCopies, onDismissRequest = { confirmCopies = false },
         title = { Text("Clear shared copies?") },
         text = { Text("Shared images and logs will be removed. Previously shared file links may stop working. Original messages and media will stay.") },

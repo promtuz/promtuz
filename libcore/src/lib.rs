@@ -20,6 +20,7 @@ pub mod push;
 pub mod quic;
 pub mod staging;
 pub mod state;
+pub mod stickers;
 pub mod transfer;
 pub mod utils;
 

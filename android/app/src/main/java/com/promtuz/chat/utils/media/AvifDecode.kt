@@ -17,21 +17,23 @@ import java.nio.ByteBuffer
  * platform path stays as a fallback. Every failure branch logs so a grey
  * bubble is diagnosable.
  */
-fun decodeAvif(bytes: ByteArray): ImageBitmap? {
+fun decodeAvif(bytes: ByteArray, maxEdge: Int = Int.MAX_VALUE): ImageBitmap? {
     if (bytes.isEmpty()) {
         Timber.tag("Avif").w("decode skipped: empty blob")
         return null
     }
-    decodeWithLibavif(bytes)?.let { return it }
+    decodeWithLibavif(bytes, maxEdge)?.let { return it }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
     return runCatching {
-        ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))).asImageBitmap()
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { _, info, _ ->
+            require(info.size.width in 1..maxEdge && info.size.height in 1..maxEdge) { "Image dimensions exceed limit" }
+        }.asImageBitmap()
     }.onFailure {
         Timber.tag("Avif").w(it, "platform decode failed: ${bytes.size}B, sdk ${Build.VERSION.SDK_INT}")
     }.getOrNull()
 }
 
-private fun decodeWithLibavif(bytes: ByteArray): ImageBitmap? = runCatching {
+private fun decodeWithLibavif(bytes: ByteArray, maxEdge: Int): ImageBitmap? = runCatching {
     // libavif's JNI reads via GetDirectBufferAddress — a wrapped array won't do.
     val buf = ByteBuffer.allocateDirect(bytes.size).put(bytes).apply { rewind() }
     val info = AvifDecoder.Info()
@@ -39,6 +41,7 @@ private fun decodeWithLibavif(bytes: ByteArray): ImageBitmap? = runCatching {
         Timber.tag("Avif").w("libavif getInfo failed: ${bytes.size}B")
         return@runCatching null
     }
+    if (info.width !in 1..maxEdge || info.height !in 1..maxEdge) return@runCatching null
     val bitmap = Bitmap.createBitmap(info.width, info.height, Bitmap.Config.ARGB_8888)
     if (!AvifDecoder.decode(buf, bytes.size, bitmap)) {
         Timber.tag("Avif").w("libavif decode failed: ${info.width}x${info.height}, ${bytes.size}B")

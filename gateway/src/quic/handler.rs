@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use common::debug;
+use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
+use common::proto::push::GatewayRequest;
 use common::proto::push::PushProvider;
-use common::proto::push::PushRequest;
 use common::proto::push::WakeRequest;
+use common::proto::sticker::StoreReject;
+use common::proto::sticker::StoreResponse;
 use common::quic::protorole::ProtoRole;
 use common::warn;
 use quinn::Connection;
@@ -13,11 +16,13 @@ use crate::gateway::Gateway;
 
 /// Per-connection handler. Serves the one-RPC-per-bi-stream contract (mirrors
 /// the resolver's client handler): each accepted bi-stream is one
-/// [`PushRequest`], dispatched on its own task so a slow send can't
+/// [`GatewayRequest`], dispatched on its own task so a slow send can't
 /// head-of-line block the connection's other streams.
 ///
 /// `Register` (devices, `client/5`) verifies + stores `P → token`. `Wake`
-/// (home relays, `relay/5`) resolves `P → token` and pushes it.
+/// (home relays, `relay/5`) resolves `P → token` and pushes it. `Store`
+/// (devices) writes a sticker-pack object and is the one request answered on
+/// its stream.
 pub struct Handler;
 
 impl Handler {
@@ -33,11 +38,29 @@ impl Handler {
             None => return conn.close(0u32.into(), b"NoALPN"),
         };
 
-        while let Ok((_send, mut recv)) = conn.accept_bi().await {
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let gateway = gateway.clone();
             tokio::spawn(async move {
-                match PushRequest::unpack(&mut recv).await {
-                    Ok(PushRequest::Register(reg)) => match gateway.registry.register(&reg) {
+                match GatewayRequest::unpack(&mut recv).await {
+                    Ok(GatewayRequest::Store(_)) if role != ProtoRole::Client => {
+                        warn!("gateway: store request from a non-device {addr}; ignored");
+                    },
+                    Ok(GatewayRequest::Store(req)) => {
+                        let resp = match &gateway.store {
+                            Some(store) => store.handle(req).await,
+                            None => StoreResponse::Rejected(StoreReject::Unavailable),
+                        };
+                        match resp.pack() {
+                            Ok(bytes) => {
+                                if let Err(e) = send.write_all(&bytes).await {
+                                    debug!("gateway: store response to {addr} not written: {e}");
+                                }
+                                let _ = send.finish();
+                            },
+                            Err(e) => warn!("gateway: store response pack failed: {e}"),
+                        }
+                    },
+                    Ok(GatewayRequest::Register(reg)) => match gateway.registry.register(&reg) {
                         // A pseudonym is never journalled alongside an address.
                         Ok(()) => debug!(
                             "gateway: registered {:?} token for P={}",
@@ -46,10 +69,10 @@ impl Handler {
                         ),
                         Err(e) => warn!("gateway: rejected registration from {addr}: {e}"),
                     },
-                    Ok(PushRequest::Wake(_)) if role != ProtoRole::Relay => {
+                    Ok(GatewayRequest::Wake(_)) if role != ProtoRole::Relay => {
                         warn!("gateway: wake from a non-relay {addr}; ignored");
                     },
-                    Ok(PushRequest::Wake(req)) => Self::dispatch_wake(&gateway, req).await,
+                    Ok(GatewayRequest::Wake(req)) => Self::dispatch_wake(&gateway, req).await,
                     Err(e) => warn!("gateway: request decode failed from {addr}: {e}"),
                 }
             });

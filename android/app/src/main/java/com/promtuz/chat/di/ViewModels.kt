@@ -9,6 +9,7 @@ import com.promtuz.chat.presentation.viewmodel.QrScannerVM
 import com.promtuz.chat.presentation.viewmodel.RelaysVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
 import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
+import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import org.koin.core.module.dsl.singleOf
@@ -28,4 +29,5 @@ val vmModule = module {
     viewModelOf(::UpdateVM)
     viewModelOf(::BackupRestoreVM)
     viewModelOf(::GroupVM)
+    viewModelOf(::StickersVM)
 }

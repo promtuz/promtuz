@@ -18,8 +18,11 @@ import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.StagedMedia
+import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.domain.model.mediaLabel
+import com.promtuz.chat.domain.model.toRecord
+import com.promtuz.chat.domain.model.toRef
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.VoicePlayer
@@ -66,10 +69,12 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
      */
     private var others: List<ByteArray> = emptyList()
     private var started = false
-    private val outgoingTyping = OutgoingTyping(viewModelScope, SystemClock::uptimeMillis) { active ->
-        CoreBridge.setActivity(conversation, if (active) Activity.Typing.bit else 0)
+    private val outgoingActivity = OutgoingActivity(viewModelScope, SystemClock::uptimeMillis) { activity ->
+        CoreBridge.setActivity(conversation, activity)
     }
-    fun setChatForeground(value: Boolean) { outgoingTyping.setForeground(value) }
+    fun setChatForeground(value: Boolean) {
+        outgoingActivity.setForeground(value)
+    }
 
     // Computed, not `by lazy`: the top bar composes before [init] runs and
     // reads this, and a lazy would memoize the placeholder zeros for the
@@ -324,7 +329,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 .collect { sig -> if (!_isGroup.value) _presence.value = sig.presence }
         }
 
-        viewModelScope.launch { input.collect(outgoingTyping::edited) }
+        viewModelScope.launch { input.collect(outgoingActivity::edited) }
         viewModelScope.launch {
             var previous = emptyMap<String, Presence>()
             CoreBridge.presenceByPeer.collect { current ->
@@ -336,13 +341,13 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                         (after is Presence.Idle && before != Presence.Online && before !is Presence.Idle)
                 }
                 previous = current
-                if (returned) outgoingTyping.refresh()
+                if (returned) outgoingActivity.refresh()
             }
         }
         viewModelScope.launch {
             CoreBridge.connection.collect { connection ->
                 if (connection == com.promtuz.chat.presentation.state.ConnectionState.Connected) {
-                    outgoingTyping.refresh()
+                    outgoingActivity.refresh()
                 }
             }
         }
@@ -661,6 +666,17 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         fire { CoreBridge.sendVoice(to, r.bytes, r.mime, r.durationMs, r.waveform, replyTo) }
     }
 
+    /** Send immediately with the current reply, preserving the text draft. */
+    fun sendSticker(ref: StickerRef) {
+        if (composerAction.value is ComposerAction.Edit) return
+        val to = conversation
+        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
+        composerAction.value = null
+        fire { CoreBridge.sendSticker(to, ref.toRecord(), replyTo) }
+    }
+
+    fun setChoosingSticker(active: Boolean) = outgoingActivity.setChoosingSticker(active)
+
     override fun onCleared() {
         cancelRecording()
     }
@@ -741,8 +757,8 @@ fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.Attachment -> c.caption
     is MessageContent.Album -> c.caption
     // Not editable — a system row narrates something that already happened,
-    // and a voice note carries no text at all.
-    is MessageContent.System, is MessageContent.Voice -> ""
+    // and a voice note or sticker carries no text at all.
+    is MessageContent.System, is MessageContent.Voice, is MessageContent.Sticker -> ""
 }
 
 
@@ -813,13 +829,16 @@ private fun MessageRecord.toUi(
     )
 }
 
-/** kind: 1 = inline Image (blob), 3 = inline Voice (blob), else P2P Attachment (thumb + transfer progress). */
+/** kind: 1 = inline Image (blob), 3 = inline Voice (blob), 4 = Sticker (reference), else P2P Attachment (thumb + transfer progress). */
 private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): MessageContent =
     if (kind.toInt() == 1) MessageContent.Image(
         caption = caption,
         bitmap = blob?.let { decodeAvifCached(dispatchIdHex, it) },
         width = width.toInt(),
         height = height.toInt(),
+    ) else if (kind.toInt() == 4) (
+        // Older backup formats may omit the reference.
+        sticker?.let { MessageContent.Sticker(it.toRef()) } ?: MessageContent.Text(mediaLabel(4))
     ) else if (kind.toInt() == 3) MessageContent.Voice(
         dispatchIdHex = dispatchIdHex,
         mime = mime,

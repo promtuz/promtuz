@@ -13,7 +13,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
@@ -24,7 +23,6 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
 import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
 import org.koin.androidx.compose.koinViewModel
@@ -54,6 +52,7 @@ fun SettingsScreen(
                     SettingItem(
                         "Storage", R.drawable.i_hard_drive
                     ) { navigate(Routes.Storage) },
+                    SettingItem("Stickers", R.drawable.oi_sticker) { navigate(Routes.Stickers) },
                     SettingItem("Notifications", R.drawable.i_notifications) {
                         navigate(Routes.NotificationsSettings)
                     },

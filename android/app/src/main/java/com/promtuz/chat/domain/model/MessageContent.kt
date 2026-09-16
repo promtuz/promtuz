@@ -56,6 +56,9 @@ sealed interface MessageContent {
         val localPath: String?,
     ) : MessageContent
 
+    /** The reference supplies dimensions before the image is downloaded. */
+    data class Sticker(val sticker: StickerRef) : MessageContent
+
     /**
      * Inline voice note. [waveform] is the sender's loudness samples (0–255),
      * enough to draw the bubble before anything decodes; [bytes] is the encoded
@@ -81,6 +84,7 @@ fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
     1 -> "Photo"
     2 -> name.ifEmpty { "File" }
     3 -> "Voice message"
+    4 -> "Sticker"
     else -> ""
 }
 

@@ -17,6 +17,7 @@ pub mod qr;
 pub mod recovery;
 pub mod relays;
 pub mod staging;
+pub mod stickers;
 pub mod storage;
 pub mod update;
 

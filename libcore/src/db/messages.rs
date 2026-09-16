@@ -386,6 +386,37 @@ const MIGRATION_ARRAY: &[M] = &[
     // Voice notes: the one fact about a recording the bubble needs before it
     // decodes anything. Pictures leave it 0.
     M::up("ALTER TABLE message_media ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;"),
+    // Persist message references and installed packs; image bytes are cached separately.
+    M::up(
+        "ALTER TABLE message_media ADD COLUMN sticker BLOB; \
+         CREATE TABLE sticker_packs ( \
+             pack_id  BLOB PRIMARY KEY CHECK(length(pack_id) = 16), \
+             store_id INTEGER NOT NULL, \
+             token    BLOB NOT NULL CHECK(length(token) = 32), \
+             creator  BLOB NOT NULL CHECK(length(creator) = 32), \
+             version  INTEGER NOT NULL, \
+             name     TEXT NOT NULL, \
+             added_at INTEGER NOT NULL \
+         ) WITHOUT ROWID; \
+         CREATE TABLE stickers ( \
+             pack_id    BLOB NOT NULL, \
+             sticker_id BLOB NOT NULL CHECK(length(sticker_id) = 32), \
+             position   INTEGER NOT NULL, \
+             width      INTEGER NOT NULL, \
+             height     INTEGER NOT NULL, \
+             PRIMARY KEY (pack_id, sticker_id) \
+         ) WITHOUT ROWID; \
+         CREATE TABLE sticker_recents ( \
+             pack_id    BLOB NOT NULL, \
+             sticker_id BLOB NOT NULL, \
+             used_at    INTEGER NOT NULL, \
+             PRIMARY KEY (pack_id, sticker_id) \
+         ) WITHOUT ROWID;",
+    ),
+    M::up("CREATE TABLE sticker_uploads (
+        pack_id BLOB PRIMARY KEY CHECK(length(pack_id) = 16),
+        payload BLOB NOT NULL
+    ) WITHOUT ROWID;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -402,6 +433,9 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
         "conversations",
         "conversation_members",
         "peer_names",
+        "sticker_packs",
+        "stickers",
+        "sticker_recents",
     ]);
 
     Mutex::new(conn)

@@ -544,6 +544,7 @@ mod download_resume {
             thumb:    None,
             file_id:  Some(file_id.to_vec()),
             duration_ms: 0,
+            sticker: None,
         };
         // The media row is conversation-scoped; the peer only names who to
         // pull from, which lives on the message row.

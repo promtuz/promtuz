@@ -47,6 +47,7 @@ enum Capability {
     BlobStore,
     CallRelay,
     HighAvailability,
+    StickerStore,
 }
 
 impl Capability {
@@ -57,6 +58,7 @@ impl Capability {
             Capability::BlobStore => NodeCapabilities::BLOB_STORE,
             Capability::CallRelay => NodeCapabilities::CALL_RELAY,
             Capability::HighAvailability => NodeCapabilities::HIGH_AVAILABILITY,
+            Capability::StickerStore => NodeCapabilities::STICKER_STORE,
         }
     }
 }

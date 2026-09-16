@@ -72,11 +72,23 @@ pub enum ClientRequest {
     /// wake, verifying the `PUSH_GATEWAY` capability on the gateway's cert at
     /// dial. Appended last (postcard variant order).
     GetGateways(),
+
+    /// Public sticker-store directory, supplied by operator configuration.
+    /// Auth: none. Appended last (postcard variant order).
+    GetStores(),
 }
 
 /// A push gateway's directory entry — same wire shape as [`RelayDescriptor`]
 /// (id to check the dialed NodeId, addr to dial, pubkey carried along).
 pub type GatewayDescriptor = RelayDescriptor;
+
+/// Store ids are permanent references in messages. Update `base_url` to move a store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreDescriptor {
+    pub id:       u16,
+    /// Scheme + host (+ port), no trailing slash: `https://s1.promtuz.app`.
+    pub base_url: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClientResponse {
@@ -98,6 +110,8 @@ pub enum ClientResponse {
     },
     /// Resolver's response to [`ClientRequest::GetGateways`].
     GetGateways { gateways: Vec<GatewayDescriptor> },
+    /// Resolver's response to [`ClientRequest::GetStores`].
+    GetStores { stores: Vec<StoreDescriptor> },
 }
 
 #[cfg(test)]

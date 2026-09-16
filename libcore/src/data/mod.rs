@@ -11,6 +11,7 @@ pub mod reaction;
 pub mod recovery;
 pub mod relay;
 pub mod seen;
+pub mod stickers;
 
 use std::str::FromStr;
 

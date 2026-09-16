@@ -68,9 +68,7 @@ pub struct Resolver {
     /// gossip layer actually consumes it.
     #[allow(dead_code)]
     pub key: NodeKey,
-    /// Held for the same reason as [`Self::key`] — the gossip layer will
-    /// need access to peer-resolver seed addresses, TLS roots, etc.
-    #[allow(dead_code)]
+    /// Operator configuration, including the public sticker-store directory.
     pub cfg: AppConfig,
     pub endpoint: Arc<Endpoint>,
     /// Live relay registry. Read-mostly: every client `GetRelays` RPC reads

@@ -66,6 +66,28 @@ struct BackupPayload {
     prefs:         Vec<(String, String)>,
 }
 
+/// Optional suffix preserving the serialized layout of older [`BackupPayload`]s.
+#[derive(Default, Serialize, Deserialize)]
+struct BackupExtra {
+    /// Sticker rows' references (`message_media.sticker`), keyed by message.
+    sticker_refs: Vec<crate::data::media::StickerRefBackup>,
+    /// The sticker packs kept on the device, with their rosters.
+    packs:        Vec<crate::data::stickers::PackBackup>,
+}
+
+fn extra_now() -> BackupExtra {
+    BackupExtra {
+        sticker_refs: crate::data::media::dump_sticker_refs(),
+        packs:        crate::data::stickers::dump_all(),
+    }
+}
+
+fn import_extra(extra: &BackupExtra) -> Result<()> {
+    crate::data::media::import_sticker_refs(&extra.sticker_refs)?;
+    crate::data::stickers::import_rows(&extra.packs)?;
+    Ok(())
+}
+
 /// Our own read watermark for a conversation.
 #[derive(Serialize, Deserialize)]
 pub struct ReadRow {
@@ -92,8 +114,9 @@ fn backup_key(isk: &[u8; 32]) -> [u8; 32] {
     okm
 }
 
-fn encode(key: &[u8; 32], payload: &BackupPayload) -> Result<Vec<u8>> {
-    let plain = postcard::to_allocvec(payload).map_err(|e| anyhow!("encode payload: {e}"))?;
+fn encode(key: &[u8; 32], payload: &BackupPayload, extra: &BackupExtra) -> Result<Vec<u8>> {
+    let mut plain = postcard::to_allocvec(payload).map_err(|e| anyhow!("encode payload: {e}"))?;
+    plain.extend(postcard::to_allocvec(extra).map_err(|e| anyhow!("encode extra: {e}"))?);
     let compressed = lz4_flex::compress_prepend_size(&plain);
 
     let mut nonce = [0u8; 24];
@@ -114,7 +137,7 @@ fn encode(key: &[u8; 32], payload: &BackupPayload) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn decode(key: &[u8; 32], blob: &[u8]) -> Result<BackupPayload> {
+fn decode(key: &[u8; 32], blob: &[u8]) -> Result<(BackupPayload, BackupExtra)> {
     let rest = blob.strip_prefix(MAGIC.as_slice()).ok_or_else(|| anyhow!("not a backup blob"))?;
     let (&version, rest) = rest.split_first().ok_or_else(|| anyhow!("truncated blob"))?;
     if version != VERSION {
@@ -130,7 +153,19 @@ fn decode(key: &[u8; 32], blob: &[u8]) -> Result<BackupPayload> {
         .map_err(|_| anyhow!("decrypt failed — wrong identity or corrupted blob"))?;
     let plain = lz4_flex::decompress_size_prepended(&compressed)
         .map_err(|e| anyhow!("decompress: {e}"))?;
-    postcard::from_bytes(&plain).map_err(|e| anyhow!("decode payload: {e}"))
+    split_plain(&plain)
+}
+
+/// Older backups contain only the payload; newer ones include [`BackupExtra`].
+fn split_plain(plain: &[u8]) -> Result<(BackupPayload, BackupExtra)> {
+    let (payload, rest) =
+        postcard::take_from_bytes::<BackupPayload>(plain).map_err(|e| anyhow!("decode payload: {e}"))?;
+    let extra = if rest.is_empty() {
+        BackupExtra::default()
+    } else {
+        postcard::from_bytes(rest).map_err(|e| anyhow!("decode extra: {e}"))?
+    };
+    Ok((payload, extra))
 }
 
 /// Snapshot everything restorable into one encrypted blob. The platform
@@ -153,14 +188,14 @@ pub fn export() -> Result<Vec<u8>> {
         prefs: crate::data::app_prefs::dump_all(),
     };
     let secret = Identity::secret_key_with_manager()?;
-    encode(&backup_key(&secret), &payload)
+    encode(&backup_key(&secret), &payload, &extra_now())
 }
 
 /// Restore a blob into the local DBs. Requires the identity to already be
 /// restored (the key derives from the isk). Idempotent — upserts throughout.
 pub fn import(blob: &[u8]) -> Result<()> {
     let secret = Identity::secret_key_with_manager()?;
-    let payload = decode(&backup_key(&secret), blob)?;
+    let (payload, extra) = decode(&backup_key(&secret), blob)?;
 
     let contacts = Contact::import_rows(&payload.contacts)?;
     // Conversations first: everything below hangs off them.
@@ -168,6 +203,7 @@ pub fn import(blob: &[u8]) -> Result<()> {
     let messages = Message::import_rows(&payload.messages)?;
     let reactions = Reaction::import_rows(&payload.reactions)?;
     let media = crate::data::media::import_rows(&payload.media)?;
+    import_extra(&extra)?;
     crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
     Identity::set_name(&payload.name)?;
@@ -215,7 +251,7 @@ pub struct MergeReport {
 /// [`Identity::set_name`] — existing state always wins a collision.
 pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let secret = Identity::secret_key_with_manager()?;
-    let payload = decode(&backup_key(&secret), blob)?;
+    let (payload, extra) = decode(&backup_key(&secret), blob)?;
 
     let contacts_added = Contact::merge_rows(&payload.contacts)?;
     let conversations_added =
@@ -223,6 +259,7 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let messages_added = Message::merge_rows(&payload.messages)?;
     let reactions_added = Reaction::merge_rows(&payload.reactions)?;
     let media_added = crate::data::media::import_rows(&payload.media)?;
+    import_extra(&extra)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
 
     let report = MergeReport {
@@ -274,8 +311,8 @@ mod tests {
     #[test]
     fn blob_roundtrips() {
         let key = backup_key(&[7u8; 32]);
-        let blob = encode(&key, &payload()).unwrap();
-        let back = decode(&key, &blob).unwrap();
+        let blob = encode(&key, &payload(), &BackupExtra::default()).unwrap();
+        let (back, _) = decode(&key, &blob).unwrap();
         assert_eq!(back.name, "bhuv");
         assert_eq!(back.contacts.len(), 1);
         assert_eq!(back.contacts[0].mls_group_id, Some([9u8; 32]));
@@ -309,7 +346,7 @@ mod tests {
         }];
 
         let key = backup_key(&[7u8; 32]);
-        let back = decode(&key, &encode(&key, &p).unwrap()).unwrap();
+        let (back, _) = decode(&key, &encode(&key, &p, &BackupExtra::default()).unwrap()).unwrap();
 
         assert_eq!(back.conversations.len(), 1, "the chat itself must survive the round trip");
         assert_eq!(back.conversations[0].id, conv);
@@ -321,7 +358,7 @@ mod tests {
     #[test]
     fn tampered_blob_fails_auth() {
         let key = backup_key(&[7u8; 32]);
-        let mut blob = encode(&key, &payload()).unwrap();
+        let mut blob = encode(&key, &payload(), &BackupExtra::default()).unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 1;
         assert!(decode(&key, &blob).is_err());
@@ -329,8 +366,30 @@ mod tests {
 
     #[test]
     fn wrong_isk_cannot_open() {
-        let blob = encode(&backup_key(&[7u8; 32]), &payload()).unwrap();
+        let blob = encode(&backup_key(&[7u8; 32]), &payload(), &BackupExtra::default()).unwrap();
         assert!(decode(&backup_key(&[8u8; 32]), &blob).is_err());
+    }
+
+    /// A blob written before stickers ends at the payload; one written after
+    /// carries the extra behind it. Both decode, and the extra round-trips.
+    #[test]
+    fn extra_rides_behind_the_payload_and_is_optional() {
+        let old = postcard::to_allocvec(&payload()).unwrap();
+        let (back, extra) = split_plain(&old).unwrap();
+        assert_eq!(back.name, "bhuv");
+        assert!(extra.packs.is_empty() && extra.sticker_refs.is_empty());
+
+        let extra = BackupExtra {
+            sticker_refs: vec![crate::data::media::StickerRefBackup {
+                conversation_id: [1; 16], dispatch_id: [2; 16], sticker: vec![3; 82],
+            }],
+            packs: Vec::new(),
+        };
+        let mut new = old.clone();
+        new.extend(postcard::to_allocvec(&extra).unwrap());
+        let (_, back) = split_plain(&new).unwrap();
+        assert_eq!(back.sticker_refs.len(), 1);
+        assert_eq!(back.sticker_refs[0].sticker, vec![3; 82]);
     }
 
     #[test]

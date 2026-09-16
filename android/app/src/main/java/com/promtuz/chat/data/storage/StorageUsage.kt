@@ -13,10 +13,11 @@ import java.nio.file.Files
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.extensions.fromHex
 
-internal enum class StorageCategory { Chats, Attachments, Voice, Updates, Backups, Shared, Other }
+internal enum class StorageCategory { Chats, Attachments, Voice, Updates, Backups, Shared, Stickers, Other }
 internal data class StorageEntry(val category: StorageCategory, val bytes: Long)
 internal data class StorageUsage(val entries: List<StorageEntry>, val free: Long, val capacity: Long) {
     val total get() = entries.sumOf { it.bytes }
+    val stickers get() = entries.firstOrNull { it.category == StorageCategory.Stickers }?.bytes ?: 0
     val shared get() = entries.first { it.category == StorageCategory.Shared }.bytes
 }
 
@@ -32,6 +33,7 @@ internal interface StorageSource {
     suspend fun preview(item: StorageMediaItem): ByteArray? = null
     suspend fun media(): List<StorageMediaItem>
     suspend fun remove(items: List<StorageMediaItem>): Int
+    suspend fun clearStickerCache()
     suspend fun clearSharedCopies(): Boolean
 }
 
@@ -59,9 +61,15 @@ internal class StorageRepository(context: Context) : StorageSource {
             uniffi.core.StorageTarget(it.conversation.fromHex(), it.dispatch.fromHex())
         }).toInt()
 
+    override suspend fun clearStickerCache() {
+        com.promtuz.core.CoreBridge.clearStickerCache()
+        com.promtuz.chat.utils.media.StickerImages.clear()
+    }
+
     override suspend fun read(): StorageUsage = withContext(Dispatchers.IO) {
         val cache = context.cacheDir
         val shared = sharedDirectories.sumOf(::directoryBytes)
+        val stickers = com.promtuz.core.CoreBridge.stickerCacheBytes()
         val attachments = directoryBytes(File(cache, "attachments"))
         val voice = directoryBytes(File(cache, "voice"))
         val updates = directoryBytes(File(cache, "updates"))
@@ -71,12 +79,13 @@ internal class StorageRepository(context: Context) : StorageSource {
             directoryBytes(File(context.applicationInfo.dataDir, "shared_prefs"))
         val disk = StatFs(context.filesDir.absolutePath)
         StorageUsage(listOf(
-            StorageEntry(StorageCategory.Chats, (saved - backups).coerceAtLeast(0)),
+            StorageEntry(StorageCategory.Chats, (saved - backups - stickers).coerceAtLeast(0)),
             StorageEntry(StorageCategory.Attachments, attachments),
             StorageEntry(StorageCategory.Voice, voice),
             StorageEntry(StorageCategory.Updates, updates),
             StorageEntry(StorageCategory.Backups, backups),
             StorageEntry(StorageCategory.Shared, shared),
+            StorageEntry(StorageCategory.Stickers, stickers),
             StorageEntry(StorageCategory.Other, (directoryBytes(cache) - shared - attachments - voice - updates).coerceAtLeast(0)),
         ), disk.availableBytes, disk.totalBytes)
     }

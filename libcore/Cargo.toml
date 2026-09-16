@@ -55,6 +55,8 @@ hkdf = "0.13.0"
 lz4_flex = "0.11.6"
 postcard = { version = "1.1.3", features = ["alloc"] }
 x509-parser = "0.18.1"
+# HTTPS downloads of encrypted sticker objects.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 # Still-image pipeline (FILE_TRANSFER.md): RGBA→AVIF + blurred thumb.
 # `image` decoders off — the platform supplies decoded RGBA pixels.
 image = { version = "0.25", default-features = false }

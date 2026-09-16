@@ -866,6 +866,14 @@ async fn process_deliver(
                         Body::Attachment { size, file_id, .. } => Some((*size, *file_id)),
                         _ => None,
                     };
+                    let sticker = match &body {
+                        Body::Sticker { pack, id, token, store, .. } => {
+                            Some(common::proto::sticker::StickerRef {
+                                pack: *pack, id: *id, token: *token, store: *store,
+                            })
+                        },
+                        _ => None,
+                    };
                     match crate::messaging::save_inbound_body(
                         &conv, &author, &did, timestamp, reply_to, body,
                     ) {
@@ -900,6 +908,15 @@ async fn process_deliver(
                                         let _ = crate::transfer::download(file_id).await;
                                     });
                                 }
+                            }
+                            // A sticker is small and named by hash: fetch it now so
+                            // the chat opens on the picture, not on a fetch.
+                            if let Some(r) = sticker {
+                                crate::RUNTIME.spawn(async move {
+                                    if let Err(e) = crate::stickers::fetch(&r).await {
+                                        debug!("STICKERS: prefetch failed: {e:#}");
+                                    }
+                                });
                             }
                         },
                         // Relay redelivered a dispatch_id we already stored: no

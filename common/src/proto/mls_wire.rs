@@ -228,13 +228,15 @@ pub enum Body {
         thumb:    Vec<u8>,
         file_id:  [u8; 32],
     },
-    /// Named by pack + index rather than carrying bytes, so re-sending one
-    /// costs a handful of bytes. Atomic: no caption, and nothing to pair with
-    /// text — which is what keeps it off every other row of the revision
-    /// matrix. Pack distribution is not built yet.
+    /// Fetch and decryption reference. The token also grants access to the pack.
+    /// Dimensions reserve the bubble's space before download. Stickers have no caption.
     Sticker {
-        pack: [u8; 16],
-        id:   u32,
+        pack:   [u8; 16],
+        id:     [u8; 32],
+        token:  [u8; 32],
+        store:  u16,
+        width:  u16,
+        height: u16,
     },
     /// Inline voice note — a short recording rides in the frame like an
     /// `Image`, offline-safe and under the same cap. `waveform` is a few dozen
