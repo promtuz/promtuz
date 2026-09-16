@@ -314,6 +314,40 @@ pub fn set_presence(idle: bool) {
     });
 }
 
+/// Fetch queued messages even when a push wakes an already-connected process.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_messages() -> Result<(), CoreError> {
+    crate::api::init::on_foreground();
+    let ipk = crate::data::identity::Identity::public_key().map_err(anyhow::Error::from)?;
+    // Replacing an Android wake job must not cancel a message halfway through
+    // decryption/storage. Core owns this bounded sync; the next job joins the
+    // same serialized drain path.
+    crate::RUNTIME.spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            loop {
+                let relay = crate::state::RELAY.read().clone();
+                if let Some(relay) = relay.filter(|r| {
+                    r.connection.as_ref().is_some_and(|c| c.close_reason().is_none())
+                }) {
+                    return relay.sync_incoming(ipk).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }).await.map_err(anyhow::Error::from)?
+    }).await.map_err(anyhow::Error::from)??;
+    Ok(())
+}
+
+#[uniffi::export]
+pub fn pending_notification_ids(conversation_id: Vec<u8>) -> Result<Vec<String>, CoreError> {
+    Ok(Message::pending_notification_ids(&to_conv16(&conversation_id)?)?)
+}
+
+#[uniffi::export]
+pub fn mark_notified(ids: Vec<String>) -> Result<(), CoreError> {
+    Ok(Message::mark_notified(&ids)?)
+}
+
 /// (Re)register our push-pseudonym with the connected home relay so it can
 /// wake us on offline delivery. Fire-and-forget; also runs automatically on
 /// each connect. Call after obtaining/refreshing the platform push token.
@@ -326,14 +360,11 @@ pub fn register_push() {
     });
 }
 
-/// Provide/refresh the platform push token — call from the FCM `onNewToken`
-/// callback. Stores it and registers `P → token` with a gateway so a wake can
-/// reach this device.
-#[uniffi::export]
-pub fn register_push_token(token: Vec<u8>) {
-    crate::RUNTIME.spawn(async move {
-        crate::push::set_push_token(token).await;
-    });
+/// Register the platform push token. Returns after a gateway acknowledges
+/// persistence, so the platform can retry failed setup as background work.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn register_push_token(token: Vec<u8>) -> Result<(), CoreError> {
+    Ok(crate::push::set_push_token(token).await?)
 }
 
 /// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's

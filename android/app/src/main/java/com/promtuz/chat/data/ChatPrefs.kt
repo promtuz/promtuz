@@ -54,15 +54,6 @@ object ChatPrefs {
         runCatching { CoreBridge.setConversationMuted(convHex.fromHex(), muted) }
     }
 
-    /**
-     * Newest message this chat has already alerted for, unix seconds. Persisted
-     * rather than held in memory because the case that needs it is a wake-drain
-     * in a fresh process, whose heap is empty and whose unread set is hours old.
-     */
-    fun setLastAlerted(convHex: String, tsSecs: Long) = scope.launch {
-        runCatching { CoreBridge.setAlertedAt(convHex.fromHex(), tsSecs.toULong()) }
-    }
-
     // Settings are read from composition and from the notification path, both of
     // which want an answer now. The table is tiny and local; a suspend getter
     // would turn every read site into a coroutine for no gain.

@@ -36,6 +36,9 @@ use log::info;
 use log::warn;
 use quinn::ConnectionError;
 use quinn::SendStream;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -81,6 +84,7 @@ where
 /// rolls to the next one, instead of hanging on quinn's default idle timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: usize = 16;
+static INBOX_SYNC: Mutex<()> = Mutex::const_new(());
 /// Cadence for sampling the live connection RTT into the latency graph.
 const RTT_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -117,6 +121,29 @@ fn is_terminal_for_relay(err: &ConnectionError) -> bool {
 // global it shares with us. Re-exported here for backwards
 // compatibility with existing call sites in this module.
 pub use crate::state::RELAY;
+
+/// EOF between frames ends a drain; truncation and transport errors do not.
+async fn read_relay_packet<R: AsyncRead + Unpin + Send>(rx: &mut R) -> Result<Option<SRelayPacket>> {
+    let mut first = [0u8; 1];
+    if rx.read(&mut first).await? == 0 { return Ok(None); }
+    let mut framed = first.as_slice().chain(rx);
+    Ok(Some(SRelayPacket::unpack(&mut framed).await?))
+}
+
+struct InboxSync {
+    connection: quinn::Connection,
+    completed: bool,
+}
+
+impl Drop for InboxSync {
+    fn drop(&mut self) {
+        if !self.completed {
+            // A cancelled worker must not leave an old drain mutating the
+            // relay's pending batch while its replacement starts another.
+            self.connection.close(0u32.into(), b"inbox-sync-interrupted");
+        }
+    }
+}
 
 impl Relay {
     pub async fn connect(
@@ -252,7 +279,11 @@ impl Relay {
 
         let handle = tokio::spawn({
             let relay = self.clone();
-            async move { relay.handle(ipk).await }
+            async move {
+                let error = relay.handle(ipk).await;
+                relay.handle_err(&error);
+                error
+            }
         });
 
         *RELAY.write() = Some(self);
@@ -293,12 +324,7 @@ impl Relay {
             if let Err(e) = crate::messaging::reassert_presence().await {
                 debug!("PRESENCE: reassert on connect failed: {e}");
             }
-            if let Err(e) = crate::push::register_push().await {
-                warn!("register_push failed: {e}");
-            }
-            if let Err(e) = crate::push::register_token_at_gateway().await {
-                debug!("register_token_at_gateway failed: {e}");
-            }
+            crate::push::request_registration();
         });
 
         Ok(handle)
@@ -324,7 +350,7 @@ impl Relay {
     /// The transcript binds (self_ipk, this_relay_id, timestamp); the same
     /// signature is reusable across all K homes (no per-home identity in the
     /// transcript) within the ±60s skew window. Part of the sticky-home flow.
-    async fn send_drain_auth(&self, conn: &quinn::Connection, ipk: VerifyingKey) -> Result<()> {
+    async fn send_drain_auth(&self, tx: &mut quinn::SendStream, ipk: VerifyingKey) -> Result<()> {
         let timestamp = systime().as_millis() as u64;
         let relay_node_id = NodeId::from_str(&self.id)
             .map_err(|e| anyhow!("relay id {:?} not parseable as NodeId: {e:?}", self.id))?;
@@ -332,10 +358,8 @@ impl Relay {
         let transcript = queue_fetch_signing_input(&self_ipk, &relay_node_id, timestamp);
         let sig = IdentitySigner::sign(&transcript)?;
 
-        let (mut tx, _rx) = conn.open_bi().await?;
         let packet = CRelayPacket::DrainAuth { timestamp, sig: Bytes::from(sig.to_bytes()) };
-        packet.send(&mut tx).await?;
-        _ = tx.finish();
+        packet.send(tx).await?;
         Ok(())
     }
 
@@ -348,65 +372,117 @@ impl Relay {
     /// oneshot, so it can't read a reply from the same stream.
     async fn ack_drain(
         &self, conn: &quinn::Connection, ipk: VerifyingKey, drained: &HashSet<[u8; 16]>,
-    ) {
-        let (mut tx, mut rx) = match conn.open_bi().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("relay {} ack_drain: open_bi failed: {e}", node_short(&self.id));
-                return;
-            },
-        };
-        if CRelayPacket::AckDrain.send(&mut tx).await.is_err() {
-            return;
+    ) -> Result<()> {
+        let (mut tx, mut rx) = conn.open_bi().await?;
+        CRelayPacket::AckDrain.send(&mut tx).await?;
+        tx.finish()?;
+        let reply = tokio::time::timeout(Duration::from_secs(10), read_relay_packet(&mut rx)).await??;
+        let Some(reply) = reply else { return Ok(()) };
+        let SRelayPacket::AckAuthRequest {
+            requester_relay_id, delivered_ids, suggested_timestamp,
+        } = reply else { bail!("unexpected drain acknowledgement"); };
+        let (mut ack_tx, _ack_rx) = conn.open_bi().await?;
+        handle_ack_auth_request(
+            &mut ack_tx, ipk, requester_relay_id, delivered_ids, suggested_timestamp, drained,
+        ).await?;
+        ack_tx.finish()?;
+        // The original stream ends after the remote-home ack round. Wait
+        // before another drain replaces that round's pending state.
+        if tokio::time::timeout(Duration::from_secs(10), read_relay_packet(&mut rx)).await??.is_some() {
+            bail!("unexpected packet after drain acknowledgement");
         }
-        _ = tx.finish();
-
-        // Optional follow-up: absent when the drain was local-only (the
-        // relay's stream task just ends → read errors out).
-        if let Ok(Ok(SRelayPacket::AckAuthRequest {
-            requester_relay_id,
-            delivered_ids,
-            suggested_timestamp,
-        })) = tokio::time::timeout(Duration::from_secs(10), SRelayPacket::unpack(&mut rx)).await
-        {
-            match conn.open_bi().await {
-                Ok((mut ack_tx, _ack_rx)) => {
-                    if let Err(e) = handle_ack_auth_request(
-                        &mut ack_tx,
-                        ipk,
-                        requester_relay_id,
-                        delivered_ids,
-                        suggested_timestamp,
-                        drained,
-                    )
-                    .await
-                    {
-                        warn!("relay {} ack_drain: AckAuth reply failed: {e}", node_short(&self.id));
-                    }
-                    _ = ack_tx.finish();
-                },
-                Err(e) => {
-                    warn!("relay {} ack_drain: open_bi for AckAuth failed: {e}", node_short(&self.id))
-                },
-            }
-        }
+        Ok(())
     }
 
     // TODO: make custom error type for relay handling and handle it, supporting io errors from
     // send, unpack etc utils
     fn handle_err(&self, err: &ConnectionError) {
-        ConnectionState::Disconnected.emit();
-        _ = self.record_failure();
-
-        // Only clear RELAY if it still points to this relay.
-        // A reconnect may have already replaced it.
-        // FIXME: it might've reconnected to itself so checking only id is not good
+        if !matches!(err, ConnectionError::LocallyClosed) {
+            _ = self.record_failure();
+        }
         let mut guard = RELAY.write();
-        if guard.as_ref().map(|r| r.id == self.id).unwrap_or(false) {
+        let current = guard.as_ref().and_then(|r| r.connection.as_ref()).map(|c| c.stable_id());
+        if current == self.connection.as_ref().map(|c| c.stable_id()) {
             *guard = None;
+            drop(guard);
+            ConnectionState::Disconnected.emit();
         }
 
         error!("relay {} connection lost: {err}", node_short(&self.id));
+    }
+
+    /// Used both on connect and by a platform background job. Draining and
+    /// acknowledging must stay serialized because the relay tracks one batch.
+    pub(crate) async fn sync_incoming(&self, ipk: VerifyingKey) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(45), self.sync_incoming_inner(ipk)).await?
+    }
+
+    async fn sync_incoming_inner(&self, ipk: VerifyingKey) -> Result<()> {
+        let _guard = INBOX_SYNC.lock().await;
+        let conn = self.connection.as_ref().ok_or_else(|| anyhow!("no relay connection"))?;
+        let mut sync = InboxSync { connection: conn.clone(), completed: false };
+        if let Some(client) = self.dht_client.as_ref() {
+            // Welcome poll — awaited BEFORE the queue drain so a pairing
+            // Welcome is processed before the first application message
+            // that references its group is drained (a drained message
+            // from a not-yet-known sender would be dropped). Bounded so
+            // a dead DHT can't stall the drain.
+            match tokio::time::timeout(Duration::from_secs(15), poll_welcomes_once(client.clone()))
+                .await
+            {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
+                Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
+            }
+        }
+        // Drain the offline queue. The relay streams every queued
+        // message back as individual `Deliver` frames on this stream's
+        // response half; processing is store-only. Per-message
+        // `DeliverAck` is the live-delivery contract — the drain is
+        // acknowledged as one batch via `AckDrain` once everything is
+        // durably stored.
+        let mut previous = HashSet::new();
+        for _ in 0..16 {
+            let (mut tx, mut rx) = conn.open_bi().await?;
+            // The relay must install auth before handling DrainQueue.
+            self.send_drain_auth(&mut tx, ipk).await?;
+            CRelayPacket::DrainQueue.send(&mut tx).await?;
+            tx.finish()?;
+
+            // Every id streamed on this drain. The relay asks us to sign a
+            // deletion authorization over the ids it claims to have delivered;
+            // this is what that claim is checked against.
+            let mut drained: HashSet<[u8; 16]> = HashSet::new();
+            let mut failed = false;
+            while let Some(packet) = read_relay_packet(&mut rx).await? {
+                match packet {
+                    SRelayPacket::Deliver(msg) => {
+                        let id = msg.id.0;
+                        match process_deliver(ipk, msg, self.dht_client.clone()).await {
+                            Ok(()) => {
+                                drained.insert(id);
+                            },
+                            Err(e) => {
+                                failed = true;
+                                warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
+                            },
+                        }
+                    },
+                    other => debug!("unexpected packet in drain response: {other:?}"),
+                }
+            }
+
+            if failed { bail!("some queued messages could not be processed"); }
+            if drained.is_empty() {
+                sync.completed = true;
+                return Ok(());
+            }
+            if drained == previous { bail!("relay did not acknowledge the previous drain"); }
+            info!("relay {}: drained {} queued message(s)", node_short(&self.id), drained.len());
+            self.ack_drain(conn, ipk, &drained).await?;
+            previous = drained;
+        }
+        bail!("more queued messages remain")
     }
 
     /// Waits for incoming streams. Runs until the connection is lost.
@@ -415,15 +491,6 @@ impl Relay {
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
-        // Sticky-home auth: hand the relay a one-shot signed permit it can use to
-        // QueueFetch our offline queue from the K-closest homes. Sig is reusable
-        // across all K homes within the ±60s skew window. Best-effort; if it
-        // fails we still proceed with DrainQueue (relay will only be able to
-        // serve its own local queue, falling back to natural TTL convergence).
-        if let Err(err) = self.send_drain_auth(conn, ipk).await {
-            warn!("relay {} drain-auth send failed: {err}", node_short(&self.id));
-        }
 
         // Re-dispatch durably-queued outbox rows (enqueued while offline, or
         // whose ack was lost) now that a live relay connection exists.
@@ -445,20 +512,13 @@ impl Relay {
         let mls_cancel = CancellationToken::new();
         let dht_client = self.dht_client.clone();
 
-        if let Some(client) = dht_client.as_ref() {
-            // Welcome poll — awaited BEFORE the queue drain so a pairing
-            // Welcome is processed before the first application message
-            // that references its group is drained (a drained message
-            // from a not-yet-known sender would be dropped). Bounded so
-            // a dead DHT can't stall the drain.
-            match tokio::time::timeout(Duration::from_secs(15), poll_welcomes_once(client.clone()))
-                .await
-            {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
-                Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
-            }
+        if let Err(e) = self.sync_incoming(ipk).await {
+            warn!("relay {} inbox sync failed: {e:#}", node_short(&self.id));
+            conn.close(0u32.into(), b"inbox-sync-failed");
+            return ConnectionError::LocallyClosed;
+        }
 
+        if let Some(client) = dht_client.as_ref() {
             // Durable first-send retry: re-drive first-sends that deferred
             // (peer had no published KP). Outbound-only, so it needn't gate the
             // inbound drain or the Connected state — spawned (not awaited) so its
@@ -496,54 +556,6 @@ impl Relay {
         }
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
-        // Drain the offline queue. The relay streams every queued
-        // message back as individual `Deliver` frames on this stream's
-        // response half; processing is store-only. Per-message
-        // `DeliverAck` is the live-delivery contract — the drain is
-        // acknowledged as one batch via `AckDrain` once everything is
-        // durably stored.
-        {
-            let (mut tx, mut rx) =
-                ret_err!(conn.open_bi().await.inspect_err(|e| self.handle_err(e)));
-
-            if CRelayPacket::DrainQueue.send(&mut tx).await.is_err() {
-                return ConnectionError::LocallyClosed;
-            }
-            _ = tx.finish();
-
-            // Every id streamed on this drain. The relay asks us to sign a
-            // deletion authorization over the ids it claims to have delivered;
-            // this is what that claim is checked against.
-            let mut drained: HashSet<[u8; 16]> = HashSet::new();
-            let mut failed = false;
-            while let Ok(packet) = SRelayPacket::unpack(&mut rx).await {
-                match packet {
-                    SRelayPacket::Deliver(msg) => {
-                        let id = msg.id.0;
-                        match process_deliver(ipk, msg, self.dht_client.clone()).await {
-                            Ok(()) => {
-                                drained.insert(id);
-                            },
-                            Err(e) => {
-                                failed = true;
-                                warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
-                            },
-                        }
-                    },
-                    other => debug!("unexpected packet in drain response: {other:?}"),
-                }
-            }
-
-            if !drained.is_empty() && !failed {
-                info!(
-                    "relay {}: drained {} queued message(s)",
-                    node_short(&self.id),
-                    drained.len()
-                );
-                self.ack_drain(conn, ipk, &drained).await;
-            }
-        }
 
         // Offline backlog is in the local DB — synced and live. (A drain-setup
         // failure returns above → Disconnected, so we never stick on Syncing.)
@@ -1418,6 +1430,23 @@ mod tests {
     use crate::mls::KeyPackageStash;
     use crate::mls::PromtuzMlsProvider;
     use crate::quic::dht_client::tests::FakeDhtClient;
+
+    #[tokio::test]
+    async fn drain_only_completes_at_a_frame_boundary() {
+        use common::proto::client_rel::{DeliverP, SRelayPacket};
+        use common::proto::pack::Packer;
+        let packet = SRelayPacket::Deliver(DeliverP {
+            id: [1; 16].into(), from: [2; 32].into(), payload: vec![3; 16].into(),
+            sig: [0; 64].into(), accepted_at_ms: 100,
+        });
+        let frame = packet.pack().unwrap();
+        let mut stream = frame.as_slice();
+        assert_eq!(super::read_relay_packet(&mut stream).await.unwrap(), Some(packet));
+        assert!(super::read_relay_packet(&mut stream).await.unwrap().is_none());
+        for length in 1..frame.len() {
+            assert!(super::read_relay_packet(&mut &frame[..length]).await.is_err());
+        }
+    }
 
     fn fresh_mls_conn() -> Arc<Mutex<Connection>> {
         let mut conn = Connection::open_in_memory().expect("in-memory db");

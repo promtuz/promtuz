@@ -120,7 +120,7 @@ impl Message {
     ) -> Result<Option<Self>> {
         let id = Ulid::new();
         let changed = conn.execute(
-            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8)
+            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to, notification_seen) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, 0)
              ON CONFLICT(conversation_id, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
             (&id.to_string(), conversation_id.as_slice(), sender.as_slice(), content, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
@@ -698,6 +698,32 @@ mod tests {
         assert!(b > a, "ids must strictly increase");
     }
 
+    #[test]
+    fn notification_acknowledgement_does_not_consume_a_racing_arrival() {
+        let db = crate::db::messages::open_in_memory();
+        let conversation = [8; 16];
+        let sender = [7; 32];
+        let insert = |did: [u8; 16], time| {
+            Message::save_incoming_tx(&db, conversation, sender, &did, "message", time, None).unwrap();
+        };
+        insert([1; 16], 100);
+        let first = pending_notification_ids(&db, &conversation).unwrap();
+        assert_eq!(first.len(), 1);
+        insert([2; 16], 100);
+        mark_notified(&db, &first).unwrap();
+        let next = pending_notification_ids(&db, &conversation).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_ne!(next, first);
+        mark_notified(&db, &next).unwrap();
+        // An older sender clock and an already-delivered dispatch are distinct cases.
+        insert([3; 16], 90);
+        insert([2; 16], 100);
+        assert_eq!(pending_notification_ids(&db, &conversation).unwrap().len(), 1);
+        db.execute("INSERT INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2)",
+            (conversation.as_slice(), [3u8; 16].as_slice())).unwrap();
+        assert!(pending_notification_ids(&db, &conversation).unwrap().is_empty());
+    }
+
     /// `save_incoming` runs through the process-global `MESSAGES_DB`
     /// Lazy, which is fragile to test directly (path resolves once from
     /// `PROMTUZ_DATA_DIR`). Exercise the same SQL against an in-memory
@@ -946,6 +972,20 @@ pub fn import_read_state(
 /// a query about messages, and Android and iOS would otherwise each write their
 /// own filter-and-sort over a full page of rows.
 impl Message {
+    /// Snapshot only unseen, unread arrivals. Message ids avoid sender clock
+    /// skew and multiple messages in the same timestamp second.
+    pub fn pending_notification_ids(conversation_id: &[u8; 16]) -> Result<Vec<String>> {
+        pending_notification_ids(&MESSAGES_DB.lock(), conversation_id)
+    }
+
+    pub fn mark_notified(ids: &[String]) -> Result<()> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        mark_notified(&tx, ids)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn recent_incoming(conversation_id: &[u8; 16], limit: u32) -> Vec<MessageRow> {
         let conn = MESSAGES_DB.lock();
         let Ok(mut stmt) = conn.prepare(
@@ -962,4 +1002,23 @@ impl Message {
         rows.reverse();
         rows
     }
+}
+
+fn pending_notification_ids(conn: &rusqlite::Connection, conversation_id: &[u8; 16]) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id FROM messages m
+         LEFT JOIN read_state r ON r.conversation_id = m.conversation_id
+         WHERE m.conversation_id = ?1 AND m.outgoing = 0 AND m.deleted = 0
+           AND m.notification_seen = 0 AND m.dispatch_id IS NOT NULL
+           AND (r.upto_dispatch_id IS NULL OR m.dispatch_id > r.upto_dispatch_id)",
+    )?;
+    Ok(stmt.query_map([conversation_id.as_slice()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
+fn mark_notified(conn: &rusqlite::Connection, ids: &[String]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "UPDATE messages SET notification_seen = 1 WHERE id = ?1 AND notification_seen = 0",
+    )?;
+    for id in ids { stmt.execute([id])?; }
+    Ok(())
 }

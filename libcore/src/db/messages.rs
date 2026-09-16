@@ -417,6 +417,10 @@ const MIGRATION_ARRAY: &[M] = &[
         pack_id BLOB PRIMARY KEY CHECK(length(pack_id) = 16),
         payload BLOB NOT NULL
     ) WITHOUT ROWID;"),
+    // Existing and restored history is already seen; new incoming inserts opt in.
+    M::up("ALTER TABLE messages ADD COLUMN notification_seen INTEGER NOT NULL DEFAULT 1;
+        CREATE INDEX idx_messages_notification_pending ON messages(conversation_id)
+            WHERE notification_seen = 0 AND outgoing = 0 AND deleted = 0;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already

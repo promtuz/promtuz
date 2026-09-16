@@ -14,10 +14,10 @@ import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
-import com.google.firebase.messaging.FirebaseMessaging
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
 import com.promtuz.core.AppCloseService
+import com.promtuz.core.push.PushRegistrationWorker
 import com.promtuz.core.push.PushNotifier
 import com.promtuz.core.PresenceStore
 import com.promtuz.core.adapter.CoreEventBus
@@ -71,17 +71,12 @@ class Promtuz : Application() {
         PresenceStore.init(this)
         CoreEventBus.hydratePresence(PresenceStore.seed())
 
+        PushNotifier.start(this)
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)
 
-        // Push: post notifications from delivered messages, and hand libcore the current FCM token
-        // (onNewToken won't re-fire if unchanged). registerPushToken stores it and re-registers on
-        // each relay connect, so calling before the first connect is fine.
-        PushNotifier.start(this)
-        FirebaseMessaging.getInstance().token
-            .addOnSuccessListener { token -> CoreBridge.registerPushToken(token.toByteArray()) }
-            .addOnFailureListener { Timber.tag("Push").w(it, "FCM token fetch failed — no wake until it succeeds") }
+        PushRegistrationWorker.enqueue(this)
 
         CoroutineScope(Dispatchers.IO).launch {
             CoreEventBus.presenceByPeer.collectLatest { map ->

@@ -23,6 +23,16 @@ pub const MAX_PUSH_TOKEN_BYTES: usize = 512;
 /// FCM's own limit on a data message.
 pub const MAX_WAKE_PAYLOAD_BYTES: usize = 4096;
 
+/// Registration candidates must match the relay's bounded wake fanout.
+pub const MAX_PUSH_GATEWAYS: usize = 8;
+
+/// Sent only after the gateway commits a device's registration.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RegisterResponse {
+    Registered,
+    Rejected,
+}
+
 /// Which platform wake service a token targets. The tag travels with every
 /// registration so the gateway can add APNs / UnifiedPush as new dispatch arms
 /// without a registry migration — the iOS-readiness pin.
@@ -80,17 +90,17 @@ pub struct RegisterToken {
 pub struct WakeRequest {
     /// Recipient's push pseudonym `P` (the relay holds `IPK → P`).
     pub pseudonym: Bytes<32>,
-    /// Wake payload: the queued MLS ciphertext envelope or a contentless
-    /// pointer, bounded by [`MAX_WAKE_PAYLOAD_BYTES`]. The gateway forwards
-    /// it blind.
+    /// Reserved payload field. Current gateways accept only an empty wake;
+    /// message content is fetched from the relay.
     #[serde(deserialize_with = "bounded_vec::<_, _, MAX_WAKE_PAYLOAD_BYTES>")]
     pub payload:   Vec<u8>,
 }
 
 /// One-RPC-per-bi-stream request the gateway unpacks (mirrors the resolver's
 /// `ClientRequest`). `Register` and `Store` arrive over `client/N`, `Wake`
-/// over `relay/N`. Only `Store` is answered (with a
-/// [`crate::proto::sticker::StoreResponse`]); the other two are fire-and-forget.
+/// over `relay/N`. `Register` answers with [`RegisterResponse`] after persistence;
+/// `Store` answers with [`crate::proto::sticker::StoreResponse`]. `Wake` is
+/// fire-and-forget.
 /// Append variants, never reorder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GatewayRequest {

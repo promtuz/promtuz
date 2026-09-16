@@ -31,6 +31,8 @@ key = "55ECA4054C27FF7E8D613F876CBED9C9AC72F7737AF520511663EBA4F6CE1D1B"
 addr = "resolver.promtuz.dev"
 
 [push]
+# Device registrations survive gateway restarts.
+db = "/var/lib/pzgateway/push.db"
 # FCM HTTP v1 service-account JSON. This is a SECRET — it is NOT shipped in the
 # package. Provision it out of band: drop the file here, 0600, owned pzgateway.
 fcm_service_account = "/etc/promtuz/fcm-service-account.json"

@@ -13,7 +13,7 @@ WorkingDirectory=/etc/promtuz
 Restart=on-failure
 RestartSec=2
 
-# Writes keys and CSRs under /etc/promtuz and the sticker ledger under /var/lib/pzgateway.
+# Writes keys and CSRs under /etc/promtuz and databases under /var/lib/pzgateway.
 # Network access is required for QUIC and HTTPS to FCM and object storage.
 NoNewPrivileges=true
 ProtectSystem=strict

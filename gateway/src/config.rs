@@ -56,11 +56,27 @@ fn auto_region() -> String {
     "auto".into()
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug)]
 pub struct PushConfig {
+    /// Persistent device registrations. systemd supplies STATE_DIRECTORY.
+    #[serde(default = "default_push_db")]
+    pub db: std::path::PathBuf,
     /// Path to the FCM service-account JSON. Absent → FCM dispatch is disabled
     /// (the gateway still runs; a wake for an FCM token is logged and dropped).
     pub fcm_service_account: Option<std::path::PathBuf>,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self { db: default_push_db(), fcm_service_account: None }
+    }
+}
+
+fn default_push_db() -> std::path::PathBuf {
+    std::env::var_os("STATE_DIRECTORY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".".into())
+        .join("push.db")
 }
 
 #[derive(Deserialize, Debug, Default)]

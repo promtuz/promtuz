@@ -112,6 +112,7 @@ fn init_inner(
     });
 
     start_relay_loop(seeds);
+    RUNTIME.spawn(crate::push::maintain_registration());
     Ok(())
 }
 
@@ -127,6 +128,7 @@ pub fn on_foreground() {
     TASK_REMOVED.store(false, Ordering::Relaxed);
     // `notify_one` retains a permit when the relay loop has not started waiting.
     FOREGROUND.notify_one();
+    crate::push::request_registration();
 }
 
 /// Client hook: call when the OS task is removed. Best-effort close makes the

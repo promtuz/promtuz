@@ -1,6 +1,6 @@
 //! FCM HTTP v1 dispatch. Holds the service-account credential (which never
-//! leaves the gateway), mints + caches an OAuth2 access token, and posts wake
-//! messages. The gateway never inspects the payload — it is opaque ciphertext.
+//! leaves the gateway), caches an OAuth2 access token, and posts contentless
+//! wake messages. Message content stays at the relay.
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,6 +11,8 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine as _;
+use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 use jsonwebtoken::Algorithm;
 use jsonwebtoken::EncodingKey;
 use jsonwebtoken::Header;
@@ -147,41 +149,125 @@ impl FcmSender {
         Ok(tok.access_token)
     }
 
-    /// Wake a device: a high-priority data message carrying the opaque payload
-    /// base64'd into one data field, which the device's FCM handler decrypts.
+    /// Wake data is collapsible: one pending wake drains all queued messages.
     pub async fn send(&self, device_token: &str, payload: &[u8]) -> Result<()> {
         let _permit = self.inflight.try_acquire().map_err(|_| anyhow!("FCM dispatch saturated"))?;
-        let access = self.access_token().await?;
+        let url =
+            format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", self.project_id);
+        self.send_to(&url, device_token, payload).await
+    }
+
+    async fn send_to(&self, url: &str, device_token: &str, payload: &[u8]) -> Result<()> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
         let body = serde_json::json!({
             "message": {
                 "token": device_token,
-                "android": { "priority": "high" },
+                "android": { "priority": "high", "collapse_key": "message-sync" },
                 "data": { "p": b64 },
             }
         });
-        let url =
-            format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", self.project_id);
-        let resp = self
-            .http
-            .post(url)
-            .bearer_auth(access)
-            .json(&body)
-            .send()
-            .await
-            .context("FCM send request")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("FCM send failed: {status}: {body}"));
+        for attempt in 0..3 {
+            let response: Result<_> = async {
+                let access = self.access_token().await?;
+                Ok(self.http.post(url).bearer_auth(access).json(&body).send().await?)
+            }
+            .await;
+            let (error, delay) = match response {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => {
+                    let status = response.status();
+                    let retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let body = response.text().await.unwrap_or_default();
+                    let error = anyhow!("FCM send failed: {status}: {body}");
+                    if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                        *self.cached.lock() = None;
+                    } else if !status.is_server_error()
+                        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        return Err(error);
+                    }
+                    let minimum =
+                        if status == reqwest::StatusCode::TOO_MANY_REQUESTS { 60 } else { 1 };
+                    let mut delay = Duration::from_secs(minimum * (1 << attempt));
+                    if let Some(header) = retry_after {
+                        let requested = header.parse::<u64>().ok().map(Duration::from_secs)
+                            .or_else(|| httpdate::parse_http_date(&header).ok().map(|time| {
+                                time.duration_since(SystemTime::now()).unwrap_or_default()
+                            }));
+                        let Some(requested) = requested else { return Err(error) };
+                        delay = delay.max(requested);
+                    }
+                    (error, delay)
+                },
+                Err(error) => {
+                    (anyhow!("FCM send request: {error}"), Duration::from_secs(1 << attempt))
+                },
+            };
+            if attempt == 2 || delay > Duration::from_secs(5 * 60) {
+                return Err(error);
+            }
+            let jitter = Duration::from_millis(u64::from(OsRng.next_u32() % 250));
+            tokio::time::sleep(delay + jitter).await;
         }
-        Ok(())
+        unreachable!()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retries_transient_dispatch_failure() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/send", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for status in ["503 Service Unavailable", "200 OK"] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(json["message"]["android"]["collapse_key"], "message-sync");
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let sender = FcmSender {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            project_id: "test".into(),
+            client_email: String::new(),
+            token_uri: String::new(),
+            encoding_key: EncodingKey::from_secret(b"unused: cached access token"),
+            cached: Mutex::new(Some(CachedToken {
+                token: "test".into(),
+                expires_at: SystemTime::now() + Duration::from_secs(3600),
+            })),
+            inflight: Semaphore::new(1),
+        };
+        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[]))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+    }
 
     #[test]
     fn rejects_non_json() {

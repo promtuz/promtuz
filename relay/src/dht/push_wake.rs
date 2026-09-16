@@ -17,6 +17,7 @@ use common::node::capability::NodeCapabilities;
 use common::proto::client_res::GatewayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::push::GatewayRequest;
+use common::proto::push::MAX_PUSH_GATEWAYS;
 use common::proto::push::WakeRequest;
 use common::types::bytes::Bytes;
 use governor::Quota;
@@ -33,11 +34,6 @@ use crate::quic::resolver_link::ResolverLinkHandle;
 /// the enqueue path cannot be allowed to mint one per injected dispatch.
 const MAX_WAKES_PER_RECIPIENT_PER_HOUR: u32 = 120;
 const MAX_WAKE_BURST: u32 = 12;
-
-/// Gateways contacted per wake. `P → token` lives only in the memory of the
-/// gateway the client registered with, and there is no query RPC, so a wake
-/// has to reach every gateway that could be holding the mapping.
-const MAX_WAKE_GATEWAYS: usize = 8;
 
 /// Per-gateway wall-clock budget for one wake.
 const WAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,7 +72,7 @@ impl Dht {
             return;
         }
         gateways.sort_by_key(|g| g.id);
-        gateways.truncate(MAX_WAKE_GATEWAYS);
+        gateways.truncate(MAX_PUSH_GATEWAYS);
         debug!(
             "wake({who} P={}): dialing {} gateway(s)",
             hex::encode(&pseudonym[..8]),

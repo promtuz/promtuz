@@ -120,7 +120,7 @@ impl Gateway {
             .allow_burst(std::num::NonZeroU32::new(MAX_WAKE_BURST).unwrap());
         Self {
             endpoint,
-            registry: PushRegistry::default(),
+            registry: graceful!(PushRegistry::open(&cfg.push.db), "opening the push registry"),
             fcm,
             wakes: governor::RateLimiter::keyed(quota),
             store,

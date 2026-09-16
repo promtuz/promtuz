@@ -69,11 +69,23 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
      */
     private var others: List<ByteArray> = emptyList()
     private var started = false
+    private var chatForeground = false
+    private var lastMarkedRead: String? = null
     private val outgoingActivity = OutgoingActivity(viewModelScope, SystemClock::uptimeMillis) { activity ->
         CoreBridge.setActivity(conversation, activity)
     }
     fun setChatForeground(value: Boolean) {
+        chatForeground = value
         outgoingActivity.setForeground(value)
+        if (value) markVisibleMessagesRead()
+    }
+
+    private fun markVisibleMessagesRead() {
+        if (!chatForeground) return
+        val did = _messages.value.firstOrNull { !it.outgoing }?.dispatchIdHex ?: return
+        if (did == lastMarkedRead) return
+        lastMarkedRead = did
+        fire { CoreBridge.markRead(conversation, did.fromHex()) }
     }
 
     // Computed, not `by lazy`: the top bar composes before [init] runs and
@@ -236,7 +248,6 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         var incomingLoaded = false
         var newestIncoming: String? = null
         var previousIncomingKeys = emptySet<String>()
-        var lastMarkedRead: String? = null
         viewModelScope.launch {
             // Roster and messages ride one doorbell. Attribution reads the
             // roster, so resolving them in separate flows would let a message
@@ -269,16 +280,8 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 newestIncoming = newest?.key
                 previousIncomingKeys = list.filterNot { it.outgoing }.mapTo(HashSet()) { it.key }
                 incomingLoaded = true
-                // With this chat on screen it's read: receipt the high-water mark.
-                // Keyed on the dispatch id, not the row — `key` falls back to the
-                // local ULID, so a row can surface before the id the receipt needs.
-                newest?.dispatchIdHex?.let { did ->
-                    if (did != lastMarkedRead) {
-                        lastMarkedRead = did
-                        fire { CoreBridge.markRead(conversation, did.fromHex()) }
-                    }
-                }
                 _messages.value = list
+                markVisibleMessagesRead()
             }
         }
 

@@ -7,23 +7,33 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.promtuz.chat.R
 import com.promtuz.core.CoreBridge
-import com.promtuz.core.adapter.CoreEventBus
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
+import timber.log.Timber
 
-/**
- * Keeps the process alive across an FCM wake while libcore connects + drains the
- * offline queue. [CoreBridge.onForeground] nudges the reconnect; we then wait
- * (bounded) for the first message write, by which point PushNotifier has posted,
- * before letting the process go.
- */
+/** Keeps the wake job alive through message sync and notification posting. */
 class DrainWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        CoreBridge.onForeground()
-        val drained = withTimeoutOrNull(DRAIN_WAIT_MS) {
-            CoreEventBus.dbChanged.first { "messages" in it }
+        if (!CoreBridge.shouldLaunchApp()) return Result.success()
+        val synced = try {
+            CoreBridge.syncMessages()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.tag("Push").w(e, "Message sync will retry")
+            false
         }
-        return if (drained == null) Result.retry() else Result.success()
+        // A partial drain can still have delivered messages.
+        val notified = try {
+            PushNotifier.refresh()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.tag("Push").w(e, "Notification posting will retry")
+            false
+        }
+        return if (synced && notified) Result.success() else Result.retry()
     }
 
     // API < 31 runs expedited work as a foreground service and requires this. A minimal, low-key
@@ -40,7 +50,6 @@ class DrainWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
     }
 
     private companion object {
-        const val DRAIN_WAIT_MS = 30_000L
         const val SYNC_NOTIF_ID = 42
     }
 }

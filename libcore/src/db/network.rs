@@ -106,6 +106,12 @@ const MIGRATION_ARRAY: &[M] = &[
             );
         "#,
     ),
+    M::up(
+        "CREATE TABLE push_identity (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            sealed_key BLOB NOT NULL
+        );",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

@@ -43,6 +43,7 @@ import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
 import uniffi.core.onTaskRemoved as ffiOnTaskRemoved
+import uniffi.core.syncMessages as ffiSyncMessages
 import uniffi.core.registerPushToken as ffiRegisterPushToken
 import uniffi.core.registerPush as ffiRegisterPush
 import uniffi.core.kpPublishReady as ffiKpPublishReady
@@ -97,7 +98,8 @@ import uniffi.core.deleteConversation as ffiDeleteConversation
 import uniffi.core.clearConversationHistory as ffiClearConversationHistory
 import uniffi.core.setConversationPinned as ffiSetConversationPinned
 import uniffi.core.setConversationMuted as ffiSetConversationMuted
-import uniffi.core.setAlertedAt as ffiSetAlertedAt
+import uniffi.core.pendingNotificationIds as ffiPendingNotificationIds
+import uniffi.core.markNotified as ffiMarkNotified
 import uniffi.core.getPref as ffiGetPref
 import uniffi.core.setPref as ffiSetPref
 import uniffi.core.recentIncoming as ffiRecentIncoming
@@ -127,8 +129,10 @@ object CoreBridge {
     /** App task was removed from recents — best-effort close so relay marks us offline. */
     fun onTaskRemoved() = ffiOnTaskRemoved()
 
-    /** Hand libcore the FCM push token; it registers `P → token` with a gateway. Fire-and-forget. */
-    fun registerPushToken(token: ByteArray) = ffiRegisterPushToken(token)
+    /** Returns after a gateway has persisted the FCM registration. */
+    suspend fun registerPushToken(token: ByteArray) = ffiRegisterPushToken(token)
+
+    suspend fun syncMessages() = ffiSyncMessages()
 
     /** Re-assert our push pseudonym with the home relay. Auto-runs on connect; rarely needed manually. */
     fun registerPush() = ffiRegisterPush()
@@ -244,9 +248,6 @@ object CoreBridge {
 
     suspend fun setConversationMuted(id: ByteArray, muted: Boolean) =
         withContext(Dispatchers.IO) { ffiSetConversationMuted(id, muted) }
-
-    suspend fun setAlertedAt(id: ByteArray, tsSecs: ULong) =
-        withContext(Dispatchers.IO) { ffiSetAlertedAt(id, tsSecs) }
 
     /** An app setting, or null if never set. Stored in core so it survives a reinstall. */
     suspend fun pref(key: String): String? = withContext(Dispatchers.IO) { ffiGetPref(key) }
@@ -427,6 +428,12 @@ object CoreBridge {
     /** Per-conversation unread incoming counts (only those with unread > 0) for home badges. */
     suspend fun unreadCounts(): List<UnreadCount> =
         withContext(Dispatchers.IO) { ffiUnreadCounts() }
+
+    suspend fun pendingNotificationIds(conversationId: ByteArray): List<String> =
+        withContext(Dispatchers.IO) { ffiPendingNotificationIds(conversationId) }
+
+    suspend fun markNotified(ids: List<String>) =
+        withContext(Dispatchers.IO) { ffiMarkNotified(ids) }
 
     /** Ephemeral typing/recording signal (OR of Activity bits; 0 = idle). Fire-and-forget. */
     suspend fun setActivity(conversationId: ByteArray, activityBits: Int) =

@@ -1,6 +1,7 @@
 package com.promtuz.core.push
 
 import android.Manifest
+import android.app.Activity
 import android.app.Application
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -12,44 +13,39 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.os.Bundle
+import android.os.SystemClock
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.LocusIdCompat
-import com.promtuz.chat.domain.model.mediaLabel
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import com.promtuz.chat.LauncherActivity
 import com.promtuz.chat.R
-import com.promtuz.core.CoreBridge
-import com.promtuz.core.adapter.CoreEventBus
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.data.NotifBuzz
+import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
-import java.util.concurrent.ConcurrentHashMap
+import com.promtuz.core.CoreBridge
+import com.promtuz.core.adapter.CoreEventBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import timber.log.Timber
 
-/**
- * Turns unread incoming messages into notifications — one
- * [NotificationCompat.MessagingStyle] per chat, grouped under a summary. Nothing
- * here decrypts or trusts the wake payload; it re-reads the DB.
- *
- * Reconcile model: no per-event patching. Every DB change RECONCILES the whole
- * notification set from [CoreBridge.unreadCounts] — a read chat's notif clears
- * itself (from any surface), and only a genuine new inbound buzzes.
- */
+/** Reconciles the notification shade with unread messages and persisted alert state. */
 object PushNotifier {
     private const val SUMMARY_ID = 1
 
@@ -71,7 +67,25 @@ object PushNotifier {
     /** Conversation hexes that are groups — they attribute lines per sender. */
     private var groupConvs: Set<String> = emptySet()
     private var mutedConvs: Set<String> = emptySet()
-    private var alertedAt: Map<String, Long> = emptyMap()
+    private val reconcileLock = Mutex()
+    private val rendered = mutableMapOf<String, ChatSnapshot>()
+
+    private data class ChatSnapshot(
+        val name: String,
+        val count: Int,
+        val group: Boolean,
+        val preview: Boolean,
+        val buzz: NotifBuzz,
+        val lines: List<LineSnapshot>,
+    )
+
+    private data class LineSnapshot(
+        val id: String,
+        val text: String,
+        val mediaKind: Int,
+        val timestamp: ULong,
+        val author: String?,
+    )
 
     /** Gates posting — reconcile still runs foregrounded, but only to clear read chats' notifs. */
     @Volatile
@@ -80,24 +94,46 @@ object PushNotifier {
     fun start(application: Application) {
         app = application
         Notifications.ensureChannels(application)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) { foreground = true }
-            override fun onStop(owner: LifecycleOwner) {
-                foreground = false
-                scope.launch { reconcile(alertConv = null) } // paint the current unread set on background
+        application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            private val resumed = mutableSetOf<Activity>()
+            override fun onActivityResumed(activity: Activity) {
+                resumed.add(activity)
+                foreground = true
+                scope.launch { reconcileSafely() }
             }
+            override fun onActivityPaused(activity: Activity) {
+                resumed.remove(activity)
+                foreground = resumed.isNotEmpty()
+                if (!foreground) scope.launch { reconcileSafely() }
+            }
+            override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
         })
-        // A genuine new inbound: reconcile and buzz that peer — only when we're not already looking.
-        scope.launch {
-            CoreEventBus.incoming.collect { msg -> if (!foreground) reconcile(alertConv = msg.conversationHex) }
+        // Subscribe before core starts. Alerts come from durable message state,
+        // so a cold start or a dropped transient event cannot lose an arrival.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it }
+                .debounce(150L).collect { reconcileSafely() }
         }
-        // Any other message write (edit/delete/local-read): silent reconcile — repaint/clear only.
-        scope.launch {
-            CoreEventBus.dbChanged.filter { "messages" in it }.debounce(150L).collect { reconcile(alertConv = null) }
+        scope.launch { reconcileSafely() }
+    }
+
+    suspend fun refresh() = reconcileLock.withLock { reconcile() }
+
+    private suspend fun reconcileSafely() {
+        try {
+            refresh()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.tag("Push").w(e, "Could not update message notifications")
         }
     }
 
-    private suspend fun reconcile(alertConv: String?) {
+    private suspend fun reconcile() {
         if (!::app.isInitialized) return
         if (ActivityCompat.checkSelfPermission(app, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -107,15 +143,35 @@ object PushNotifier {
 
         // Master off: nuke our whole group (children + summary) and post nothing — flipping the switch
         // off should silence AND clear the shade, not just stop future buzzes.
-        if (!ChatPrefs.notifEnabled) {
+        val enabled = ChatPrefs.notifEnabled
+        if (!enabled) {
             nm.activeNotifications
                 .filter { it.notification.group == Notifications.GROUP_KEY }
                 .forEach { nm.cancel(it.id) }
-            return
+            rendered.clear()
         }
 
-        val counts = runCatching { CoreBridge.unreadCounts() }.getOrDefault(emptyList())
-            .associate { it.conversationId.toHex() to it.count.toInt() }
+        val counts = CoreBridge.unreadCounts().associate { it.conversationId.toHex() to it.count.toInt() }
+        val contacts = CoreBridge.contacts().associate { it.ipk.toHex() to it.name }
+        val convs = CoreBridge.listConversations()
+        senderNames = contacts
+        names = convs.associate { c ->
+            c.id.toHex() to (if (c.kind.toInt() == 1) c.displayName else contacts[c.peer?.toHex()].orEmpty())
+                .ifBlank { "New message" }
+        }
+        groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()
+        mutedConvs = convs.filter { it.muted }.map { it.id.toHex() }.toSet()
+        rendered.keys.retainAll(counts.keys)
+        for (conv in counts.keys) {
+            if (!enabled || foreground || conv in mutedConvs) {
+                val pending = CoreBridge.pendingNotificationIds(conv.fromHex())
+                if (pending.isNotEmpty() && (!enabled || foreground || conv in mutedConvs)) {
+                    CoreBridge.markNotified(pending)
+                }
+            }
+        }
+
+        if (!enabled) return
 
         // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
         // clears any notif it already had.
@@ -128,42 +184,28 @@ object PushNotifier {
         nm.activeNotifications
             .filter { it.notification.group == Notifications.GROUP_KEY && it.id != SUMMARY_ID && it.id !in live }
             .forEach { nm.cancel(it.id) }
+        rendered.keys.retainAll(visible.keys)
 
         if (visible.isEmpty()) {
             nm.cancel(SUMMARY_ID)
             return
         }
 
-        if (visible.keys.any { it !in names } || senderNames.isEmpty()) {
-            runCatching {
-                val contacts = CoreBridge.contacts().associate { it.ipk.toHex() to it.name }
-                senderNames = contacts
-                // A group titles itself; a 1:1 borrows its peer's contact name.
-                val convs = CoreBridge.listConversations()
-                names = convs.associate { c ->
-                    c.id.toHex() to if (c.kind.toInt() == 1) c.displayName
-                                    else contacts[c.peer?.toHex()].orEmpty()
-                }
-                groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()
-                mutedConvs = convs.filter { it.muted }.map { it.id.toHex() }.toSet()
-                alertedAt = convs.associate { it.id.toHex() to it.alertedAt.toLong() }
-            }
+        if (!foreground) {
+            for ((convHex, n) in visible) postChat(convHex, n)
         }
-        // Foregrounded: clear-only, no new shade notifs while you're already looking at the app.
-        // ponytail: no 7-dialog cap (limit concurrent chat notifs) — add if noisy.
-        if (!foreground) visible.forEach { (convHex, n) -> postChat(convHex, n, alertConv) }
     }
 
-    private suspend fun postChat(convHex: String, n: Int, alertConv: String?) {
+    private suspend fun postChat(convHex: String, n: Int) {
         val conv = convHex.fromHex()
         val displayName = names[convHex] ?: "New message"
 
         // The newest n incoming ≈ the unread ones (read is a high-water-mark). Core
         // picks and orders them — it is a question about messages, and iOS would
         // otherwise write the same filter-and-sort over a full page of rows.
-        val recent = runCatching { CoreBridge.recentIncoming(conv, MAX_LINES) }
-            .getOrDefault(emptyList())
-            .takeLast(n)
+        val pending = CoreBridge.pendingNotificationIds(conv)
+        val recent = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
+        if (foreground) return
         // All newest-window rows deleted-for-everyone while count>0: nothing to paint, so clear this
         // chat's own notif (a bare return would strand a stale one reconcile can't repaint or cancel).
         if (recent.isEmpty()) { nm().cancel(notifId(convHex)); return }
@@ -178,27 +220,25 @@ object PushNotifier {
             .setShowsUserInterface(false)
             .build()
 
-        // Buzz only the peer this reconcile fired for, and only per the configured cadence. Because the
-        // alert rides the arriving peer (not a global flag), a silent reconcile racing in first can't
-        // swallow it.
-        //
-        // `newest > lastAlerted` is what separates an arrival from a repaint: an unread message stays
-        // unread, so every later reconcile — including a wake-drain in a fresh process — rebuilds the
-        // same set and would otherwise re-buzz for messages already alerted hours ago.
         val isGroup = groupConvs.contains(convHex)
         val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
-        val alertThisChat = convHex == alertConv && newest > (alertedAt[convHex] ?: 0L)
+        val alertThisChat = pending.isNotEmpty()
+        val snapshot = ChatSnapshot(displayName, n, isGroup, ChatPrefs.notifPreview, mode,
+            recent.map { message ->
+                LineSnapshot(message.id, message.content, message.mediaKind.toInt(), message.timestamp,
+                    message.senderIpk?.toHex()?.let(senderNames::get))
+            })
+        if (!alertThisChat && rendered[convHex] == snapshot) return
         val silent = when (mode) {
             NotifBuzz.EveryMessage, NotifBuzz.FirstOnly -> !alertThisChat
             NotifBuzz.Throttled -> {
-                val now = System.currentTimeMillis()
+                val now = SystemClock.elapsedRealtime()
                 val buzz = alertThisChat && now - (lastBuzz[convHex] ?: 0L) > BUZZ_THROTTLE_MS
                 if (buzz) lastBuzz[convHex] = now
                 !buzz
             }
         }
-        if (!silent) ChatPrefs.setLastAlerted(convHex, newest)
 
         val chat = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
             .setSmallIcon(R.drawable.i_logo_mono)
@@ -264,6 +304,8 @@ object PushNotifier {
         chat.addAction(readAction)
         if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true) // only the first msg per live notif buzzes
         nm().notify(notifId(convHex), chat.build())
+        rendered[convHex] = snapshot
+        if (pending.isNotEmpty()) CoreBridge.markNotified(pending)
 
         nm().notify(
             SUMMARY_ID,
@@ -334,9 +376,7 @@ object PushNotifier {
         0xFFEF5350.toInt(), 0xFF26A69A.toInt(), 0xFFFFA726.toInt(),
     )
 
-    /** Per-peer last-buzz wall-clock for [NotifBuzz.Throttled]. ConcurrentHashMap: the incoming and
-     *  dbChanged collectors can reconcile on different IO threads at once. */
-    private val lastBuzz = ConcurrentHashMap<String, Long>()
+    private val lastBuzz = mutableMapOf<String, Long>()
 
     private const val MAX_LINES = 8
     private const val RESERVED_MAX = 100

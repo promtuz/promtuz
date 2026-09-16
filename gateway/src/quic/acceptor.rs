@@ -80,6 +80,8 @@ async fn maintain(gateway: Arc<Gateway>, limiter: Arc<IpRateLimiter>) {
         limiter.shrink_to_fit();
         gateway.wakes.retain_recent();
         gateway.wakes.shrink_to_fit();
-        gateway.registry.sweep();
+        if let Err(e) = gateway.registry.sweep() {
+            common::warn!("gateway: push registry cleanup failed: {e:#}");
+        }
     }
 }
