@@ -175,8 +175,8 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
     /** Only the part above the live bottom edge displaces older rows. */
     fun occupiedHeight(): Float = (effectiveHeight() - travel()).coerceAtLeast(0f)
 
-    /** Key of the next-newer row at removal time — where the exit stays spliced. */
-    var afterKey: Any? = null
+    /** Next surviving older row; null keeps the exit at the history edge. */
+    var beforeKey: Any? = null
 }
 
 /**
@@ -504,8 +504,8 @@ private class StageHolder {
             val out = ArrayList<Any>(rows.size + exiting.size)
             out.addAll(rows)
             for (e in exiting) {
-                val at = e.afterKey?.let { ak -> out.indexOfFirst { keyOf(it) == ak } } ?: -1
-                out.add(if (at == -1) 0 else at + 1, e)
+                val at = e.beforeKey?.let { bk -> out.indexOfFirst { keyOf(it) == bk } } ?: -1
+                out.add(if (at == -1) out.size else at, e)
             }
             out
         }
@@ -562,6 +562,7 @@ private class StageHolder {
         entranceClock: (T) -> SendTransition?,
         enterFromBelow: (T) -> Float,
     ) {
+        val previousDisplayKeys = displayList.map(::keyOf)
         rawKey = key as (Any) -> Any
         rows = newRows
         val keys = newRows.map(key)
@@ -596,9 +597,9 @@ private class StageHolder {
             }
         }
 
-        // Removals → exit in place (spliced after their old newer-neighbor).
+        // Removals keep their place until their exit finishes.
         if (prev != null) {
-            for ((idx, k) in prev.withIndex()) {
+            for (k in prev) {
                 if (k in keySet) continue
                 val e = entities[k] ?: continue
                 if (e.exiting) continue
@@ -614,7 +615,6 @@ private class StageHolder {
                 e.exitBaseH = if (e.factor.value > 0f) e.effectiveHeight() / e.factor.value else 0f
                 e.exitTravel = if (e.factor.value > 0f) e.travel() / e.factor.value else 0f
                 e.exiting = true
-                e.afterKey = prev.getOrNull(idx - 1)?.takeIf { it in keySet }
                 exiting.add(e)
                 dropWarm(k)
                 e.motion = scope.launch {
@@ -659,6 +659,21 @@ private class StageHolder {
             e.origin = transformOrigin(r)
             if (e.rowState.value != r) e.rowState.value = r
         }
+
+        // Re-anchor every active exit: another burst may remove its neighbor
+        // before the animation finishes. Preserve the old display order, with
+        // evicted history staying above the live rows instead of at the bottom.
+        var olderKey: Any? = null
+        val orderedExits = ArrayList<Entity>(exiting.size)
+        for (k in previousDisplayKeys.asReversed()) {
+            if (k in keySet) olderKey = k
+            else entities[k]?.takeIf { it.exiting }?.let { e ->
+                e.beforeKey = olderKey
+                orderedExits.add(e)
+            }
+        }
+        exiting.clear()
+        exiting.addAll(orderedExits.asReversed())
 
         // A pinned key that vanished entirely releases the pin.
         val pinned = state.pinnedKey
