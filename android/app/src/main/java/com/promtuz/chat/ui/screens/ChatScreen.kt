@@ -59,6 +59,8 @@ import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
+import com.promtuz.chat.ui.components.ChatDateDivider
+import com.promtuz.chat.ui.components.rememberChatCalendar
 import com.promtuz.chat.ui.components.ComposerMetrics
 import com.promtuz.chat.ui.components.rememberComposerMetrics
 import com.promtuz.chat.ui.components.NotificationPrimer
@@ -75,18 +77,10 @@ import com.promtuz.chat.ui.stage.MessageStage
 import com.promtuz.chat.ui.stage.rememberMessageStageState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
-import kotlin.math.abs
 import androidx.compose.ui.text.style.TextAlign
 import com.promtuz.chat.ui.components.BubbleTextLayouts
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-private sealed interface ChatRow {
-    data class Msg(val msg: UiMessage, val mergedTop: Boolean, val mergedBottom: Boolean) : ChatRow
-    /** A membership or title change — a centred line, not a bubble. */
-    data class System(val msg: UiMessage) : ChatRow
-    data class Typing(val mergedTop: Boolean) : ChatRow
-}
 
 // Best-effort "open" for a finished download: hand the file to the system via the
 // app's FileProvider. Silently no-ops if the path isn't under a shared root or no
@@ -125,6 +119,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val hazeState = rememberHazeState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val calendar = rememberChatCalendar()
 
     // High-intent moment to ask for notifications: they're in a conversation. One-shot, self-gated.
     NotificationPrimer()
@@ -133,7 +128,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     // is windowed (only the visible band is measured), so the full loaded window sits
     // in the list free off-screen; older pages arrive via onNearTop on scroll.
     var groupingNow by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(messages.firstOrNull()?.key, typingMembers, mergeWindowMs) {
+    LaunchedEffect(messages.firstOrNull()?.key, typingMembers, mergeWindowMs, calendar) {
         groupingNow = System.currentTimeMillis()
         val remaining = (messages.firstOrNull()?.timestampMs ?: 0L) + mergeWindowMs - groupingNow
         if (typing && remaining >= 0) {
@@ -141,8 +136,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             groupingNow = System.currentTimeMillis()
         }
     }
-    val rows = remember(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow) {
-        buildChatRows(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow)
+    val rows = remember(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar) {
+        buildChatRows(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar.zone)
     }
     val stage = rememberMessageStageState()
     val metrics = rememberComposerMetrics()
@@ -249,6 +244,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 },
                 enterFromBelow = { r -> if (r is ChatRow.Msg) metrics.composerPx.toFloat() else 0f },
                 horizontalPivotInset = 12.dp,
+                stickyHeader = { it is ChatRow.Date },
                 transformOrigin = { r ->
                     when (r) {
                         is ChatRow.Msg -> TransformOrigin(if (r.msg.outgoing) 1f else 0f, 1f)
@@ -315,6 +311,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                         chatRow.msg.content as MessageContent.System,
                         Modifier.padding(top = layout.groupGap.dp),
                     )
+                    is ChatRow.Date -> ChatDateDivider(chatRow.date, calendar.today)
                     is ChatRow.Typing -> {
                         val gap by androidx.compose.animation.core.animateDpAsState(
                             if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
@@ -456,40 +453,8 @@ private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.Msg -> row.msg.key
     is ChatRow.System -> row.msg.key
     is ChatRow.Typing -> "typing"
+    is ChatRow.Date -> row
 }
-
-/** Newest-first messages with contiguous sender grouping and an optional typing row. */
-private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing: Boolean,
-    typingMembers: Set<String>, isGroup: Boolean, nowMs: Long): List<ChatRow> {
-    val rows = ArrayList<ChatRow>(messages.size + 1)
-    val joinsTyping = typing && typingJoinsMessage(messages.firstOrNull(), typingMembers, isGroup, nowMs, mergeWindowMs)
-    if (typing) rows.add(ChatRow.Typing(joinsTyping))
-    for (i in messages.indices) {
-        val m = messages[i]
-        val older = messages.getOrNull(i + 1)
-        val newer = messages.getOrNull(i - 1)
-        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs)
-        val mergedBottom = (i == 0 && joinsTyping) ||
-            (newer != null && sameGroup(m, newer, mergeWindowMs))
-        rows.add(
-            if (m.content is MessageContent.System) ChatRow.System(m)
-            else ChatRow.Msg(m, mergedTop, mergedBottom)
-        )
-    }
-    return rows
-}
-
-/**
- * Whether two messages merge into one bubble run. Sender is part of it, not
- * just direction: in a group two incoming messages are only the same run if
- * the same person wrote both, or Alice and Bob would blend together.
- */
-private fun sameGroup(a: UiMessage, b: UiMessage, windowMs: Long): Boolean =
-    a.outgoing == b.outgoing &&
-        a.senderHex == b.senderHex &&
-        a.content !is MessageContent.System &&
-        b.content !is MessageContent.System &&
-        abs(a.timestampMs - b.timestampMs) <= windowMs
 
 /**
  * The stage's insets, with the bottom resolved on each call rather than captured.

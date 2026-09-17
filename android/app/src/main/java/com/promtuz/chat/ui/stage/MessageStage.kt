@@ -13,6 +13,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,6 +29,8 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.layout.SubcomposeLayoutState
@@ -35,6 +38,8 @@ import androidx.compose.ui.layout.SubcomposeSlotReusePolicy
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -127,6 +132,7 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
     val bubbleMotion = StageBubbleMotion { exitMorphPhase ?: factor.value }
     var measuredH = 0
     var exiting = false
+    var stickyHeader = false
 
     /**
      * Enter decision deferred to the first measure pass that places this row:
@@ -230,6 +236,8 @@ fun <T : Any> MessageStage(
     horizontalPivotInset: Dp = 0.dp,
     /** Fold pivot per row (a bubble's tail corner); bottom-center default. */
     transformOrigin: (T) -> TransformOrigin = { TransformOrigin(0.5f, 1f) },
+    /** Section headers pin below the top inset until the next newer header pushes them away. */
+    stickyHeader: (T) -> Boolean = { false },
     /**
      * Fired from the measure walk while the view sits within ~1.5 viewports of
      * the top of loaded history — the pagination doorbell. Fires every pass in
@@ -261,7 +269,7 @@ fun <T : Any> MessageStage(
 
     // Diff rows synchronously (before measure) so removals never blink out for a
     // frame; animations launch on the composition scope so they survive re-diffs.
-    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill, entranceClock, enterFromBelow) }
+    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill, entranceClock, enterFromBelow, stickyHeader) }
 
     val scrollable = rememberScrollableState { delta ->
         if (state.pinnedKey != null) 0f
@@ -422,11 +430,37 @@ fun <T : Any> MessageStage(
         // scroll > 0 keeps a bottom-pinned (or short) chat from paging on open.
         if (scroll > 0f && state.maxScroll - scroll < state.innerViewport * 1.5f) onNearTop()
 
+        var stickyIndex = -1
+        var nextHeaderTop = Float.POSITIVE_INFINITY
+        for (i in display.indices) {
+            val entity = entities[holder.keyOf(display[i])] ?: continue
+            if (!entity.stickyHeader || entity.exiting) continue
+            val rowHeight = entity.measuredH.takeIf { it > 0 } ?: ESTIMATED_ROW_PX
+            val top = anchorY + scroll - stacks[i] - rowHeight
+            if (top <= topPad) {
+                stickyIndex = i
+                break
+            }
+            nextHeaderTop = top
+        }
+        // A section can span many off-screen rows. Reuse its header slot without
+        // measuring that whole section or changing its estimated scroll extent.
+        val sticky = if (stickyIndex >= 0) {
+            val entity = entities.getValue(holder.keyOf(display[stickyIndex]))
+            placeables[stickyIndex] ?: subcompose(entity.key, entity.content).first().measure(childConstraints)
+        } else null
+        val stickyY = sticky?.let { minOf(topPad.toFloat(), nextHeaderTop - it.height) } ?: 0f
+        val stickyClip = StickyHeaderClip((topPad - stickyY).coerceAtLeast(0f))
+
         val pivotInset = horizontalPivotInset.toPx()
         layout(width, height) {
             for (i in display.indices) {
+                if (i == stickyIndex) continue
                 val p = placeables[i] ?: continue
                 val e = entities[holder.keyOf(display[i])] ?: continue
+                // Pagination can replace a section's header. Keep the old row's
+                // collapsing space, but let the live header own the label.
+                if (e.stickyHeader && e.exiting) continue
                 val bottom = anchorY + scroll - stacks[i]
                 val top = bottom - e.measuredH
                 if (bottom < -buffer || top > height + buffer) continue
@@ -449,6 +483,10 @@ fun <T : Any> MessageStage(
                     this.transformOrigin = TransformOrigin(0f, 0f)
                 }
             }
+            sticky?.placeWithLayer(0, stickyY.roundToInt(), zIndex = 1f) {
+                clip = true
+                shape = stickyClip
+            }
         }
     }
 
@@ -465,6 +503,11 @@ fun <T : Any> MessageStage(
 }
 
 private const val ESTIMATED_ROW_PX = 120
+
+private data class StickyHeaderClip(val top: Float) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density) =
+        Outline.Rectangle(Rect(0f, top.coerceAtMost(size.height), size.width, size.height))
+}
 
 /** Composition-side bookkeeping: entity map, exit splicing, display list. */
 private class StageHolder {
@@ -561,6 +604,7 @@ private class StageHolder {
         animateOnInitialFill: (T) -> Boolean,
         entranceClock: (T) -> SendTransition?,
         enterFromBelow: (T) -> Float,
+        stickyHeader: (T) -> Boolean,
     ) {
         val previousDisplayKeys = displayList.map(::keyOf)
         rawKey = key as (Any) -> Any
@@ -657,6 +701,7 @@ private class StageHolder {
                 e.motion = scope.launch { e.factor.animateTo(1f, ChatMotion.spec()) }
             }
             e.origin = transformOrigin(r)
+            e.stickyHeader = stickyHeader(r)
             if (e.rowState.value != r) e.rowState.value = r
         }
 
