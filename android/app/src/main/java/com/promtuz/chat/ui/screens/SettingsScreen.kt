@@ -52,7 +52,6 @@ fun SettingsScreen(
                     SettingItem(
                         "Storage", R.drawable.i_hard_drive
                     ) { navigate(Routes.Storage) },
-                    SettingItem("Stickers", R.drawable.oi_sticker) { navigate(Routes.Stickers) },
                     SettingItem("Notifications", R.drawable.i_notifications) {
                         navigate(Routes.NotificationsSettings)
                     },
@@ -83,7 +82,8 @@ fun SettingsScreen(
             SettingGroup(
                 "About", listOf(
                     SettingItem("App Info", R.drawable.i_info) { navigate(Routes.About) },
-                    SettingItem("Open Source Licenses", R.drawable.i_code) { },
+                    SettingItem("Updates", R.drawable.i_download) { navigate(Routes.Updates) },
+                    SettingItem("Open Source Licenses", R.drawable.i_code) { navigate(Routes.OpenSourceLicenses) },
                 )
             ),
         )

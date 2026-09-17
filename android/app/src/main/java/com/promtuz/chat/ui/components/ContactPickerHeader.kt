@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
@@ -34,11 +35,13 @@ fun ContactPickerHeader(
     close: Boolean,
     onBack: () -> Unit,
     onSearch: (() -> Unit)? = null,
+    searchLabel: String = "Search contacts",
     enabled: Boolean = true,
     selectionCount: Int? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
+    val titleStyle = MaterialTheme.typography.titleLarge
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     PickerSearchBackHandler(searching) { if (enabled) onBack() }
@@ -53,42 +56,48 @@ fun ContactPickerHeader(
                 description, Modifier.size(24.dp), tint)
 
         }
-        AnimatedContent(searching, Modifier.weight(1f), transitionSpec = {
-            (fadeIn(ChatMotion.spec()) + slideInHorizontally(ChatMotion.spec()) { it / 8 }) togetherWith
-                (fadeOut(ChatMotion.spec()) + slideOutHorizontally(ChatMotion.spec()) { -it / 8 })
+        AnimatedContent(searching, Modifier.weight(1f).height(48.dp), contentAlignment = Alignment.CenterStart, transitionSpec = {
+            (fadeIn(ChatMotion.spec()) togetherWith fadeOut(ChatMotion.spec())).using(null)
         }, label = "picker search") { search ->
             if (search) {
                 val focus = remember { FocusRequester() }
-                LaunchedEffect(Unit) { focus.requestFocus() }
-                BasicTextField(query, onQuery, enabled = enabled, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp).focusRequester(focus).semantics { contentDescription = "Search contacts" },
-                    textStyle = MaterialTheme.typography.titleMedium.copy(color = colors.onSurface),
+                LaunchedEffect(searching) { if (searching) focus.requestFocus() }
+                BasicTextField(query, onQuery, enabled = enabled && searching, singleLine = true,
+                    modifier = Modifier.fillMaxSize().focusRequester(focus).semantics { contentDescription = searchLabel },
+                    textStyle = titleStyle.copy(color = colors.onSurface),
                     cursorBrush = SolidColor(colors.primary),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
                     decorationBox = { inner ->
-                        Box { if (query.isEmpty()) Text("Search contacts", color = colors.onSurfaceVariant,
-                            style = MaterialTheme.typography.titleMedium); inner() }
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                            if (query.isEmpty()) Text(searchLabel, color = colors.onSurfaceVariant,
+                                style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            inner()
+                        }
                     })
-            } else AnimatedContent(selectionCount != null, Modifier.fillMaxWidth().clipToBounds(),
-                contentAlignment = Alignment.CenterStart, transitionSpec = {
-                    ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
-                        (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
-                        .using(null)
-                }, label = "picker title mode") { counted ->
-                if (counted) {
-                    // Retain the outgoing count while selection mode animates away.
-                    var lastCount by remember { mutableIntStateOf(selectionCount ?: 1) }
-                    if (selectionCount != null) SideEffect { lastCount = selectionCount }
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.semantics(mergeDescendants = true) {}) {
-                        AnimatedContent(selectionCount ?: lastCount, transitionSpec = {
-                            (fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
-                                (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it })
-                        }, label = "selected count") { Text("$it", style = MaterialTheme.typography.titleLarge) }
-                        Text(" selected", style = MaterialTheme.typography.titleLarge)
-                    }
-                } else Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1)
+            } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart,
+                propagateMinConstraints = false) {
+                AnimatedContent(selectionCount != null, Modifier.fillMaxWidth().clipToBounds(),
+                    contentAlignment = Alignment.CenterStart, transitionSpec = {
+                        ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
+                            (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
+                            .using(null)
+                    }, label = "picker title mode") { counted ->
+                    if (counted) {
+                        // Retain the outgoing count while selection mode animates away.
+                        var lastCount by remember { mutableIntStateOf(selectionCount ?: 1) }
+                        if (selectionCount != null) SideEffect { lastCount = selectionCount }
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                            AnimatedContent(selectionCount ?: lastCount, transitionSpec = {
+                                ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
+                                    (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
+                                    .using(SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> Tweens.microInteraction(300) }))
+                            }, label = "selected count") { Text("$it", style = titleStyle) }
+                            Text(" selected", style = titleStyle)
+                        }
+                    } else Text(title, style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
 
         }
@@ -97,7 +106,7 @@ fun ContactPickerHeader(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 actions()
                 if (onSearch != null) IconButton(onClick = onSearch, enabled = enabled && !searching) {
-                    Icon(painterResource(R.drawable.oi_search), "Search contacts", Modifier.size(22.dp))
+                    Icon(painterResource(R.drawable.oi_search), searchLabel, Modifier.size(22.dp))
                 }
             }
         }

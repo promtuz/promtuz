@@ -52,6 +52,15 @@ object Routes : NavKey {
     data object About : NavKey
 
     @Serializable
+    data object Updates : NavKey
+
+    @Serializable
+    data object OpenSourceLicenses : NavKey
+
+    @Serializable
+    data class LibraryLicense(val id: String) : NavKey
+
+    @Serializable
     data object NotificationsSettings : NavKey
 
     @Serializable
@@ -64,7 +73,7 @@ object Routes : NavKey {
     @Serializable
     data object BackupRestore : NavKey
 
-    /** Settings: installed sticker packs. */
+    /** Installed sticker packs, opened from the chat sticker picker. */
     @Serializable
     data object Stickers : NavKey
 

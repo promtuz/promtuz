@@ -12,7 +12,6 @@ import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -35,6 +34,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 sealed interface UpdateState {
+    data object Unchecked : UpdateState
     data object None : UpdateState
     data object Checking : UpdateState
     data class Available(val manifest: UpdateManifest) : UpdateState
@@ -69,11 +69,11 @@ class UpdateRepository(private val context: Context) {
     private val notificationCheck = Mutex()
     private val notifier = UpdateNotifier(context)
     private var downloadJob: Job? = null
+    private var channelGeneration = 0L
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
-    private val _state = MutableStateFlow<UpdateState>(UpdateState.None)
+    private val _state = MutableStateFlow<UpdateState>(UpdateState.Unchecked)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
-    private val _sheetVisible = MutableStateFlow(false)
-    val sheetVisible: StateFlow<Boolean> = _sheetVisible.asStateFlow()
+    private var screenVisible = false
 
     companion object {
         internal val CHANNELS = listOf("debug", "release")
@@ -86,7 +86,9 @@ class UpdateRepository(private val context: Context) {
     } else {
         "release"
     }
-    val channel: String get() = ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel
+    private val _selectedChannel = MutableStateFlow(ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel)
+    val selectedChannel: StateFlow<String> = _selectedChannel.asStateFlow()
+    val channel: String get() = _selectedChannel.value
 
     init {
         notifier.clearIfInstalled(installedVersionCode(), nativeChannel)
@@ -96,18 +98,16 @@ class UpdateRepository(private val context: Context) {
     fun switchChannel(newChannel: String) {
         require(newChannel in CHANNELS)
         if (newChannel == channel) return
+        channelGeneration++
         ChatPrefs.updateChannel = newChannel
+        _selectedChannel.value = newChannel
         notifier.clear()
         checkJob?.cancel()
         checkJob = null
         downloadJob?.cancel()
-        _state.value = UpdateState.None
+        _state.value = UpdateState.Unchecked
         UpdateWorker.enqueue(context, replace = true)
-        scope.launch {
-            downloadJob?.cancelAndJoin()
-            _state.value = UpdateState.None
-            check()
-        }
+        check()
     }
 
     // Same-versionCode installs are allowed when crossing channels (the binaries
@@ -117,8 +117,9 @@ class UpdateRepository(private val context: Context) {
             manifest.versionCode, installedVersionCode(), selectedChannel != nativeChannel,
         )
 
-    fun showSheet(check: Boolean = false) {
-        _sheetVisible.value = true
+    fun setScreenVisible(visible: Boolean) {
+        screenVisible = visible
+        if (!visible) return
         notifier.clear()
         val manifest = when (val state = _state.value) {
             is UpdateState.Available -> state.manifest
@@ -128,11 +129,6 @@ class UpdateRepository(private val context: Context) {
             else -> null
         }
         if (manifest != null) notifier.markSeen(manifest, channel)
-        if (check) this.check()
-    }
-
-    fun dismissSheet() {
-        _sheetVisible.value = false
     }
 
     /** A push is only a hint. The signed manifest decides what we can offer. */
@@ -142,9 +138,9 @@ class UpdateRepository(private val context: Context) {
             val manifest = availableUpdate(selectedChannel)
             currentCoroutineContext().ensureActive()
             withContext(Dispatchers.Main.immediate) notify@{
-                // Channel switches and sheet actions run on main too.
+                // Channel switches and screen actions run on main too.
                 if (selectedChannel != channel) return@notify
-                if (manifest == null || _sheetVisible.value || _state.value is UpdateState.Downloading ||
+                if (manifest == null || screenVisible || _state.value is UpdateState.Downloading ||
                     _state.value is UpdateState.Ready || _state.value is UpdateState.PermissionNeeded) {
                     notifier.clear()
                 } else {
@@ -173,21 +169,25 @@ class UpdateRepository(private val context: Context) {
             else -> {}
         }
         if (checkJob?.isActive == true) return
+        val previousDownload = downloadJob
         checkJob = scope.launch {
             val selectedChannel = channel
+            val generation = channelGeneration
             try {
                 log().v("Checking for Updates...")
                 _state.value = UpdateState.Checking
+                // A channel change may still be closing/deleting the previous download.
+                previousDownload?.join()
                 val manifest = withContext(Dispatchers.IO) { availableUpdate(selectedChannel) }
-                if (selectedChannel == channel) {
+                if (generation == channelGeneration) {
                     _state.value = manifest?.let { UpdateState.Available(it) } ?: UpdateState.None
-                    if (manifest != null && _sheetVisible.value) notifier.markSeen(manifest, selectedChannel)
-                    if (manifest == null || _sheetVisible.value) notifier.clear()
+                    if (manifest != null && screenVisible) notifier.markSeen(manifest, selectedChannel)
+                    if (manifest == null || screenVisible) notifier.clear()
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (selectedChannel == channel) {
+                if (generation == channelGeneration) {
                     _state.value = UpdateState.Error(error.message ?: "Update check failed.")
                 }
             }
@@ -195,8 +195,9 @@ class UpdateRepository(private val context: Context) {
     }
 
     fun download(manifest: UpdateManifest) {
-        if (downloadJob?.isActive == true) return
+        if (downloadJob?.isCompleted == false) return
         val selectedChannel = channel
+        val generation = channelGeneration
         notifier.clear()
         notifier.markSeen(manifest, selectedChannel)
         downloadJob = scope.launch {
@@ -243,12 +244,12 @@ class UpdateRepository(private val context: Context) {
                 _state.value = UpdateState.Ready(manifest, destination)
             } catch (_: CancellationException) {
                 destination.delete()
-                if (selectedChannel == channel) _state.value = UpdateState.Available(manifest)
+                if (generation == channelGeneration) _state.value = UpdateState.Available(manifest)
             } catch (error: Exception) {
                 destination.delete()
-                if (selectedChannel == channel) _state.value = UpdateState.Error(error.message ?: "Update download failed.")
+                if (generation == channelGeneration) _state.value = UpdateState.Error(error.message ?: "Update download failed.")
             } finally {
-                downloadJob = null
+                if (downloadJob === currentCoroutineContext()[Job]) downloadJob = null
             }
         }
     }

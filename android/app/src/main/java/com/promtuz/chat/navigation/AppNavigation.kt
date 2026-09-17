@@ -11,6 +11,9 @@ import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.ui.screens.GroupInfoScreen
 import com.promtuz.chat.ui.screens.AboutScreen
+import com.promtuz.chat.ui.screens.UpdateScreen
+import com.promtuz.chat.ui.screens.OpenSourceLicensesScreen
+import com.promtuz.chat.ui.screens.LibraryLicenseScreen
 import com.promtuz.chat.ui.screens.BackupRestoreScreen
 import com.promtuz.chat.ui.screens.ChatAppearanceScreen
 import com.promtuz.chat.ui.screens.ChatScreen
@@ -84,7 +87,14 @@ fun AppNavigation(
             ) }
             entry<Routes.Settings> { SettingsScreen(appViewModel) }
             entry<Routes.ChatAppearance> { ChatAppearanceScreen() }
-            entry<Routes.About> { AboutScreen() }
+            entry<Routes.About> { AboutScreen(
+                onOpenLicenses = { appViewModel.navigator.push(Routes.OpenSourceLicenses) },
+            ) }
+            entry<Routes.Updates> { UpdateScreen() }
+            entry<Routes.OpenSourceLicenses> { OpenSourceLicensesScreen(
+                onLibraryClick = { appViewModel.navigator.push(Routes.LibraryLicense(it)) },
+            ) }
+            entry<Routes.LibraryLicense> { key -> LibraryLicenseScreen(key.id) }
             entry<Routes.NotificationsSettings> { NotificationsSettingsScreen() }
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }

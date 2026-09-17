@@ -15,21 +15,19 @@ import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.update.UpdateState
 import org.koin.androidx.compose.koinViewModel
 
-/** Top-bar entry to the update flow. Only present when there's actually something
- *  to do — a permanent download glyph that usually no-ops is worse than no button. */
 @Composable
-fun AppUpdateIcon(modifier: Modifier = Modifier, updates: UpdateVM = koinViewModel()) {
+fun AppUpdateIcon(onClick: () -> Unit, modifier: Modifier = Modifier, updates: UpdateVM = koinViewModel()) {
     val state by updates.state.collectAsState()
     val pending = state is UpdateState.Available || state is UpdateState.Downloading ||
         state is UpdateState.Ready || state is UpdateState.PermissionNeeded
     if (!pending) return
 
-    IconButton({ updates.showSheet() }, modifier) {
+    IconButton(onClick, modifier) {
         val s = state
         if (s is UpdateState.Downloading) {
             CircularProgressIndicator({ s.progress }, Modifier.size(22.dp), strokeWidth = 2.dp)
         } else {
-            BadgedBox(badge = { Badge() }) { DrawableIcon(R.drawable.i_download) }
+            BadgedBox(badge = { Badge() }) { DrawableIcon(R.drawable.i_download, desc = "Updates") }
         }
     }
 }

@@ -54,7 +54,7 @@ fun HomeTopBar(
             )
         },
         actions = {
-            AppUpdateIcon()
+            AppUpdateIcon(onClick = { appViewModel.navigator.push(Routes.Updates) })
             HomeMoreMenu(appViewModel)
         })
 }

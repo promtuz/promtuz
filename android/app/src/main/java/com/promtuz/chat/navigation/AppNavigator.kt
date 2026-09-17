@@ -31,6 +31,17 @@ class AppNavigator(val backStack: MutableList<NavKey>) {
         return false
     }
 
+    /** OS intents must not be dropped by the touch debounce or duplicate an existing destination. */
+    fun openExternal(key: NavKey) {
+        val existing = backStack.indexOfLast { it == key }
+        if (existing >= 0) {
+            while (backStack.lastIndex > existing) backStack.removeLastOrNull()
+        } else {
+            backStack.add(key)
+        }
+        lastGrowAt = SystemClock.uptimeMillis()
+    }
+
     /** Replace the whole stack with a single destination — no back path to what was there. */
     fun reset(key: NavKey) {
         backStack.clear()

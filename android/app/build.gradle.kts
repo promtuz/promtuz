@@ -1,6 +1,12 @@
 import com.android.build.gradle.internal.tasks.factory.dependsOn
 import java.io.FileInputStream
 import java.util.Properties
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.gradle.maven.MavenModule
+import org.gradle.maven.MavenPomArtifact
+import javax.xml.parsers.DocumentBuilderFactory
 
 plugins {
     alias(libs.plugins.android.application)
@@ -92,11 +98,13 @@ val sdkDir = Properties().apply {
 // set below for the rustc/ndk toolchain cargo-ndk re-spawns. (Homebrew: repoint cargoBin.)
 val cargoBin = "${System.getProperty("user.home")}/.cargo/bin"
 val cargo = file("$cargoBin/cargo").takeIf { it.exists() }?.absolutePath ?: "cargo"
+val cargoNdk = file("$cargoBin/cargo-ndk").takeIf { it.exists() }?.absolutePath ?: "cargo-ndk"
 val cargoAugmentedPath = "$cargoBin:${System.getenv("PATH") ?: ""}"
 
 // Generated uniffi Kotlin bindings land here (see generateUniffiBindings).
 // mkdirs at config time so the Variant API can register it as a source dir.
 val uniffiOutDir = layout.buildDirectory.dir("generated/source/uniffi/kotlin").get().asFile.apply { mkdirs() }
+val rustLicenseArtifacts = layout.buildDirectory.file("intermediates/licenses/rust-artifacts.jsonl")
 
 android {
     namespace = "com.promtuz.chat"
@@ -204,10 +212,97 @@ android {
 androidComponents {
     onVariants { variant ->
         variant.sources.java?.addStaticSourceDirectory("build/generated/source/uniffi/kotlin")
+
+        val variantName = variant.name.replaceFirstChar { it.uppercase() }
+        val licenseOutput = layout.buildDirectory.dir("generated/licenses/${variant.name}")
+        val generateLicenses = tasks.register<Exec>("generate${variantName}LicenseAssets") {
+            dependsOn("buildRustCore")
+            val runtime = configurations.named("${variant.name}RuntimeClasspath")
+            val generator = rootProject.file("../tools/licenses/generate.py")
+            inputs.files(runtime)
+            inputs.files(rootProject.file("../Cargo.lock"), rootProject.file("../Cargo.toml"),
+                rootProject.file("../libcore/Cargo.toml"), rootProject.file("../common/Cargo.toml"), generator)
+            inputs.file(rustLicenseArtifacts)
+            inputs.dir(rootProject.file("../tools/licenses/notices"))
+            outputs.dir(licenseOutput)
+            environment("PATH", cargoAugmentedPath)
+            workingDir = rootProject.file("..")
+            val inventory = layout.buildDirectory.file("intermediates/licenses/${variant.name}.json")
+            doFirst {
+                val artifacts = runtime.get().resolvedConfiguration.resolvedArtifacts
+                    .distinctBy { it.moduleVersion.id.toString() to it.file }
+                val ids = artifacts.mapNotNull { it.id.componentIdentifier as? ModuleComponentIdentifier }.distinct()
+                val pomResult = dependencies.createArtifactResolutionQuery()
+                    .forComponents(ids)
+                    .withArtifacts(MavenModule::class.java, MavenPomArtifact::class.java)
+                    .execute()
+                val poms = pomResult.resolvedComponents.associate { component ->
+                        component.id.displayName to component.getArtifacts(MavenPomArtifact::class.java)
+                            .filterIsInstance<ResolvedArtifactResult>().firstOrNull()?.file?.absolutePath
+                    }.toMutableMap()
+                val xml = DocumentBuilderFactory.newInstance().apply {
+                    setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+                }.newDocumentBuilder()
+                val inspected = mutableSetOf<String>()
+                while (true) {
+                    val parents = poms.values.filterNotNull().filter { inspected.add(it) }.mapNotNull { path ->
+                        val parent = xml.parse(file(path)).getElementsByTagName("parent").item(0)
+                            as? org.w3c.dom.Element ?: return@mapNotNull null
+                        listOf("groupId", "artifactId", "version").joinToString(":") {
+                            parent.getElementsByTagName(it).item(0).textContent.trim()
+                        }
+                    }.filter { it !in poms }.distinct()
+                    if (parents.isEmpty()) break
+                    val query = dependencies.createArtifactResolutionQuery()
+                    parents.forEach { id ->
+                        val (group, name, version) = id.split(":")
+                        query.forModule(group, name, version)
+                        poms[id] = null
+                    }
+                    query.withArtifacts(MavenModule::class.java, MavenPomArtifact::class.java)
+                        .execute().resolvedComponents.forEach { component ->
+                            poms[component.id.displayName] = component.getArtifacts(MavenPomArtifact::class.java)
+                                .filterIsInstance<ResolvedArtifactResult>().firstOrNull()?.file?.absolutePath
+                        }
+                }
+                val entries = artifacts.map { artifact ->
+                    mapOf(
+                        "id" to artifact.moduleVersion.id.toString(),
+                        "artifact" to artifact.file.absolutePath,
+                        "pom" to poms[artifact.id.componentIdentifier.displayName],
+                    )
+                }
+                inventory.get().asFile.apply {
+                    parentFile.mkdirs()
+                    writeText(JsonOutput.toJson(mapOf("libraries" to entries, "poms" to poms)))
+                }
+            }
+            commandLine("python3", generator.absolutePath,
+                "--android", inventory.get().asFile.absolutePath,
+                "--output", licenseOutput.get().asFile.absolutePath,
+                "--rust-artifacts", rustLicenseArtifacts.get().asFile.absolutePath)
+        }
+        variant.sources.assets?.addStaticSourceDirectory(licenseOutput.get().asFile.absolutePath)
+        tasks.matching { it.name == "merge${variantName}Assets" }.configureEach {
+            dependsOn(generateLicenses)
+        }
     }
 }
 
 tasks.register<Exec>("buildRustCore") {
+    val artifactOutput = rustLicenseArtifacts.get().asFile
+    val pendingArtifacts = file("${artifactOutput.absolutePath}.pending")
+    environment("CARGO", rootProject.file("../tools/licenses/cargo-artifacts.py").absolutePath)
+    environment("PROMTUZ_REAL_CARGO", cargo)
+    environment("PROMTUZ_RUST_ARTIFACTS", pendingArtifacts.absolutePath)
+    doFirst {
+        pendingArtifacts.parentFile.mkdirs()
+        pendingArtifacts.writeText("")
+    }
+    doLast {
+        pendingArtifacts.copyTo(artifactOutput, overwrite = true)
+        pendingArtifacts.delete()
+    }
     val isRelease =
         name.contains("Release", ignoreCase = true) || gradle.startParameter.taskNames.any {
             it.contains("Release", ignoreCase = true)
@@ -227,19 +322,19 @@ tasks.register<Exec>("buildRustCore") {
 
     // @formatter:off
     if (isRelease) commandLine(
-        cargo, "ndk",
+        cargoNdk, "ndk",
         "-t", "arm64-v8a",
         "-t", "x86_64",
         "-o", "../android/app/src/main/jniLibs",
         "--platform", (android.defaultConfig.minSdk ?: 21).toString(),
         "build", "--release"
     ) else commandLine(
-        cargo, "ndk",
+        cargoNdk, "ndk",
         "-t", "arm64-v8a",
         "-t", "x86_64",
         "-o", "../android/app/src/main/jniLibs",
         "--platform", (android.defaultConfig.minSdk ?: 21).toString(),
-        "build" //, "--release"
+        "build"
     )
     // @formatter:on
 }

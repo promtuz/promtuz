@@ -75,6 +75,8 @@ The hard parts are in place and running: networking, identity, the DHT, MLS, NAT
 
 The relay, resolver, and gateway are standard Rust binaries (`cargo run -p relay`, `-p resolver`, `-p gateway`). The client library cross-compiles to Android targets with `cargo-ndk`, and the Android app builds it automatically via a Gradle task.
 
+Android builds require Python 3.11 or newer to generate the bundled [open-source license notices](tools/licenses/README.md).
+
 The infrastructure needs a root CA and node certificates. The `common` crate ships a `certgen` binary that mints them and stamps in the capability bits a node is entitled to.
 
 Deployment packages are built with `tools/scripts/build-deb.sh <crate>`, which links against an old glibc through cargo-zigbuild so the result runs on Debian 10+ and Ubuntu 18.04+. Operator docs live with each node: [relay](relay/README.md), [resolver](resolver/README.md).

@@ -9,10 +9,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.promtuz.chat.navigation.AppNavigation
+import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.InviteBottomSheet
-import com.promtuz.chat.ui.components.UpdateSheet
 import com.promtuz.chat.update.UpdateNotifier
 import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.ui.theme.PromtuzTheme
@@ -40,11 +40,9 @@ class LauncherActivity : ComponentActivity() {
 
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
-            val showUpdate by updates.sheetVisible.collectAsState()
             PromtuzTheme(appearance = appearance) {
                 AppNavigation(viewModel)
                 InviteBottomSheet(viewModel)
-                if (showUpdate) UpdateSheet(onDismiss = updates::dismissSheet)
             }
         }
     }
@@ -60,7 +58,8 @@ class LauncherActivity : ComponentActivity() {
     private fun consumeUpdateOpen(intent: Intent) {
         if (!intent.getBooleanExtra(UpdateNotifier.EXTRA_OPEN_UPDATE, false)) return
         intent.removeExtra(UpdateNotifier.EXTRA_OPEN_UPDATE)
-        updates.showSheet(check = true)
+        viewModel.navigator.openExternal(Routes.Updates)
+        updates.check()
     }
 
     /**

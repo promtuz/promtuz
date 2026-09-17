@@ -7,9 +7,9 @@ import java.io.File
 
 class UpdateVM(private val updates: UpdateRepository) : ViewModel() {
     val state = updates.state
-    val channel get() = updates.channel
+    val channel = updates.selectedChannel
     fun check() = updates.check()
-    fun showSheet(check: Boolean = false) = updates.showSheet(check)
+    fun setScreenVisible(visible: Boolean) = updates.setScreenVisible(visible)
     fun switchChannel(channel: String) = updates.switchChannel(channel)
     fun download(manifest: UpdateManifest) = updates.download(manifest)
     fun cancelDownload() = updates.cancelDownload()
