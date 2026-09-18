@@ -221,13 +221,15 @@ fun <T : Any> MessageStage(
      */
     pushBottom: () -> Dp = { 0.dp },
     followThreshold: Dp = 240.dp,
+    /** False while the initial query is pending; true also for successfully loaded empty history. */
+    historyLoaded: Boolean = true,
     /**
      * The key of a row removed in the same emission that this new row visually
      * REPLACES (typing bubble → the message that ended it). The source vanishes
      * without an exit and this row enters from its height — a morph.
      */
     morphFrom: (T) -> Any? = { null },
-    /** Transient rows enter even when history is being painted for the first time. */
+    /** Transient rows can enter before or alongside the first history snapshot. */
     animateOnInitialFill: (T) -> Boolean = { false },
     /** An outgoing send can share the exact clock used to clear its composer. */
     entranceClock: (T) -> SendTransition? = { null },
@@ -269,7 +271,14 @@ fun <T : Any> MessageStage(
 
     // Diff rows synchronously (before measure) so removals never blink out for a
     // frame; animations launch on the composition scope so they survive re-diffs.
-    remember(rows) { holder.diff(rows, key, scope, state, morphFrom, transformOrigin, animateOnInitialFill, entranceClock, enterFromBelow, stickyHeader) }
+    remember(rows, historyLoaded) {
+        val animateArrivals = holder.hasPresentedHistory
+        holder.diff(rows, key, scope, state, morphFrom, transformOrigin,
+            { animateArrivals || animateOnInitialFill(it) }, entranceClock, enterFromBelow, stickyHeader)
+        // Latch after the diff, inside the stage's composition (Scaffold subcomposes it).
+        // Loaded empty history matters too: its first future message is a live arrival.
+        if (historyLoaded) holder.hasPresentedHistory = true
+    }
 
     val scrollable = rememberScrollableState { delta ->
         if (state.pinnedKey != null) 0f
@@ -535,6 +544,7 @@ private class StageHolder {
     var scope: CoroutineScope? = null
     private val warm = HashMap<Any, SubcomposeLayoutState.PrecomposedSlotHandle>()
     private var lastKeys: List<Any>? = null
+    var hasPresentedHistory = false
 
     // Snapshot-backed: the measure pass depends on it, and a plain var would leave
     // the layout with no reason to re-run when rows change (first symptom: a chat
@@ -601,7 +611,7 @@ private class StageHolder {
         state: MessageStageState,
         morphFrom: (T) -> Any?,
         transformOrigin: (T) -> TransformOrigin,
-        animateOnInitialFill: (T) -> Boolean,
+        animateEntrance: (T) -> Boolean,
         entranceClock: (T) -> SendTransition?,
         enterFromBelow: (T) -> Float,
         stickyHeader: (T) -> Boolean,
@@ -669,14 +679,13 @@ private class StageHolder {
             }
         }
 
-        // First fill of an empty stage appears in place — the open paints a whole
-        // screenful at once; per-row unfolds are for rows arriving after that.
-        val initialFill = prev.isNullOrEmpty()
+        // History paints in place even if transient rows (such as typing) arrived
+        // first. Conversely, a live message can enter a loaded but still empty chat.
         for (r in newRows) {
             val k = key(r)
             var e = entities[k]
             if (e == null) {
-                val animate = !initialFill || animateOnInitialFill(r) || morphFrom(r) in morphSources
+                val animate = animateEntrance(r) || morphFrom(r) in morphSources
                 e = Entity(k, if (animate) 0f else 1f, this)
                 val sharedClock = entranceClock(r)
                 if (sharedClock != null) {

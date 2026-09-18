@@ -44,7 +44,6 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
-import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.navigation.Routes
@@ -103,7 +102,9 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         viewModel.setChatForeground(true)
         onPauseOrDispose { viewModel.setChatForeground(false) }
     }
-    val messages by viewModel.messages.collectAsState()
+    // Capture once: Scaffold must receive rows and load state from the same snapshot.
+    val messageSnapshot = viewModel.messages.collectAsState().value
+    val messages = messageSnapshot.orEmpty()
     val typingMembers by viewModel.typingBubbleMembers.collectAsState()
     val typing = typingMembers.isNotEmpty()
     val isGroup by viewModel.isGroup.collectAsState()
@@ -141,7 +142,6 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     }
     val stage = rememberMessageStageState()
     val metrics = rememberComposerMetrics()
-    val sentRevision by viewModel.sentRevision.collectAsState()
 
     // Own sends always land us at the bottom; incoming near the bottom is the
     // stage's built-in follow, and scrolled-up reading holds.
@@ -226,16 +226,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             }
             MessageStage(
                 rows = rows,
+                historyLoaded = messageSnapshot != null,
                 key = ::rowKey,
                 state = stage,
                 contentPadding = stagePadding,
                 pushBottom = { with(density) { metrics.pushPx.toDp() } },
                 modifier = Modifier.fillMaxSize(),
-                // The incoming message that ended a live typing signal inherits the
-                // typing bubble: same spot, its height, dots out / text in.
-                animateOnInitialFill = { it is ChatRow.Typing ||
-                    (it is ChatRow.Msg && (it.msg.key == handoff ||
-                        (it.msg.outgoing && (it.msg.status == SendStatus.Pending || sentRevision > 0)))) },
+                animateOnInitialFill = { it is ChatRow.Typing },
+                // A real typing handoff or a send prepared by this composer owns its
+                // entrance even if it happens while the initial query is returning.
                 morphFrom = { r -> if (r is ChatRow.Msg && r.msg.key == handoff) "typing" else null },
                 entranceClock = { r ->
                     if (r is ChatRow.Msg && r.msg.outgoing) {
