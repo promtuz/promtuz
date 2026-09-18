@@ -23,6 +23,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,6 +44,7 @@ import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.utils.common.parseMessageDate
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -179,7 +181,15 @@ fun HomeChatListItem(
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (chat.lastOutgoing && !typing) DeliveryTick(chat.lastStatus)
+                        if (chat.lastOutgoing && !typing) {
+                            key(chat.conversationHex, chat.lastMessageId) {
+                                MessageStatusIcon(
+                                    status = SendStatus.from(chat.lastStatus),
+                                    tint = colors.onSurfaceVariant.copy(0.7f),
+                                    seenTint = colors.primary,
+                                )
+                            }
+                        }
                         Text(
                             parseMessageDate(chat.timestampMs),
                             style = type.bodySmallEmphasized,
@@ -244,20 +254,6 @@ private fun declineText(reason: Int?): String = when (reason) {
     1 -> "Couldn't connect — their invite was already used"
     2 -> "Couldn't connect — they declined"
     else -> "Couldn't connect"
-}
-
-/** Delivery tick for our last message; nothing while still pending. */
-@Composable
-private fun DeliveryTick(status: Int) {
-    val colors = MaterialTheme.colorScheme
-    val (glyph, color) = when (status) {
-        2 -> "!" to colors.error
-        3 -> "✓✓" to colors.onSurfaceVariant.copy(0.7f)
-        4 -> "✓✓" to colors.primary
-        1 -> "✓" to colors.onSurfaceVariant.copy(0.7f)
-        else -> return
-    }
-    Text(glyph, style = MaterialTheme.typography.labelMedium, color = color, maxLines = 1)
 }
 
 @Composable

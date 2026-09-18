@@ -287,6 +287,7 @@ class AppVM(
                 peerHex = c.peer?.toHex(),
                 memberCount = c.members.size,
                 lastPreview = last?.content,
+                lastMessageId = last?.id,
                 lastMediaKind = last?.mediaKind?.toInt() ?: 0,
                 timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
                 status = contact?.status?.toInt() ?: 1,

@@ -13,6 +13,8 @@ data class ChatSummary(
     /** Active roster size. 2 for a direct chat. */
     val memberCount: Int = 2,
     val lastPreview: String?,
+    /** Stable identity for the newest message; status animation resets when it changes. */
+    val lastMessageId: String? = null,
     /** The last message's media kind (see [mediaLabel]); 0 when it's text. */
     val lastMediaKind: Int = 0,
     val timestampMs: Long,

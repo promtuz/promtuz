@@ -21,17 +21,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -42,6 +41,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
@@ -104,11 +104,11 @@ private const val MetaHaloSpreadY = 3.4f
 /**
  * A message bubble as an ordered stack of content blocks (text today; media /
  * reply become sibling blocks with the polymorphic content). Shape/colors/width
- * come from [LocalChatAppearance]. The trailing meta — a sent-time, or a spinner
- * for a not-yet-sent message — is pinned to the bubble's bottom-end corner; the
+ * come from [LocalChatAppearance]. The trailing timestamp and outgoing status
+ * are pinned to the bubble's bottom-end corner; the
  * bubble widens to seat it beside the text's last line, or gives it a compact row
  * of its own when that line has no room.
- * Delivery ticks will be added separately; the timestamp stays in the meta corner.
+ * Every outgoing state keeps the same footprint beside the timestamp.
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
  * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
@@ -218,9 +218,15 @@ fun MessageBubble(
                             appearance.type.fontScale * (if (jumboEmoji) JumboEmojiScale else 1f),
                         ) { coords.text = it }
                     content is MessageContent.Image ->
-                        ImageBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
+                        ImageBlock(
+                            content, textColor, appearance.type.fontScale,
+                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                        )
                     content is MessageContent.Album ->
-                        AlbumBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
+                        AlbumBlock(
+                            content, textColor, appearance.type.fontScale,
+                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                        )
                     content is MessageContent.Attachment ->
                         AttachmentBlock(
                             content, textColor, appearance.type.fontScale,
@@ -512,12 +518,12 @@ private fun Modifier.fadeOnChange(value: Any?): Modifier {
 }
 
 /**
- * Pending spinner / failed dot / sent time, crossfading inside the corner slot.
+ * A persistent timestamp with a fixed outgoing-status slot.
  *
  * [onMedia] is the uncaptioned-picture case: the meta lands on the photo, where
  * `textColor` at 55% would be unreadable over an arbitrary image, so it goes
- * white against the gradient the media block lays under it. Its position doesn't
- * change — that's the point of the gradient over a chip.
+ * white against the dark halo below. Status colours are lightened on that same
+ * halo so a dark chat accent remains visible over the picture.
  */
 @Composable
 private fun MetaRow(
@@ -525,12 +531,8 @@ private fun MetaRow(
 ) {
     val metaStyle = MaterialTheme.typography.labelSmall
     val metaColor = if (onMedia) Color.White else textColor.copy(alpha = if (pill != null) 0.8f else 0.55f)
-    val edited = msg.edited && !msg.deleted
-    val state = when {
-        msg.outgoing && msg.status == SendStatus.Pending -> MetaState.Pending
-        msg.outgoing && msg.status == SendStatus.Failed -> MetaState.Failed
-        else -> MetaState.Sent
-    }
+    val accent = LocalChatColors.current.accent
+    val error = MaterialTheme.colorScheme.error
 
     Box(
         // A standalone message carries its time in a pill of the bubble's
@@ -541,35 +543,22 @@ private fun MetaRow(
     ) {
         if (onMedia) MetaHalo(Modifier.matchParentSize())
         Row(verticalAlignment = Alignment.CenterVertically) {
-        if (edited) Text(
-            "edited",
-            style = metaStyle,
-            color = metaColor,
-            modifier = Modifier.padding(end = 4.dp),
-        )
-        Box(Modifier.fadeOnChange(state), contentAlignment = Alignment.CenterEnd) {
-            // Reserve the actual timestamp footprint from the first frame. Otherwise
-            // replacing the small spinner starts a separate width animation after
-            // the entrance, and can even move metadata onto another line.
             Text(
-                BubbleTextLayouts.clock(msg.timestampMs),
+                BubbleTextLayouts.metaLabelOf(msg),
                 style = metaStyle,
                 color = metaColor,
-                modifier = if (state == MetaState.Sent) Modifier else Modifier
-                    .graphicsLayer { alpha = 0f }
-                    .clearAndSetSemantics {},
+                maxLines = 1,
+                softWrap = false,
             )
-            when (state) {
-                MetaState.Pending ->
-                    CircularProgressIndicator(Modifier.size(11.dp), color = metaColor, strokeWidth = 1.5.dp)
-                MetaState.Failed ->
-                    Box(Modifier
-                        .size(9.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error))
-                MetaState.Sent -> Unit
+            if (msg.outgoing) key(msg.localId) {
+                MessageStatusIcon(
+                    status = msg.status,
+                    modifier = Modifier.padding(start = BubbleStatusGap).size(BubbleStatusSize),
+                    tint = metaColor,
+                    seenTint = if (onMedia) lerp(accent, Color.White, 0.55f) else accent,
+                    errorTint = if (onMedia) lerp(error, Color.White, 0.35f) else error,
+                )
             }
-        }
         }
     }
 }
@@ -606,8 +595,6 @@ private fun MetaHalo(modifier: Modifier) {
         )
     }
 }
-
-private enum class MetaState { Pending, Failed, Sent }
 
 /** How much larger a lone emoji draws than body text. */
 private const val JumboEmojiScale = 2.8f
