@@ -1,12 +1,13 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -14,7 +15,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -29,15 +29,17 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.UiPackPreview
 import kotlinx.coroutines.launch
 
-/** Pack preview with install, remove and creator actions. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StickerPackSheet(
@@ -70,77 +72,76 @@ fun StickerPackSheet(
         }
     }
 
-    ModalBottomSheet(
+    AppBottomSheet(
         onDismissRequest = { if (!busy) onDismiss() },
         sheetState = sheetState,
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        dismissEnabled = !busy,
     ) {
-        Column(Modifier.fillMaxHeight(0.8f)) {
-            val p = preview
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
+        val p = preview
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    p?.name ?: "Sticker pack",
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                p?.let {
                     Text(
-                        p?.name ?: "Sticker pack",
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        if (it.stickers.size == 1) "1 sticker" else "${it.stickers.size} stickers",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
                     )
-                    p?.let {
-                        Text(
-                            if (it.stickers.size == 1) "1 sticker" else "${it.stickers.size} stickers",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.onSurfaceVariant,
-                        )
-                    }
-                }
-                if (p?.mine == true && p.stickers.size < 100) TextButton(onClick = { onAddImages(ref.packHex) }, enabled = !busy) {
-                    Text("Add images")
                 }
             }
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                when {
-                    p != null -> LazyVerticalGrid(
-                        columns = GridCells.Adaptive(72.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    ) {
-                        items(p.stickers.size, key = { p.stickers[it].key }) { i -> StickerCell(p.stickers[i]) }
-                    }
-                    error != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(error!!, color = colors.error)
-                        TextButton(onClick = { attempt++ }) { Text("Retry") }
-                    }
-                    else -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
-                }
+            if (p?.mine == true && p.stickers.size < 100) TextButton(onClick = { onAddImages(ref.packHex) }, enabled = !busy) {
+                Text("Add images")
             }
-            if (p != null) {
-                if (error != null) Text(
-                    error!!, Modifier.padding(horizontal = 24.dp), color = colors.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                val label = when {
-                    busy -> if (kept) "Removing…" else "Adding…"
-                    kept -> "Remove stickers"
-                    else -> "Add stickers"
-                }
-                GroupActionButton(
-                    label,
-                    onClick = {
-                        busy = true
-                        error = null
-                        scope.launch {
-                            val result = if (kept) viewModel.remove(ref.packHex) else viewModel.install(ref)
-                            busy = false
-                            result.onSuccess { dismissRequested = true }
-                                .onFailure { error = if (kept) "Couldn’t remove the pack" else "Couldn’t add the pack" }
-                        }
-                    },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                )
+        }
+        if (p != null) {
+            val columns = remember { ChatPrefs.stickerColumns }
+            val maxGrid = with(LocalDensity.current) { (LocalWindowInfo.current.containerSize.height * 0.5f).toDp() }
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                modifier = Modifier.fillMaxWidth().heightIn(max = maxGrid),
+                contentPadding = PaddingValues(horizontal = StickerGap, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(StickerGap),
+                verticalArrangement = Arrangement.spacedBy(StickerGap),
+            ) {
+                items(p.stickers.size, key = { p.stickers[it].key }) { i -> StickerCell(p.stickers[i]) }
             }
+            if (error != null) Text(
+                error!!, Modifier.padding(horizontal = 24.dp), color = colors.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            val label = when {
+                busy -> if (kept) "Removing…" else "Adding…"
+                kept -> "Remove stickers"
+                else -> "Add stickers"
+            }
+            GroupActionButton(
+                label,
+                onClick = {
+                    busy = true
+                    error = null
+                    scope.launch {
+                        val result = if (kept) viewModel.remove(ref.packHex) else viewModel.install(ref)
+                        busy = false
+                        result.onSuccess { dismissRequested = true }
+                            .onFailure { error = if (kept) "Couldn’t remove the pack" else "Couldn’t add the pack" }
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+            )
+        } else Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
+            if (error != null) Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(error!!, color = colors.error)
+                TextButton(onClick = { attempt++ }) { Text("Retry") }
+            } else CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
         }
     }
 }

@@ -10,8 +10,8 @@ import kotlinx.coroutines.runBlocking
 /**
  * App settings, stored by libcore rather than by the platform.
  *
- * They were SharedPreferences, which `backup_rules.xml` does not ship — it
- * carries the encrypted blob and nothing else — so every reinstall silently
+ * They were SharedPreferences, which `backup_rules.xml` does not ship (it
+ * carries the encrypted blob and nothing else), so every reinstall silently
  * reset them. In core they ride the blob, and iOS gets them for free.
  *
  * Per-conversation flags (pin, mute) are not here at all any more: they are
@@ -40,6 +40,10 @@ object ChatPrefs {
         get() = runCatching { NotifBuzz.valueOf(get(NOTIF_BUZZ)!!) }
             .getOrDefault(NotifBuzz.EveryMessage)
         set(v) = put(NOTIF_BUZZ, v.name)
+
+    var stickerColumns: Int
+        get() = get(STICKER_COLUMNS)?.toIntOrNull()?.coerceIn(3, 6) ?: 5
+        set(v) = put(STICKER_COLUMNS, v.toString())
 
     /** Update channel override ("debug"/"release"); null = follow the installed build. */
     var updateChannel: String?
@@ -72,6 +76,7 @@ object ChatPrefs {
     private const val NOTIF_PREVIEW = "notif_preview"
     private const val NOTIF_BUZZ = "notif_buzz"
     private const val UPDATE_CHANNEL = "update_channel"
+    private const val STICKER_COLUMNS = "sticker_columns"
 }
 
 /** New-message alert cadence, persisted via [ChatPrefs.notifBuzz]. */
