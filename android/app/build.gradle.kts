@@ -195,7 +195,6 @@ android {
         compilerOptions {
             freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
             freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
-            freeCompilerArgs.add("-opt-in=androidx.camera.core.ExperimentalGetImage")
             freeCompilerArgs.add("-XXLanguage:+NestedTypeAliases")
         }
     }
