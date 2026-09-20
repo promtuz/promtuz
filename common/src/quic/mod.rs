@@ -26,6 +26,11 @@ pub fn session_binding(conn: &Connection, label: &[u8]) -> Result<[u8; 32]> {
 
 /// [`session_binding`] under the client-auth label — see
 /// [`crate::proto::client_rel::client_auth_message`].
+///
+/// Gated on `proto`: the label it applies lives there, while `quic` alone is
+/// what `certgen` builds against. Without the gate that binary cannot compile
+/// on its own, and only feature unification across the workspace hides it.
+#[cfg(feature = "proto")]
 pub fn client_auth_binding(conn: &Connection) -> Result<[u8; 32]> {
     session_binding(conn, crate::proto::client_rel::CLIENT_AUTH_EXPORTER_LABEL)
 }
