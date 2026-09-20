@@ -17,9 +17,11 @@ pub struct IdentityRow {
     /// Unix timestamp in milliseconds
     pub created_at: u64,
     pub name: String,
+    /// Our profile picture as AVIF, as last set. `None` when we have none.
+    pub avatar: Option<Vec<u8>>,
 }
 
-from_row!(IdentityRow { id, ipk, enc_isk, created_at, name });
+from_row!(IdentityRow { id, ipk, enc_isk, created_at, name, avatar });
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
@@ -40,6 +42,10 @@ const MIGRATION_ARRAY: &[M] = &[
             unusable_at_ms INTEGER NOT NULL
         );",
     ),
+    // The picture beside the name. It lives with the identity for the reason
+    // the name does: it is what we tell people about ourselves, and a restore
+    // should bring it back with the rest of the profile.
+    M::up("ALTER TABLE identity ADD COLUMN avatar BLOB;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

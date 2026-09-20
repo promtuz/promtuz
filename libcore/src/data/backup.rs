@@ -88,6 +88,22 @@ fn import_extra(extra: &BackupExtra) -> Result<()> {
     Ok(())
 }
 
+/// Second optional suffix, behind [`BackupExtra`]: the rest of the profile.
+///
+/// Its own struct rather than a field on the one before it because postcard is
+/// not self-describing: a field appended to `BackupExtra` would make every blob
+/// written before it fail to decode, while a suffix that is simply absent reads
+/// as its default. The same trick `BackupExtra` itself plays on the payload.
+#[derive(Default, Serialize, Deserialize)]
+struct BackupProfile {
+    /// Our profile picture, AVIF. The name travels in [`BackupPayload`].
+    avatar: Option<Vec<u8>>,
+}
+
+fn profile_now() -> BackupProfile {
+    BackupProfile { avatar: Identity::get().and_then(|i| i.avatar()) }
+}
+
 /// Our own read watermark for a conversation.
 #[derive(Serialize, Deserialize)]
 pub struct ReadRow {
@@ -114,9 +130,12 @@ fn backup_key(isk: &[u8; 32]) -> [u8; 32] {
     okm
 }
 
-fn encode(key: &[u8; 32], payload: &BackupPayload, extra: &BackupExtra) -> Result<Vec<u8>> {
+fn encode(
+    key: &[u8; 32], payload: &BackupPayload, extra: &BackupExtra, profile: &BackupProfile,
+) -> Result<Vec<u8>> {
     let mut plain = postcard::to_allocvec(payload).map_err(|e| anyhow!("encode payload: {e}"))?;
     plain.extend(postcard::to_allocvec(extra).map_err(|e| anyhow!("encode extra: {e}"))?);
+    plain.extend(postcard::to_allocvec(profile).map_err(|e| anyhow!("encode profile: {e}"))?);
     let compressed = lz4_flex::compress_prepend_size(&plain);
 
     let mut nonce = [0u8; 24];
@@ -137,7 +156,7 @@ fn encode(key: &[u8; 32], payload: &BackupPayload, extra: &BackupExtra) -> Resul
     Ok(out)
 }
 
-fn decode(key: &[u8; 32], blob: &[u8]) -> Result<(BackupPayload, BackupExtra)> {
+fn decode(key: &[u8; 32], blob: &[u8]) -> Result<(BackupPayload, BackupExtra, BackupProfile)> {
     let rest = blob.strip_prefix(MAGIC.as_slice()).ok_or_else(|| anyhow!("not a backup blob"))?;
     let (&version, rest) = rest.split_first().ok_or_else(|| anyhow!("truncated blob"))?;
     if version != VERSION {
@@ -156,16 +175,23 @@ fn decode(key: &[u8; 32], blob: &[u8]) -> Result<(BackupPayload, BackupExtra)> {
     split_plain(&plain)
 }
 
-/// Older backups contain only the payload; newer ones include [`BackupExtra`].
-fn split_plain(plain: &[u8]) -> Result<(BackupPayload, BackupExtra)> {
+/// Older backups contain only the payload; newer ones include [`BackupExtra`],
+/// and newer still [`BackupProfile`] behind it. Each suffix is optional, so a
+/// blob from any vintage decodes, with what it never carried at default.
+fn split_plain(plain: &[u8]) -> Result<(BackupPayload, BackupExtra, BackupProfile)> {
     let (payload, rest) =
         postcard::take_from_bytes::<BackupPayload>(plain).map_err(|e| anyhow!("decode payload: {e}"))?;
-    let extra = if rest.is_empty() {
-        BackupExtra::default()
+    if rest.is_empty() {
+        return Ok((payload, BackupExtra::default(), BackupProfile::default()));
+    }
+    let (extra, rest) =
+        postcard::take_from_bytes::<BackupExtra>(rest).map_err(|e| anyhow!("decode extra: {e}"))?;
+    let profile = if rest.is_empty() {
+        BackupProfile::default()
     } else {
-        postcard::from_bytes(rest).map_err(|e| anyhow!("decode extra: {e}"))?
+        postcard::from_bytes(rest).map_err(|e| anyhow!("decode profile: {e}"))?
     };
-    Ok((payload, extra))
+    Ok((payload, extra, profile))
 }
 
 /// Snapshot everything restorable into one encrypted blob. The platform
@@ -188,14 +214,14 @@ pub fn export() -> Result<Vec<u8>> {
         prefs: crate::data::app_prefs::dump_all(),
     };
     let secret = Identity::secret_key_with_manager()?;
-    encode(&backup_key(&secret), &payload, &extra_now())
+    encode(&backup_key(&secret), &payload, &extra_now(), &profile_now())
 }
 
 /// Restore a blob into the local DBs. Requires the identity to already be
 /// restored (the key derives from the isk). Idempotent — upserts throughout.
 pub fn import(blob: &[u8]) -> Result<()> {
     let secret = Identity::secret_key_with_manager()?;
-    let (payload, extra) = decode(&backup_key(&secret), blob)?;
+    let (payload, extra, profile) = decode(&backup_key(&secret), blob)?;
 
     let contacts = Contact::import_rows(&payload.contacts)?;
     // Conversations first: everything below hangs off them.
@@ -207,6 +233,11 @@ pub fn import(blob: &[u8]) -> Result<()> {
     crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
     Identity::set_name(&payload.name)?;
+    // The picture is the one profile field that can fail its own gate; a
+    // restore should not lose the history over it.
+    if let Err(e) = Identity::set_avatar(profile.avatar.as_deref()) {
+        log::warn!("BACKUP: could not restore the profile picture: {e}");
+    }
 
     log::info!(
         "BACKUP: imported {contacts} contacts, {conversations} conversations, \
@@ -251,7 +282,9 @@ pub struct MergeReport {
 /// [`Identity::set_name`] — existing state always wins a collision.
 pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let secret = Identity::secret_key_with_manager()?;
-    let (payload, extra) = decode(&backup_key(&secret), blob)?;
+    // The profile suffix is left alone for the reason the name is: a merge
+    // never rewrites who we are.
+    let (payload, extra, _profile) = decode(&backup_key(&secret), blob)?;
 
     let contacts_added = Contact::merge_rows(&payload.contacts)?;
     let conversations_added =
@@ -311,8 +344,8 @@ mod tests {
     #[test]
     fn blob_roundtrips() {
         let key = backup_key(&[7u8; 32]);
-        let blob = encode(&key, &payload(), &BackupExtra::default()).unwrap();
-        let (back, _) = decode(&key, &blob).unwrap();
+        let blob = encode(&key, &payload(), &BackupExtra::default(), &BackupProfile::default()).unwrap();
+        let (back, _, _) = decode(&key, &blob).unwrap();
         assert_eq!(back.name, "bhuv");
         assert_eq!(back.contacts.len(), 1);
         assert_eq!(back.contacts[0].mls_group_id, Some([9u8; 32]));
@@ -346,7 +379,7 @@ mod tests {
         }];
 
         let key = backup_key(&[7u8; 32]);
-        let (back, _) = decode(&key, &encode(&key, &p, &BackupExtra::default()).unwrap()).unwrap();
+        let (back, _, _) = decode(&key, &encode(&key, &p, &BackupExtra::default(), &BackupProfile::default()).unwrap()).unwrap();
 
         assert_eq!(back.conversations.len(), 1, "the chat itself must survive the round trip");
         assert_eq!(back.conversations[0].id, conv);
@@ -358,7 +391,7 @@ mod tests {
     #[test]
     fn tampered_blob_fails_auth() {
         let key = backup_key(&[7u8; 32]);
-        let mut blob = encode(&key, &payload(), &BackupExtra::default()).unwrap();
+        let mut blob = encode(&key, &payload(), &BackupExtra::default(), &BackupProfile::default()).unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 1;
         assert!(decode(&key, &blob).is_err());
@@ -366,7 +399,7 @@ mod tests {
 
     #[test]
     fn wrong_isk_cannot_open() {
-        let blob = encode(&backup_key(&[7u8; 32]), &payload(), &BackupExtra::default()).unwrap();
+        let blob = encode(&backup_key(&[7u8; 32]), &payload(), &BackupExtra::default(), &BackupProfile::default()).unwrap();
         assert!(decode(&backup_key(&[8u8; 32]), &blob).is_err());
     }
 
@@ -375,7 +408,7 @@ mod tests {
     #[test]
     fn extra_rides_behind_the_payload_and_is_optional() {
         let old = postcard::to_allocvec(&payload()).unwrap();
-        let (back, extra) = split_plain(&old).unwrap();
+        let (back, extra, _) = split_plain(&old).unwrap();
         assert_eq!(back.name, "bhuv");
         assert!(extra.packs.is_empty() && extra.sticker_refs.is_empty());
 
@@ -387,9 +420,40 @@ mod tests {
         };
         let mut new = old.clone();
         new.extend(postcard::to_allocvec(&extra).unwrap());
-        let (_, back) = split_plain(&new).unwrap();
+        let (_, back, _) = split_plain(&new).unwrap();
         assert_eq!(back.sticker_refs.len(), 1);
         assert_eq!(back.sticker_refs[0].sticker, vec![3; 82]);
+    }
+
+    /// The profile rides behind the extra the way the extra rides behind the
+    /// payload: a blob that stops at either earlier point still decodes, with
+    /// no picture, and one that carries it brings the picture back.
+    #[test]
+    fn profile_rides_behind_the_extra_and_is_optional() {
+        let payload_only = postcard::to_allocvec(&payload()).unwrap();
+        let (_, _, profile) = split_plain(&payload_only).unwrap();
+        assert!(profile.avatar.is_none(), "a pre-sticker blob has no picture");
+
+        let mut with_extra = payload_only.clone();
+        with_extra.extend(postcard::to_allocvec(&BackupExtra::default()).unwrap());
+        let (_, _, profile) = split_plain(&with_extra).unwrap();
+        assert!(profile.avatar.is_none(), "a pre-picture blob has no picture");
+
+        let picture = vec![0, 0, 0, 0x1c, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', 9];
+        let mut with_profile = with_extra.clone();
+        with_profile
+            .extend(postcard::to_allocvec(&BackupProfile { avatar: Some(picture.clone()) }).unwrap());
+        let (back, _, profile) = split_plain(&with_profile).unwrap();
+        assert_eq!(back.name, "bhuv", "the payload in front is untouched");
+        assert_eq!(profile.avatar, Some(picture), "and the picture comes back");
+
+        let key = backup_key(&[7u8; 32]);
+        let blob = encode(&key, &payload(), &BackupExtra::default(), &BackupProfile {
+            avatar: Some(vec![1, 2, 3]),
+        })
+        .unwrap();
+        let (_, _, profile) = decode(&key, &blob).unwrap();
+        assert_eq!(profile.avatar, Some(vec![1, 2, 3]), "sealed and opened whole");
     }
 
     #[test]

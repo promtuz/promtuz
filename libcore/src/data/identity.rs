@@ -95,14 +95,15 @@ impl Identity {
 
         conn.execute(
             "INSERT INTO identity (
-                    id, ipk, enc_isk, created_at, name
-                 ) VALUES (?1, ?2, ?3, ?4, ?5);",
+                    id, ipk, enc_isk, created_at, name, avatar
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
             (
                 identity.id,
                 identity.ipk,
                 identity.enc_isk.clone(),
                 identity.created_at,
                 identity.name.clone(),
+                identity.avatar.clone(),
             ),
         )?;
 
@@ -127,6 +128,7 @@ impl Identity {
             enc_isk,
             created_at: systime().as_millis() as u64,
             name,
+            avatar: None,
         })?;
         Ok(())
     }
@@ -137,6 +139,24 @@ impl Identity {
         let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
         let conn = IDENTITY_DB.lock();
         conn.execute("UPDATE identity SET name = ?1 WHERE id = 0", [name])?;
+        Ok(())
+    }
+
+    /// Our profile picture as AVIF bytes, if we set one.
+    pub fn avatar(&self) -> Option<Vec<u8>> {
+        self.inner.avatar.clone()
+    }
+
+    /// Replace the profile picture, or with `None` remove it. Takes what the
+    /// media pipeline produced, never a raw upload: the cap is the wire's, and
+    /// a row that broke it could never be told to anyone.
+    pub fn set_avatar(avif: Option<&[u8]>) -> Result<()> {
+        if let Some(bytes) = avif {
+            crate::data::peer_avatar::check_avif(bytes)?;
+        }
+        let conn = IDENTITY_DB.lock();
+        conn.execute("UPDATE identity SET avatar = ?1 WHERE id = 0", [avif])?;
+        crate::data::peer_avatar::bump_generation();
         Ok(())
     }
 
@@ -160,6 +180,7 @@ impl Identity {
             enc_isk,
             created_at: systime().as_millis() as u64,
             name,
+            avatar: None,
         })?;
         Ok(())
     }

@@ -3,6 +3,7 @@
 //! every platform; the platform owns decode (HEIC/HDR/EXIF) + video/PDF.
 
 use anyhow::{bail, Result};
+use common::proto::mls_wire::MAX_AVATAR_BYTES;
 use ravif::{Encoder, Img};
 use rgb::FromSlice;
 
@@ -86,6 +87,46 @@ pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     encode_avif(blurred.as_raw(), tw, th, 50.0)
 }
 
+/// Longest side of a profile picture. Enough for a header at 3x density, and
+/// small enough that the file stays a few kilobytes: it travels inside an MLS
+/// frame to every chat we are in, and again to every member who joins one.
+pub const AVATAR_EDGE: u32 = 256;
+
+/// Square-crop `rgba` about its centre, shrink it to at most [`AVATAR_EDGE`]
+/// (never enlarged), and AVIF-encode it under [`MAX_AVATAR_BYTES`]. Quality
+/// steps down before size does, since the frame is already small; a picture
+/// that fits at no quality is refused rather than shipped over the cap.
+pub fn avatar_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 {
+        bail!("zero dimension");
+    }
+    if rgba.len() != width as usize * height as usize * 4 {
+        bail!("rgba len mismatch");
+    }
+    // Owned, unlike the other encoders: `to_image` on the crop wants a buffer
+    // that outlives the call, and a picture this size is cheap to copy once.
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
+
+    let side = width.min(height);
+    let square =
+        image::imageops::crop_imm(&img, (width - side) / 2, (height - side) / 2, side, side)
+            .to_image();
+    let edge = side.min(AVATAR_EDGE);
+    let scaled = if edge == side {
+        square
+    } else {
+        image::imageops::resize(&square, edge, edge, image::imageops::FilterType::Lanczos3)
+    };
+
+    for quality in [65.0, 45.0, 30.0] {
+        let out = encode_avif(scaled.as_raw(), edge, edge, quality)?;
+        if out.len() <= MAX_AVATAR_BYTES {
+            return Ok(out);
+        }
+    }
+    bail!("could not encode the picture under {MAX_AVATAR_BYTES} bytes");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +201,51 @@ mod tests {
     #[test]
     fn blur_thumb_rejects_zero_dimension() {
         assert!(blur_thumb(&[], 0, 0).is_err());
+    }
+
+    // Photo-like input: smooth gradients, the case a real picture is. Must
+    // encode, and must land under the cap on the first quality step.
+    fn gradient_rgba(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                v.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, 128, 255]);
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn avatar_from_a_landscape_photo_is_a_capped_avif() {
+        let (w, h) = (640, 480);
+        let out = avatar_from_rgba(&gradient_rgba(w, h), w, h).unwrap();
+        assert!(is_avif(&out), "not a valid avif");
+        assert!(out.len() <= MAX_AVATAR_BYTES, "over cap: {}", out.len());
+    }
+
+    // A source smaller than the edge is neither cropped nor enlarged, and a
+    // portrait one crops as well as a landscape one.
+    #[test]
+    fn avatar_handles_small_and_portrait_sources() {
+        let out = avatar_from_rgba(&gradient_rgba(40, 40), 40, 40).unwrap();
+        assert!(is_avif(&out));
+        let out = avatar_from_rgba(&gradient_rgba(300, 900), 300, 900).unwrap();
+        assert!(is_avif(&out));
+    }
+
+    // Worst-case entropy: whatever the codec manages, the contract is that an
+    // Ok is never over the cap. An Err is the honest alternative, not a leak.
+    #[test]
+    fn avatar_never_returns_over_the_cap() {
+        let (w, h) = (256, 256);
+        if let Ok(out) = avatar_from_rgba(&noisy_rgba(w, h), w, h) {
+            assert!(out.len() <= MAX_AVATAR_BYTES, "over cap: {}", out.len());
+        }
+    }
+
+    #[test]
+    fn avatar_rejects_bad_input() {
+        assert!(avatar_from_rgba(&[], 0, 0).is_err());
+        assert!(avatar_from_rgba(&[0u8; 12], 2, 2).is_err(), "len mismatch");
     }
 }

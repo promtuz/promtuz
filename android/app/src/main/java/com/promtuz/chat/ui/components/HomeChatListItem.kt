@@ -45,6 +45,7 @@ import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
 import kotlinx.coroutines.withTimeoutOrNull
+import com.promtuz.chat.utils.media.rememberAvatar
 
 private enum class DownResult { TAP, SCROLL, GONE }
 
@@ -158,7 +159,7 @@ fun HomeChatListItem(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (chat.isGroup) GroupAvatar(title = chat.name, members = emptyList())
-            else Avatar(chat.name, statusColor = presenceColor(presence))
+            else Avatar(chat.name, statusColor = presenceColor(presence), image = rememberAvatar(chat.peerHex))
 
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(

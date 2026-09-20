@@ -2011,17 +2011,38 @@ enum WelcomeOutcome {
     Rejected(u8),
 }
 
-/// Tell a group what we call ourselves.
+/// What we tell a chat about ourselves: our name, and our picture when we have
+/// one. Each rides its own control message, so a member who already holds one
+/// of them loses nothing when only the other changes.
+fn own_introduction() -> Vec<AppPayload> {
+    let Some(identity) = Identity::get() else { return Vec::new() };
+    let mut out = Vec::with_capacity(2);
+    let name = identity.name();
+    if !name.is_empty() {
+        out.push(AppPayload::Profile { name });
+    }
+    if let Some(avif) = identity.avatar() {
+        out.push(AppPayload::Avatar { avif: Some(avif) });
+    }
+    out
+}
+
+/// Tell a group what we call ourselves, and what we look like.
 ///
 /// Best-effort and fire-and-forget: a missed introduction costs a name, and the
 /// members who never hear it fall back to our key's head. Spawned rather than
 /// awaited because every caller is on a receive path that must not block on a
 /// send.
 pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
-    let Some(name) = Identity::get().map(|i| i.name()).filter(|n| !n.is_empty()) else { return };
+    let payloads = own_introduction();
+    if payloads.is_empty() {
+        return;
+    }
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = send_control(conversation, AppPayload::Profile { name }).await {
-            debug!("PROFILE: could not introduce ourselves: {e}");
+        for payload in payloads {
+            if let Err(e) = send_control(conversation, payload).await {
+                debug!("PROFILE: could not introduce ourselves: {e}");
+            }
         }
     });
 }
@@ -2029,10 +2050,47 @@ pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
 /// Tell one member what we call ourselves — for someone who joined after us,
 /// and so never heard the introduction we made on the way in.
 pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
-    let Some(name) = Identity::get().map(|i| i.name()).filter(|n| !n.is_empty()) else { return };
+    let payloads = own_introduction();
+    if payloads.is_empty() {
+        return;
+    }
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = send_control_to(conversation, AppPayload::Profile { name }, who).await {
-            debug!("PROFILE: could not introduce ourselves to a new member: {e}");
+        for payload in payloads {
+            if let Err(e) = send_control_to(conversation, payload, who).await {
+                debug!("PROFILE: could not introduce ourselves to a new member: {e}");
+            }
+        }
+    });
+}
+
+/// Our picture alone, for a chat that already knows our name. A pair carries
+/// the name in the invite, so saying it again would tell them nothing.
+pub(crate) fn introduce_avatar(conversation: [u8; 16]) {
+    let Some(avif) = Identity::get().and_then(|i| i.avatar()) else { return };
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = send_control(conversation, AppPayload::Avatar { avif: Some(avif) }).await {
+            debug!("PROFILE: could not send our picture: {e}");
+        }
+    });
+}
+
+/// Our picture changed, or went: tell every chat we can still speak in. `None`
+/// is a removal, and travels too, so a member stops showing a face we took
+/// down. Outboxed like any control message, so a chat we are offline for
+/// hears it on reconnect.
+pub(crate) fn broadcast_avatar(avif: Option<Vec<u8>>) {
+    let Some(me) = Identity::get().map(|i| i.ipk()) else { return };
+    let chats: Vec<[u8; 16]> = Conversation::list()
+        .into_iter()
+        .filter(|c| c.mls_group_id.is_some())
+        .map(|c| c.id)
+        .filter(|id| Conversation::members(id).iter().any(|m| m.active && m.member_ipk == me))
+        .collect();
+    crate::RUNTIME.spawn(async move {
+        for id in chats {
+            if let Err(e) = send_control(id, AppPayload::Avatar { avif: avif.clone() }).await {
+                debug!("PROFILE: could not send our picture to {}: {e}", hex::encode(&id[..4]));
+            }
         }
     });
 }
@@ -2484,7 +2542,13 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
                 // process_deliver, so the ack must fire here too — otherwise an
                 // offline-received pair never confirms.
                 crate::RUNTIME.spawn(async move {
-                    let _ = send_pair_ack(sender_ipk).await;
+                    // They hold our name from the invite; the picture is new
+                    // to them, and only worth sending once the pair works.
+                    if send_pair_ack(sender_ipk).await.is_ok()
+                        && let Ok(conv) = Conversation::for_peer(&sender_ipk)
+                    {
+                        introduce_avatar(conv);
+                    }
                 });
             },
             Ok(WelcomeOutcome::Rejected(reason)) => {

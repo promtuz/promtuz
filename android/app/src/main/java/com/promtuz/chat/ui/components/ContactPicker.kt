@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import com.promtuz.chat.presentation.viewmodel.GroupWork
 import com.promtuz.chat.presentation.viewmodel.UiMember
+import com.promtuz.chat.utils.media.rememberAvatar
 
 /** Shared contact rows for starting chats, creating groups and adding members. */
 @Composable
@@ -89,7 +90,7 @@ fun ContactPicker(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    SelectableContactAvatar(person.name, selecting, person.ipkHex in selected)
+                    SelectableContactAvatar(person.name, person.ipkHex, selecting, person.ipkHex in selected)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(person.name, style = MaterialTheme.typography.bodyLarge,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -102,14 +103,14 @@ fun ContactPicker(
 }
 
 @Composable
-private fun SelectableContactAvatar(name: String, selecting: Boolean, selected: Boolean) {
+private fun SelectableContactAvatar(name: String, ipkHex: String, selecting: Boolean, selected: Boolean) {
     val colors = MaterialTheme.colorScheme
     val scale by animateFloatAsState(if (selected) 0.94f else 1f, spring(), label = "selected avatar")
     val check by animateFloatAsState(if (selected) 1f else 0f, spring(), label = "contact check")
     val fill by animateColorAsState(if (selected) colors.primary else colors.surfaceContainerHigh,
         ChatMotion.spec(), label = "contact selection fill")
     Box(Modifier.size(48.dp)) {
-        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp) }
+        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp, image = rememberAvatar(ipkHex)) }
         AnimatedVisibility(selected, Modifier.align(Alignment.BottomEnd),
             enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.4f),
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {
