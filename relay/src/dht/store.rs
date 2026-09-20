@@ -633,7 +633,6 @@ mod tests {
         assert!(!found_overflow, "QueueFull rejection must not write the entry");
     }
 
-    #[test]
     /// The local fallback queue stores `DeliverP` and is reached whenever the
     /// K-home fan-out misses quorum, so it needs the same admission scan.
     #[test]
