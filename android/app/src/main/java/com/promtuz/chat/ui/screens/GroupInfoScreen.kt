@@ -14,6 +14,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.promtuz.chat.presentation.viewmodel.*
+import com.promtuz.chat.ui.components.AppBottomSheet
 import com.promtuz.chat.ui.components.*
 import org.koin.androidx.compose.koinViewModel
 
@@ -186,9 +187,10 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
                 actions.clearError()
             }
         }
-        ModalBottomSheet(
+        AppBottomSheet(
             onDismissRequest = { if (!busy) { adding = false; actions.clearError() } },
             sheetState = sheetState,
+            dismissEnabled = !busy,
         ) {
             Column(Modifier.fillMaxHeight(0.9f)) {
                 fun closePickerMode() {
