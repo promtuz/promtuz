@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -45,20 +44,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
-/**
- * Reserves the composer's keyboard or panel height, including system insets.
- *
- * Jump-free rule: the region height is sourced from ONE animating thing at a
- * time, never a blend. [presence] is SNAPPED (not tweened) whenever the keyboard
- * is what's moving, so we ride the system's own keyboard animation:
- *  - open with keyboard up   → snap present, THEN hide the keyboard (order matters:
- *    `panelH` must hold the region before the ime starts dropping, or it collapses
- *    for a frame). The keyboard's slide-down uncovers the already-full-height sheet.
- *  - close to keyboard        → hold present while the rising keyboard covers the
- *    sheet, then drop it in one step (never tween down INTO a rising inset).
- *  - open/close with no keyboard → the only case we animate ourselves.
- * [panelH] is learned from `imeAnimationTarget` (the SETTLED target), not the live
- * max — the live max captures the keyboard's overshoot and makes the sheet too tall.
+/*
+ * The region is as tall as whatever is moving: the keyboard while it moves, the panel otherwise.
+ * Under a keyboard that is leaving the panel snaps in first, and under one that is arriving it
+ * stays until the keyboard has fully covered it, so the messages above never shift.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -70,58 +59,44 @@ fun ComposerPanel(
     content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
-    val ime = WindowInsets.ime.getBottom(density)                      // live, system-animated
-    val imeTarget = WindowInsets.imeAnimationTarget.getBottom(density) // settled target (no overshoot)
+    val ime = WindowInsets.ime.getBottom(density)
+    val imeTarget = WindowInsets.imeAnimationTarget.getBottom(density)
     val nav = WindowInsets.navigationBars.getBottom(density)
-    val kbdUp = with(density) { 120.dp.roundToPx() }                   // ime above this = keyboard really up
+    val keyboardMin = with(density) { 120.dp.roundToPx() }
 
-    // Learn the SETTLED keyboard height. Falls back to 300.dp until first seen.
     var learned by remember { mutableIntStateOf(0) }
-    val imeTargetState = rememberUpdatedState(imeTarget)
+    val target = rememberUpdatedState(imeTarget)
+    val opened = rememberUpdatedState(open)
     LaunchedEffect(Unit) {
-        snapshotFlow { imeTargetState.value }.collect { if (it > kbdUp) learned = it }
+        snapshotFlow { target.value }.collect { if (it > keyboardMin && !opened.value) learned = it }
     }
     val panelH = if (learned > 0) learned else with(density) { 300.dp.roundToPx() }
 
-    // Presence 0..1. Snapped for keyboard-driven transitions, tweened only when no
-    // keyboard moves — so the region never averages two curves.
     val presence = remember { Animatable(0f) }
-    val imeLive = rememberUpdatedState(ime)
-    val imeVisible = rememberUpdatedState(WindowInsets.isImeVisible)
+    val live = rememberUpdatedState(ime)
     val hide = rememberUpdatedState(onHideKeyboard)
     LaunchedEffect(open, closingToKeyboard) {
-        if (open) {
-            if (imeLive.value > kbdUp) {
-                presence.snapTo(1f)   // present FIRST so panelH holds the region,
-                hide.value()          // THEN hide the keyboard — its exit uncovers the sheet
+        val keyboardUp = { target.value > keyboardMin && live.value >= target.value }
+        when {
+            open -> if (live.value > 0) {
+                presence.snapTo(1f)
+                hide.value()
             } else {
-                // Floating/handwriting keyboards can be visible with zero inset.
                 hide.value()
                 presence.animateTo(1f, tween(240))
             }
-        } else if (closingToKeyboard) {
-            // Hold the sheet until the keyboard is FULLY up (live ime has reached its
-            // target), THEN drop in one step. Snapping any earlier leaves the region
-            // below where the keyboard now is — that's the end-of-close jump. Timeout
-            // guards a keyboard that never actually shows.
-            withTimeoutOrNull(600) {
-                snapshotFlow { Triple(imeVisible.value, imeLive.value, imeTargetState.value) }
-                    .first { (visible, live, target) -> visible && (target <= kbdUp || live >= target) }
+            closingToKeyboard -> {
+                withTimeoutOrNull(250) { snapshotFlow { !keyboardUp() }.first { it } }
+                val arrived = withTimeoutOrNull(1500) { snapshotFlow { keyboardUp() }.first { it } } != null
+                if (arrived) presence.snapTo(0f) else presence.animateTo(0f, tween(240))
             }
-            if (imeTargetState.value > kbdUp) presence.snapTo(0f)
-            else presence.animateTo(0f, tween(240))
-        } else {
-            presence.animateTo(0f, tween(240))       // no keyboard: slide down
+            else -> presence.animateTo(0f, tween(240))
         }
     }
 
     val regionPx = maxOf(ime, (panelH * presence.value).roundToInt(), nav)
-    // The stage reserves this too, and holds its scroll position across it — the
-    // region covers content rather than displacing it.
     Box(Modifier.fillMaxWidth().height(with(density) { regionPx.toDp() })) {
         if (presence.value > 0f) {
-            // Anchored bottom at the full learned height; the region uncovers it. A
-            // rounded-top translucent sheet sharing the composer's blur recipe.
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -137,21 +112,15 @@ fun ComposerPanel(
     }
 }
 
-/** The attachments panel: an inline photo grid or the file picker, under floating pill tabs. */
 @Composable
 fun AttachPanelBody(
-    /**
-     * During editing, restrict sources to the target message's supported replacements.
-     */
     allowPhotos: Boolean,
     allowFiles: Boolean,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
     onSendPhotos: (List<Uri>) -> Unit,
 ) {
-    // Open on whichever source is permitted, so a narrowed panel never shows an
-    // empty pane before the user notices the tab they wanted is gone.
-    var tab by remember(allowPhotos) { mutableStateOf(if (allowPhotos) 0 else 1) } // 0 = Photos, 1 = Files
+    var tab by remember(allowPhotos) { mutableStateOf(if (allowPhotos) 0 else 1) }
 
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().navigationBarsPadding(), contentAlignment = Alignment.Center) {
@@ -159,7 +128,6 @@ fun AttachPanelBody(
             else PlaceholderAction("Browse files", onPickFiles)
         }
 
-        // Floating pill tabs, bottom-centered above the nav bar, over the content.
         Row(
             Modifier
                 .align(Alignment.BottomCenter)
@@ -193,7 +161,6 @@ private fun PillTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Centered action for opening a system picker. */
 @Composable
 fun PlaceholderAction(label: String, onClick: () -> Unit) {
     val accent = LocalChatColors.current.accent

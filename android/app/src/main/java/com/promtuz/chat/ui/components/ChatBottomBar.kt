@@ -20,6 +20,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -58,6 +60,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
@@ -238,7 +241,7 @@ fun ChatBottomBar(
                             it,
                             onCancel = { if (!busy && action != null) viewModel.cancelComposerAction() },
                             // Editing can't reach the body's media from the field, so
-                            // the block's line opens the picker — narrowed to whatever
+                            // the block's line opens the picker, narrowed to whatever
                             // the target may legally become.
                             onAddMedia = { if (!busy && action != null) open(ComposerPanelKind.Attach) },
                             onJumpTo = { if (action != null) onJumpTo(it) },
@@ -276,14 +279,14 @@ fun ChatBottomBar(
             }
         }
         // Editing narrows what may be picked to what the target's body can legally
-        // become — the client half of libcore's revision matrix, so a swap the core
+        // become: the client half of libcore's revision matrix, so a swap the core
         // would refuse is never on offer.
         val editing = (action as? ComposerAction.Edit)?.msg?.content
         ComposerPanel(
             open = openPanel != null,
             closingToKeyboard = closingToKeyboard,
             haze = haze,
-            onHideKeyboard = { focusManager.clearFocus() },
+            onHideKeyboard = { keyboard?.hide() },
         ) {
             when (shownPanel) {
                 ComposerPanelKind.Attach -> AttachPanelBody(
@@ -348,7 +351,7 @@ private fun ComposerSlots(metrics: ComposerMetrics, content: @Composable () -> U
 /**
  * A reveal slot: reports [progress] of its content's height and places the
  * content at its own top edge. The content rides the bar's rising edge and is
- * uncovered top-down — a reply's label before its snippet — with the fade
+ * uncovered top-down, a reply's label before its snippet, with the fade
  * tracking the same value so the clip line never reads as a cut.
  *
  * The parent measures the revealed allocation and publishes that actual height
@@ -374,7 +377,7 @@ private fun Reveal(
 }
 
 /**
- * The staged reply/edit line — label, one-line snippet, cancel — drawn straight
+ * The staged reply/edit line (label, one-line snippet, cancel) drawn straight
  * onto the bar's surface. One line always, so a swap never resizes the bar and the
  * snippet can roll in place ([AppBarDynamicTitle]'s treatment); the label, being
  * one of two fixed strings, just cuts.
@@ -398,7 +401,7 @@ private fun ComposerActionBlock(
         is MessageContent.Image -> content.bitmap
         is MessageContent.Attachment -> content.thumb
         is MessageContent.Sticker -> StickerImages.peek(content.sticker)
-        // An album's cover is its first member — the one that carries the caption.
+        // An album's cover is its first member, the one that carries the caption.
         is MessageContent.Album -> content.items.firstOrNull()?.content?.let {
             when (it) {
                 is MessageContent.Image -> it.bitmap
@@ -410,7 +413,7 @@ private fun ComposerActionBlock(
     }
 
     // A reply names what it's answering. An edit doesn't: the text is already in
-    // the field and editable, so repeating it is noise — the line offers the one
+    // the field and editable, so repeating it is noise. The line offers the one
     // part of the body the composer can't otherwise reach.
     val snippet = when {
         action.msg.deleted -> "Deleted message"
@@ -491,7 +494,7 @@ private fun ComposerActionBlock(
                 Text(
                     s,
                     style = MaterialTheme.typography.bodyMedium,
-                    // The edit line is an affordance, not a quote — tinted so it
+                    // The edit line is an affordance, not a quote, tinted so it
                     // reads as something to press rather than something to read.
                     color = if (offersMedia) chat.accent else colors.onSurfaceVariant,
                     maxLines = 1,
@@ -511,7 +514,7 @@ private fun ComposerActionBlock(
     }
 }
 
-/** The input row itself — unstyled; the pill above it owns shape, blur and inset. */
+/** The input row itself, unstyled. The pill above it owns shape, blur and inset. */
 @Composable
 private fun ComposerRow(
     viewModel: ChatVM,
@@ -530,7 +533,7 @@ private fun ComposerRow(
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
 
-    // Buffered media is a draft on its own — text is optional once something's
+    // Buffered media is a draft on its own. Text is optional once something's
     // staged. Held while anything is still encoding: libcore refuses a
     // half-prepared item, so an enabled button there would fail silently.
     val staged by viewModel.staged.collectAsState()
@@ -544,6 +547,7 @@ private fun ComposerRow(
     val canClearCaption = editing?.msg?.content is MessageContent.Image || editing?.msg?.content is MessageContent.Attachment
     val hasContent = input.isNotBlank() || staged.isNotEmpty()
     val hasDraft = (hasContent || canClearCaption) && staged.all { it.ready } && !busy
+    val panelOpen = attachOpen || stickersOpen
 
     Row(
         modifier.fillMaxWidth(),
@@ -586,6 +590,9 @@ private fun ComposerRow(
             modifier = Modifier.weight(1f)
                 .then(textExit.modifier)
                 .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart)
+                .pointerInput(panelOpen) {
+                    if (panelOpen) awaitEachGesture { awaitFirstDown(requireUnconsumed = false); onFieldFocused() }
+                }
                 .focusRequester(fieldFocus)
                 .onFocusChanged { if (it.isFocused) onFieldFocused() }
                 .semantics { contentDescription = "Message input" },
@@ -598,7 +605,7 @@ private fun ComposerRow(
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     // Staged media makes the field a caption for it, not a message
-                    // of its own — the send commits one thing either way.
+                    // of its own. The send commits one thing either way.
                     if (input.isEmpty()) Text(
                         if (staged.isEmpty()) "Message" else "Caption",
                         style = MaterialTheme.typography.bodyLarge,
@@ -622,7 +629,7 @@ private fun ComposerRow(
 
         // The trailing slot is ALWAYS occupied at a fixed size so the pill's
         // height never jumps: mic by default, send when there's a draft,
-        // crossfading in place. Solid accent, no haze — a blurred layer under
+        // crossfading in place. Solid accent, no haze, since a blurred layer under
         // the circle rendered as a square. Held while media is still encoding:
         // the tap then does nothing rather than start a recording under a draft.
         Box(
@@ -671,7 +678,7 @@ private fun ComposerRow(
 /**
  * The input row while a voice note records: a level-driven red dot, the
  * elapsed time, cancel, and the same accent send circle the draft uses. Tap
- * to start and tap to send rather than hold — one gesture fewer to get wrong,
+ * to start and tap to send rather than hold, one gesture fewer to get wrong,
  * and the note survives a glance away from the screen.
  */
 @Composable
