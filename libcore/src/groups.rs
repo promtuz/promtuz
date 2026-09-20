@@ -177,11 +177,15 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
         let env = crate::mls::make_welcome_envelope(
             welcome, group_id, our_ipk, who, kp_ref, &ipk_signer,
         )
-        .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
-        ctx.dht.deliver_welcome(&env).await.map_err(|e| anyhow!("deliver_welcome: {e}"))?;
+        .map_err(|e| abandon(&mut group, ctx.provider, anyhow!("make_welcome_envelope: {e}")))?;
+        ctx.dht
+            .deliver_welcome(&env)
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, anyhow!("deliver_welcome: {e}")))?;
 
         fan_out_commit(&conversation, &commit, group_id, commit_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
@@ -250,7 +254,8 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
             .remove_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[idx])
             .map_err(|e| anyhow!("remove_members: {e}"))?;
         fan_out_commit_to(&recipients, &commit, group_id, commit_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
@@ -267,7 +272,8 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
             .map_err(|e| anyhow!("self_update: {e}"))?;
         let remaining = Conversation::recipients(&conversation);
         fan_out_commit_to(&remaining, &update, group_id, rotate_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit after self_update: {e}"))?;
@@ -358,6 +364,19 @@ async fn fan_out_commit_to(
         .await;
     }
     Ok(())
+}
+
+/// The change that built `group`'s pending commit failed before it reached
+/// anyone: drop the commit, so the group stays at the epoch the members share.
+/// The builders would clear it on the next attempt anyway; clearing here keeps
+/// the stored state honest in between. Returns `why` so it slots into `map_err`.
+fn abandon(
+    group: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, why: anyhow::Error,
+) -> anyhow::Error {
+    if let Err(e) = group.clear_pending_commit(provider) {
+        warn!("GROUP: could not drop an unmerged commit: {e}");
+    }
+    why
 }
 
 /// Turn a KeyPackage miss into something a person can act on.
