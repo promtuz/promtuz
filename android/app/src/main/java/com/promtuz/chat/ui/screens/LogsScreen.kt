@@ -22,7 +22,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.promtuz.chat.ui.components.AppBottomSheet
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
@@ -76,7 +76,7 @@ private fun LogExportSheet(onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val logs by AppLogger.logs.collectAsState()
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()

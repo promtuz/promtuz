@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiStickerPack
 import com.promtuz.chat.ui.appearance.LocalChatColors
@@ -47,18 +48,11 @@ import com.promtuz.chat.ui.stage.ChatMotion
 import com.promtuz.chat.utils.media.rememberStickerBitmap
 import kotlinx.coroutines.launch
 
-/** Grid cell edge; the columns follow from the width. */
-private val CellSize = 72.dp
-/** Pack cover in the strip. */
+internal val StickerGap = 8.dp
 private val TabSize = 36.dp
 
-/** One section of the grid: a heading followed by its stickers. */
-private data class Section(val key: String, val title: String, val stickers: List<StickerRef>) {
-    /** Grid index of the heading, given the sections before it. */
-    var start: Int = 0
-}
+private class Section(val key: String, val title: String, val stickers: List<StickerRef>, val start: Int)
 
-/** Installed packs and recent stickers, with tabs tracking the visible grid section. */
 @Composable
 fun StickerPanelBody(
     packs: List<UiStickerPack>,
@@ -84,14 +78,19 @@ fun StickerPanelBody(
     }
 
     val sections = remember(packs, recents) {
+        var index = 0
         buildList {
-            if (recents.isNotEmpty()) add(Section("recent", "Recent", recents))
-            packs.forEach { add(Section(it.packHex, it.name, it.stickers)) }
-        }.also { list ->
-            var index = 0
-            list.forEach { s -> s.start = index; index += 1 + s.stickers.size }
+            if (recents.isNotEmpty()) {
+                add(Section("recent", "Recent", recents, index))
+                index += 1 + recents.size
+            }
+            packs.forEach {
+                add(Section(it.packHex, it.name, it.stickers, index))
+                index += 1 + it.stickers.size
+            }
         }
     }
+    val columns = remember { ChatPrefs.stickerColumns }
     val grid = rememberLazyGridState()
     val scope = rememberCoroutineScope()
     val current by remember(sections) {
@@ -147,21 +146,23 @@ fun StickerPanelBody(
                     .semantics { contentDescription = "Manage stickers" },
                 contentAlignment = Alignment.Center,
             ) {
-                DrawableIcon(R.drawable.oi_settings, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+                DrawableIcon(R.drawable.oi_settings, tint = colors.onSurfaceVariant)
             }
         }
 
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(CellSize),
+            columns = GridCells.Fixed(columns),
             state = grid,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 6.dp, end = 6.dp, bottom = 8.dp),
+            contentPadding = PaddingValues(start = StickerGap, end = StickerGap, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(StickerGap),
+            verticalArrangement = Arrangement.spacedBy(StickerGap),
         ) {
             sections.forEach { section ->
                 item(key = "h:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
                     Text(
                         section.title,
-                        Modifier.padding(start = 8.dp, top = 10.dp, bottom = 4.dp),
+                        Modifier.padding(start = 2.dp, top = 6.dp),
                         style = MaterialTheme.typography.labelMedium,
                         color = colors.onSurfaceVariant,
                         maxLines = 1,
@@ -177,23 +178,14 @@ fun StickerPanelBody(
     }
 }
 
-/** One sticker in a grid, drawn fitted inside a square cell. */
 @Composable
 fun StickerCell(ref: StickerRef, onClick: (() -> Unit)? = null) {
     val bitmap = rememberStickerBitmap(ref)
     Box(
-        Modifier
-            .aspectRatio(1f)
-            .padding(3.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(4.dp),
+        Modifier.aspectRatio(1f).then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        else Box(
-            Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)),
-        )
+        else Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f)))
     }
 }

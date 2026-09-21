@@ -1,8 +1,13 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SystemEventKind
 import com.promtuz.chat.domain.model.UiMessage
+
+/** Stable across every outgoing status, including pending and failed. */
+internal val BubbleStatusSize = 16.dp
+internal val BubbleStatusGap = 3.dp
 
 /**
  * Static helpers for a message's display text and its meta label (send time,
@@ -31,9 +36,6 @@ object BubbleTextLayouts {
     fun metaLabelOf(msg: UiMessage): String = buildString {
         if (msg.edited && !msg.deleted) append("edited ")
         append(clock(msg.timestampMs))
-        // A group's tick can't say "read" — it would have to mean everyone.
-        // The count says exactly what's known instead.
-        if (msg.seenBy > 0) append("  seen ${msg.seenBy}")
     }
 
     private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())

@@ -24,7 +24,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,7 +42,6 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.utils.media.rememberStickerBitmap
@@ -61,7 +59,10 @@ private val AlbumGap = 2.dp
  * a null bitmap shows a muted stand-in of the same size, never a collapse.
  */
 @Composable
-fun ImageBlock(image: MessageContent.Image, textColor: Color, fontScale: Float, metaLabel: String) {
+fun ImageBlock(
+    image: MessageContent.Image, textColor: Color, fontScale: Float, metaLabel: String,
+    outgoing: Boolean = false,
+) {
     val ratio = (if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f)
         .coerceIn(0.6f, 1.9f)
     Column {
@@ -77,7 +78,9 @@ fun ImageBlock(image: MessageContent.Image, textColor: Color, fontScale: Float, 
                 Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
         }
-        if (image.caption.isNotEmpty()) Caption(image.caption, textColor, fontScale, metaLabel, inset = true)
+        if (image.caption.isNotEmpty()) {
+            Caption(image.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
+        }
     }
 }
 
@@ -92,6 +95,7 @@ fun ImageBlock(image: MessageContent.Image, textColor: Color, fontScale: Float, 
 @Composable
 fun AlbumBlock(
     album: MessageContent.Album, textColor: Color, fontScale: Float, metaLabel: String,
+    outgoing: Boolean = false,
 ) {
     val cols = when {
         album.items.size <= 2 -> album.items.size.coerceAtLeast(1)
@@ -123,7 +127,9 @@ fun AlbumBlock(
                 }
             }
         }
-        if (album.caption.isNotEmpty()) Caption(album.caption, textColor, fontScale, metaLabel, inset = true)
+        if (album.caption.isNotEmpty()) {
+            Caption(album.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
+        }
     }
 }
 
@@ -190,7 +196,7 @@ fun AttachmentBlock(
             }
             TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
         }
-        Caption(att.caption, textColor, fontScale, metaLabel, inset = false)
+        Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = false)
     }
 }
 
@@ -340,22 +346,33 @@ private fun TransferAffordance(
  */
 @Composable
 private fun Caption(
-    text: String, textColor: Color, fontScale: Float, metaLabel: String, inset: Boolean,
+    text: String, textColor: Color, fontScale: Float, metaLabel: String,
+    outgoing: Boolean, inset: Boolean,
 ) {
     val style = if (text.isEmpty()) MaterialTheme.typography.labelSmall
     else MaterialTheme.typography.bodyLarge.let { it.copy(fontSize = it.fontSize * fontScale) }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val metaStyle = MaterialTheme.typography.labelSmall
-    val labelPx = remember(metaLabel, metaStyle) { measurer.measure(metaLabel, metaStyle).size.width }
-    val metaWidth = with(density) { (labelPx + 8.dp.roundToPx()).toSp() }
+    // Use the exact label and fixed status footprint rendered by MetaRow. The
+    // measurer already caches; an outer remember would miss density/font changes.
+    val labelSize = measurer.measure(metaLabel, metaStyle, maxLines = 1, softWrap = false).size
+    val metaWidth = with(density) {
+        val statusPx = if (outgoing) {
+            BubbleStatusSize.roundToPx() + BubbleStatusGap.roundToPx()
+        } else 0
+        (labelSize.width + 8.dp.roundToPx() + statusPx).toSp()
+    }
+    val metaHeight = with(density) {
+        maxOf(labelSize.height, if (outgoing) BubbleStatusSize.roundToPx() else 0).toSp()
+    }
 
     val annotated = buildAnnotatedString {
         append(text)
         appendInlineContent("meta")
     }
     val inline = mapOf(
-        "meta" to InlineTextContent(Placeholder(metaWidth, 1.2.em, PlaceholderVerticalAlign.TextBottom)) {}
+        "meta" to InlineTextContent(Placeholder(metaWidth, metaHeight, PlaceholderVerticalAlign.TextBottom)) {}
     )
     Text(
         annotated,

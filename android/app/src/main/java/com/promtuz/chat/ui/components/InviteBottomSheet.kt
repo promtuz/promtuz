@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -30,8 +29,8 @@ import kotlinx.coroutines.delay
 
 /**
  * Material 3 confirmation sheet for a remote invite link. Drives the pairing
- * state machine (PAIRING.md): confirm → pairing → added (PENDING) / unreachable,
- * never a false "Added" — the contact must actually reach PENDING first.
+ * state machine (PAIRING.md): confirm, pairing, then added (PENDING) or unreachable.
+ * Never a false "Added": the contact must actually reach PENDING first.
  */
 @Composable
 fun InviteBottomSheet(vm: AppVM) {
@@ -39,7 +38,7 @@ fun InviteBottomSheet(vm: AppVM) {
     val s = state ?: return
     val sheetState = rememberModalBottomSheetState()
 
-    ModalBottomSheet(
+    AppBottomSheet(
         onDismissRequest = vm::dismissInvite,
         sheetState = sheetState,
     ) {
@@ -85,7 +84,7 @@ fun InviteBottomSheet(vm: AppVM) {
 
                 is InviteSheet.Confirm -> when {
                     s.expiryMs <= System.currentTimeMillis() ->
-                        Title("This invite expired — ask ${s.name} for a new link.")
+                        Title("This invite expired. Ask ${s.name} for a new link.")
 
                     s.alreadyContact -> {
                         Title("You're already connected with ${s.name}")

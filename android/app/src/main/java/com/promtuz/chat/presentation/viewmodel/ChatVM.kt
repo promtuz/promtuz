@@ -82,7 +82,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
 
     private fun markVisibleMessagesRead() {
         if (!chatForeground) return
-        val did = _messages.value.firstOrNull { !it.outgoing }?.dispatchIdHex ?: return
+        val did = _messages.value.orEmpty().firstOrNull { !it.outgoing }?.dispatchIdHex ?: return
         if (did == lastMarkedRead) return
         lastMarkedRead = did
         fire { CoreBridge.markRead(conversation, did.fromHex()) }
@@ -142,8 +142,9 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         typingPresentation.update(_typingMembers.value)
     }
 
-    private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
-    val messages: StateFlow<List<UiMessage>> = _messages.asStateFlow()
+    // Null is still loading; an empty list is a loaded chat whose first new message can animate.
+    private val _messages = MutableStateFlow<List<UiMessage>?>(null)
+    val messages: StateFlow<List<UiMessage>?> = _messages.asStateFlow()
 
     /** Composer draft; two-way bound to the input field, cleared on [send]. */
     val input = MutableStateFlow("")
@@ -215,7 +216,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         // What decides is whether the row is actually loaded.
         val depth = hitDepth.getOrNull(i) ?: 0
         viewModelScope.launch {
-            if (_messages.value.none { it.dispatchIdHex == did }) {
+            if (_messages.value.orEmpty().none { it.dispatchIdHex == did }) {
                 limit = maxOf(limit, depth) + PAGE
                 _messages.value = load()
             }
