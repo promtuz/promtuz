@@ -1477,6 +1477,7 @@ mod tests {
             sig:            sig.to_bytes().into(),
             accepted_at_ms: 1,
             wake:           false,
+            ttl_ms:         0,
         }
     }
 
@@ -1928,6 +1929,7 @@ mod tests {
             sig:            [4u8; 64].into(),
             accepted_at_ms: 1,
             wake:           false,
+            ttl_ms:         0,
         };
         let resp = QueueFetchResp {
             messages:  vec![dispatch; MAX_FETCH_QUEUE_BATCH + 1],

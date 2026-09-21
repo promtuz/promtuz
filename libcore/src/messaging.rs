@@ -453,8 +453,12 @@ async fn send_control_inner(
 ) -> Result<()> {
     // Offers and profile probes describe current state. Reconnect regenerates
     // them; retaining retries would accumulate obsolete probes while offline.
-    let outbox = (!matches!(payload, AppPayload::P2p { .. } | AppPayload::AvatarSync { .. }))
+    // An offer also tells the relay to drop it unread once it is stale, so a
+    // peer who was away does not drain a queue of dead bridges.
+    let is_offer = matches!(payload, AppPayload::P2pOffer { .. });
+    let outbox = (!is_offer && !matches!(payload, AppPayload::AvatarSync { .. }))
         .then_some(OpType::Control);
+    let ttl_ms = if is_offer { crate::p2p::OFFER_TTL_MS } else { 0 };
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -504,6 +508,7 @@ async fn send_control_inner(
             env,
             outbox.unwrap_or(OpType::Control),
             wake,
+            ttl_ms,
         )
         .await;
         if matches!(outcome, LastOutcome::Durable) {
@@ -552,6 +557,7 @@ async fn dispatch_envelope(
         sig:            Bytes(sig),
         accepted_at_ms: 0,
         wake,
+        ttl_ms:         0,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
     if let Some(op) = outbox {
@@ -1579,7 +1585,7 @@ async fn group_for_conversation<C: DhtClient>(
 /// transport failure, which leaves the outbox row for the reconciler.
 pub(crate) async fn dispatch_to_member(
     to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
-    op: OpType, wake: bool,
+    op: OpType, wake: bool, ttl_ms: u64,
 ) -> LastOutcome {
     let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
     let sig = {
@@ -1594,6 +1600,7 @@ pub(crate) async fn dispatch_to_member(
         sig:            Bytes(sig),
         accepted_at_ms: 0,
         wake,
+        ttl_ms,
     };
     // Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the
     // length-prefixed bytes `send()` writes; the relay's read side is
@@ -1717,7 +1724,8 @@ async fn send_payload<C: DhtClient>(
             .map_err(|e| anyhow!("address envelope to member: {e}"))?;
         // New content: push-wake an offline member.
         let outcome =
-            dispatch_to_member(to, &our_ipk, &ipk_signer, &id, payload, OpType::Message, true).await;
+            dispatch_to_member(to, &our_ipk, &ipk_signer, &id, payload, OpType::Message, true, 0)
+                .await;
         terminal |= matches!(outcome, LastOutcome::Terminal);
     }
 

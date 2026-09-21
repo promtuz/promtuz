@@ -72,6 +72,10 @@ pub struct Relay {
     /// task. `main` takes it once to spawn `stunturn::serve`; `None` unless
     /// `cfg.assist.enabled`.
     pub assist: Mutex<Option<crate::stunturn::AssistInbox>>,
+    /// Advertised to every client at handshake so it aims bridges only at
+    /// relays that will answer. Read from config; `assist` above is taken
+    /// once at startup and says nothing afterwards.
+    pub assist_enabled: bool,
 
     pub cfg: AppConfig,
 
@@ -250,6 +254,7 @@ impl Relay {
             None
         };
 
+        let assist_enabled = cfg.assist.enabled;
         Self {
             key,
             keys,
@@ -259,6 +264,7 @@ impl Relay {
             dht,
             endpoint,
             assist: Mutex::new(assist),
+            assist_enabled,
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_leases,

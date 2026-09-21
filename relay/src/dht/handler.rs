@@ -831,6 +831,7 @@ mod tests {
             sig: sig.to_bytes().into(),
             accepted_at_ms: 1,
             wake: false,
+            ttl_ms: 0,
         }
     }
 

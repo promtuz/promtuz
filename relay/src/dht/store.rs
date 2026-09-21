@@ -538,6 +538,7 @@ mod tests {
             sig:     sig.to_bytes().into(),
             accepted_at_ms: 1,
             wake:    false,
+            ttl_ms:  0,
         }
     }
 
@@ -653,6 +654,7 @@ mod tests {
             payload:        b"x".to_vec().into(),
             sig:            [0u8; 64].into(),
             accepted_at_ms: 0,
+            ttl_ms:         0,
         };
 
         for i in 0..MAX_QUEUED_PER_SENDER {

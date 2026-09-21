@@ -325,6 +325,7 @@ pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
         payload: d.payload.clone(),
         sig:     d.sig,
         accepted_at_ms: d.accepted_at_ms,
+        ttl_ms:  d.ttl_ms,
     }
 }
 
@@ -588,6 +589,7 @@ mod tests {
             sig:            [5u8; 64].into(),
             accepted_at_ms: 42,
             wake:           false,
+            ttl_ms:         0,
         };
         let queued = store_in_rocks(&store, fwd.to, &dispatch_to_deliver(&fwd)).await.unwrap();
         assert!(matches!(queued, DispatchAckP::Queued { .. }));

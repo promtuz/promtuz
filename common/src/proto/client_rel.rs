@@ -63,6 +63,10 @@ pub enum ServerHandshakeResultP {
         /// signed for this home, which is fine because a DHT-disabled
         /// relay replies `DhtUnavailable` to those RPCs anyway.
         relay_node_id: Option<Bytes<32>>,
+        /// Whether this relay answers STUN echoes and bridges TURN datagrams
+        /// on its QUIC port. A client only aims a bridge at a relay that
+        /// said yes here; dialing one that did not is a silent black hole.
+        assist:        bool,
     },
     Reject {
         reason: String,
@@ -150,6 +154,12 @@ pub struct DispatchP {
     /// content (text/reply/welcome) that should push-wake an offline peer.
     /// Receipts/edits/deletes/reactions/pair-acks set false — queued, never woken.
     pub wake: bool,
+    /// Plaintext queue hint the relay reads (outside `sig`): how long past
+    /// `accepted_at_ms` this dispatch is still worth delivering, in
+    /// milliseconds. Zero means the relay's default retention. A P2P offer
+    /// names addresses and secrets that are dead within a minute, so it sets
+    /// a short life and a drain skips and drops it once that has passed.
+    pub ttl_ms: u64,
 }
 
 /// Relay → Client (relay-verified delivery)
@@ -164,6 +174,16 @@ pub struct DeliverP {
     /// Origin relay acceptance time, copied unchanged through queues and DHT
     /// forwarding. Recipients use it rather than local receive time.
     pub accepted_at_ms: u64,
+    /// Copied from [`DispatchP::ttl_ms`]; zero means default retention.
+    pub ttl_ms:         u64,
+}
+
+impl DeliverP {
+    /// Past its sender-declared life at `now_ms`. Zero never expires here;
+    /// the store's retention sweep still bounds it.
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
+    }
 }
 
 /// Activity bits for [`ActivityP::activity`]. OR them for "several at once".
@@ -629,6 +649,26 @@ mod tests {
         let a = activity_sig_message(&to, &from, &dm, 1, 1_700_000_000_000);
         let b = activity_sig_message(&to, &from, &group, 1, 1_700_000_000_000);
         assert_ne!(a, b, "moving a signal between chats must invalidate its signature");
+    }
+
+    /// A sender-declared life counts from relay acceptance; zero is the
+    /// relay's own retention and never expires here.
+    #[test]
+    fn delivery_expires_by_its_own_life_only() {
+        use super::DeliverP;
+        let mut d = DeliverP {
+            id:             [1u8; 16].into(),
+            from:           [2u8; 32].into(),
+            payload:        vec![3u8].into(),
+            sig:            [4u8; 64].into(),
+            accepted_at_ms: 1_000,
+            ttl_ms:         30_000,
+        };
+        assert!(!d.is_expired(31_000), "still within its life");
+        assert!(d.is_expired(31_001), "one ms past it");
+        assert!(!d.is_expired(0), "a clock behind acceptance is not expiry");
+        d.ttl_ms = 0;
+        assert!(!d.is_expired(u64::MAX), "default retention never expires here");
     }
 
     #[test]

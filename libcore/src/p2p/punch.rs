@@ -37,15 +37,16 @@ pub(super) const MAX_CANDIDATES: usize = 16;
 
 /// Whether a peer-supplied candidate is an address we are willing to send to.
 /// Reserved, local and non-unicast space is never a peer's reachable address,
-/// only a way to aim our pokes at something that isn't the peer.
+/// only a way to aim our pokes at something that isn't the peer. Private
+/// IPv4 stays: two phones on one wifi reach each other through it, and a
+/// sealed poke at a LAN address the peer named is harmless to anyone else.
 pub(super) fn is_punchable(addr: &SocketAddr) -> bool {
     if addr.port() < 1024 {
         return false;
     }
-    match addr.ip() {
+    match addr.ip().to_canonical() {
         IpAddr::V4(v4) => {
             !v4.is_loopback()
-                && !v4.is_private()
                 && !v4.is_link_local()
                 && !v4.is_multicast()
                 && !v4.is_broadcast()
@@ -238,9 +239,6 @@ mod tests {
     fn is_punchable_rejects_local_and_non_unicast() {
         for bad in [
             "127.0.0.1:5000",
-            "192.168.1.5:5000",
-            "10.0.0.1:5000",
-            "172.16.0.1:5000",
             "169.254.1.1:5000",
             "224.0.0.1:5000",
             "255.255.255.255:5000",
@@ -250,10 +248,19 @@ mod tests {
             "[fe80::1]:5000",
             "[fc00::1]:5000",
             "[ff02::1]:5000",
+            // the same loopback, arriving v4-mapped off a dual-stack socket
+            "[::ffff:127.0.0.1]:5000",
         ] {
             assert!(!is_punchable(&bad.parse().unwrap()), "{bad} must be rejected");
         }
-        for good in ["9.9.9.9:5000", "[2409:4117::1]:5000"] {
+        for good in [
+            "9.9.9.9:5000",
+            "[2409:4117::1]:5000",
+            // LAN peers: what the gatherer publishes for a shared wifi
+            "192.168.1.5:5000",
+            "10.0.0.1:5000",
+            "172.16.0.1:5000",
+        ] {
             assert!(is_punchable(&good.parse().unwrap()), "{good} must be allowed");
         }
     }

@@ -115,6 +115,10 @@ pub struct Relay {
     /// disabled — those wrappers can't be signed and the home would
     /// reply `DhtUnavailable` regardless.
     pub home_node_id: Option<[u8; 32]>,
+    /// Whether this relay bridges hole-punch assist on its QUIC port. Learned
+    /// from its handshake `Accept` and kept on the row, so a P2P session can
+    /// pick a relay that will actually answer, connected to it or not.
+    pub assist: bool,
 }
 
 impl std::fmt::Debug for Relay {
@@ -279,6 +283,7 @@ impl Relay {
             latency:      Option<i64>,
             success_rate: f64,
             pubkey:       Option<[u8; 32]>,
+            assist:       bool,
         }
 
         let mut stmt = conn.prepare(
@@ -287,7 +292,8 @@ impl Relay {
                     CAST(window_successes AS REAL) / MAX(window_attempts, 1) AS success_rate,
                     pubkey,
                     MIN(last_latency) OVER () AS min_lat,
-                    MAX(last_latency) OVER () AS max_lat
+                    MAX(last_latency) OVER () AS max_lat,
+                    assist
              FROM relays
              WHERE protocol_version = ?1
                AND circuit_state IN ('closed', 'half_open')",
@@ -315,6 +321,7 @@ impl Relay {
                     latency,
                     success_rate,
                     pubkey,
+                    assist: row.get::<_, i64>(8)? != 0,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -375,7 +382,46 @@ impl Relay {
             dht_client: None,
             pubkey:     chosen.pubkey,
             home_node_id: None,
+            assist:     chosen.assist,
         })
+    }
+
+    /// The best-known relay that bridges hole-punch assist, by latency, or
+    /// `None` if no relay has ever said it does. Bypasses scoring: a bridge
+    /// that answers beats a faster one that silently drops the datagrams.
+    pub fn fetch_assist_capable() -> Option<Self> {
+        let conn = NETWORK_DB.lock();
+        conn.query_row(
+            "SELECT id, host, port, pubkey FROM relays
+              WHERE assist = 1 AND circuit_state IN ('closed', 'half_open')
+              ORDER BY last_latency IS NULL, last_latency ASC
+              LIMIT 1",
+            [],
+            |row| {
+                let pubkey: Option<[u8; 32]> =
+                    row.get::<_, Option<Vec<u8>>>(3)?.and_then(|v| v.try_into().ok());
+                Ok(Self {
+                    id:           Arc::from(row.get::<_, String>(0)?.as_str()),
+                    host:         Arc::from(row.get::<_, String>(1)?.as_str()),
+                    port:         row.get::<_, i64>(2)? as u16,
+                    connection:   None,
+                    dht_client:   None,
+                    pubkey,
+                    home_node_id: None,
+                    assist:       true,
+                })
+            },
+        )
+        .ok()
+    }
+
+    /// Remember what the relay said about assist at handshake.
+    pub fn record_assist(&self, assist: bool) -> Result<(), RelayError> {
+        NETWORK_DB.lock().execute(
+            "UPDATE relays SET assist = ?1 WHERE id = ?2",
+            params![assist as i64, self.id.as_ref()],
+        )?;
+        Ok(())
     }
 
     /// Loads one relay by id, bypassing scoring and circuit state — for a
@@ -383,7 +429,7 @@ impl Relay {
     pub fn fetch_by_id(id: &str) -> Result<Self, RelayError> {
         let conn = NETWORK_DB.lock();
         conn.query_row(
-            "SELECT id, host, port, pubkey FROM relays WHERE id = ?1",
+            "SELECT id, host, port, pubkey, assist FROM relays WHERE id = ?1",
             params![id],
             |row| {
                 let pubkey: Option<[u8; 32]> = row
@@ -397,6 +443,7 @@ impl Relay {
                     dht_client:   None,
                     pubkey,
                     home_node_id: None,
+                    assist:       row.get::<_, i64>(4)? != 0,
                 })
             },
         )

@@ -112,14 +112,9 @@ pub enum AppPayload {
     /// inbound MLS message, which proves the group works end-to-end and flips
     /// the inviter's contact PENDING → PAIRED. Not stored as a message.
     PairAck,
-    /// Peer-to-peer connection offer: the sender's candidate addresses for a
-    /// direct QUIC hole-punch, its home relay's address for the TURN fallback
-    /// when the punch can't land, and two random session secrets — a TURN
-    /// bridge `token` and a `disco_key` for the punch pokes. Both are
-    /// exchanged, not derived, so the two ends agree regardless of MLS
-    /// group/epoch (the dialer's win). A control message — routed to the P2P
-    /// transport, never shown as a chat message. Appended last so postcard's
-    /// ordinal tags for older variants hold.
+    /// Retired peer-to-peer offer, superseded by [`AppPayload::P2pOffer`].
+    /// Kept so the ordinal survives; a receiver ignores it, since a sender
+    /// old enough to emit it cannot read the reply either.
     P2p {
         candidates: Vec<SocketAddr>,
         relay:      Option<SocketAddr>,
@@ -208,6 +203,28 @@ pub enum AppPayload {
     /// Confirms a successfully stored owner-issued picture revision. This is
     /// application-level persistence, not a relay delivery acknowledgement.
     AvatarAck { revision: u64 },
+    /// Peer-to-peer connection offer: the sender's candidate addresses for a
+    /// direct QUIC hole-punch, its home relay's address for the TURN fallback
+    /// when the punch can't land, and two random session secrets, a TURN
+    /// bridge `token` and a `disco_key` for the punch pokes. Both are
+    /// exchanged, not derived, so the two ends agree regardless of MLS
+    /// group/epoch (the dialer's win).
+    ///
+    /// `session` names one connect attempt; the answering side echoes it in
+    /// `in_reply_to` so a session only pairs with the reply to its own offer.
+    /// `expires_at_ms` is the sender's clock: an offer read after it names a
+    /// bridge nobody is waiting on any more and is dropped, never answered.
+    /// A control message, routed to the P2P transport and never shown as a
+    /// chat message. Appended last so postcard ordinals hold.
+    P2pOffer {
+        session:       [u8; 16],
+        in_reply_to:   Option<[u8; 16]>,
+        expires_at_ms: u64,
+        candidates:    Vec<SocketAddr>,
+        relay:         Option<SocketAddr>,
+        token:         [u8; 16],
+        disco_key:     [u8; 32],
+    },
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the
@@ -2032,5 +2049,12 @@ mod tests {
         assert_eq!(AppPayload::deser(&att.ser().unwrap()).unwrap(), att);
         let want = AppPayload::FileWant { file_id: [7u8;32] };
         assert_eq!(AppPayload::deser(&want.ser().unwrap()).unwrap(), want);
+        let offer = AppPayload::P2pOffer {
+            session: [3u8; 16], in_reply_to: Some([4u8; 16]), expires_at_ms: 1_700_000_000_000,
+            candidates: vec!["9.9.9.9:5000".parse().unwrap()],
+            relay: Some("[2409:4117::1]:40432".parse().unwrap()),
+            token: [5u8; 16], disco_key: [6u8; 32],
+        };
+        assert_eq!(AppPayload::deser(&offer.ser().unwrap()).unwrap(), offer);
     }
 }

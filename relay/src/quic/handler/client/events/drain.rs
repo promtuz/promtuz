@@ -146,11 +146,13 @@ pub(crate) async fn handle_drain_queue_with(
     //    the ack lands.
     let mut delivered_keys: Vec<MessageKey> = Vec::new();
     let mut batch = DrainBatch::default();
+    let now_ms = systime().as_millis() as u64;
 
     stream_keyspace(
         &ctx.relay.store.messages,
         &recipient_arr,
         decode_deliver,
+        now_ms,
         tx,
         &mut batch,
         &mut delivered_keys,
@@ -167,6 +169,7 @@ pub(crate) async fn handle_drain_queue_with(
             &dht.store.queue,
             &recipient_arr,
             decode_dispatch,
+            now_ms,
             tx,
             &mut batch,
             &mut delivered_keys,
@@ -236,6 +239,11 @@ pub(crate) async fn handle_drain_queue_with(
             break;
         }
         let deliver = dispatch_to_deliver(dispatch);
+        // Past its life: the home keeps it until its own sweep, the client
+        // never sees it.
+        if deliver.is_expired(now_ms) {
+            continue;
+        }
         if !batch.admit(deliver.id.0, deliver.payload.0.len()) {
             continue;
         }
@@ -492,10 +500,14 @@ fn decode_dispatch(value: &[u8]) -> Option<DeliverP> {
 /// cleanup. Returns the ids actually sent. Stops once `batch` is full; the
 /// untouched remainder stays on disk for the client's next `DrainQueue`.
 ///
+/// An entry past the life its sender gave it is deleted on the spot instead
+/// of sent: nothing it says is true any more, and no ack is needed to let
+/// go of what was never delivered.
+///
 /// Keys are collected up front so no keyspace iterator is held across the
 /// `await` that writes to the wire.
 async fn stream_keyspace(
-    ks: &Keyspace, recipient: &[u8; 32], decode: fn(&[u8]) -> Option<DeliverP>,
+    ks: &Keyspace, recipient: &[u8; 32], decode: fn(&[u8]) -> Option<DeliverP>, now_ms: u64,
     tx: &mut SendStream, batch: &mut DrainBatch, keys: &mut Vec<MessageKey>,
 ) -> Result<Vec<[u8; 16]>> {
     let mut sent: Vec<[u8; 16]> = Vec::new();
@@ -508,6 +520,11 @@ async fn stream_keyspace(
             warn!("DRAIN: malformed queue value; skipping");
             continue;
         };
+        if deliver.is_expired(now_ms) {
+            trace!("DRAIN: dropping expired message id={}", hex::encode(deliver.id));
+            let _ = ks.remove(key.as_bytes());
+            continue;
+        }
         keys.push(key);
         if !batch.admit(deliver.id.0, value.len()) {
             continue;
@@ -547,6 +564,7 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
         payload: d.payload,
         sig:     d.sig,
         accepted_at_ms: d.accepted_at_ms,
+        ttl_ms:  d.ttl_ms,
     }
 }
 
@@ -624,6 +642,7 @@ mod tests {
             sig:     [7u8; 64].into(),
             accepted_at_ms: 1,
             wake:    false,
+            ttl_ms:  0,
         };
         let deliver = dispatch_to_deliver(dispatch.clone());
         assert_eq!(deliver.id, dispatch.id);

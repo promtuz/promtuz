@@ -80,6 +80,7 @@ pub(super) async fn handle_handshake(
     HandshakeResult(ServerHandshakeResultP::Accept {
         timestamp: systime().as_secs(),
         relay_node_id,
+        assist: relay.assist_enabled,
     })
     .send(&mut tx)
     .await?;

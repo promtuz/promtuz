@@ -41,4 +41,9 @@ enabled = true
 # STUN echo + TURN bridge on the QUIC port. Off: bridge tokens are not issued
 # by the relay, so an enabled relay forwards datagrams for anyone who guesses
 # one, under the relay's own source address.
+#
+# The relay tells every client at handshake whether this is on, and a client
+# only bridges through relays that said yes. With it off everywhere, large
+# attachments can only cross a direct hole punch, which most phone networks
+# refuse.
 enabled = false

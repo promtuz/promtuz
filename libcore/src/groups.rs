@@ -354,6 +354,7 @@ async fn fan_out_commit_to(
             env,
             OpType::Control,
             true,
+            0,
         )
         .await;
     }

@@ -229,10 +229,16 @@ impl Relay {
         };
 
         let timestamp = match result {
-            SHSRP::Accept { timestamp, relay_node_id } => {
+            SHSRP::Accept { timestamp, relay_node_id, assist } => {
                 // Stash the home's advertised DHT NodeId for the
                 // RelayDhtClient to bind in welcome fetch/ack sigs.
                 self.home_node_id = relay_node_id.map(|b| b.0);
+                // Remembered on the row too, so a later session can pick an
+                // assist-capable relay without being connected to it.
+                self.assist = assist;
+                if let Err(e) = self.record_assist(assist) {
+                    warn!("relay {} assist flag not recorded: {e}", node_short(&self.id));
+                }
                 timestamp
             },
             SHSRP::Reject { reason } => {
@@ -700,6 +706,11 @@ fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
         if !Contact::exists(&e.who.0) {
             continue;
         }
+        // A contact coming online is the moment a held download can move:
+        // the sender we could not reach is reachable now.
+        if matches!(e.state, PresenceState::Online) {
+            crate::transfer::resume_for_peer(e.who.0);
+        }
         let presence = match e.state {
             PresenceState::Online => Presence::Online,
             PresenceState::Idle { since } => Presence::Idle { since },
@@ -1118,7 +1129,9 @@ async fn process_deliver(
                     // the invite: our picture is the one thing left to show them.
                     crate::messaging::introduce_avatar(conv);
                 },
-                Ok(AppPayload::P2p { candidates, relay, token, disco_key }) => {
+                Ok(AppPayload::P2pOffer {
+                    session, in_reply_to, expires_at_ms, candidates, relay, token, disco_key,
+                }) => {
                     // Candidate offer for a direct connection — hand to the
                     // P2P layer (routed to the waiting session), never stored.
                     info!(
@@ -1126,7 +1139,23 @@ async fn process_deliver(
                         hex::encode(&msg.from[..4]),
                         candidates.len()
                     );
-                    crate::p2p::deliver_offer(*msg.from, candidates, relay, token, disco_key);
+                    crate::p2p::deliver_offer(
+                        *msg.from,
+                        crate::p2p::Offer {
+                            session,
+                            in_reply_to,
+                            expires_at_ms,
+                            candidates,
+                            relay,
+                            token,
+                            disco_key,
+                        },
+                    );
+                },
+                Ok(AppPayload::P2p { .. }) => {
+                    // A sender this old cannot read our answer, so there is
+                    // nothing to do with its offer but let it go.
+                    debug!("P2P[{}]: legacy offer ignored", hex::encode(&msg.from[..4]));
                 },
                 Ok(AppPayload::FileWant { file_id }) => {
                     // Reverse-wake control message — routed, never stored. The push
@@ -1454,7 +1483,7 @@ mod tests {
         use common::proto::pack::Packer;
         let packet = SRelayPacket::Deliver(DeliverP {
             id: [1; 16].into(), from: [2; 32].into(), payload: vec![3; 16].into(),
-            sig: [0; 64].into(), accepted_at_ms: 100,
+            sig: [0; 64].into(), accepted_at_ms: 100, ttl_ms: 0,
         });
         let frame = packet.pack().unwrap();
         let mut stream = frame.as_slice();
@@ -1569,6 +1598,7 @@ mod gate_tests {
             payload:        payload.to_vec().into(),
             sig:            sig.into(),
             accepted_at_ms: 0,
+            ttl_ms:         0,
         }
     }
 
