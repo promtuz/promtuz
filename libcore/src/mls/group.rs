@@ -211,7 +211,6 @@ impl MlsGroupHandle {
     pub fn add_members<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S, new_members: &[KeyPackage],
     ) -> Result<(MlsMessageOut, MlsMessageOut)> {
-        self.abandon_stale_commit(provider)?;
         let (commit, welcome, _group_info) = self
             .inner
             .add_members(provider, signer, new_members)
@@ -231,7 +230,6 @@ impl MlsGroupHandle {
     pub fn remove_members<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S, members: &[LeafNodeIndex],
     ) -> Result<MlsMessageOut> {
-        self.abandon_stale_commit(provider)?;
         let (commit, _welcome, _group_info) = self
             .inner
             .remove_members(provider, signer, members)
@@ -248,7 +246,6 @@ impl MlsGroupHandle {
     pub fn self_update<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S,
     ) -> Result<MlsMessageOut> {
-        self.abandon_stale_commit(provider)?;
         let bundle = self
             .inner
             .self_update(provider, signer, LeafNodeParameters::default())
@@ -265,7 +262,6 @@ impl MlsGroupHandle {
     pub fn leave<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S,
     ) -> Result<MlsMessageOut> {
-        self.abandon_stale_commit(provider)?;
         self.inner
             .leave_group(provider, signer)
             .map_err(MlsGroupError::from_openmls)
@@ -416,7 +412,6 @@ impl MlsGroupHandle {
     pub fn commit_to_pending_proposals<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S,
     ) -> Result<MlsMessageOut> {
-        self.abandon_stale_commit(provider)?;
         let (commit, _welcome, _group_info) = self
             .inner
             .commit_to_pending_proposals(provider, signer)
@@ -443,28 +438,14 @@ impl MlsGroupHandle {
     }
 
     /// Drop a commit we built but will not merge: the change that made it
-    /// failed before it reached anyone, so the group stays at the epoch the
+    /// died before it reached anyone, so the group stays at the epoch the
     /// members still share. openmls refuses every further membership change
     /// while one is pending and persists that state across restarts, so a
     /// failed add would otherwise be the last change this group ever took.
+    /// Whether a pending commit reached anyone is not this layer's to know:
+    /// `groups::recover` decides between this and a merge.
     pub fn clear_pending_commit(&mut self, provider: &PromtuzMlsProvider) -> Result<()> {
         self.inner.clear_pending_commit(provider.storage()).map_err(MlsGroupError::Storage)
-    }
-
-    /// A pending commit at the start of a new change is a leftover: the change
-    /// that built it failed or died before merging, and nothing will merge it
-    /// now. Clear it, or openmls refuses this change over it. Membership
-    /// changes run one at a time, so a commit still in flight is never taken
-    /// for a leftover.
-    fn abandon_stale_commit(&mut self, provider: &PromtuzMlsProvider) -> Result<()> {
-        if self.has_pending_commit() {
-            log::warn!(
-                "MLS: abandoning an unmerged commit on {}",
-                hex::encode(&self.group_id()[..4])
-            );
-            self.clear_pending_commit(provider)?;
-        }
-        Ok(())
     }
 
     /// Current group epoch as a plain `u64`.
@@ -1083,37 +1064,6 @@ mod tests {
         assert!(MlsGroupHandle::load(&provider, &orphan).expect("load").is_none());
     }
 
-    /// A change that dies between building its commit and merging it must not
-    /// be the last change the group ever takes. openmls refuses every further
-    /// commit while an unmerged one is pending, persists that state, and only
-    /// we can clear it; a founder whose add failed on a Welcome delivery would
-    /// otherwise never add, remove, or carry a leave in that group again.
-    #[test]
-    fn a_failed_change_does_not_wedge_the_group() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let provider_c = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let carol = Party::new(&provider_c, 3);
-        let mut group = create_group(&provider_a, &alice, &[0xAB; 32]);
-
-        // Adding Bob builds a commit that a failed Welcome delivery leaves
-        // unmerged.
-        group.add_members(&provider_a, &alice.sig_kp, &[make_kp(&provider_b, &bob)]).expect("add bob");
-        assert!(group.has_pending_commit());
-        assert_eq!(group.epoch(), 0, "nothing merged, so nothing moved");
-
-        // The next change goes through: the leftover is abandoned, not fatal.
-        group
-            .add_members(&provider_a, &alice.sig_kp, &[make_kp(&provider_c, &carol)])
-            .expect("add carol despite the leftover");
-        group.merge_pending_commit(&provider_a).expect("merge");
-        assert_eq!(group.epoch(), 1);
-        assert_eq!(group.member_count(), 2, "Carol is in; the abandoned add of Bob is not");
-        assert!(!group.has_pending_commit());
-    }
-
     /// The leftover survives a reload, since openmls persists it, so a failure
     /// path has to drop it explicitly rather than let it fall out of scope.
     #[test]
@@ -1134,5 +1084,54 @@ mod tests {
         let again = MlsGroupHandle::load(&provider_a, &gid).expect("load").expect("stored");
         assert!(!again.has_pending_commit(), "the drop is persisted too");
         assert_eq!(again.epoch(), 0);
+    }
+
+    /// The other fate of an unmerged commit: one that left the device is
+    /// merged as it stands, and the merge lands on exactly the epoch the
+    /// Welcome it produced put the joiner on, so founder and joiner agree and
+    /// keep talking. Building afresh instead would leave them holding
+    /// different keys at the same epoch.
+    #[test]
+    fn a_recovered_merge_lands_where_the_welcome_put_the_joiner() {
+        let provider_a = build_provider();
+        let provider_b = build_provider();
+        let alice = Party::new(&provider_a, 1);
+        let bob = Party::new(&provider_b, 2);
+        let gid = [0xAD; 32];
+        let mut group = create_group(&provider_a, &alice, &gid);
+        let (_commit, welcome) = group
+            .add_members(&provider_a, &alice.sig_kp, &[make_kp(&provider_b, &bob)])
+            .expect("add");
+        // The change dies here: the Welcome is out, the merge never happened.
+        drop(group);
+
+        let staged = StagedWelcome::new_from_welcome(
+            &provider_b,
+            &MlsGroupJoinConfig::default(),
+            extract_welcome_via_tls(welcome),
+            None,
+        )
+        .expect("staged");
+        let mut bob_group = MlsGroupHandle::wrap(staged.into_group(&provider_b).expect("into"));
+
+        let mut recovered = MlsGroupHandle::load(&provider_a, &gid).expect("load").expect("stored");
+        assert!(recovered.has_pending_commit(), "the commit is still waiting");
+        recovered.merge_pending_commit(&provider_a).expect("merge the recovered commit");
+        assert_eq!(recovered.epoch(), bob_group.epoch(), "founder and joiner agree on the epoch");
+        assert_eq!(recovered.roster(), bob_group.roster(), "and on who is in the group");
+
+        // The proof that the keys agree: a message after the recovery decrypts.
+        let msg = recovered
+            .create_application_message(&provider_a, &alice.sig_kp, b"still here")
+            .expect("encrypt");
+        let on_bob =
+            mls_message_from_bytes(&mls_message_to_bytes(&msg).expect("ser")).expect("deser");
+        let proto = on_bob.try_into_protocol_message().expect("proto");
+        match bob_group.process_incoming(&provider_b, proto).expect("process").content {
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                assert_eq!(app.into_bytes(), b"still here");
+            },
+            other => panic!("expected an application message, got {other:?}"),
+        }
     }
 }
