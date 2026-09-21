@@ -34,7 +34,7 @@ import com.promtuz.chat.data.NotifBuzz
 import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
-import com.promtuz.chat.utils.media.decodeAvif
+import com.promtuz.chat.utils.media.decodeAvatar
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CancellationException
@@ -365,7 +365,7 @@ object PushNotifier {
     private suspend fun peerAvatar(conv: ByteArray, px: Int = 128): Bitmap? {
         val peer = runCatching { CoreBridge.conversation(conv)?.peer }.getOrNull() ?: return null
         val bytes = runCatching { CoreBridge.avatarOf(peer) }.getOrNull() ?: return null
-        val src = decodeAvif(bytes)?.asAndroidBitmap() ?: return null
+        val src = decodeAvatar(bytes)?.asAndroidBitmap() ?: return null
         val scaled = Bitmap.createScaledBitmap(src, px, px, true)
         val out = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

@@ -6,8 +6,7 @@ import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.promtuz.chat.utils.media.AvatarImages
-import com.promtuz.chat.utils.media.decodeAvif
+import com.promtuz.chat.utils.media.decodeAvatar
 import com.promtuz.chat.utils.media.decodeDownscaled
 import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.core.CoreBridge
@@ -49,7 +48,7 @@ class SettingsVM(
     private fun refresh() = viewModelScope.launch {
         val name = runCatching { CoreBridge.profileName() }.getOrDefault("")
         val picture = runCatching { CoreBridge.profilePicture() }.getOrNull()
-            ?.let { decodeAvif(it, maxEdge = 1024) }
+            ?.let { decodeAvatar(it) }
         _profile.value = OwnProfile(name, picture)
     }
 
@@ -74,8 +73,7 @@ class SettingsVM(
             { ProfileWork.Idle },
             { ProfileWork.Failed(it.message ?: "Couldn't update your picture") },
         )
-        // Every tile drawing us re-reads, and so does the header.
-        AvatarImages.invalidateAll()
+        // Core notifies the shared avatar cache after storing the change.
         refresh().join()
     }
 
