@@ -2011,8 +2011,8 @@ enum WelcomeOutcome {
     Rejected(u8),
 }
 
-/// What we tell a chat about ourselves: our name, and our picture when we have
-/// one. Each rides its own control message, so a member who already holds one
+/// What we tell a chat about ourselves: our name and current picture revision,
+/// including a removal. Each rides its own control message, so a member who already holds one
 /// of them loses nothing when only the other changes.
 fn own_introduction() -> Vec<AppPayload> {
     let Some(identity) = Identity::get() else { return Vec::new() };
@@ -2021,9 +2021,8 @@ fn own_introduction() -> Vec<AppPayload> {
     if !name.is_empty() {
         out.push(AppPayload::Profile { name });
     }
-    if let Some(avif) = identity.avatar() {
-        out.push(AppPayload::Avatar { avif: Some(avif) });
-    }
+    // Include removals too, so introductions cannot revive a stale picture.
+    out.push(identity.avatar_update().into_payload());
     out
 }
 
@@ -2066,9 +2065,9 @@ pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
 /// Our picture alone, for a chat that already knows our name. A pair carries
 /// the name in the invite, so saying it again would tell them nothing.
 pub(crate) fn introduce_avatar(conversation: [u8; 16]) {
-    let Some(avif) = Identity::get().and_then(|i| i.avatar()) else { return };
+    let Some(update) = Identity::get().map(|i| i.avatar_update()) else { return };
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = send_control(conversation, AppPayload::Avatar { avif: Some(avif) }).await {
+        if let Err(e) = send_control(conversation, update.into_payload()).await {
             debug!("PROFILE: could not send our picture: {e}");
         }
     });
@@ -2078,7 +2077,7 @@ pub(crate) fn introduce_avatar(conversation: [u8; 16]) {
 /// is a removal, and travels too, so a member stops showing a face we took
 /// down. Outboxed like any control message, so a chat we are offline for
 /// hears it on reconnect.
-pub(crate) fn broadcast_avatar(avif: Option<Vec<u8>>) {
+pub(crate) fn broadcast_avatar(update: crate::data::peer_avatar::AvatarUpdate) {
     let Some(me) = Identity::get().map(|i| i.ipk()) else { return };
     let chats: Vec<[u8; 16]> = Conversation::list()
         .into_iter()
@@ -2088,7 +2087,7 @@ pub(crate) fn broadcast_avatar(avif: Option<Vec<u8>>) {
         .collect();
     crate::RUNTIME.spawn(async move {
         for id in chats {
-            if let Err(e) = send_control(id, AppPayload::Avatar { avif: avif.clone() }).await {
+            if let Err(e) = send_control(id, update.clone().into_payload()).await {
                 debug!("PROFILE: could not send our picture to {}: {e}", hex::encode(&id[..4]));
             }
         }
@@ -2273,6 +2272,14 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(AppPayload::Avatar { revision, avif }) => {
+                if let Err(e) = crate::data::peer_avatar::apply(
+                    &sender_ipk, &crate::data::peer_avatar::AvatarUpdate { revision, avif },
+                ) {
+                    warn!("PROFILE: could not apply buffered picture: {e}");
+                }
+                continue;
+            },
             Ok(p) => legacy_body(p),
             Err(_) => None,
         };
@@ -3391,4 +3398,85 @@ mod tests {
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");
     }
+    /// Run in a child process so the real persistence/notification path can use
+    /// its global DB without racing other tests' PROMTUZ_DATA_DIR or event sink.
+    #[tokio::test(flavor = "current_thread")]
+    async fn avatar_epoch_catchup_notifies_after_persisting_its_revision() {
+        const CHILD: &str = "PROMTUZ_AVATAR_CATCHUP_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!(
+                "promtuz-avatar-catchup-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "messaging::tests::avatar_epoch_catchup_notifies_after_persisting_its_revision", "--nocapture"])
+                .env(CHILD, "1").env("PROMTUZ_DATA_DIR", &dir).output().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(result.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        struct Events(Mutex<Vec<u64>>);
+        impl crate::platform::CoreEvents for Events {
+            fn on_connection(&self, _: crate::events::connection::ConnectionState) {}
+            fn on_message(&self, _: crate::platform::MessageEvent) {}
+            fn on_activity(&self, _: Vec<u8>, _: Vec<u8>, _: u16) {}
+            fn on_presence(&self, _: Vec<u8>, _: crate::platform::Presence) {}
+            fn on_reaction(&self, _: Vec<u8>, _: Vec<u8>, _: Vec<u8>, _: String, _: bool) {}
+            fn on_db_changed(&self, _: Vec<String>) {
+                // Like Android's collector running immediately: read just the
+                // atomic counter, never the locked DB, at notification time.
+                self.0.lock().push(crate::data::peer_avatar::generation());
+            }
+        }
+        let events = Arc::new(Events(Mutex::new(Vec::new())));
+        assert!(crate::platform::EVENTS.set(events.clone()).is_ok());
+        let alice = Node::new(0xD1);
+        let bob = Node::new(0xD2);
+        let dht = FakeDhtClient::new_arc();
+        let kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
+        dht.publish_keypackages(&kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+        let mut ga = lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk).await.unwrap();
+        let entries = dht.fetch_welcomes().await.unwrap();
+        process_welcome(&bob.provider, &entries[0].envelope).unwrap();
+        let leaf = leaf_signer_for_group(&alice.provider, &ga, &alice.ipk).unwrap();
+        let before = ga.epoch();
+        let commit = ga.self_update(&alice.provider, &leaf).unwrap();
+        ga.merge_pending_commit(&alice.provider).unwrap();
+        let image = b"\0\0\0\x0cftypavif".to_vec();
+        let update = crate::data::peer_avatar::AvatarUpdate { revision: 10, avif: Some(image.clone()) };
+        let bytes = build_application_envelope_bytes(
+            &alice.ctx(dht.as_ref()), &mut ga, &leaf, &alice.ipk, &bob.ipk,
+            &update.into_payload().ser().unwrap(), &alice.ipk_signer,
+        ).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+        let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123).unwrap();
+        assert!(matches!(received, InboundDecoded::ApplicationBuffered));
+        assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
+        let sealed = SealedMessage::from_mls_out(&commit, ga.group_id(), before).unwrap();
+        let bytes = sealed.address_to(&bob.ipk, &alice.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124).unwrap();
+        assert_eq!(crate::data::peer_avatar::get(&alice.ipk), Some(image));
+        let generation = crate::data::peer_avatar::generation();
+        assert!(generation > 0);
+        assert_eq!(events.0.lock().last().copied(), Some(generation),
+            "a notification must expose the new generation, even with immediate event handling");
+
+        // The same store used by live delivery must keep a removal revision
+        // across a replay from another chat or a late buffered update.
+        crate::data::peer_avatar::apply(&alice.ipk, &crate::data::peer_avatar::AvatarUpdate {
+            revision: 12, avif: None,
+        }).unwrap();
+        persist_drained(vec![crate::mls::epoch_catchup::ProcessedApplicationMessage {
+            dispatch_id: vec![0xDA; 16], epoch: ga.epoch(), accepted_at_ms: 123,
+            sender: alice.ipk,
+            plaintext: crate::data::peer_avatar::AvatarUpdate {
+                revision: 11, avif: Some(b"\0\0\0\x0cftypavif".to_vec()),
+            }.into_payload().ser().unwrap(),
+        }], [0; 16]);
+        assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
+    }
+
 }

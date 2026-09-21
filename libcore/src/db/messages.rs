@@ -432,6 +432,19 @@ const MIGRATION_ARRAY: &[M] = &[
              updated_at INTEGER NOT NULL \
          ) WITHOUT ROWID;",
     ),
+    // Keep a revision even when the owner removes their picture. A delayed
+    // upload must not resurrect it. Preserve pictures from pre-revision builds.
+    M::up(
+        "ALTER TABLE peer_avatars RENAME TO peer_avatars_unversioned;
+         CREATE TABLE peer_avatars (
+             ipk BLOB PRIMARY KEY CHECK(length(ipk) = 32),
+             avif BLOB,
+             updated_at INTEGER NOT NULL,
+             revision INTEGER NOT NULL CHECK(revision >= 0)
+         ) WITHOUT ROWID;
+         INSERT INTO peer_avatars SELECT ipk, avif, updated_at, 0 FROM peer_avatars_unversioned;
+         DROP TABLE peer_avatars_unversioned;",
+    ),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already

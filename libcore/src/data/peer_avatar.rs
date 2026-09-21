@@ -27,8 +27,26 @@ pub fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
 }
 
-pub(crate) fn bump_generation() {
+/// Called after a successful write and after releasing its DB lock. SQLite's
+/// commit hook fires earlier, so publish a second doorbell after the generation
+/// moves. Own-profile writes need this too: the identity DB has no change hook.
+pub(crate) fn notify_changed() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    if let Some(events) = crate::platform::EVENTS.get() {
+        events.on_db_changed(vec!["peer_avatars".into()]);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AvatarUpdate {
+    pub revision: u64,
+    pub avif: Option<Vec<u8>>,
+}
+
+impl AvatarUpdate {
+    pub fn into_payload(self) -> common::proto::mls_wire::AppPayload {
+        common::proto::mls_wire::AppPayload::Avatar { revision: self.revision, avif: self.avif }
+    }
 }
 
 /// Refuse anything that is not a plausibly small AVIF file. The size cap is
@@ -44,35 +62,31 @@ pub fn check_avif(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Record what `who` looks like. Last assertion wins: a new picture is just
-/// the same person showing something new.
-pub fn put(who: &[u8; 32], avif: &[u8]) -> Result<()> {
-    let conn = MESSAGES_DB.lock();
-    put_tx(&conn, who, avif)
+/// Apply only a newer owner-issued revision, regardless of delivery order or
+/// which shared chat carried it. A NULL picture is a durable removal tombstone.
+pub fn apply(who: &[u8; 32], update: &AvatarUpdate) -> Result<()> {
+    let changed = {
+        let conn = MESSAGES_DB.lock();
+        apply_tx(&conn, who, update)?
+    };
+    if changed {
+        notify_changed();
+    }
+    Ok(())
 }
 
-pub fn put_tx(conn: &Connection, who: &[u8; 32], avif: &[u8]) -> Result<()> {
-    check_avif(avif)?;
-    conn.execute(
-        "INSERT INTO peer_avatars (ipk, avif, updated_at) VALUES (?1, ?2, ?3) \
-         ON CONFLICT(ipk) DO UPDATE SET avif = excluded.avif, updated_at = excluded.updated_at",
-        (who.as_slice(), avif, systime().as_secs()),
+pub(crate) fn apply_tx(conn: &Connection, who: &[u8; 32], update: &AvatarUpdate) -> Result<bool> {
+    if let Some(bytes) = &update.avif {
+        check_avif(bytes)?;
+    }
+    let revision = i64::try_from(update.revision)?;
+    let changed = conn.execute(
+        "INSERT INTO peer_avatars (ipk, avif, updated_at, revision) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(ipk) DO UPDATE SET avif = excluded.avif, updated_at = excluded.updated_at, \
+             revision = excluded.revision WHERE excluded.revision > peer_avatars.revision",
+        (who.as_slice(), update.avif.as_deref(), systime().as_secs(), revision),
     )?;
-    bump_generation();
-    Ok(())
-}
-
-/// `who` took their picture down: forget it, so we stop showing a face they
-/// chose to remove.
-pub fn clear(who: &[u8; 32]) -> Result<()> {
-    let conn = MESSAGES_DB.lock();
-    clear_tx(&conn, who)
-}
-
-pub fn clear_tx(conn: &Connection, who: &[u8; 32]) -> Result<()> {
-    conn.execute("DELETE FROM peer_avatars WHERE ipk = ?1", [who.as_slice()])?;
-    bump_generation();
-    Ok(())
+    Ok(changed != 0)
 }
 
 pub fn get(who: &[u8; 32]) -> Option<Vec<u8>> {
@@ -83,6 +97,7 @@ pub fn get(who: &[u8; 32]) -> Option<Vec<u8>> {
 pub fn get_tx(conn: &Connection, who: &[u8; 32]) -> Option<Vec<u8>> {
     conn.query_row("SELECT avif FROM peer_avatars WHERE ipk = ?1", [who.as_slice()], |r| r.get(0))
         .ok()
+        .flatten()
 }
 
 #[cfg(test)]
@@ -99,20 +114,32 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_round_trips_and_the_latest_one_wins() {
+    fn reordered_updates_and_replays_cannot_resurrect_a_removed_picture() {
         let conn = open_in_memory();
         let who = [7u8; 32];
-        assert_eq!(get_tx(&conn, &who), None, "nothing known yet");
+        let old = AvatarUpdate { revision: 10, avif: Some(avif_like(1)) };
+        let latest = AvatarUpdate { revision: 12, avif: Some(avif_like(2)) };
+        let removal = AvatarUpdate { revision: 13, avif: None };
+        assert!(apply_tx(&conn, &who, &latest).unwrap());
+        assert!(!apply_tx(&conn, &who, &old).unwrap());
+        assert_eq!(get_tx(&conn, &who), latest.avif);
+        assert!(apply_tx(&conn, &who, &removal).unwrap());
+        // Duplicate copies arriving through another shared chat also do nothing.
+        assert!(!apply_tx(&conn, &who, &latest).unwrap());
+        assert!(!apply_tx(&conn, &who, &removal).unwrap());
+        assert_eq!(get_tx(&conn, &who), None);
+        let revision: u64 = conn.query_row(
+            "SELECT revision FROM peer_avatars WHERE ipk = ?1", [who.as_slice()], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(revision, removal.revision, "removal revision survives future reads");
+        let next = AvatarUpdate { revision: 14, avif: Some(avif_like(3)) };
+        assert!(apply_tx(&conn, &who, &next).unwrap());
+        assert_eq!(get_tx(&conn, &who), next.avif);
 
-        put_tx(&conn, &who, &avif_like(1)).expect("first");
-        assert_eq!(get_tx(&conn, &who), Some(avif_like(1)));
-
-        put_tx(&conn, &who, &avif_like(2)).expect("replace");
-        assert_eq!(get_tx(&conn, &who), Some(avif_like(2)), "a new picture replaces the old");
-
-        clear_tx(&conn, &who).expect("clear");
-        assert_eq!(get_tx(&conn, &who), None, "taken down means gone");
-        clear_tx(&conn, &who).expect("clearing nothing is not an error");
+        let fresh_peer = [8u8; 32];
+        assert!(apply_tx(&conn, &fresh_peer, &removal).unwrap());
+        assert!(!apply_tx(&conn, &fresh_peer, &old).unwrap());
+        assert_eq!(get_tx(&conn, &fresh_peer), None, "removal may arrive before any upload");
     }
 
     #[test]
@@ -122,15 +149,15 @@ mod tests {
 
         let mut oversized = avif_like(0);
         oversized.resize(MAX_AVATAR_BYTES + 1, 0);
-        assert!(put_tx(&conn, &who, &oversized).is_err(), "over the cap");
+        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(oversized) }).is_err(), "over the cap");
 
-        assert!(put_tx(&conn, &who, b"not an image at all").is_err(), "no ftyp box");
-        assert!(put_tx(&conn, &who, &[]).is_err(), "empty");
+        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(b"not an image at all".to_vec()) }).is_err(), "no ftyp box");
+        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(vec![]) }).is_err(), "empty");
 
         assert_eq!(get_tx(&conn, &who), None, "a refused picture leaves no row");
 
         let mut at_cap = avif_like(0);
         at_cap.resize(MAX_AVATAR_BYTES, 0);
-        put_tx(&conn, &who, &at_cap).expect("exactly the cap is allowed");
+        apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(at_cap) }).expect("exactly the cap is allowed");
     }
 }

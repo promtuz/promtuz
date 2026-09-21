@@ -193,6 +193,8 @@ pub enum AppPayload {
     /// beside the name, never shown as something they said. Appended after
     /// Profile so postcard ordinals hold.
     Avatar {
+        /// Owner-issued revision, shared across chats; removals carry one too.
+        revision: u64,
         avif: Option<Vec<u8>>,
     },
 }
@@ -1465,12 +1467,12 @@ mod tests {
     #[test]
     fn avatar_payload_round_trips_with_and_without_a_picture() {
         for avif in [Some(vec![1u8, 2, 3]), None] {
-            let p = AppPayload::Avatar { avif: avif.clone() };
+            let p = AppPayload::Avatar { revision: 42, avif: avif.clone() };
             let bytes = p.ser().expect("ser");
             assert_eq!(AppPayload::deser(&bytes).expect("deser"), p);
         }
         let profile = AppPayload::Profile { name: "bhuv".into() }.ser().expect("ser");
-        let avatar = AppPayload::Avatar { avif: None }.ser().expect("ser");
+        let avatar = AppPayload::Avatar { revision: 43, avif: None }.ser().expect("ser");
         assert_eq!(avatar[0], profile[0] + 1, "Avatar is the ordinal right after Profile");
     }
 

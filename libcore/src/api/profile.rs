@@ -7,6 +7,7 @@
 
 use crate::api::messaging::to_ipk32;
 use crate::data::identity::Identity;
+use crate::data::peer_avatar::AvatarUpdate;
 use crate::platform::CoreError;
 
 /// Our display name, as enrolled or last restored.
@@ -32,16 +33,16 @@ pub fn profile_picture() -> Option<Vec<u8>> {
 #[uniffi::export]
 pub fn set_profile_picture(rgba: Vec<u8>, width: u32, height: u32) -> Result<(), CoreError> {
     let avif = crate::media::avatar_from_rgba(&rgba, width, height)?;
-    Identity::set_avatar(Some(&avif))?;
-    crate::messaging::broadcast_avatar(Some(avif));
+    let revision = Identity::set_avatar(Some(&avif))?;
+    crate::messaging::broadcast_avatar(AvatarUpdate { revision, avif: Some(avif) });
     Ok(())
 }
 
 /// Remove the profile picture, and tell every chat to stop showing it.
 #[uniffi::export]
 pub fn clear_profile_picture() -> Result<(), CoreError> {
-    Identity::set_avatar(None)?;
-    crate::messaging::broadcast_avatar(None);
+    let revision = Identity::set_avatar(None)?;
+    crate::messaging::broadcast_avatar(AvatarUpdate { revision, avif: None });
     Ok(())
 }
 

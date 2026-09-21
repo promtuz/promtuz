@@ -1104,13 +1104,12 @@ async fn process_deliver(
                         warn!("PROFILE: could not record a self-asserted name: {e}");
                     }
                 },
-                Ok(AppPayload::Avatar { avif }) => {
+                Ok(AppPayload::Avatar { revision, avif }) => {
                     // Their picture, on the same say-so as their name and kept
                     // beside it; `None` is them taking it down. Never a message.
-                    let stored = match avif.as_deref() {
-                        Some(bytes) => crate::data::peer_avatar::put(&author, bytes),
-                        None => crate::data::peer_avatar::clear(&author),
-                    };
+                    let stored = crate::data::peer_avatar::apply(
+                        &author, &crate::data::peer_avatar::AvatarUpdate { revision, avif },
+                    );
                     if let Err(e) = stored {
                         warn!("PROFILE: could not record a self-asserted picture: {e}");
                     }
