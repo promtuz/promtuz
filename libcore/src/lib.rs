@@ -16,6 +16,7 @@ pub mod messaging;
 pub mod mls;
 pub mod p2p;
 pub mod platform;
+mod profile_sync;
 pub mod push;
 pub mod quic;
 pub mod staging;

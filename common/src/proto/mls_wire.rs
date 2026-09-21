@@ -197,6 +197,17 @@ pub enum AppPayload {
         revision: u64,
         avif: Option<Vec<u8>>,
     },
+    /// Reconcile pictures with one authenticated member. `known_revision` is
+    /// the revision of THEIR picture we have stored, including removals. None
+    /// means unknown, distinct from revision zero. A request gets one reply
+    /// with the other side's knowledge; replies never solicit another reply.
+    AvatarSync {
+        known_revision: Option<u64>,
+        reply: bool,
+    },
+    /// Confirms a successfully stored owner-issued picture revision. This is
+    /// application-level persistence, not a relay delivery acknowledgement.
+    AvatarAck { revision: u64 },
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the

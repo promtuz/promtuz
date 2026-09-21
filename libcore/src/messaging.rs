@@ -451,9 +451,10 @@ pub(crate) async fn send_control_wake(conversation: [u8; 16], payload: AppPayloa
 async fn send_control_inner(
     conversation: [u8; 16], payload: AppPayload, wake: bool, only: Option<[u8; 32]>,
 ) -> Result<()> {
-    // P2P candidates describe a path that is gone by the next reconnect; every
-    // other control payload is a state edit every member must eventually see.
-    let outbox = (!matches!(payload, AppPayload::P2p { .. })).then_some(OpType::Control);
+    // Offers and profile probes describe current state. Reconnect regenerates
+    // them; retaining retries would accumulate obsolete probes while offline.
+    let outbox = (!matches!(payload, AppPayload::P2p { .. } | AppPayload::AvatarSync { .. }))
+        .then_some(OpType::Control);
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -2272,12 +2273,8 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
-            Ok(AppPayload::Avatar { revision, avif }) => {
-                if let Err(e) = crate::data::peer_avatar::apply(
-                    &sender_ipk, &crate::data::peer_avatar::AvatarUpdate { revision, avif },
-                ) {
-                    warn!("PROFILE: could not apply buffered picture: {e}");
-                }
+            Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
+                crate::profile_sync::receive(conversation, sender_ipk, payload);
                 continue;
             },
             Ok(p) => legacy_body(p),
@@ -3434,6 +3431,10 @@ mod tests {
         assert!(crate::platform::EVENTS.set(events.clone()).is_ok());
         let alice = Node::new(0xD1);
         let bob = Node::new(0xD2);
+        Identity::save(crate::db::identity::IdentityRow {
+            id: 0, ipk: bob.ipk, enc_isk: vec![], created_at: 0,
+            name: "Bob".into(), avatar: None, avatar_revision: 9,
+        }).unwrap();
         let dht = FakeDhtClient::new_arc();
         let kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
         dht.publish_keypackages(&kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
@@ -3454,11 +3455,30 @@ mod tests {
         let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123).unwrap();
         assert!(matches!(received, InboundDecoded::ApplicationBuffered));
         assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
+        // Sync and ACK controls must also survive a future epoch. Otherwise a
+        // lost key-update commit leaves the owner retrying a photo forever.
+        for payload in [
+            AppPayload::AvatarSync { known_revision: Some(9), reply: true },
+            AppPayload::AvatarAck { revision: 9 },
+        ] {
+            let bytes = build_application_envelope_bytes(
+                &alice.ctx(dht.as_ref()), &mut ga, &leaf, &alice.ipk, &bob.ipk,
+                &payload.ser().unwrap(), &alice.ipk_signer,
+            ).unwrap();
+            let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+            let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123).unwrap();
+            assert!(matches!(received, InboundDecoded::ApplicationBuffered));
+        }
         let sealed = SealedMessage::from_mls_out(&commit, ga.group_id(), before).unwrap();
         let bytes = sealed.address_to(&bob.ipk, &alice.ipk_signer).unwrap();
         let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
         process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124).unwrap();
         assert_eq!(crate::data::peer_avatar::get(&alice.ipk), Some(image));
+        let acknowledged: Option<u64> = crate::db::messages::MESSAGES_DB.lock().query_row(
+            "SELECT revision FROM avatar_acks WHERE owner_ipk = ?1 AND peer_ipk = ?2",
+            (bob.ipk.as_slice(), alice.ipk.as_slice()), |r| r.get(0),
+        ).unwrap();
+        assert_eq!(acknowledged, Some(9), "epoch catch-up persists profile acknowledgements too");
         let generation = crate::data::peer_avatar::generation();
         assert!(generation > 0);
         assert_eq!(events.0.lock().last().copied(), Some(generation),

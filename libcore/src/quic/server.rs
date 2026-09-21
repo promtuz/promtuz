@@ -557,6 +557,10 @@ impl Relay {
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
+        // Reconcile profile state after draining stored updates. The task shares
+        // the connection's cancellation token, and never gates inbox readiness.
+        tokio::spawn(crate::profile_sync::run(mls_cancel.clone()));
+
         // Offline backlog is in the local DB — synced and live. (A drain-setup
         // failure returns above → Disconnected, so we never stick on Syncing.)
         ConnectionState::Connected.emit();
@@ -1104,15 +1108,8 @@ async fn process_deliver(
                         warn!("PROFILE: could not record a self-asserted name: {e}");
                     }
                 },
-                Ok(AppPayload::Avatar { revision, avif }) => {
-                    // Their picture, on the same say-so as their name and kept
-                    // beside it; `None` is them taking it down. Never a message.
-                    let stored = crate::data::peer_avatar::apply(
-                        &author, &crate::data::peer_avatar::AvatarUpdate { revision, avif },
-                    );
-                    if let Err(e) = stored {
-                        warn!("PROFILE: could not record a self-asserted picture: {e}");
-                    }
+                Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
+                    crate::profile_sync::receive(conv, author, payload);
                 },
                 Ok(AppPayload::PairAck) => {
                     // Proof-of-pair — its whole job was the mark_paired above.
@@ -1143,7 +1140,9 @@ async fn process_deliver(
                         "MESSAGE: undecodable AppPayload from {}: {e}",
                         hex::encode(&msg.from[..4])
                     );
-                    bail!("bad AppPayload");
+                    // The authenticated ciphertext is already consumed. A newer
+                    // app may add a control variant we do not understand yet;
+                    // discard it without tearing down the relay connection.
                 },
             }
         },

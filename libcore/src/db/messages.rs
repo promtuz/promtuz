@@ -445,6 +445,14 @@ const MIGRATION_ARRAY: &[M] = &[
          INSERT INTO peer_avatars SELECT ipk, avif, updated_at, 0 FROM peer_avatars_unversioned;
          DROP TABLE peer_avatars_unversioned;",
     ),
+    // A row also establishes support for avatar reconciliation. Scope by our
+    // identity so restoring a different account cannot inherit acknowledgements.
+    M::up("CREATE TABLE avatar_acks (
+        owner_ipk BLOB NOT NULL CHECK(length(owner_ipk) = 32),
+        peer_ipk BLOB NOT NULL CHECK(length(peer_ipk) = 32),
+        revision INTEGER CHECK(revision >= 0),
+        PRIMARY KEY(owner_ipk, peer_ipk)
+    ) WITHOUT ROWID;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
