@@ -6,6 +6,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.entryProvider
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import com.promtuz.chat.presentation.viewmodel.ProfileVM
+import com.promtuz.chat.ui.screens.ProfileScreen
+import com.promtuz.chat.ui.screens.ProfilePhotoScreen
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
@@ -39,6 +43,8 @@ fun AppNavigation(
     appViewModel: AppVM
 ) {
     val backStack = appViewModel.backStack
+    // Profile and its photo editor share writes, including when Back interrupts a save.
+    val profileOwner = checkNotNull(LocalViewModelStoreOwner.current)
 
     NavStage(
         backStack,
@@ -85,6 +91,19 @@ fun AppNavigation(
             entry<Routes.StorageChat> { key -> com.promtuz.chat.ui.screens.StorageScreen(
                 conversation = key.conversation, chatName = key.name,
             ) }
+            entry<Routes.Profile> {
+                ProfileScreen(
+                    viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
+                    onChoosePhoto = { appViewModel.navigator.push(Routes.ProfilePhoto(it.toString())) },
+                )
+            }
+            entry<Routes.ProfilePhoto> { key ->
+                ProfilePhotoScreen(
+                    uri = key.uri,
+                    viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
+                    onSaved = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
+                )
+            }
             entry<Routes.Settings> { SettingsScreen(appViewModel) }
             entry<Routes.ChatAppearance> { ChatAppearanceScreen() }
             entry<Routes.About> { AboutScreen(

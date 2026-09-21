@@ -42,7 +42,7 @@ fun HomeDrawerContent(
         val drawerButtonGroups: List<List<DrawerButton>> = remember {
             listOf(
                 listOf(
-                    DrawerButton("My Profile", R.drawable.i_profile)
+                    DrawerButton("My Profile", R.drawable.i_profile) { open(Routes.Profile) }
                 ), listOf(
                     DrawerButton("Contacts", R.drawable.i_contacts) { open(Routes.Contacts) },
                     DrawerButton("Blocked Users", R.drawable.i_user_blocked),

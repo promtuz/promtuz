@@ -13,7 +13,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 fun HomeMoreMenu(viewModel: AppVM, modifier: Modifier = Modifier) {
     val groups = remember(viewModel) {
         listOf(
-            listOf(MenuAction("My Profile", R.drawable.oi_user_circle) {}),
+            listOf(MenuAction("My Profile", R.drawable.oi_user_circle) { viewModel.navigator.push(Routes.Profile) }),
             listOf(MenuAction("Settings", R.drawable.oi_settings) { viewModel.navigator.push(Routes.Settings) }),
         )
     }
