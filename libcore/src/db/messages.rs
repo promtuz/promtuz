@@ -421,6 +421,30 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("ALTER TABLE messages ADD COLUMN notification_seen INTEGER NOT NULL DEFAULT 1;
         CREATE INDEX idx_messages_notification_pending ON messages(conversation_id)
             WHERE notification_seen = 0 AND outgoing = 0 AND deleted = 0;"),
+    // What a peer looks like, by their own account: the picture beside the
+    // name in `peer_names`, asserted the same way. Outranked by nothing local,
+    // since a picture is theirs alone to choose. Its own table because either
+    // can arrive without the other, and a picture must not mint a name row.
+    M::up(
+        "CREATE TABLE peer_avatars ( \
+             ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
+             avif       BLOB NOT NULL, \
+             updated_at INTEGER NOT NULL \
+         ) WITHOUT ROWID;",
+    ),
+    // Keep a revision even when the owner removes their picture. A delayed
+    // upload must not resurrect it. Preserve pictures from pre-revision builds.
+    M::up(
+        "ALTER TABLE peer_avatars RENAME TO peer_avatars_unversioned;
+         CREATE TABLE peer_avatars (
+             ipk BLOB PRIMARY KEY CHECK(length(ipk) = 32),
+             avif BLOB,
+             updated_at INTEGER NOT NULL,
+             revision INTEGER NOT NULL CHECK(revision >= 0)
+         ) WITHOUT ROWID;
+         INSERT INTO peer_avatars SELECT ipk, avif, updated_at, 0 FROM peer_avatars_unversioned;
+         DROP TABLE peer_avatars_unversioned;",
+    ),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -437,6 +461,7 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
         "conversations",
         "conversation_members",
         "peer_names",
+        "peer_avatars",
         "sticker_packs",
         "stickers",
         "sticker_recents",

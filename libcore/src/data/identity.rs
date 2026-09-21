@@ -95,14 +95,16 @@ impl Identity {
 
         conn.execute(
             "INSERT INTO identity (
-                    id, ipk, enc_isk, created_at, name
-                 ) VALUES (?1, ?2, ?3, ?4, ?5);",
+                    id, ipk, enc_isk, created_at, name, avatar, avatar_revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             (
                 identity.id,
                 identity.ipk,
                 identity.enc_isk.clone(),
                 identity.created_at,
                 identity.name.clone(),
+                identity.avatar.clone(),
+                identity.avatar_revision,
             ),
         )?;
 
@@ -127,6 +129,8 @@ impl Identity {
             enc_isk,
             created_at: systime().as_millis() as u64,
             name,
+            avatar: None,
+            avatar_revision: 0,
         })?;
         Ok(())
     }
@@ -138,6 +142,30 @@ impl Identity {
         let conn = IDENTITY_DB.lock();
         conn.execute("UPDATE identity SET name = ?1 WHERE id = 0", [name])?;
         Ok(())
+    }
+
+    /// Our profile picture as AVIF bytes, if we set one.
+    pub fn avatar(&self) -> Option<Vec<u8>> {
+        self.inner.avatar.clone()
+    }
+
+    /// A snapshot of both bytes and revision from the same identity row.
+    pub fn avatar_update(&self) -> crate::data::peer_avatar::AvatarUpdate {
+        crate::data::peer_avatar::AvatarUpdate {
+            revision: self.inner.avatar_revision,
+            avif: self.avatar(),
+        }
+    }
+
+    /// Store a new picture or removal, allocating its revision under the same
+    /// DB lock. The caller broadcasts this exact revision with these bytes.
+    pub fn set_avatar(avif: Option<&[u8]>) -> Result<u64> {
+        let revision = {
+            let conn = IDENTITY_DB.lock();
+            set_avatar_tx(&conn, avif, systime().as_millis() as u64)?
+        };
+        crate::data::peer_avatar::notify_changed();
+        Ok(revision)
     }
 
     /// Restore a previously-created identity from its raw secret — the shared
@@ -160,6 +188,8 @@ impl Identity {
             enc_isk,
             created_at: systime().as_millis() as u64,
             name,
+            avatar: None,
+            avatar_revision: 0,
         })?;
         Ok(())
     }
@@ -358,6 +388,25 @@ fn validate_nickname(name: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Wall time lets a fresh restore supersede its old profile; the persisted
+/// counter also advances when changes share a millisecond or the clock recedes.
+fn set_avatar_tx(conn: &rusqlite::Connection, avif: Option<&[u8]>, now_ms: u64) -> Result<u64> {
+    if let Some(bytes) = avif {
+        crate::data::peer_avatar::check_avif(bytes)?;
+    }
+    let previous: u64 = conn.query_row(
+        "SELECT avatar_revision FROM identity WHERE id = 0", [], |r| r.get(0),
+    )?;
+    let next = previous.checked_add(1).ok_or_else(|| anyhow!("profile revision exhausted"))?;
+    let revision = now_ms.max(next);
+    let stored_revision = i64::try_from(revision)?;
+    conn.execute(
+        "UPDATE identity SET avatar = ?1, avatar_revision = ?2 WHERE id = 0",
+        (avif, stored_revision),
+    )?;
+    Ok(revision)
+}
+
 #[cfg(test)]
 mod cache_tests {
     use super::{CachedIsk, cached_or_open};
@@ -403,5 +452,24 @@ mod cache_tests {
 
         assert_eq!(opens.get(), 2, "identity switch must re-open");
         assert_eq!(&b[..], &[7u8; 32][..], "must serve the new identity's secret");
+    }
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    #[test]
+    fn revisions_advance_with_equal_or_backwards_clocks() {
+        let conn = crate::db::identity::open_in_memory();
+        conn.execute(
+            "INSERT INTO identity (id, ipk, enc_isk, created_at, name) VALUES (0, ?1, X'01', 0, 'me')",
+            [[1u8; 32].as_slice()],
+        ).unwrap();
+        let image = b"\0\0\0\x0cftypavif";
+        assert_eq!(super::set_avatar_tx(&conn, Some(image), 100).unwrap(), 100);
+        assert_eq!(super::set_avatar_tx(&conn, None, 100).unwrap(), 101);
+        assert_eq!(super::set_avatar_tx(&conn, Some(image), 90).unwrap(), 102);
+        let row = conn.query_row("SELECT * FROM identity", [], crate::db::identity::IdentityRow::from_row).unwrap();
+        assert_eq!(row.avatar_revision, 102);
+        assert_eq!(row.avatar.as_deref(), Some(image.as_slice()));
     }
 }

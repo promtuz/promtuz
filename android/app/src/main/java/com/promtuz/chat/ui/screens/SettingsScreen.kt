@@ -21,18 +21,16 @@ import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
-import com.promtuz.chat.presentation.viewmodel.SettingsVM
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
-import org.koin.androidx.compose.koinViewModel
 
 private data class SettingItem(val title: String, val drawableIcon: Int, val onClick: () -> Unit)
 private data class SettingGroup(val name: String, val items: List<SettingItem>)
 
 @Composable
 fun SettingsScreen(
-    appViewModel: AppVM, viewModel: SettingsVM = koinViewModel()
+    appViewModel: AppVM
 ) {
     val direction = LocalLayoutDirection.current
     val context = LocalContext.current

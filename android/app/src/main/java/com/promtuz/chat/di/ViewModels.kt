@@ -7,7 +7,7 @@ import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ContactsVM
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
 import com.promtuz.chat.presentation.viewmodel.RelaysVM
-import com.promtuz.chat.presentation.viewmodel.SettingsVM
+import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
@@ -23,7 +23,7 @@ val vmModule = module {
     viewModelOf(::ShareIdentityVM)
     viewModelOf(::QrScannerVM)
     viewModelOf(::ContactsVM)
-    viewModelOf(::SettingsVM)
+    viewModelOf(::ProfileVM)
     viewModelOf(::ChatVM)
     viewModelOf(::RelaysVM)
     viewModelOf(::UpdateVM)

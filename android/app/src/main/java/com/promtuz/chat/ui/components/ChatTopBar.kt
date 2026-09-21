@@ -59,6 +59,7 @@ import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
+import com.promtuz.chat.utils.media.rememberAvatar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -149,7 +150,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp)
-                else Avatar(name, 40.dp)
+                else Avatar(name, 40.dp, image = rememberAvatar(summary?.peerHex))
                 Column {
                     Text(name, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1)
                     if (subtitle != null) Text(

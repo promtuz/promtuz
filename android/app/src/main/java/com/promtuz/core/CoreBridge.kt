@@ -108,6 +108,12 @@ import uniffi.core.inviteFromLink as ffiInviteFromLink
 import uniffi.core.timeBucket as ffiTimeBucket
 import uniffi.core.validateUpdateManifest as ffiValidateUpdateManifest
 import uniffi.core.updateIsInstallable as ffiUpdateIsInstallable
+import uniffi.core.profileName as ffiProfileName
+import uniffi.core.profilePicture as ffiProfilePicture
+import uniffi.core.setProfilePicture as ffiSetProfilePicture
+import uniffi.core.clearProfilePicture as ffiClearProfilePicture
+import uniffi.core.avatarOf as ffiAvatarOf
+import uniffi.core.avatarGeneration as ffiAvatarGeneration
 import uniffi.core.TimeBucket
 import uniffi.core.UpdateManifest
 import com.promtuz.core.adapter.ActivitySignal
@@ -194,6 +200,29 @@ object CoreBridge {
         withContext(Dispatchers.IO) { ffiPreviewInvite(bytes) }
 
     suspend fun contacts(): List<ContactInfo> = withContext(Dispatchers.IO) { ffiGetContacts() }
+
+    /** Our display name, as enrolled or last restored. */
+    suspend fun profileName(): String = withContext(Dispatchers.IO) { ffiProfileName() }
+
+    /** Our profile picture as AVIF bytes, or null when we have none. */
+    suspend fun profilePicture(): ByteArray? = withContext(Dispatchers.IO) { ffiProfilePicture() }
+
+    /**
+     * Set the profile picture from a decoded bitmap's RGBA. Core crops, scales and
+     * encodes it, stores it and tells every chat; returns once it is stored, the
+     * sends landing on their own like any control message.
+     */
+    suspend fun setProfilePicture(rgba: ByteArray, width: Int, height: Int) =
+        withContext(Dispatchers.IO) { ffiSetProfilePicture(rgba, width.toUInt(), height.toUInt()) }
+
+    /** Remove the profile picture and tell every chat to stop showing it. */
+    suspend fun clearProfilePicture() = withContext(Dispatchers.IO) { ffiClearProfilePicture() }
+
+    /** The picture to draw for [ipk] (ours for ourselves) as AVIF bytes; null draws initials. */
+    suspend fun avatarOf(ipk: ByteArray): ByteArray? = withContext(Dispatchers.IO) { ffiAvatarOf(ipk) }
+
+    /** Moves whenever any picture changes; cheaper to compare than to re-decode on every doorbell. */
+    suspend fun avatarGeneration(): ULong = withContext(Dispatchers.IO) { ffiAvatarGeneration() }
 
     /** Contacts + per-contact diagnostics (paired, MLS epoch, msg count/status, pending ops). */
     suspend fun contactsDiag(): List<ContactDiag> = withContext(Dispatchers.IO) { ffiListContactsDiag() }

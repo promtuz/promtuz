@@ -9,10 +9,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Shader
 import android.graphics.Typeface
+import androidx.compose.ui.graphics.asAndroidBitmap
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.core.app.ActivityCompat
@@ -31,6 +34,7 @@ import com.promtuz.chat.data.NotifBuzz
 import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
+import com.promtuz.chat.utils.media.decodeAvatar
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CancellationException
@@ -254,7 +258,8 @@ object PushNotifier {
             .setContentIntent(openChat(convHex, displayName)) // peer rides in the extras even when hidden
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
-            val avatar = letterAvatar(displayName) // no contact photos exist — colored initials, like the app
+            // Their own picture for a direct chat, when they told us one; initials otherwise, like the app.
+            val avatar = (if (isGroup) null else peerAvatar(conv)) ?: letterAvatar(displayName)
             val avatarIcon = IconCompat.createWithBitmap(avatar)
             chat.setLargeIcon(avatar)
             val them = Person.Builder().setName(displayName).setKey(convHex).setIcon(avatarIcon).build()
@@ -353,6 +358,23 @@ object PushNotifier {
 
     /** Colored initials avatar — contacts carry no photo, so this mirrors the in-app letter avatar
      *  (a distinguishing hue per name beats the system's flat-gray fallback). */
+    /**
+     * The peer's picture for a direct chat's notification, rounded to match the
+     * initials tile. Null when we hold none for them, or the chat has no single peer.
+     */
+    private suspend fun peerAvatar(conv: ByteArray, px: Int = 128): Bitmap? {
+        val peer = runCatching { CoreBridge.conversation(conv)?.peer }.getOrNull() ?: return null
+        val bytes = runCatching { CoreBridge.avatarOf(peer) }.getOrNull() ?: return null
+        val src = decodeAvatar(bytes)?.asAndroidBitmap() ?: return null
+        val scaled = Bitmap.createScaledBitmap(src, px, px, true)
+        val out = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        }
+        Canvas(out).drawCircle(px / 2f, px / 2f, px / 2f, paint)
+        return out
+    }
+
     private fun letterAvatar(name: String, px: Int = 128): Bitmap {
         val initials = name.split(" ").filter { it.isNotBlank() }
             .take(2).joinToString("") { it.first().uppercase() }.ifEmpty { "?" }

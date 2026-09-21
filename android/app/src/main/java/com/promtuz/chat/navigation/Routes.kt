@@ -25,6 +25,12 @@ object Routes : NavKey {
     data object Contacts : NavKey
 
     @Serializable
+    data object Profile : NavKey
+
+    @Serializable
+    data class ProfilePhoto(val uri: String) : NavKey
+
+    @Serializable
     data object Settings : NavKey
 
     @Serializable

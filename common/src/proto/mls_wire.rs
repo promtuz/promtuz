@@ -185,6 +185,18 @@ pub enum AppPayload {
     Profile {
         name: String,
     },
+    /// What the sender looks like, told to a chat they share with us: their
+    /// profile picture as AVIF bytes, or `None` once they took it down.
+    ///
+    /// Self-asserted and chat-scoped exactly like [`AppPayload::Profile`], and
+    /// held to [`MAX_AVATAR_BYTES`] on both ends. A control message: stored
+    /// beside the name, never shown as something they said. Appended after
+    /// Profile so postcard ordinals hold.
+    Avatar {
+        /// Owner-issued revision, shared across chats; removals carry one too.
+        revision: u64,
+        avif: Option<Vec<u8>>,
+    },
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the
@@ -272,6 +284,12 @@ pub const MLS_ENVELOPE_VERSION: u8 = 1;
 /// envelope + postcard framing that wraps these bytes, so a valid MLS message
 /// always fits one [`super::pack::MAX_FRAME_BYTES`] frame.
 pub const MAX_FRAMED_MLS_BYTES: usize = super::pack::MAX_FRAME_BYTES - 16 * 1024;
+
+/// Ceiling on a profile picture's AVIF bytes, enforced by the sender's encoder
+/// and re-checked on receipt. A 256px square encodes to a fraction of it; the
+/// cap is what stops a hostile member parking a payload under the name of a
+/// picture, in every chat they share with us.
+pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 
 /// Ceiling on `(env.epoch - group.epoch())` before the recipient drops
 /// an incoming envelope as "implausibly far ahead." A malicious member
@@ -1442,6 +1460,21 @@ mod tests {
     use crate::proto::pack::Packer;
     use crate::proto::pack::Unpacker;
     use crate::quic::id::NodeId;
+
+    /// The picture is optional on the wire in both senses: present, and absent
+    /// as a removal. Both shapes must survive the trip, and the variant must
+    /// sit behind Profile so an older reader's ordinals are undisturbed.
+    #[test]
+    fn avatar_payload_round_trips_with_and_without_a_picture() {
+        for avif in [Some(vec![1u8, 2, 3]), None] {
+            let p = AppPayload::Avatar { revision: 42, avif: avif.clone() };
+            let bytes = p.ser().expect("ser");
+            assert_eq!(AppPayload::deser(&bytes).expect("deser"), p);
+        }
+        let profile = AppPayload::Profile { name: "bhuv".into() }.ser().expect("ser");
+        let avatar = AppPayload::Avatar { revision: 43, avif: None }.ser().expect("ser");
+        assert_eq!(avatar[0], profile[0] + 1, "Avatar is the ordinal right after Profile");
+    }
 
     /// Mint a fresh Ed25519 keypair via OS-RNG. Same idiom as the
     /// existing `dht_p2p` test fixture.

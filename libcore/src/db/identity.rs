@@ -17,9 +17,12 @@ pub struct IdentityRow {
     /// Unix timestamp in milliseconds
     pub created_at: u64,
     pub name: String,
+    /// Our profile picture as AVIF, as last set. `None` when we have none.
+    pub avatar: Option<Vec<u8>>,
+    pub avatar_revision: u64,
 }
 
-from_row!(IdentityRow { id, ipk, enc_isk, created_at, name });
+from_row!(IdentityRow { id, ipk, enc_isk, created_at, name, avatar, avatar_revision });
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
@@ -40,6 +43,11 @@ const MIGRATION_ARRAY: &[M] = &[
             unusable_at_ms INTEGER NOT NULL
         );",
     ),
+    // The picture beside the name. It lives with the identity for the reason
+    // the name does: it is what we tell people about ourselves, and a restore
+    // should bring it back with the rest of the profile.
+    M::up("ALTER TABLE identity ADD COLUMN avatar BLOB;"),
+    M::up("ALTER TABLE identity ADD COLUMN avatar_revision INTEGER NOT NULL DEFAULT 0;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -49,3 +57,10 @@ pub static IDENTITY_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
 
     Mutex::new(conn)
 });
+
+#[cfg(test)]
+pub(crate) fn open_in_memory() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("identity DB");
+    MIGRATIONS.to_latest(&mut conn).expect("identity migrations");
+    conn
+}

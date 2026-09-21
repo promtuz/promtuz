@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -19,7 +20,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -27,6 +30,12 @@ import androidx.compose.ui.unit.sp
 
 const val AVATAR_RADIUS_RATIO = 2.875f;
 
+/**
+ * A person's tile: their picture when we hold one ([image], see
+ * [com.promtuz.chat.utils.media.rememberAvatar]), their initials otherwise.
+ * Tappable only when given an [onClick]; a tile with nothing to do lets the
+ * tap fall through to the row it sits in.
+ */
 @ExperimentalMaterial3Api
 @Composable
 fun Avatar(
@@ -34,6 +43,8 @@ fun Avatar(
     size: Dp = 52.dp,
     clipRatio: Float = AVATAR_RADIUS_RATIO,
     statusColor: Color? = null,
+    image: ImageBitmap? = null,
+    onClick: (() -> Unit)? = null,
 ) {
     val clip = RoundedCornerShape(size / clipRatio)
     val fallbackChars = name.split(" ")
@@ -49,13 +60,17 @@ fun Avatar(
                 .clip(clip)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(0.5f))
                 .clickable(
-                    enabled = true,
+                    enabled = onClick != null,
                     interactionSource = interactionSource,
                 ) {
-
+                    onClick?.invoke()
                 }, contentAlignment = Alignment.Center
         ) {
-            Text(
+            if (image != null) Image(
+                image, null,
+                Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            ) else Text(
                 fallbackChars,
                 fontWeight = FontWeight.Bold,
                 fontSize = (size.value / 2.6f).sp,

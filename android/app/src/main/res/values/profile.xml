@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="profile_photo_choose">Choose photo</string>
+    <string name="profile_photo_remove">Remove photo</string>
+    <string name="profile_photo_edit">Change profile picture</string>
+</resources>

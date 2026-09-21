@@ -1104,9 +1104,22 @@ async fn process_deliver(
                         warn!("PROFILE: could not record a self-asserted name: {e}");
                     }
                 },
+                Ok(AppPayload::Avatar { revision, avif }) => {
+                    // Their picture, on the same say-so as their name and kept
+                    // beside it; `None` is them taking it down. Never a message.
+                    let stored = crate::data::peer_avatar::apply(
+                        &author, &crate::data::peer_avatar::AvatarUpdate { revision, avif },
+                    );
+                    if let Err(e) = stored {
+                        warn!("PROFILE: could not record a self-asserted picture: {e}");
+                    }
+                },
                 Ok(AppPayload::PairAck) => {
                     // Proof-of-pair — its whole job was the mark_paired above.
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
+                    // The pair now works both ways, and they hold our name from
+                    // the invite: our picture is the one thing left to show them.
+                    crate::messaging::introduce_avatar(conv);
                 },
                 Ok(AppPayload::P2p { candidates, relay, token, disco_key }) => {
                     // Candidate offer for a direct connection — hand to the
@@ -1143,6 +1156,11 @@ async fn process_deliver(
             crate::RUNTIME.spawn(async move {
                 if let Err(e) = crate::messaging::send_pair_ack(to).await {
                     warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
+                    return;
+                }
+                // They hold our name from the invite; the picture is new to them.
+                if let Ok(conv) = Conversation::for_peer(&to) {
+                    crate::messaging::introduce_avatar(conv);
                 }
             });
         },
