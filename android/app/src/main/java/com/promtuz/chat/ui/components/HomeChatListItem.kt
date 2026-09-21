@@ -80,12 +80,12 @@ fun HomeChatListItem(
 
     val groups = listOf(
         buildList {
-            add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_thumbtack_angle_slash else R.drawable.oi_thumbtack_angle) { onPin() })
-            add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) { onMute() })
+            add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
+            add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
             if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
         listOf(
-            MenuAction("Clear history", R.drawable.oi_clear_list) { confirmClear = true },
+            MenuAction("Clear history", R.drawable.oi_broom) { confirmClear = true },
             MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true },
         ),
     )

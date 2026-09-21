@@ -39,6 +39,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
+import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.MenuAction
@@ -71,7 +72,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
     val channelActions = listOf("release", "debug").map { option ->
         MenuAction(
             "${option.replaceFirstChar { it.uppercase() }} channel",
-            icon = if (channel == option) R.drawable.i_check else null,
+            glyph = if (channel == option) MorphGlyph.Check else null,
         ) {
             if (option != channel) {
                 when (state) {
@@ -87,7 +88,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
         actions = {
             AppDropMenu(
                 anchor = {
-                    DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp), desc = "Update options")
+                    DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Update options")
                 },
                 groups = listOf(channelActions),
             )

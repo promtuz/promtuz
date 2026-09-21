@@ -71,7 +71,7 @@ fun DrawableIcon(
 @Composable
 private fun DrawableIconPreview() {
     Column(Modifier.background(Color.White).padding(4.dp)) {
-        DrawableIcon(R.drawable.oi_bell_on, size = 24.dp)
-        DrawableIcon(R.drawable.oi_bell_slash, size = 24.dp)
+        DrawableIcon(R.drawable.oi_volume, size = 24.dp)
+        DrawableIcon(R.drawable.oi_volume_off, size = 24.dp)
     }
 }

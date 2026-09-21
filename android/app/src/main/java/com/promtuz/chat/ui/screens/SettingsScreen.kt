@@ -81,7 +81,7 @@ fun SettingsScreen(
                 "About", listOf(
                     SettingItem("App Info", R.drawable.i_info) { navigate(Routes.About) },
                     SettingItem("Updates", R.drawable.i_download) { navigate(Routes.Updates) },
-                    SettingItem("Open Source Licenses", R.drawable.i_code) { navigate(Routes.OpenSourceLicenses) },
+                    SettingItem("Open Source Licenses", R.drawable.oi_code) { navigate(Routes.OpenSourceLicenses) },
                 )
             ),
         )

@@ -17,8 +17,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.res.painterResource
-import com.promtuz.chat.R
 import com.promtuz.chat.ui.stage.ChatMotion
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,7 +63,8 @@ fun ContactPicker(
                                 .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(person.name, maxLines = 1, style = MaterialTheme.typography.labelLarge)
-                                Icon(painterResource(R.drawable.i_close), "Deselect ${person.name}", Modifier.size(12.dp))
+                                MorphIcon(MorphGlyph.Close, "Deselect ${person.name}", Modifier.size(12.dp),
+                                    strokeWidth = 1.25.dp)
                             }
                         }
                     }
@@ -116,9 +115,9 @@ private fun SelectableContactAvatar(name: String, ipkHex: String, selecting: Boo
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {
             Box(Modifier.size(20.dp).clip(CircleShape).background(fill).border(2.dp, colors.background, CircleShape),
                 contentAlignment = Alignment.Center) {
-                Icon(painterResource(R.drawable.i_check), null, Modifier.size(10.dp).graphicsLayer {
+                MorphIcon(MorphGlyph.Check, null, Modifier.size(10.dp).graphicsLayer {
                     alpha = check; scaleX = check; scaleY = check
-                }, tint = colors.onPrimary)
+                }, tint = colors.onPrimary, strokeWidth = 1.25.dp)
             }
         }
     }

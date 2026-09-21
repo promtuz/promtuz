@@ -52,9 +52,8 @@ fun ContactPickerHeader(
         IconButton(onClick = onBack, enabled = enabled) {
             val description = if (searching) "Close search" else if (close) "Clear selection" else "Back"
             val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
-            MorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
-                description, Modifier.size(24.dp), tint)
-
+            TopBarMorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
+                description, tint = tint)
         }
         AnimatedContent(searching, Modifier.weight(1f).height(48.dp), contentAlignment = Alignment.CenterStart, transitionSpec = {
             (fadeIn(ChatMotion.spec()) togetherWith fadeOut(ChatMotion.spec())).using(null)

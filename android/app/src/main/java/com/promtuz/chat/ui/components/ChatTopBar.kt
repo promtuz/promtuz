@@ -42,7 +42,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
@@ -109,7 +108,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 },
             contentAlignment = Alignment.Center,
         ) {
-            MorphIcon(navigationMorph, if (searching) "Close search" else "Back", Modifier.size(24.dp))
+            TopBarMorphIcon(navigationMorph, if (searching) "Close search" else "Back")
         }
     }
 
@@ -164,8 +163,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         navigationIcon = navigationIcon,
         actions = {
             if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else AppDropMenu(
-                iconSize = 20.dp,
-                anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp), desc = "Chat options") },
+                anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
                     if (isGroup) {
                         add(
@@ -179,14 +177,14 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     add(
                         listOf(
                             MenuAction("Search", R.drawable.oi_search) { chatVM.openSearch() },
-                            MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) {
+                            MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) {
                                 chatVM.toggleMute()
                             })
                     )
                     add(
                         buildList {
                             add(
-                                MenuAction("Clear History", R.drawable.oi_clear_list) {
+                                MenuAction("Clear History", R.drawable.oi_broom) {
                                     confirmClear = true
                                 },
                             )
@@ -297,8 +295,8 @@ private fun SearchActions(chatVM: ChatVM, query: String) {
                 Modifier.size(40.dp).clip(CircleShape).clickable(enabled = enabled) { chatVM.nextHit() },
                 contentAlignment = Alignment.Center,
             ) {
-                DrawableIcon(
-                    R.drawable.i_back_chevron, Modifier.size(18.dp).rotate(90f),
+                TopBarMorphIcon(
+                    MorphGlyph.ChevronUp, "Next result",
                     tint = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.4f),
                 )
             }
@@ -307,8 +305,8 @@ private fun SearchActions(chatVM: ChatVM, query: String) {
                     .clickable(enabled = enabled) { chatVM.prevHit() },
                 contentAlignment = Alignment.Center,
             ) {
-                DrawableIcon(
-                    R.drawable.i_back_chevron, Modifier.size(18.dp).rotate(-90f),
+                TopBarMorphIcon(
+                    MorphGlyph.ChevronDown, "Previous result",
                     tint = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.4f),
                 )
             }

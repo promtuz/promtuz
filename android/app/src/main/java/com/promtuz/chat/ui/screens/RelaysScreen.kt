@@ -188,7 +188,7 @@ private fun RelayMenu(
     AppDropMenu(
         anchor = {
             DrawableIcon(
-                R.drawable.i_ellipsis_vertical,
+                R.drawable.i_more_vert,
                 Modifier.padding(4.dp),
                 desc = "Actions",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -509,7 +509,7 @@ private fun ComposerActionBlock(
                 .semantics { contentDescription = "Cancel action" },
             contentAlignment = Alignment.Center,
         ) {
-            DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            MorphIcon(MorphGlyph.Close, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         }
     }
 }
@@ -718,7 +718,7 @@ private fun RecordingRow(viewModel: ChatVM, onCancel: () -> Unit, onSend: () -> 
             Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onCancel),
             contentAlignment = Alignment.Center,
         ) {
-            DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            MorphIcon(MorphGlyph.Close, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         }
         Box(
             Modifier

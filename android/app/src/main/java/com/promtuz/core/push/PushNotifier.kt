@@ -219,7 +219,7 @@ object PushNotifier {
             Intent(app, MarkReadReceiver::class.java).putExtra("conversation", conv),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val readAction = NotificationCompat.Action.Builder(R.drawable.i_check, "Mark read", readPI)
+        val readAction = NotificationCompat.Action.Builder(R.drawable.oi_check, "Mark read", readPI)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
             .setShowsUserInterface(false)
             .build()

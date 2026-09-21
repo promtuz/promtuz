@@ -183,7 +183,7 @@ private fun PickTile(pick: PickedSticker, enabled: Boolean, onRemove: () -> Unit
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {
-            DrawableIcon(R.drawable.i_close, Modifier.size(12.dp), tint = Color.White)
+            MorphIcon(MorphGlyph.Close, null, Modifier.size(12.dp), tint = Color.White, strokeWidth = 1.25.dp)
         }
     }
 }

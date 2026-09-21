@@ -24,7 +24,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.STAGED_ATTACHMENT
 import com.promtuz.chat.domain.model.StagedMedia
 import com.promtuz.chat.ui.appearance.LocalChatColors
@@ -94,8 +93,8 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
                         strokeWidth = 2.dp,
                     )
                 }
-                item.failed -> DrawableIcon(
-                    R.drawable.i_close,
+                item.failed -> MorphIcon(
+                    MorphGlyph.Close, null,
                     Modifier.size(20.dp),
                     tint = colors.error,
                 )
@@ -114,7 +113,7 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {
-            DrawableIcon(R.drawable.i_close, Modifier.size(11.dp), tint = Color.White)
+            MorphIcon(MorphGlyph.Close, null, Modifier.size(11.dp), tint = Color.White, strokeWidth = 1.25.dp)
         }
     }
 }

@@ -54,6 +54,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.promtuz.chat.ui.components.MorphGlyph
+import com.promtuz.chat.ui.components.TopBarMorphIcon
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
@@ -171,9 +173,9 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
         ),
         navigationIcon = {
             IconButton(onBack) {
-                Icon(
-                    painterResource(R.drawable.i_back), "Close",
-                    Modifier, MaterialTheme.colorScheme.onSurface
+                TopBarMorphIcon(
+                    MorphGlyph.Back, "Close",
+                    tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
         },

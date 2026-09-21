@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.screens
 
 import android.text.format.Formatter
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -98,19 +99,23 @@ internal fun StorageManager(
     }
     val chosen = remember(media, selected) { media.filter { it.key in selected } }
     BackHandler(selected.isNotEmpty()) { selected = emptySet() }
+    val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+    val navigationMorph = rememberMorphIconState(if (selected.isNotEmpty()) MorphGlyph.Close else MorphGlyph.Back)
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = { TopAppBar(title = { Text(chatName ?: "Storage") },
             navigationIcon = {
-                if (selected.isNotEmpty()) IconButton(onClick = { selected = emptySet() }) {
-                    DrawableIcon(R.drawable.i_close, desc = "Close selection", size = 20.dp)
+                IconButton(onClick = {
+                    if (selected.isNotEmpty()) selected = emptySet() else backDispatcher?.onBackPressed()
+                }) {
+                    TopBarMorphIcon(navigationMorph, if (selected.isNotEmpty()) "Close selection" else "Go Back",
+                        tint = MaterialTheme.colorScheme.onSurface)
                 }
-                else GoBackButton()
             }, actions = {
                 AppDropMenu(
                     iconSize = 20.dp,
-                    anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp), desc = "Storage options") },
+                    anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Storage options") },
                     groups = listOf(listOf(
                         MenuAction("Refresh", R.drawable.i_refresh) { refresh() },
                     )),
@@ -291,7 +296,7 @@ private fun StorageCheck(checked: Boolean, color: Color, diameter: androidx.comp
     val fill by animateColorAsState(if (checked) color else color.copy(alpha = 0.15f), ChatMotion.spec(), label = "selection")
     Box(Modifier.size(diameter).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
         AnimatedVisibility(checked) {
-            DrawableIcon(R.drawable.i_check, size = diameter / 2, tint = Color.White)
+            MorphIcon(MorphGlyph.Check, null, Modifier.size(diameter / 2), tint = Color.White, strokeWidth = 1.25.dp)
         }
     }
 }

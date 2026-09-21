@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -61,6 +62,7 @@ data class MenuAction(
     @param:DrawableRes val icon: Int? = null,
     val destructive: Boolean = false,
     val iconPlaceholder: String? = null,
+    val glyph: MorphGlyph? = null,
     val onClick: () -> Unit,
 )
 
@@ -70,7 +72,7 @@ data class MenuAction(
  * a vector drawable always reports one, so without this every row would silently
  * render at whatever its XML happened to declare.
  */
-val MenuIconSize = 20.dp
+val MenuIconSize = 24.dp
 
 /**
  * Our dropdown, so height/shape/spacing are ours instead of M3's forced 48dp / 8dp internals.
@@ -278,8 +280,12 @@ private fun MenuRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        action.icon?.let { DrawableIcon(it, tint = color, size = iconSize) }
-            ?: action.iconPlaceholder?.let { Text("[$it]", color = color, style = MaterialTheme.typography.labelSmall) }
+        when {
+            action.glyph != null -> MorphIcon(action.glyph, null, Modifier.size(iconSize), tint = color)
+            action.icon != null -> DrawableIcon(action.icon, tint = color, size = iconSize)
+            action.iconPlaceholder != null -> Text("[${action.iconPlaceholder}]", color = color,
+                style = MaterialTheme.typography.labelSmall)
+        }
         Text(action.label, color = color, style = MaterialTheme.typography.labelLarge)
     }
 }

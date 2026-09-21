@@ -64,7 +64,7 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
 
     SimpleScreen({ Text("Backup & Restore") }, actions = {
         IconButton(viewModel::clearConsole) {
-            DrawableIcon(R.drawable.oi_clear_list, desc = "Clear console", size = 20.dp)
+            DrawableIcon(R.drawable.oi_broom, desc = "Clear console", size = 20.dp)
         }
     }) { padding ->
         Column(

@@ -20,7 +20,7 @@ fun HomeMoreMenu(viewModel: AppVM, modifier: Modifier = Modifier) {
 
     AppDropMenu(
         iconSize = 24.dp,
-        anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp)) },
+        anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp)) },
         groups = groups,
         modifier = modifier,
     )

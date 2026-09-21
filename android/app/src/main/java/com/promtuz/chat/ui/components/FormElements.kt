@@ -160,10 +160,10 @@ object OutlinedFormElements {
                             .fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        DrawableIcon(
-                            R.drawable.i_check,
-                            Modifier.size(checkBoxSize * CHECKBOX.ICON_SIZE_RATIO),
+                        MorphIcon(
+                            MorphGlyph.Check,
                             "Checked",
+                            Modifier.size(checkBoxSize * CHECKBOX.ICON_SIZE_RATIO),
                             checkColor
                         )
                     }

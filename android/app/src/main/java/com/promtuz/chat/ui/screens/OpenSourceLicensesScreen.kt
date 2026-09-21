@@ -39,6 +39,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.components.MorphGlyph
+import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.ContactPickerHeader
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
@@ -117,7 +119,7 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
                         onClick = { onLibraryClick(library.id) },
                         supportingText = "${library.version} · ${library.license}",
                     ) {
-                        Icon(painterResource(R.drawable.i_code), null, Modifier.size(26.dp))
+                        MorphIcon(MorphGlyph.Code, null, Modifier.size(26.dp))
                     }
                 }
             }

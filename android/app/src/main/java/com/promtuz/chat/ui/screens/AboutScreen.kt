@@ -28,6 +28,8 @@ import androidx.core.net.toUri
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
+import com.promtuz.chat.ui.components.MorphGlyph
+import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SimpleScreen
@@ -96,7 +98,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
             item("source") {
                 GroupedActionRow("Source code", 1, 3, onClick = {
                     open(Intent(Intent.ACTION_VIEW, "https://github.com/promtuz/promtuz".toUri()))
-                }) { DrawableIcon(R.drawable.i_code, size = 26.dp) }
+                }) { MorphIcon(MorphGlyph.Code, null, Modifier.size(26.dp)) }
             }
             item("licenses") {
                 GroupedActionRow("Open source licenses", 2, 3, onOpenLicenses) {

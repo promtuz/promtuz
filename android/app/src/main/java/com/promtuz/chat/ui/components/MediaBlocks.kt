@@ -330,7 +330,7 @@ private fun TransferAffordance(
             else CircularProgressIndicator(ring, color = textColor, strokeWidth = 2.dp)
         }
         2 -> IconButton({ att.localPath?.let { onOpen?.invoke(it) } }) {
-            DrawableIcon(R.drawable.i_check, Modifier.size(20.dp), tint = textColor)
+            MorphIcon(MorphGlyph.Check, null, Modifier.size(20.dp), tint = textColor)
         }
         else -> IconButton({ onDownload?.invoke(att.fileIdHex) }) {
             val tint = if (att.transferState == 3) MaterialTheme.colorScheme.error else textColor
