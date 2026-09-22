@@ -37,6 +37,10 @@ review its notices and update the pinned mapping in `generate.py`.
 An initial build needs access to the configured Maven repositories for license
 POMs as well as the usual dependency artifacts. Once cached, normal offline
 builds work. Python 3.11 or newer is required and uses only its standard library.
+The build uses `python3` by default. If your IDE finds an older Python, set
+`python.executable=/absolute/path/to/python3` in the gitignored
+`android/local.properties` file.
+
 To regenerate explicitly:
 
 ```sh

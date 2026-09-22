@@ -23,6 +23,9 @@ val localProperties = Properties().apply {
     }
 }
 
+val pythonExecutable = localProperties.getProperty("python.executable")
+    ?.trim()?.takeIf { it.isNotEmpty() } ?: "python3"
+
 // Release signing comes from gitignored keystore.properties or temporary
 // release-script environment variables. Missing credentials leave release
 // unsigned rather than silently using another signing identity.
@@ -276,7 +279,7 @@ androidComponents {
                     writeText(JsonOutput.toJson(mapOf("libraries" to entries, "poms" to poms)))
                 }
             }
-            commandLine("python3", generator.absolutePath,
+            commandLine(pythonExecutable, generator.absolutePath,
                 "--android", inventory.get().asFile.absolutePath,
                 "--output", licenseOutput.get().asFile.absolutePath,
                 "--rust-artifacts", rustLicenseArtifacts.get().asFile.absolutePath)
