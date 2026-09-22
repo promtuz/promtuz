@@ -28,6 +28,7 @@ import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.VoicePlayer
 import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
+import com.promtuz.chat.utils.media.videoPoster
 import com.promtuz.chat.utils.media.decodeDownscaled
 import com.promtuz.chat.utils.media.resolvePickedFile
 import com.promtuz.chat.utils.media.toRgba
@@ -477,8 +478,12 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                         runCatching { CoreBridge.discardStaged(items.single().id) }
                     }
                     editing != null -> CoreBridge.editMessage(conversation, did!!.fromHex(), text)
-                    items.isNotEmpty() -> CoreBridge.sendStaged(conversation, items.map { it.id }, text,
-                        (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                    // An album holds at most ten; a bigger pick goes out as
+                    // several albums, the caption and reply riding the first.
+                    items.isNotEmpty() -> items.chunked(ALBUM_MAX).forEachIndexed { i, chunk ->
+                        CoreBridge.sendStaged(conversation, chunk.map { it.id }, if (i == 0) text else "",
+                            if (i == 0) (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex() else null)
+                    }
                     else -> CoreBridge.sendMessage(conversation, text,
                         (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
                 }
@@ -575,6 +580,25 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 rememberPreview(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height), tile)
             }
         }
+    }
+
+    /** A photo or clip the camera just wrote, as the picker would have staged it. */
+    fun attachCaptured(file: java.io.File, video: Boolean) {
+        val uri = Uri.fromFile(file)
+        if (video) prepareMedia(listOf(uri), photos = false) { stageCaptured(file, "video/mp4", uri) }
+        else prepareMedia(listOf(uri), photos = true) {
+            val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@prepareMedia
+            rememberPreview(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height), bmp.tile())
+        }
+    }
+
+    private suspend fun stageCaptured(file: java.io.File, mime: String, uri: Uri) {
+        val poster = videoPoster(application, uri, POSTER_MAX_EDGE)?.first
+        val id = CoreBridge.stageAttachment(
+            file.absolutePath, file.name, mime,
+            poster?.toRgba(), poster?.width ?: 0, poster?.height ?: 0,
+        )
+        poster?.let { rememberPreview(id, it.tile()) }
     }
 
     /** Picked documents → the buffer as P2P attachments. */
@@ -688,7 +712,11 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     /** Copy a picked uri into cache and buffer it as a P2P attachment; image mimes get a preview thumb. */
     private suspend fun stagePickedFile(uri: Uri) {
         val picked = resolvePickedFile(application, uri) ?: return
-        val thumb = if (picked.mime.startsWith("image/")) decodeDownscaled(application, uri, THUMB_MAX_EDGE) else null
+        val thumb = when {
+            picked.mime.startsWith("image/") -> decodeDownscaled(application, uri, POSTER_MAX_EDGE)
+            picked.mime.startsWith("video/") -> videoPoster(application, uri, POSTER_MAX_EDGE)?.first
+            else -> null
+        }
         val id = CoreBridge.stageAttachment(
             picked.path, picked.name, picked.mime,
             thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0,
@@ -729,6 +757,8 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
 
         /** Attachment preview thumb; libcore blurs it, so tiny is plenty. */
         const val THUMB_MAX_EDGE = 256
+        const val POSTER_MAX_EDGE = 640
+        const val ALBUM_MAX = 10
 
         /** Composer strip tile; a 60dp square needs nothing like the full pick. */
         const val TILE_MAX_EDGE = 192

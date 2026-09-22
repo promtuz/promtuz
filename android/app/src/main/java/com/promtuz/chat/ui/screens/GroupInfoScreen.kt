@@ -18,6 +18,8 @@ import com.promtuz.chat.ui.components.AppBottomSheet
 import com.promtuz.chat.ui.components.*
 import org.koin.androidx.compose.koinViewModel
 import com.promtuz.chat.utils.media.rememberAvatar
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.ui.media.pictureItem
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -254,7 +256,13 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
 private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = { Avatar(member.name, size = 44.dp, image = rememberAvatar(member.ipkHex)) },
+        leadingContent = {
+            val avatar = rememberAvatar(member.ipkHex)
+            Avatar(
+                member.name, size = 44.dp, image = avatar, originKey = "avatar-${member.ipkHex}",
+                onClick = avatar?.let { { MediaViewer.open(listOf(pictureItem("avatar-${member.ipkHex}", it, member.name))) } },
+            )
+        },
         supportingContent = if (!member.active) {{ Text("Past member") }} else null,
         trailingContent = if (member.admin && member.active) {{ Text("Admin", color = MaterialTheme.colorScheme.onSurfaceVariant) }} else null,
         modifier = Modifier.clickable(enabled = enabled, onClick = onClick),

@@ -42,8 +42,25 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layout
+import androidx.compose.runtime.remember
+import kotlin.math.roundToInt
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.ui.appearance.LocalChatAppearance
+import com.promtuz.chat.ui.media.mediaOrigin
+import com.promtuz.chat.ui.media.InlinePlayback
+import com.promtuz.chat.ui.media.MediaItem
+import com.promtuz.chat.ui.media.VideoSurface
+import com.promtuz.chat.ui.media.rememberVideoPlayer
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import com.promtuz.chat.ui.appearance.LocalChatColors
+import androidx.compose.ui.res.painterResource
 import com.promtuz.chat.utils.media.rememberStickerBitmap
 import java.util.Locale
 
@@ -62,16 +79,19 @@ private val AlbumGap = 2.dp
 fun ImageBlock(
     image: MessageContent.Image, textColor: Color, fontScale: Float, metaLabel: String,
     outgoing: Boolean = false,
+    originKey: String? = null,
+    onOpen: (() -> Unit)? = null,
 ) {
-    val ratio = (if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f)
-        .coerceIn(0.6f, 1.9f)
+    val ratio = if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f
+    val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
     Column {
         // No clip of its own: the picture runs to the bubble's edge and the
         // bubble's shape does the rounding, so there's one outline, not two.
         Box(
             Modifier
-                .fillMaxWidth()
-                .aspectRatio(ratio)
+                .mediaSize(ratio)
+                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) else Modifier)
+                .then(if (onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
                 .background(textColor.copy(alpha = 0.10f)),
         ) {
             image.bitmap?.let {
@@ -85,47 +105,54 @@ fun ImageBlock(
 }
 
 /**
- * An album: its members in a square grid, one visual unit for what are still
- * separate messages underneath.
- *
- * Columns come from the count rather than a fixed grid — two photos side by side
- * read as a pair, where forcing them into a 3-wide row leaves a hole. Cells are
- * cropped square so a mixed-orientation pick still tiles evenly.
+ * An album: the cells come from [albumLayout], sized by each picture's proportions, and the whole thing
+ * fills the bubble's width. Every cell is its own message and its own tap.
  */
 @Composable
 fun AlbumBlock(
     album: MessageContent.Album, textColor: Color, fontScale: Float, metaLabel: String,
     outgoing: Boolean = false,
+    onOpen: ((String) -> Unit)? = null,
 ) {
-    val cols = when {
-        album.items.size <= 2 -> album.items.size.coerceAtLeast(1)
-        album.items.size == 4 -> 2
-        else -> 3
+    val ratios = album.items.map { item ->
+        (item.content as? MessageContent.Image)?.let { if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f } ?: 1f
     }
+    val cells = remember(ratios) { albumLayout(ratios) }
     Column {
-        Column(verticalArrangement = Arrangement.spacedBy(AlbumGap)) {
-            album.items.chunked(cols).forEach { row ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(AlbumGap),
-                ) {
-                    row.forEach { item ->
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .aspectRatio(1f)
-                                .background(textColor.copy(alpha = 0.10f)),
-                        ) {
-                            albumBitmap(item.content)?.let {
-                                Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                            }
+        Layout(
+            content = {
+                album.items.forEach { item ->
+                    Box(
+                        Modifier
+                            .mediaOrigin(item.dispatchIdHex, 0.dp)
+                            .then(if (onOpen != null) Modifier.tapOnly { onOpen(item.dispatchIdHex) } else Modifier)
+                            .background(textColor.copy(alpha = 0.10f)),
+                    ) {
+                        albumBitmap(item.content)?.let {
+                            Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         }
                     }
-                    // A short last row keeps its cells the same size as the rest
-                    // instead of stretching to fill the width.
-                    repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
                 }
+            },
+        ) { measurables, constraints ->
+            val width = constraints.maxWidth
+            val maxHeight = width * ALBUM_HEIGHT_RATIO
+            // Normalise: a layout that leaves a strip unused spans out to the full width.
+            val spanW = cells.maxOf { it.x + it.w }.coerceAtLeast(0.01f)
+            val spanH = cells.maxOf { it.y + it.h }
+            // Gaps sit only between cells; the outer edges run to the bubble's own edge so
+            // its rounding is the only outline the album has.
+            val half = (AlbumGap / 2).roundToPx()
+            val placed = measurables.mapIndexed { i, m ->
+                val c = cells[i]
+                val left = (c.x / spanW * width).roundToInt() + if (c.x > 0.001f) half else 0
+                val top = (c.y * maxHeight).roundToInt() + if (c.y > 0.001f) half else 0
+                val right = ((c.x + c.w) / spanW * width).roundToInt() - if (c.x + c.w < spanW - 0.001f) half else 0
+                val bottom = ((c.y + c.h) * maxHeight).roundToInt() - if (c.y + c.h < spanH - 0.001f) half else 0
+                m.measure(Constraints.fixed((right - left).coerceAtLeast(1), (bottom - top).coerceAtLeast(1))) to IntOffset(left, top)
             }
+            val height = placed.maxOf { it.second.y + it.first.height }
+            layout(width, height) { placed.forEach { (p, at) -> p.place(at) } }
         }
         if (album.caption.isNotEmpty()) {
             Caption(album.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
@@ -133,7 +160,26 @@ fun AlbumBlock(
     }
 }
 
-/** Whatever an album member can draw: an inline image's bitmap, a file's thumb. */
+/**
+ * How big a picture is in a bubble. It takes the bubble's full width until that
+ * would make it taller than [MediaMaxHeight]; past that the width gives way, so a
+ * tall photo becomes a narrower bubble rather than a cropped one. A sliver still
+ * keeps a minimum width, where cropping is the lesser evil.
+ */
+private fun Modifier.mediaSize(ratio: Float) = layout { measurable, constraints ->
+    val maxW = constraints.maxWidth
+    val maxH = MediaMaxHeight.roundToPx()
+    val minW = (maxW * 0.45f).roundToInt()
+    var w = minOf(maxW.toFloat(), maxH * ratio).roundToInt()
+    var h = (w / ratio).roundToInt()
+    if (w < minW) { w = minW; h = minOf(maxH, (w / ratio).roundToInt()) }
+    if (h > maxH) h = maxH
+    val placeable = measurable.measure(Constraints.fixed(w, h))
+    layout(w, h) { placeable.place(0, 0) }
+}
+
+private val MediaMaxHeight = 360.dp
+
 private fun albumBitmap(content: MessageContent) = when (content) {
     is MessageContent.Image -> content.bitmap
     is MessageContent.Attachment -> content.thumb
@@ -183,7 +229,7 @@ fun AttachmentBlock(
                 Alignment.Center,
             ) {
                 att.thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-                    ?: Text(glyphFor(att.mime), style = MaterialTheme.typography.titleMedium)
+                    ?: FileGlyph(att.mime, textColor, LocalChatColors.current.accent)
             }
             Column(Modifier.weight(1f)) {
                 Text(
@@ -198,6 +244,84 @@ fun AttachmentBlock(
             TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
         }
         Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = false)
+    }
+}
+
+/** A picture or video sent as a file is drawn as a tile once it carries a poster. */
+val MessageContent.Attachment.isMediaTile: Boolean
+    get() = thumb != null && (mime.startsWith("image/") || mime.startsWith("video/"))
+
+/**
+ * A picture or video attachment as a media tile: poster at its own aspect, the
+ * transfer ring over it until the bytes land, a play badge and size pill for a
+ * video. Tapping a finished one opens the viewer; tapping anything else drives
+ * the download, the same as the file card's ring.
+ */
+@Composable
+fun MediaTileBlock(
+    att: MessageContent.Attachment, textColor: Color, fontScale: Float, metaLabel: String,
+    outgoing: Boolean, originKey: String?, onDownload: ((String) -> Unit)?, onOpen: (() -> Unit)?,
+) {
+    val thumb = att.thumb ?: return
+    val ratio = thumb.width.toFloat() / thumb.height
+    val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
+    val video = att.mime.startsWith("video/")
+    val ready = att.transferState == 2 && att.localPath != null
+    // The tile opens once the bytes are here; before that only the ring is a control,
+    // and it is its own control, so a tap on it never lights the whole picture.
+    val download: (() -> Unit)? = when {
+        ready || outgoing -> null
+        att.transferState == 1 || att.transferState == 4 -> null
+        else -> onDownload?.let { { it(att.fileIdHex) } }
+    }
+    Column {
+        Box(
+            Modifier
+                .mediaSize(ratio)
+                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) else Modifier)
+                .then(if (ready && onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
+                .background(textColor.copy(alpha = 0.10f)),
+        ) {
+            Image(thumb, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            // A clip plays in its own bubble; tapping the playing picture carries it into the viewer.
+            val playingHere = video && ready && originKey != null && InlinePlayback.key == originKey
+            if (playingHere) {
+                val player = rememberVideoPlayer(att.localPath!!, active = true)
+                DisposableEffect(player) {
+                    InlinePlayback.attach(originKey, player)
+                    onDispose { if (InlinePlayback.key == originKey) InlinePlayback.stop() }
+                }
+                LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
+                VideoSurface(player, MediaItem(originKey, thumb, thumb.width, thumb.height), Modifier.fillMaxSize())
+            }
+            if (!ready) Box(
+                Modifier.align(Alignment.Center)
+                    .then(if (download != null) Modifier.pressScale(download) else Modifier)
+                    .size(44.dp).clip(RoundedCornerShape(22.dp))
+                    .background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (outgoing || att.transferState == 1) {
+                    if (att.transferTotal > 0) CircularProgressIndicator(
+                        progress = { att.transferHave.toFloat() / att.transferTotal },
+                        modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp,
+                    ) else CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
+                } else Image(painterResource(R.drawable.ic_media_download), "Download", Modifier.size(24.dp))
+            } else if (video && !playingHere) Image(
+                painterResource(R.drawable.ic_media_play_badge), "Play",
+                Modifier.align(Alignment.Center)
+                    .then(if (originKey != null) Modifier.pressScale({ InlinePlayback.play(originKey) }) else Modifier)
+                    .size(48.dp),
+            )
+            Text(
+                if (att.transferState == 4) "Waiting…" else formatBytes(att.size),
+                style = MaterialTheme.typography.labelSmall, color = Color.White,
+                modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
+        if (att.caption.isNotEmpty()) Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
     }
 }
 
@@ -387,12 +511,27 @@ private fun Caption(
     )
 }
 
-private fun glyphFor(mime: String): String = when {
-    mime.startsWith("image/") -> "🖼️" // framed picture
-    mime.startsWith("video/") -> "🎬" // clapper
-    mime.startsWith("audio/") -> "🎵" // note
-    mime == "application/pdf" -> "📄" // page
-    else -> "📎" // paperclip
+/**
+ * The file-type mark: a page outline in the text colour, a badge in the bubble
+ * accent, and a white label. Three tinted layers so it keeps its two tones in
+ * either bubble.
+ */
+@Composable
+fun FileGlyph(mime: String, textColor: Color, accent: Color, modifier: Modifier = Modifier) {
+    val label = when {
+        mime == "application/pdf" -> R.drawable.ic_file_label_pdf
+        mime.startsWith("audio/") -> R.drawable.ic_file_label_audio
+        mime == "application/vnd.android.package-archive" -> R.drawable.ic_file_label_apk
+        mime.contains("zip") || mime.contains("compressed") || mime.contains("rar") || mime.contains("tar") -> R.drawable.ic_file_label_zip
+        mime.contains("spreadsheet") || mime.contains("excel") || mime == "text/csv" -> R.drawable.ic_file_label_xls
+        mime.contains("word") || mime.contains("document") || mime.startsWith("text/") -> R.drawable.ic_file_label_doc
+        else -> R.drawable.ic_file_label_generic
+    }
+    Box(modifier.size(28.dp)) {
+        DrawableIcon(R.drawable.ic_file_base, Modifier.fillMaxSize(), tint = textColor)
+        DrawableIcon(R.drawable.ic_file_badge, Modifier.fillMaxSize(), tint = accent)
+        DrawableIcon(label, Modifier.fillMaxSize(), tint = Color.White)
+    }
 }
 
 fun formatBytes(bytes: Long): String = when {

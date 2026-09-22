@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.promtuz.chat.ui.media.mediaOrigin
 
 const val AVATAR_RADIUS_RATIO = 2.875f;
 
@@ -45,6 +46,7 @@ fun Avatar(
     statusColor: Color? = null,
     image: ImageBitmap? = null,
     onClick: (() -> Unit)? = null,
+    originKey: String? = null,
 ) {
     val clip = RoundedCornerShape(size / clipRatio)
     val fallbackChars = name.split(" ")
@@ -53,7 +55,7 @@ fun Avatar(
         .joinToString("")
     val interactionSource = remember { MutableInteractionSource() }
 
-    Box(Modifier.size(size)) {
+    Box(Modifier.size(size).then(if (originKey != null) Modifier.mediaOrigin(originKey, size / clipRatio) else Modifier)) {
         Box(
             Modifier
                 .fillMaxSize()

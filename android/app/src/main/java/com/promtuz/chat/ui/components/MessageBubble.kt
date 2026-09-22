@@ -129,6 +129,7 @@ fun MessageBubble(
     onQuoteClick: ((String) -> Unit)? = null,
     onDoubleTap: (() -> Unit)? = null,
     onTap: (() -> Unit)? = null,
+    onMediaTap: ((String) -> Unit)? = null,
     onDownload: ((String) -> Unit)? = null,
     onOpen: ((String) -> Unit)? = null,
     peerName: String = "",
@@ -139,7 +140,6 @@ fun MessageBubble(
     // Name the author only in a group, only on an incoming message, and only
     // at the head of a run — the rest of the run is visibly the same person.
     val showSender = msg.senderName != null && !outgoing && !mergedTop
-    val shape = rememberBubbleShape(outgoing, mergedTop, mergedBottom, appearance.bubble)
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
     val haptic = LocalHapticFeedback.current
@@ -164,15 +164,23 @@ fun MessageBubble(
     // around a frame — so the bubble waives its inset and the padded blocks
     // (quote, caption, reactions) each put it back for themselves. An attachment
     // card is not a picture: it keeps the inset like text.
+    val tile = (msg.content as? MessageContent.Attachment)?.isMediaTile == true
     val bleeds = !msg.deleted &&
-        (msg.content is MessageContent.Image || msg.content is MessageContent.Album)
+        (msg.content is MessageContent.Image || msg.content is MessageContent.Album || tile)
     val caption = when (val c = msg.content) {
         is MessageContent.Image -> c.caption
         is MessageContent.Album -> c.caption
+        is MessageContent.Attachment -> if (tile) c.caption else ""
         else -> ""
     }
     // With nothing below it to sit in, the time has to ride the picture itself.
-    val metaOnMedia = bleeds && caption.isEmpty() && msg.reactions.isEmpty()
+    val stickerAlone = !msg.deleted && msg.quote == null && msg.content is MessageContent.Sticker
+    val metaOnMedia = (bleeds || stickerAlone) && caption.isEmpty() && msg.reactions.isEmpty()
+    // A borderless picture has no body for a tail to grow from, so it goes without one.
+    val shape = rememberBubbleShape(
+        outgoing, mergedTop, mergedBottom,
+        if (metaOnMedia) appearance.bubble.copy(tail = false) else appearance.bubble,
+    )
 
     // Plain Box, not BoxWithConstraints — that's a nested SubcomposeLayout per
     // bubble, real weight on every bubble birth. The width cap is applied inside
@@ -221,11 +229,21 @@ fun MessageBubble(
                         ImageBlock(
                             content, textColor, appearance.type.fontScale,
                             BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                            originKey = msg.dispatchIdHex,
+                            onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
                         )
                     content is MessageContent.Album ->
                         AlbumBlock(
                             content, textColor, appearance.type.fontScale,
                             BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                            onOpen = onMediaTap,
+                        )
+                    content is MessageContent.Attachment && tile ->
+                        MediaTileBlock(
+                            content, textColor, appearance.type.fontScale,
+                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                            originKey = msg.dispatchIdHex, onDownload = onDownload,
+                            onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
                         )
                     content is MessageContent.Attachment ->
                         AttachmentBlock(
@@ -251,7 +269,7 @@ fun MessageBubble(
                     }
                 }
 
-                MetaRow(msg, textColor, metaOnMedia, pill = if (bare) bubbleColor else null)
+                MetaRow(msg, textColor, metaOnMedia, pill = if (bare && !metaOnMedia) bubbleColor else null)
             },
             modifier = Modifier
                 .typingMorphSurface(shape, bubbleColor, textColor, enabled = !bare)
@@ -376,7 +394,7 @@ fun MessageBubble(
             var metaDrop = 0
             val contentWidth = when {
                 // Nothing to ride: the pill sits under the content, at its end.
-                bare -> { metaRow = meta.height + BarePillGap.roundToPx(); maxOf(text.width, meta.width) }
+                bare && !metaOnMedia -> { metaRow = meta.height + BarePillGap.roundToPx(); maxOf(text.width, meta.width) }
                 hasReactions -> maxOf(text.width, reactions!!.width + metaGap + meta.width)
                 // Media owns its whole footprint and keeps the corner clear itself.
                 !isTextBlock -> text.width
@@ -415,8 +433,8 @@ fun MessageBubble(
                 // A bleeding bubble has no outer padding to sit in, so the meta
                 // takes the inset itself — the same one text bubbles get from the
                 // padding, which is what lines the time up across every variant.
-                val metaInsetX = if (bleeds) BubblePadH.roundToPx() else 0
-                val metaInsetY = if (bleeds) BubblePadV.roundToPx() else 0
+                val metaInsetX = if (bleeds || metaOnMedia) BubblePadH.roundToPx() else 0
+                val metaInsetY = if (bleeds || metaOnMedia) BubblePadV.roundToPx() else 0
                 meta.placeRelative(
                     width - meta.width - metaInsetX + metaDrop,
                     height - meta.height - metaInsetY + metaDrop,

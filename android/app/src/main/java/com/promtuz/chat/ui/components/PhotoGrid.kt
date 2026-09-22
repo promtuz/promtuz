@@ -45,6 +45,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import coil.decode.VideoFrameDecoder
+import coil.request.ImageRequest
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.utils.media.GalleryItem
@@ -86,7 +88,7 @@ private fun formatDuration(ms: Long): String {
  * isn't granted, so picking media never hard-depends on this permission.
  */
 @Composable
-fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit) {
+fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpenCamera: () -> Unit) {
     val context = LocalContext.current
     val perms = remember { galleryPermissions() }
     var access by remember { mutableStateOf(context.galleryAccess(perms)) }
@@ -123,6 +125,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit) {
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 88.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            item(key = "camera") { com.promtuz.chat.ui.camera.CameraTile(onOpenCamera) }
             items(items, key = { it.uri }) { item ->
                 val order = selection.indexOf(item.uri)
                 PhotoCell(item, order) {
@@ -165,7 +168,10 @@ private fun PhotoCell(item: GalleryItem, order: Int, onToggle: () -> Unit) {
             .clickable(onClick = onToggle),
     ) {
         AsyncImage(
-            model = item.uri,
+            // Coil only pulls a frame out of a video when asked; a plain uri draws nothing.
+            model = ImageRequest.Builder(LocalContext.current).data(item.uri)
+                .apply { if (item.isVideo) decoderFactory(VideoFrameDecoder.Factory()) }
+                .build(),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),

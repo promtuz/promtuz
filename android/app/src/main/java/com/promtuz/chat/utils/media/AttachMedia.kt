@@ -51,6 +51,21 @@ suspend fun decodeDownscaled(context: Context, uri: Uri, maxEdge: Int): Bitmap? 
         }.getOrNull() else decodeLegacy(context, uri, maxEdge)
     }
 
+/** A frame near the start of the video, sized for a poster, plus its length. */
+suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, Long>? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            android.media.MediaMetadataRetriever().use { r ->
+                r.setDataSource(context, uri)
+                val duration = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val frame = r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return@use null
+                val (w, h) = fit(frame.width, frame.height, maxEdge)
+                val bmp = if (w == frame.width) frame else Bitmap.createScaledBitmap(frame, w, h, true)
+                bmp to duration
+            }
+        }.getOrNull()
+    }
+
 /** Copy [uri]'s stream into cacheDir and read its display name + mime; null if unreadable. */
 suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
     withContext(Dispatchers.IO) {

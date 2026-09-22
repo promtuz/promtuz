@@ -95,6 +95,10 @@ class MessageMenuState {
     /** Drag-release on a strip emoji lands here (actions carry their own onClick). */
     var onReact: ((String) -> Unit)? = null
 
+    /** How lifted the copy is, 0..1. The list row fades by the same amount, so the two cross-fade. */
+    var lift by mutableFloatStateOf(0f)
+        internal set
+
     val isOpen get() = anchor != null
 
     fun open(anchor: MenuAnchor) {
@@ -112,6 +116,7 @@ class MessageMenuState {
     }
 
     internal fun closed() {
+        lift = 0f
         anchor = null
         closing = false
         hovered = -1
@@ -188,12 +193,13 @@ fun MessageContextMenu(
     val pop = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         launch { scrim.animateTo(0.2f, tween(320, easing = EaseOutQuint)) }
-        launch { pop.animateTo(1f, tween(250, easing = Overshoot)) }
+        launch { pop.animateTo(1f, tween(250, easing = Overshoot)) { state.lift = value.coerceIn(0f, 1f) } }
     }
     LaunchedEffect(state.closing) {
         if (state.closing) {
             launch { scrim.animateTo(0f, tween(160)) }
-            pop.animateTo(0f, tween(160))
+            pop.animateTo(0f, tween(160)) { state.lift = value.coerceIn(0f, 1f) }
+            state.lift = 0f
             state.closed()
         }
     }
@@ -225,6 +231,7 @@ fun MessageContextMenu(
                 }
                 .width(with(density) { anchor.bounds.width.toDp() })
                 .graphicsLayer {
+                    alpha = pop.value.coerceIn(0f, 1f)
                     val s = 1f + 0.03f * pop.value
                     scaleX = s
                     scaleY = s
@@ -271,12 +278,21 @@ private fun MenuStack(
 ) {
     val outgoing = anchor.msg.outgoing
     val pivot = TransformOrigin(if (outgoing) 1f else 0f, 0.1f)
+    // Set by the layout below: a card placed above the bubble grows from its bottom corner.
+    val flipped = remember { mutableStateOf(false) }
     val entrance = Modifier.graphicsLayer {
         val p = pop()
         alpha = p.coerceIn(0f, 1f)
         scaleX = 0.75f + 0.25f * p
         scaleY = 0.75f + 0.25f * p
         transformOrigin = pivot
+    }
+    val cardEntrance = Modifier.graphicsLayer {
+        val p = pop()
+        alpha = p.coerceIn(0f, 1f)
+        scaleX = 0.75f + 0.25f * p
+        scaleY = 0.75f + 0.25f * p
+        transformOrigin = TransformOrigin(pivot.pivotFractionX, if (flipped.value) 0.9f else 0.1f)
     }
 
     Layout(
@@ -285,7 +301,7 @@ private fun MenuStack(
             MenuCard(
                 groups = actionGroups,
                 hovered = state.hovered - quickReactions.size,
-                modifier = entrance,
+                modifier = cardEntrance,
                 itemHeight = 42.dp,
                 iconSize = iconSize,
                 onRowPositioned = { i, coords -> state.rowCoords[i] = coords },
@@ -305,17 +321,28 @@ private fun MenuStack(
             val bottom = (anchor.bounds.bottom - origin.y).roundToInt()
             fun xFor(w: Int) = if (outgoing) constraints.maxWidth - margin - w else margin
 
-            // Shift the bubble (not the menu) when cramped; card visibility wins when
-            // the bubble is too tall for both, and the strip then clamps at the margin.
-            val minTop = margin + strip.height + gap
+            // A bubble low on the screen keeps its place: the card goes above it and the
+            // thinner strip below, which always has the bottom bar's height to sit in.
+            // Only a bubble that cannot fit either way shifts, and then the card wins.
             val maxBottom = constraints.maxHeight - margin - gap - card.height
+            val flip = bottom > maxBottom
+            flipped.value = flip
+            val minTop = margin + gap + if (flip) card.height else strip.height
             var dy = 0
             if (top < minTop) dy = minTop - top
-            if (bottom + dy > maxBottom) dy = maxBottom - bottom
+            if (flip) {
+                val stripMax = constraints.maxHeight - margin - gap - strip.height
+                if (bottom + dy > stripMax) dy = stripMax - bottom
+            } else if (bottom + dy > maxBottom) dy = maxBottom - bottom
             shift.floatValue = dy.toFloat()
 
-            strip.place(xFor(strip.width), (top + dy - gap - strip.height).coerceAtLeast(margin))
-            card.place(xFor(card.width), bottom + dy + gap)
+            if (flip) {
+                card.place(xFor(card.width), (top + dy - gap - card.height).coerceAtLeast(margin))
+                strip.place(xFor(strip.width), bottom + dy + gap)
+            } else {
+                strip.place(xFor(strip.width), (top + dy - gap - strip.height).coerceAtLeast(margin))
+                card.place(xFor(card.width), bottom + dy + gap)
+            }
         }
     }
 }

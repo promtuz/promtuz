@@ -13,6 +13,7 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.InviteBottomSheet
+import com.promtuz.chat.ui.media.MediaViewerHost
 import com.promtuz.chat.update.UpdateNotifier
 import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.ui.theme.PromtuzTheme
@@ -42,6 +43,8 @@ class LauncherActivity : ComponentActivity() {
             val appearance by AppearanceStore.appearance.collectAsState()
             PromtuzTheme(appearance = appearance) {
                 AppNavigation(viewModel)
+                MediaViewerHost()
+                com.promtuz.chat.ui.camera.CameraOverlayHost()
                 InviteBottomSheet(viewModel)
             }
         }

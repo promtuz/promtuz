@@ -60,6 +60,8 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.ui.media.pictureItem
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -150,7 +152,17 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp)
-                else Avatar(name, 40.dp, image = rememberAvatar(summary?.peerHex))
+                else {
+                    val peerHex = summary?.peerHex
+                    val avatar = rememberAvatar(peerHex)
+                    Avatar(
+                        name, 40.dp, image = avatar,
+                        originKey = peerHex?.let { "avatar-$it" },
+                        onClick = if (avatar != null && peerHex != null) {
+                            { MediaViewer.open(listOf(pictureItem("avatar-$peerHex", avatar, name))) }
+                        } else null,
+                    )
+                }
                 Column {
                     Text(name, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1)
                     if (subtitle != null) Text(
@@ -275,7 +287,7 @@ private fun CallButton(peerHex: String, video: Boolean) {
         contentAlignment = Alignment.Center,
     ) {
         DrawableIcon(
-            if (video) R.drawable.oi_camera else R.drawable.i_phone,
+            if (video) R.drawable.i_video else R.drawable.i_phone,
             Modifier.size(20.dp),
             desc = if (video) "Video call" else "Call",
         )

@@ -39,6 +39,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -297,6 +301,12 @@ fun ChatBottomBar(
                     },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onSendPhotos = { uris -> viewModel.attachPhotos(uris); closeFlat() },
+                    onOpenCamera = {
+                        com.promtuz.chat.ui.camera.CameraLauncher.open { file, video ->
+                            viewModel.attachCaptured(file, video)
+                            closeFlat()
+                        }
+                    },
                 )
                 ComposerPanelKind.Stickers -> {
                     val stickers = koinViewModel<StickersVM>()
@@ -515,6 +525,7 @@ private fun ComposerActionBlock(
 }
 
 /** The input row itself, unstyled. The pill above it owns shape, blur and inset. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ComposerRow(
     viewModel: ChatVM,
@@ -588,6 +599,13 @@ private fun ComposerRow(
             maxLines = 6,
             // Tapping the field to type raises the keyboard, so close the panel it replaces.
             modifier = Modifier.weight(1f)
+                .contentReceiver { content ->
+                    if (!content.hasMediaType(MediaType.Image)) return@contentReceiver content
+                    val uris = ArrayList<android.net.Uri>()
+                    val rest = content.consume { item -> item.uri?.let { uris += it; true } ?: false }
+                    if (uris.isNotEmpty()) viewModel.attachPhotos(uris)
+                    rest
+                }
                 .then(textExit.modifier)
                 .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart)
                 .pointerInput(panelOpen) {

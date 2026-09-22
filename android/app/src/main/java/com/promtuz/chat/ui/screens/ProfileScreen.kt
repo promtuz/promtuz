@@ -21,10 +21,11 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ProfileWork
-import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.ui.media.pictureItem
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,7 +61,7 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
             item {
                 val tile: @Composable (onClick: (() -> Unit)?) -> Unit = { onClick ->
                     Box(Modifier.semantics { contentDescription = editLabel }) {
-                        Avatar(profile.name, size = 96.dp, image = profile.picture, onClick = onClick)
+                        Avatar(profile.name, size = 96.dp, image = profile.picture, onClick = onClick, originKey = "profile-photo")
                         Box(
                             Modifier.align(Alignment.BottomEnd).size(30.dp).clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary),
@@ -76,16 +77,14 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
                         }
                     }
                 }
-                if (profile.picture != null && !busy) {
-                    AppDropMenu(
-                        anchor = { tile(null) },
-                        groups = listOf(
-                            listOf(MenuAction(chooseLabel, R.drawable.oi_image, onClick = choose)),
-                            listOf(MenuAction(removeLabel, R.drawable.oi_trash, destructive = true) {
-                                viewModel.removePicture()
-                            }),
-                        ),
-                    )
+                val picture = profile.picture
+                if (picture != null && !busy) tile {
+                    MediaViewer.open(listOf(pictureItem("profile-photo", picture, profile.name, actions = listOf(
+                        listOf(MenuAction(chooseLabel, R.drawable.oi_image) { MediaViewer.close(); choose() }),
+                        listOf(MenuAction(removeLabel, R.drawable.oi_trash, destructive = true) {
+                            MediaViewer.close(); viewModel.removePicture()
+                        }),
+                    ))))
                 } else tile(if (busy) null else choose)
             }
             item { Text(profile.name, style = MaterialTheme.typography.titleLargeEmphasized) }

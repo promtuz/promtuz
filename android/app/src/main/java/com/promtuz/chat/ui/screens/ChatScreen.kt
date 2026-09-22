@@ -52,6 +52,13 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.ui.components.StickerPackSheet
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.ui.media.LocalMediaClip
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import com.promtuz.chat.ui.media.chatMediaItems
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 import com.promtuz.chat.ui.appearance.DoubleTapAction
@@ -211,11 +218,13 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         ) { padding ->
         // Wallpaper + stage are the haze source; the translucent bars sample them.
         // contentPadding (not an outer padding) so messages draw under the bars.
+        val stageCoords = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
         Box(
             Modifier
                 .fillMaxSize()
                 .then(wallpaper)
-                .hazeSource(hazeState),
+                .hazeSource(hazeState)
+                .onGloballyPositioned { stageCoords[0] = it },
         ) {
             val handoff by viewModel.typingHandoff.collectAsState()
             val density = LocalDensity.current
@@ -225,6 +234,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             val stagePadding = remember(padding, metrics, density) {
                 ComposerPadding(padding.calculateTopPadding(), metrics, density)
             }
+            // The media viewer flies pictures out of, and back into, only the strip
+            // between the bars, so nothing crisp is ever drawn over a bar's blur.
+            val topPadPx = with(density) { stagePadding.calculateTopPadding().toPx() }
+            val bottomPadPx = with(density) { stagePadding.calculateBottomPadding().toPx() }
+            CompositionLocalProvider(LocalMediaClip provides {
+                stageCoords[0]?.takeIf { it.isAttached }?.boundsInWindow()?.let { r ->
+                    Rect(r.left, r.top + topPadPx, r.right, r.bottom - bottomPadPx)
+                }
+            }) {
             MessageStage(
                 rows = rows,
                 historyLoaded = messageSnapshot != null,
@@ -273,7 +291,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                 Modifier
                                     .padding(top = gapAbove)
                                     // the context menu re-draws this row lifted; hide the original
-                                    .graphicsLayer { alpha = if (menu.anchor?.msg?.key == chatRow.msg.key) 0f else 1f },
+                                    .graphicsLayer { alpha = if (menu.anchor?.msg?.key == chatRow.msg.key) 1f - menu.lift else 1f },
                             ) {
                                 val actionable = chatRow.msg.dispatchIdHex != null && !chatRow.msg.deleted
                                 val interaction = appearance.interaction
@@ -289,6 +307,10 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                     onQuoteClick = ::jumpToQuoted,
                                     onDownload = viewModel::download,
                                     onOpen = { openAttachment(context, it) },
+                                    onMediaTap = { did ->
+                                        val (items, index) = chatMediaItems(context, messages, name, did) { confirmDelete = it }
+                                        MediaViewer.open(items, index)
+                                    },
                                     onTap = (chatRow.msg.content as? MessageContent.Sticker)?.let { s ->
                                         { packSheet = s.sticker }
                                     },
@@ -323,6 +345,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 }
             }
 
+            }
             // Drawn after the stage so it fades the messages, not the wallpaper
             // behind them, and spans exactly the bar's own live footprint — the
             // composer's top edge to the bottom of the screen — so it tracks the
@@ -362,7 +385,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             DeleteConfirmDialog(
                 msg = msg,
                 onConfirm = {
-                    msg.dispatchIdHex?.let { viewModel.delete(it, forEveryone = msg.outgoing) }
+                    msg.dispatchIdHex?.let { viewModel.delete(it, forEveryone = msg.outgoing); MediaViewer.remove(it) }
                     confirmDelete = null
                 },
                 onDismiss = { confirmDelete = null },
@@ -454,7 +477,7 @@ private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier)
     ) {
         com.promtuz.chat.ui.components.DrawableIcon(
             com.promtuz.chat.R.drawable.i_phone,
-            Modifier.size(13.dp).padding(end = 6.dp),
+            Modifier.size(18.dp).padding(end = 6.dp),
             tint = marker.copy(alpha = 0.6f),
         )
         Text(

@@ -410,11 +410,19 @@ dependencies {
     implementation(kotlin("reflect"))
 
     implementation(libs.coil.compose)
+    implementation(libs.coil.video)
 
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.video)
+
+    // Video playback in the media viewer.
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui.compose)
+
+    implementation(libs.lottie.compose)
 
     implementation(libs.barcode.scanning)
     implementation(libs.zxing.core)

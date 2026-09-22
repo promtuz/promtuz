@@ -119,12 +119,13 @@ fun AttachPanelBody(
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
     onSendPhotos: (List<Uri>) -> Unit,
+    onOpenCamera: () -> Unit,
 ) {
     var tab by remember(allowPhotos) { mutableStateOf(if (allowPhotos) 0 else 1) }
 
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().navigationBarsPadding(), contentAlignment = Alignment.Center) {
-            if (tab == 0) PhotoGrid(onSend = onSendPhotos, onOpenSystemPicker = onPickPhotos)
+            if (tab == 0) PhotoGrid(onSend = onSendPhotos, onOpenSystemPicker = onPickPhotos, onOpenCamera = onOpenCamera)
             else PlaceholderAction("Browse files", onPickFiles)
         }
 
