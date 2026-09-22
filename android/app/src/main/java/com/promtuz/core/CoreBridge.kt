@@ -108,6 +108,7 @@ import uniffi.core.inviteFromLink as ffiInviteFromLink
 import uniffi.core.timeBucket as ffiTimeBucket
 import uniffi.core.validateUpdateManifest as ffiValidateUpdateManifest
 import uniffi.core.updateIsInstallable as ffiUpdateIsInstallable
+import uniffi.core.updateIsRequired as ffiUpdateIsRequired
 import uniffi.core.profileName as ffiProfileName
 import uniffi.core.profilePicture as ffiProfilePicture
 import uniffi.core.setProfilePicture as ffiSetProfilePicture
@@ -299,6 +300,8 @@ object CoreBridge {
     fun validateUpdateManifest(m: UpdateManifest) = ffiValidateUpdateManifest(m)
     fun updateIsInstallable(offered: Int, installed: Long, switchingChannel: Boolean) =
         ffiUpdateIsInstallable(offered.toUInt(), installed.toULong(), switchingChannel)
+    /** A major or minor step the installed build cannot skip. */
+    fun updateIsRequired(installed: String, offered: String) = ffiUpdateIsRequired(installed, offered)
 
     /** Full roster, departed members included so old messages still name someone. */
     suspend fun members(conversationId: ByteArray): List<MemberRecord> =

@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +45,36 @@ sealed interface UpdateState {
     data class Error(val message: String) : UpdateState
 }
 
+/** The build an update state is about, if it is about one. */
+val UpdateState.offered: UpdateManifest?
+    get() = when (this) {
+        is UpdateState.Available -> manifest
+        is UpdateState.Downloading -> manifest
+        is UpdateState.Ready -> manifest
+        is UpdateState.PermissionNeeded -> manifest
+        else -> null
+    }
+
+/** One release's notes, published beside its APK; [body] is a small Markdown subset. */
+class ReleaseNote(val code: Long, val version: String, val date: String, val body: String) {
+    companion object {
+        private val HEADER = Regex("""^# (\S+) - (\d{4}-\d{2}-\d{2})\n?""")
+
+        /** The release tool writes the first line as `# <version> - <date>`. */
+        fun parse(code: Long, text: String): ReleaseNote {
+            val header = HEADER.find(text)
+            return ReleaseNote(
+                code,
+                header?.groupValues?.get(1) ?: "Build $code",
+                header?.groupValues?.get(2).orEmpty(),
+                text.substring(header?.range?.let { it.last + 1 } ?: 0).trim(),
+            )
+        }
+    }
+}
+
+private class HttpError(val status: Int) : RuntimeException("Update server returned HTTP $status.")
+
 @Serializable
 data class UpdateManifest(
     val versionCode: Int,
@@ -73,10 +104,19 @@ class UpdateRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Unchecked)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
+    /** Every release after the installed one up to the offered build, newest first. */
+    private val _notes = MutableStateFlow<List<ReleaseNote>>(emptyList())
+    val notes: StateFlow<List<ReleaseNote>> = _notes.asStateFlow()
+    /** The offered build when the installed one can no longer be used; the app is gated on it. */
+    private val _required = MutableStateFlow<UpdateManifest?>(null)
+    val required: StateFlow<UpdateManifest?> = _required.asStateFlow()
+
+    private class Offer(val manifest: UpdateManifest, val notes: List<ReleaseNote>)
     private var screenVisible = false
 
     companion object {
         internal val CHANNELS = listOf("debug", "release")
+        private const val NOTES_MAX = 10
         private const val TAG = "AppUpdater"
         private val log = { Timber.tag(TAG) }
     }
@@ -106,6 +146,7 @@ class UpdateRepository(private val context: Context) {
         checkJob = null
         downloadJob?.cancel()
         _state.value = UpdateState.Unchecked
+        accept(null)
         UpdateWorker.enqueue(context, replace = true)
         check()
     }
@@ -121,36 +162,38 @@ class UpdateRepository(private val context: Context) {
         screenVisible = visible
         if (!visible) return
         notifier.clear()
-        val manifest = when (val state = _state.value) {
-            is UpdateState.Available -> state.manifest
-            is UpdateState.Downloading -> state.manifest
-            is UpdateState.Ready -> state.manifest
-            is UpdateState.PermissionNeeded -> state.manifest
-            else -> null
-        }
-        if (manifest != null) notifier.markSeen(manifest, channel)
+        _state.value.offered?.let { notifier.markSeen(it, channel) }
+    }
+
+    private fun isRequired(manifest: UpdateManifest) =
+        CoreBridge.updateIsRequired(BuildConfig.VERSION_NAME, manifest.versionName)
+
+    private fun accept(offer: Offer?) {
+        _notes.value = offer?.notes.orEmpty()
+        _required.value = offer?.manifest?.takeIf(::isRequired)
     }
 
     /** A push is only a hint. The signed manifest decides what we can offer. */
     internal suspend fun checkAndNotify() = withContext(Dispatchers.IO) {
         notificationCheck.withLock {
             val selectedChannel = channel
-            val manifest = availableUpdate(selectedChannel)
+            val offer = availableUpdate(selectedChannel)
             currentCoroutineContext().ensureActive()
             withContext(Dispatchers.Main.immediate) notify@{
                 // Channel switches and screen actions run on main too.
                 if (selectedChannel != channel) return@notify
-                if (manifest == null || screenVisible || _state.value is UpdateState.Downloading ||
+                accept(offer)
+                if (offer == null || screenVisible || _state.value is UpdateState.Downloading ||
                     _state.value is UpdateState.Ready || _state.value is UpdateState.PermissionNeeded) {
                     notifier.clear()
                 } else {
-                    notifier.show(manifest, selectedChannel)
+                    notifier.show(offer.manifest, selectedChannel, isRequired(offer.manifest))
                 }
             }
         }
     }
 
-    private fun availableUpdate(selectedChannel: String): UpdateManifest? {
+    private fun availableUpdate(selectedChannel: String): Offer? {
         val abi = supportedAbi()
         val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/manifest.json"
         val rawManifest = getBytes(url, selectedChannel, 16 * 1024)
@@ -158,7 +201,35 @@ class UpdateRepository(private val context: Context) {
         require(CoreBridge.verifyUpdateManifest(rawManifest, signature)) { "Update signature could not be verified." }
         val manifest = json.decodeFromString<UpdateManifest>(rawManifest.decodeToString())
         validateManifest(manifest, abi, selectedChannel)
-        return manifest.takeIf { installable(it, selectedChannel) }
+        if (!installable(manifest, selectedChannel)) return null
+        return Offer(manifest, releaseNotes(selectedChannel, abi, manifest))
+    }
+
+    /**
+     * Walks the version codes from the offered build back to the installed one; a code
+     * without notes is a 404. Signed like the manifest, but only decoration: an update
+     * without notes is still an update.
+     */
+    private fun releaseNotes(selectedChannel: String, abi: String, offered: UpdateManifest): List<ReleaseNote> {
+        val installed = installedVersionCode()
+        val notes = ArrayList<ReleaseNote>()
+        var code = offered.versionCode.toLong()
+        while (code > installed && notes.size < NOTES_MAX) {
+            val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/notes-$code.md"
+            try {
+                val raw = getBytes(url, selectedChannel, 64 * 1024)
+                val signature = getBytes("$url.sig", selectedChannel, 64)
+                require(CoreBridge.verifyUpdateManifest(raw, signature)) { "Notes signature could not be verified." }
+                notes += ReleaseNote.parse(code, raw.decodeToString())
+            } catch (error: Exception) {
+                if ((error as? HttpError)?.status != 404) {
+                    log().w(error, "Release notes unavailable")
+                    break
+                }
+            }
+            code--
+        }
+        return notes
     }
 
     fun check() {
@@ -178,11 +249,12 @@ class UpdateRepository(private val context: Context) {
                 _state.value = UpdateState.Checking
                 // A channel change may still be closing/deleting the previous download.
                 previousDownload?.join()
-                val manifest = withContext(Dispatchers.IO) { availableUpdate(selectedChannel) }
+                val offer = withContext(Dispatchers.IO) { availableUpdate(selectedChannel) }
                 if (generation == channelGeneration) {
-                    _state.value = manifest?.let { UpdateState.Available(it) } ?: UpdateState.None
-                    if (manifest != null && screenVisible) notifier.markSeen(manifest, selectedChannel)
-                    if (manifest == null || screenVisible) notifier.clear()
+                    accept(offer)
+                    _state.value = offer?.let { UpdateState.Available(it.manifest) } ?: UpdateState.None
+                    if (offer != null && screenVisible) notifier.markSeen(offer.manifest, selectedChannel)
+                    if (offer == null || screenVisible) notifier.clear()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -321,11 +393,12 @@ class UpdateRepository(private val context: Context) {
             "/apk/$selectedChannel/$abi/manifest.json.sig",
         )
         val apkPrefix = "/apk/$selectedChannel/$abi/promtuz-"
+        val notes = Regex("/apk/$selectedChannel/$abi/notes-[0-9]{1,10}\\.md(\\.sig)?")
         require(parsed.protocol == "https" && parsed.host == "apt.promtuz.dev") { "Update server is not trusted." }
         require((parsed.port == -1 || parsed.port == 443) && parsed.userInfo == null && parsed.query == null && parsed.ref == null) {
             "Update URL is invalid."
         }
-        require(parsed.path in expectedPaths || (parsed.path.startsWith(apkPrefix) && parsed.path.endsWith(".apk"))) {
+        require(parsed.path in expectedPaths || notes.matches(parsed.path) || (parsed.path.startsWith(apkPrefix) && parsed.path.endsWith(".apk"))) {
             "Update path is invalid."
         }
         return (parsed.openConnection() as HttpURLConnection).apply {
@@ -335,7 +408,7 @@ class UpdateRepository(private val context: Context) {
             readTimeout = 30_000
             requestMethod = "GET"
             try {
-                require(responseCode == HttpURLConnection.HTTP_OK) { "Update server returned HTTP $responseCode." }
+                if (responseCode != HttpURLConnection.HTTP_OK) throw HttpError(responseCode)
             } catch (error: Exception) {
                 disconnect()
                 throw error

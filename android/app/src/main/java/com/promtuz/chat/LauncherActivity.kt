@@ -14,6 +14,7 @@ import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.InviteBottomSheet
 import com.promtuz.chat.ui.media.MediaViewerHost
+import com.promtuz.chat.ui.screens.RequiredUpdateHost
 import com.promtuz.chat.update.UpdateNotifier
 import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.ui.theme.PromtuzTheme
@@ -46,6 +47,7 @@ class LauncherActivity : ComponentActivity() {
                 MediaViewerHost()
                 com.promtuz.chat.ui.camera.CameraOverlayHost()
                 InviteBottomSheet(viewModel)
+                RequiredUpdateHost()
             }
         }
     }

@@ -6,6 +6,12 @@
 verifies the live files, and announces the release. `debug` builds are debuggable;
 `release` builds are not. `--channel both` publishes one versionCode to both channels.
 
+`--notes FILE` publishes a Markdown file as the release's notes, signed and stored as
+`notes-<versionCode>.md` beside the APK. The app shows the notes of every version
+between the installed and the offered build, skipping versions without any. A new
+major or minor version makes the update required. Nothing about notes is kept in the
+repo.
+
 The build uses the signing vault at `~/.promtuz-vault` (`PZ_VAULT` overrides it).
 Announcements also need Python 3 and an FCM service-account JSON for the app's
 Firebase project. Keep that file outside the checkout:
@@ -31,6 +37,9 @@ zsh tools/scripts/release-android.zsh --channel both --dry-run
 
 # Build and keep signed files in android/app/build/release-staging.
 zsh tools/scripts/release-android.zsh --no-publish
+
+# Publish with release notes.
+zsh tools/scripts/release-android.zsh --channel release --notes ~/notes/0.5.0.md
 
 # Publish without sending a release announcement.
 zsh tools/scripts/release-android.zsh --channel release --no-notify

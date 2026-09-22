@@ -22,6 +22,7 @@ PUBLISH=1
 DRY_RUN=0
 NOTIFY=1
 NOTIFY_ONLY=0
+NOTES=""
 
 _info() { print -r -- "  $*" }
 _ok()   { print -r -- "✓ $*" }
@@ -37,6 +38,7 @@ Usage: release-android.zsh [options]
   --channel debug|release|both  Target channel (default: debug)
   --version-name VERSION       Skip the version prompt
   --version-code CODE          Use an explicit code above published versions
+  --notes FILE                 Markdown release notes shown in the app (optional)
   --no-publish                 Build, sign, and stage locally
   --no-notify                  Publish without a release announcement
   --notify-only                Announce the current live release; skip the build
@@ -84,6 +86,7 @@ while (( $# )); do
         --channel)      _value "$1" "${2-}"; CHANNEL="$2"; shift 2 ;;
         --version-name) _value "$1" "${2-}"; VERSION_NAME="$2"; shift 2 ;;
         --version-code) _value "$1" "${2-}"; VERSION_CODE="$2"; shift 2 ;;
+        --notes)        _value "$1" "${2-}"; NOTES="$2"; shift 2 ;;
         --no-publish)   PUBLISH=0; shift ;;
         --no-notify)    NOTIFY=0; shift ;;
         --notify-only)  NOTIFY_ONLY=1; shift ;;
@@ -107,6 +110,10 @@ fi
 if [[ -n "$VERSION_NAME" ]]; then
     [[ "$VERSION_NAME" =~ '^[A-Za-z0-9][A-Za-z0-9._+-]*$' ]] || _die "invalid versionName '$VERSION_NAME'"
 fi
+if [[ -n "$NOTES" ]]; then
+    [[ -s "$NOTES" ]] || _die "release notes file '$NOTES' is missing or empty"
+    (( $(wc -c < "$NOTES") <= 65536 )) || _die "release notes are over 64 KB"
+fi
 
 if (( NOTIFY_ONLY )); then
     (( NOTIFY && PUBLISH )) || _die "--notify-only cannot be combined with --no-notify or --no-publish"
@@ -122,6 +129,7 @@ if (( DRY_RUN )); then
     _info "version: ${VERSION_NAME:-prompt at release time}"
     _info "versionCode: ${VERSION_CODE:-next code above local and published versions}"
     _info "build and sign: ${ABIS[*]}"
+    _info "release notes: ${NOTES:-none}"
     if (( ! PUBLISH )); then
         _info "stage locally: $REPO/android/app/build/release-staging (no upload or announcement)"
     elif (( NOTIFY )); then
@@ -279,9 +287,17 @@ if (( ${TARGETS[(I)release]} )) && [[ "$VERSION_NAME" == *-* ]]; then
 fi
 
 APK_NAME="promtuz-${VERSION_NAME}~${VERSION_CODE}.apk"
+# Named by code alone so a client can walk the codes between its own build and
+# the offered one without a list of releases; a code without notes is a 404.
+NOTES_NAME="notes-${VERSION_CODE}.md"
 print -r -- ""
 _info "version   $VERSION_NAME (versionCode $VERSION_CODE)"
 _info "artefact  $APK_NAME"
+if [[ -n "$NOTES" ]]; then
+    _info "notes     $NOTES_NAME (from $NOTES)"
+else
+    _warn "no --notes: the app will show this release without notes"
+fi
 
 # ── unlock ───────────────────────────────────────────────────────────────
 _step "Unlock"
@@ -413,6 +429,17 @@ EOF
             -in "$dir/manifest.json" -sigfile "$dir/manifest.json.sig" >/dev/null 2>&1 \
             || _die "$channel/$abi signature does not verify against the vault's public key"
 
+        if [[ -n "$NOTES" ]]; then
+            # First line labels the notes for the app; the rest is the file as written.
+            { print -r -- "# $VERSION_NAME - ${PUBLISHED_AT%%T*}"; print -r -- ""; cat "$NOTES"; } > "$dir/$NOTES_NAME"
+            openssl pkeyutl -sign -inkey "$SCRATCH/manifest.key" -rawin \
+                -in "$dir/$NOTES_NAME" -out "$dir/$NOTES_NAME.sig" \
+                || _die "could not sign the $channel/$abi release notes"
+            openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
+                -in "$dir/$NOTES_NAME" -sigfile "$dir/$NOTES_NAME.sig" >/dev/null 2>&1 \
+                || _die "$channel/$abi notes signature does not verify against the vault's public key"
+        fi
+
         _ok "$channel/$abi  signed, ${size} bytes, sha256 ${sha:0:16}…"
     done
 done
@@ -437,6 +464,10 @@ for channel in $TARGETS; do
         # APK first, manifest last: the manifest is what clients act on, so it
         # must never point at a file that is still uploading.
         rsync -q "$STAGE/$channel/$abi/$APK_NAME"         "$PUBLISH_HOST:$dest/" || _die "APK upload failed"
+        if [[ -n "$NOTES" ]]; then
+            rsync -q "$STAGE/$channel/$abi/$NOTES_NAME.sig" "$PUBLISH_HOST:$dest/" || _die "notes sig upload failed"
+            rsync -q "$STAGE/$channel/$abi/$NOTES_NAME"     "$PUBLISH_HOST:$dest/" || _die "notes upload failed"
+        fi
         rsync -q "$STAGE/$channel/$abi/manifest.json.sig" "$PUBLISH_HOST:$dest/" || _die "sig upload failed"
         rsync -q "$STAGE/$channel/$abi/manifest.json"     "$PUBLISH_HOST:$dest/" || _die "manifest upload failed"
 
@@ -470,6 +501,16 @@ for channel in $TARGETS; do
 
         code="$(curl -fsS -m 30 -o /dev/null -w '%{http_code}' -r 0-0 "$url/$APK_NAME" || true)"
         [[ "$code" == 206 || "$code" == 200 ]] || _die "$channel/$abi APK unreachable (HTTP $code)"
+
+        if [[ -n "$NOTES" ]]; then
+            curl -fsS -m 30 "$url/$NOTES_NAME"     -o "$SCRATCH/live-notes.md"  || _die "$channel/$abi notes unreachable"
+            curl -fsS -m 30 "$url/$NOTES_NAME.sig" -o "$SCRATCH/live-notes.sig" || _die "$channel/$abi notes sig unreachable"
+            cmp -s "$SCRATCH/live-notes.md" "$STAGE/$channel/$abi/$NOTES_NAME" \
+                || _die "$channel/$abi live notes differ from what we uploaded"
+            openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
+                -in "$SCRATCH/live-notes.md" -sigfile "$SCRATCH/live-notes.sig" >/dev/null 2>&1 \
+                || _die "$channel/$abi live notes signature does not verify"
+        fi
 
         # Confirm latest.apk resolves to THIS build. Comparing Content-Length
         # against the manifest is what would have caught it going stale.

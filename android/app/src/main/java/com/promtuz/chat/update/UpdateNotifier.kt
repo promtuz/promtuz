@@ -17,7 +17,7 @@ internal class UpdateNotifier(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
     private val prefs = context.getSharedPreferences("update_notifications", Context.MODE_PRIVATE)
 
-    fun show(manifest: UpdateManifest, channel: String) {
+    fun show(manifest: UpdateManifest, channel: String, required: Boolean) {
         if (manifest.versionCode <= prefs.getInt(channel, 0)) return
         Notifications.ensureChannels(context)
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -36,7 +36,7 @@ internal class UpdateNotifier(private val context: Context) {
             NotificationCompat.Builder(context, Notifications.UPDATES_CHANNEL)
                 .setSmallIcon(R.drawable.i_download)
                 .setContentTitle("Promtuz ${manifest.versionName} is available")
-                .setContentText("Tap to update")
+                .setContentText(if (required) "Update required to keep chatting" else "Tap to see what's new")
                 .setContentIntent(pending)
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)

@@ -44,6 +44,8 @@ import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.releaseNotes
+import com.promtuz.chat.update.offered
 import com.promtuz.chat.ui.constants.Tweens
 import com.promtuz.chat.update.UpdateManifest
 import com.promtuz.chat.update.UpdateState
@@ -54,6 +56,7 @@ import java.util.Locale
 fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
     val state by viewModel.state.collectAsState()
     val channel by viewModel.channel.collectAsState()
+    val notes by viewModel.notes.collectAsState()
     val context = LocalContext.current
     val direction = LocalLayoutDirection.current
     var pendingChannel by remember { mutableStateOf<String?>(null) }
@@ -168,6 +171,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                     }
                 }
             }
+            state.offered?.let { releaseNotes(notes, it.versionName) }
             item("channel") {
                 Column(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -216,7 +220,7 @@ private fun UpdateDetail(text: String) {
 
 private fun versionLine(manifest: UpdateManifest) = "Promtuz ${manifest.versionName} · ${formatSize(manifest.size)}"
 
-private fun formatSize(bytes: Long): String = when {
+internal fun formatSize(bytes: Long): String = when {
     bytes >= 1_000_000 -> String.format(Locale.ROOT, "%.1f MB", bytes / 1_000_000.0)
     bytes >= 1_000 -> String.format(Locale.ROOT, "%.0f KB", bytes / 1_000.0)
     else -> "$bytes B"

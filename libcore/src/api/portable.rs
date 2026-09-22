@@ -139,6 +139,19 @@ pub fn update_is_installable(
     offered_code as u64 >= min
 }
 
+/// `major.minor` of a `major.minor.patch[-pre]` name; a missing part counts as 0.
+fn major_minor(name: &str) -> (u64, u64) {
+    let core = name.split('-').next().unwrap_or("");
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+/// A major or minor step cannot be skipped: the offered build is the only one that keeps working.
+#[uniffi::export]
+pub fn update_is_required(installed: String, offered: String) -> bool {
+    major_minor(&installed) != major_minor(&offered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +235,15 @@ mod tests {
         assert!(update_is_installable(16, 16, true));
         assert!(update_is_installable(17, 16, false));
         assert!(!update_is_installable(15, 16, true));
+    }
+
+    #[test]
+    fn only_major_and_minor_steps_are_required() {
+        assert!(update_is_required("0.4.3-beta1".into(), "0.5.0".into()));
+        assert!(update_is_required("0.4.3".into(), "1.0.0".into()));
+        assert!(!update_is_required("0.4.2".into(), "0.4.3".into()));
+        assert!(!update_is_required("0.4.3-beta1".into(), "0.4.3".into()));
+        assert!(update_is_required("0.10.0".into(), "0.9.9".into()));
     }
 
 }
