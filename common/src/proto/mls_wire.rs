@@ -263,9 +263,16 @@ pub enum CallMsg {
     },
     /// An address found after the offer or answer went out.
     Candidate { call: [u8; 16], candidate: CallCandidate },
+    /// The sender muted or unmuted. Rides the same channel rather than the
+    /// media, so it is reliable and survives a media reconnect; a lost one is
+    /// corrected by the next. Not latency-critical.
+    Media { call: [u8; 16], muted: bool },
     /// Fresh ICE credentials after a network change. The peer restarts ICE
-    /// against them with the candidates that follow.
-    Restart { call: [u8; 16], ufrag: String, pwd: String, candidates: Vec<CallCandidate> },
+    /// against them with the candidates that follow. `gen` counts restarts
+    /// within the call: a side that sees a higher one than its own restarts
+    /// too and answers with its own credentials, so two phones that lost the
+    /// path at once settle on one restart instead of trading them forever.
+    Restart { call: [u8; 16], generation: u32, ufrag: String, pwd: String, candidates: Vec<CallCandidate> },
     /// The call is over, or never started.
     End { call: [u8; 16], reason: CallEnd },
 }

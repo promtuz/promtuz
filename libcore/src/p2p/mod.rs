@@ -21,7 +21,7 @@
 
 #![allow(dead_code)]
 
-mod candidate;
+pub(crate) mod candidate;
 pub(crate) mod consent;
 mod disco;
 mod punch;

@@ -54,6 +54,11 @@ pub const SYSTEM_ADDED: u8 = 1;
 pub const SYSTEM_LEFT: u8 = 2;
 pub const SYSTEM_REMOVED: u8 = 3;
 pub const SYSTEM_TITLED: u8 = 4;
+/// A call, narrated where it happened. `sender_ipk` is who called, `content`
+/// how it went: `answered:<seconds>`, `missed`, `declined`, `busy`,
+/// `unanswered`, `cancelled` or `failed`. `dispatch_id` is the call id, the
+/// same on both phones, so each records the call exactly once.
+pub const SYSTEM_CALL: u8 = 5;
 
 from_row!(MessageRow { id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to, system });
 

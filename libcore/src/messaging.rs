@@ -433,6 +433,14 @@ pub(crate) async fn send_control(conversation: [u8; 16], payload: AppPayload) ->
     send_control_inner(conversation, payload, Wake::No, None).await
 }
 
+/// [`send_control`] with an explicit wake class, for call signaling: an
+/// offer rings a sleeping phone, the rest of a call must not.
+pub(crate) async fn send_control_class(
+    conversation: [u8; 16], payload: AppPayload, wake: Wake,
+) -> Result<()> {
+    send_control_inner(conversation, payload, wake, None).await
+}
+
 /// [`send_control`] addressed to one member instead of the whole roster — for
 /// state only they are missing, like the group's name after they join. MLS
 /// tolerates the generation gap this leaves in the others' view of our ratchet.
@@ -3435,6 +3443,7 @@ mod tests {
             fn on_activity(&self, _: Vec<u8>, _: Vec<u8>, _: u16) {}
             fn on_presence(&self, _: Vec<u8>, _: crate::platform::Presence) {}
             fn on_reaction(&self, _: Vec<u8>, _: Vec<u8>, _: Vec<u8>, _: String, _: bool) {}
+            fn on_call(&self, _: crate::platform::CallEvent) {}
             fn on_db_changed(&self, _: Vec<String>) {
                 // Like Android's collector running immediately: read just the
                 // atomic counter, never the locked DB, at notification time.

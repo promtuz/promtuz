@@ -55,6 +55,59 @@ pub trait CoreEvents: Send + Sync {
     /// truth stays in the DB. Fired on the writer thread, so the impl must not
     /// block or re-enter the core (just wake a flow).
     fn on_db_changed(&self, tables: Vec<String>);
+    /// A call changed state. The platform owns the ringing screen, the
+    /// foreground service and the audio device; core owns everything else.
+    fn on_call(&self, event: CallEvent);
+}
+
+/// One step of a call, for the platform. `call` is the 16-byte call id every
+/// call API takes; `peer` the other party's IPK; `conversation` the chat the
+/// call row lands in.
+#[derive(uniffi::Enum, Debug, Clone)]
+pub enum CallEvent {
+    /// We started a call. Show the outgoing screen and hold the service.
+    Outgoing { call: Vec<u8>, peer: Vec<u8>, conversation: Vec<u8> },
+    /// Someone is calling. Ring, and show the incoming screen.
+    Incoming { call: Vec<u8>, peer: Vec<u8>, conversation: Vec<u8>, video: bool },
+    /// The peer's phone is ringing, so play ringback.
+    Ringing { call: Vec<u8> },
+    /// Answered on both ends; media is being set up.
+    Connecting { call: Vec<u8> },
+    /// Media flows. Run the audio device from here until `Ended`.
+    Connected { call: Vec<u8> },
+    /// The path dropped and recovery is under way; audio keeps running.
+    Reconnecting { call: Vec<u8> },
+    /// The peer muted or unmuted themselves.
+    PeerMuted { call: Vec<u8>, muted: bool },
+    /// Over, however it went. Stop audio and dismiss the screen. `duration_ms`
+    /// is the connected time, zero when it never connected. A `Missed` for a
+    /// call that never rang here (the offer arrived already dead) still
+    /// reports, so a missed-call notice can be shown.
+    Ended {
+        call: Vec<u8>,
+        peer: Vec<u8>,
+        conversation: Vec<u8>,
+        reason: CallEndReason,
+        duration_ms: u64,
+    },
+}
+
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallEndReason {
+    /// Hung up by either side after it connected.
+    Hangup,
+    /// We hung up before the peer answered.
+    Cancelled,
+    /// The callee refused (the peer, or us).
+    Declined,
+    /// The callee was on another call.
+    Busy,
+    /// We called and nobody picked up.
+    Unanswered,
+    /// We were called and did not pick up.
+    Missed,
+    /// The media path never came up or never recovered.
+    Failed,
 }
 
 /// The single error type crossing the FFI boundary.
