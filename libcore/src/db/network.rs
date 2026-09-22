@@ -112,6 +112,9 @@ const MIGRATION_ARRAY: &[M] = &[
             sealed_key BLOB NOT NULL
         );",
     ),
+    // Whether the relay bridges hole-punch assist, as it said at handshake.
+    // Unknown until we have connected to it once, which reads as "no".
+    M::up("ALTER TABLE relays ADD COLUMN assist INTEGER NOT NULL DEFAULT 0;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

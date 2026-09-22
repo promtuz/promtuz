@@ -11,6 +11,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine as _;
+use common::proto::client_rel::Wake;
 use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 use jsonwebtoken::Algorithm;
@@ -150,22 +151,37 @@ impl FcmSender {
     }
 
     /// Wake data is collapsible: one pending wake drains all queued messages.
-    pub async fn send(&self, device_token: &str, payload: &[u8]) -> Result<()> {
+    pub async fn send(&self, device_token: &str, payload: &[u8], class: Wake) -> Result<()> {
         let _permit = self.inflight.try_acquire().map_err(|_| anyhow!("FCM dispatch saturated"))?;
         let url =
             format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", self.project_id);
-        self.send_to(&url, device_token, payload).await
+        self.send_to(&url, device_token, payload, class).await
     }
 
-    async fn send_to(&self, url: &str, device_token: &str, payload: &[u8]) -> Result<()> {
+    async fn send_to(
+        &self, url: &str, device_token: &str, payload: &[u8], class: Wake,
+    ) -> Result<()> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
-        let body = serde_json::json!({
-            "message": {
-                "token": device_token,
-                "android": { "priority": "high", "collapse_key": "message-sync" },
-                "data": { "p": b64 },
-            }
-        });
+        // A call that cannot be delivered while it rings is not worth
+        // delivering: FCM drops it after the offer's life instead of ringing
+        // a phone that comes back an hour later. Its own collapse key keeps a
+        // message wake from swallowing it.
+        let body = match class {
+            Wake::Call => serde_json::json!({
+                "message": {
+                    "token": device_token,
+                    "android": { "priority": "high", "collapse_key": "call", "ttl": "40s" },
+                    "data": { "p": b64, "type": "call" },
+                }
+            }),
+            _ => serde_json::json!({
+                "message": {
+                    "token": device_token,
+                    "android": { "priority": "high", "collapse_key": "message-sync" },
+                    "data": { "p": b64 },
+                }
+            }),
+        };
         for attempt in 0..3 {
             let response: Result<_> = async {
                 let access = self.access_token().await?;
@@ -262,7 +278,57 @@ mod tests {
             })),
             inflight: Semaphore::new(1),
         };
-        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[]))
+        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[], Wake::Message))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    /// A call wake must reach the phone as a call: its own collapse key, a
+    /// life no longer than the ring, and a type the app switches on.
+    #[tokio::test]
+    async fn call_wake_is_short_lived_and_typed() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/send", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["message"]["android"]["collapse_key"], "call");
+            assert_eq!(json["message"]["android"]["ttl"], "40s");
+            assert_eq!(json["message"]["data"]["type"], "call");
+            reader.get_mut().write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            ).await.unwrap();
+        });
+        let sender = FcmSender {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            project_id: "test".into(),
+            client_email: String::new(),
+            token_uri: String::new(),
+            encoding_key: EncodingKey::from_secret(b"unused: cached access token"),
+            cached: Mutex::new(Some(CachedToken {
+                token: "test".into(),
+                expires_at: SystemTime::now() + Duration::from_secs(3600),
+            })),
+            inflight: Semaphore::new(1),
+        };
+        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[], Wake::Call))
             .await
             .unwrap()
             .unwrap();

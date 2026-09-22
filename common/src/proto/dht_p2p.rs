@@ -1476,7 +1476,8 @@ mod tests {
             payload:        payload.to_vec().into(),
             sig:            sig.to_bytes().into(),
             accepted_at_ms: 1,
-            wake:           false,
+            wake:           crate::proto::client_rel::Wake::No,
+            ttl_ms:         0,
         }
     }
 
@@ -1927,7 +1928,8 @@ mod tests {
             payload:        crate::types::bytes::ByteVec(vec![0u8; 4]),
             sig:            [4u8; 64].into(),
             accepted_at_ms: 1,
-            wake:           false,
+            wake:           crate::proto::client_rel::Wake::No,
+            ttl_ms:         0,
         };
         let resp = QueueFetchResp {
             messages:  vec![dispatch; MAX_FETCH_QUEUE_BATCH + 1],

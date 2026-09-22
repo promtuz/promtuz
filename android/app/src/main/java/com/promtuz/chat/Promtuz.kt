@@ -73,6 +73,8 @@ class Promtuz : Application() {
         CoreEventBus.hydratePresence(PresenceStore.seed())
 
         PushNotifier.start(this)
+        com.promtuz.core.call.CallController.init(this)
+        com.promtuz.core.call.CallVideoManager.init(this)
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)

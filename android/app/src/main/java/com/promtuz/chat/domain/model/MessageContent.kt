@@ -42,7 +42,7 @@ sealed interface MessageContent {
     data class System(val event: SystemEventKind, val actor: String, val target: String) :
         MessageContent
 
-    /** P2P attachment pulled by [fileIdHex]; [transferState] 0 none/1 active/2 done/3 failed/4 held. */
+    /** P2P attachment pulled by [fileIdHex]; [transferState] 0 none/1 active/2 done/3 failed/4 held/5 connecting. */
     data class Attachment(
         val caption: String,
         val name: String,
@@ -58,6 +58,18 @@ sealed interface MessageContent {
 
     /** The reference supplies dimensions before the image is downloaded. */
     data class Sticker(val sticker: StickerRef) : MessageContent
+
+    /**
+     * A finished call, narrated where it happened like a system line but with
+     * its own icon. [outgoing] is our direction; [durationSecs] is set only
+     * when it connected, otherwise [missed] tells a missed call from a
+     * declined or unanswered one.
+     */
+    data class Call(
+        val outgoing: Boolean,
+        val durationSecs: Int?,
+        val missed: Boolean,
+    ) : MessageContent
 
     /**
      * Inline voice note. [waveform] is the sender's loudness samples (0–255),

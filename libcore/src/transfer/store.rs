@@ -13,6 +13,9 @@ pub const ACTIVE: u8 = 1;
 pub const DONE: u8 = 2;
 pub const FAILED: u8 = 3;
 pub const HELD: u8 = 4;
+/// Reaching the sender: from the tap until a link forms (then ACTIVE) or
+/// the attempt gives up (then HELD). What the card shows meanwhile.
+pub const CONNECTING: u8 = 5;
 
 /// Sender-side: the manifest + source bytes we keep serving until `expires_at`.
 #[derive(Debug, Clone)]
@@ -185,10 +188,10 @@ pub fn partial_put(p: &Partial) -> rusqlite::Result<()> {
 pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     let conn = TRANSFERS_DB.lock();
     let mut stmt = conn
-        .prepare("SELECT path FROM partials WHERE state IN (?1, ?2) AND updated_at < ?3")
+        .prepare("SELECT path FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4")
         .expect("gc_dead_partials prepare");
     let paths: Vec<String> = stmt
-        .query_map(params![FAILED, HELD, older_than as i64], |r| r.get(0))
+        .query_map(params![FAILED, HELD, CONNECTING, older_than as i64], |r| r.get(0))
         .expect("gc_dead_partials query")
         .collect::<rusqlite::Result<_>>()
         .expect("gc_dead_partials rows");
@@ -197,8 +200,8 @@ pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
         let _ = std::fs::remove_file(p);
     }
     conn.execute(
-        "DELETE FROM partials WHERE state IN (?1, ?2) AND updated_at < ?3",
-        params![FAILED, HELD, older_than as i64],
+        "DELETE FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4",
+        params![FAILED, HELD, CONNECTING, older_than as i64],
     )
     .expect("gc_dead_partials delete");
     paths
@@ -275,12 +278,25 @@ fn forget_row(table: &str, file_id: &[u8; 32], fallback: Option<String>) {
 pub fn incomplete_file_ids() -> Vec<[u8; 32]> {
     let conn = TRANSFERS_DB.lock();
     let mut stmt = conn
-        .prepare("SELECT file_id FROM partials WHERE state IN (?1, ?2)")
+        .prepare("SELECT file_id FROM partials WHERE state IN (?1, ?2, ?3)")
         .expect("incomplete_file_ids prepare");
-    stmt.query_map(params![HELD, ACTIVE], |r| r.get(0))
+    stmt.query_map(params![HELD, ACTIVE, CONNECTING], |r| r.get(0))
         .expect("incomplete_file_ids query")
         .collect::<rusqlite::Result<_>>()
         .expect("incomplete_file_ids rows")
+}
+
+/// [`incomplete_file_ids`] narrowed to pulls from one sender, for the
+/// moment that sender becomes reachable.
+pub fn incomplete_file_ids_for(peer: &[u8; 32]) -> Vec<[u8; 32]> {
+    let conn = TRANSFERS_DB.lock();
+    let mut stmt = conn
+        .prepare("SELECT file_id FROM partials WHERE source_ipk = ?1 AND state IN (?2, ?3, ?4)")
+        .expect("incomplete_file_ids_for prepare");
+    stmt.query_map(params![peer.as_slice(), HELD, ACTIVE, CONNECTING], |r| r.get(0))
+        .expect("incomplete_file_ids_for query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("incomplete_file_ids_for rows")
 }
 
 #[cfg(test)]

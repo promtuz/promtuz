@@ -59,6 +59,7 @@ import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.utils.media.rememberAvatar
+import com.promtuz.chat.utils.extensions.fromHex
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -162,7 +163,12 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         },
         navigationIcon = navigationIcon,
         actions = {
-            if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else AppDropMenu(
+            if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else {
+            if (!isGroup) summary?.peerHex?.let {
+                CallButton(it, video = true)
+                CallButton(it, video = false)
+            }
+            AppDropMenu(
                 anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
                     if (isGroup) {
@@ -200,6 +206,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     )
                 },
             )
+            }
         },
         // freezeOnExit: bake the blur to pixels while the nav card scales out (Haze
         // samples screen-space and shatters under an ancestor scale).
@@ -232,6 +239,45 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             onDelete = { confirmDelete = false; appVM.deleteChat(chat, popThisChat) },
             onLeaveAndDelete = { confirmDelete = false; appVM.leaveAndDelete(chat, popThisChat) },
             onDismiss = { confirmDelete = false },
+        )
+    }
+}
+
+/**
+ * The audio or video call button in a 1:1 chat. A call needs the microphone
+ * (and, for video, the camera), so it asks for those first and starts the call
+ * only once they are granted; a call with a dead device is worse than no call.
+ */
+@Composable
+private fun CallButton(peerHex: String, video: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val needed = if (video) {
+        arrayOf(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.CAMERA)
+    } else {
+        arrayOf(android.Manifest.permission.RECORD_AUDIO)
+    }
+    val start = {
+        runCatching { com.promtuz.core.CoreBridge.callStart(peerHex.fromHex(), video) }
+            .onFailure { android.widget.Toast.makeText(context, "Can't start call", android.widget.Toast.LENGTH_SHORT).show() }
+        Unit
+    }
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants -> if (grants.values.all { it }) start() }
+    Box(
+        Modifier.size(40.dp).clip(CircleShape).clickable {
+            val granted = needed.all {
+                androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+            if (granted) start() else permission.launch(needed)
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        DrawableIcon(
+            if (video) R.drawable.oi_camera else R.drawable.i_phone,
+            Modifier.size(20.dp),
+            desc = if (video) "Video call" else "Call",
         )
     }
 }

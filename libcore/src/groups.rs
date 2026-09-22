@@ -353,7 +353,8 @@ async fn fan_out_commit_to(
             &id,
             env,
             OpType::Control,
-            true,
+            common::proto::client_rel::Wake::Message,
+            0,
         )
         .await;
     }

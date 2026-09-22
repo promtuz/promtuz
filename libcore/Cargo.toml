@@ -85,6 +85,16 @@ sha2 = "0.11.0"
 blake3 = "1.8.5"
 uniffi = { version = "0.31.2", default-features = false, features = ["tokio"] }
 
+# Calls (CALLS.md): the WebRTC stack (ICE, DTLS-SRTP, RTP, SCTP) on the
+# aws-lc-rs crypto the tree already builds; Opus through libopus; the TURN
+# client and the STUN helpers behind the relayed and reflexive candidates.
+# `webrtc-util` only names the socket trait the TURN client hands back.
+str0m = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+opus = "0.4"
+turn = "0.17"
+stun = "0.17"
+webrtc-util = "0.17"
+
 # aarch64 (real phones) gets rav1e's NEON asm; it builds with `cc` from the
 # NDK, not nasm (nasm is x86-only). Cargo unions this with the base dep.
 [target.'cfg(target_arch = "aarch64")'.dependencies]

@@ -221,7 +221,8 @@ impl DhtClient for RelayDhtClient {
             sig:     Bytes(sig),
             accepted_at_ms: 0,
             // First-contact welcome: the peer must be woken to receive it.
-            wake:    true,
+            wake:    common::proto::client_rel::Wake::Message,
+            ttl_ms:  0,
         };
 
         match self.rpc(CRelayPacket::Dispatch(fwd)).await? {

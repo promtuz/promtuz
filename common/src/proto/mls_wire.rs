@@ -112,14 +112,9 @@ pub enum AppPayload {
     /// inbound MLS message, which proves the group works end-to-end and flips
     /// the inviter's contact PENDING → PAIRED. Not stored as a message.
     PairAck,
-    /// Peer-to-peer connection offer: the sender's candidate addresses for a
-    /// direct QUIC hole-punch, its home relay's address for the TURN fallback
-    /// when the punch can't land, and two random session secrets — a TURN
-    /// bridge `token` and a `disco_key` for the punch pokes. Both are
-    /// exchanged, not derived, so the two ends agree regardless of MLS
-    /// group/epoch (the dialer's win). A control message — routed to the P2P
-    /// transport, never shown as a chat message. Appended last so postcard's
-    /// ordinal tags for older variants hold.
+    /// Retired peer-to-peer offer, superseded by [`AppPayload::P2pOffer`].
+    /// Kept so the ordinal survives; a receiver ignores it, since a sender
+    /// old enough to emit it cannot read the reply either.
     P2p {
         candidates: Vec<SocketAddr>,
         relay:      Option<SocketAddr>,
@@ -208,6 +203,109 @@ pub enum AppPayload {
     /// Confirms a successfully stored owner-issued picture revision. This is
     /// application-level persistence, not a relay delivery acknowledgement.
     AvatarAck { revision: u64 },
+    /// Peer-to-peer connection offer: the sender's candidate addresses for a
+    /// direct QUIC hole-punch, its home relay's address for the TURN fallback
+    /// when the punch can't land, and two random session secrets, a TURN
+    /// bridge `token` and a `disco_key` for the punch pokes. Both are
+    /// exchanged, not derived, so the two ends agree regardless of MLS
+    /// group/epoch (the dialer's win).
+    ///
+    /// `session` names one connect attempt; the answering side echoes it in
+    /// `in_reply_to` so a session only pairs with the reply to its own offer.
+    /// `expires_at_ms` is the sender's clock: an offer read after it names a
+    /// bridge nobody is waiting on any more and is dropped, never answered.
+    /// A control message, routed to the P2P transport and never shown as a
+    /// chat message. Appended last so postcard ordinals hold.
+    P2pOffer {
+        session:       [u8; 16],
+        in_reply_to:   Option<[u8; 16]>,
+        expires_at_ms: u64,
+        candidates:    Vec<SocketAddr>,
+        relay:         Option<SocketAddr>,
+        token:         [u8; 16],
+        disco_key:     [u8; 32],
+    },
+    /// Call signaling. Rides the MLS channel like the P2P offer, so it is
+    /// end-to-end and authenticated for free; routed to the call engine and
+    /// never shown as a message. Appended last so postcard ordinals hold.
+    Call(CallMsg),
+}
+
+/// One step of a call. Every variant names its call, so a message that
+/// outlived the call it belongs to is dropped instead of steering the next.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CallMsg {
+    /// Ring the peer. Carries what their engine needs to start ICE and DTLS
+    /// toward us: our ICE credentials, the SHA-256 fingerprint of our DTLS
+    /// certificate, the SSRCs our audio and (for a video call) video arrive
+    /// on, and whether this is a video call. `video_ssrc` is zero for an
+    /// audio call. Sent with the call wake class; dead once `expires_at_ms`
+    /// passes on the sender's clock.
+    Offer {
+        call:          [u8; 16],
+        expires_at_ms: u64,
+        video:         bool,
+        ufrag:         String,
+        pwd:           String,
+        fingerprint:   [u8; 32],
+        ssrc:          u32,
+        video_ssrc:    u32,
+        candidates:    Vec<CallCandidate>,
+    },
+    /// The peer's phone is ringing, so the caller can play ringback.
+    Ringing { call: [u8; 16] },
+    /// The peer picked up: their half of the ICE and DTLS parameters.
+    /// `video_ssrc` is zero unless this is a video call.
+    Answer {
+        call:        [u8; 16],
+        ufrag:       String,
+        pwd:         String,
+        fingerprint: [u8; 32],
+        ssrc:        u32,
+        video_ssrc:  u32,
+        candidates:  Vec<CallCandidate>,
+    },
+    /// An address found after the offer or answer went out.
+    Candidate { call: [u8; 16], candidate: CallCandidate },
+    /// The sender muted or unmuted. Rides the same channel rather than the
+    /// media, so it is reliable and survives a media reconnect; a lost one is
+    /// corrected by the next. Not latency-critical.
+    Media { call: [u8; 16], muted: bool },
+    /// The sender turned their camera on or off in a video call. Like
+    /// [`Self::Media`], it rides the channel, not the media.
+    Camera { call: [u8; 16], on: bool },
+    /// Fresh ICE credentials after a network change. The peer restarts ICE
+    /// against them with the candidates that follow. `gen` counts restarts
+    /// within the call: a side that sees a higher one than its own restarts
+    /// too and answers with its own credentials, so two phones that lost the
+    /// path at once settle on one restart instead of trading them forever.
+    Restart { call: [u8; 16], generation: u32, ufrag: String, pwd: String, candidates: Vec<CallCandidate> },
+    /// The call is over, or never started.
+    End { call: [u8; 16], reason: CallEnd },
+}
+
+/// One ICE candidate as the peer's agent should see it. Structured rather
+/// than the SDP line so nothing parses text on the signaling path.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CallCandidate {
+    Host { addr: SocketAddr },
+    ServerReflexive { addr: SocketAddr, base: SocketAddr },
+    Relayed { addr: SocketAddr },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CallEnd {
+    /// Hung up by whoever sent it. Before the answer, this is the caller
+    /// giving up, which the callee records as a missed call.
+    Hangup,
+    /// The callee refused.
+    Declined,
+    /// The callee was already in a call. Sent without ringing.
+    Busy,
+    /// Rang out.
+    Unanswered,
+    /// The media path never came up, or dropped and did not recover.
+    Failed,
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the
@@ -2032,5 +2130,28 @@ mod tests {
         assert_eq!(AppPayload::deser(&att.ser().unwrap()).unwrap(), att);
         let want = AppPayload::FileWant { file_id: [7u8;32] };
         assert_eq!(AppPayload::deser(&want.ser().unwrap()).unwrap(), want);
+        let offer = AppPayload::P2pOffer {
+            session: [3u8; 16], in_reply_to: Some([4u8; 16]), expires_at_ms: 1_700_000_000_000,
+            candidates: vec!["9.9.9.9:5000".parse().unwrap()],
+            relay: Some("[2409:4117::1]:40432".parse().unwrap()),
+            token: [5u8; 16], disco_key: [6u8; 32],
+        };
+        assert_eq!(AppPayload::deser(&offer.ser().unwrap()).unwrap(), offer);
+        let call = AppPayload::Call(CallMsg::Offer {
+            call: [8u8; 16], expires_at_ms: 1_700_000_040_000, video: true,
+            ufrag: "abcd".into(), pwd: "0123456789abcdef0123456".into(), fingerprint: [9u8; 32],
+            ssrc: 0xdead_beef, video_ssrc: 0xfeed_face,
+            candidates: vec![
+                CallCandidate::Host { addr: "10.0.0.2:40000".parse().unwrap() },
+                CallCandidate::ServerReflexive {
+                    addr: "49.36.1.1:40001".parse().unwrap(),
+                    base: "10.0.0.2:40000".parse().unwrap(),
+                },
+                CallCandidate::Relayed { addr: "[2409:4117::1]:50000".parse().unwrap() },
+            ],
+        });
+        assert_eq!(AppPayload::deser(&call.ser().unwrap()).unwrap(), call);
+        let end = AppPayload::Call(CallMsg::End { call: [8u8; 16], reason: CallEnd::Busy });
+        assert_eq!(AppPayload::deser(&end.ser().unwrap()).unwrap(), end);
     }
 }

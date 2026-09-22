@@ -118,6 +118,24 @@ impl TurnRoutes {
         true
     }
 
+    /// Accept inbound datagrams from a peer address the punch has
+    /// authenticated, without touching our egress.
+    ///
+    /// The upgrade is one-sided whenever the punch is: a peer whose pings
+    /// reach us validates that path and flips to direct while our own pings
+    /// die in their NAT, so we never call [`Self::set_direct`] and keep
+    /// egressing through the relay. Their packets then arrive raw from an
+    /// address we have no synth for, and quinn drops them as belonging to no
+    /// connection — the bridge looks alive from our side and the handshake
+    /// never completes. Registering the source repairs the inbound half
+    /// alone: they egress direct, we egress relayed, and both ends still see
+    /// the one synthetic address. `false` if the route is already gone.
+    pub fn accept_from(&mut self, token: &[u8; 16], src: SocketAddr) -> bool {
+        let Some(&synth) = self.by_token.get(token) else { return false };
+        self.by_real.insert(src, synth);
+        true
+    }
+
     /// If `dest` is a synthetic address, where its quinn packets really go.
     fn egress(&self, dest: SocketAddr) -> Option<Egress> {
         self.by_synth.get(&dest).copied()
@@ -580,5 +598,73 @@ mod tests {
         .await;
 
         run.expect("direct upgrade broke the connection");
+    }
+
+    /// Registering a heard-from source repairs inbound only: the route keeps
+    /// egressing through the relay, so a peer that upgraded before us can
+    /// reach us without us having validated a path back.
+    #[test]
+    fn accepting_a_peer_source_leaves_egress_relayed() {
+        let mut r = TurnRoutes::default();
+        let relay: SocketAddr = "203.0.113.9:40432".parse().unwrap();
+        let peer: SocketAddr = "198.51.100.7:51820".parse().unwrap();
+        let synth = r.register([7; 16], relay);
+
+        assert!(r.accept_from(&[7; 16], peer));
+        assert_eq!(r.synth_for_real(&peer), Some(synth));
+        assert_eq!(r.egress(synth), Some(Egress::Relay { relay, token: [7; 16] }));
+
+        // A route that has already gone away takes no registration with it.
+        r.unregister(&[7; 16]);
+        assert!(!r.accept_from(&[7; 16], peer));
+        assert_eq!(r.synth_for_real(&peer), None);
+    }
+
+    /// The punch is one-sided far more often than not: the peer's pings reach
+    /// us, ours die in their NAT. They validate that path and flip their
+    /// egress to direct while we are still bridged, so every packet they send
+    /// arrives raw from an address quinn was never told about — mid-handshake,
+    /// where a client may not migrate, it simply drops them and the dial times
+    /// out on a bridge that looked fine. Accepting the source we heard them
+    /// from is what keeps that connection alive.
+    #[tokio::test]
+    async fn quic_completes_when_only_the_acceptor_upgrades() {
+        let _ = common::quic::config::setup_crypto_provider();
+
+        let (relay_addr, relay_task) = stub_relay().await;
+        let (ep_a, pokes_a, turn_a) = peer_endpoint();
+        let (ep_b, pokes_b, turn_b) = peer_endpoint();
+        let a_real = ep_a.local_addr().unwrap();
+        let b_real = ep_b.local_addr().unwrap();
+
+        let token = [44u8; 16];
+        let synth_a = turn_a.lock().register(token, relay_addr);
+        let _synth_b = turn_b.lock().register(token, relay_addr);
+        let alloc = RelayMsg::TurnAlloc { token }.encode();
+        pokes_a.send(relay_addr, &alloc).await.unwrap();
+        pokes_b.send(relay_addr, &alloc).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The acceptor's punch validated a path first, so it is already
+        // egressing direct when the dial starts. The dialer never validates
+        // one and stays on the relay — it only knows the address it heard the
+        // peer's pings from.
+        assert!(turn_b.lock().set_direct(&token, a_real));
+        assert!(turn_a.lock().accept_from(&token, b_real));
+
+        let accept = tokio::spawn(async move {
+            let inc = ep_b.accept().await.expect("inbound connection");
+            inc.accept().unwrap().await.expect("accept-side handshake")
+        });
+        let run = tokio::time::timeout(Duration::from_secs(15), async move {
+            let conn_a = ep_a.connect(synth_a, "peer").unwrap().await.expect("dial handshake");
+            let conn_b = accept.await.unwrap();
+            roundtrip(&conn_a, &conn_b, b"one-sided").await;
+            assert_eq!(conn_a.remote_address(), synth_a);
+        })
+        .await;
+
+        relay_task.abort();
+        run.expect("a one-sided upgrade stranded the connection");
     }
 }

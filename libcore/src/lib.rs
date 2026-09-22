@@ -6,6 +6,7 @@ use quinn::Endpoint;
 use tokio::runtime::Runtime;
 
 pub mod api;
+pub mod call;
 pub mod data;
 pub mod db;
 pub mod delivery;

@@ -37,15 +37,16 @@ pub(super) const MAX_CANDIDATES: usize = 16;
 
 /// Whether a peer-supplied candidate is an address we are willing to send to.
 /// Reserved, local and non-unicast space is never a peer's reachable address,
-/// only a way to aim our pokes at something that isn't the peer.
+/// only a way to aim our pokes at something that isn't the peer. Private
+/// IPv4 stays: two phones on one wifi reach each other through it, and a
+/// sealed poke at a LAN address the peer named is harmless to anyone else.
 pub(super) fn is_punchable(addr: &SocketAddr) -> bool {
     if addr.port() < 1024 {
         return false;
     }
-    match addr.ip() {
+    match addr.ip().to_canonical() {
         IpAddr::V4(v4) => {
             !v4.is_loopback()
-                && !v4.is_private()
                 && !v4.is_link_local()
                 && !v4.is_multicast()
                 && !v4.is_broadcast()
@@ -76,12 +77,16 @@ struct PunchState {
     sent: HashMap<[u8; 8], SocketAddr>,
     /// First address to answer a Pong. Once set we stop pinging back.
     validated: Option<SocketAddr>,
+    /// Sources we have taken an authenticated Ping from since the last
+    /// drain. The peer can reach us from each, so each is an address they
+    /// may flip their own egress to even if we never validate one.
+    heard: Vec<SocketAddr>,
 }
 
 impl PunchState {
     fn new(key: DiscoKey, mut candidates: Vec<SocketAddr>) -> Self {
         candidates.truncate(MAX_CANDIDATES);
-        Self { key, candidates, sent: HashMap::new(), validated: None }
+        Self { key, candidates, sent: HashMap::new(), validated: None, heard: Vec::new() }
     }
 
     /// Ping every candidate — one round, opens/refreshes our NAT toward
@@ -94,6 +99,10 @@ impl PunchState {
     fn on_poke(&mut self, src: SocketAddr, bytes: &[u8]) -> Vec<Poke> {
         match self.key.open(bytes) {
             Some(DiscoMsg::Ping { tx }) => {
+                // Sealed with the session's disco key, which only rode the
+                // peer's offer — hearing this is proof the peer reaches us
+                // from `src`, whatever our own pings toward them do.
+                self.heard.push(src);
                 let mut out = vec![(src, self.key.seal(&DiscoMsg::Pong { tx, seen: src }))];
                 let learned = !self.candidates.contains(&src)
                     && self.candidates.len() < MAX_CANDIDATES;
@@ -139,12 +148,18 @@ impl PunchState {
 /// open, and the caller (dialer) connects to it while QUIC's own packets
 /// keep the hole alive. The accepting side runs this too, purely to open
 /// its own NAT, and accepts the incoming connection regardless.
+///
+/// `heard` is called with every source an authenticated Ping arrives from,
+/// validated or not: the peer reaches us from there, so a bridged session
+/// must accept their datagrams at that address even when our own punch
+/// never validates one (see `TurnRoutes::accept_from`).
 pub async fn punch(
     pokes: &PokeSender,
     inbox: &mut UnboundedReceiver<Poke>,
     key: DiscoKey,
     candidates: Vec<SocketAddr>,
     timeout: Duration,
+    mut heard: impl FnMut(SocketAddr),
 ) -> Option<SocketAddr> {
     let mut state = PunchState::new(key, candidates);
     let mut ticker = interval(PING_INTERVAL);
@@ -160,6 +175,9 @@ pub async fn punch(
             },
             _ = &mut deadline => return state.validated,
         };
+        for src in state.heard.drain(..) {
+            heard(src);
+        }
         for (addr, bytes) in out {
             let _ = pokes.send(addr, &bytes).await;
         }
@@ -238,9 +256,6 @@ mod tests {
     fn is_punchable_rejects_local_and_non_unicast() {
         for bad in [
             "127.0.0.1:5000",
-            "192.168.1.5:5000",
-            "10.0.0.1:5000",
-            "172.16.0.1:5000",
             "169.254.1.1:5000",
             "224.0.0.1:5000",
             "255.255.255.255:5000",
@@ -250,10 +265,19 @@ mod tests {
             "[fe80::1]:5000",
             "[fc00::1]:5000",
             "[ff02::1]:5000",
+            // the same loopback, arriving v4-mapped off a dual-stack socket
+            "[::ffff:127.0.0.1]:5000",
         ] {
             assert!(!is_punchable(&bad.parse().unwrap()), "{bad} must be rejected");
         }
-        for good in ["9.9.9.9:5000", "[2409:4117::1]:5000"] {
+        for good in [
+            "9.9.9.9:5000",
+            "[2409:4117::1]:5000",
+            // LAN peers: what the gatherer publishes for a shared wifi
+            "192.168.1.5:5000",
+            "10.0.0.1:5000",
+            "172.16.0.1:5000",
+        ] {
             assert!(is_punchable(&good.parse().unwrap()), "{good} must be allowed");
         }
     }

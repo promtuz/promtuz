@@ -63,6 +63,14 @@ pub enum ServerHandshakeResultP {
         /// signed for this home, which is fine because a DHT-disabled
         /// relay replies `DhtUnavailable` to those RPCs anyway.
         relay_node_id: Option<Bytes<32>>,
+        /// Whether this relay answers STUN echoes and bridges TURN datagrams
+        /// on its QUIC port. A client only aims a bridge at a relay that
+        /// said yes here; dialing one that did not is a silent black hole.
+        assist:        bool,
+        /// UDP port of this relay's TURN server for calls, on the host the
+        /// client dialed, or `None` when it runs none. Credentials come from
+        /// [`CRelayPacket::TurnCredentials`].
+        turn_port:     Option<u16>,
     },
     Reject {
         reason: String,
@@ -146,10 +154,45 @@ pub struct DispatchP {
     /// Clients send zero; the authenticated ingress relay overwrites it after
     /// verifying `sig`. It deliberately stays outside the sender signature.
     pub accepted_at_ms: u64,
-    /// Plaintext push hint the relay reads (outside `sig`): true only for new
-    /// content (text/reply/welcome) that should push-wake an offline peer.
-    /// Receipts/edits/deletes/reactions/pair-acks set false — queued, never woken.
-    pub wake: bool,
+    /// Plaintext push hint the relay reads (outside `sig`): whether, and how
+    /// urgently, to push-wake an offline peer for this.
+    pub wake: Wake,
+    /// Plaintext queue hint the relay reads (outside `sig`): how long past
+    /// `accepted_at_ms` this dispatch is still worth delivering, in
+    /// milliseconds. Zero means the relay's default retention. A P2P offer
+    /// names addresses and secrets that are dead within a minute, so it sets
+    /// a short life and a drain skips and drops it once that has passed.
+    pub ttl_ms: u64,
+}
+
+/// How a dispatch may wake an offline recipient. The ordinals are the wire:
+/// `No` and `Message` encode as the `false` and `true` the flag used to be.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// Queued silently: receipts, edits, reactions, pair acks.
+    No,
+    /// New content the recipient should see soon.
+    Message,
+    /// A ringing call: the highest push priority a platform offers, and
+    /// worthless once the offer's life is over.
+    Call,
+}
+
+impl Wake {
+    pub fn wakes(self) -> bool {
+        self != Wake::No
+    }
+}
+
+/// Short-lived credentials for the relay's own TURN server, minted for the
+/// authenticated client that asked. The server is on the host the client
+/// dialed, at the port the handshake named.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct TurnCredentialsP {
+    pub username:      String,
+    pub password:      String,
+    /// The relay's clock; allocations refuse the credentials past it.
+    pub expires_at_ms: u64,
 }
 
 /// Relay → Client (relay-verified delivery)
@@ -164,6 +207,16 @@ pub struct DeliverP {
     /// Origin relay acceptance time, copied unchanged through queues and DHT
     /// forwarding. Recipients use it rather than local receive time.
     pub accepted_at_ms: u64,
+    /// Copied from [`DispatchP::ttl_ms`]; zero means default retention.
+    pub ttl_ms:         u64,
+}
+
+impl DeliverP {
+    /// Past its sender-declared life at `now_ms`. Zero never expires here;
+    /// the store's retention sweep still bounds it.
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
+    }
 }
 
 /// Activity bits for [`ActivityP::activity`]. OR them for "several at once".
@@ -487,6 +540,11 @@ pub enum CRelayPacket {
         timestamp: u64,
         sig:       Bytes<64>,
     },
+
+    /// Ask for TURN credentials on this relay's call server, minted for the
+    /// connection-authenticated IPK. Reply: [`SRelayPacket::TurnCredentials`].
+    /// Appended last (postcard).
+    TurnCredentials,
 }
 
 /// Server Relay Packet
@@ -591,6 +649,10 @@ pub enum SRelayPacket {
     /// deltas as contacts connect/disconnect. Appended last for postcard
     /// wire-compat (see [`CRelayPacket::SubscribePresence`]).
     Presence(Vec<PresenceP>),
+
+    /// Reply to [`CRelayPacket::TurnCredentials`]: `None` when this relay
+    /// runs no TURN server. Appended last (postcard).
+    TurnCredentials(Option<TurnCredentialsP>),
 }
 
 #[cfg(feature = "client")]
@@ -629,6 +691,55 @@ mod tests {
         let a = activity_sig_message(&to, &from, &dm, 1, 1_700_000_000_000);
         let b = activity_sig_message(&to, &from, &group, 1, 1_700_000_000_000);
         assert_ne!(a, b, "moving a signal between chats must invalidate its signature");
+    }
+
+    /// A sender-declared life counts from relay acceptance; zero is the
+    /// relay's own retention and never expires here.
+    /// The class replaced a bool in place: relays and clients that only ever
+    /// wrote `false`/`true` produce `No`/`Message` byte for byte.
+    #[test]
+    fn wake_class_encodes_like_the_flag_it_replaced() {
+        use super::Wake;
+        assert_eq!(Wake::No.ser().unwrap(), false.ser().unwrap());
+        assert_eq!(Wake::Message.ser().unwrap(), true.ser().unwrap());
+        assert_eq!(Wake::deser(&Wake::Call.ser().unwrap()).unwrap(), Wake::Call);
+        assert!(!Wake::No.wakes());
+        assert!(Wake::Call.wakes());
+    }
+
+    #[test]
+    fn turn_credentials_round_trip() {
+        use super::CRelayPacket;
+        use super::SRelayPacket;
+        use super::TurnCredentialsP;
+        let req = CRelayPacket::TurnCredentials;
+        assert_eq!(CRelayPacket::deser(&req.ser().unwrap()).unwrap(), req);
+        let resp = SRelayPacket::TurnCredentials(Some(TurnCredentialsP {
+            username:      "1700000000:abcd".into(),
+            password:      "c2VjcmV0".into(),
+            expires_at_ms: 1_700_000_000_000,
+        }));
+        assert_eq!(SRelayPacket::deser(&resp.ser().unwrap()).unwrap(), resp);
+        let none = SRelayPacket::TurnCredentials(None);
+        assert_eq!(SRelayPacket::deser(&none.ser().unwrap()).unwrap(), none);
+    }
+
+    #[test]
+    fn delivery_expires_by_its_own_life_only() {
+        use super::DeliverP;
+        let mut d = DeliverP {
+            id:             [1u8; 16].into(),
+            from:           [2u8; 32].into(),
+            payload:        vec![3u8].into(),
+            sig:            [4u8; 64].into(),
+            accepted_at_ms: 1_000,
+            ttl_ms:         30_000,
+        };
+        assert!(!d.is_expired(31_000), "still within its life");
+        assert!(d.is_expired(31_001), "one ms past it");
+        assert!(!d.is_expired(0), "a clock behind acceptance is not expiry");
+        d.ttl_ms = 0;
+        assert!(!d.is_expired(u64::MAX), "default retention never expires here");
     }
 
     #[test]

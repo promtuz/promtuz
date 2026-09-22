@@ -165,6 +165,7 @@ fun AttachmentBlock(
         else formatBytes(att.size)
         3 -> "Tap to retry"
         4 -> if (peerName.isNotBlank()) "Waiting for $peerName…" else "Waiting…"
+        5 -> "Connecting…"
         else -> formatBytes(att.size)
     }
     Column {
@@ -315,12 +316,12 @@ private fun TransferAffordance(
         return
     }
     when (att.transferState) {
-        // Downloading — tapping the ring re-drives download(): the in-flight
-        // guard no-ops a genuinely-live pull, so a tap only force-resumes a
-        // stalled one (e.g. one auto-resume hasn't picked up yet).
-        1 -> {
+        // Connecting or downloading — tapping the ring re-drives download():
+        // the in-flight guard no-ops a genuinely-live pull, so a tap only
+        // force-resumes a stalled one (e.g. one auto-resume hasn't picked up yet).
+        1, 5 -> {
             val ring = Modifier.size(26.dp).clickable { onDownload?.invoke(att.fileIdHex) }
-            if (att.transferTotal > 0)
+            if (att.transferState == 1 && att.transferTotal > 0)
                 CircularProgressIndicator(
                     progress = { att.transferHave.toFloat() / att.transferTotal },
                     modifier = ring,

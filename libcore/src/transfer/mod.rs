@@ -192,6 +192,9 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
         store::forget_file(&file_id);
         anyhow::bail!("no media row for that file_id");
     };
+    // The card shows "Connecting" from the tap, not from the first chunk: a
+    // connect takes seconds and a tap that changes nothing reads as broken.
+    set_state(&file_id, peer, store::CONNECTING);
     let link = match crate::p2p::link(peer).await {
         Ok(l) => l,
         Err(e) => {
@@ -242,6 +245,12 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
 /// so `get_media` surfaces the held state to the UI. Mirrors [`pull`]'s upsert
 /// but with no manifest yet — the real bytes arrive once the sender comes back.
 fn hold(file_id: &[u8; 32], peer: [u8; 32]) {
+    set_state(file_id, peer, store::HELD);
+}
+
+/// Upsert the partial's state, keeping whatever progress it has. A row that
+/// does not exist yet is created empty, as the tap's first trace.
+fn set_state(file_id: &[u8; 32], peer: [u8; 32], state: u8) {
     let mut p = store::partial_get(file_id).unwrap_or(store::Partial {
         file_id: *file_id,
         source_ipk: peer,
@@ -249,14 +258,33 @@ fn hold(file_id: &[u8; 32], peer: [u8; 32]) {
         chunk_size: 0,
         manifest: None,
         have: 0,
-        state: store::HELD,
+        state,
         path: store::partial_path(file_id),
         updated_at: 0,
     });
-    p.state = store::HELD;
+    p.state = state;
     p.source_ipk = peer;
     p.updated_at = crate::utils::systime().as_secs();
     let _ = store::partial_put(&p);
+}
+
+/// Re-drive every incomplete pull from `peer`: they just became reachable,
+/// whether the relay said so or a link to them formed. Held pulls otherwise
+/// waited for our own next reconnect, which on a phone that stays online is
+/// never.
+pub fn resume_for_peer(peer: [u8; 32]) {
+    for file_id in store::incomplete_file_ids_for(&peer) {
+        crate::RUNTIME.spawn(async move {
+            if let Err(e) = download(file_id).await {
+                log::warn!("transfer: resume {} failed: {e}", hex::encode(&file_id[..4]));
+            }
+        });
+    }
+}
+
+/// A direct link to `peer` just opened, in either direction.
+pub fn on_link_ready(peer: [u8; 32]) {
+    resume_for_peer(peer);
 }
 
 /// Flip an existing partial to FAILED, preserving `have` so a later re-tap
@@ -273,8 +301,9 @@ fn fail(file_id: &[u8; 32]) {
 }
 
 /// Handle an inbound reverse-wake: a contact wants a file we offered but
-/// couldn't reach us for. The platform push already revived the app; make sure
-/// our P2P listener is live so their retry-dial can land (they drive the connect).
+/// couldn't reach us for. The platform push already revived the app. They
+/// gave up dialing when they sent this, so the link is ours to open: once it
+/// forms, their side pulls whatever it was holding for us.
 pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
     log::info!(
         "transfer: FileWant from {} for {}",
@@ -282,8 +311,8 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
         hex::encode(&file_id[..4]),
     );
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::p2p::ensure_endpoint() {
-            log::warn!("transfer: P2P endpoint bring-up failed: {e}");
+        if let Err(e) = crate::p2p::link(peer).await {
+            log::debug!("transfer: dial back to {} failed: {e}", hex::encode(&peer[..4]));
         }
     });
 }

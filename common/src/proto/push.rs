@@ -9,6 +9,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::proto::client_rel::Wake;
 use crate::proto::pack::bounded_vec;
 use crate::types::bytes::Bytes;
 
@@ -94,6 +95,9 @@ pub struct WakeRequest {
     /// message content is fetched from the relay.
     #[serde(deserialize_with = "bounded_vec::<_, _, MAX_WAKE_PAYLOAD_BYTES>")]
     pub payload:   Vec<u8>,
+    /// What is waiting: a call rides the platform's highest priority with a
+    /// short life, a message the ordinary one. Never [`Wake::No`].
+    pub class:     Wake,
 }
 
 /// One-RPC-per-bi-stream request the gateway unpacks (mirrors the resolver's
@@ -190,6 +194,7 @@ mod tests {
         let wake = WakeRequest {
             pseudonym: Bytes([1u8; 32]),
             payload:   vec![0u8; MAX_WAKE_PAYLOAD_BYTES + 1],
+            class:     Wake::Message,
         };
         let bytes = wake.ser().unwrap();
         assert!(WakeRequest::deser(&bytes).is_err());

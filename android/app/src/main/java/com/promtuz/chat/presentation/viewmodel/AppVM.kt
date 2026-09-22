@@ -286,7 +286,7 @@ class AppVM(
                 kind = c.kind.toInt(),
                 peerHex = c.peer?.toHex(),
                 memberCount = c.members.size,
-                lastPreview = last?.content,
+                lastPreview = last?.let { if (it.system.toInt() == 5) "Call" else it.content },
                 lastMessageId = last?.id,
                 lastMediaKind = last?.mediaKind?.toInt() ?: 0,
                 timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
