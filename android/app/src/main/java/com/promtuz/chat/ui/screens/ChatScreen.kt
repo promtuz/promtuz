@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -306,10 +307,11 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                             }
                         }
                     }
-                    is ChatRow.System -> SystemRow(
-                        chatRow.msg.content as MessageContent.System,
-                        Modifier.padding(top = layout.groupGap.dp),
-                    )
+                    is ChatRow.System -> when (val content = chatRow.msg.content) {
+                        is MessageContent.Call -> CallRow(content, Modifier.padding(top = layout.groupGap.dp))
+                        is MessageContent.System -> SystemRow(content, Modifier.padding(top = layout.groupGap.dp))
+                        else -> {}
+                    }
                     is ChatRow.Date -> ChatDateDivider(chatRow.date, calendar.today)
                     is ChatRow.Typing -> {
                         val gap by androidx.compose.animation.core.animateDpAsState(
@@ -426,6 +428,42 @@ private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
     )
+}
+
+/**
+ * A finished call, centred like a system line but with a phone icon and, when
+ * it connected, its length.
+ */
+@Composable
+private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier) {
+    val marker = LocalChatColors.current.marker
+    val label = when {
+        content.durationSecs != null -> {
+            val s = content.durationSecs
+            val length = if (s >= 60) "${s / 60} min ${s % 60} s" else "$s s"
+            "${if (content.outgoing) "Outgoing" else "Incoming"} call · $length"
+        }
+        content.missed -> "Missed call"
+        content.outgoing -> "No answer"
+        else -> "Call declined"
+    }
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        com.promtuz.chat.ui.components.DrawableIcon(
+            com.promtuz.chat.R.drawable.i_phone,
+            Modifier.size(13.dp).padding(end = 6.dp),
+            tint = marker.copy(alpha = 0.6f),
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = marker.copy(alpha = 0.6f),
+            textAlign = TextAlign.Center,
+        )
+    }
 }
 
 /**

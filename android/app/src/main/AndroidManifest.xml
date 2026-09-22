@@ -16,6 +16,13 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Calls: a foreground service with the microphone type, and a
+         full-screen intent so an incoming call comes up over the lock screen.
+         No Telecom (ConnectionService), on purpose — see CALLS.md. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FLASHLIGHT" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -113,6 +120,30 @@
             android:name="com.promtuz.core.AppCloseService"
             android:exported="false"
             android:stopWithTask="false" />
+
+        <!-- Call: holds the microphone, the ongoing notification and the
+             network watch for the length of a call. -->
+        <service
+            android:name="com.promtuz.core.call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- The full-screen call, shown over the lock screen. Its own task so
+             ending a call never lands back on a stale call screen. -->
+        <activity
+            android:name="com.promtuz.core.call.CallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="com.promtuz.chat.call"
+            android:theme="@style/Theme.Promtuz" />
+
+        <!-- Answer / hang-up buttons on the call notification. -->
+        <receiver
+            android:name="com.promtuz.core.call.CallActionReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

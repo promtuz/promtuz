@@ -81,6 +81,13 @@ object CoreEventBus : CoreEvents {
         _dbChanged.tryEmit(REACTIONS)
     }
 
+    override fun onCall(event: uniffi.core.CallEvent) {
+        // The call machine turns this into service, notification and screen.
+        // A call also writes a row when it ends, so nudge the message tables.
+        com.promtuz.core.call.CallController.onEvent(event)
+        if (event is uniffi.core.CallEvent.Ended) _dbChanged.tryEmit(MESSAGES)
+    }
+
     override fun onActivity(conversation: ByteArray, peer: ByteArray, activity: UShort) {
         _activity.tryEmit(ActivitySignal(conversation, peer, activity.toInt()))
     }

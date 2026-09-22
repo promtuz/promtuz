@@ -42,6 +42,16 @@ pub fn call_network_changed() {
     super::network_changed();
 }
 
+/// The name to show for a peer (a 32-byte IPK): the address-book name, else
+/// what they call themselves, else a short hex. For the call screen.
+#[uniffi::export]
+pub fn contact_name(ipk: Vec<u8>) -> String {
+    match crate::api::messaging::to_ipk32(&ipk) {
+        Ok(ipk) => crate::data::peer_name::resolve(&ipk),
+        Err(_) => String::new(),
+    }
+}
+
 /// The current call for the UI, or `None` when there is none.
 #[uniffi::export]
 pub fn call_current() -> Option<CallState> {

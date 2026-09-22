@@ -487,8 +487,46 @@ object CoreBridge {
     /** Connect (or reconnect) to a specific relay by id. */
     suspend fun connectRelay(id: String) = withContext(Dispatchers.IO) { ffiConnectRelay(id) }
 
+    // — Calls (CALLS.md). Control is synchronous and returns once queued; the
+    //   call's progress arrives on CoreEvents.onCall. Audio crosses on its own
+    //   real-time threads, so these two stay off the IO dispatcher.
+
+    /** Ring a paired contact. Returns the call id; state comes as call events. */
+    fun callStart(peer: ByteArray): ByteArray = uniffi.core.callStart(peer)
+
+    /** Pick up the ringing call. */
+    fun callAccept() = uniffi.core.callAccept()
+
+    /** Refuse the ringing call. */
+    fun callReject() = uniffi.core.callReject()
+
+    /** Hang up, cancel, or refuse — whatever the current call is doing. */
+    fun callHangup() = uniffi.core.callHangup()
+
+    /** Mute or unmute our microphone. */
+    fun callSetMuted(muted: Boolean) = uniffi.core.callSetMuted(muted)
+
+    /** The default network moved; restart ICE at once. */
+    fun callNetworkChanged() = uniffi.core.callNetworkChanged()
+
+    /** One captured 20 ms frame of 48 kHz mono PCM (1920 LE bytes). */
+    fun callPushAudio(pcm: ByteArray) = uniffi.core.callPushAudio(pcm)
+
+    /** The next [frames] of playback as LE PCM; silence outside a call. */
+    fun callPullAudio(frames: Int): ByteArray = uniffi.core.callPullAudio(frames.toUInt())
+
+    /** The current call, or null when there is none. */
+    fun callCurrent() = uniffi.core.callCurrent()
+
+    /** Display name for a peer IPK — address-book, else self-asserted, else hex. */
+    fun contactName(peer: ByteArray): String = uniffi.core.contactName(peer)
+
     /** Latest connection state, mapped to the app enum (carries @StringRes). */
     val connection: StateFlow<ConnectionState> get() = CoreEventBus.connection
+
+    /** Live call state for the UI (null when idle). */
+    val call: StateFlow<com.promtuz.core.call.CallController.Ui?>
+        get() = com.promtuz.core.call.CallController.state
 
     /** The reactive doorbell: "these tables changed, re-read." Drives [observeQuery]. */
     val dbChanged: SharedFlow<Set<String>> get() = CoreEventBus.dbChanged

@@ -48,8 +48,8 @@ fun MessageContent.acceptsStaged(kind: Int): Boolean = when (this) {
     // An album is several messages wearing one bubble; a revision targets exactly
     // one, so there's no single body for a pick to replace.
     is MessageContent.Album -> false
-    // Nobody authored a system row, so there is nothing to revise.
-    is MessageContent.System -> false
+    // Nobody authored a system or call row, so there is nothing to revise.
+    is MessageContent.System, is MessageContent.Call -> false
     // Atomic: no caption, nothing to swap in for it.
     is MessageContent.Voice, is MessageContent.Sticker -> false
 }

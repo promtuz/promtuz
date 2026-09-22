@@ -60,6 +60,18 @@ sealed interface MessageContent {
     data class Sticker(val sticker: StickerRef) : MessageContent
 
     /**
+     * A finished call, narrated where it happened like a system line but with
+     * its own icon. [outgoing] is our direction; [durationSecs] is set only
+     * when it connected, otherwise [missed] tells a missed call from a
+     * declined or unanswered one.
+     */
+    data class Call(
+        val outgoing: Boolean,
+        val durationSecs: Int?,
+        val missed: Boolean,
+    ) : MessageContent
+
+    /**
      * Inline voice note. [waveform] is the sender's loudness samples (0–255),
      * enough to draw the bubble before anything decodes; [bytes] is the encoded
      * audio, handed to the player on the first tap.

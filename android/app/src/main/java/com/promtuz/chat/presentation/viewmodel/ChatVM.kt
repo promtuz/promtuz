@@ -760,9 +760,10 @@ fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.Image -> c.caption
     is MessageContent.Attachment -> c.caption
     is MessageContent.Album -> c.caption
-    // Not editable — a system row narrates something that already happened,
-    // and a voice note or sticker carries no text at all.
-    is MessageContent.System, is MessageContent.Voice, is MessageContent.Sticker -> ""
+    // Not editable — a system or call row narrates something that already
+    // happened, and a voice note or sticker carries no text at all.
+    is MessageContent.System, is MessageContent.Call, is MessageContent.Voice,
+    is MessageContent.Sticker -> ""
 }
 
 
@@ -792,6 +793,14 @@ private fun MessageRecord.toUi(
     }
     val senderHex = senderIpk?.toHex()
     val payload = when {
+        // A call row: `content` is the outcome the engine wrote —
+        // "answered:<seconds>" for a connected call, else a word.
+        system.toInt() == 5 -> MessageContent.Call(
+            outgoing = outgoing,
+            durationSecs = content.removePrefix("answered:").toIntOrNull()
+                .takeIf { content.startsWith("answered:") },
+            missed = content == "missed",
+        )
         // A system row's `content` carries its target: a member's hex for the
         // membership events, the new name for a rename.
         system.toInt() != 0 -> MessageContent.System(

@@ -39,7 +39,8 @@ internal fun buildChatRows(
         val mergedBottom = (i == 0 && joinsTyping) ||
             (newer != null && date == dates[i - 1] && sameGroup(message, newer, mergeWindowMs))
         rows.add(
-            if (message.content is MessageContent.System) ChatRow.System(message)
+            if (message.content is MessageContent.System || message.content is MessageContent.Call)
+                ChatRow.System(message)
             else ChatRow.Msg(message, mergedTop, mergedBottom)
         )
         if (date != dates.getOrNull(i + 1)) {
@@ -54,6 +55,6 @@ internal fun buildChatRows(
 private fun sameGroup(a: UiMessage, b: UiMessage, windowMs: Long): Boolean =
     a.outgoing == b.outgoing &&
         a.senderHex == b.senderHex &&
-        a.content !is MessageContent.System &&
-        b.content !is MessageContent.System &&
+        a.content !is MessageContent.System && b.content !is MessageContent.System &&
+        a.content !is MessageContent.Call && b.content !is MessageContent.Call &&
         abs(a.timestampMs - b.timestampMs) <= windowMs

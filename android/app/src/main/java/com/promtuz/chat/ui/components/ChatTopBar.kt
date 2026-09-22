@@ -60,6 +60,7 @@ import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.utils.media.rememberAvatar
+import com.promtuz.chat.utils.extensions.fromHex
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -163,7 +164,9 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         },
         navigationIcon = navigationIcon,
         actions = {
-            if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else AppDropMenu(
+            if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else {
+            if (!isGroup) summary?.peerHex?.let { CallButton(it) }
+            AppDropMenu(
                 iconSize = 20.dp,
                 anchor = { DrawableIcon(R.drawable.i_ellipsis_vertical, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
@@ -202,6 +205,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     )
                 },
             )
+            }
         },
         // freezeOnExit: bake the blur to pixels while the nav card scales out (Haze
         // samples screen-space and shatters under an ancestor scale).
@@ -235,6 +239,35 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             onLeaveAndDelete = { confirmDelete = false; appVM.leaveAndDelete(chat, popThisChat) },
             onDismiss = { confirmDelete = false },
         )
+    }
+}
+
+/**
+ * The call button in a 1:1 chat. A call needs the microphone, so it asks for
+ * it first and starts the call only once it is granted — a call with a dead
+ * mic is worse than no call.
+ */
+@Composable
+private fun CallButton(peerHex: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val start = {
+        runCatching { com.promtuz.core.CoreBridge.callStart(peerHex.fromHex()) }
+            .onFailure { android.widget.Toast.makeText(context, "Can't start call", android.widget.Toast.LENGTH_SHORT).show() }
+        Unit
+    }
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) start() }
+    Box(
+        Modifier.size(40.dp).clip(CircleShape).clickable {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (granted) start() else permission.launch(android.Manifest.permission.RECORD_AUDIO)
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        DrawableIcon(R.drawable.i_phone, Modifier.size(20.dp), desc = "Call")
     }
 }
 

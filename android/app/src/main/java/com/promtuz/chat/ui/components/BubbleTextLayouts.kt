@@ -22,7 +22,8 @@ object BubbleTextLayouts {
             is MessageContent.Attachment -> c.caption
             is MessageContent.Album -> c.caption
             is MessageContent.System -> systemLine(c)
-            is MessageContent.Voice, is MessageContent.Sticker -> ""
+            // A call row draws its own line with an icon, never as bubble text.
+            is MessageContent.Call, is MessageContent.Voice, is MessageContent.Sticker -> ""
         }
 
     /** The narration for a membership or title change, in the past tense. */
