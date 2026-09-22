@@ -92,7 +92,7 @@ pub fn send_attachment(
     // No preview (zip/doc/audio) → None, stored as a NULL thumb so the UI's
     // "has preview?" check stays clean; the wire field flattens. Blur is light
     // next to the hash below, so it stays sync — the placeholder carries it.
-    let thumb = thumb_rgba.map(|r| crate::media::blur_thumb(&r, thumb_w, thumb_h)).transpose()?;
+    let thumb = thumb_rgba.map(|r| crate::media::attachment_thumb(&mime, &r, thumb_w, thumb_h)).transpose()?;
     // Optimistic placeholder row FIRST — the bubble shows while prepare_send
     // (a BLAKE3 pass over the whole file, seconds for a big one) runs off-thread.
     let msg = crate::messaging::build_attachment_message(to, size, &name, &mime, thumb, &caption, gid)?;

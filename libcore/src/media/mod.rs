@@ -19,10 +19,7 @@ fn encode_avif(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
 /// Encodes once at full size; on overshoot, downscales proportionally to the
 /// overshoot ratio and retries. Returns `(avif_bytes, out_w, out_h)`.
 pub fn compress_image(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    max_bytes: usize,
+    rgba: &[u8], width: u32, height: u32, max_bytes: usize,
 ) -> Result<(Vec<u8>, u32, u32)> {
     if width == 0 || height == 0 {
         bail!("zero dimension");
@@ -87,6 +84,48 @@ pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     encode_avif(blurred.as_raw(), tw, th, 50.0)
 }
 
+/// Longest side of a picture or video poster sent ahead of a P2P attachment.
+pub const POSTER_EDGE: u32 = 320;
+const MAX_POSTER_BYTES: usize = 32 * 1024;
+
+/// A sharp, small preview for an attachment that is itself a picture or a
+/// video: the bubble draws it as a tile before the bytes arrive. Documents
+/// keep [`blur_thumb`], a placeholder that gives away nothing.
+pub fn poster_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 {
+        bail!("zero dimension");
+    }
+    if rgba.len() != (width as usize * height as usize * 4) {
+        bail!("rgba len mismatch");
+    }
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+        .expect("len checked above");
+    let mut edge = POSTER_EDGE.min(width.max(height));
+    loop {
+        let scale = edge as f32 / width.max(height) as f32;
+        let (tw, th) = (
+            ((width as f32 * scale).round() as u32).max(1),
+            ((height as f32 * scale).round() as u32).max(1),
+        );
+        let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+        let out = encode_avif(small.as_raw(), tw, th, 50.0)?;
+        if out.len() <= MAX_POSTER_BYTES || edge <= 96 {
+            return Ok(out);
+        }
+        edge = (edge * 3 / 4).max(96);
+    }
+}
+
+/// The preview an attachment carries on the wire: a sharp poster for media,
+/// a blur for everything else.
+pub fn attachment_thumb(mime: &str, rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if mime.starts_with("image/") || mime.starts_with("video/") {
+        poster_thumb(rgba, width, height)
+    } else {
+        blur_thumb(rgba, width, height)
+    }
+}
+
 /// Longest side of a profile picture. Enough for a header at 3x density, and
 /// small enough that the file stays a few kilobytes: it travels inside an MLS
 /// frame to every chat we are in, and again to every member who joins one.
@@ -129,6 +168,18 @@ pub fn avatar_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn poster_is_sharp_size_and_small() {
+        let (w, h) = (1200u32, 800u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, (i % 173) as u8, (i % 97) as u8, 255])
+            .collect();
+        let out = super::poster_thumb(&rgba, w, h).unwrap();
+        assert!(out.len() <= 32 * 1024, "poster {}B", out.len());
+        let doc = super::attachment_thumb("application/pdf", &rgba, w, h).unwrap();
+        assert!(doc.len() < out.len(), "blur must stay the tiny placeholder");
+    }
+
     use super::*;
 
     fn solid_rgba(w: u32, h: u32) -> Vec<u8> {

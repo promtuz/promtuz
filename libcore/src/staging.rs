@@ -229,7 +229,7 @@ pub fn stage_attachment(
     let size = std::fs::metadata(&source_path)
         .map_err(|e| anyhow!("stat {source_path}: {e}"))?
         .len();
-    let thumb = thumb_rgba.map(|r| crate::media::blur_thumb(&r, thumb_w, thumb_h)).transpose()?;
+    let thumb = thumb_rgba.map(|r| crate::media::attachment_thumb(&mime, &r, thumb_w, thumb_h)).transpose()?;
 
     let mut s = blank(KIND_ATTACHMENT);
     s.mime = mime;
