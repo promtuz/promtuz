@@ -57,6 +57,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
+import com.promtuz.chat.ui.text.EmojiText
 
 /** What was long-pressed: the message, its row bounds in root space, its merge shape. */
 data class MenuAnchor(
@@ -365,7 +366,7 @@ private fun ReactionStrip(
                     .clickable { onReact(emoji) }
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             ) {
-                Text(emoji, fontSize = 19.sp)
+                EmojiText(emoji, fontSize = 19.sp)
             }
         }
     }

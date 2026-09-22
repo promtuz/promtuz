@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import com.promtuz.chat.ui.text.EmojiText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -466,7 +467,7 @@ private fun ReactionChip(rg: ReactionGroup, textColor: Color, accent: Color, onT
             .padding(horizontal = 7.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(rg.emoji, style = MaterialTheme.typography.labelMedium)
+        EmojiText(rg.emoji, style = MaterialTheme.typography.labelMedium)
         if (rg.count > 1) Text(
             " ${rg.count}",
             style = MaterialTheme.typography.labelSmall,
@@ -492,7 +493,7 @@ private fun BubbleText(
     val text = BubbleTextLayouts.contentOf(msg)
 
     val base = MaterialTheme.typography.bodyLarge
-    Text(
+    EmojiText(
         text,
         Modifier.fadeOnChange(text),
         style = base.copy(fontSize = base.fontSize * fontScale, color = color),
