@@ -225,6 +225,73 @@ pub enum AppPayload {
         token:         [u8; 16],
         disco_key:     [u8; 32],
     },
+    /// Call signaling. Rides the MLS channel like the P2P offer, so it is
+    /// end-to-end and authenticated for free; routed to the call engine and
+    /// never shown as a message. Appended last so postcard ordinals hold.
+    Call(CallMsg),
+}
+
+/// One step of a call. Every variant names its call, so a message that
+/// outlived the call it belongs to is dropped instead of steering the next.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CallMsg {
+    /// Ring the peer. Carries what their engine needs to start ICE and DTLS
+    /// toward us: our ICE credentials, the SHA-256 fingerprint of our DTLS
+    /// certificate, the SSRC our audio arrives on, and whether we want video.
+    /// Sent with the call wake class; dead once `expires_at_ms` passes on
+    /// the sender's clock.
+    Offer {
+        call:          [u8; 16],
+        expires_at_ms: u64,
+        video:         bool,
+        ufrag:         String,
+        pwd:           String,
+        fingerprint:   [u8; 32],
+        ssrc:          u32,
+        candidates:    Vec<CallCandidate>,
+    },
+    /// The peer's phone is ringing, so the caller can play ringback.
+    Ringing { call: [u8; 16] },
+    /// The peer picked up: their half of the ICE and DTLS parameters.
+    Answer {
+        call:        [u8; 16],
+        ufrag:       String,
+        pwd:         String,
+        fingerprint: [u8; 32],
+        ssrc:        u32,
+        candidates:  Vec<CallCandidate>,
+    },
+    /// An address found after the offer or answer went out.
+    Candidate { call: [u8; 16], candidate: CallCandidate },
+    /// Fresh ICE credentials after a network change. The peer restarts ICE
+    /// against them with the candidates that follow.
+    Restart { call: [u8; 16], ufrag: String, pwd: String, candidates: Vec<CallCandidate> },
+    /// The call is over, or never started.
+    End { call: [u8; 16], reason: CallEnd },
+}
+
+/// One ICE candidate as the peer's agent should see it. Structured rather
+/// than the SDP line so nothing parses text on the signaling path.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CallCandidate {
+    Host { addr: SocketAddr },
+    ServerReflexive { addr: SocketAddr, base: SocketAddr },
+    Relayed { addr: SocketAddr },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CallEnd {
+    /// Hung up by whoever sent it. Before the answer, this is the caller
+    /// giving up, which the callee records as a missed call.
+    Hangup,
+    /// The callee refused.
+    Declined,
+    /// The callee was already in a call. Sent without ringing.
+    Busy,
+    /// Rang out.
+    Unanswered,
+    /// The media path never came up, or dropped and did not recover.
+    Failed,
 }
 
 /// What happened to a group. The *actor* is implicit — the MLS sender of the
@@ -2056,5 +2123,21 @@ mod tests {
             token: [5u8; 16], disco_key: [6u8; 32],
         };
         assert_eq!(AppPayload::deser(&offer.ser().unwrap()).unwrap(), offer);
+        let call = AppPayload::Call(CallMsg::Offer {
+            call: [8u8; 16], expires_at_ms: 1_700_000_040_000, video: false,
+            ufrag: "abcd".into(), pwd: "0123456789abcdef0123456".into(), fingerprint: [9u8; 32],
+            ssrc: 0xdead_beef,
+            candidates: vec![
+                CallCandidate::Host { addr: "10.0.0.2:40000".parse().unwrap() },
+                CallCandidate::ServerReflexive {
+                    addr: "49.36.1.1:40001".parse().unwrap(),
+                    base: "10.0.0.2:40000".parse().unwrap(),
+                },
+                CallCandidate::Relayed { addr: "[2409:4117::1]:50000".parse().unwrap() },
+            ],
+        });
+        assert_eq!(AppPayload::deser(&call.ser().unwrap()).unwrap(), call);
+        let end = AppPayload::Call(CallMsg::End { call: [8u8; 16], reason: CallEnd::Busy });
+        assert_eq!(AppPayload::deser(&end.ser().unwrap()).unwrap(), end);
     }
 }

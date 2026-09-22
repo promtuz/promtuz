@@ -119,6 +119,9 @@ pub struct Relay {
     /// from its handshake `Accept` and kept on the row, so a P2P session can
     /// pick a relay that will actually answer, connected to it or not.
     pub assist: bool,
+    /// UDP port of this relay's call TURN server, from its handshake
+    /// `Accept`. Connection-scoped: a call asks the relay it is connected to.
+    pub turn_port: Option<u16>,
 }
 
 impl std::fmt::Debug for Relay {
@@ -383,6 +386,7 @@ impl Relay {
             pubkey:     chosen.pubkey,
             home_node_id: None,
             assist:     chosen.assist,
+            turn_port:  None,
         })
     }
 
@@ -409,6 +413,7 @@ impl Relay {
                     pubkey,
                     home_node_id: None,
                     assist:       true,
+                    turn_port:    None,
                 })
             },
         )
@@ -444,6 +449,7 @@ impl Relay {
                     pubkey,
                     home_node_id: None,
                     assist:       row.get::<_, i64>(4)? != 0,
+                    turn_port:    None,
                 })
             },
         )

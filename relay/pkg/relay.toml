@@ -47,3 +47,16 @@ enabled = true
 # attachments can only cross a direct hole punch, which most phone networks
 # refuse.
 enabled = false
+
+[turn]
+# A standard TURN server for calls on its own UDP port, advertised to every
+# client at handshake. Most phone-to-phone calls relay through one of these,
+# so a relay without it can still pass call signaling but rarely carries the
+# audio. Credentials are minted per client and expire after an hour; nothing
+# is forwarded without them.
+#
+# `public_ip` is required when enabled: a relayed address is handed to the
+# far end as public_ip:port. Open UDP 3478 and the ephemeral port range.
+enabled = false
+# port = 3478
+# public_ip = "203.0.113.9"

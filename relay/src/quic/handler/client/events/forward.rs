@@ -588,7 +588,7 @@ mod tests {
             payload:        vec![4u8].into(),
             sig:            [5u8; 64].into(),
             accepted_at_ms: 42,
-            wake:           false,
+            wake:           common::proto::client_rel::Wake::No,
             ttl_ms:         0,
         };
         let queued = store_in_rocks(&store, fwd.to, &dispatch_to_deliver(&fwd)).await.unwrap();

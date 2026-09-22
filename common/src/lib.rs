@@ -10,7 +10,10 @@
 /// 8: activity addresses the shared MLS group, not a device-local conversation.
 /// 9: dispatches carry a relay-side time to live; the handshake says whether
 ///    the relay offers hole-punch assist.
-pub static PROTOCOL_VERSION: u16 = 9;
+/// 10: the wake flag becomes a class (message or call), the handshake names
+///     the relay's TURN port, and a client can ask its relay for TURN
+///     credentials.
+pub static PROTOCOL_VERSION: u16 = 10;
 
 #[cfg(feature = "crypto")]
 pub mod crypto;

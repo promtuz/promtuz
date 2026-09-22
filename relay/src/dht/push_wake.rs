@@ -14,6 +14,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use common::debug;
 use common::node::capability::NodeCapabilities;
+use common::proto::client_rel::Wake;
 use common::proto::client_res::GatewayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::push::GatewayRequest;
@@ -52,7 +53,7 @@ impl Dht {
     /// Wake `recipient_ipk`'s device if we hold its pseudonym and know a
     /// gateway. No-op otherwise. Fire-and-forget: spawns the dial so the
     /// enqueue path never blocks on the gateway.
-    pub(crate) fn trigger_wake(&self, recipient_ipk: &[u8; 32]) {
+    pub(crate) fn trigger_wake(&self, recipient_ipk: &[u8; 32], class: Wake) {
         let who = hex::encode(&recipient_ipk[..8]);
         let Some(endpoint) = &self.endpoint else {
             debug!("wake({who}) skipped: no DHT endpoint attached");
@@ -82,7 +83,7 @@ impl Dht {
         let endpoint = endpoint.clone();
         tokio::spawn(async move {
             for gateway in &gateways {
-                match timeout(WAKE_TIMEOUT, send_wake(&endpoint, gateway, pseudonym)).await {
+                match timeout(WAKE_TIMEOUT, send_wake(&endpoint, gateway, pseudonym, class)).await {
                     Ok(Ok(())) => debug!("wake({who}): delivered to gateway {}", gateway.id),
                     Ok(Err(e)) => debug!("wake({who}): gateway {} failed: {e}", gateway.id),
                     Err(_) => debug!("wake({who}): gateway {} timed out", gateway.id),
@@ -108,7 +109,7 @@ pub(crate) async fn refresh_gateways(dht: Arc<Dht>, resolver: ResolverLinkHandle
 /// verify it carries `PUSH_GATEWAY`, and send one [`WakeRequest`]. Contentless
 /// payload — the device wakes and drains via the normal sticky-home path.
 async fn send_wake(
-    endpoint: &Endpoint, gateway: &GatewayDescriptor, pseudonym: [u8; 32],
+    endpoint: &Endpoint, gateway: &GatewayDescriptor, pseudonym: [u8; 32], class: Wake,
 ) -> Result<()> {
     // ponytail: one QUIC dial per wake. Pool/cache the gateway connection if
     // wake volume ever makes the per-message handshake hurt.
@@ -124,7 +125,11 @@ async fn send_wake(
     }
 
     let (mut send, _recv) = conn.open_bi().await?;
-    let req = GatewayRequest::Wake(WakeRequest { pseudonym: Bytes(pseudonym), payload: Vec::new() });
+    let req = GatewayRequest::Wake(WakeRequest {
+        pseudonym: Bytes(pseudonym),
+        payload: Vec::new(),
+        class,
+    });
     send.write_all(&req.pack()?).await?;
     send.finish()?;
     // finish() only marks the stream done locally; close() would drop the

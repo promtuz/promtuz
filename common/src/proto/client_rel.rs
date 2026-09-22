@@ -67,6 +67,10 @@ pub enum ServerHandshakeResultP {
         /// on its QUIC port. A client only aims a bridge at a relay that
         /// said yes here; dialing one that did not is a silent black hole.
         assist:        bool,
+        /// UDP port of this relay's TURN server for calls, on the host the
+        /// client dialed, or `None` when it runs none. Credentials come from
+        /// [`CRelayPacket::TurnCredentials`].
+        turn_port:     Option<u16>,
     },
     Reject {
         reason: String,
@@ -150,16 +154,45 @@ pub struct DispatchP {
     /// Clients send zero; the authenticated ingress relay overwrites it after
     /// verifying `sig`. It deliberately stays outside the sender signature.
     pub accepted_at_ms: u64,
-    /// Plaintext push hint the relay reads (outside `sig`): true only for new
-    /// content (text/reply/welcome) that should push-wake an offline peer.
-    /// Receipts/edits/deletes/reactions/pair-acks set false — queued, never woken.
-    pub wake: bool,
+    /// Plaintext push hint the relay reads (outside `sig`): whether, and how
+    /// urgently, to push-wake an offline peer for this.
+    pub wake: Wake,
     /// Plaintext queue hint the relay reads (outside `sig`): how long past
     /// `accepted_at_ms` this dispatch is still worth delivering, in
     /// milliseconds. Zero means the relay's default retention. A P2P offer
     /// names addresses and secrets that are dead within a minute, so it sets
     /// a short life and a drain skips and drops it once that has passed.
     pub ttl_ms: u64,
+}
+
+/// How a dispatch may wake an offline recipient. The ordinals are the wire:
+/// `No` and `Message` encode as the `false` and `true` the flag used to be.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// Queued silently: receipts, edits, reactions, pair acks.
+    No,
+    /// New content the recipient should see soon.
+    Message,
+    /// A ringing call: the highest push priority a platform offers, and
+    /// worthless once the offer's life is over.
+    Call,
+}
+
+impl Wake {
+    pub fn wakes(self) -> bool {
+        self != Wake::No
+    }
+}
+
+/// Short-lived credentials for the relay's own TURN server, minted for the
+/// authenticated client that asked. The server is on the host the client
+/// dialed, at the port the handshake named.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct TurnCredentialsP {
+    pub username:      String,
+    pub password:      String,
+    /// The relay's clock; allocations refuse the credentials past it.
+    pub expires_at_ms: u64,
 }
 
 /// Relay → Client (relay-verified delivery)
@@ -507,6 +540,11 @@ pub enum CRelayPacket {
         timestamp: u64,
         sig:       Bytes<64>,
     },
+
+    /// Ask for TURN credentials on this relay's call server, minted for the
+    /// connection-authenticated IPK. Reply: [`SRelayPacket::TurnCredentials`].
+    /// Appended last (postcard).
+    TurnCredentials,
 }
 
 /// Server Relay Packet
@@ -611,6 +649,10 @@ pub enum SRelayPacket {
     /// deltas as contacts connect/disconnect. Appended last for postcard
     /// wire-compat (see [`CRelayPacket::SubscribePresence`]).
     Presence(Vec<PresenceP>),
+
+    /// Reply to [`CRelayPacket::TurnCredentials`]: `None` when this relay
+    /// runs no TURN server. Appended last (postcard).
+    TurnCredentials(Option<TurnCredentialsP>),
 }
 
 #[cfg(feature = "client")]
@@ -653,6 +695,35 @@ mod tests {
 
     /// A sender-declared life counts from relay acceptance; zero is the
     /// relay's own retention and never expires here.
+    /// The class replaced a bool in place: relays and clients that only ever
+    /// wrote `false`/`true` produce `No`/`Message` byte for byte.
+    #[test]
+    fn wake_class_encodes_like_the_flag_it_replaced() {
+        use super::Wake;
+        assert_eq!(Wake::No.ser().unwrap(), false.ser().unwrap());
+        assert_eq!(Wake::Message.ser().unwrap(), true.ser().unwrap());
+        assert_eq!(Wake::deser(&Wake::Call.ser().unwrap()).unwrap(), Wake::Call);
+        assert!(!Wake::No.wakes());
+        assert!(Wake::Call.wakes());
+    }
+
+    #[test]
+    fn turn_credentials_round_trip() {
+        use super::CRelayPacket;
+        use super::SRelayPacket;
+        use super::TurnCredentialsP;
+        let req = CRelayPacket::TurnCredentials;
+        assert_eq!(CRelayPacket::deser(&req.ser().unwrap()).unwrap(), req);
+        let resp = SRelayPacket::TurnCredentials(Some(TurnCredentialsP {
+            username:      "1700000000:abcd".into(),
+            password:      "c2VjcmV0".into(),
+            expires_at_ms: 1_700_000_000_000,
+        }));
+        assert_eq!(SRelayPacket::deser(&resp.ser().unwrap()).unwrap(), resp);
+        let none = SRelayPacket::TurnCredentials(None);
+        assert_eq!(SRelayPacket::deser(&none.ser().unwrap()).unwrap(), none);
+    }
+
     #[test]
     fn delivery_expires_by_its_own_life_only() {
         use super::DeliverP;

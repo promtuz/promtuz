@@ -122,7 +122,7 @@ impl Handler {
                     return;
                 };
                 let token = String::from_utf8_lossy(&entry.token);
-                match fcm.send(token.as_ref(), &req.payload).await {
+                match fcm.send(token.as_ref(), &req.payload, req.class).await {
                     Ok(()) => debug!("gateway: FCM wake pushed for P={p}"),
                     Err(e) => warn!("gateway: FCM dispatch failed: {e:#}"),
                 }

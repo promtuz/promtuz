@@ -77,6 +77,11 @@ pub struct Relay {
     /// once at startup and says nothing afterwards.
     pub assist_enabled: bool,
 
+    /// The call TURN server, bound at startup and served by `main`; `None`
+    /// unless `[turn] enabled`. Its port rides the client handshake and it
+    /// mints the credentials clients ask for.
+    pub turn: Option<Arc<crate::turn::Turn>>,
+
     pub cfg: AppConfig,
 
     pub client_cfg: Arc<ClientConfig>,
@@ -255,6 +260,9 @@ impl Relay {
         };
 
         let assist_enabled = cfg.assist.enabled;
+        let turn = cfg.turn.enabled.then(|| {
+            Arc::new(graceful!(crate::turn::Turn::bind(&cfg.turn, &keys.signing), "starting TURN"))
+        });
         Self {
             key,
             keys,
@@ -265,6 +273,7 @@ impl Relay {
             endpoint,
             assist: Mutex::new(assist),
             assist_enabled,
+            turn,
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_leases,

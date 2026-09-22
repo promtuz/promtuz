@@ -229,13 +229,14 @@ impl Relay {
         };
 
         let timestamp = match result {
-            SHSRP::Accept { timestamp, relay_node_id, assist } => {
+            SHSRP::Accept { timestamp, relay_node_id, assist, turn_port } => {
                 // Stash the home's advertised DHT NodeId for the
                 // RelayDhtClient to bind in welcome fetch/ack sigs.
                 self.home_node_id = relay_node_id.map(|b| b.0);
                 // Remembered on the row too, so a later session can pick an
                 // assist-capable relay without being connected to it.
                 self.assist = assist;
+                self.turn_port = turn_port;
                 if let Err(e) = self.record_assist(assist) {
                     warn!("relay {} assist flag not recorded: {e}", node_short(&self.id));
                 }
@@ -1163,6 +1164,11 @@ async fn process_deliver(
                     // receiver's retry-dial can land (they drive the connect).
                     info!("P2P: FileWant received from {}", hex::encode(&msg.from[..4]));
                     crate::transfer::on_file_want(*msg.from, file_id);
+                },
+                Ok(AppPayload::Call(signal)) => {
+                    // Call signaling — routed to the call engine, never stored.
+                    // Only the person in the direct chat can be on the call.
+                    crate::call::on_signal(author, conv, signal);
                 },
                 Err(e) => {
                     warn!(

@@ -41,6 +41,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub assist: AssistConfig,
 
+    /// Optional TURN server for calls. Default **disabled**.
+    #[serde(default)]
+    pub turn: TurnConfig,
+
     /// Optional logging block. Absent → info. `PZ_LOG` env overrides.
     #[serde(default)]
     pub log: LogConfig,
@@ -54,6 +58,31 @@ pub struct AssistConfig {
     /// enabled relay will forward datagrams for anyone who guesses one.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// A standard TURN server for calls on its own UDP port (see [`crate::turn`]).
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TurnConfig {
+    #[serde(default)]
+    pub enabled:   bool,
+    /// UDP port to listen on. Default 3478, the TURN port.
+    #[serde(default = "default_turn_port")]
+    pub port:      u16,
+    /// The address peers reach relayed traffic at: this host's public IP.
+    /// Required when enabled, because a relay allocation is handed to the
+    /// far end as `public_ip:port` and the relay cannot see its own NAT.
+    pub public_ip: Option<std::net::IpAddr>,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        Self { enabled: false, port: default_turn_port(), public_ip: None }
+    }
+}
+
+fn default_turn_port() -> u16 {
+    3478
 }
 
 #[derive(Deserialize, Debug, Default)]

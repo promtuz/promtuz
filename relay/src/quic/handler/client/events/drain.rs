@@ -641,7 +641,7 @@ mod tests {
             payload: vec![4u8, 5, 6].into(),
             sig:     [7u8; 64].into(),
             accepted_at_ms: 1,
-            wake:    false,
+            wake:    common::proto::client_rel::Wake::No,
             ttl_ms:  0,
         };
         let deliver = dispatch_to_deliver(dispatch.clone());

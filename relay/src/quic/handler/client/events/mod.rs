@@ -118,6 +118,8 @@ pub(super) async fn handle_packet(
             misc::handle_register_push(pseudonym.0, timestamp, sig.0, ctx.clone()).await
         },
 
+        TurnCredentials => misc::handle_turn_credentials(ctx.clone(), tx).await,
+
         // Ignore Extra
         _ => Ok(()),
     }

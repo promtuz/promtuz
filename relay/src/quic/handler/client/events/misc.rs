@@ -27,6 +27,17 @@ pub(super) async fn handle_misc(
     }
 }
 
+/// Mint TURN credentials for the authenticated client, or say we run no
+/// TURN server.
+pub(super) async fn handle_turn_credentials(ctx: ClientCtxHandle, tx: &mut SendStream) -> Result<()> {
+    let creds = ctx
+        .relay
+        .turn
+        .as_ref()
+        .map(|t| t.credentials(&ctx.ipk.to_bytes(), crate::util::systime().as_millis() as u64));
+    SRelayPacket::TurnCredentials(creds).send(tx).await.map_err(|e| e.into())
+}
+
 /// Store `IPK → P` so the DHT enqueue path can wake this device. Bound to the
 /// connection-authenticated `ctx.ipk`; the client cannot register for another
 /// IPK. Not cleared on disconnect (an offline device is exactly the one to

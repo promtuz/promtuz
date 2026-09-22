@@ -21,6 +21,7 @@ mod quic;
 mod relay;
 mod storage;
 mod stunturn;
+mod turn;
 mod util;
 
 #[tokio::main]
@@ -72,6 +73,11 @@ async fn main() -> Result<()> {
     // when `[assist] enabled = true`.
     if let Some(assist) = relay.assist.lock().take() {
         tokio::spawn(stunturn::serve(assist, cancel.clone()));
+    }
+
+    // TURN for calls on its own UDP port. Present only when `[turn] enabled`.
+    if let Some(turn) = relay.turn.clone() {
+        tokio::spawn(turn.serve(cancel.clone()));
     }
 
     // Capture `client_handle` (Arc-shared, survives reconnects) before

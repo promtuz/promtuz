@@ -51,6 +51,13 @@ governor = "0.10.4"
 # Post-handshake TLS pubkey extraction in `dht::handler`. Same parser
 # libcore uses for peer certs.
 x509-parser = "0.18.1"
+# The call TURN server (`turn.rs`). `webrtc-util` only names the `Net` its
+# relay-address generator takes; `ring` signs the time-limited credentials
+# and is already in the tree under `turn`.
+turn = "0.17"
+webrtc-util = "0.17"
+ring = "0.17"
+base64.workspace = true
 
 # ---------------------------------------------------------------------------
 # Debian packaging (`cargo deb`) → `pzrelay_<version>_<arch>.deb`.
