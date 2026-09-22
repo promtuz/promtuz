@@ -491,8 +491,14 @@ object CoreBridge {
     //   call's progress arrives on CoreEvents.onCall. Audio crosses on its own
     //   real-time threads, so these two stay off the IO dispatcher.
 
-    /** Ring a paired contact. Returns the call id; state comes as call events. */
-    fun callStart(peer: ByteArray): ByteArray = uniffi.core.callStart(peer)
+    /** Ring a paired contact, as video when [video]. Returns the call id. */
+    fun callStart(peer: ByteArray, video: Boolean = false): ByteArray = uniffi.core.callStart(peer, video)
+
+    /** Turn our camera on or off in a video call. */
+    fun callSetCamera(on: Boolean) = uniffi.core.callSetCamera(on)
+
+    /** One encoded H.264 access unit (Annex-B) from the video encoder. */
+    fun callPushVideo(frame: ByteArray, keyframe: Boolean) = uniffi.core.callPushVideo(frame, keyframe)
 
     /** Pick up the ringing call. */
     fun callAccept() = uniffi.core.callAccept()

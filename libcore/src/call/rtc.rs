@@ -46,11 +46,17 @@ use super::audio::AudioPath;
 use super::audio::FRAME_SAMPLES;
 use super::audio::SAMPLE_RATE;
 
-/// The one audio stream's media id, fixed so both ends agree without SDP.
-const MID: &str = "0";
+/// Fixed media ids, so both ends agree without SDP.
+const AUDIO_MID: &str = "0";
+const VIDEO_MID: &str = "1";
 /// str0m's own STUN retransmit gives up a dead pair after a few seconds; a
 /// fresh session per network change covers the rest.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(4);
+/// Video bitrate bounds. The cap is Telegram's; the floor keeps a call alive
+/// on a bad link by shedding quality rather than freezing.
+const VIDEO_START_BITRATE: u32 = 600_000;
+const VIDEO_MAX_BITRATE: u32 = 1_000_000;
+const VIDEO_MIN_BITRATE: u32 = 120_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -83,17 +89,24 @@ pub struct Params {
     pub pwd:         String,
     pub fingerprint: [u8; 32],
     pub ssrc:        u32,
+    /// Zero unless this is a video call.
+    pub video_ssrc:  u32,
 }
 
 pub enum Cmd {
     /// One encoded Opus frame from capture, to send.
     Audio(Vec<u8>),
-    /// The peer's session parameters (offer, answer, or restart).
+    /// One encoded H.264 access unit from capture, Annex-B. str0m reads the
+    /// NAL types itself, so the sender need not flag a keyframe.
+    Video(Vec<u8>),
+    /// The peer's session parameters (offer, answer, or restart). `video_ssrc`
+    /// is zero for an audio call.
     Remote {
         ufrag:       String,
         pwd:         String,
         fingerprint: [u8; 32],
         ssrc:        u32,
+        video_ssrc:  u32,
         candidates:  Vec<CallCandidate>,
     },
     /// One of the peer's trickled candidates.
@@ -110,17 +123,25 @@ pub enum Event {
     Local { params: Params, candidates: Vec<CallCandidate> },
     Connected,
     Disconnected,
+    /// An encoded H.264 access unit from the peer, Annex-B, and whether it is
+    /// a keyframe.
+    Video { frame: Vec<u8>, keyframe: bool },
+    /// Our encoder should emit a keyframe (the peer sent a PLI/FIR).
+    KeyframeNeeded,
+    /// The bandwidth estimate moved; kbps our video encoder should target.
+    Bitrate(u32),
     Failed(String),
 }
 
-/// Start a session and return the command channel into it.
+/// Start a session and return the command channel into it. `video` declares a
+/// video media section as well as audio; an audio call never carries video.
 pub fn spawn(
-    role: Role, cert: DtlsCert, relay: Option<Relay>, audio: Arc<AudioPath>,
+    role: Role, cert: DtlsCert, relay: Option<Relay>, video: bool, audio: Arc<AudioPath>,
     events: mpsc::UnboundedSender<Event>,
 ) -> mpsc::UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = run(role, cert, relay, audio, events.clone(), cmd_rx).await {
+        if let Err(e) = run(role, cert, relay, video, audio, events.clone(), cmd_rx).await {
             let _ = events.send(Event::Failed(format!("{e:#}")));
         }
     });
@@ -143,33 +164,50 @@ struct Relayed {
 }
 
 async fn run(
-    role: Role, cert: DtlsCert, relay: Option<Relay>, audio: Arc<AudioPath>,
+    role: Role, cert: DtlsCert, relay: Option<Relay>, video: bool, audio: Arc<AudioPath>,
     events: mpsc::UnboundedSender<Event>, mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
 ) -> Result<()> {
-    let mut rtc = RtcConfig::new()
+    let mut config = RtcConfig::new()
         .set_dtls_cert(cert.clone())
         // We run our own jitter buffer, so str0m releases audio immediately.
-        .set_reordering_size_audio(0)
-        .build(std::time::Instant::now());
+        .set_reordering_size_audio(0);
+    if video {
+        // Google's transport-wide congestion control drives the encoder's
+        // target bitrate; start it at a conservative estimate.
+        config = config.enable_bwe(Some((VIDEO_START_BITRATE as u64).into()));
+    }
+    let mut rtc = config.build(std::time::Instant::now());
     rtc.direct_api().set_ice_controlling(role.controlling());
+    if video {
+        rtc.bwe().set_desired_bitrate((VIDEO_MAX_BITRATE as u64).into());
+    }
 
-    let mid = Mid::from(MID);
+    let mid = Mid::from(AUDIO_MID);
     let our_ssrc = rtc.direct_api().new_ssrc();
     rtc.direct_api().declare_media(mid, MediaKind::Audio);
     rtc.direct_api().declare_stream_tx(our_ssrc, None, mid, None);
 
-    let opus_pt = rtc
-        .codec_config()
-        .params()
-        .iter()
-        .find(|p| p.spec().codec == Codec::Opus)
-        .map(|p| p.pt())
-        .context("no Opus payload type")?;
+    let vmid = Mid::from(VIDEO_MID);
+    let our_video_ssrc = video.then(|| {
+        let ssrc = rtc.direct_api().new_ssrc();
+        rtc.direct_api().declare_media(vmid, MediaKind::Video);
+        rtc.direct_api().declare_stream_tx(ssrc, None, vmid, None);
+        ssrc
+    });
+
+    let opus_pt = codec_pt(&rtc, Codec::Opus).context("no Opus payload type")?;
+    let h264_pt = if video { codec_pt(&rtc, Codec::H264) } else { None };
 
     let creds = rtc.direct_api().local_ice_credentials();
     let mut fingerprint = [0u8; 32];
     fingerprint.copy_from_slice(&rtc.direct_api().local_dtls_fingerprint().bytes);
-    let params = Params { ufrag: creds.ufrag, pwd: creds.pass, fingerprint, ssrc: *our_ssrc };
+    let params = Params {
+        ufrag: creds.ufrag,
+        pwd: creds.pass,
+        fingerprint,
+        ssrc: *our_ssrc,
+        video_ssrc: our_video_ssrc.map(|s| *s).unwrap_or(0),
+    };
 
     let (transport, candidates) = gather(&relay, &mut rtc).await?;
     events
@@ -183,14 +221,22 @@ async fn run(
         audio,
         events,
         mid,
+        vmid,
         opus_pt,
+        h264_pt,
         role,
         dtls_started: false,
         remote_ssrc: None,
+        remote_video_ssrc: None,
         rtp_samples: 0,
+        video_start: None,
         connected: false,
     };
     session.event_loop(&mut cmd_rx).await
+}
+
+fn codec_pt(rtc: &Rtc, codec: Codec) -> Option<str0m::media::Pt> {
+    rtc.codec_config().params().iter().find(|p| p.spec().codec == codec).map(|p| p.pt())
 }
 
 /// Bind the direct socket, allocate the TURN relay, probe the reflexive
@@ -298,19 +344,25 @@ async fn allocate(relay: &Relay) -> Result<Relayed> {
 }
 
 struct Session {
-    rtc:          Rtc,
-    transport:    Transport,
-    relay:        Option<Relay>,
-    audio:        Arc<AudioPath>,
-    events:       mpsc::UnboundedSender<Event>,
-    mid:          Mid,
-    opus_pt:      str0m::media::Pt,
-    role:         Role,
-    dtls_started: bool,
-    remote_ssrc:  Option<Ssrc>,
+    rtc:               Rtc,
+    transport:         Transport,
+    relay:             Option<Relay>,
+    audio:             Arc<AudioPath>,
+    events:            mpsc::UnboundedSender<Event>,
+    mid:               Mid,
+    vmid:              Mid,
+    opus_pt:           str0m::media::Pt,
+    /// `None` for an audio call.
+    h264_pt:           Option<str0m::media::Pt>,
+    role:              Role,
+    dtls_started:      bool,
+    remote_ssrc:       Option<Ssrc>,
+    remote_video_ssrc: Option<Ssrc>,
     /// RTP timestamp of the next captured frame, in 48 kHz samples.
-    rtp_samples:  u64,
-    connected:    bool,
+    rtp_samples:       u64,
+    /// When the first video frame was written, for the 90 kHz RTP clock.
+    video_start:       Option<Instant>,
+    connected:         bool,
 }
 
 impl Session {
@@ -410,9 +462,32 @@ impl Session {
                 }
             },
             RtcEvent::MediaData(data) => {
-                if let Some(seq) = extended_seq(&data) {
+                if data.mid == self.mid {
+                    let seq = *(*data.seq_range.end());
                     self.audio.jitter.lock().push(seq, data.data.to_vec());
+                } else if data.mid == self.vmid {
+                    // Encoded H.264, Annex-B, straight to the platform decoder.
+                    let keyframe = is_h264_keyframe(&data.data);
+                    let _ = self.events.send(Event::Video { frame: data.data.to_vec(), keyframe });
                 }
+            },
+            RtcEvent::KeyframeRequest(req) if req.mid == self.vmid => {
+                // The peer wants a fresh IDR from our encoder.
+                let _ = self.events.send(Event::KeyframeNeeded);
+            },
+            RtcEvent::EgressBitrateEstimate(kind) => {
+                // BweKind is non-exhaustive; ignore a future variant we can't read.
+                let (str0m::bwe::BweKind::Twcc(bitrate) | str0m::bwe::BweKind::Remb(_, bitrate)) =
+                    kind
+                else {
+                    return true;
+                };
+                let kbps = bitrate
+                    .as_u64()
+                    .clamp(VIDEO_MIN_BITRATE as u64, VIDEO_MAX_BITRATE as u64) as u32
+                    / 1000;
+                self.rtc.bwe().set_desired_bitrate((VIDEO_MAX_BITRATE as u64).into());
+                let _ = self.events.send(Event::Bitrate(kbps));
             },
             _ => {},
         }
@@ -429,8 +504,20 @@ impl Session {
                     let _ = writer.write(self.opus_pt, Instant::now(), time, packet);
                 }
             },
-            Cmd::Remote { ufrag, pwd, fingerprint, ssrc, candidates } => {
-                self.set_remote(ufrag, pwd, fingerprint, ssrc);
+            Cmd::Video(frame) => {
+                let Some(pt) = self.h264_pt else { return Ok(()) };
+                let now = Instant::now();
+                // 90 kHz RTP clock from the first frame; str0m packetizes the
+                // Annex-B access unit into RTP.
+                let start = *self.video_start.get_or_insert(now);
+                let ticks = (now.duration_since(start).as_millis() as u64) * 90;
+                let time = MediaTime::new(ticks, str0m::media::Frequency::NINETY_KHZ);
+                if let Some(writer) = self.rtc.writer(self.vmid) {
+                    let _ = writer.write(pt, now, time, frame);
+                }
+            },
+            Cmd::Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates } => {
+                self.set_remote(ufrag, pwd, fingerprint, ssrc, video_ssrc);
                 for c in candidates {
                     self.add_remote(c);
                 }
@@ -456,6 +543,7 @@ impl Session {
                         // only credentials and candidates.
                         fingerprint: [0u8; 32],
                         ssrc: 0,
+                        video_ssrc: 0,
                     },
                     candidates,
                 });
@@ -465,7 +553,9 @@ impl Session {
         Ok(())
     }
 
-    fn set_remote(&mut self, ufrag: String, pwd: String, fingerprint: [u8; 32], ssrc: u32) {
+    fn set_remote(
+        &mut self, ufrag: String, pwd: String, fingerprint: [u8; 32], ssrc: u32, video_ssrc: u32,
+    ) {
         let mut api = self.rtc.direct_api();
         api.set_remote_ice_credentials(str0m::IceCreds { ufrag, pass: pwd });
         if !self.dtls_started {
@@ -476,10 +566,28 @@ impl Session {
             let ssrc = Ssrc::from(ssrc);
             api.expect_stream_rx(ssrc, None, self.mid, None);
             self.remote_ssrc = Some(ssrc);
+            if self.h264_pt.is_some() && video_ssrc != 0 {
+                let vssrc = Ssrc::from(video_ssrc);
+                api.expect_stream_rx(vssrc, None, self.vmid, None);
+                self.remote_video_ssrc = Some(vssrc);
+            }
             if let Err(e) = api.start_dtls(self.role.dtls_active()) {
                 warn!("CALL: DTLS start failed: {e}");
             }
             self.dtls_started = true;
+            // Ask the peer for an IDR so our decoder has something to start on
+            // rather than waiting out its own retransmit timers.
+            self.request_peer_keyframe();
+        }
+    }
+
+    /// Ask the peer's encoder for a keyframe, if we are receiving video.
+    fn request_peer_keyframe(&mut self) {
+        if self.remote_video_ssrc.is_none() {
+            return;
+        }
+        if let Some(mut writer) = self.rtc.writer(self.vmid) {
+            let _ = writer.request_keyframe(None, str0m::media::KeyframeRequestKind::Pli);
         }
     }
 
@@ -497,13 +605,62 @@ impl Session {
     }
 }
 
-/// A 48-bit extended sequence number for the jitter buffer, from str0m's
-/// already-unrolled `SeqNo`.
-fn extended_seq(data: &str0m::media::MediaData) -> Option<u64> {
-    Some(*(*data.seq_range.end()))
+/// Whether an Annex-B H.264 access unit contains an IDR (keyframe). Scans the
+/// NAL headers between start codes for type 5. SPS and PPS precede an IDR in a
+/// well-formed keyframe access unit, but the IDR NAL is the definitive marker.
+fn is_h264_keyframe(au: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < au.len() {
+        // Match a 3- or 4-byte Annex-B start code.
+        let (start, len) = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            (i + 3, 3)
+        } else if i + 4 <= au.len() && au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
+            (i + 4, 4)
+        } else {
+            i += 1;
+            continue;
+        };
+        if start < au.len() && (au[start] & 0x1f) == 5 {
+            return true;
+        }
+        i += len;
+    }
+    false
 }
 
 const _: () = {
     // The engine assumes 20 ms Opus frames at 48 kHz throughout.
     assert!(FRAME_SAMPLES == (SAMPLE_RATE as usize) / 50);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::is_h264_keyframe;
+
+    #[test]
+    fn keyframe_detection_reads_nal_types() {
+        // NAL type is the low 5 bits of the byte after a start code. 5 = IDR,
+        // 1 = non-IDR slice, 7 = SPS, 8 = PPS.
+        let idr = [0, 0, 0, 1, 0x65, 0x88, 0x84];
+        assert!(is_h264_keyframe(&idr));
+
+        // A real keyframe access unit: SPS, PPS, then the IDR slice.
+        let key_au = [
+            0, 0, 0, 1, 0x67, 0x42, 0x00, // SPS
+            0, 0, 0, 1, 0x68, 0xce, // PPS
+            0, 0, 1, 0x65, 0x88, // IDR, 3-byte start code
+        ];
+        assert!(is_h264_keyframe(&key_au));
+
+        // A delta frame: a non-IDR slice only.
+        let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x00];
+        assert!(!is_h264_keyframe(&delta));
+
+        // SPS and PPS without an IDR is not, by itself, a decodable keyframe.
+        let params_only = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce];
+        assert!(!is_h264_keyframe(&params_only));
+
+        assert!(!is_h264_keyframe(&[]));
+        assert!(!is_h264_keyframe(&[0, 0, 0, 1]));
+    }
+}

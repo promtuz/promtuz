@@ -41,6 +41,17 @@ class CallActivity : ComponentActivity() {
         }
     }
 
+    override fun onUserLeaveHint() {
+        // Keep a connected video call visible as a floating window when the
+        // user leaves, the way a phone call does.
+        val call = CallController.state.value
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            call?.video == true && call.phase == CallController.Phase.Connected
+        ) {
+            runCatching { enterPictureInPictureMode(android.app.PictureInPictureParams.Builder().build()) }
+        }
+    }
+
     private fun showOverLockScreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)

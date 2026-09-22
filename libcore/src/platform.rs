@@ -58,6 +58,16 @@ pub trait CoreEvents: Send + Sync {
     /// A call changed state. The platform owns the ringing screen, the
     /// foreground service and the audio device; core owns everything else.
     fn on_call(&self, event: CallEvent);
+    /// One encoded H.264 access unit from the peer, Annex-B framed. The
+    /// platform feeds it to its decoder and renders. Fires only in a video
+    /// call, off the media thread, so the impl must not block.
+    fn on_call_video(&self, frame: Vec<u8>, keyframe: bool);
+    /// Our encoder should produce a keyframe now: the peer asked for one, or a
+    /// receiver just came up. No-op outside a video call.
+    fn on_call_video_keyframe(&self);
+    /// The target send bitrate for our video encoder, in kbps, from the
+    /// bandwidth estimate. The platform retunes MediaCodec to it.
+    fn on_call_video_bitrate(&self, kbps: u32);
 }
 
 /// One step of a call, for the platform. `call` is the 16-byte call id every
@@ -79,6 +89,8 @@ pub enum CallEvent {
     Reconnecting { call: Vec<u8> },
     /// The peer muted or unmuted themselves.
     PeerMuted { call: Vec<u8>, muted: bool },
+    /// The peer turned their camera on or off. When off, show their avatar.
+    PeerCamera { call: Vec<u8>, on: bool },
     /// Over, however it went. Stop audio and dismiss the screen. `duration_ms`
     /// is the connected time, zero when it never connected. A `Missed` for a
     /// call that never rang here (the offer arrived already dead) still

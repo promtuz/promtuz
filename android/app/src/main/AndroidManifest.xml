@@ -22,6 +22,7 @@
          No Telecom (ConnectionService), on purpose — see CALLS.md. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FLASHLIGHT" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
@@ -121,15 +122,17 @@
             android:exported="false"
             android:stopWithTask="false" />
 
-        <!-- Call: holds the microphone, the ongoing notification and the
-             network watch for the length of a call. -->
+        <!-- Call: holds the microphone (and camera for a video call), the
+             ongoing notification and the network watch for the length of a
+             call. -->
         <service
             android:name="com.promtuz.core.call.CallService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|camera" />
 
         <!-- The full-screen call, shown over the lock screen. Its own task so
-             ending a call never lands back on a stale call screen. -->
+             ending a call never lands back on a stale call screen; supports
+             picture in picture for a video call. -->
         <activity
             android:name="com.promtuz.core.call.CallActivity"
             android:exported="false"
@@ -137,6 +140,8 @@
             android:excludeFromRecents="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:taskAffinity="com.promtuz.chat.call"
             android:theme="@style/Theme.Promtuz" />
 

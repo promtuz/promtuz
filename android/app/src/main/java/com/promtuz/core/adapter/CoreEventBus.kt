@@ -88,6 +88,18 @@ object CoreEventBus : CoreEvents {
         if (event is uniffi.core.CallEvent.Ended) _dbChanged.tryEmit(MESSAGES)
     }
 
+    override fun onCallVideo(frame: ByteArray, keyframe: Boolean) {
+        com.promtuz.core.call.CallVideoManager.onFrame(frame, keyframe)
+    }
+
+    override fun onCallVideoKeyframe() {
+        com.promtuz.core.call.CallVideoManager.onKeyframeNeeded()
+    }
+
+    override fun onCallVideoBitrate(kbps: UInt) {
+        com.promtuz.core.call.CallVideoManager.onBitrate(kbps.toInt())
+    }
+
     override fun onActivity(conversation: ByteArray, peer: ByteArray, activity: UShort) {
         _activity.tryEmit(ActivitySignal(conversation, peer, activity.toInt()))
     }

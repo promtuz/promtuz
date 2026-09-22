@@ -28,9 +28,11 @@ object CallController {
         val conversation: ByteArray,
         val name: String,
         val outgoing: Boolean,
+        val video: Boolean,
         val phase: Phase,
         val muted: Boolean,
         val peerMuted: Boolean,
+        val peerCamera: Boolean,
         val speaker: Boolean,
         /** When the call connected, elapsed-real-time millis, for the timer. */
         val connectedAt: Long,
@@ -50,24 +52,32 @@ object CallController {
     /** Called from [com.promtuz.core.adapter.CoreEventBus.onCall] on a core thread. */
     fun onEvent(event: CallEvent) {
         when (event) {
-            is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, Phase.Outgoing)
-            is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, Phase.Incoming)
+            is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, video = videoNow(event.call), Phase.Outgoing)
+            is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, video = event.video, Phase.Incoming)
             is CallEvent.Ringing -> update(event.call) { it.copy(phase = Phase.Ringing) }
             is CallEvent.Connecting -> update(event.call) { it.copy(phase = Phase.Connecting) }
             is CallEvent.Connected -> update(event.call) {
+                if (it.video) CallVideoManager.start()
                 it.copy(phase = Phase.Connected, connectedAt = android.os.SystemClock.elapsedRealtime())
             }
             is CallEvent.Reconnecting -> update(event.call) { it.copy(phase = Phase.Reconnecting) }
             is CallEvent.PeerMuted -> update(event.call) { it.copy(peerMuted = event.muted) }
+            is CallEvent.PeerCamera -> update(event.call) { it.copy(peerCamera = event.on) }
             is CallEvent.Ended -> ended(event)
         }
     }
 
+    /** An outgoing call's video flag, read from core's current-call snapshot. */
+    private fun videoNow(call: ByteArray): Boolean =
+        runCatching { CoreBridge.callCurrent()?.takeIf { it.call.contentEquals(call) }?.video }
+            .getOrNull() ?: false
+
     private fun begin(
-        call: ByteArray, peer: ByteArray, conversation: ByteArray, outgoing: Boolean, phase: Phase,
+        call: ByteArray, peer: ByteArray, conversation: ByteArray, outgoing: Boolean, video: Boolean,
+        phase: Phase,
     ) {
         val name = runCatching { CoreBridge.contactName(peer) }.getOrNull().orEmpty()
-        _state.value = Ui(call, peer, conversation, name, outgoing, phase, false, false, false, 0)
+        _state.value = Ui(call, peer, conversation, name, outgoing, video, phase, false, false, true, false, 0)
         startService()
         if (!outgoing) CallNotifications.ringing(app, _state.value!!)
         CallActivity.launch(app)
@@ -88,6 +98,7 @@ object CallController {
         val current = _state.value
         if (current != null && !current.callId.contentEquals(event.call)) return
         _state.value = null
+        CallVideoManager.stop()
         stopService()
         CallNotifications.clearOngoing(app)
         if (event.reason == CallEndReason.MISSED) {
@@ -110,6 +121,10 @@ object CallController {
         CallService.instance?.setSpeaker(on)
         _state.value = s.copy(speaker = on)
     }
+
+    fun toggleCamera() = CallVideoManager.toggleCamera()
+
+    fun switchCamera() = CallVideoManager.switchCamera()
 
     /** The default network moved; tell the engine to restart ICE now. */
     fun networkChanged() {

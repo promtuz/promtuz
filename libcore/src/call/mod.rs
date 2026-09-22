@@ -81,6 +81,7 @@ struct Remote {
     pwd:         String,
     fingerprint: [u8; 32],
     ssrc:        u32,
+    video_ssrc:  u32,
     candidates:  Vec<CallCandidate>,
 }
 
@@ -111,6 +112,7 @@ pub struct Snapshot {
     pub peer:         [u8; 32],
     pub conversation: [u8; 16],
     pub outgoing:     bool,
+    pub video:        bool,
     pub phase:        Phase,
     pub muted:        bool,
     pub peer_muted:   bool,
@@ -141,8 +143,9 @@ fn short(id: &[u8]) -> String {
     hex::encode(&id[..4])
 }
 
-/// Ring `peer`. Returns the call id; the rest arrives as events.
-pub fn start(peer: [u8; 32]) -> Result<[u8; 16]> {
+/// Ring `peer`, as a video call when `video`. Returns the call id; the rest
+/// arrives as events.
+pub fn start(peer: [u8; 32], video: bool) -> Result<[u8; 16]> {
     if !Contact::is_paired(&peer) {
         bail!("not a paired contact");
     }
@@ -159,7 +162,7 @@ pub fn start(peer: [u8; 32]) -> Result<[u8; 16]> {
             peer,
             conversation,
             outgoing: true,
-            video: false,
+            video,
             phase: Phase::Offering,
             connected_at: None,
             peer_muted: false,
@@ -171,9 +174,9 @@ pub fn start(peer: [u8; 32]) -> Result<[u8; 16]> {
             restart_gen: 0,
         });
     }
-    info!("CALL[{}]: calling {}", short(&id), short(&peer));
+    info!("CALL[{}]: calling {} ({})", short(&id), short(&peer), if video { "video" } else { "audio" });
     emit(CallEvent::Outgoing { call: id.to_vec(), peer: peer.to_vec(), conversation: conversation.to_vec() });
-    RUNTIME.spawn(spawn_session(id, rtc::Role::Caller));
+    RUNTIME.spawn(spawn_session(id, rtc::Role::Caller, video));
     arm(RING_TIMEOUT, id, Phase::Offering, |call| {
         info!("CALL[{}]: no answer", short(&call.id));
         signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Unanswered });
@@ -184,18 +187,18 @@ pub fn start(peer: [u8; 32]) -> Result<[u8; 16]> {
 
 /// Pick up the call that is ringing.
 pub fn accept() -> Result<()> {
-    let id = {
+    let (id, video) = {
         let mut current = CURRENT.lock();
         let call = current.as_mut().ok_or_else(|| anyhow!("no call"))?;
         if call.phase != Phase::Ringing {
             bail!("nothing to accept");
         }
         call.phase = Phase::Connecting;
-        call.id
+        (call.id, call.video)
     };
     info!("CALL[{}]: accepted", short(&id));
     emit(CallEvent::Connecting { call: id.to_vec() });
-    RUNTIME.spawn(spawn_session(id, rtc::Role::Callee));
+    RUNTIME.spawn(spawn_session(id, rtc::Role::Callee, video));
     arm(CONNECT_TIMEOUT, id, Phase::Connecting, |call| {
         signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Failed });
         Some(CallEndReason::Failed)
@@ -268,11 +271,34 @@ pub fn current() -> Option<Snapshot> {
         peer:         c.peer,
         conversation: c.conversation,
         outgoing:     c.outgoing,
+        video:        c.video,
         phase:        c.phase,
         muted:        c.audio.muted(),
         peer_muted:   c.peer_muted,
         connected_ms: c.connected_at.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0),
     })
+}
+
+/// Turn our camera on or off in a video call. The camera device is the
+/// platform's; core only tells the peer, so their screen shows our video or
+/// our avatar.
+pub fn set_camera(on: bool) {
+    with_call(|call| {
+        if call.video && matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
+            signal(call.conversation, CallMsg::Camera { call: call.id, on });
+        }
+        None
+    });
+}
+
+/// One encoded H.264 access unit (Annex-B) from the platform's video encoder.
+/// The keyframe flag is the platform's to know; str0m re-derives it, so it is
+/// not threaded through.
+pub fn video_capture(frame: Vec<u8>, _keyframe: bool) {
+    let session = CURRENT.lock().as_ref().and_then(|c| c.session.clone());
+    if let Some(session) = session {
+        let _ = session.send(rtc::Cmd::Video(frame));
+    }
 }
 
 /// One captured 20 ms frame of 48 kHz mono PCM, little-endian.
@@ -300,8 +326,8 @@ pub fn audio_playback(frames: usize) -> Vec<u8> {
 /// Inbound call signaling, from the direct chat with `from`.
 pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
     match msg {
-        CallMsg::Offer { call, expires_at_ms, video, ufrag, pwd, fingerprint, ssrc, candidates } => {
-            let remote = Remote { ufrag, pwd, fingerprint, ssrc, candidates };
+        CallMsg::Offer { call, expires_at_ms, video, ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates } => {
+            let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
             on_offer(from, conversation, call, expires_at_ms, video, remote);
         },
         CallMsg::Ringing { call } => {
@@ -312,14 +338,14 @@ pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
                 None
             });
         },
-        CallMsg::Answer { call, ufrag, pwd, fingerprint, ssrc, candidates } => {
+        CallMsg::Answer { call, ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates } => {
             with_call(|c| {
                 if c.id != call || c.phase != Phase::Offering {
                     return None;
                 }
                 info!("CALL[{}]: answered", short(&call));
                 c.phase = Phase::Connecting;
-                let remote = Remote { ufrag, pwd, fingerprint, ssrc, candidates };
+                let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
                 offer_remote(c, remote);
                 emit(CallEvent::Connecting { call: call.to_vec() });
                 None
@@ -351,6 +377,14 @@ pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
                 None
             });
         },
+        CallMsg::Camera { call, on } => {
+            with_call(|c| {
+                if c.id == call {
+                    emit(CallEvent::PeerCamera { call: call.to_vec(), on });
+                }
+                None
+            });
+        },
         CallMsg::Restart { call, generation, ufrag, pwd, candidates } => {
             with_call(|c| {
                 if c.id != call || !matches!(c.phase, Phase::Connected | Phase::Reconnecting) {
@@ -358,7 +392,8 @@ pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
                 }
                 let fingerprint = c.remote.as_ref().map(|r| r.fingerprint).unwrap_or_default();
                 let ssrc = c.remote.as_ref().map(|r| r.ssrc).unwrap_or_default();
-                let remote = Remote { ufrag, pwd, fingerprint, ssrc, candidates };
+                let video_ssrc = c.remote.as_ref().map(|r| r.video_ssrc).unwrap_or_default();
+                let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
                 if generation > c.restart_gen {
                     // They lost the path first; start over on our side too and
                     // answer with fresh credentials once we have them.
@@ -452,7 +487,7 @@ fn on_offer(
                 };
                 drop(current);
                 emit(CallEvent::Connecting { call: call.to_vec() });
-                RUNTIME.spawn(spawn_session(call, rtc::Role::Callee));
+                RUNTIME.spawn(spawn_session(call, rtc::Role::Callee, video));
                 arm(CONNECT_TIMEOUT, call, Phase::Connecting, |c| {
                     signal(c.conversation, CallMsg::End { call: c.id, reason: CallEnd::Failed });
                     Some(CallEndReason::Failed)
@@ -538,6 +573,7 @@ fn offer_remote(call: &mut Call, remote: Remote) {
                 pwd:         remote.pwd.clone(),
                 fingerprint: remote.fingerprint,
                 ssrc:        remote.ssrc,
+                video_ssrc:  remote.video_ssrc,
                 candidates:  remote.candidates.clone(),
             });
             for c in call.early.drain(..) {
@@ -576,7 +612,7 @@ fn begin_restart(call: &mut Call, theirs: Option<Remote>) {
 }
 
 /// Fetch TURN credentials and start the media session for call `id`.
-async fn spawn_session(id: [u8; 16], role: rtc::Role) {
+async fn spawn_session(id: [u8; 16], role: rtc::Role, video: bool) {
     let relay = match tokio::time::timeout(TURN_TIMEOUT, relay_turn()).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
@@ -593,7 +629,7 @@ async fn spawn_session(id: [u8; 16], role: rtc::Role) {
         if call.id != id {
             return None;
         }
-        let session = rtc::spawn(role, call.cert.clone(), relay, call.audio.clone(), ev_tx);
+        let session = rtc::spawn(role, call.cert.clone(), relay, video, call.audio.clone(), ev_tx);
         call.session = Some(session);
         // A callee already holds the caller's parameters; a caller waits for
         // the answer. On a restart both hold what the last round left.
@@ -626,6 +662,7 @@ fn on_session_event(id: [u8; 16], ev: rtc::Event) {
                         pwd: params.pwd,
                         fingerprint: params.fingerprint,
                         ssrc: params.ssrc,
+                        video_ssrc: params.video_ssrc,
                         candidates,
                     },
                     Phase::Connecting if !call.outgoing => CallMsg::Answer {
@@ -634,6 +671,7 @@ fn on_session_event(id: [u8; 16], ev: rtc::Event) {
                         pwd: params.pwd,
                         fingerprint: params.fingerprint,
                         ssrc: params.ssrc,
+                        video_ssrc: params.video_ssrc,
                         candidates,
                     },
                     Phase::Reconnecting | Phase::Connected => CallMsg::Restart {
@@ -661,6 +699,24 @@ fn on_session_event(id: [u8; 16], ev: rtc::Event) {
                 if call.phase == Phase::Connected {
                     warn!("CALL[{}]: path lost, restarting", short(&id));
                     begin_restart(call, None);
+                }
+                None
+            },
+            rtc::Event::Video { frame, keyframe } => {
+                if let Some(events) = crate::platform::EVENTS.get() {
+                    events.on_call_video(frame, keyframe);
+                }
+                None
+            },
+            rtc::Event::KeyframeNeeded => {
+                if let Some(events) = crate::platform::EVENTS.get() {
+                    events.on_call_video_keyframe();
+                }
+                None
+            },
+            rtc::Event::Bitrate(kbps) => {
+                if let Some(events) = crate::platform::EVENTS.get() {
+                    events.on_call_video_bitrate(kbps);
                 }
                 None
             },
@@ -725,6 +781,7 @@ fn signal(conversation: [u8; 16], msg: CallMsg) {
         | CallMsg::Answer { call, .. }
         | CallMsg::Candidate { call, .. }
         | CallMsg::Media { call, .. }
+        | CallMsg::Camera { call, .. }
         | CallMsg::Restart { call, .. }
         | CallMsg::End { call, .. } => *call,
     };

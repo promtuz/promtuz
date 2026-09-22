@@ -237,9 +237,10 @@ pub enum AppPayload {
 pub enum CallMsg {
     /// Ring the peer. Carries what their engine needs to start ICE and DTLS
     /// toward us: our ICE credentials, the SHA-256 fingerprint of our DTLS
-    /// certificate, the SSRC our audio arrives on, and whether we want video.
-    /// Sent with the call wake class; dead once `expires_at_ms` passes on
-    /// the sender's clock.
+    /// certificate, the SSRCs our audio and (for a video call) video arrive
+    /// on, and whether this is a video call. `video_ssrc` is zero for an
+    /// audio call. Sent with the call wake class; dead once `expires_at_ms`
+    /// passes on the sender's clock.
     Offer {
         call:          [u8; 16],
         expires_at_ms: u64,
@@ -248,17 +249,20 @@ pub enum CallMsg {
         pwd:           String,
         fingerprint:   [u8; 32],
         ssrc:          u32,
+        video_ssrc:    u32,
         candidates:    Vec<CallCandidate>,
     },
     /// The peer's phone is ringing, so the caller can play ringback.
     Ringing { call: [u8; 16] },
     /// The peer picked up: their half of the ICE and DTLS parameters.
+    /// `video_ssrc` is zero unless this is a video call.
     Answer {
         call:        [u8; 16],
         ufrag:       String,
         pwd:         String,
         fingerprint: [u8; 32],
         ssrc:        u32,
+        video_ssrc:  u32,
         candidates:  Vec<CallCandidate>,
     },
     /// An address found after the offer or answer went out.
@@ -267,6 +271,9 @@ pub enum CallMsg {
     /// media, so it is reliable and survives a media reconnect; a lost one is
     /// corrected by the next. Not latency-critical.
     Media { call: [u8; 16], muted: bool },
+    /// The sender turned their camera on or off in a video call. Like
+    /// [`Self::Media`], it rides the channel, not the media.
+    Camera { call: [u8; 16], on: bool },
     /// Fresh ICE credentials after a network change. The peer restarts ICE
     /// against them with the candidates that follow. `gen` counts restarts
     /// within the call: a side that sees a higher one than its own restarts
@@ -2131,9 +2138,9 @@ mod tests {
         };
         assert_eq!(AppPayload::deser(&offer.ser().unwrap()).unwrap(), offer);
         let call = AppPayload::Call(CallMsg::Offer {
-            call: [8u8; 16], expires_at_ms: 1_700_000_040_000, video: false,
+            call: [8u8; 16], expires_at_ms: 1_700_000_040_000, video: true,
             ufrag: "abcd".into(), pwd: "0123456789abcdef0123456".into(), fingerprint: [9u8; 32],
-            ssrc: 0xdead_beef,
+            ssrc: 0xdead_beef, video_ssrc: 0xfeed_face,
             candidates: vec![
                 CallCandidate::Host { addr: "10.0.0.2:40000".parse().unwrap() },
                 CallCandidate::ServerReflexive {

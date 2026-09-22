@@ -4,12 +4,12 @@
 
 use crate::platform::CoreError;
 
-/// Start a call to `peer` (a 32-byte IPK). Returns the 16-byte call id; the
-/// ringing screen and the rest come as events.
+/// Start a call to `peer` (a 32-byte IPK), as video when `video`. Returns the
+/// 16-byte call id; the ringing screen and the rest come as events.
 #[uniffi::export]
-pub fn call_start(peer: Vec<u8>) -> Result<Vec<u8>, CoreError> {
+pub fn call_start(peer: Vec<u8>, video: bool) -> Result<Vec<u8>, CoreError> {
     let peer = crate::api::messaging::to_ipk32(&peer)?;
-    Ok(super::start(peer).map_err(anyhow_to_core)?.to_vec())
+    Ok(super::start(peer, video).map_err(anyhow_to_core)?.to_vec())
 }
 
 /// Pick up the ringing call.
@@ -34,6 +34,20 @@ pub fn call_hangup() {
 #[uniffi::export]
 pub fn call_set_muted(muted: bool) {
     super::set_muted(muted);
+}
+
+/// Turn our camera on or off in a video call. The camera device is the
+/// platform's; this tells the peer to show our video or our avatar.
+#[uniffi::export]
+pub fn call_set_camera(on: bool) {
+    super::set_camera(on);
+}
+
+/// Push one encoded H.264 access unit (Annex-B) from the platform's video
+/// encoder. Called from the encoder thread in a video call.
+#[uniffi::export]
+pub fn call_push_video(frame: Vec<u8>, keyframe: bool) {
+    super::video_capture(frame, keyframe);
 }
 
 /// Tell the engine the default network moved, so it restarts ICE at once.
@@ -79,6 +93,7 @@ pub struct CallState {
     pub peer:         Vec<u8>,
     pub conversation: Vec<u8>,
     pub outgoing:     bool,
+    pub video:        bool,
     pub phase:        CallPhase,
     pub muted:        bool,
     pub peer_muted:   bool,
@@ -102,6 +117,7 @@ impl From<super::Snapshot> for CallState {
             peer:         s.peer.to_vec(),
             conversation: s.conversation.to_vec(),
             outgoing:     s.outgoing,
+            video:        s.video,
             phase:        s.phase.into(),
             muted:        s.muted,
             peer_muted:   s.peer_muted,

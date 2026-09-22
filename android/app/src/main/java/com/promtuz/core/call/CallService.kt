@@ -73,13 +73,15 @@ class CallService : Service() {
         // Android 14+, which wants it named at promotion.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val state = CallController.state.value
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            if (state?.video == true) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
             runCatching {
                 startForeground(
                     CallNotifications.ONGOING_ID,
                     CallNotifications.build(this, state, ringing = state?.phase == Phase.Incoming),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+                    type,
                 )
-            }.onFailure { Timber.tag("Call").w(it, "microphone foreground type refused") }
+            }.onFailure { Timber.tag("Call").w(it, "call foreground type refused") }
         }
         return START_NOT_STICKY
     }

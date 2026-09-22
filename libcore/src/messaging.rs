@@ -3444,6 +3444,9 @@ mod tests {
             fn on_presence(&self, _: Vec<u8>, _: crate::platform::Presence) {}
             fn on_reaction(&self, _: Vec<u8>, _: Vec<u8>, _: Vec<u8>, _: String, _: bool) {}
             fn on_call(&self, _: crate::platform::CallEvent) {}
+            fn on_call_video(&self, _: Vec<u8>, _: bool) {}
+            fn on_call_video_keyframe(&self) {}
+            fn on_call_video_bitrate(&self, _: u32) {}
             fn on_db_changed(&self, _: Vec<String>) {
                 // Like Android's collector running immediately: read just the
                 // atomic counter, never the locked DB, at notification time.

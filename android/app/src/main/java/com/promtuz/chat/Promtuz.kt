@@ -74,6 +74,7 @@ class Promtuz : Application() {
 
         PushNotifier.start(this)
         com.promtuz.core.call.CallController.init(this)
+        com.promtuz.core.call.CallVideoManager.init(this)
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)

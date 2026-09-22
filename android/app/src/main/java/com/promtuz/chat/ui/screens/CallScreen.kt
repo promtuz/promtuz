@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +39,7 @@ import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.call.CallController
 import com.promtuz.core.call.CallController.Phase
+import com.promtuz.core.call.CallVideoManager
 import kotlinx.coroutines.delay
 
 /**
@@ -48,38 +51,60 @@ import kotlinx.coroutines.delay
 fun CallScreen(call: CallController.Ui?) {
     if (call == null) return
     val colors = MaterialTheme.colorScheme
+    val onVideo = call.video && call.phase == Phase.Connected
     Box(
         Modifier
             .fillMaxSize()
-            .background(colors.surface)
-            .windowInsetsPadding(WindowInsets.safeDrawing),
+            .background(if (onVideo) Color.Black else colors.surface),
     ) {
-        Column(
-            Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 72.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Avatar(
-                name = call.name.ifEmpty { "?" },
-                size = 128.dp,
-                image = rememberAvatar(call.peer.toHex()),
-            )
-            Spacer(Modifier.height(24.dp))
-            Text(
-                call.name.ifEmpty { "Unknown" },
-                style = MaterialTheme.typography.headlineMedium,
-                color = colors.onSurface,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                statusLine(call),
-                style = MaterialTheme.typography.bodyLarge,
-                color = colors.onSurfaceVariant,
-            )
-            if (call.peerMuted) {
-                Spacer(Modifier.height(4.dp))
-                Text("Muted", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        // Remote video fills the screen when it is a connected video call and
+        // the peer's camera is on; otherwise the peer's avatar and name.
+        if (onVideo && call.peerCamera) {
+            CallSurface(Modifier.fillMaxSize()) { CallVideoManager.setRemoteSurface(it) }
+        }
+
+        Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+        if (!onVideo || !call.peerCamera) {
+            Column(
+                Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 72.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Avatar(
+                    name = call.name.ifEmpty { "?" },
+                    size = 128.dp,
+                    image = rememberAvatar(call.peer.toHex()),
+                )
+                Spacer(Modifier.height(24.dp))
+                Text(
+                    call.name.ifEmpty { "Unknown" },
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = if (onVideo) Color.White else colors.onSurface,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    statusLine(call),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (onVideo) Color.White.copy(alpha = 0.8f) else colors.onSurfaceVariant,
+                )
+                if (call.peerMuted) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Muted", style = MaterialTheme.typography.labelMedium,
+                        color = if (onVideo) Color.White.copy(alpha = 0.8f) else colors.onSurfaceVariant)
+                }
             }
+        }
+
+        // Local self-view, a small tile top-right, while our camera is on.
+        val cameraOn by CallVideoManager.cameraOn.collectAsState()
+        if (onVideo && cameraOn) {
+            CallSurface(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .size(108.dp, 160.dp)
+                    .clip(RoundedCornerShape(12.dp)),
+            ) { CallVideoManager.setLocalSurface(it) }
         }
 
         Box(Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 56.dp)) {
@@ -88,6 +113,7 @@ fun CallScreen(call: CallController.Ui?) {
             } else {
                 OngoingControls(call)
             }
+        }
         }
     }
 }
@@ -130,9 +156,10 @@ private fun IncomingControls() {
 @Composable
 private fun OngoingControls(call: CallController.Ui) {
     val colors = MaterialTheme.colorScheme
+    val cameraOn by CallVideoManager.cameraOn.collectAsState()
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 40.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val muteBg = if (call.muted) colors.onSurface else colors.surfaceVariant
@@ -142,6 +169,15 @@ private fun OngoingControls(call: CallController.Ui) {
             "Mute", muteBg, muteFg,
         ) { CallController.toggleMute() }
 
+        if (call.video && call.phase == Phase.Connected) {
+            val camBg = if (cameraOn) colors.surfaceVariant else colors.onSurface
+            val camFg = if (cameraOn) colors.onSurface else colors.surface
+            RoundButton(R.drawable.oi_camera, "Camera", camBg, camFg) { CallController.toggleCamera() }
+            RoundButton(R.drawable.i_refresh, "Flip", colors.surfaceVariant, colors.onSurface) {
+                CallController.switchCamera()
+            }
+        }
+
         RoundButton(R.drawable.i_phone, "End", Color(0xFFE5484D), Color.White) {
             com.promtuz.core.CoreBridge.callHangup()
         }
@@ -150,6 +186,26 @@ private fun OngoingControls(call: CallController.Ui) {
         val spkFg = if (call.speaker) colors.surface else colors.onSurface
         RoundButton(R.drawable.i_speaker, "Speaker", spkBg, spkFg) { CallController.toggleSpeaker() }
     }
+}
+
+/**
+ * A `SurfaceView` for call video, handing its `Surface` to the caller as it
+ * comes and goes so the encoder or decoder can bind it.
+ */
+@Composable
+private fun CallSurface(modifier: Modifier = Modifier, onSurface: (android.view.Surface?) -> Unit) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            android.view.SurfaceView(ctx).apply {
+                holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: android.view.SurfaceHolder) = onSurface(holder.surface)
+                    override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {}
+                    override fun surfaceDestroyed(holder: android.view.SurfaceHolder) = onSurface(null)
+                })
+            }
+        },
+    )
 }
 
 @Composable
