@@ -170,12 +170,21 @@ def rust_libraries(artifacts):
                    license=expression, notices=notices)
 
 
+def bundled_assets():
+    """Artwork shipped in the APK's assets rather than pulled in as a dependency."""
+    yield dict(id="assets:apple-color-emoji", name="Apple Color Emoji", version="macOS 26 (20260722)",
+               url="https://github.com/samuelngs/apple-emoji-ttf", license="Apple Inc. artwork · MIT (build tooling)",
+               notices=[("Apple Color Emoji", (NOTICES / "apple-color-emoji.txt").read_text()),
+                        ("apple-emoji-ttf", (NOTICES / "apple-emoji-ttf.txt").read_text())])
+
+
 def generate(args):
     output = Path(args.output) / "licenses"
     output.mkdir(parents=True, exist_ok=True)
     entries = []
     missing = []
-    for library in [*android_libraries(json.loads(Path(args.android).read_text())), *rust_libraries(args.rust_artifacts)]:
+    for library in [*android_libraries(json.loads(Path(args.android).read_text())), *rust_libraries(args.rust_artifacts),
+                    *bundled_assets()]:
         if not library["notices"]:
             missing.append(library["id"])
             continue
