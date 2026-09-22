@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1561" viewBox="0 0 1200 1561">
-<rect width="1200" height="1561" fill="#f5f6f8"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1975" viewBox="0 0 1200 1975">
+<rect width="1200" height="1975" fill="#f5f6f8"/>
 <text x="28" y="42" font-family="sans-serif" font-size="24" fill="#18212c">Promtuz · rounded stroke icons</text>
 <text x="28" y="68" font-family="sans-serif" font-size="14" fill="#657080">1.75 stroke · enlarged + 24 px light and dark · static and morph icons</text>
 <rect x="20" y="92" width="224" height="195" rx="12" fill="white"/>
@@ -51,419 +51,585 @@
 </svg>
 <text x="506" y="269" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="728" y="92" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="117" font-family="sans-serif" font-size="13" fill="#18212c">oi_check</text>
+<text x="742" y="117" font-family="sans-serif" font-size="13" fill="#18212c">oi_camera_flip</text>
 <svg x="744" y="152" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
+  <path d="M5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 17.375Q21.625 20.375 18.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375Z"/>
+  <path d="M7.67886 12.6656C8.01552 10.54006 9.84797 8.975 12 8.975C14.15203 8.975 15.98448 10.54006 16.32114 12.6656"/>
+  <path d="M16.32114 14.0344C15.98448 16.15994 14.15203 17.725 12 17.725C9.84797 17.725 8.01552 16.15994 7.67886 14.0344"/>
+  <path d="M13.6 11.225L16.2 12.675Q16.45 12.825 16.6 12.525L17.65 10.3"/>
+  <path d="M10.4 15.475L7.8 14.025Q7.55 13.875 7.4 14.175L6.35 16.4"/>
 </svg>
 <svg x="848" y="176" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
+  <path d="M5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 17.375Q21.625 20.375 18.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375Z"/>
+  <path d="M7.67886 12.6656C8.01552 10.54006 9.84797 8.975 12 8.975C14.15203 8.975 15.98448 10.54006 16.32114 12.6656"/>
+  <path d="M16.32114 14.0344C15.98448 16.15994 14.15203 17.725 12 17.725C9.84797 17.725 8.01552 16.15994 7.67886 14.0344"/>
+  <path d="M13.6 11.225L16.2 12.675Q16.45 12.825 16.6 12.525L17.65 10.3"/>
+  <path d="M10.4 15.475L7.8 14.025Q7.55 13.875 7.4 14.175L6.35 16.4"/>
 </svg>
 <rect x="893" y="164" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="905" y="176" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
+  <path d="M5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 17.375Q21.625 20.375 18.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375Z"/>
+  <path d="M7.67886 12.6656C8.01552 10.54006 9.84797 8.975 12 8.975C14.15203 8.975 15.98448 10.54006 16.32114 12.6656"/>
+  <path d="M16.32114 14.0344C15.98448 16.15994 14.15203 17.725 12 17.725C9.84797 17.725 8.01552 16.15994 7.67886 14.0344"/>
+  <path d="M13.6 11.225L16.2 12.675Q16.45 12.825 16.6 12.525L17.65 10.3"/>
+  <path d="M10.4 15.475L7.8 14.025Q7.55 13.875 7.4 14.175L6.35 16.4"/>
 </svg>
-<text x="742" y="269" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<text x="742" y="269" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="964" y="92" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="117" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_down</text>
+<text x="978" y="117" font-family="sans-serif" font-size="13" fill="#18212c">oi_camera_permission</text>
 <svg x="980" y="152" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
+  <path d="M10.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 10.125"/>
+  <path d="M15.375 12.875C15.375 14.73896 13.86396 16.25 12 16.25C10.13604 16.25 8.625 14.73896 8.625 12.875C8.625 11.01104 10.13604 9.5 12 9.5C13.86396 9.5 15.375 11.01104 15.375 12.875Z"/>
+  <path d="M15.625 18.625Q15.625 17.625 16.625 17.625L20.625 17.625Q21.625 17.625 21.625 18.625L21.625 20.625Q21.625 21.625 20.625 21.625L16.625 21.625Q15.625 21.625 15.625 20.625L15.625 18.625Z"/>
+  <path d="M17 17.625L17 15.75Q17 14.125 18.625 14.125Q20.25 14.125 20.25 15.75L20.25 17.625"/>
 </svg>
 <svg x="1084" y="176" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
+  <path d="M10.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 10.125"/>
+  <path d="M15.375 12.875C15.375 14.73896 13.86396 16.25 12 16.25C10.13604 16.25 8.625 14.73896 8.625 12.875C8.625 11.01104 10.13604 9.5 12 9.5C13.86396 9.5 15.375 11.01104 15.375 12.875Z"/>
+  <path d="M15.625 18.625Q15.625 17.625 16.625 17.625L20.625 17.625Q21.625 17.625 21.625 18.625L21.625 20.625Q21.625 21.625 20.625 21.625L16.625 21.625Q15.625 21.625 15.625 20.625L15.625 18.625Z"/>
+  <path d="M17 17.625L17 15.75Q17 14.125 18.625 14.125Q20.25 14.125 20.25 15.75L20.25 17.625"/>
 </svg>
 <rect x="1129" y="164" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="1141" y="176" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
+  <path d="M10.625 20.375L5.375 20.375Q2.375 20.375 2.375 17.375L2.375 9.375Q2.375 6.375 5.375 6.375L7.125 6.375Q7.875 6.375 8.25 5.625L8.875 4.375Q9.25 3.625 10 3.625L14 3.625Q14.75 3.625 15.125 4.375L15.75 5.625Q16.125 6.375 16.875 6.375L18.625 6.375Q21.625 6.375 21.625 9.375L21.625 10.125"/>
+  <path d="M15.375 12.875C15.375 14.73896 13.86396 16.25 12 16.25C10.13604 16.25 8.625 14.73896 8.625 12.875C8.625 11.01104 10.13604 9.5 12 9.5C13.86396 9.5 15.375 11.01104 15.375 12.875Z"/>
+  <path d="M15.625 18.625Q15.625 17.625 16.625 17.625L20.625 17.625Q21.625 17.625 21.625 18.625L21.625 20.625Q21.625 21.625 20.625 21.625L16.625 21.625Q15.625 21.625 15.625 20.625L15.625 18.625Z"/>
+  <path d="M17 17.625L17 15.75Q17 14.125 18.625 14.125Q20.25 14.125 20.25 15.75L20.25 17.625"/>
 </svg>
-<text x="978" y="269" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<text x="978" y="269" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="20" y="299" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_left</text>
+<text x="34" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_check</text>
 <svg x="36" y="359" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
+  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
 </svg>
 <svg x="140" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
+  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
 </svg>
 <rect x="185" y="371" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="197" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
+  <path d="M2.375 12L2.375 12L7.94314 17.56814Q8.79167 18.41667 9.6402 17.56814L21.625 5.58333L21.625 5.58333"/>
 </svg>
 <text x="34" y="476" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="256" y="299" width="224" height="195" rx="12" fill="white"/>
-<text x="270" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_right</text>
+<text x="270" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_down</text>
 <svg x="272" y="359" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
+  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
 </svg>
 <svg x="376" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
+  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
 </svg>
 <rect x="421" y="371" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="433" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
+  <path d="M2.375 7.1875L2.375 7.1875L11.15147 15.96397Q12 16.8125 12.84853 15.96397L21.625 7.1875L21.625 7.1875"/>
 </svg>
 <text x="270" y="476" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="492" y="299" width="224" height="195" rx="12" fill="white"/>
-<text x="506" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_up</text>
+<text x="506" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_left</text>
 <svg x="508" y="359" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
+  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
 </svg>
 <svg x="612" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
+  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
 </svg>
 <rect x="657" y="371" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="669" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
+  <path d="M16.8125 2.375L16.8125 2.375L8.03603 11.15147Q7.1875 12 8.03603 12.84853L16.8125 21.625L16.8125 21.625"/>
 </svg>
 <text x="506" y="476" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="728" y="299" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_close</text>
+<text x="742" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_right</text>
 <svg x="744" y="359" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.1941 5.1941L18.8059 18.8059"/>
-  <path d="M5.1941 18.8059L18.8059 5.1941"/>
+  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
 </svg>
 <svg x="848" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.1941 5.1941L18.8059 18.8059"/>
-  <path d="M5.1941 18.8059L18.8059 5.1941"/>
+  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
 </svg>
 <rect x="893" y="371" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="905" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.1941 5.1941L18.8059 18.8059"/>
-  <path d="M5.1941 18.8059L18.8059 5.1941"/>
+  <path d="M7.1875 21.625L7.1875 21.625L15.96397 12.84853Q16.8125 12 15.96397 11.15147L7.1875 2.375L7.1875 2.375"/>
 </svg>
 <text x="742" y="476" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="964" y="299" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_code</text>
+<text x="978" y="324" font-family="sans-serif" font-size="13" fill="#18212c">oi_chevron_up</text>
 <svg x="980" y="359" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
-  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
+  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
 </svg>
 <svg x="1084" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
-  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
+  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
 </svg>
 <rect x="1129" y="371" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="1141" y="383" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
-  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
+  <path d="M21.625 16.8125L21.625 16.8125L12.84853 8.03603Q12 7.1875 11.15147 8.03603L2.375 16.8125L2.375 16.8125"/>
 </svg>
 <text x="978" y="476" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="20" y="506" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_copy</text>
+<text x="34" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_close</text>
 <svg x="36" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
+  <path d="M5.1941 5.1941L18.8059 18.8059"/>
+  <path d="M5.1941 18.8059L18.8059 5.1941"/>
 </svg>
 <svg x="140" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
+  <path d="M5.1941 5.1941L18.8059 18.8059"/>
+  <path d="M5.1941 18.8059L18.8059 5.1941"/>
 </svg>
 <rect x="185" y="578" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="197" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
+  <path d="M5.1941 5.1941L18.8059 18.8059"/>
+  <path d="M5.1941 18.8059L18.8059 5.1941"/>
 </svg>
-<text x="34" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<text x="34" y="683" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="256" y="506" width="224" height="195" rx="12" fill="white"/>
-<text x="270" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_edit</text>
+<text x="270" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_code</text>
 <svg x="272" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
+  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
+  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
 </svg>
 <svg x="376" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
+  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
+  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
 </svg>
 <rect x="421" y="578" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="433" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
+  <path d="M8.875 5.5L8.875 5.5L3.22353 11.15147Q2.375 12 3.22353 12.84853L8.875 18.5L8.875 18.5"/>
+  <path d="M15.125 5.5L15.125 5.5L20.77647 11.15147Q21.625 12 20.77647 12.84853L15.125 18.5L15.125 18.5"/>
 </svg>
-<text x="270" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<text x="270" y="683" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
 <rect x="492" y="506" width="224" height="195" rx="12" fill="white"/>
-<text x="506" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_export</text>
+<text x="506" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_copy</text>
 <svg x="508" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
 </svg>
 <svg x="612" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
 </svg>
 <rect x="657" y="578" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="669" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+  <path d="M11.375 2.375H18.625Q21.625 2.375 21.625 5.375V12.625Q21.625 15.625 18.625 15.625H11.375Q8.375 15.625 8.375 12.625V5.375Q8.375 2.375 11.375 2.375Z M5.375 8.375Q2.375 8.375 2.375 11.375V18.625Q2.375 21.625 5.375 21.625H12.625Q15.625 21.625 15.625 18.625"/>
 </svg>
 <text x="506" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="728" y="506" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_external_link</text>
+<text x="742" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_edit</text>
 <svg x="744" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M9.25 7.875H5.375Q2.375 7.875 2.375 10.875
-           V18.625Q2.375 21.625 5.375 21.625
-           H13.125Q16.125 21.625 16.125 18.625V14.75
-           M13.375 2.375H20.425Q21.625 2.375 21.625 3.575V10.625
-           M10.625 13.375L21.325 2.675"/>
+  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
 </svg>
 <svg x="848" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M9.25 7.875H5.375Q2.375 7.875 2.375 10.875
-           V18.625Q2.375 21.625 5.375 21.625
-           H13.125Q16.125 21.625 16.125 18.625V14.75
-           M13.375 2.375H20.425Q21.625 2.375 21.625 3.575V10.625
-           M10.625 13.375L21.325 2.675"/>
+  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
 </svg>
 <rect x="893" y="578" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="905" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M3.1 21.43Q2.375 21.625 2.57 20.9L4.125 15.125Q4.375 14.375 4.925 13.825L15.825 2.925Q16.925 1.825 18.025 2.925L21.075 5.975Q22.175 7.075 21.075 8.175L10.175 19.075Q9.625 19.625 8.875 19.875L3.1 21.43Z M13.125 5.625L18.375 10.875"/>
+</svg>
+<text x="742" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="964" y="506" width="224" height="195" rx="12" fill="white"/>
+<text x="978" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_export</text>
+<svg x="980" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+</svg>
+<svg x="1084" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+</svg>
+<rect x="1129" y="578" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="1141" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7.125 9.375H6.625Q3.625 9.375 3.625 12.375V18.625Q3.625 21.625 6.625 21.625H17.375Q20.375 21.625 20.375 18.625V12.375Q20.375 9.375 17.375 9.375H16.875 M8 6.375L11.15147 3.22353Q12 2.375 12.84853 3.22353L16 6.375 M12 2.8V15.125"/>
+</svg>
+<text x="978" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="20" y="713" width="224" height="195" rx="12" fill="white"/>
+<text x="34" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_external_link</text>
+<svg x="36" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M9.25 7.875H5.375Q2.375 7.875 2.375 10.875
            V18.625Q2.375 21.625 5.375 21.625
            H13.125Q16.125 21.625 16.125 18.625V14.75
            M13.375 2.375H20.425Q21.625 2.375 21.625 3.575V10.625
            M10.625 13.375L21.325 2.675"/>
 </svg>
-<text x="742" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="964" y="506" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="531" font-family="sans-serif" font-size="13" fill="#18212c">oi_forward</text>
-<svg x="980" y="566" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
-</svg>
-<svg x="1084" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
-</svg>
-<rect x="1129" y="578" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="1141" y="590" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
-</svg>
-<text x="978" y="683" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="20" y="713" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_image</text>
-<svg x="36" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
-  <circle cx="7.625" cy="7.625" r="1.5"/>
-</svg>
 <svg x="140" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
-  <circle cx="7.625" cy="7.625" r="1.5"/>
+  <path d="M9.25 7.875H5.375Q2.375 7.875 2.375 10.875
+           V18.625Q2.375 21.625 5.375 21.625
+           H13.125Q16.125 21.625 16.125 18.625V14.75
+           M13.375 2.375H20.425Q21.625 2.375 21.625 3.575V10.625
+           M10.625 13.375L21.325 2.675"/>
 </svg>
 <rect x="185" y="785" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="197" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
-  <circle cx="7.625" cy="7.625" r="1.5"/>
+  <path d="M9.25 7.875H5.375Q2.375 7.875 2.375 10.875
+           V18.625Q2.375 21.625 5.375 21.625
+           H13.125Q16.125 21.625 16.125 18.625V14.75
+           M13.375 2.375H20.425Q21.625 2.375 21.625 3.575V10.625
+           M10.625 13.375L21.325 2.675"/>
 </svg>
 <text x="34" y="890" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="256" y="713" width="224" height="195" rx="12" fill="white"/>
-<text x="270" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_info</text>
+<text x="270" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_file_attachment</text>
 <svg x="272" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="12" cy="12" r="9.625"/>
-  <path d="M12 11V17 M12 7V7.01"/>
+  <path d="M9.625 21.625L6.625 21.625Q3.625 21.625 3.625 18.625L3.625 5.375Q3.625 2.375 6.625 2.375L10.625 2.375Q11.25 2.375 11.75 2.875L15.875 7Q16.375 7.5 16.375 8.125"/>
+  <path d="M10.625 2.375L10.625 5.875Q10.625 7.625 12.375 7.625L16.125 7.625"/>
+  <path d="M19.125 14.25L19.125 17.625C19.125 18.45343 18.45343 19.125 17.625 19.125C16.79657 19.125 16.125 18.45343 16.125 17.625L16.125 12.875C16.125 11.35622 17.35622 10.125 18.875 10.125C20.39378 10.125 21.625 11.35622 21.625 12.875L21.625 17.625C21.625 19.83414 19.83414 21.625 17.625 21.625C15.41586 21.625 13.625 19.83414 13.625 17.625L13.625 15.625"/>
 </svg>
 <svg x="376" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="12" cy="12" r="9.625"/>
-  <path d="M12 11V17 M12 7V7.01"/>
+  <path d="M9.625 21.625L6.625 21.625Q3.625 21.625 3.625 18.625L3.625 5.375Q3.625 2.375 6.625 2.375L10.625 2.375Q11.25 2.375 11.75 2.875L15.875 7Q16.375 7.5 16.375 8.125"/>
+  <path d="M10.625 2.375L10.625 5.875Q10.625 7.625 12.375 7.625L16.125 7.625"/>
+  <path d="M19.125 14.25L19.125 17.625C19.125 18.45343 18.45343 19.125 17.625 19.125C16.79657 19.125 16.125 18.45343 16.125 17.625L16.125 12.875C16.125 11.35622 17.35622 10.125 18.875 10.125C20.39378 10.125 21.625 11.35622 21.625 12.875L21.625 17.625C21.625 19.83414 19.83414 21.625 17.625 21.625C15.41586 21.625 13.625 19.83414 13.625 17.625L13.625 15.625"/>
 </svg>
 <rect x="421" y="785" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="433" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="12" cy="12" r="9.625"/>
-  <path d="M12 11V17 M12 7V7.01"/>
+  <path d="M9.625 21.625L6.625 21.625Q3.625 21.625 3.625 18.625L3.625 5.375Q3.625 2.375 6.625 2.375L10.625 2.375Q11.25 2.375 11.75 2.875L15.875 7Q16.375 7.5 16.375 8.125"/>
+  <path d="M10.625 2.375L10.625 5.875Q10.625 7.625 12.375 7.625L16.125 7.625"/>
+  <path d="M19.125 14.25L19.125 17.625C19.125 18.45343 18.45343 19.125 17.625 19.125C16.79657 19.125 16.125 18.45343 16.125 17.625L16.125 12.875C16.125 11.35622 17.35622 10.125 18.875 10.125C20.39378 10.125 21.625 11.35622 21.625 12.875L21.625 17.625C21.625 19.83414 19.83414 21.625 17.625 21.625C15.41586 21.625 13.625 19.83414 13.625 17.625L13.625 15.625"/>
 </svg>
 <text x="270" y="890" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="492" y="713" width="224" height="195" rx="12" fill="white"/>
-<text x="506" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_paperclip</text>
+<text x="506" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_film</text>
 <svg x="508" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+  <path d="M2.375 6.625Q2.375 4.125 4.875 4.125L19.125 4.125Q21.625 4.125 21.625 6.625L21.625 17.375Q21.625 19.875 19.125 19.875L4.875 19.875Q2.375 19.875 2.375 17.375L2.375 6.625Z"/>
+  <path d="M7.125 4.125L7.125 19.875"/>
+  <path d="M16.875 4.125L16.875 19.875"/>
+  <path d="M2.375 9.375L7.125 9.375"/>
+  <path d="M2.375 14.625L7.125 14.625"/>
+  <path d="M16.875 9.375L21.625 9.375"/>
+  <path d="M16.875 14.625L21.625 14.625"/>
 </svg>
 <svg x="612" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+  <path d="M2.375 6.625Q2.375 4.125 4.875 4.125L19.125 4.125Q21.625 4.125 21.625 6.625L21.625 17.375Q21.625 19.875 19.125 19.875L4.875 19.875Q2.375 19.875 2.375 17.375L2.375 6.625Z"/>
+  <path d="M7.125 4.125L7.125 19.875"/>
+  <path d="M16.875 4.125L16.875 19.875"/>
+  <path d="M2.375 9.375L7.125 9.375"/>
+  <path d="M2.375 14.625L7.125 14.625"/>
+  <path d="M16.875 9.375L21.625 9.375"/>
+  <path d="M16.875 14.625L21.625 14.625"/>
 </svg>
 <rect x="657" y="785" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="669" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+  <path d="M2.375 6.625Q2.375 4.125 4.875 4.125L19.125 4.125Q21.625 4.125 21.625 6.625L21.625 17.375Q21.625 19.875 19.125 19.875L4.875 19.875Q2.375 19.875 2.375 17.375L2.375 6.625Z"/>
+  <path d="M7.125 4.125L7.125 19.875"/>
+  <path d="M16.875 4.125L16.875 19.875"/>
+  <path d="M2.375 9.375L7.125 9.375"/>
+  <path d="M2.375 14.625L7.125 14.625"/>
+  <path d="M16.875 9.375L21.625 9.375"/>
+  <path d="M16.875 14.625L21.625 14.625"/>
 </svg>
 <text x="506" y="890" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="728" y="713" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_pause</text>
+<text x="742" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_flash</text>
 <svg x="744" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
-  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
 </svg>
 <svg x="848" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
-  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
 </svg>
 <rect x="893" y="785" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="905" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
-  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
 </svg>
-<text x="742" y="890" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<text x="742" y="890" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="964" y="713" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_pin</text>
+<text x="978" y="738" font-family="sans-serif" font-size="13" fill="#18212c">oi_flash_auto</text>
 <svg x="980" y="773" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
+  <path d="M15.625 9.5L18.325 2.975Q18.625 2.25 18.925 2.975L21.625 9.5"/>
+  <path d="M16.55 7.25L20.7 7.25"/>
 </svg>
 <svg x="1084" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
+  <path d="M15.625 9.5L18.325 2.975Q18.625 2.25 18.925 2.975L21.625 9.5"/>
+  <path d="M16.55 7.25L20.7 7.25"/>
 </svg>
 <rect x="1129" y="785" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="1141" y="797" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L12.04842 10.86915Q12.375 10.25 11.675 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L10.4739 2.90384Z"/>
+  <path d="M15.625 9.5L18.325 2.975Q18.625 2.25 18.925 2.975L21.625 9.5"/>
+  <path d="M16.55 7.25L20.7 7.25"/>
 </svg>
 <text x="978" y="890" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="20" y="920" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_play</text>
+<text x="34" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_flash_off</text>
 <svg x="36" y="980" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L8.98622 4.38622"/>
+  <path d="M6.92092 6.92092L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L11.64119 11.64119"/>
+  <path d="M10.25 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L8.79167 8.79167"/>
+  <path d="M9.81389 5.21389L10.4739 2.90384"/>
+  <path d="M2.375 2.375L21.625 21.625"/>
 </svg>
 <svg x="140" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L8.98622 4.38622"/>
+  <path d="M6.92092 6.92092L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L11.64119 11.64119"/>
+  <path d="M10.25 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L8.79167 8.79167"/>
+  <path d="M9.81389 5.21389L10.4739 2.90384"/>
+  <path d="M2.375 2.375L21.625 21.625"/>
 </svg>
 <rect x="185" y="992" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="197" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+  <path d="M10.4739 2.90384Q10.625 2.375 10.27758 2.80138L8.98622 4.38622"/>
+  <path d="M6.92092 6.92092L2.81717 11.95734Q2.375 12.5 3.075 12.5L7.375 12.5Q7.875 12.5 7.7939 12.99338L6.46421 21.08228Q6.375 21.625 6.6316 21.13853L11.64119 11.64119"/>
+  <path d="M10.25 10.25L8.875 10.25Q8.375 10.25 8.51236 9.76924L8.79167 8.79167"/>
+  <path d="M9.81389 5.21389L10.4739 2.90384"/>
+  <path d="M2.375 2.375L21.625 21.625"/>
 </svg>
-<text x="34" y="1097" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<text x="34" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="256" y="920" width="224" height="195" rx="12" fill="white"/>
-<text x="270" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_plus</text>
+<text x="270" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_forward</text>
 <svg x="272" y="980" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
-  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
 </svg>
 <svg x="376" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
-  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
 </svg>
 <rect x="421" y="992" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="433" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
-  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+  <path d="M14.625 4.375 L20.77647 10.52647 Q21.625 11.375 20.77647 12.22353 L14.625 18.375 M21.2 11.375 L5.375 11.375 Q2.375 11.375 2.375 14.375 L2.375 19.625"/>
 </svg>
-<text x="270" y="1097" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<text x="270" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="492" y="920" width="224" height="195" rx="12" fill="white"/>
-<text x="506" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_reply</text>
+<text x="506" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_gallery</text>
 <svg x="508" y="980" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+  <path d="M6.125 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 17.875"/>
+  <path d="M2.375 9.125Q2.375 6.125 5.375 6.125L14.875 6.125Q17.875 6.125 17.875 9.125L17.875 18.625Q17.875 21.625 14.875 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 9.125Z"/>
+  <path d="M2.375 18.375L6.875 13.875Q7.625 13.125 8.375 13.875L10.625 16.125Q11.125 16.625 11.625 16.125L13.125 14.625Q13.625 14.125 14.125 14.625L17.875 18.375"/>
+  <path d="M7.85 10.625C7.85 11.23251 7.35751 11.725 6.75 11.725C6.14249 11.725 5.65 11.23251 5.65 10.625C5.65 10.01749 6.14249 9.525 6.75 9.525C7.35751 9.525 7.85 10.01749 7.85 10.625Z"/>
 </svg>
 <svg x="612" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+  <path d="M6.125 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 17.875"/>
+  <path d="M2.375 9.125Q2.375 6.125 5.375 6.125L14.875 6.125Q17.875 6.125 17.875 9.125L17.875 18.625Q17.875 21.625 14.875 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 9.125Z"/>
+  <path d="M2.375 18.375L6.875 13.875Q7.625 13.125 8.375 13.875L10.625 16.125Q11.125 16.625 11.625 16.125L13.125 14.625Q13.625 14.125 14.125 14.625L17.875 18.375"/>
+  <path d="M7.85 10.625C7.85 11.23251 7.35751 11.725 6.75 11.725C6.14249 11.725 5.65 11.23251 5.65 10.625C5.65 10.01749 6.14249 9.525 6.75 9.525C7.35751 9.525 7.85 10.01749 7.85 10.625Z"/>
 </svg>
 <rect x="657" y="992" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="669" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+  <path d="M6.125 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 17.875"/>
+  <path d="M2.375 9.125Q2.375 6.125 5.375 6.125L14.875 6.125Q17.875 6.125 17.875 9.125L17.875 18.625Q17.875 21.625 14.875 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 9.125Z"/>
+  <path d="M2.375 18.375L6.875 13.875Q7.625 13.125 8.375 13.875L10.625 16.125Q11.125 16.625 11.625 16.125L13.125 14.625Q13.625 14.125 14.125 14.625L17.875 18.375"/>
+  <path d="M7.85 10.625C7.85 11.23251 7.35751 11.725 6.75 11.725C6.14249 11.725 5.65 11.23251 5.65 10.625C5.65 10.01749 6.14249 9.525 6.75 9.525C7.35751 9.525 7.85 10.01749 7.85 10.625Z"/>
 </svg>
 <text x="506" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="728" y="920" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_search</text>
+<text x="742" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_image</text>
 <svg x="744" y="980" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
-  <path d="M15.51972 15.51972 21.625 21.625"/>
+  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
+  <circle cx="7.625" cy="7.625" r="1.5"/>
 </svg>
 <svg x="848" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
-  <path d="M15.51972 15.51972 21.625 21.625"/>
+  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
+  <circle cx="7.625" cy="7.625" r="1.5"/>
 </svg>
 <rect x="893" y="992" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="905" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
-  <path d="M15.51972 15.51972 21.625 21.625"/>
+  <path d="M5.375 2.375H18.625Q21.625 2.375 21.625 5.375V18.625Q21.625 21.625 18.625 21.625H5.375Q2.375 21.625 2.375 18.625V5.375Q2.375 2.375 5.375 2.375Z M2.375 17.875L7.875 12.375Q8.625 11.625 9.375 12.375L11.375 14.375Q12.125 15.125 12.875 14.375L14.875 12.375Q15.625 11.625 16.375 12.375L21.625 17.625"/>
+  <circle cx="7.625" cy="7.625" r="1.5"/>
 </svg>
 <text x="742" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 <rect x="964" y="920" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_settings</text>
+<text x="978" y="945" font-family="sans-serif" font-size="13" fill="#18212c">oi_image_save</text>
 <svg x="980" y="980" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.898 5.6062
-           Q9.7312 5.125 9.965 4.1914
-           L10.0846 3.7088
-           Q10.4187 2.375 11.7937 2.375
-           L12.2063 2.375
-           Q13.5813 2.375 13.9154 3.7088
-           L14.035 4.1914
-           Q14.2688 5.125 15.102 5.6062
-           L15.9861 6.1164
-           Q16.8194 6.5976 17.7448 6.3336
-           L18.2233 6.1961
-           Q19.5446 5.818 20.2321 7.0087
-           L20.4384 7.3663
-           Q21.1259 8.557 20.1372 9.5126
-           L19.7797 9.8577
-           Q19.0881 10.5274 19.0881 11.4899
-           L19.0881 12.5101
-           Q19.0881 13.4726 19.7797 14.1423
-           L20.1372 14.4874
-           Q21.1259 15.443 20.4384 16.6337
-           L20.2321 16.9913
-           Q19.5446 18.182 18.2233 17.8039
-           L17.7448 17.6664
-           Q16.8194 17.4024 15.9861 17.8836
-           L15.102 18.3937
-           Q14.2688 18.875 14.035 19.8086
-           L13.9154 20.2913
-           Q13.5813 21.625 12.2063 21.625
-           L11.7937 21.625
-           Q10.4187 21.625 10.0846 20.2913
-           L9.965 19.8086
-           Q9.7312 18.875 8.898 18.3937
-           L8.0139 17.8836
-           Q7.1806 17.4024 6.2553 17.6664
-           L5.7767 17.8039
-           Q4.4554 18.182 3.7679 16.9913
-           L3.5616 16.6337
-           Q2.8741 15.443 3.8628 14.4874
-           L4.2202 14.1423
-           Q4.9119 13.4726 4.9119 12.5101
-           L4.9119 11.4899
-           Q4.9119 10.5274 4.2202 9.8577
-           L3.8628 9.5126
-           Q2.8741 8.557 3.5616 7.3663
-           L3.7679 7.0087
-           Q4.4554 5.818 5.7767 6.1961
-           L6.2553 6.3336
-           Q7.1806 6.5976 8.0139 6.1164
-           Z"/>
-  <circle cx="12" cy="12" r="2.75"/>
+  <path d="M11.5 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 10.5"/>
+  <path d="M2.375 17.75L7.4 12.725Q8.2 11.925 9 12.725L11.2 14.925"/>
+  <path d="M18.125 13.75L18.125 21.225"/>
+  <path d="M14.625 18.125L17.525 21.025Q18.125 21.625 18.725 21.025L21.625 18.125"/>
+  <path d="M8.75 7.375C8.75 8.13439 8.13439 8.75 7.375 8.75C6.61561 8.75 6 8.13439 6 7.375C6 6.61561 6.61561 6 7.375 6C8.13439 6 8.75 6.61561 8.75 7.375Z"/>
 </svg>
 <svg x="1084" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.898 5.6062
-           Q9.7312 5.125 9.965 4.1914
-           L10.0846 3.7088
-           Q10.4187 2.375 11.7937 2.375
-           L12.2063 2.375
-           Q13.5813 2.375 13.9154 3.7088
-           L14.035 4.1914
-           Q14.2688 5.125 15.102 5.6062
-           L15.9861 6.1164
-           Q16.8194 6.5976 17.7448 6.3336
-           L18.2233 6.1961
-           Q19.5446 5.818 20.2321 7.0087
-           L20.4384 7.3663
-           Q21.1259 8.557 20.1372 9.5126
-           L19.7797 9.8577
-           Q19.0881 10.5274 19.0881 11.4899
-           L19.0881 12.5101
-           Q19.0881 13.4726 19.7797 14.1423
-           L20.1372 14.4874
-           Q21.1259 15.443 20.4384 16.6337
-           L20.2321 16.9913
-           Q19.5446 18.182 18.2233 17.8039
-           L17.7448 17.6664
-           Q16.8194 17.4024 15.9861 17.8836
-           L15.102 18.3937
-           Q14.2688 18.875 14.035 19.8086
-           L13.9154 20.2913
-           Q13.5813 21.625 12.2063 21.625
-           L11.7937 21.625
-           Q10.4187 21.625 10.0846 20.2913
-           L9.965 19.8086
-           Q9.7312 18.875 8.898 18.3937
-           L8.0139 17.8836
-           Q7.1806 17.4024 6.2553 17.6664
-           L5.7767 17.8039
-           Q4.4554 18.182 3.7679 16.9913
-           L3.5616 16.6337
-           Q2.8741 15.443 3.8628 14.4874
-           L4.2202 14.1423
-           Q4.9119 13.4726 4.9119 12.5101
-           L4.9119 11.4899
-           Q4.9119 10.5274 4.2202 9.8577
-           L3.8628 9.5126
-           Q2.8741 8.557 3.5616 7.3663
-           L3.7679 7.0087
-           Q4.4554 5.818 5.7767 6.1961
-           L6.2553 6.3336
-           Q7.1806 6.5976 8.0139 6.1164
-           Z"/>
-  <circle cx="12" cy="12" r="2.75"/>
+  <path d="M11.5 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 10.5"/>
+  <path d="M2.375 17.75L7.4 12.725Q8.2 11.925 9 12.725L11.2 14.925"/>
+  <path d="M18.125 13.75L18.125 21.225"/>
+  <path d="M14.625 18.125L17.525 21.025Q18.125 21.625 18.725 21.025L21.625 18.125"/>
+  <path d="M8.75 7.375C8.75 8.13439 8.13439 8.75 7.375 8.75C6.61561 8.75 6 8.13439 6 7.375C6 6.61561 6.61561 6 7.375 6C8.13439 6 8.75 6.61561 8.75 7.375Z"/>
 </svg>
 <rect x="1129" y="992" width="48" height="48" rx="8" fill="#18212c"/>
 <svg x="1141" y="1004" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M11.5 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 10.5"/>
+  <path d="M2.375 17.75L7.4 12.725Q8.2 11.925 9 12.725L11.2 14.925"/>
+  <path d="M18.125 13.75L18.125 21.225"/>
+  <path d="M14.625 18.125L17.525 21.025Q18.125 21.625 18.725 21.025L21.625 18.125"/>
+  <path d="M8.75 7.375C8.75 8.13439 8.13439 8.75 7.375 8.75C6.61561 8.75 6 8.13439 6 7.375C6 6.61561 6.61561 6 7.375 6C8.13439 6 8.75 6.61561 8.75 7.375Z"/>
+</svg>
+<text x="978" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="20" y="1127" width="224" height="195" rx="12" fill="white"/>
+<text x="34" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_image_unavailable</text>
+<svg x="36" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12.75 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 8.625L18.125 11.625L20.125 14.125L16.375 16.875L17.625 19.125"/>
+  <path d="M2.375 17.875L7.625 12.625Q8.375 11.875 9.125 12.625L12.5 16"/>
+  <path d="M8.875 7.5C8.875 8.25939 8.25939 8.875 7.5 8.875C6.74061 8.875 6.125 8.25939 6.125 7.5C6.125 6.74061 6.74061 6.125 7.5 6.125C8.25939 6.125 8.875 6.74061 8.875 7.5Z"/>
+</svg>
+<svg x="140" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12.75 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 8.625L18.125 11.625L20.125 14.125L16.375 16.875L17.625 19.125"/>
+  <path d="M2.375 17.875L7.625 12.625Q8.375 11.875 9.125 12.625L12.5 16"/>
+  <path d="M8.875 7.5C8.875 8.25939 8.25939 8.875 7.5 8.875C6.74061 8.875 6.125 8.25939 6.125 7.5C6.125 6.74061 6.74061 6.125 7.5 6.125C8.25939 6.125 8.875 6.74061 8.875 7.5Z"/>
+</svg>
+<rect x="185" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="197" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12.75 21.625L5.375 21.625Q2.375 21.625 2.375 18.625L2.375 5.375Q2.375 2.375 5.375 2.375L18.625 2.375Q21.625 2.375 21.625 5.375L21.625 8.625L18.125 11.625L20.125 14.125L16.375 16.875L17.625 19.125"/>
+  <path d="M2.375 17.875L7.625 12.625Q8.375 11.875 9.125 12.625L12.5 16"/>
+  <path d="M8.875 7.5C8.875 8.25939 8.25939 8.875 7.5 8.875C6.74061 8.875 6.125 8.25939 6.125 7.5C6.125 6.74061 6.74061 6.125 7.5 6.125C8.25939 6.125 8.875 6.74061 8.875 7.5Z"/>
+</svg>
+<text x="34" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="256" y="1127" width="224" height="195" rx="12" fill="white"/>
+<text x="270" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_info</text>
+<svg x="272" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="9.625"/>
+  <path d="M12 11V17 M12 7V7.01"/>
+</svg>
+<svg x="376" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="9.625"/>
+  <path d="M12 11V17 M12 7V7.01"/>
+</svg>
+<rect x="421" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="433" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="9.625"/>
+  <path d="M12 11V17 M12 7V7.01"/>
+</svg>
+<text x="270" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="492" y="1127" width="224" height="195" rx="12" fill="white"/>
+<text x="506" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_lock</text>
+<svg x="508" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625L16.25 10.625"/>
+</svg>
+<svg x="612" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625L16.25 10.625"/>
+</svg>
+<rect x="657" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="669" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625L16.25 10.625"/>
+</svg>
+<text x="506" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="728" y="1127" width="224" height="195" rx="12" fill="white"/>
+<text x="742" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_lock_open</text>
+<svg x="744" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625"/>
+</svg>
+<svg x="848" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625"/>
+</svg>
+<rect x="893" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="905" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.875 13.625Q4.875 10.625 7.875 10.625L16.125 10.625Q19.125 10.625 19.125 13.625L19.125 18.625Q19.125 21.625 16.125 21.625L7.875 21.625Q4.875 21.625 4.875 18.625L4.875 13.625Z"/>
+  <path d="M7.75 10.625L7.75 6.625Q7.75 2.375 12 2.375Q16.25 2.375 16.25 6.625"/>
+</svg>
+<text x="742" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="964" y="1127" width="224" height="195" rx="12" fill="white"/>
+<text x="978" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_paperclip</text>
+<svg x="980" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+</svg>
+<svg x="1084" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+</svg>
+<rect x="1129" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="1141" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M15.088628 6.704781 L8.973007 12.820402 A2.472574 2.472574 0 0 0 12.469755 16.31715 L19.025236 9.761668 A4.327004 4.327004 0 0 0 12.905928 3.64236 L5.475667 11.072621 A6.181435 6.181435 0 0 0 14.217536 19.81449 L20.334833 13.697192"/>
+</svg>
+<text x="978" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="20" y="1334" width="224" height="195" rx="12" fill="white"/>
+<text x="34" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_pause</text>
+<svg x="36" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
+  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+</svg>
+<svg x="140" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
+  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+</svg>
+<rect x="185" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="197" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 2.375L6.5 2.375L6.5 12L6.5 21.625L6.5 21.625"/>
+  <path d="M17.5 2.375L17.5 2.375L17.5 12L17.5 21.625L17.5 21.625"/>
+</svg>
+<text x="34" y="1511" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<rect x="256" y="1334" width="224" height="195" rx="12" fill="white"/>
+<text x="270" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_pin</text>
+<svg x="272" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+</svg>
+<svg x="376" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+</svg>
+<rect x="421" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="433" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L16.16602 14.72946 Q15.39986 15.49563 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q8.50437 8.60014 9.27054 7.83398 L13.2929 3.81161 Z M8.69591 15.30409 L2.37505 21.62495"/>
+</svg>
+<text x="270" y="1511" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="492" y="1334" width="224" height="195" rx="12" fill="white"/>
+<text x="506" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_play</text>
+<svg x="508" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+</svg>
+<svg x="612" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+</svg>
+<rect x="657" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="669" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 12L4.5 4.375Q4.5 2.375 6.24349 3.35492L20.57891 11.41205Q21.625 12 20.57891 12.58795L6.24349 20.64508Q4.5 21.625 4.5 19.625L4.5 12"/>
+</svg>
+<text x="506" y="1511" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<rect x="728" y="1334" width="224" height="195" rx="12" fill="white"/>
+<text x="742" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_plus</text>
+<svg x="744" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
+  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+</svg>
+<svg x="848" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
+  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+</svg>
+<rect x="893" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="905" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375L12 2.375L12 12L12 21.625L12 21.625"/>
+  <path d="M2.375 12L2.375 12L12 12L21.625 12L21.625 12"/>
+</svg>
+<text x="742" y="1511" font-family="sans-serif" font-size="11" fill="#657080">MorphIcon</text>
+<rect x="964" y="1334" width="224" height="195" rx="12" fill="white"/>
+<text x="978" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_replay</text>
+<svg x="980" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375C16.59184 2.375 20.54423 5.61865 21.44006 10.12226C22.33588 14.62586 19.92564 19.13512 15.68333 20.89234C11.44102 22.64956 6.54819 21.16534 3.9971 17.34736C1.44602 13.52939 1.94718 8.44102 5.1941 5.1941"/>
+  <path d="M2.4441 4.9441L4.4441 4.9441Q5.4441 4.9441 5.4441 5.9441L5.4441 7.9441"/>
+  <path d="M9.7 8.775Q9.7 8.125 10.25544 8.46262L15.51956 11.66238Q16.075 12 15.51956 12.33762L10.25544 15.53738Q9.7 15.875 9.7 15.225L9.7 8.775Z"/>
+</svg>
+<svg x="1084" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375C16.59184 2.375 20.54423 5.61865 21.44006 10.12226C22.33588 14.62586 19.92564 19.13512 15.68333 20.89234C11.44102 22.64956 6.54819 21.16534 3.9971 17.34736C1.44602 13.52939 1.94718 8.44102 5.1941 5.1941"/>
+  <path d="M2.4441 4.9441L4.4441 4.9441Q5.4441 4.9441 5.4441 5.9441L5.4441 7.9441"/>
+  <path d="M9.7 8.775Q9.7 8.125 10.25544 8.46262L15.51956 11.66238Q16.075 12 15.51956 12.33762L10.25544 15.53738Q9.7 15.875 9.7 15.225L9.7 8.775Z"/>
+</svg>
+<rect x="1129" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="1141" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 2.375C16.59184 2.375 20.54423 5.61865 21.44006 10.12226C22.33588 14.62586 19.92564 19.13512 15.68333 20.89234C11.44102 22.64956 6.54819 21.16534 3.9971 17.34736C1.44602 13.52939 1.94718 8.44102 5.1941 5.1941"/>
+  <path d="M2.4441 4.9441L4.4441 4.9441Q5.4441 4.9441 5.4441 5.9441L5.4441 7.9441"/>
+  <path d="M9.7 8.775Q9.7 8.125 10.25544 8.46262L15.51956 11.66238Q16.075 12 15.51956 12.33762L10.25544 15.53738Q9.7 15.875 9.7 15.225L9.7 8.775Z"/>
+</svg>
+<text x="978" y="1511" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="20" y="1541" width="224" height="195" rx="12" fill="white"/>
+<text x="34" y="1566" font-family="sans-serif" font-size="13" fill="#18212c">oi_reply</text>
+<svg x="36" y="1601" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+</svg>
+<svg x="140" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+</svg>
+<rect x="185" y="1613" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="197" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.375 4.375L3.22353 10.52647Q2.375 11.375 3.22353 12.22353L9.375 18.375 M2.8 11.375H18.625Q21.625 11.375 21.625 14.375V19.625"/>
+</svg>
+<text x="34" y="1718" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="256" y="1541" width="224" height="195" rx="12" fill="white"/>
+<text x="270" y="1566" font-family="sans-serif" font-size="13" fill="#18212c">oi_search</text>
+<svg x="272" y="1601" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
+  <path d="M15.51972 15.51972 21.625 21.625"/>
+</svg>
+<svg x="376" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
+  <path d="M15.51972 15.51972 21.625 21.625"/>
+</svg>
+<rect x="421" y="1613" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="433" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.375 10.075A7.7 7.7 0 1 0 17.775 10.075A7.7 7.7 0 1 0 2.375 10.075Z"/>
+  <path d="M15.51972 15.51972 21.625 21.625"/>
+</svg>
+<text x="270" y="1718" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="492" y="1541" width="224" height="195" rx="12" fill="white"/>
+<text x="506" y="1566" font-family="sans-serif" font-size="13" fill="#18212c">oi_settings</text>
+<svg x="508" y="1601" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M8.898 5.6062
            Q9.7312 5.125 9.965 4.1914
            L10.0846 3.7088
@@ -515,98 +681,231 @@
            Z"/>
   <circle cx="12" cy="12" r="2.75"/>
 </svg>
-<text x="978" y="1097" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="20" y="1127" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_trash</text>
-<svg x="36" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<svg x="612" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.898 5.6062
+           Q9.7312 5.125 9.965 4.1914
+           L10.0846 3.7088
+           Q10.4187 2.375 11.7937 2.375
+           L12.2063 2.375
+           Q13.5813 2.375 13.9154 3.7088
+           L14.035 4.1914
+           Q14.2688 5.125 15.102 5.6062
+           L15.9861 6.1164
+           Q16.8194 6.5976 17.7448 6.3336
+           L18.2233 6.1961
+           Q19.5446 5.818 20.2321 7.0087
+           L20.4384 7.3663
+           Q21.1259 8.557 20.1372 9.5126
+           L19.7797 9.8577
+           Q19.0881 10.5274 19.0881 11.4899
+           L19.0881 12.5101
+           Q19.0881 13.4726 19.7797 14.1423
+           L20.1372 14.4874
+           Q21.1259 15.443 20.4384 16.6337
+           L20.2321 16.9913
+           Q19.5446 18.182 18.2233 17.8039
+           L17.7448 17.6664
+           Q16.8194 17.4024 15.9861 17.8836
+           L15.102 18.3937
+           Q14.2688 18.875 14.035 19.8086
+           L13.9154 20.2913
+           Q13.5813 21.625 12.2063 21.625
+           L11.7937 21.625
+           Q10.4187 21.625 10.0846 20.2913
+           L9.965 19.8086
+           Q9.7312 18.875 8.898 18.3937
+           L8.0139 17.8836
+           Q7.1806 17.4024 6.2553 17.6664
+           L5.7767 17.8039
+           Q4.4554 18.182 3.7679 16.9913
+           L3.5616 16.6337
+           Q2.8741 15.443 3.8628 14.4874
+           L4.2202 14.1423
+           Q4.9119 13.4726 4.9119 12.5101
+           L4.9119 11.4899
+           Q4.9119 10.5274 4.2202 9.8577
+           L3.8628 9.5126
+           Q2.8741 8.557 3.5616 7.3663
+           L3.7679 7.0087
+           Q4.4554 5.818 5.7767 6.1961
+           L6.2553 6.3336
+           Q7.1806 6.5976 8.0139 6.1164
+           Z"/>
+  <circle cx="12" cy="12" r="2.75"/>
+</svg>
+<rect x="657" y="1613" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="669" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.898 5.6062
+           Q9.7312 5.125 9.965 4.1914
+           L10.0846 3.7088
+           Q10.4187 2.375 11.7937 2.375
+           L12.2063 2.375
+           Q13.5813 2.375 13.9154 3.7088
+           L14.035 4.1914
+           Q14.2688 5.125 15.102 5.6062
+           L15.9861 6.1164
+           Q16.8194 6.5976 17.7448 6.3336
+           L18.2233 6.1961
+           Q19.5446 5.818 20.2321 7.0087
+           L20.4384 7.3663
+           Q21.1259 8.557 20.1372 9.5126
+           L19.7797 9.8577
+           Q19.0881 10.5274 19.0881 11.4899
+           L19.0881 12.5101
+           Q19.0881 13.4726 19.7797 14.1423
+           L20.1372 14.4874
+           Q21.1259 15.443 20.4384 16.6337
+           L20.2321 16.9913
+           Q19.5446 18.182 18.2233 17.8039
+           L17.7448 17.6664
+           Q16.8194 17.4024 15.9861 17.8836
+           L15.102 18.3937
+           Q14.2688 18.875 14.035 19.8086
+           L13.9154 20.2913
+           Q13.5813 21.625 12.2063 21.625
+           L11.7937 21.625
+           Q10.4187 21.625 10.0846 20.2913
+           L9.965 19.8086
+           Q9.7312 18.875 8.898 18.3937
+           L8.0139 17.8836
+           Q7.1806 17.4024 6.2553 17.6664
+           L5.7767 17.8039
+           Q4.4554 18.182 3.7679 16.9913
+           L3.5616 16.6337
+           Q2.8741 15.443 3.8628 14.4874
+           L4.2202 14.1423
+           Q4.9119 13.4726 4.9119 12.5101
+           L4.9119 11.4899
+           Q4.9119 10.5274 4.2202 9.8577
+           L3.8628 9.5126
+           Q2.8741 8.557 3.5616 7.3663
+           L3.7679 7.0087
+           Q4.4554 5.818 5.7767 6.1961
+           L6.2553 6.3336
+           Q7.1806 6.5976 8.0139 6.1164
+           Z"/>
+  <circle cx="12" cy="12" r="2.75"/>
+</svg>
+<text x="506" y="1718" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="728" y="1541" width="224" height="195" rx="12" fill="white"/>
+<text x="742" y="1566" font-family="sans-serif" font-size="13" fill="#18212c">oi_torch</text>
+<svg x="744" y="1601" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.375 7L17.625 7L17.625 9Q17.625 9.6 17.25 10L15 12.5L15 19.875Q15 21.625 13.25 21.625L10.75 21.625Q9 21.625 9 19.875L9 12.5L6.75 10Q6.375 9.6 6.375 9L6.375 7Z"/>
+  <path d="M6.375 9.75L17.625 9.75"/>
+  <path d="M12 15.25L12 17.5"/>
+  <path d="M12 2.375L12 3.75"/>
+  <path d="M6.25 3.25L7.25 4.25"/>
+  <path d="M17.75 3.25L16.75 4.25"/>
+</svg>
+<svg x="848" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.375 7L17.625 7L17.625 9Q17.625 9.6 17.25 10L15 12.5L15 19.875Q15 21.625 13.25 21.625L10.75 21.625Q9 21.625 9 19.875L9 12.5L6.75 10Q6.375 9.6 6.375 9L6.375 7Z"/>
+  <path d="M6.375 9.75L17.625 9.75"/>
+  <path d="M12 15.25L12 17.5"/>
+  <path d="M12 2.375L12 3.75"/>
+  <path d="M6.25 3.25L7.25 4.25"/>
+  <path d="M17.75 3.25L16.75 4.25"/>
+</svg>
+<rect x="893" y="1613" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="905" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.375 7L17.625 7L17.625 9Q17.625 9.6 17.25 10L15 12.5L15 19.875Q15 21.625 13.25 21.625L10.75 21.625Q9 21.625 9 19.875L9 12.5L6.75 10Q6.375 9.6 6.375 9L6.375 7Z"/>
+  <path d="M6.375 9.75L17.625 9.75"/>
+  <path d="M12 15.25L12 17.5"/>
+  <path d="M12 2.375L12 3.75"/>
+  <path d="M6.25 3.25L7.25 4.25"/>
+  <path d="M17.75 3.25L16.75 4.25"/>
+</svg>
+<text x="742" y="1718" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="964" y="1541" width="224" height="195" rx="12" fill="white"/>
+<text x="978" y="1566" font-family="sans-serif" font-size="13" fill="#18212c">oi_trash</text>
+<svg x="980" y="1601" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M3.5 5.5H20.5M8.75 5.5V4.875Q8.75 2.375 11.25 2.375H12.75Q15.25 2.375 15.25 4.875V5.5M5 8.25L6.05 18.625Q6.35 21.625 9.35 21.625H14.65Q17.65 21.625 17.95 18.625L19 8.25"/>
 </svg>
-<svg x="140" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<svg x="1084" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M3.5 5.5H20.5M8.75 5.5V4.875Q8.75 2.375 11.25 2.375H12.75Q15.25 2.375 15.25 4.875V5.5M5 8.25L6.05 18.625Q6.35 21.625 9.35 21.625H14.65Q17.65 21.625 17.95 18.625L19 8.25"/>
 </svg>
-<rect x="185" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="197" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<rect x="1129" y="1613" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="1141" y="1625" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M3.5 5.5H20.5M8.75 5.5V4.875Q8.75 2.375 11.25 2.375H12.75Q15.25 2.375 15.25 4.875V5.5M5 8.25L6.05 18.625Q6.35 21.625 9.35 21.625H14.65Q17.65 21.625 17.95 18.625L19 8.25"/>
 </svg>
-<text x="34" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="256" y="1127" width="224" height="195" rx="12" fill="white"/>
-<text x="270" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_unpin</text>
-<svg x="272" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.14774 13.74774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.25226 6.85226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
+<text x="978" y="1718" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="20" y="1748" width="224" height="195" rx="12" fill="white"/>
+<text x="34" y="1773" font-family="sans-serif" font-size="13" fill="#18212c">oi_unpin</text>
+<svg x="36" y="1808" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.74774 13.14774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.85226 6.25226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
 </svg>
-<svg x="376" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.14774 13.74774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.25226 6.85226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
+<svg x="140" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.74774 13.14774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.85226 6.25226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
 </svg>
-<rect x="421" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="433" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.14774 13.74774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.25226 6.85226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
+<rect x="185" y="1820" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="197" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.2929 3.81161 Q16.16602 0.93849 19.03914 3.81161 L20.18839 4.96086 Q23.06151 7.83398 20.18839 10.7071 L17.74774 13.14774 M15.5914 15.5914 Q15.39986 16.07025 15.39986 16.64488 L15.39986 19.518 Q15.39986 22.00803 13.58022 20.18839 L3.81161 10.41978 Q1.99197 8.60014 4.482 8.60014 L7.35512 8.60014 Q7.92975 8.60014 8.4086 8.4086 M10.85226 6.25226 L13.2929 3.81161 M8.69591 15.30409 L2.37505 21.62495 M2.375 2.375L21.625 21.625"/>
 </svg>
-<text x="270" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="492" y="1127" width="224" height="195" rx="12" fill="white"/>
-<text x="506" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_user</text>
-<svg x="508" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<text x="34" y="1925" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="256" y="1748" width="224" height="195" rx="12" fill="white"/>
+<text x="270" y="1773" font-family="sans-serif" font-size="13" fill="#18212c">oi_user</text>
+<svg x="272" y="1808" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="6.86667" r="4.49167"/>
   <path d="M3.65833 21.625V20.98333A6.41667 6.41667 0 0 1 10.075 14.56667H13.925A6.41667 6.41667 0 0 1 20.34167 20.98333V21.625"/>
 </svg>
-<svg x="612" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<svg x="376" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="6.86667" r="4.49167"/>
   <path d="M3.65833 21.625V20.98333A6.41667 6.41667 0 0 1 10.075 14.56667H13.925A6.41667 6.41667 0 0 1 20.34167 20.98333V21.625"/>
 </svg>
-<rect x="657" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="669" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<rect x="421" y="1820" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="433" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="6.86667" r="4.49167"/>
   <path d="M3.65833 21.625V20.98333A6.41667 6.41667 0 0 1 10.075 14.56667H13.925A6.41667 6.41667 0 0 1 20.34167 20.98333V21.625"/>
 </svg>
-<text x="506" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="728" y="1127" width="224" height="195" rx="12" fill="white"/>
-<text x="742" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_user_circle</text>
-<svg x="744" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<text x="270" y="1925" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="492" y="1748" width="224" height="195" rx="12" fill="white"/>
+<text x="506" y="1773" font-family="sans-serif" font-size="13" fill="#18212c">oi_user_circle</text>
+<svg x="508" y="1808" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="9.625"/>
   <circle cx="12" cy="9.43333" r="2.56667"/>
   <path d="M6.225 19.7A4.49167 4.49167 0 0 1 10.71667 15.20833H13.28333A4.49167 4.49167 0 0 1 17.775 19.7"/>
 </svg>
-<svg x="848" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<svg x="612" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="9.625"/>
   <circle cx="12" cy="9.43333" r="2.56667"/>
   <path d="M6.225 19.7A4.49167 4.49167 0 0 1 10.71667 15.20833H13.28333A4.49167 4.49167 0 0 1 17.775 19.7"/>
 </svg>
-<rect x="893" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="905" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<rect x="657" y="1820" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="669" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="9.625"/>
   <circle cx="12" cy="9.43333" r="2.56667"/>
   <path d="M6.225 19.7A4.49167 4.49167 0 0 1 10.71667 15.20833H13.28333A4.49167 4.49167 0 0 1 17.775 19.7"/>
 </svg>
-<text x="742" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="964" y="1127" width="224" height="195" rx="12" fill="white"/>
-<text x="978" y="1152" font-family="sans-serif" font-size="13" fill="#18212c">oi_volume</text>
-<svg x="980" y="1187" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<text x="506" y="1925" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="728" y="1748" width="224" height="195" rx="12" fill="white"/>
+<text x="742" y="1773" font-family="sans-serif" font-size="13" fill="#18212c">oi_volume</text>
+<svg x="744" y="1808" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
   <path d="M16.5 3.491732A9.625 9.625 0 0 1 16.5 20.508268M16.5 8.031373A6 6 0 0 1 16.5 15.968627"/>
 </svg>
-<svg x="1084" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<svg x="848" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
   <path d="M16.5 3.491732A9.625 9.625 0 0 1 16.5 20.508268M16.5 8.031373A6 6 0 0 1 16.5 15.968627"/>
 </svg>
-<rect x="1129" y="1199" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="1141" y="1211" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+<rect x="893" y="1820" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="905" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
   <path d="M16.5 3.491732A9.625 9.625 0 0 1 16.5 20.508268M16.5 8.031373A6 6 0 0 1 16.5 15.968627"/>
 </svg>
-<text x="978" y="1304" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
-<rect x="20" y="1334" width="224" height="195" rx="12" fill="white"/>
-<text x="34" y="1359" font-family="sans-serif" font-size="13" fill="#18212c">oi_volume_off</text>
-<svg x="36" y="1394" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
-  <path d="M17.125 9.75L21.625 14.25M21.625 9.75L17.125 14.25"/>
+<text x="742" y="1925" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<rect x="964" y="1748" width="224" height="195" rx="12" fill="white"/>
+<text x="978" y="1773" font-family="sans-serif" font-size="13" fill="#18212c">oi_volume_off</text>
+<svg x="980" y="1808" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.875 7.75 L4.375 7.75 Q2.375 7.75 2.375 9.75 L2.375 14.25 Q2.375 16.25 4.375 16.25 L5.875 16.25 Q6.5 16.25 7 16.75 L11.25 20.75 Q13.75 22.7 13.75 19.65 L13.75 13.75 M13.75 9.15 L13.75 4.35 Q13.75 1.3 11.25 3.25 L9.49848 4.89848 M7.12879 7.12879 L7 7.25 Q6.5 7.75 5.875 7.75 M2.375 2.375L21.625 21.625"/>
+  <path d="M16.5 3.49173A9.625 9.625 0 0 1 20.70549 16.10549M18.8059 18.8059A9.625 9.625 0 0 1 16.5 20.50827M16.5 8.03137A6 6 0 0 1 17.86511 13.26511"/>
 </svg>
-<svg x="140" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
-  <path d="M17.125 9.75L21.625 14.25M21.625 9.75L17.125 14.25"/>
+<svg x="1084" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18212c" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.875 7.75 L4.375 7.75 Q2.375 7.75 2.375 9.75 L2.375 14.25 Q2.375 16.25 4.375 16.25 L5.875 16.25 Q6.5 16.25 7 16.75 L11.25 20.75 Q13.75 22.7 13.75 19.65 L13.75 13.75 M13.75 9.15 L13.75 4.35 Q13.75 1.3 11.25 3.25 L9.49848 4.89848 M7.12879 7.12879 L7 7.25 Q6.5 7.75 5.875 7.75 M2.375 2.375L21.625 21.625"/>
+  <path d="M16.5 3.49173A9.625 9.625 0 0 1 20.70549 16.10549M18.8059 18.8059A9.625 9.625 0 0 1 16.5 20.50827M16.5 8.03137A6 6 0 0 1 17.86511 13.26511"/>
 </svg>
-<rect x="185" y="1406" width="48" height="48" rx="8" fill="#18212c"/>
-<svg x="197" y="1418" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5.875 7.75H4.375Q2.375 7.75 2.375 9.75V14.25Q2.375 16.25 4.375 16.25H5.875Q6.5 16.25 7 16.75L11.25 20.75Q13.75 22.7 13.75 19.65V4.35Q13.75 1.3 11.25 3.25L7 7.25Q6.5 7.75 5.875 7.75Z"/>
-  <path d="M17.125 9.75L21.625 14.25M21.625 9.75L17.125 14.25"/>
+<rect x="1129" y="1820" width="48" height="48" rx="8" fill="#18212c"/>
+<svg x="1141" y="1832" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f5f6f8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.875 7.75 L4.375 7.75 Q2.375 7.75 2.375 9.75 L2.375 14.25 Q2.375 16.25 4.375 16.25 L5.875 16.25 Q6.5 16.25 7 16.75 L11.25 20.75 Q13.75 22.7 13.75 19.65 L13.75 13.75 M13.75 9.15 L13.75 4.35 Q13.75 1.3 11.25 3.25 L9.49848 4.89848 M7.12879 7.12879 L7 7.25 Q6.5 7.75 5.875 7.75 M2.375 2.375L21.625 21.625"/>
+  <path d="M16.5 3.49173A9.625 9.625 0 0 1 20.70549 16.10549M18.8059 18.8059A9.625 9.625 0 0 1 16.5 20.50827M16.5 8.03137A6 6 0 0 1 17.86511 13.26511"/>
 </svg>
-<text x="34" y="1511" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
+<text x="978" y="1925" font-family="sans-serif" font-size="11" fill="#657080">VectorDrawable</text>
 </svg>

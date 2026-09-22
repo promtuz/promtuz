@@ -1,0 +1,13 @@
+{
+  "hero": {"sizeDp":72,"discBlackAlpha":0.4,"ringWidthDp":1,"ringWhiteAlpha":0.3,"playOpticalOffsetXDp":2},
+  "playBadge": {"sizeDp":28,"discBlackAlpha":0.4,"ringWidthDp":1,"ringWhiteAlpha":0.3,"placement":"bottom-left beside duration"},
+  "buffering": {"arcWidthDp":2,"arcRadiusDp":27,"revolutionMs":1200},
+  "shutter": {"sizeDp":80,"idleRingRadiusDp":34,"recordRingRadiusDp":38,"ringWidthDp":4,"discInsetFromRingInnerEdgeDp":6,"pressScale":0.9,"recordSquareDp":26,"recordSquareCornerSetbackDp":5,"progress":"elapsed / maxClipLength, supplied by host","recordColor":"#FF4D5E"},
+  "zoomChip": {"heightDp":32,"collapsedWidthDp":48,"cornerRadiusDp":16,"blackAlpha":0.3,"textStyle":"MaterialTheme.typography.labelMedium","initialLabel":"1×","expandedTrack":"host-selected width; preview uses 218 dp pill","limits":"use supported camera zoom range; preview 1–8 is illustrative"},
+  "mediaUnavailable": {"sizeDp":48,"alpha":0.6},
+  "cameraPermission": {"sizeDp":96,"alpha":0.6,"symbol":"camera with lock; no slash"},
+  "recordIndicator": {"sizeDp":10,"periodMs":1000,"color":"#FF4D5E"},
+  "attachmentCamera": {"resource":"oi_camera","sizeDp":20,"placement":"top-left"},
+  "filmMark": {"resource":"oi_film","sizeDp":14},
+  "fileTypes": {"sizeDp":28,"baseTint":"content color","badgeTint":"bubble accent","labelTint":"contrast color on accent; white by default"}
+}

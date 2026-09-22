@@ -23,20 +23,34 @@ resource-based settings list. Compose controls use the matching morph glyphs.
 | --- | --- |
 | Broom | [oi_broom.svg](oi_broom.svg) |
 | Camera | [oi_camera.svg](oi_camera.svg) |
+| Camera permission | [oi_camera_permission.svg](oi_camera_permission.svg) |
 | Check | [oi_check.svg](oi_check.svg) |
 | Code | [oi_code.svg](oi_code.svg) |
 | Copy | [oi_copy.svg](oi_copy.svg) |
 | Edit | [oi_edit.svg](oi_edit.svg) |
 | Export | [oi_export.svg](oi_export.svg) |
 | External link | [oi_external_link.svg](oi_external_link.svg) |
+| File attachment | [oi_file_attachment.svg](oi_file_attachment.svg) |
+| Film | [oi_film.svg](oi_film.svg) |
+| Flash | [oi_flash.svg](oi_flash.svg) |
+| Flash auto | [oi_flash_auto.svg](oi_flash_auto.svg) |
+| Flash off | [oi_flash_off.svg](oi_flash_off.svg) |
+| Flip lens | [oi_camera_flip.svg](oi_camera_flip.svg) |
 | Forward | [oi_forward.svg](oi_forward.svg) |
+| Gallery | [oi_gallery.svg](oi_gallery.svg) |
 | Image | [oi_image.svg](oi_image.svg) |
 | Info | [oi_info.svg](oi_info.svg) |
+| Lock | [oi_lock.svg](oi_lock.svg) |
+| Lock open | [oi_lock_open.svg](oi_lock_open.svg) |
+| Media unavailable | [oi_image_unavailable.svg](oi_image_unavailable.svg) |
 | Paperclip | [oi_paperclip.svg](oi_paperclip.svg) |
 | Pin | [oi_pin.svg](oi_pin.svg) |
+| Replay | [oi_replay.svg](oi_replay.svg) |
 | Reply | [oi_reply.svg](oi_reply.svg) |
+| Save to gallery | [oi_image_save.svg](oi_image_save.svg) |
 | Search | [oi_search.svg](oi_search.svg) |
 | Settings | [oi_settings.svg](oi_settings.svg) |
+| Torch | [oi_torch.svg](oi_torch.svg) |
 | Trash | [oi_trash.svg](oi_trash.svg) |
 | Unpin | [oi_unpin.svg](oi_unpin.svg) |
 | User | [oi_user.svg](oi_user.svg) |
@@ -89,11 +103,22 @@ MorphIcon(
 
 Pin/unpin and volume/volume-off are static SVGs in this directory, not morph
 glyphs. Each pair shares identical base coordinates and scale. The unpin slash
-connects to the left side of the pin, with clearance on the opposite side.
-Volume uses concentric circular waves; volume-off replaces both waves with a
-larger, separated cross. Volume names describe the depicted sound state, so
+connects to the left side of the pin, with 1.5 units of visible clearance on the
+opposite side.
+Volume and volume-off share concentric circular waves. Volume-off adds a
+diagonal slash, connected on the left with the same 1.5-unit visible clearance
+on the opposite side. Volume names describe the depicted sound state, so
 choose the action label independently at the call site. Trash uses a plain open
 bin with a rounded handle.
+
+## Media and camera controls
+
+The [media/camera asset guide](../media-camera/README.md) covers composed controls,
+file-type badges, Lottie markers, progress rings, and the interactive preview.
+Their size and color requirements are separate from the ordinary outlined SVGs.
+Rebuild those platform assets with `python3 tools/scripts/build_media_icon_assets.py`.
+Camera permission uses a camera with a lock and keeps the original centered lens.
+The unused camera-off extra is deferred pending a better alternative.
 
 ## Deferred families
 

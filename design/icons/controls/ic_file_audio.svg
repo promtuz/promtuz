@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.125 12L5.125 5.375Q5.125 2.375 8.125 2.375L13.625 2.375Q14.25 2.375 14.75 2.875L18.375 6.5Q18.875 7 18.875 7.625L18.875 12"/>
+  <path d="M13.625 2.375L13.625 6Q13.625 7.625 15.25 7.625L18.625 7.625"/>
+<path id="badge" d="M2.375 15.125Q2.375 13.125 4.375 13.125L19.625 13.125Q21.625 13.125 21.625 15.125L21.625 19.625Q21.625 21.625 19.625 21.625L4.375 21.625Q2.375 21.625 2.375 19.625L2.375 15.125Z" fill="#3868A7" stroke="none"/>
+<g id="label" stroke="#FFFFFF" stroke-width="0.9"><path d="M7 17L7 18"/><path d="M9.5 15.75L9.5 19.25"/><path d="M12 14.75L12 20.25"/><path d="M14.5 16L14.5 19"/><path d="M17 17L17 18"/></g>
+</svg>
