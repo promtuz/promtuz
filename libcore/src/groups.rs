@@ -14,6 +14,9 @@
 //! member may leave. That is a policy check here, not a protocol rule, so
 //! loosening it later needs no wire change.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -22,6 +25,9 @@ use common::proto::mls_wire::SystemEvent;
 use ed25519_dalek::SigningKey;
 use log::info;
 use log::warn;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex as PlMutex;
+use tokio::sync::Mutex as TokMutex;
 
 use crate::data::conversation::Conversation;
 use crate::data::conversation::KIND_GROUP;
@@ -32,6 +38,7 @@ use crate::mls::MlsGroupHandle;
 use crate::mls::PromtuzMlsProvider;
 use crate::db::mls::stash_db_handle;
 use crate::db::outbox::OpType;
+use crate::delivery;
 use crate::messaging::MlsContext;
 use crate::messaging::SealedMessage;
 use crate::quic::dht_client::DhtClient;
@@ -63,6 +70,64 @@ macro_rules! with_mls {
         };
         $body
     }};
+}
+
+/// One membership change per conversation at a time.
+///
+/// Every FFI call spawns its own task and an inbound leave spawns
+/// [`carry_leave`], so without this two changes could interleave: one awaiting
+/// a Welcome delivery with its commit pending while the other loads the group,
+/// takes that commit for a leftover, and builds its own over it. Same shape as
+/// the group-creation lock in `messaging`: the outer mutex guards the map and
+/// is never held across an await; the inner one is what a change holds for its
+/// whole run, network round trips included. Entries are never removed; each is
+/// a few words, one per group changed this session.
+#[allow(clippy::type_complexity)]
+static MEMBERSHIP_LOCKS: Lazy<PlMutex<HashMap<[u8; 16], Arc<TokMutex<()>>>>> =
+    Lazy::new(|| PlMutex::new(HashMap::new()));
+
+fn membership_lock(conversation: &[u8; 16]) -> Arc<TokMutex<()>> {
+    MEMBERSHIP_LOCKS
+        .lock()
+        .entry(*conversation)
+        .or_insert_with(|| Arc::new(TokMutex::new(())))
+        .clone()
+}
+
+/// What to do with a commit found still pending as a change begins.
+///
+/// It belongs to a change that died before merging, and whether members ever
+/// saw it decides everything. One that left the device (its outbox rows were
+/// written, so members hold it or will) has to be merged, or founder and
+/// members part ways at the next epoch; one that never left has to be dropped,
+/// or openmls refuses every change over it. The mark written with the rows is
+/// what tells the two apart, keyed on the epoch the commit was built at, which
+/// is where a group with a pending commit still stands.
+///
+/// A merged recovery re-reads the roster from the tree. The system event the
+/// original change would have announced is lost with it: a missing line of
+/// narration, not a missing member.
+fn recover(
+    group: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, conversation: &[u8; 16],
+) -> Result<()> {
+    if !group.has_pending_commit() {
+        return Ok(());
+    }
+    let gid = group.group_id();
+    if delivery::commit_left(&gid, group.epoch()) {
+        warn!("GROUP: merging a commit that left before it was merged ({})", hex::encode(&gid[..4]));
+        group
+            .merge_pending_commit(provider)
+            .map_err(|e| anyhow!("merge recovered commit: {e}"))?;
+        delivery::commit_settled(&gid);
+        Conversation::sync_roster(conversation, &group.roster())?;
+    } else {
+        warn!("GROUP: dropping a commit that never left ({})", hex::encode(&gid[..4]));
+        group
+            .clear_pending_commit(provider)
+            .map_err(|e| anyhow!("drop unmerged commit: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Create a group with `members` and us as the founding admin.
@@ -150,6 +215,8 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
 /// the joiner. They get no pre-join history — MLS forward secrecy means the
 /// keys for it no longer exist.
 pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
+    let lock = membership_lock(&conversation);
+    let _one_at_a_time = lock.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     require_admin(&conversation, &our_ipk)?;
     let group_id = require_group(&conversation)?;
@@ -163,6 +230,7 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
             .await
             .map_err(|e| no_keys_error(&who, e))?;
         let mut group = load_group(ctx.provider, &group_id)?;
+        recover(&mut group, ctx.provider, &conversation)?;
 
         if group.member_count() + 1 > crate::mls::MAX_GROUP_MEMBERS {
             bail!("a group is limited to {} members", crate::mls::MAX_GROUP_MEMBERS);
@@ -177,14 +245,19 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
         let env = crate::mls::make_welcome_envelope(
             welcome, group_id, our_ipk, who, kp_ref, &ipk_signer,
         )
-        .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
-        ctx.dht.deliver_welcome(&env).await.map_err(|e| anyhow!("deliver_welcome: {e}"))?;
+        .map_err(|e| abandon(&mut group, ctx.provider, anyhow!("make_welcome_envelope: {e}")))?;
+        ctx.dht
+            .deliver_welcome(&env)
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, anyhow!("deliver_welcome: {e}")))?;
 
         fan_out_commit(&conversation, &commit, group_id, commit_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
+        delivery::commit_settled(&group_id);
 
         Conversation::sync_roster(&conversation, &group.roster())?;
         crate::messaging::announce(
@@ -228,6 +301,8 @@ pub async fn carry_leave(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
 }
 
 async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<()> {
+    let lock = membership_lock(&conversation);
+    let _one_at_a_time = lock.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     require_admin(&conversation, &our_ipk)?;
     let group_id = require_group(&conversation)?;
@@ -237,6 +312,7 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
 
     with_mls!(ctx, {
         let mut group = load_group(ctx.provider, &group_id)?;
+        recover(&mut group, ctx.provider, &conversation)?;
         let idx = group
             .member_index_by_ipk(&who)
             .ok_or_else(|| anyhow!("that member is not in this group"))?;
@@ -250,10 +326,12 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
             .remove_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[idx])
             .map_err(|e| anyhow!("remove_members: {e}"))?;
         fan_out_commit_to(&recipients, &commit, group_id, commit_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
+        delivery::commit_settled(&group_id);
 
         // The tree, not our intent, is the roster: the commit may have
         // carried more than this one removal.
@@ -267,10 +345,12 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
             .map_err(|e| anyhow!("self_update: {e}"))?;
         let remaining = Conversation::recipients(&conversation);
         fan_out_commit_to(&remaining, &update, group_id, rotate_epoch, &our_ipk, &ipk_signer)
-            .await?;
+            .await
+            .map_err(|e| abandon(&mut group, ctx.provider, e))?;
         group
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit after self_update: {e}"))?;
+        delivery::commit_settled(&group_id);
 
         if announce {
             crate::messaging::announce(
@@ -287,12 +367,15 @@ async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<
 /// group state. The conversation and its history stay — leaving a chat is not
 /// deleting it.
 pub async fn leave(conversation: [u8; 16]) -> Result<()> {
+    let lock = membership_lock(&conversation);
+    let _one_at_a_time = lock.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     let group_id = require_group(&conversation)?;
     require_not_stranding_the_group(&conversation, &our_ipk)?;
 
     with_mls!(ctx, {
         let mut group = load_group(ctx.provider, &group_id)?;
+        recover(&mut group, ctx.provider, &conversation)?;
         let recipients = Conversation::recipients(&conversation);
         let commit_epoch = group.epoch();
 
@@ -307,7 +390,7 @@ pub async fn leave(conversation: [u8; 16]) -> Result<()> {
         let proposal = group
             .leave(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?)
             .map_err(|e| anyhow!("leave: {e}"))?;
-        fan_out_commit_to(&recipients, &proposal, group_id, commit_epoch, &our_ipk, &ipk_signer)
+        fan_out_proposal_to(&recipients, &proposal, group_id, commit_epoch, &our_ipk, &ipk_signer)
             .await?;
 
         Conversation::deactivate_member(&conversation, &our_ipk)?;
@@ -339,25 +422,63 @@ async fn fan_out_commit_to(
     recipients: &[[u8; 32]], commit: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
     epoch: u64, our_ipk: &[u8; 32], ipk_signer: &SigningKey,
 ) -> Result<()> {
-    let sealed = SealedMessage::from_mls_out(commit, group_id, epoch)
-        .map_err(|e| anyhow!("seal commit: {e}"))?;
+    fan_out_to(recipients, commit, group_id, epoch, our_ipk, ipk_signer, true).await
+}
+
+/// A proposal rides the same path but leaves no mark: nothing is pending
+/// behind it, so there is nothing a recovery could take it for.
+async fn fan_out_proposal_to(
+    recipients: &[[u8; 32]], proposal: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
+    epoch: u64, our_ipk: &[u8; 32], ipk_signer: &SigningKey,
+) -> Result<()> {
+    fan_out_to(recipients, proposal, group_id, epoch, our_ipk, ipk_signer, false).await
+}
+
+/// Address every copy first, then queue them all in one write, for a commit
+/// together with the mark that it left (see [`recover`]), then send. The order
+/// is the point: a failure while addressing is still a change that never left,
+/// and once the write lands the commit is out of our hands whatever the
+/// network does, which is exactly what the mark records.
+async fn fan_out_to(
+    recipients: &[[u8; 32]], msg: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
+    epoch: u64, our_ipk: &[u8; 32], ipk_signer: &SigningKey, is_commit: bool,
+) -> Result<()> {
+    let sealed = SealedMessage::from_mls_out(msg, group_id, epoch)
+        .map_err(|e| anyhow!("seal: {e}"))?;
     let id = crate::data::message::next_dispatch_id();
+    let mut copies = Vec::with_capacity(recipients.len());
     for to in recipients {
         let env = sealed
             .address_to(to, ipk_signer)
-            .map_err(|e| anyhow!("address commit to member: {e}"))?;
-        crate::messaging::dispatch_to_member(
-            to,
-            our_ipk,
-            ipk_signer,
-            &id,
-            env,
-            OpType::Control,
-            true,
-        )
-        .await;
+            .map_err(|e| anyhow!("address to member: {e}"))?;
+        let framed = crate::messaging::frame_dispatch(to, our_ipk, ipk_signer, &id, env, true)
+            .ok_or_else(|| anyhow!("frame dispatch to member"))?;
+        copies.push((*to, framed));
+    }
+    if is_commit {
+        delivery::enqueue_commit(&group_id, epoch, &id, &copies)?;
+    } else {
+        for (to, bytes) in &copies {
+            delivery::enqueue(&id, OpType::Control, Some(*to), bytes);
+        }
+    }
+    for (to, bytes) in &copies {
+        crate::messaging::send_framed(to, &id, bytes).await;
     }
     Ok(())
+}
+
+/// The change that built `group`'s pending commit failed before it reached
+/// anyone: drop the commit, so the group stays at the epoch the members share.
+/// The builders would clear it on the next attempt anyway; clearing here keeps
+/// the stored state honest in between. Returns `why` so it slots into `map_err`.
+fn abandon(
+    group: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, why: anyhow::Error,
+) -> anyhow::Error {
+    if let Err(e) = group.clear_pending_commit(provider) {
+        warn!("GROUP: could not drop an unmerged commit: {e}");
+    }
+    why
 }
 
 /// Turn a KeyPackage miss into something a person can act on.

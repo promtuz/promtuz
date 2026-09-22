@@ -1581,6 +1581,21 @@ pub(crate) async fn dispatch_to_member(
     to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
     op: OpType, wake: bool,
 ) -> LastOutcome {
+    let Some(bytes) = frame_dispatch(to, our_ipk, ipk_signer, id, payload, wake) else {
+        return LastOutcome::Terminal;
+    };
+    delivery::enqueue(id, op, Some(*to), &bytes);
+    send_framed(to, id, &bytes).await
+}
+
+/// Sign and frame one member's copy of a dispatch: the bytes an outbox row
+/// stores and the wire carries, byte-identical. `None` when the packet will
+/// not pack, which no retry can mend. Split from the send so a caller can
+/// queue every copy of a fan-out in one write before any of them goes out.
+pub(crate) fn frame_dispatch(
+    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
+    wake: bool,
+) -> Option<Vec<u8>> {
     let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
     let sig = {
         use ed25519_dalek::Signer;
@@ -1599,11 +1614,13 @@ pub(crate) async fn dispatch_to_member(
     // length-prefixed bytes `send()` writes; the relay's read side is
     // length-prefixed, so storing raw postcard would desync every frame. Store
     // framed, send framed, reconciler re-sends framed — all byte-identical.
-    let Ok(bytes) = CRelayPacket::Dispatch(fwd).pack() else {
-        return LastOutcome::Terminal;
-    };
-    delivery::enqueue(id, op, Some(*to), &bytes);
+    CRelayPacket::Dispatch(fwd).pack().ok()
+}
 
+/// Send an already-queued framed dispatch to the relay and read its verdict.
+/// Every transport failure is `Silence`: the outbox row stays for the
+/// reconciler.
+pub(crate) async fn send_framed(to: &[u8; 32], id: &[u8; 16], bytes: &[u8]) -> LastOutcome {
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -1616,7 +1633,7 @@ pub(crate) async fn dispatch_to_member(
         debug!("MESSAGE: {} send stream failed to open; left in outbox", hex::encode(&to[..4]));
         return LastOutcome::Silence;
     };
-    if send.write_all(&bytes).await.is_err() || send.finish().is_err() {
+    if send.write_all(bytes).await.is_err() || send.finish().is_err() {
         debug!("MESSAGE: {} interrupted mid-send; left in outbox", hex::encode(&to[..4]));
         return LastOutcome::Silence;
     }

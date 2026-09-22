@@ -4,6 +4,7 @@ use log::debug;
 use log::warn;
 use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Unpacker;
+use rusqlite::Connection;
 use rusqlite::params;
 
 use crate::data::message::Message;
@@ -81,6 +82,67 @@ pub fn enqueue(id: &[u8], op: OpType, target_ipk: Option<[u8; 32]>, payload: &[u
             ],
         )
         .ok();
+}
+
+/// Queue a membership commit's copies for every member together with the
+/// mark that it has left the device, in one transaction. A recovery that
+/// finds this commit still pending after a crash reads the mark: members hold
+/// the commit or will, so it must be merged rather than dropped. Written with
+/// the rows rather than beside them so no crash can separate the two facts,
+/// and all rows at once so none can leave a commit half-published.
+pub fn enqueue_commit(
+    group_id: &[u8; 32], epoch: u64, id: &[u8; 16], copies: &[([u8; 32], Vec<u8>)],
+) -> anyhow::Result<()> {
+    let mut db = OUTBOX_DB.lock();
+    enqueue_commit_tx(&mut db, group_id, epoch, id, copies)
+}
+
+pub fn enqueue_commit_tx(
+    conn: &mut Connection, group_id: &[u8; 32], epoch: u64, id: &[u8; 16],
+    copies: &[([u8; 32], Vec<u8>)],
+) -> anyhow::Result<()> {
+    let now = ms_i64(crate::utils::systime().as_millis() as u64);
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO commit_publish (group_id, epoch, dispatch_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(group_id) DO UPDATE SET epoch = excluded.epoch, \
+         dispatch_id = excluded.dispatch_id, created_at = excluded.created_at",
+        params![group_id.as_slice(), epoch as i64, id.as_slice(), now],
+    )?;
+    for (to, bytes) in copies {
+        tx.execute(
+            "INSERT INTO outbox (id, op_type, target_ipk, payload, created_at, next_attempt) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0) \
+             ON CONFLICT(id, COALESCE(target_ipk, X'')) DO NOTHING",
+            params![id.as_slice(), OpType::Control as u8, to.as_slice(), bytes, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Whether the commit `group_id` built at `epoch` left the device.
+pub fn commit_left(group_id: &[u8; 32], epoch: u64) -> bool {
+    commit_left_tx(&OUTBOX_DB.lock(), group_id, epoch)
+}
+
+pub fn commit_left_tx(conn: &Connection, group_id: &[u8; 32], epoch: u64) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM commit_publish WHERE group_id = ?1 AND epoch = ?2",
+        params![group_id.as_slice(), epoch as i64],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// The commit was merged or dropped: its mark has served.
+pub fn commit_settled(group_id: &[u8; 32]) {
+    commit_settled_tx(&OUTBOX_DB.lock(), group_id);
+}
+
+pub fn commit_settled_tx(conn: &Connection, group_id: &[u8; 32]) {
+    conn.execute("DELETE FROM commit_publish WHERE group_id = ?1", [group_id.as_slice()]).ok();
 }
 
 /// Retire one member's copy of a dispatch. The rest of the fan-out is
@@ -501,5 +563,47 @@ mod tests {
         retire(&id, Some(bob));
         assert!(!any_pending(&id), "drained once every member is retired");
         retire_all(&id);
+    }
+}
+
+#[cfg(test)]
+mod commit_marks {
+    use super::*;
+    use crate::db::outbox::open_in_memory;
+
+    /// The mark and the rows land together: after `enqueue_commit` the commit
+    /// built at that epoch reads as left, one copy is queued per member, and
+    /// settling it takes the mark away again.
+    #[test]
+    fn a_published_commit_is_marked_with_its_rows() {
+        let mut conn = open_in_memory();
+        let gid = [0xAA; 32];
+        let id = [1u8; 16];
+        let copies = vec![([2u8; 32], vec![1, 2]), ([3u8; 32], vec![3, 4])];
+        assert!(!commit_left_tx(&conn, &gid, 4), "nothing has left yet");
+
+        enqueue_commit_tx(&mut conn, &gid, 4, &id, &copies).expect("enqueue");
+        assert!(commit_left_tx(&conn, &gid, 4), "the commit built at epoch 4 left");
+        assert!(!commit_left_tx(&conn, &gid, 5), "a commit of another epoch did not");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outbox WHERE id = ?1", [id.as_slice()], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 2, "one copy per member");
+
+        commit_settled_tx(&conn, &gid);
+        assert!(!commit_left_tx(&conn, &gid, 4), "settled means the mark has served");
+    }
+
+    /// A group builds one commit at a time, so the next one replaces the mark
+    /// rather than piling up beside it, and a mark left behind by a merge that
+    /// crashed before settling cannot be taken for the newer commit.
+    #[test]
+    fn the_next_commit_replaces_the_mark() {
+        let mut conn = open_in_memory();
+        let gid = [0xAB; 32];
+        enqueue_commit_tx(&mut conn, &gid, 4, &[1u8; 16], &[]).expect("first");
+        enqueue_commit_tx(&mut conn, &gid, 5, &[2u8; 16], &[]).expect("second");
+        assert!(!commit_left_tx(&conn, &gid, 4));
+        assert!(commit_left_tx(&conn, &gid, 5));
     }
 }

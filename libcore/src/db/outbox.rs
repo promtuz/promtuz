@@ -87,6 +87,23 @@ const MIGRATION_ARRAY: &[M] = &[
         CREATE UNIQUE INDEX idx_outbox_key ON outbox(id, COALESCE(target_ipk, X''));
     "#,
     ),
+    // A membership commit that has left the device. Written in the same
+    // transaction as its outbox rows, so "left" is one durable fact rather
+    // than two writes with a crash between them. Read when a change finds
+    // the group's previous commit still pending: one that left has to be
+    // merged, since members hold it or will, and one that never left has to
+    // be dropped. Keyed on the group, which builds one commit at a time; the
+    // epoch says which commit the row is about.
+    M::up(
+        r#"--sql
+        CREATE TABLE commit_publish (
+          group_id    BLOB PRIMARY KEY CHECK(length(group_id) = 32),
+          epoch       INTEGER NOT NULL,
+          dispatch_id BLOB NOT NULL CHECK(length(dispatch_id) = 16),
+          created_at  INTEGER NOT NULL
+        ) WITHOUT ROWID;
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -96,3 +113,10 @@ pub static OUTBOX_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
 
     Mutex::new(conn)
 });
+
+#[cfg(test)]
+pub(crate) fn open_in_memory() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("open in-memory db");
+    PRAGMA!(conn, MIGRATIONS);
+    conn
+}
