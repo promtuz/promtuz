@@ -460,7 +460,14 @@ async fn punch_upgrade(
     ep: &'static P2pEndpoint, mut poke_rx: mpsc::UnboundedReceiver<Poke>, key: DiscoKey,
     cands: Vec<SocketAddr>, token: [u8; 16], peer: [u8; 32],
 ) {
-    match punch::punch(&ep.pokes, &mut poke_rx, key, cands, PUNCH_TIMEOUT).await {
+    // Accept the peer's datagrams at every address they reach us from, as
+    // soon as we hear them. They may flip to direct off their own validated
+    // path while ours is still dying in a NAT, and an inbound relabel we
+    // only install on our own upgrade would arrive too late (or never).
+    let accept_from = |src| {
+        ep.turn.lock().accept_from(&token, src);
+    };
+    match punch::punch(&ep.pokes, &mut poke_rx, key, cands, PUNCH_TIMEOUT, accept_from).await {
         Some(addr) if ep.turn.lock().set_direct(&token, addr) => {
             log::info!("P2P[{}]: upgraded to direct {}", hex::encode(&peer[..4]), addr_short(addr));
         },
@@ -839,9 +846,18 @@ impl Session {
             // un-NATed global-IPv6 peers).
             let key = DiscoKey::new(&my_disco_key, self.chan);
             let addr =
-                punch::punch(&ep.pokes, &mut self.poke_rx, key, offer.candidates, PUNCH_TIMEOUT)
-                    .await
-                    .ok_or_else(|| anyhow!("no relay and no direct path"))?;
+                // No bridge in this path, so nothing to relabel: the dial goes
+                // straight to whatever the punch validates.
+                punch::punch(
+                    &ep.pokes,
+                    &mut self.poke_rx,
+                    key,
+                    offer.candidates,
+                    PUNCH_TIMEOUT,
+                    |_| {},
+                )
+                .await
+                .ok_or_else(|| anyhow!("no relay and no direct path"))?;
             log::info!("P2P[{}]: hole punched, dialing {}", self.short(), addr_short(addr));
             let conn = timeout(DIAL_TIMEOUT, ep.endpoint.connect(addr, PEER_SNI)?)
                 .await
@@ -915,7 +931,16 @@ impl Session {
             }
         };
         drop(offer_guard);
-        let conn = incoming.accept()?.await?;
+        // Bound the handshake itself, not just the wait for an inbound. The
+        // dialer gives up after DIAL_TIMEOUT, so a handshake still unfinished
+        // past ours is one nobody is driving any more — left to quinn's idle
+        // timer it holds this peer's CONNECTING slot for another half minute
+        // and every retry behind it bails as already-connecting.
+        let conn = timeout(ACCEPT_TIMEOUT, incoming.accept()?)
+            .await
+            .map_err(|_| {
+                anyhow!("inbound handshake timed out after {}s", ACCEPT_TIMEOUT.as_secs())
+            })??;
         drop(inbound_guard);
         hold_route_while_open(conn.clone(), routes);
         Ok((PeerLink { conn, dialer: false, ipk: peer }, "inbound"))

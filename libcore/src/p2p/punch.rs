@@ -77,12 +77,16 @@ struct PunchState {
     sent: HashMap<[u8; 8], SocketAddr>,
     /// First address to answer a Pong. Once set we stop pinging back.
     validated: Option<SocketAddr>,
+    /// Sources we have taken an authenticated Ping from since the last
+    /// drain. The peer can reach us from each, so each is an address they
+    /// may flip their own egress to even if we never validate one.
+    heard: Vec<SocketAddr>,
 }
 
 impl PunchState {
     fn new(key: DiscoKey, mut candidates: Vec<SocketAddr>) -> Self {
         candidates.truncate(MAX_CANDIDATES);
-        Self { key, candidates, sent: HashMap::new(), validated: None }
+        Self { key, candidates, sent: HashMap::new(), validated: None, heard: Vec::new() }
     }
 
     /// Ping every candidate — one round, opens/refreshes our NAT toward
@@ -95,6 +99,10 @@ impl PunchState {
     fn on_poke(&mut self, src: SocketAddr, bytes: &[u8]) -> Vec<Poke> {
         match self.key.open(bytes) {
             Some(DiscoMsg::Ping { tx }) => {
+                // Sealed with the session's disco key, which only rode the
+                // peer's offer — hearing this is proof the peer reaches us
+                // from `src`, whatever our own pings toward them do.
+                self.heard.push(src);
                 let mut out = vec![(src, self.key.seal(&DiscoMsg::Pong { tx, seen: src }))];
                 let learned = !self.candidates.contains(&src)
                     && self.candidates.len() < MAX_CANDIDATES;
@@ -140,12 +148,18 @@ impl PunchState {
 /// open, and the caller (dialer) connects to it while QUIC's own packets
 /// keep the hole alive. The accepting side runs this too, purely to open
 /// its own NAT, and accepts the incoming connection regardless.
+///
+/// `heard` is called with every source an authenticated Ping arrives from,
+/// validated or not: the peer reaches us from there, so a bridged session
+/// must accept their datagrams at that address even when our own punch
+/// never validates one (see `TurnRoutes::accept_from`).
 pub async fn punch(
     pokes: &PokeSender,
     inbox: &mut UnboundedReceiver<Poke>,
     key: DiscoKey,
     candidates: Vec<SocketAddr>,
     timeout: Duration,
+    mut heard: impl FnMut(SocketAddr),
 ) -> Option<SocketAddr> {
     let mut state = PunchState::new(key, candidates);
     let mut ticker = interval(PING_INTERVAL);
@@ -161,6 +175,9 @@ pub async fn punch(
             },
             _ = &mut deadline => return state.validated,
         };
+        for src in state.heard.drain(..) {
+            heard(src);
+        }
         for (addr, bytes) in out {
             let _ = pokes.send(addr, &bytes).await;
         }
