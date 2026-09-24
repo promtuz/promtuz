@@ -192,6 +192,14 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
         store::forget_file(&file_id);
         anyhow::bail!("no media row for that file_id");
     };
+    // Read the reverse-wake backoff before overwriting the row: a hold set
+    // seconds ago should still suppress the wake, but CONNECTING (written
+    // next) would erase the HELD state and time this check reads.
+    let woke_recently = store::partial_get(&file_id)
+        .filter(|p| p.state == store::HELD)
+        .is_some_and(|p| {
+            crate::utils::systime().as_secs().saturating_sub(p.updated_at) < WAKE_BACKOFF_SECS
+        });
     // The card shows "Connecting" from the tap, not from the first chunk: a
     // connect takes seconds and a tap that changes nothing reads as broken.
     set_state(&file_id, peer, store::CONNECTING);
@@ -202,14 +210,9 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
             // for a large file. Reverse-wake them and hold; the receiver retries
             // on reconnect or a user tap. Not an error: the UI reads HELD. But a
             // sender we poked seconds ago won't have come up yet, so on a fresh
-            // reconnect re-drive we suppress the wake within the backoff (the row
-            // stays HELD with its wake time); a first-time hold always wakes.
-            let woke_recently = store::partial_get(&file_id)
-                .filter(|p| p.state == store::HELD)
-                .is_some_and(|p| {
-                    crate::utils::systime().as_secs().saturating_sub(p.updated_at)
-                        < WAKE_BACKOFF_SECS
-                });
+            // reconnect re-drive we suppress the wake within the backoff
+            // (`woke_recently`, read above before the row became CONNECTING); a
+            // first-time hold always wakes.
             log::warn!(
                 "transfer: {} unreachable ({e}); holding {}{}",
                 hex::encode(&peer[..4]),
