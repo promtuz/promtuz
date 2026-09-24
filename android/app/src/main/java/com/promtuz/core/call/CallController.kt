@@ -43,6 +43,12 @@ object CallController {
     private val _state = MutableStateFlow<Ui?>(null)
     val state: StateFlow<Ui?> = _state.asStateFlow()
 
+    private val _pendingAnswer = MutableStateFlow(false)
+    /** Raised by an Answer tap (the in-call button or the notification action).
+     *  The call screen watches it, obtains microphone/camera permission, then
+     *  calls [answer]; answering is not done from the background receiver. */
+    val pendingAnswer: StateFlow<Boolean> = _pendingAnswer.asStateFlow()
+
     private lateinit var app: Context
 
     fun init(context: Context) {
@@ -55,6 +61,7 @@ object CallController {
             is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, video = videoNow(event.call), Phase.Outgoing)
             is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, video = event.video, Phase.Incoming)
             is CallEvent.Ringing -> update(event.call) { it.copy(phase = Phase.Ringing) }
+            is CallEvent.Switched -> switched(event)
             is CallEvent.Connecting -> update(event.call) { it.copy(phase = Phase.Connecting) }
             is CallEvent.Connected -> update(event.call) {
                 if (it.video) CallVideoManager.start()
@@ -78,9 +85,31 @@ object CallController {
     ) {
         val name = runCatching { CoreBridge.contactName(peer) }.getOrNull().orEmpty()
         _state.value = Ui(call, peer, conversation, name, outgoing, video, phase, false, false, true, false, 0)
-        startService()
-        if (!outgoing) CallNotifications.ringing(app, _state.value!!)
+        if (outgoing) {
+            // The call button already secured mic (and camera): run the service.
+            startService()
+        } else {
+            // Ring without a capture service. Starting one needs mic/camera
+            // permission and a foreground start a backgrounded incoming call
+            // cannot make; the service starts on answer() instead. Until then a
+            // full-screen notification and the ringtone carry the ring.
+            _pendingAnswer.value = false
+            CallNotifications.ringing(app, _state.value!!)
+            CallRingtone.start(app)
+        }
         CallActivity.launch(app)
+    }
+
+    /** Crossed calls resolved to the peer's: re-key the ongoing call to the new
+     *  id so later events (Connecting, Connected, Ended) still match. */
+    private fun switched(event: CallEvent.Switched) {
+        val current = _state.value ?: return
+        if (!current.callId.contentEquals(event.from)) return
+        val next = current.copy(
+            callId = event.to, outgoing = false, video = event.video, phase = Phase.Connecting,
+        )
+        _state.value = next
+        CallNotifications.ongoing(app, next)
     }
 
     private fun update(call: ByteArray, f: (Ui) -> Ui) {
@@ -88,8 +117,10 @@ object CallController {
         if (!current.callId.contentEquals(call)) return
         val next = f(current)
         _state.value = next
-        // Once connected the ringing notification becomes the ongoing one.
-        if (next.phase == Phase.Connected || next.phase == Phase.Reconnecting) {
+        // Past ringing: stop the ringtone and replace the incoming (Answer)
+        // notification with the ongoing one, so a stale Answer cannot fire.
+        if (next.phase != Phase.Incoming && next.phase != Phase.Ringing) {
+            CallRingtone.stop()
             CallNotifications.ongoing(app, next)
         }
     }
@@ -98,6 +129,8 @@ object CallController {
         val current = _state.value
         if (current != null && !current.callId.contentEquals(event.call)) return
         _state.value = null
+        _pendingAnswer.value = false
+        CallRingtone.stop()
         CallVideoManager.stop()
         stopService()
         CallNotifications.clearOngoing(app)
@@ -108,6 +141,20 @@ object CallController {
     }
 
     // — UI actions (each just delegates; state moves on the next core event) —
+
+    /** Ask to answer the ringing call; the call screen handles permission. */
+    fun requestAnswer() { _pendingAnswer.value = true }
+
+    fun answerConsumed() { _pendingAnswer.value = false }
+
+    /** Accept the ringing call and start the capture service. Call only once
+     *  microphone (and, for a video call, camera) permission is granted. */
+    fun answer() {
+        val ok = runCatching { CoreBridge.callAccept() }
+            .onFailure { Timber.tag("Call").w(it, "answer refused") }
+            .isSuccess
+        if (ok) startService()
+    }
 
     fun toggleMute() {
         val s = _state.value ?: return

@@ -67,17 +67,22 @@ class CallVideo(private val context: Context) {
     }
 
     fun stop() {
-        if (!running) return
-        running = false
-        handler.post {
-            runCatching { camera?.close() }
-            camera = null
-            runCatching { encoder?.stop() }
-            runCatching { encoder?.release() }
-            encoder = null
-            encoderSurface?.release()
-            encoderSurface = null
+        if (running) {
+            running = false
+            handler.post {
+                runCatching { camera?.close() }
+                camera = null
+                runCatching { encoder?.stop() }
+                runCatching { encoder?.release() }
+                encoder = null
+                encoderSurface?.release()
+                encoderSurface = null
+            }
         }
+        // Always quit the thread: the constructor started it, so even a start()
+        // that bailed on a denied permission must not leak it. quitSafely lets
+        // the cleanup post above run first.
+        thread.quitSafely()
     }
 
     /** Flip between the front and back camera. */

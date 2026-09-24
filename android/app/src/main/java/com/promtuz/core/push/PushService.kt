@@ -21,7 +21,9 @@ class PushService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         when (message.data["type"]) {
             "app_update" -> UpdateWorker.enqueue(applicationContext, replace = true)
-            null -> enqueueDrain()
+            // A plain message wake (no type) and a call wake ("call") both drain
+            // the queue; draining fetches and verifies the offer, which rings.
+            else -> enqueueDrain()
         }
     }
 

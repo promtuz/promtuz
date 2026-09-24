@@ -52,6 +52,39 @@ fun CallScreen(call: CallController.Ui?) {
     if (call == null) return
     val colors = MaterialTheme.colorScheme
     val onVideo = call.video && call.phase == Phase.Connected
+
+    // Answering (from the in-call button or the notification action) obtains
+    // microphone, and camera for a video call, before accepting; a denial
+    // declines rather than starting a call with a dead device.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val needed = remember(call.video) {
+        if (call.video) {
+            arrayOf(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.CAMERA)
+        } else {
+            arrayOf(android.Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    val answerPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants.values.all { it }) CallController.answer()
+        else runCatching { com.promtuz.core.CoreBridge.callReject() }
+        CallController.answerConsumed()
+    }
+    val pendingAnswer by CallController.pendingAnswer.collectAsState()
+    LaunchedEffect(pendingAnswer) {
+        if (!pendingAnswer) return@LaunchedEffect
+        val granted = needed.all {
+            androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (granted) {
+            CallController.answer()
+            CallController.answerConsumed()
+        } else {
+            answerPermission.launch(needed)
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -145,10 +178,10 @@ private fun IncomingControls() {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         RoundButton(R.drawable.i_phone, "Decline", Color(0xFFE5484D), Color.White) {
-            com.promtuz.core.CoreBridge.callReject()
+            runCatching { com.promtuz.core.CoreBridge.callReject() }
         }
         RoundButton(R.drawable.i_phone, "Answer", Color(0xFF30A46C), Color.White) {
-            com.promtuz.core.CoreBridge.callAccept()
+            CallController.requestAnswer()
         }
     }
 }
