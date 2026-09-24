@@ -159,8 +159,20 @@ struct Transport {
 }
 
 struct Relayed {
-    conn: Arc<dyn Conn + Send + Sync>,
-    addr: SocketAddr,
+    conn:   Arc<dyn Conn + Send + Sync>,
+    addr:   SocketAddr,
+    /// The TURN client handle, kept for its lifetime. `Client::listen` spawns a
+    /// reader task that owns the UDP socket; dropping the conn alone leaves it
+    /// running, so teardown must `close()` the client explicitly.
+    client: Client,
+}
+
+/// Close a transport's TURN client, stopping its reader task and freeing its
+/// socket. A no-op for a direct-only transport.
+async fn close_relayed(transport: Transport) {
+    if let Some(relayed) = transport.relayed {
+        let _ = relayed.client.close().await;
+    }
 }
 
 async fn run(
@@ -232,7 +244,10 @@ async fn run(
         video_start: None,
         connected: false,
     };
-    session.event_loop(&mut cmd_rx).await
+    let result = session.event_loop(&mut cmd_rx).await;
+    // Free the TURN allocation's reader task and socket on the way out.
+    close_relayed(session.transport).await;
+    result
 }
 
 fn codec_pt(rtc: &Rtc, codec: Codec) -> Option<str0m::media::Pt> {
@@ -340,7 +355,7 @@ async fn allocate(relay: &Relay) -> Result<Relayed> {
     client.listen().await?;
     let conn: Arc<dyn Conn + Send + Sync> = Arc::new(client.allocate().await?);
     let addr = conn.local_addr()?;
-    Ok(Relayed { conn, addr })
+    Ok(Relayed { conn, addr, client })
 }
 
 struct Session {
@@ -461,6 +476,17 @@ impl Session {
                     let _ = self.events.send(Event::Disconnected);
                 }
             },
+            RtcEvent::IceConnectionStateChange(
+                IceConnectionState::Connected | IceConnectionState::Completed,
+            ) => {
+                // After a restart, str0m's one-shot DTLS `Connected` does not
+                // fire again; ICE pairing back up is the signal that media has
+                // recovered. On the initial connect this precedes DTLS, so it is
+                // ignored until we have been up once.
+                if self.connected {
+                    let _ = self.events.send(Event::Connected);
+                }
+            },
             RtcEvent::MediaData(data) => {
                 if data.mid == self.mid {
                     let seq = *(*data.seq_range.end());
@@ -534,7 +560,10 @@ impl Session {
                 let relay = self.relay.take();
                 let (transport, candidates) = gather(&relay, &mut self.rtc).await?;
                 self.relay = relay;
-                self.transport = transport;
+                // Swap in the new transport, then close the old TURN client so
+                // its reader task and socket do not outlive the restart.
+                let old = std::mem::replace(&mut self.transport, transport);
+                close_relayed(old).await;
                 let _ = self.events.send(Event::Local {
                     params: Params {
                         ufrag: creds.ufrag,

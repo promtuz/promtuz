@@ -81,6 +81,10 @@ pub enum CallEvent {
     Incoming { call: Vec<u8>, peer: Vec<u8>, conversation: Vec<u8>, video: bool },
     /// The peer's phone is ringing, so play ringback.
     Ringing { call: Vec<u8> },
+    /// Crossed calls resolved to the peer's: the call id changed. Re-key the
+    /// screen and service from `from` to `to`; it is now an answered incoming
+    /// call being connected, so `Connecting` follows immediately.
+    Switched { from: Vec<u8>, to: Vec<u8>, video: bool },
     /// Answered on both ends; media is being set up.
     Connecting { call: Vec<u8> },
     /// Media flows. Run the audio device from here until `Ended`.
