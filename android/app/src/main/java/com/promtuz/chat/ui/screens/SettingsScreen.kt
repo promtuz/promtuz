@@ -1,126 +1,129 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.text.avgSizeInStyle
 
-private data class SettingItem(val title: String, val drawableIcon: Int, val onClick: () -> Unit)
+private enum class SettingsIcon(@param:DrawableRes val drawable: Int) {
+    Profile(R.drawable.i_user),
+    Identity(R.drawable.i_key),
+    Notifications(R.drawable.i_notifications),
+    Appearance(R.drawable.i_chat_settings),
+    Stickers(R.drawable.i_sticker),
+    Storage(R.drawable.i_usage_chart),
+    Backup(R.drawable.i_chat_backup),
+    Relays(R.drawable.i_network_nodes),
+    Updates(R.drawable.i_update),
+    About(R.drawable.i_info),
+}
+
+private data class SettingItem(
+    val title: String,
+    val summary: String,
+    val icon: SettingsIcon,
+    val route: NavKey,
+)
+
 private data class SettingGroup(val name: String, val items: List<SettingItem>)
 
 @Composable
-fun SettingsScreen(
-    appViewModel: AppVM
-) {
+fun SettingsScreen(appViewModel: AppVM) {
     val direction = LocalLayoutDirection.current
-    val context = LocalContext.current
     val textTheme = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
+    val groups = listOf(
+        SettingGroup("Identity", listOf(
+            SettingItem("Profile", "Your name and photo", SettingsIcon.Profile, Routes.Profile),
+            SettingItem(
+                stringResource(R.string.identity_keys_title), "QR code and recovery phrase",
+                SettingsIcon.Identity, Routes.IdentityKeys,
+            ),
+        )),
+        SettingGroup("Chats", listOf(
+            SettingItem(
+                "Notifications", "Alerts and message previews",
+                SettingsIcon.Notifications, Routes.NotificationsSettings,
+            ),
+            SettingItem(
+                "Chat appearance", "Theme, bubbles and wallpaper",
+                SettingsIcon.Appearance, Routes.ChatAppearance,
+            ),
+            SettingItem("Stickers", "Create and manage packs", SettingsIcon.Stickers, Routes.Stickers),
+        )),
+        SettingGroup("Data & connection", listOf(
+            SettingItem("Storage", "Media and space usage", SettingsIcon.Storage, Routes.Storage),
+            SettingItem(
+                "Backup & restore", "Save or restore an encrypted backup",
+                SettingsIcon.Backup, Routes.BackupRestore,
+            ),
+            SettingItem("Relay nodes", "Connections and latency", SettingsIcon.Relays, Routes.Relays),
+        )),
+        SettingGroup("App", listOf(
+            SettingItem("Updates", "App version and update channel", SettingsIcon.Updates, Routes.Updates),
+            SettingItem("About Promtuz", "Share, source code and licenses", SettingsIcon.About, Routes.About),
+        )),
+    )
 
-    val navigate: (NavKey) -> Unit = { route -> appViewModel.navigator.push(route) }
-
-    // @formatter:off
-    val settingGroups = remember {
-        listOf(
-            SettingGroup(
-                "General", listOf(
-                    SettingItem(context.getString(R.string.identity_keys_title), R.drawable.i_key) { navigate(Routes.IdentityKeys) },
-                    SettingItem("Privacy & Security", R.drawable.i_shield_lock) {},
-                    // SettingItem("Blocked Users", R.drawable.i_user_blocked) {},
-                    SettingItem(
-                        "Storage", R.drawable.i_hard_drive
-                    ) { navigate(Routes.Storage) },
-                    SettingItem("Notifications", R.drawable.i_notifications) {
-                        navigate(Routes.NotificationsSettings)
-                    },
-                )
-            ),
-            SettingGroup(
-                "Appearance", listOf(
-                    SettingItem(
-                        "Chat Appearance", R.drawable.i_dark_mode
-                    ) { navigate(Routes.ChatAppearance) },
-                    SettingItem("Language", R.drawable.i_language) {},
-                )
-            ),
-            SettingGroup(
-                "Network", listOf(
-                    SettingItem("Resolvers", R.drawable.i_dns) {},
-                    SettingItem("Relay Nodes", R.drawable.i_hub) { navigate(Routes.Relays) },
-                )
-            ),
-            SettingGroup(
-                "Developer", listOf(
-                    SettingItem("App Logs", R.drawable.i_logs) { navigate(Routes.Logs) },
-                    SettingItem("Backup & Restore", R.drawable.i_encrypted) {
-                        navigate(Routes.BackupRestore)
-                    },
-                )
-            ),
-            SettingGroup(
-                "About", listOf(
-                    SettingItem("App Info", R.drawable.i_info) { navigate(Routes.About) },
-                    SettingItem("Updates", R.drawable.i_download) { navigate(Routes.Updates) },
-                    SettingItem("Open Source Licenses", R.drawable.oi_code) { navigate(Routes.OpenSourceLicenses) },
-                )
-            ),
-        )
-    }
-    // @formatter:on
-
-    SimpleScreen(
-        { Text("Settings") },
-    ) { padding ->
+    SimpleScreen({ Text("Settings") }) { padding ->
         LazyColumn(
-            Modifier
-                .fillMaxSize()
-                .padding(
-                    start = padding.calculateLeftPadding(direction),
-                    end = padding.calculateRightPadding(direction),
-                    top = 0.dp,
-                    bottom = 0.dp
-                ), contentPadding = PaddingValues(
-                18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, 48.dp
-            ), verticalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier.fillMaxSize().padding(
+                start = padding.calculateLeftPadding(direction),
+                end = padding.calculateRightPadding(direction),
+            ),
+            contentPadding = PaddingValues(
+                start = 18.dp,
+                top = padding.calculateTopPadding() + 12.dp,
+                end = 18.dp,
+                bottom = padding.calculateBottomPadding() + 24.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            for ((title, settings) in settingGroups) {
-                item {
+            groups.forEachIndexed { groupIndex, group ->
+                item(key = "heading-${group.name}", contentType = "heading") {
                     Text(
-                        title.uppercase(),
-                        Modifier.padding(top = 16.dp, bottom = 3.dp, start = 2.dp),
+                        group.name.uppercase(),
+                        Modifier.padding(
+                            top = if (groupIndex == 0) 0.dp else 20.dp,
+                            bottom = 3.dp,
+                            start = 2.dp,
+                        ).semantics { heading() },
                         colors.onSurfaceVariant,
-                        style = avgSizeInStyle(
-                            textTheme.labelLargeEmphasized, textTheme.labelMediumEmphasized
-                        )
+                        style = avgSizeInStyle(textTheme.labelLargeEmphasized, textTheme.labelMediumEmphasized),
                     )
                 }
-                itemsIndexed(settings) { index, setting ->
-                    GroupedActionRow(setting.title, index, settings.size, setting.onClick) {
-                        Icon(painterResource(setting.drawableIcon), null, Modifier.size(26.dp))
+                itemsIndexed(group.items, key = { _, item -> item.icon }, contentType = { _, _ -> "setting" }) { index, setting ->
+                    GroupedActionRow(
+                        title = setting.title,
+                        index = index,
+                        groupSize = group.items.size,
+                        onClick = { appViewModel.navigator.push(setting.route) },
+                        supportingText = setting.summary,
+                    ) {
+                        DrawableIcon(setting.icon.drawable, size = 26.dp)
                     }
                 }
             }
         }
     }
-
 }
