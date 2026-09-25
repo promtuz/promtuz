@@ -1,8 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
@@ -24,10 +23,11 @@ fun AppUpdateIcon(onClick: () -> Unit, modifier: Modifier = Modifier, updates: U
 
     IconButton(onClick, modifier) {
         val s = state
+        // TODO: Temporarily allowing a separate progress indicator, will need xit included in the icon itself (lottie) later on
         if (s is UpdateState.Downloading) {
             CircularProgressIndicator({ s.progress }, Modifier.size(22.dp), strokeWidth = 2.dp)
         } else {
-            BadgedBox(badge = { Badge() }) { DrawableIcon(R.drawable.i_download, desc = "Updates") }
+            Box { DrawableIcon(R.drawable.oi_update, desc = "Updates") }
         }
     }
 }

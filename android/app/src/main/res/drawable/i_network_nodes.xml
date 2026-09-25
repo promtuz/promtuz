@@ -1,0 +1,33 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+  <path
+      android:pathData="M12 3.5L4.25 7.55L12 12L19.75 7.55M12 12V20.5M4.25 16.75L12 20.5L19.75 16.75"
+      android:strokeColor="#e3e3e3"
+      android:strokeWidth="1.75"
+      android:strokeLineCap="round"
+      android:strokeLineJoin="round"/>
+  <path
+      android:pathData="M10 3.5A2 2 0 1 0 14 3.5A2 2 0 1 0 10 3.5Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M2.25 7.55A2 2 0 1 0 6.25 7.55A2 2 0 1 0 2.25 7.55Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M17.75 7.55A2 2 0 1 0 21.75 7.55A2 2 0 1 0 17.75 7.55Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M10 12A2 2 0 1 0 14 12A2 2 0 1 0 10 12Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M2.25 16.75A2 2 0 1 0 6.25 16.75A2 2 0 1 0 2.25 16.75Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M17.75 16.75A2 2 0 1 0 21.75 16.75A2 2 0 1 0 17.75 16.75Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M10 20.5A2 2 0 1 0 14 20.5A2 2 0 1 0 10 20.5Z"
+      android:fillColor="#e3e3e3"/>
+</vector>

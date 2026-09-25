@@ -16,8 +16,14 @@ def build(sources, catalog, resources, converter):
     spec = importlib.util.spec_from_file_location('svg2vd', converter)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    entries = json.loads(catalog.read_text())
-    files = [(sources / entry['kind'] / (entry['name'] + '.svg'), entry['kind'] == 'controls') for entry in entries if not entry.get('reused')]
+    if catalog is not None:
+        entries = json.loads(catalog.read_text())
+        files = [(sources / entry['kind'] / (entry['name'] + '.svg'), entry['kind'] == 'controls') for entry in entries if not entry.get('reused')]
+    else:
+        # SVGs are the source of truth; morph endpoint references are excluded.
+        files = [(p, False) for p in sorted((sources / 'outlined').glob('*.svg'))]
+        files += [(p, False) for p in sorted((sources / 'filled').glob('*.svg'))]
+        files += [(p, True) for p in sorted((sources / 'controls').glob('*.svg'))]
     files += [(p, True) for p in sorted((sources / 'controls' / 'file-parts').glob('*.svg'))]
     (resources / 'drawable').mkdir(parents=True, exist_ok=True)
     (resources / 'raw').mkdir(parents=True, exist_ok=True)
@@ -46,7 +52,7 @@ if __name__ == '__main__':
     repo = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sources', type=Path, default=repo / 'design/icons')
-    parser.add_argument('--catalog', type=Path, default=repo / 'design/icons/media-camera/catalog.json')
+    parser.add_argument('--catalog', type=Path, help='Optional legacy catalog; otherwise discover SVG sources directly')
     parser.add_argument('--resources', type=Path, default=repo / 'android/app/src/main/res')
     parser.add_argument('--converter', type=Path, default=repo / 'tools/scripts/svg2vd.py')
     args = parser.parse_args()
