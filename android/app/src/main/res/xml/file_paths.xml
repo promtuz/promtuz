@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <paths>
+        <cache-path name="notification_previews" path="notification-previews/" />
         <cache-path
             name="shared_images"
             path="images/" />

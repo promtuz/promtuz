@@ -399,6 +399,9 @@ object CoreBridge {
     suspend fun getMedia(conversationId: ByteArray): List<MediaRecord> =
         withContext(Dispatchers.IO) { ffiGetMedia(conversationId) }
 
+    suspend fun getMessageMedia(conversationId: ByteArray, dispatchId: ByteArray): MediaRecord? =
+        withContext(Dispatchers.IO) { uniffi.core.getMessageMedia(conversationId, dispatchId) }
+
     suspend fun stickerCacheBytes(): Long = withContext(Dispatchers.IO) { uniffi.core.stickerCacheBytes().toLong() }
 
     suspend fun clearStickerCache() = uniffi.core.clearStickerCache()

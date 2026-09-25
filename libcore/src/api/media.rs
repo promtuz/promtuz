@@ -185,69 +185,79 @@ pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
 /// `.part` file holds unverified-tail bytes no platform should open.
 #[uniffi::export]
 pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
-    use crate::transfer::store;
     let conv = to_conv16(&conversation_id)?;
     let rows = crate::data::media::for_conversation(&conv)?;
-    Ok(rows.into_iter().map(|(did, r)| {
-        let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
-        let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
-            Some(p) => {
-                // A DONE row can outlive its bytes (see [`store::Partial::is_complete`]).
-                // Surfaced as PENDING it gets the download affordance back and the
-                // tap re-pulls; DONE with no path is a check-mark that opens nothing.
-                let complete = p.is_complete();
-                let state =
-                    if p.state == store::DONE && !complete { store::PENDING } else { p.state };
-                (
-                    state,
-                    p.have,
-                    p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
-                    complete.then(|| p.path.clone()),
-                )
+    Ok(rows.into_iter().map(|(did, r)| media_record(did, r)).collect())
+}
+
+/// Read just one media row for a home-list or notification preview.
+#[uniffi::export]
+pub fn get_message_media(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<Option<MediaRecord>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let did = to_did16(&dispatch_id)?;
+    Ok(crate::data::media::get(&conv, &did)?.map(|r| media_record(did, r)))
+}
+
+fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
+    use crate::transfer::store;
+    let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
+    let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
+        Some(p) => {
+            // A DONE row can outlive its bytes (see [`store::Partial::is_complete`]).
+            // Surfaced as PENDING it gets the download affordance back and the
+            // tap re-pulls; DONE with no path is a check-mark that opens nothing.
+            let complete = p.is_complete();
+            let state =
+                if p.state == store::DONE && !complete { store::PENDING } else { p.state };
+            (
+                state,
+                p.have,
+                p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
+                complete.then(|| p.path.clone()),
+            )
+        },
+        // No receiver partial: this may be our OWN sent attachment, whose
+        // file lives in `retention` under the same file_id. Surface it as a
+        // complete local file so the sender can open what they sent.
+        None => match fid.and_then(store::retention_get) {
+            Some(ret) => {
+                let chunks = ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
+                (store::DONE, chunks, chunks, Some(ret.path))
             },
-            // No receiver partial: this may be our OWN sent attachment, whose
-            // file lives in `retention` under the same file_id. Surface it as a
-            // complete local file so the sender can open what they sent.
-            None => match fid.and_then(store::retention_get) {
-                Some(ret) => {
-                    let chunks = ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
-                    (store::DONE, chunks, chunks, Some(ret.path))
-                },
-                None => (store::PENDING, 0, 0, None),
-            },
-        };
-        let sticker = r.sticker.as_deref().and_then(|b| {
-            use common::proto::pack::Unpacker;
-            let s = common::proto::sticker::StickerRef::deser(b).ok()?;
-            Some(crate::api::stickers::StickerRecord {
-                pack:   s.pack.to_vec(),
-                id:     s.id.to_vec(),
-                token:  s.token.to_vec(),
-                store:  s.store,
-                width:  r.width,
-                height: r.height,
-            })
-        });
-        MediaRecord {
-            dispatch_id: did.to_vec(),
-            kind: r.kind,
-            group_id: r.group_id,
-            mime: r.mime,
-            name: r.name,
-            size: r.size,
-            width: r.width,
+            None => (store::PENDING, 0, 0, None),
+        },
+    };
+    let sticker = r.sticker.as_deref().and_then(|b| {
+        use common::proto::pack::Unpacker;
+        let s = common::proto::sticker::StickerRef::deser(b).ok()?;
+        Some(crate::api::stickers::StickerRecord {
+            pack:   s.pack.to_vec(),
+            id:     s.id.to_vec(),
+            token:  s.token.to_vec(),
+            store:  s.store,
+            width:  r.width,
             height: r.height,
-            duration_ms: r.duration_ms,
-            blob: r.blob,
-            thumb: r.thumb,
-            file_id: r.file_id,
-            transfer_state,
-            transfer_have,
-            transfer_total,
-            local_path,
-            sticker,
-        }
-    }).collect())
+        })
+    });
+    MediaRecord {
+        dispatch_id: did.to_vec(),
+        kind: r.kind,
+        group_id: r.group_id,
+        mime: r.mime,
+        name: r.name,
+        size: r.size,
+        width: r.width,
+        height: r.height,
+        duration_ms: r.duration_ms,
+        blob: r.blob,
+        thumb: r.thumb,
+        file_id: r.file_id,
+        transfer_state,
+        transfer_have,
+        transfer_total,
+        local_path,
+        sticker,
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +352,10 @@ mod tests {
         assert_eq!(record.transfer_have, 0);
         assert_eq!(record.transfer_total, 0);
         assert_eq!(record.local_path, None);
+        let single = super::get_message_media(conv.to_vec(), did.to_vec()).unwrap().unwrap();
+        assert_eq!(single.blob, record.blob);
+        assert!(super::get_message_media(vec![99; 16], did.to_vec()).unwrap().is_none());
+        assert!(super::get_message_media(conv.to_vec(), vec![99; 16]).unwrap().is_none());
     }
 
     /// The sender's own sent attachment has no receiver `partial` — its file

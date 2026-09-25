@@ -18,6 +18,14 @@ import android.graphics.Typeface
 import androidx.compose.ui.graphics.asAndroidBitmap
 import android.os.Bundle
 import android.os.SystemClock
+import android.net.Uri
+import androidx.core.content.FileProvider
+import com.promtuz.chat.utils.media.MessagePreviews
+import java.io.ByteArrayOutputStream
+import java.io.File
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -89,6 +97,7 @@ object PushNotifier {
         val mediaKind: Int,
         val timestamp: ULong,
         val author: String?,
+        val image: Uri?,
     )
 
     /** Gates posting — reconcile still runs foregrounded, but only to clear read chats' notifs. */
@@ -119,7 +128,7 @@ object PushNotifier {
         // Subscribe before core starts. Alerts come from durable message state,
         // so a cold start or a dropped transient event cannot lose an arrival.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it }
+            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it }
                 .debounce(150L).collect { reconcileSafely() }
         }
         scope.launch { reconcileSafely() }
@@ -153,6 +162,7 @@ object PushNotifier {
                 .filter { it.notification.group == Notifications.GROUP_KEY }
                 .forEach { nm.cancel(it.id) }
             rendered.clear()
+            prunePreviewFiles(emptySet())
         }
 
         val counts = CoreBridge.unreadCounts().associate { it.conversationId.toHex() to it.count.toInt() }
@@ -189,6 +199,7 @@ object PushNotifier {
             .filter { it.notification.group == Notifications.GROUP_KEY && it.id != SUMMARY_ID && it.id !in live }
             .forEach { nm.cancel(it.id) }
         rendered.keys.retainAll(visible.keys)
+        prunePreviewFiles(visible.keys)
 
         if (visible.isEmpty()) {
             nm.cancel(SUMMARY_ID)
@@ -228,10 +239,25 @@ object PushNotifier {
         val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
         val alertThisChat = pending.isNotEmpty()
+        val previewEnabled = ChatPrefs.notifPreview
+        val images = if (previewEnabled) coroutineScope {
+            recent.map { message -> async {
+                val did = message.dispatchId?.toHex()
+                message.id to if (did != null && message.mediaKind.toInt() in listOf(1, 2, 4))
+                    notificationImage(convHex, did) else null
+            } }.awaitAll().toMap()
+        } else emptyMap()
+        // A read, mute or privacy change may have happened while a sticker was fetched.
+        if (foreground || !ChatPrefs.notifEnabled || ChatPrefs.notifPreview != previewEnabled ||
+            CoreBridge.conversation(conv)?.muted == true ||
+            CoreBridge.unreadCounts().none { it.conversationId.contentEquals(conv) && it.count.toInt() == n }) return
+        val current = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
+        if (current.map { Triple(it.id, it.content, it.mediaKind) } !=
+            recent.map { Triple(it.id, it.content, it.mediaKind) }) return
         val snapshot = ChatSnapshot(displayName, n, isGroup, ChatPrefs.notifPreview, mode,
             recent.map { message ->
                 LineSnapshot(message.id, message.content, message.mediaKind.toInt(), message.timestamp,
-                    message.senderIpk?.toHex()?.let(senderNames::get))
+                    message.senderIpk?.toHex()?.let(senderNames::get), images[message.id])
             })
         if (!alertThisChat && rendered[convHex] == snapshot) return
         val silent = when (mode) {
@@ -289,7 +315,9 @@ object PushNotifier {
                 val author = if (!isGroup || who == null) them
                              else Person.Builder().setName(who).setKey(who).build()
                 val line = m.content.ifEmpty { mediaLabel(m.mediaKind.toInt()) }
-                style.addMessage(line, m.timestamp.toLong() * 1000, author)
+                val message = NotificationCompat.MessagingStyle.Message(line, m.timestamp.toLong() * 1000, author)
+                images[m.id]?.let { message.setData("image/png", it) }
+                style.addMessage(message)
             }
             val replyPI = PendingIntent.getBroadcast(
                 app, notifId(convHex),
@@ -310,6 +338,11 @@ object PushNotifier {
         if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true) // only the first msg per live notif buzzes
         nm().notify(notifId(convHex), chat.build())
         rendered[convHex] = snapshot
+        // Only disposable, generated previews; never the authoritative media files.
+        val keep = images.values.filterNotNull().map { it.lastPathSegment }.toSet()
+        File(app.cacheDir, "notification-previews").listFiles()?.filter {
+            it.name.startsWith("$convHex-") && it.name !in keep
+        }?.forEach { it.delete() }
         if (pending.isNotEmpty()) CoreBridge.markNotified(pending)
 
         nm().notify(
@@ -326,6 +359,38 @@ object PushNotifier {
     }
 
     private fun nm() = app.getSystemService(NotificationManager::class.java)
+
+    private fun prunePreviewFiles(conversations: Set<String>) {
+        File(app.cacheDir, "notification-previews").listFiles()?.filter {
+            it.name.substringBefore('-') !in conversations
+        }?.forEach { it.delete() }
+    }
+
+    private suspend fun notificationImage(conversation: String, dispatch: String): Uri? {
+        try {
+            val bitmap = MessagePreviews.load(conversation, dispatch) ?: return null
+            val bytes = ByteArrayOutputStream().use { out ->
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) return null
+                out.toByteArray()
+            }
+            val dir = File(app.cacheDir, "notification-previews").apply { mkdirs() }
+            val file = File(dir, "$conversation-$dispatch-${bytes.contentHashCode()}.png")
+            if (!file.exists()) {
+                val pending = File.createTempFile("preview-", ".tmp", dir)
+                try {
+                    pending.writeBytes(bytes)
+                    if (!pending.renameTo(file)) return null
+                } finally { pending.delete() }
+            }
+            // MessagingStyle URIs are carried by the notification so Android grants
+            // its listeners read access for the lifetime of that notification.
+            return FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            Timber.tag("Push").d(e, "Message image preview unavailable")
+            return null
+        }
+    }
 
     private fun openChat(convHex: String, name: String): PendingIntent {
         val intent = Intent(app, LauncherActivity::class.java)

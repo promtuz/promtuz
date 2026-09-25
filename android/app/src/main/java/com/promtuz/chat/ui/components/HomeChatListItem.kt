@@ -1,6 +1,11 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.layout.ContentScale
+import com.promtuz.chat.utils.media.rememberMessagePreview
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.indication
@@ -205,6 +210,16 @@ fun HomeChatListItem(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val (line, lineColor) = statusLine(chat, typing, colors)
+                    if (!typing && chat.status == 1 && !chat.lastDeleted && chat.lastMediaKind in listOf(1, 2, 4)) {
+                        chat.lastDispatchId?.let { did ->
+                            val preview = rememberMessagePreview(chat.conversationHex, did, retry = chat.lastMediaKind == 4)
+                            if (preview != null) Image(
+                                preview, contentDescription = null,
+                                modifier = Modifier.size(22.dp).clip(RoundedCornerShape(4.dp)),
+                                contentScale = if (chat.lastMediaKind == 4) ContentScale.Fit else ContentScale.Crop,
+                            )
+                        }
+                    }
                     Text(
                         line,
                         Modifier.weight(1f),

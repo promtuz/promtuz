@@ -288,6 +288,7 @@ class AppVM(
                 memberCount = c.members.size,
                 lastPreview = last?.let { if (it.system.toInt() == 5) "Call" else it.content },
                 lastMessageId = last?.id,
+                lastDispatchId = last?.dispatchId?.toHex(),
                 lastMediaKind = last?.mediaKind?.toInt() ?: 0,
                 timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
                 status = contact?.status?.toInt() ?: 1,
