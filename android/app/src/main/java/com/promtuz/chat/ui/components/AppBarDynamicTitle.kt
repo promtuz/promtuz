@@ -10,11 +10,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.ui.animation.QueuedAnimatedContent
-import com.promtuz.chat.ui.text.calSansFamily
 import com.promtuz.chat.ui.text.ttCommonsProFamily
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +50,13 @@ fun AppBarDynamicTitle(titles: StateFlow<String>, modifier: Modifier = Modifier,
 }
 
 @Composable
-internal fun screenTitleStyle() = MaterialTheme.typography.titleLarge.copy(fontFamily = ttCommonsProFamily, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
+internal fun screenTitleStyle() = MaterialTheme.typography.titleLarge.copy(
+    fontFamily = ttCommonsProFamily,
+    fontWeight = FontWeight.SemiBold,
+    fontSize = 22.sp,
+    // Keep the title centered within its line box when its font size changes.
+    lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None),
+)
 
 @Composable
 internal fun ConnectionAwareTitle(title: @Composable () -> Unit) {
