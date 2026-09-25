@@ -129,6 +129,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val calendar = rememberChatCalendar()
+    var selectedDate by remember { mutableStateOf<java.time.LocalDate?>(null) }
 
     // High-intent moment to ask for notifications: they're in a conversation. One-shot, self-gated.
     NotificationPrimer()
@@ -199,9 +200,16 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     LaunchedEffect(Unit) { viewModel.jump.collect { pendingJump = it } }
     LaunchedEffect(pendingJump, rows) {
         val did = pendingJump ?: return@LaunchedEffect
-        if (rows.any { it is ChatRow.Msg && it.msg.dispatchIdHex == did }) {
+        if (rows.any { rowKey(it) == did }) {
             pendingJump = null
-            jumpToQuoted(did)
+            // Clearing the pending key restarts this effect; the actual glide
+            // must outlive that restart and reactive message-list updates.
+            scope.launch {
+                stage.scrollToKey(did)
+                highlightKey = did
+                delay(1400)
+                if (highlightKey == did) highlightKey = null
+            }
         }
     }
 
@@ -334,7 +342,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                         is MessageContent.System -> SystemRow(content, Modifier.padding(top = layout.groupGap.dp))
                         else -> {}
                     }
-                    is ChatRow.Date -> ChatDateDivider(chatRow.date, calendar.today)
+                    is ChatRow.Date -> ChatDateDivider(chatRow.date, calendar.today) { selectedDate = chatRow.date }
                     is ChatRow.Typing -> {
                         val gap by androidx.compose.animation.core.animateDpAsState(
                             if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
@@ -378,6 +386,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 viewModel = stickersVM,
                 onDismiss = { packSheet = null },
                 onAddImages = { pack -> packSheet = null; appVM.navigator.push(Routes.NewStickerPack(pack)) },
+            )
+        }
+
+        selectedDate?.let { date ->
+            com.promtuz.chat.ui.components.ChatDatePicker(
+                initialDate = date,
+                today = calendar.today,
+                onDismiss = { selectedDate = null },
+                onJump = { viewModel.jumpToDate(it, calendar.zone) },
             )
         }
 

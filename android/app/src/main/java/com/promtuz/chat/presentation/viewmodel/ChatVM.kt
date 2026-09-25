@@ -202,6 +202,29 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     fun nextHit() = stepHit(1)
     fun prevHit() = stepHit(-1)
 
+    /** Resolve against all stored history, then widen the same window used by search. */
+    suspend fun jumpToDate(date: java.time.LocalDate, zone: java.time.ZoneId): Boolean {
+        val start = date.atStartOfDay(zone).toEpochSecond()
+        val position = CoreBridge.messageAtTime(conversation, start) ?: return false
+        val dispatch = position.dispatchId?.toHex()
+        limit = maxOf(limit, position.newer.toInt() + PAGE)
+        var loaded = load()
+        fun target() = loaded.firstOrNull { message ->
+            message.localId == position.id || (dispatch != null &&
+                (message.content as? MessageContent.Album)?.items?.any { it.dispatchIdHex == dispatch } == true)
+        }
+        // Concurrent arrivals can push the target below the depth we just read.
+        // A folded album may also need its head from the preceding page.
+        while (target() == null && !exhausted) {
+            limit += PAGE
+            loaded = load()
+        }
+        _messages.value = loaded
+        val target = target() ?: return false
+        _jump.emit(target.key)
+        return true
+    }
+
     private fun stepHit(by: Int) {
         val n = _hits.value.size
         if (n == 0) return
@@ -390,7 +413,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     private suspend fun load(): List<UiMessage> {
         val want = limit
         val rows = CoreBridge.messages(conversation, want)                   // oldest-first
-        if (rows.size < want) exhausted = true
+        exhausted = rows.size < want
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
         val media = CoreBridge.getMedia(conversation).associateBy { it.dispatchId.toHex() }
         // Quote resolution: replies name a dispatch_id; snippet comes from the
@@ -398,7 +421,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
         // reversed → newest at index 0 → drawn at the bottom under reverseLayout;
         // AVIF decode happens in toUi, so map off the main thread.
-        return withContext(Dispatchers.Default) {
+        val loaded = withContext(Dispatchers.Default) {
             // "Seen by N" is only meaningful for our own messages in a group;
             // a 1:1 already says it with the delivery tick, so the per-message
             // count query is skipped entirely there.
@@ -416,6 +439,9 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
                 .filterNot { it.inAlbum }
                 .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value, seen) }
         }
+        // A date/search jump can widen the window while this read is decoding.
+        // Never publish that older, narrower snapshot over the requested window.
+        return if (want < limit) load() else loaded
     }
 
     /**

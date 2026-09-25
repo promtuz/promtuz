@@ -597,6 +597,14 @@ impl Message {
         .unwrap_or_default()
     }
 
+    /// Window depth of the first message on/after a local day's start (UTC seconds).
+    /// If the date is after all history, use the latest timestamp. Timestamp and
+    /// insertion order may differ after an offline drain, so count by id only
+    /// after choosing the target by timestamp.
+    pub fn position_at_time(conversation_id: &[u8; 16], timestamp: u64) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+        position_at_time(&MESSAGES_DB.lock(), conversation_id, timestamp)
+    }
+
     /// Outgoing rows still pending (status = 0) — the durable-first-send
     /// retry set. Oldest-first by ULID so a reconnect re-sends in send order.
     pub fn pending_outgoing() -> Vec<MessageRow> {
@@ -687,9 +695,45 @@ impl Message {
     }
 }
 
+fn position_at_time(conn: &rusqlite::Connection, conversation: &[u8; 16], timestamp: u64) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn.query_row(
+        "SELECT m.id, m.dispatch_id, (SELECT COUNT(*) FROM messages n WHERE n.conversation_id = m.conversation_id AND n.id > m.id) \
+         FROM messages m WHERE m.conversation_id = ?1 \
+         ORDER BY CASE WHEN m.timestamp >= ?2 THEN 0 ELSE 1 END, \
+                  CASE WHEN m.timestamp >= ?2 THEN m.timestamp END ASC, \
+                  m.timestamp DESC, m.id ASC LIMIT 1",
+        (conversation.as_slice(), timestamp), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_depth_handles_late_arrivals_gaps_and_conversation_boundaries() {
+        let conn = crate::db::messages::open_in_memory();
+        let conv = [41; 16];
+        let other = [42; 16];
+        // Arrival order deliberately differs from message dates; calendar
+        // targeting uses dates, but pagination still uses insertion IDs.
+        for (id, timestamp, conversation) in [
+            ("01", 100, conv), ("02", 300, conv), ("03", 200, conv),
+            ("04", 201, other), ("05", 300, conv),
+        ] {
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, content, outgoing, timestamp, status) VALUES (?1, ?2, '', 1, ?3, 1)",
+                (id, conversation.as_slice(), timestamp),
+            ).unwrap();
+        }
+        assert_eq!(position_at_time(&conn, &conv, 0).unwrap().map(|p| p.2), Some(3));
+        assert_eq!(position_at_time(&conn, &conv, 200).unwrap().map(|p| p.2), Some(1));
+        assert_eq!(position_at_time(&conn, &conv, 201).unwrap().map(|p| p.2), Some(2));
+        assert_eq!(position_at_time(&conn, &conv, 300).unwrap().map(|p| p.2), Some(2));
+        assert_eq!(position_at_time(&conn, &conv, 400).unwrap().map(|p| p.2), Some(2));
+        assert_eq!(position_at_time(&conn, &[43; 16], 0).unwrap(), None);
+    }
 
     #[test]
     fn dispatch_id_is_monotonic() {

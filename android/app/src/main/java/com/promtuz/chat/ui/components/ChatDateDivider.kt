@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.icu.text.DateFormat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.heading
@@ -64,7 +66,7 @@ internal fun rememberChatCalendar(): ChatCalendar {
 }
 
 @Composable
-internal fun ChatDateDivider(date: LocalDate, today: LocalDate) {
+internal fun ChatDateDivider(date: LocalDate, today: LocalDate, onClick: () -> Unit) {
     val colors = LocalChatColors.current
     val locale = LocalConfiguration.current.locales[0]
     val label = remember(date, today, locale) {
@@ -84,7 +86,9 @@ internal fun ChatDateDivider(date: LocalDate, today: LocalDate) {
         Text(
             label,
             modifier = Modifier
+                .clip(CircleShape)
                 .background(colors.bar.copy(alpha = 0.9f), CircleShape)
+                .clickable(onClickLabel = "Jump to date", onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 5.dp)
                 .semantics { heading() },
             style = MaterialTheme.typography.labelMedium,

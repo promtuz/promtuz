@@ -403,8 +403,23 @@ pub fn search_messages(
         .collect())
 }
 
-/// Paginated history for a conversation, oldest-first. `before_id` (a ULID)
-/// pages backwards; pass an empty string for the latest page.
+/// A calendar target, including its pagination depth. IDs keep the target
+/// stable if newer messages arrive while the client widens its window.
+#[derive(uniffi::Record)]
+pub struct MessagePosition {
+    pub id: String,
+    pub dispatch_id: Option<Vec<u8>>,
+    pub newer: u32,
+}
+
+#[uniffi::export]
+pub fn message_at_time(conversation_id: Vec<u8>, timestamp: u64) -> Result<Option<MessagePosition>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Ok(Message::position_at_time(&conv, timestamp)?.map(|(id, dispatch_id, newer)| MessagePosition { id, dispatch_id, newer }))
+}
+
+/// Paginated history, oldest-first. `before_id` pages backwards by ULID;
+/// pass an empty string for the latest page.
 #[uniffi::export]
 pub fn get_messages(
     conversation_id: Vec<u8>, limit: u32, before_id: String,
