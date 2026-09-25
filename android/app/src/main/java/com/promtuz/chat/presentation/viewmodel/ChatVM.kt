@@ -60,9 +60,15 @@ import uniffi.core.ReactionRecord
  * index 0 and the list draws reversed, so new messages land at the bottom. Typing
  * is an ephemeral signal, timed out client-side.
  */
-class ChatVM(private val application: Application, private val app: AppVM) : ViewModel() {
+class ChatVM(
+    private val application: Application,
+    private val app: AppVM,
+    val conversationHex: String,
+) : ViewModel() {
     /** The chat's scope — a 16-byte conversation id, group or 1:1 alike. */
-    private var conversation: ByteArray = ByteArray(16)
+    private val conversation = conversationHex.fromHex()
+    // Seed before composition, without waiting for the initial database query.
+    private val initialSummary = app.chats.value.firstOrNull { it.conversationHex == conversationHex }
     /**
      * Everyone in the chat except us. Presence and typing are per-person, so
      * they key off this rather than off the conversation: comparing a
@@ -89,13 +95,8 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
         fire { CoreBridge.markRead(conversation, did.fromHex()) }
     }
 
-    // Computed, not `by lazy`: the top bar composes before [init] runs and
-    // reads this, and a lazy would memoize the placeholder zeros for the
-    // lifetime of the VM — muting and Group info would both address nothing.
-    val conversationHex: String get() = conversation.toHex()
-
     /** True once the roster is bigger than a pair — drives per-sender bubbles. */
-    private val _isGroup = MutableStateFlow(false)
+    private val _isGroup = MutableStateFlow(initialSummary?.isGroup == true)
     val isGroup: StateFlow<Boolean> = _isGroup.asStateFlow()
 
     /**
@@ -103,7 +104,7 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
      * contact's. The route carries a name too, but that one is a snapshot from
      * when the chat was opened — a rename has to land on an open header.
      */
-    private val _title = MutableStateFlow("")
+    private val _title = MutableStateFlow(initialSummary?.name.orEmpty())
     val title: StateFlow<String> = _title.asStateFlow()
 
     /**
@@ -111,11 +112,11 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
      * avatar wants this rather than [title]: an unnamed group draws its
      * members' initials, and a derived name would hide that it has none.
      */
-    private val _rawTitle = MutableStateFlow("")
+    private val _rawTitle = MutableStateFlow(initialSummary?.rawTitle.orEmpty())
     val rawTitle: StateFlow<String> = _rawTitle.asStateFlow()
 
     /** Notifications silenced for this chat. A conversation flag, so it rides the row. */
-    private val _muted = MutableStateFlow(false)
+    private val _muted = MutableStateFlow(initialSummary?.muted == true)
     val muted: StateFlow<Boolean> = _muted.asStateFlow()
 
     /**
@@ -126,13 +127,16 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     val memberNames: StateFlow<Map<String, String>> = _memberNames.asStateFlow()
 
     /** How many are in the group *now* — the header's count, so it excludes the departed. */
-    private val _memberCount = MutableStateFlow(0)
+    private val _memberCount = MutableStateFlow(initialSummary?.memberCount ?: 0)
     val memberCount: StateFlow<Int> = _memberCount.asStateFlow()
 
     /** Who is currently typing, by member hex — a group can have several. */
-    private val _typingMembers = MutableStateFlow<Set<String>>(emptySet())
+    private val _typingMembers = MutableStateFlow(
+        app.conversationActivity.members.value[conversationHex].orEmpty()
+            .filterValues { Activity.Typing in Activity.fromBits(it) }.keys.toSet()
+    )
     val typingMembers: StateFlow<Set<String>> = _typingMembers.asStateFlow()
-    private val _typing = MutableStateFlow(false)
+    private val _typing = MutableStateFlow(_typingMembers.value.isNotEmpty())
     private val typingPresentation = TypingPresentation(viewModelScope)
     val typingBubbleMembers: StateFlow<Set<String>> = typingPresentation.members
 
@@ -261,13 +265,16 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
     /** Key of the incoming message that ended a live typing signal — the morph target. */
     val typingHandoff = MutableStateFlow<String?>(null)
 
-    private val _presence = MutableStateFlow<Presence?>(null)
+    private val _presence = MutableStateFlow(initialSummary?.peerHex?.let { CoreBridge.presenceByPeer.value[it] })
     val presence: StateFlow<Presence?> = _presence.asStateFlow()
 
-    fun init(conversationId: ByteArray) {
+    /** The first resolved header is initialization, not an animated live update. */
+    private val _headerReady = MutableStateFlow(false)
+    val headerReady: StateFlow<Boolean> = _headerReady.asStateFlow()
+
+    fun init() {
         if (started) return
         started = true
-        conversation = conversationId
         syncTyping()
 
         var incomingLoaded = false
@@ -338,19 +345,8 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
             app.conversationActivity.members.collect { syncTyping() }
         }
 
-        // Seed from the app-wide cache (AppVM subscribes presence for all
-        // contacts; a delta may have landed before this chat opened), then
-        // track live. Subscription itself is owned by AppVM — not re-expressed
-        // here, or the relay's full-set replace would narrow us to one peer.
-        // A group has no single "last seen", so presence stays null there.
-        viewModelScope.launch {
-            observeQuery(setOf("conversations", "conversation_members")) {
-                runCatching { CoreBridge.conversation(conversation)?.peer }.getOrNull()
-            }.collect { peer ->
-                if (peer == null) return@collect
-                _presence.value = CoreBridge.presenceByPeer.value[peer.toHex()]
-            }
-        }
+        // Initial presence is resolved with the roster; subsequent signals stay live.
+        // AppVM owns the process-wide subscription, including its cached snapshot.
         viewModelScope.launch {
             CoreBridge.presence
                 .filter { sig -> others.any { it.contentEquals(sig.peer) } }
@@ -394,20 +390,28 @@ class ChatVM(private val application: Application, private val app: AppVM) : Vie
 
     /** Who is in this chat and what to call them — read before every message pass. */
     private suspend fun resolveRoster() {
-        val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull()
-        val roster = runCatching { CoreBridge.members(conversation) }.getOrDefault(emptyList())
-        _isGroup.value = record?.kind?.toInt() == 1
-        _title.value = record?.displayName.orEmpty()
-        _rawTitle.value = record?.title.orEmpty()
-        _muted.value = record?.muted == true
-        others = record?.others.orEmpty()
+        val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull() ?: return
+        val roster = runCatching { CoreBridge.members(conversation) }.getOrNull() ?: return
         // Core resolves a member's name — address book, then what they call
         // themselves, then their key's head — so every screen agrees on the
         // order. Only "You" is ours to say: we are never in our own contacts.
-        _memberNames.value = roster.associate { m ->
+        val names = roster.associate { m ->
             m.ipk.toHex() to if (m.me) "You" else m.name
         }
-        _memberCount.value = roster.count { it.active }
+        // Publish together on Main so the first composed header is coherent.
+        // A transient read failure keeps the last known header instead of clearing it.
+        withContext(Dispatchers.Main.immediate) {
+            _isGroup.value = record.kind.toInt() == 1
+            _title.value = record.displayName
+            _rawTitle.value = record.title
+            _muted.value = record.muted
+            others = record.others
+            _memberNames.value = names
+            _memberCount.value = roster.count { it.active }
+            _presence.value = record.peer?.let { CoreBridge.presenceByPeer.value[it.toHex()] }
+            syncTyping()
+            _headerReady.value = true
+        }
     }
 
     private suspend fun load(): List<UiMessage> {

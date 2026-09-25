@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -45,21 +46,21 @@ fun Modifier.tapOnly(onTap: () -> Unit): Modifier = this
  * Its own hit area, its own feedback; the surface it sits on stays still.
  */
 fun Modifier.pressScale(onClick: () -> Unit, scaleTo: Float = 0.88f): Modifier = composed {
+    val currentOnClick by rememberUpdatedState(onClick)
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (pressed) scaleTo else 1f, spring(stiffness = 900f), label = "press")
     this
         .graphicsLayer { scaleX = scale; scaleY = scale }
-        .semantics { role = Role.Button; onClick { onClick(); true } }
-        .pointerInput(onClick) {
+        .semantics { role = Role.Button; onClick { currentOnClick(); true } }
+        .pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown()
                 down.consume()
                 pressed = true
-                val up = waitForUpOrCancellation()
-                pressed = false
+                val up = try { waitForUpOrCancellation() } finally { pressed = false }
                 if (up != null) {
                     up.consume()
-                    onClick()
+                    currentOnClick()
                 }
             }
         }

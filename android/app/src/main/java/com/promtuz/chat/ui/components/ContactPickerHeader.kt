@@ -4,6 +4,9 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.draw.clipToBounds
 import com.promtuz.chat.ui.constants.Tweens
+import com.promtuz.chat.ui.animation.ContentProgression
+import com.promtuz.chat.ui.animation.QueuedAnimatedContent
+import com.promtuz.chat.ui.animation.queuedVerticalTransition
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -38,76 +41,91 @@ fun ContactPickerHeader(
     searchLabel: String = "Search contacts",
     enabled: Boolean = true,
     selectionCount: Int? = null,
+    scrollBehavior: TopAppBarScrollBehavior? = null,
+    windowInsets: WindowInsets = WindowInsets(0),
+    topBarColors: TopAppBarColors = appTopBarColors(),
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
-    val titleStyle = MaterialTheme.typography.titleLarge
+    val titleStyle = screenTitleStyle()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     PickerSearchBackHandler(searching) { if (enabled) onBack() }
     LaunchedEffect(searching) {
         if (!searching) { keyboard?.hide(); focusManager.clearFocus() }
     }
-    Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack, enabled = enabled) {
-            val description = if (searching) "Close search" else if (close) "Clear selection" else "Back"
-            val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
-            TopBarMorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
-                description, tint = tint)
-        }
-        AnimatedContent(searching, Modifier.weight(1f).height(48.dp), contentAlignment = Alignment.CenterStart, transitionSpec = {
-            (fadeIn(ChatMotion.spec()) togetherWith fadeOut(ChatMotion.spec())).using(null)
-        }, label = "picker search") { search ->
-            if (search) {
-                val focus = remember { FocusRequester() }
-                LaunchedEffect(searching) { if (searching) focus.requestFocus() }
-                BasicTextField(query, onQuery, enabled = enabled && searching, singleLine = true,
-                    modifier = Modifier.fillMaxSize().focusRequester(focus).semantics { contentDescription = searchLabel },
-                    textStyle = titleStyle.copy(color = colors.onSurface),
-                    cursorBrush = SolidColor(colors.primary),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
-                    decorationBox = { inner ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                            if (query.isEmpty()) Text(searchLabel, color = colors.onSurfaceVariant,
-                                style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            inner()
+    AppTopBar(
+        title = {
+            AnimatedContent(searching, Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.CenterStart, transitionSpec = {
+                (fadeIn(ChatMotion.spec()) togetherWith fadeOut(ChatMotion.spec())).using(null)
+            }, label = "picker search") { search ->
+                if (search) {
+                    val focus = remember { FocusRequester() }
+                    LaunchedEffect(searching) { if (searching) focus.requestFocus() }
+                    BasicTextField(query, onQuery, enabled = enabled && searching, singleLine = true,
+                        modifier = Modifier.fillMaxSize().focusRequester(focus).semantics { contentDescription = searchLabel },
+                        textStyle = titleStyle.copy(color = colors.onSurface),
+                        cursorBrush = SolidColor(colors.primary),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
+                        decorationBox = { inner ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                                if (query.isEmpty()) Text(searchLabel, color = colors.onSurfaceVariant,
+                                    style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                inner()
+                            }
+                        })
+                } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart,
+                    propagateMinConstraints = false) {
+                    AnimatedContent(selectionCount != null, Modifier.fillMaxWidth().clipToBounds(),
+                        contentAlignment = Alignment.CenterStart, transitionSpec = {
+                            ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
+                                (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
+                                .using(null)
+                        }, label = "picker title mode") { counted ->
+                        if (counted) {
+                            // Retain the outgoing count while selection mode animates away.
+                            var lastCount by remember { mutableIntStateOf(selectionCount ?: 1) }
+                            if (selectionCount != null) SideEffect { lastCount = selectionCount }
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                                QueuedAnimatedContent(selectionCount ?: lastCount,
+                                    progression = ContentProgression.Integers, transitionSpec = {
+                                    queuedVerticalTransition(it, clip = false)
+                                }, label = "selected count") { Text("$it", style = titleStyle) }
+                                Text(" selected", style = titleStyle)
+                            }
+                        } else if (close) Text(title, style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        else ConnectionAwareTitle {
+                            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                    })
-            } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart,
-                propagateMinConstraints = false) {
-                AnimatedContent(selectionCount != null, Modifier.fillMaxWidth().clipToBounds(),
-                    contentAlignment = Alignment.CenterStart, transitionSpec = {
-                        ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
-                            (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
-                            .using(null)
-                    }, label = "picker title mode") { counted ->
-                    if (counted) {
-                        // Retain the outgoing count while selection mode animates away.
-                        var lastCount by remember { mutableIntStateOf(selectionCount ?: 1) }
-                        if (selectionCount != null) SideEffect { lastCount = selectionCount }
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.semantics(mergeDescendants = true) {}) {
-                            AnimatedContent(selectionCount ?: lastCount, transitionSpec = {
-                                ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
-                                    (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
-                                    .using(SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> Tweens.microInteraction(300) }))
-                            }, label = "selected count") { Text("$it", style = titleStyle) }
-                            Text(" selected", style = titleStyle)
-                        }
-                    } else Text(title, style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
-            }
 
-        }
-        AnimatedVisibility(!searching, enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
-            exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec())) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                actions()
-                if (onSearch != null) IconButton(onClick = onSearch, enabled = enabled && !searching) {
-                    Icon(painterResource(R.drawable.oi_search), searchLabel, Modifier.size(22.dp))
+            }
+        },
+        navigationIcon = {
+            IconButton(onClick = onBack, enabled = enabled) {
+                val description = if (searching) "Close search" else if (close) "Clear selection" else "Back"
+                val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
+                TopBarMorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
+                    description, tint = tint)
+            }
+        },
+        scrollBehavior = scrollBehavior,
+        windowInsets = windowInsets,
+        colors = topBarColors,
+        connectionStatus = false,
+        actions = {
+            AnimatedVisibility(!searching, enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
+                exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec())) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    actions()
+                    if (onSearch != null) IconButton(onClick = onSearch, enabled = enabled && !searching) {
+                        Icon(painterResource(R.drawable.oi_search), searchLabel, Modifier.size(22.dp))
+                    }
                 }
             }
-        }
-    }
+        },
+    )
 }

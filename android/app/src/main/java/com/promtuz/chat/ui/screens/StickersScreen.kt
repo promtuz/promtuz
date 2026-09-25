@@ -60,7 +60,7 @@ fun StickersScreen(
                 start = padding.calculateLeftPadding(direction),
                 end = padding.calculateRightPadding(direction),
             ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, 48.dp),
+            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, padding.calculateBottomPadding() + 48.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {

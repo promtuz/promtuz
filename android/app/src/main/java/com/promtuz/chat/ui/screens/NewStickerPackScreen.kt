@@ -6,6 +6,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -86,7 +88,8 @@ fun NewStickerPackScreen(
         (adding || (name.isNotBlank() && nameLength <= NameMax))
 
     SimpleScreen({ Text(if (adding) "Add stickers" else "New sticker pack") }) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+        Column(Modifier.fillMaxSize().consumeWindowInsets(padding).imePadding()
+            .padding(top = padding.calculateTopPadding())) {
             if (!adding) BasicTextField(
                 value = name,
                 onValueChange = { viewModel.draftName = it },
@@ -157,7 +160,7 @@ fun NewStickerPackScreen(
                 },
                 onClick = { viewModel.publish(packHex) },
                 enabled = ready,
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = padding.calculateBottomPadding()).padding(16.dp),
             )
         }
     }

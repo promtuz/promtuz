@@ -102,19 +102,19 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
     }
     BackHandler(busy || selecting) { back() }
 
-    Scaffold(topBar = {
-        Column(Modifier.statusBarsPadding()) {
-            ContactPickerHeader(
-                title = if (selecting && selectedPeople.isEmpty()) "Select contacts" else "Contacts",
-                selectionCount = selectedPeople.size.takeIf { selecting && it > 0 },
-                close = selecting, onBack = ::back, enabled = !busy,
-                actions = { if (!selecting) IconButton(onClick = onShareIdentity) {
-                    Icon(painterResource(R.drawable.i_qr_code), "My QR code", Modifier.size(22.dp))
-                } else if (selectedPeople.size == 1) IconButton(
-                    onClick = { deleting = selectedPeople.single(); actions.clearContactError() }, enabled = !busy,
-                ) { Icon(painterResource(R.drawable.i_delete), "Delete contact", Modifier.size(22.dp)) } },
-            )
-        }
+    ScreenScaffold(topBar = { scrollBehavior ->
+        ContactPickerHeader(
+            scrollBehavior = scrollBehavior,
+            windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
+            title = if (selecting && selectedPeople.isEmpty()) "Select contacts" else "Contacts",
+            selectionCount = selectedPeople.size.takeIf { selecting && it > 0 },
+            close = selecting, onBack = ::back, enabled = !busy,
+            actions = { if (!selecting) IconButton(onClick = onShareIdentity) {
+                Icon(painterResource(R.drawable.i_qr_code), "My QR code", Modifier.size(22.dp))
+            } else if (selectedPeople.size == 1) IconButton(
+                onClick = { deleting = selectedPeople.single(); actions.clearContactError() }, enabled = !busy,
+            ) { Icon(painterResource(R.drawable.i_delete), "Delete contact", Modifier.size(22.dp)) } },
+        )
     }) { padding ->
         Box(Modifier.fillMaxSize().padding(
             start = padding.calculateLeftPadding(direction),
@@ -123,17 +123,11 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
             bottom = 0.dp
         )) {
             Column(Modifier.fillMaxSize()) {
-                if (opening || loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-                if (loadError) Row(Modifier.padding(horizontal = 16.dp)) {
-                    Text("Couldn’t load contacts", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = actions.loadContacts) { Text("Retry") }
-                }
                 ContactPicker(Modifier.weight(1f),
                     people, "", picked, selecting, !busy,
                     onClick = { if (selecting) toggle(it) else actions.open(it) },
                     onLongClick = ::toggle,
-                    yPadding = Pair(padding.calculateTopPadding() + 4.dp, 88.dp), emptyText = if (loading || loadError) "" else "No contacts yet",
+                    yPadding = Pair(padding.calculateTopPadding() + 4.dp, padding.calculateBottomPadding() + 88.dp), emptyText = if (loading || loadError) "" else "No contacts yet",
                     supportingText = { person ->
                         val status = presence[person.ipkHex]
                         presenceText(status, presenceNow)?.let { label ->
@@ -144,6 +138,12 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                         }
                     },
                     header = {
+                        if (opening || loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+                        if (loadError) Row(Modifier.padding(horizontal = 16.dp)) {
+                            Text("Couldn’t load contacts", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = actions.loadContacts) { Text("Retry") }
+                        }
                         AnimatedVisibility(!selecting,
                             enter = fadeIn(ChatMotion.spec()) + expandVertically(ChatMotion.spec()),
                             exit = fadeOut(ChatMotion.spec()) + shrinkVertically(ChatMotion.spec())) {
@@ -162,7 +162,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                     })
             }
             AnimatedVisibility(selecting && selectedPeople.isNotEmpty(),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = padding.calculateBottomPadding()).padding(16.dp),
                 enter = fadeIn(ChatMotion.spec()) + slideInVertically(ChatMotion.spec()) { it },
                 exit = fadeOut(ChatMotion.spec()) + slideOutVertically(ChatMotion.spec()) { it }) {
                 GroupActionButton("Create group", { naming = true; actions.clearGroupError() }, !busy)

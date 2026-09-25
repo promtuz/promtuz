@@ -1,6 +1,10 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.Intent
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,7 +37,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
-import com.promtuz.chat.ui.components.BackTopBar
+import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.IdentityQrCode
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
@@ -58,17 +62,11 @@ fun ShareIdentityScreen(
         }
     }
 
-    Scaffold(
-        topBar = { BackTopBar("My QR code") }
-    ) { innerPadding ->
-        Box(
-            Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(colors.background),
-        ) {
+    SimpleScreen({ Text("My QR code") }) { innerPadding ->
+        BoxWithConstraints(Modifier.fillMaxSize()) {
             Column(
-                Modifier.fillMaxSize(),
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                    .heightIn(min = maxHeight).padding(innerPadding).padding(vertical = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(48.dp, Alignment.CenterVertically)
             ) {
                 Box(

@@ -24,10 +24,12 @@ fun rememberPresenceTime(): Long {
 }
 
 fun presenceText(presence: Presence?, nowMs: Long): String? {
-    fun relative(at: Long) = DateUtils.getRelativeTimeSpanString(at, nowMs, DateUtils.MINUTE_IN_MILLIS)
+    fun relative(at: Long): CharSequence = if (nowMs - at < DateUtils.MINUTE_IN_MILLIS) "just now"
+        else DateUtils.getRelativeTimeSpanString(at, nowMs, DateUtils.MINUTE_IN_MILLIS)
     return when (presence) {
         Presence.Online -> "online"
-        is Presence.Idle -> "idle since ${relative(presence.sinceMs)}"
+        is Presence.Idle -> if (nowMs - presence.sinceMs < DateUtils.MINUTE_IN_MILLIS) "idle just now"
+            else "idle since ${relative(presence.sinceMs)}"
         is Presence.LastSeen -> "last seen ${relative(presence.atMs)}"
         else -> null
     }

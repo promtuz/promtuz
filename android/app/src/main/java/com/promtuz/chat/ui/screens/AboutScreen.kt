@@ -57,7 +57,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
                 start = padding.calculateLeftPadding(direction),
                 end = padding.calculateRightPadding(direction),
             ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 24.dp, 18.dp, 32.dp),
+            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 24.dp, 18.dp, padding.calculateBottomPadding() + 32.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item("app") {

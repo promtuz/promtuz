@@ -46,6 +46,8 @@ data class ChatSummary(
      * deleting is allowed — the group would be left with nobody to manage it.
      */
     val ownerIsStuck: Boolean = false,
+    /** Preserve the group's actual name when seeding a newly opened chat header. */
+    val rawTitle: String = "",
 ) {
     val isGroup: Boolean get() = kind == 1
 }

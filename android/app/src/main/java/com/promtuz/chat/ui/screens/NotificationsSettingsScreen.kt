@@ -25,7 +25,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.data.NotifBuzz
-import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.components.SimpleScreen
 
 @Composable

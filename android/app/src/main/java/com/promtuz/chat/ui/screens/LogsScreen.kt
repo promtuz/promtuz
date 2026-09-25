@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CornerSize
@@ -58,12 +60,13 @@ import java.util.Locale
 fun LogsScreen() {
     var showExport by remember { mutableStateOf(false) }
 
-    SimpleScreen({ Text("App Logs") }, actions = {
+    val listState = rememberLazyListState()
+    SimpleScreen({ Text("App Logs") }, scrollableState = listState, actions = {
         IconButton({ showExport = true }) {
             DrawableIcon(R.drawable.oi_export, desc = "Export logs", size = 20.dp)
         }
     }) { padding ->
-        LogsContainer(Modifier, padding)
+        LogsContainer(Modifier, padding, listState)
     }
 
     if (showExport) LogExportSheet { showExport = false }
@@ -147,6 +150,7 @@ private fun formatLogs(logs: List<AppLog>): String {
 fun LogsContainer(
     modifier: Modifier = Modifier,
     padding: PaddingValues = PaddingValues(0.dp),
+    listState: LazyListState = rememberLazyListState(),
 ) {
     val logs by AppLogger.logs.collectAsState()
 
@@ -160,6 +164,7 @@ fun LogsContainer(
             .fillMaxHeight()
             .padding(3.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.Bottom),
+        state = listState,
         reverseLayout = true
     ) {
         itemsIndexed(logs, key = { _, it -> it.id }) { i, log ->

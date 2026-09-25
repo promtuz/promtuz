@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
+import com.promtuz.chat.ui.components.ScreenScaffold
 import com.promtuz.chat.ui.components.ContactPickerHeader
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
@@ -81,29 +82,29 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
         }.orEmpty()
     }
 
-    Scaffold(topBar = {
-        Column(Modifier.background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-            ContactPickerHeader(
-                title = "Open source licenses",
-                searching = searching,
-                query = query,
-                onQuery = { query = it },
-                close = false,
-                onBack = {
-                    if (searching) { searching = false; query = "" }
-                    else back?.onBackPressed()
-                },
-                onSearch = { searching = true },
-                searchLabel = "Search libraries",
-            )
-        }
+    ScreenScaffold(topBar = { scrollBehavior ->
+        ContactPickerHeader(
+            scrollBehavior = scrollBehavior,
+            windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
+            title = "Open source licenses",
+            searching = searching,
+            query = query,
+            onQuery = { query = it },
+            close = false,
+            onBack = {
+                if (searching) { searching = false; query = "" }
+                else back?.onBackPressed()
+            },
+            onSearch = { searching = true },
+            searchLabel = "Search libraries",
+        )
     }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(
                 start = padding.calculateLeftPadding(direction),
                 end = padding.calculateRightPadding(direction),
             ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, 48.dp),
+            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, padding.calculateBottomPadding() + 48.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             when {
@@ -146,8 +147,7 @@ fun LibraryLicenseScreen(id: String) {
                     Toast.makeText(context, "No browser available", Toast.LENGTH_SHORT).show()
                 }
             }) {
-                DrawableIcon(R.drawable.oi_external_link)
-//                Icon(painterResource(R.drawable.oi_external_link), "Project website", Modifier.size(22.dp))
+                DrawableIcon(R.drawable.oi_external_link, desc = "Project website")
             }
         },
     ) { padding ->
@@ -156,7 +156,7 @@ fun LibraryLicenseScreen(id: String) {
                 start = padding.calculateLeftPadding(direction),
                 end = padding.calculateRightPadding(direction),
             ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, 48.dp),
+            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, padding.calculateBottomPadding() + 48.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             when {

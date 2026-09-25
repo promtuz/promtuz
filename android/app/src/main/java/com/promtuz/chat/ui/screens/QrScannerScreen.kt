@@ -166,8 +166,12 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
     var torchEnabled by remember { mutableStateOf(false) }
     val haveCamera by viewModel.isCameraAvailable.collectAsState()
 
-    CenterAlignedTopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+    com.promtuz.chat.ui.components.AppTopBar(
+        connectionStatus = false,
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent,
+            navigationIconContentColor = Color.White, titleContentColor = Color.White,
+            actionIconContentColor = Color.White),
         modifier = Modifier.background(
             Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent))
         ),
@@ -175,14 +179,13 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
             IconButton(onBack) {
                 TopBarMorphIcon(
                     MorphGlyph.Back, "Close",
-                    tint = MaterialTheme.colorScheme.onSurface,
+                    tint = Color.White,
                 )
             }
         },
         title = {
             Text(
-                "Scan QR",
-                style = avgSizeInStyle(textTheme.titleLargeEmphasized, textTheme.titleMediumEmphasized)
+                "Scan QR"
             )
         },
         actions = {
@@ -194,7 +197,7 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
                     Icon(
                         painterResource(if (torchEnabled) R.drawable.i_flash_off else R.drawable.i_flash_on),
                         if (torchEnabled) "Turn Flash Off" else "Turn Flash On",
-                        Modifier, MaterialTheme.colorScheme.onSurface
+                        Modifier, Color.White
                     )
                 }
             }

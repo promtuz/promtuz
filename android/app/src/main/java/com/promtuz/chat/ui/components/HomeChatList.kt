@@ -40,9 +40,12 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         Modifier.padding(
             start = innerPadding.calculateLeftPadding(direction),
             end = innerPadding.calculateRightPadding(direction),
+        ).fillMaxSize(),
+        contentPadding = PaddingValues(
+            top = innerPadding.calculateTopPadding(),
+            bottom = innerPadding.calculateBottomPadding() + 24.dp,
         ),
     ) {
-        item { Spacer(Modifier.height(innerPadding.calculateTopPadding())) }
 
         itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
             // Presence is per-person, so a group — which has no single
@@ -66,7 +69,6 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
             )
         }
 
-        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 

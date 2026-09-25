@@ -2,14 +2,9 @@ package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumTopAppBar
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.FabPosition
 import androidx.compose.material3.TopAppBarColors
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarScrollBehavior
+import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
@@ -18,22 +13,33 @@ fun SimpleScreen(
     title: @Composable (() -> Unit),
     modifier: Modifier = Modifier,
     actions: @Composable RowScope.() -> Unit = {},
-    topBarColors: TopAppBarColors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+    topBarColors: TopAppBarColors = appTopBarColors(),
     topBarModifier: Modifier = Modifier,
+    navigationIcon: @Composable () -> Unit = { GoBackButton() },
+    connectionStatus: Boolean = true,
+    scrollableState: ScrollableState? = null,
+    snackbarHost: @Composable () -> Unit = {},
+    floatingActionButton: @Composable () -> Unit = {},
+    floatingActionButtonPosition: FabPosition = FabPosition.End,
     content: @Composable ((PaddingValues) -> Unit)
 ) {
-    Scaffold(
-        modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
+    ScreenScaffold(
+        modifier = modifier,
+        topBar = { scrollBehavior ->
+            AppTopBar(
                 title = title,
+                connectionStatus = connectionStatus,
                 modifier = topBarModifier,
-                navigationIcon = { GoBackButton() },
+                navigationIcon = navigationIcon,
                 colors = topBarColors,
-                scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(),
+                scrollBehavior = scrollBehavior,
                 actions = actions
             )
         },
-        content = { content(it) }
+        scrollableState = scrollableState,
+        snackbarHost = snackbarHost,
+        floatingActionButton = floatingActionButton,
+        floatingActionButtonPosition = floatingActionButtonPosition,
+        content = content,
     )
 }

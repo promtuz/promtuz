@@ -195,7 +195,7 @@ internal fun RecoveryPhraseContent(
         },
     ) { padding ->
         Column(
-            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding)
                 .padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {

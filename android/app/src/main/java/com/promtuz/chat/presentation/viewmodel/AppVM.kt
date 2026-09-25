@@ -114,11 +114,11 @@ class AppVM(
                     _dynamicTitle.value = when (state) {
                         CS.Idle -> context.resources.getString(R.string.app_name)
                         // Held until the next state replaces it (Syncing → Connected).
-                        CS.Connecting, CS.Failed, CS.Handshaking, CS.Reconnecting, CS.Resolving, CS.NoInternet, CS.Syncing -> context.resources.getString(
+                        CS.Disconnected, CS.Connecting, CS.Failed, CS.Handshaking, CS.Reconnecting, CS.Resolving, CS.NoInternet, CS.Syncing -> context.resources.getString(
                             state.text
                         )
 
-                        CS.Connected, CS.Disconnected -> {
+                        CS.Connected -> {
                             context.resources.getString(state.text).also {
                                 titleResetJob = launch {
                                     delay(1200)
@@ -303,6 +303,7 @@ class AppVM(
                 amMember = c.amMember,
                 canLeave = c.canLeave,
                 ownerIsStuck = c.ownerIsStuck,
+                rawTitle = c.title,
             )
         }.sortedByDescending { it.timestampMs }
     } catch (e: Exception) {

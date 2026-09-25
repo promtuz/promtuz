@@ -31,6 +31,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.components.SimpleScreen
+import androidx.compose.foundation.layout.consumeWindowInsets
 import com.promtuz.chat.security.BlobOutcome
 import com.promtuz.chat.security.RecoveryStore
 import kotlinx.coroutines.launch
@@ -64,85 +66,88 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .imePadding()
-            .padding(horizontal = 24.dp, vertical = 48.dp),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text("Restore your identity", style = typography.headlineMedium)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Enter your 24-word recovery phrase. Chats reconnect on the next message.",
-            style = typography.bodyMedium,
-            color = colors.onSurfaceVariant
-        )
+    SimpleScreen({ Text("Restore your identity") }, connectionStatus = false) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .consumeWindowInsets(padding)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(padding)
+                .padding(horizontal = 24.dp, vertical = 48.dp),
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                "Enter your 24-word recovery phrase. Chats reconnect on the next message.",
+                style = typography.bodyMedium,
+                color = colors.onSurfaceVariant
+            )
 
-        Spacer(Modifier.height(24.dp))
-        OutlinedTextField(
-            phrase,
-            { phrase = it; error = null },
-            Modifier.fillMaxWidth(),
-            label = { Text("Recovery phrase") },
-            minLines = 3,
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false
-            ),
-            isError = error != null,
-            supportingText = { error?.let { Text(it, color = colors.error) } },
-        )
+            Spacer(Modifier.height(24.dp))
+            OutlinedTextField(
+                phrase,
+                { phrase = it; error = null },
+                Modifier.fillMaxWidth(),
+                label = { Text("Recovery phrase") },
+                minLines = 3,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false
+                ),
+                isError = error != null,
+                supportingText = { error?.let { Text(it, color = colors.error) } },
+            )
 
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            name,
-            { name = it },
-            Modifier.fillMaxWidth(),
-            label = { Text("Display name") },
-            supportingText = { Text("Used if no backup is found") },
-            singleLine = true,
-        )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                name,
+                { name = it },
+                Modifier.fillMaxWidth(),
+                label = { Text("Display name") },
+                supportingText = { Text("Used if no backup is found") },
+                singleLine = true,
+            )
 
-        Spacer(Modifier.height(24.dp))
-        Button(
-            {
-                val words = phrase.trim().split(Regex("\\s+"))
-                when {
-                    words.size != 24 -> error = "A recovery phrase is exactly 24 words (got ${words.size})"
-                    name.isBlank() -> error = "Pick a display name"
-                    else -> {
-                        busy = true
-                        scope.launch {
-                            try {
-                                // The identity is back either way; the history
-                                // is a separate mechanism that can fail on its
-                                // own. Never let that failure read as success.
-                                when (val blob =
-                                    RecoveryStore.restoreFromPhrase(context, words, name.trim())) {
-                                    is BlobOutcome.Imported -> onRestored()
-                                    BlobOutcome.Absent -> historyWarning =
-                                        "Your identity is restored, but no backup file was found on " +
-                                            "this device — chats and contacts did not come back."
+            Spacer(Modifier.height(24.dp))
+            Button(
+                {
+                    val words = phrase.trim().split(Regex("\\s+"))
+                    when {
+                        words.size != 24 -> error = "A recovery phrase is exactly 24 words (got ${words.size})"
+                        name.isBlank() -> error = "Pick a display name"
+                        else -> {
+                            busy = true
+                            scope.launch {
+                                try {
+                                    // The identity is back either way; the history
+                                    // is a separate mechanism that can fail on its
+                                    // own. Never let that failure read as success.
+                                    when (val blob =
+                                        RecoveryStore.restoreFromPhrase(context, words, name.trim())) {
+                                        is BlobOutcome.Imported -> onRestored()
+                                        BlobOutcome.Absent -> historyWarning =
+                                            "Your identity is restored, but no backup file was found on " +
+                                                "this device — chats and contacts did not come back."
 
-                                    is BlobOutcome.Failed -> historyWarning =
-                                        "Your identity is restored, but the backup file could not be " +
-                                            "read (${blob.reason}) — chats and contacts did not come back."
+                                        is BlobOutcome.Failed -> historyWarning =
+                                            "Your identity is restored, but the backup file could not be " +
+                                                "read (${blob.reason}) — chats and contacts did not come back."
+                                    }
+                                } catch (e: Exception) {
+                                    error = e.message ?: "Restore failed"
+                                } finally {
+                                    busy = false
                                 }
-                            } catch (e: Exception) {
-                                error = e.message ?: "Restore failed"
-                            } finally {
-                                busy = false
                             }
                         }
                     }
-                }
-            },
-            Modifier.fillMaxWidth(),
-            enabled = !busy,
-        ) {
-            if (busy) CircularProgressIndicator(Modifier.height(18.dp)) else Text("Restore")
+                },
+                Modifier.fillMaxWidth(),
+                enabled = !busy,
+            ) {
+                if (busy) CircularProgressIndicator(Modifier.height(18.dp)) else Text("Restore")
+            }
         }
+
     }
 
     historyWarning?.let { message ->

@@ -34,8 +34,8 @@ import com.promtuz.chat.ui.screens.RestorePhraseScreen
 import com.promtuz.chat.ui.screens.SettingsScreen
 import com.promtuz.chat.ui.screens.ShareIdentityScreen
 import com.promtuz.chat.ui.screens.WelcomeScreen
-import com.promtuz.chat.utils.extensions.fromHex
 import org.koin.androidx.compose.koinViewModel
+import org.koin.core.parameter.parametersOf
 
 
 @Composable
@@ -70,9 +70,9 @@ fun AppNavigation(
             }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
-                val chatVM = koinViewModel<ChatVM>()
+                val chatVM = koinViewModel<ChatVM>(parameters = { parametersOf(key.conversation) })
                 LaunchedEffect(key.conversation) {
-                    chatVM.init(key.conversation.fromHex())
+                    chatVM.init()
                 }
                 ChatScreen(key.name, chatVM)
             }

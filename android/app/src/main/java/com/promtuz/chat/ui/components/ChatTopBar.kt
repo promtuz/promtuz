@@ -46,6 +46,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import com.promtuz.chat.ui.animation.QueuedAnimatedContent
 import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.Presence
@@ -79,6 +81,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val rawTitle by chatVM.rawTitle.collectAsState()
     val muted by chatVM.muted.collectAsState()
     val typingMembers by chatVM.typingMembers.collectAsState()
+    val headerReady by chatVM.headerReady.collectAsState()
 
     // Delete needs the same standing the home list uses to decide what to offer
     // (can we leave, did we found it, are we still a member), and that already
@@ -133,10 +136,12 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     }
 
     val presenceNow = rememberPresenceTime()
+    val connection = connectionLabel()
 
     // Subtitle cascade: live activity beats presence; silence renders nothing.
     // A group has no single presence, so it falls back to its member count.
     val (subtitle, subtitleColor) = when {
+        connection != null -> connection to colors.onSurfaceVariant
         typing && isGroup -> typingLine to chatTheme.accent
         typing -> "typing…" to chatTheme.accent
         isGroup -> memberTally(memberCount) to colors.onSurfaceVariant
@@ -147,7 +152,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     TopAppBar(
         title = {
             if (searching) SearchField(chatVM, searchQuery.orEmpty()) else Row(
-                modifier = Modifier.clickable(enabled = isGroup) { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -163,14 +167,16 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                         } else null,
                     )
                 }
-                Column {
-                    Text(name, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1)
-                    if (subtitle != null) Text(
-                        subtitle,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = subtitleColor,
-                    )
-                }
+                ChatBarTitle(
+                    name = name,
+                    subtitle = subtitle,
+                    subtitleColor = subtitleColor,
+                    animateChanges = headerReady,
+                    modifier = Modifier.weight(1f, fill = false),
+                    onClick = if (isGroup) {
+                        { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) }
+                    } else null,
+                )
             }
         },
         navigationIcon = navigationIcon,
@@ -183,15 +189,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             AppDropMenu(
                 anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
-                    if (isGroup) {
-                        add(
-                            listOf(
-                                MenuAction("Group info", R.drawable.i_contacts) {
-                                    navigator.push(Routes.GroupInfo(chatVM.conversationHex))
-                                },
-                            ),
-                        )
-                    }
                     add(
                         listOf(
                             MenuAction("Search", R.drawable.oi_search) { chatVM.openSearch() },
@@ -252,6 +249,33 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             onLeaveAndDelete = { confirmDelete = false; appVM.leaveAndDelete(chat, popThisChat) },
             onDismiss = { confirmDelete = false },
         )
+    }
+}
+
+/** Only the text block opens group info; the avatar and surrounding toolbar do not. */
+@Composable
+internal fun ChatBarTitle(
+    name: String,
+    subtitle: String?,
+    subtitleColor: Color,
+    modifier: Modifier = Modifier,
+    animateChanges: Boolean = true,
+    onClick: (() -> Unit)? = null,
+) {
+    Column(modifier.then(if (onClick != null) Modifier.pressScale(onClick, 0.96f) else Modifier)) {
+        Text(name, style = MaterialTheme.typography.titleMediumEmphasized,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // Keep the queue mounted through absence. The empty target has zero height,
+        // so its size transition recenters the name without interrupting a subtitle.
+        val subtitleContent: @Composable (String?) -> Unit = { value ->
+            if (value != null) Text(value,
+                style = MaterialTheme.typography.labelMedium.copy(color = subtitleColor),
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        val value = subtitle?.takeIf { it.isNotBlank() }
+        if (animateChanges) {
+            QueuedAnimatedContent(value, label = "chat subtitle") { subtitleContent(it) }
+        } else subtitleContent(value)
     }
 }
 

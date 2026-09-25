@@ -32,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
@@ -42,7 +41,6 @@ import com.promtuz.chat.ui.appearance.ChatAppearance
 import com.promtuz.chat.ui.appearance.DoubleTapAction
 import com.promtuz.chat.ui.appearance.ThemeMode
 import com.promtuz.chat.ui.appearance.Wallpaper
-import com.promtuz.chat.ui.components.FlexibleScreen
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.rememberChatWallpaper
@@ -60,10 +58,9 @@ fun ChatAppearanceScreen() {
         Column(
             Modifier
                 .fillMaxSize()
-//                .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp)
-                .padding(top = padding.calculateTopPadding() + 12.dp, bottom = 48.dp),
+                .padding(top = padding.calculateTopPadding() + 12.dp, bottom = padding.calculateBottomPadding() + 48.dp),
         ) {
             PreviewCard(appearance)
 

@@ -102,7 +102,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                 start = padding.calculateLeftPadding(direction),
                 end = padding.calculateRightPadding(direction),
             ),
-            contentPadding = PaddingValues(24.dp, padding.calculateTopPadding() + 40.dp, 24.dp, 32.dp),
+            contentPadding = PaddingValues(24.dp, padding.calculateTopPadding() + 40.dp, 24.dp, padding.calculateBottomPadding() + 32.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

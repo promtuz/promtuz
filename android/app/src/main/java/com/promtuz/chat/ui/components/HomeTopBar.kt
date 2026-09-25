@@ -6,25 +6,25 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.theme.gradientScrim
+import com.promtuz.chat.ui.theme.transparentTopAppBar
 
 
 @Composable
 fun HomeTopBar(
     appViewModel: AppVM,
 ) {
+    // Home deliberately keeps its gradient over the scrolling chat list.
     TopAppBar(
         modifier = Modifier.background(gradientScrim()),
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+        colors = transparentTopAppBar(),
         navigationIcon = {
             Image(
                 painterResource(R.drawable.logo_colored),

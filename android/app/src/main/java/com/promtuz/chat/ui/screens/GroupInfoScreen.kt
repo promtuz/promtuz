@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -109,19 +110,21 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
     val past = members.filterNot { it.active }
     val addable = candidates.filter { c -> active.none { it.ipkHex == c.ipkHex } }
     val dialogOpen = editing || adding || removing != null || leaving || deleting
+    val direction = LocalLayoutDirection.current
     val colors = MaterialTheme.colorScheme
 
     SimpleScreen({ Text("Group info") }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        Box(Modifier.fillMaxSize()) {
             if (loading || loadError) {
-                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(Modifier.fillMaxWidth().padding(padding).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (loading) CircularProgressIndicator()
                     else {
                         Text("Couldn’t load the group")
                         TextButton(onClick = { actions.reload() }) { Text("Retry") }
                     }
                 }
-            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = padding.calculateStartPadding(direction), end = padding.calculateEndPadding(direction),
+                top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 80.dp)) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -202,7 +205,9 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
                     else { dismissRequested = true }
                 }
                 BackHandler(searching) { closePickerMode() }
-                ContactPickerHeader(title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
+                ContactPickerHeader(topBarColors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = BottomSheetDefaults.ContainerColor,
+                    scrolledContainerColor = BottomSheetDefaults.ContainerColor), title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
                     searching = searching, query = query, onQuery = { query = it }, close = true,
                     onBack = ::closePickerMode, onSearch = { searching = true }, enabled = !busy)
                 Text("New members won’t see earlier messages.", Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
