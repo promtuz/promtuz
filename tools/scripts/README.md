@@ -6,11 +6,11 @@
 verifies the live files, and announces the release. `debug` builds are debuggable;
 `release` builds are not. `--channel both` publishes one versionCode to both channels.
 
-`--notes FILE` publishes a Markdown file as the release's notes, signed and stored as
-`notes-<versionCode>.md` beside the APK. The app shows the notes of every version
-between the installed and the offered build, skipping versions without any. A new
-major or minor version makes the update required. Nothing about notes is kept in the
-repo.
+Release notes are drafted from the `Notes:` trailers on the commits since the last
+release and published as a signed `notes-<versionCode>.md` beside the APK. The app
+shows the notes of every version between the installed and the offered build,
+skipping versions without any. A new major or minor version makes the update
+required. Nothing about notes is kept in the repo. See **Release notes** below.
 
 The build uses the signing vault at `~/.promtuz-vault` (`PZ_VAULT` overrides it).
 Announcements also need Python 3 and an FCM service-account JSON for the app's
@@ -38,8 +38,11 @@ zsh tools/scripts/release-android.zsh --channel both --dry-run
 # Build and keep signed files in android/app/build/release-staging.
 zsh tools/scripts/release-android.zsh --no-publish
 
-# Publish with release notes.
+# Publish with a notes file you wrote yourself, skipping the draft.
 zsh tools/scripts/release-android.zsh --channel release --notes ~/notes/0.5.0.md
+
+# Publish with no notes at all.
+zsh tools/scripts/release-android.zsh --channel release --no-notes
 
 # Publish without sending a release announcement.
 zsh tools/scripts/release-android.zsh --channel release --no-notify
@@ -64,14 +67,34 @@ receive these announcements.
 `PZ_UPDATE_URL`, `PZ_PUBLISH_HOST`, and `PZ_PUBLISH_ROOT` override the release host
 defaults. `--dry-run` does not reserve a versionCode; the real release chooses a code
 above the local and published versions. Commit the resulting Gradle version bump
-after publishing.
+after publishing, and tag it: the tag is how the next release finds where this one
+ended. The script prints the exact command when it finishes.
 
 ## Release notes
 
-`--notes FILE` takes one Markdown file holding the body of that release's notes.
-The script writes the `# <version> - <date>` first line itself, so never put a
-version number or a date in the file. Keep it under 64 KB; the script refuses an
-empty or a larger one.
+Write the note when you make the change, as a `Notes:` trailer on the commit:
+
+```
+feat(android): receive shared text and media from other apps
+
+Notes: Send text, photos and files to Promtuz straight from any other app.
+```
+
+A trailer is one line. Wrap a long one by indenting the continuation, and it folds
+back together when it is collected.
+
+Only the commits that change something a person can see need one. At release the
+script collects every trailer since the last release, turns them into bullets, and
+opens the draft in `$EDITOR` for you to group and cut before the build starts.
+Saving publishes it; emptying the file publishes without notes.
+
+The last release is found by tag, falling back to the newest `chore: release`
+commit when a tag is missing. Tag each release and the boundary stays exact.
+
+`--notes FILE` skips the draft and uses a file you wrote yourself. `--no-notes`
+skips notes for this release entirely. Either way the script writes the
+`# <version> - <date>` first line, so never put a version number or a date in the
+file, and keep it under 64 KB.
 
 The app shows the notes of every release between the installed and the offered
 build, newest first, up to ten, each under its own version chip and date.
@@ -102,12 +125,12 @@ Two consequences are worth remembering:
 Blank lines cost nothing and do not change the spacing, so use them to keep the
 file readable.
 
-### Writing them from the commits
+### Writing them
 
-The commit log is the input, not the output. Commits are written for whoever
-maintains the code; these notes are read by someone deciding whether to install.
-Walk the log since the last release and keep only what a person would notice on
-their own screen.
+A trailer is read by someone deciding whether to install, not by whoever maintains
+the code. Write it as the line you want them to see, not as a summary of the diff.
+The same judgement applies again in the editor, where you see the release whole and
+can drop, merge and reorder what the draft collected.
 
 Do:
 
@@ -119,7 +142,9 @@ Do:
 
 Don't:
 
-- Don't paste commit subjects, and never their `feat(android):` prefixes.
+- Don't repeat the commit subject in its trailer. If the subject already says it
+  well enough for a stranger, it is probably too technical for this list.
+- Don't carry a `feat(android):` prefix into a note.
 - Don't list refactors, build changes, dependency bumps or test work. Anything
   with no visible effect is better left out than padded in.
 - Don't name files, functions, modules or protocol versions.
@@ -132,19 +157,29 @@ Don't:
 
 ### Example
 
-Given this log:
+Of these commits, four carry a trailer and three do not:
 
 ```
 feat(web): add contact-card link fallback
 feat(android): receive shared text and media from other apps
+    Notes: Send text, photos and files to Promtuz straight from any other app.
 feat(android): add contact profiles, requests and shared media
+    Notes: Everyone you chat with now has a profile, with their picture and the
+      media you have shared.
 refactor(android): unify dialogs and refine modal presentation
 style(android): use outlined QR code and scanner icons
 feat(core): add signed contact requests and synchronized profiles
+    Notes: Adding someone sends them a request, so nobody lands in your chats
+      uninvited.
 fix(core): exclude deleted messages from visible history
+    Notes: Deleted messages no longer come back when a chat reloads its history.
 ```
 
-the file holds:
+The web commit is not this app. The dialog refactor and the icon change are
+invisible to anyone who was not already looking for them, so they say nothing.
+
+The script hands you those four as a flat list. Grouping them, and seeing that two
+of them are one feature from the outside, is the editing pass:
 
 ```markdown
 ### Contacts
@@ -157,11 +192,6 @@ the file holds:
 ### Fixes
 - Deleted messages no longer come back when a chat reloads its history.
 ```
-
-The web commit is not this app. The dialog refactor and the icon change are
-invisible to anyone who was not already looking for them. The two contact commits
-and the core one behind them are a single feature from the outside, so they earn a
-section rather than three lines.
 
 ## Server packages
 
