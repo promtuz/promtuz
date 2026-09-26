@@ -33,6 +33,7 @@ internal fun ChatDatePicker(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     DatePickerDialog(
+        colors = DatePickerDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         onDismissRequest = onDismiss,
         confirmButton = {
             TextButton(enabled = state.selectedDateMillis != null && !busy, onClick = {
@@ -50,8 +51,9 @@ internal fun ChatDatePicker(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     ) {
+        ModalWindowMotion()
         Column {
-            DatePicker(state, title = { Text("Jump to date", Modifier.padding(start = 24.dp, top = 16.dp)) })
+            DatePicker(state, colors = DatePickerDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainer), title = { Text("Jump to date", Modifier.padding(start = 24.dp, top = 16.dp)) })
             error?.let { Text(it, Modifier.padding(24.dp), color = MaterialTheme.colorScheme.error) }
         }
     }

@@ -51,7 +51,7 @@ fun NotificationPrimer() {
     }
     val notNow = { dismissedThisSession = true; show = false }
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = notNow,
         title = { Text("Turn on notifications") },
         text = { Text("So you hear from your contacts when Promtuz is closed.") },

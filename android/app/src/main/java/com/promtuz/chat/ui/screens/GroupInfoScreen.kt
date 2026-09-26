@@ -231,7 +231,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
             }
         }
     }
-    person?.let { member -> GroupDialog(
+    person?.let { member -> AppAlertDialog(
         onDismissRequest = { person = null }, title = { Text(member.name) },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(when { !member.active -> "Past member"; member.admin -> "Group admin"; else -> "Group member" })
@@ -278,7 +278,7 @@ private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Un
 private fun GroupConfirmation(title: String, message: String, action: String, work: GroupWork,
     onDismiss: () -> Unit, onConfirm: () -> Unit, visible: Boolean = true) {
     val busy = work is GroupWork.Busy
-    GroupDialog(visible = visible, onDismissRequest = { if (!busy) onDismiss() }, title = { Text(title) },
+    if (visible) AppAlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text(title) },
         text = { Column { Text(message); GroupWorkFeedback(work) } },
         confirmButton = { TextButton(onClick = onConfirm, enabled = !busy) { Text(action, color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } })

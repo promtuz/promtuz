@@ -54,7 +54,7 @@ fun SettingsScreen(appViewModel: AppVM) {
     val colors = MaterialTheme.colorScheme
     val groups = listOf(
         SettingGroup("Identity", listOf(
-            SettingItem("Profile", "Your name and photo", SettingsIcon.Profile, Routes.Profile),
+            SettingItem("Profile", "Your name, photo and bio", SettingsIcon.Profile, Routes.Profile),
             SettingItem(
                 stringResource(R.string.identity_keys_title), "QR code and recovery phrase",
                 SettingsIcon.Identity, Routes.IdentityKeys,

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.AppAlertDialog
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -190,7 +191,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
     }
 
     pendingChannel?.let { selected ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { pendingChannel = null },
             title = { Text("Switch to ${selected.replaceFirstChar { it.uppercase() }}?") },
             text = { Text("The current update download will be discarded.") },

@@ -244,7 +244,7 @@ internal fun StorageManager(
         }
     }
     val pending = confirmItems.orEmpty()
-    GroupDialog(visible = confirmItems != null, onDismissRequest = { confirmItems = null },
+    if (confirmItems != null) AppAlertDialog(onDismissRequest = { confirmItems = null },
         title = { Text("Delete ${pending.size} media messages?") },
         text = { Text("The selected messages, including their captions, will be deleted from this device. They cannot be downloaded again automatically. Other people’s copies won’t change.") },
         confirmButton = { TextButton(onClick = {
@@ -258,7 +258,7 @@ internal fun StorageManager(
             }
         }) { Text("Delete from this device", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { confirmItems = null }) { Text("Cancel") } })
-    GroupDialog(visible = confirmStickers, onDismissRequest = { confirmStickers = false },
+    if (confirmStickers) AppAlertDialog(onDismissRequest = { confirmStickers = false },
         title = { Text("Clear sticker cache?") },
         text = { Text("Messages and sticker packs will stay. Sticker images will download again when needed.") },
         confirmButton = { TextButton(onClick = { confirmStickers = false; refresh {
@@ -266,7 +266,7 @@ internal fun StorageManager(
             "Sticker cache cleared"
         } }) { Text("Clear cache") } },
         dismissButton = { TextButton(onClick = { confirmStickers = false }) { Text("Cancel") } })
-    GroupDialog(visible = confirmCopies, onDismissRequest = { confirmCopies = false },
+    if (confirmCopies) AppAlertDialog(onDismissRequest = { confirmCopies = false },
         title = { Text("Clear shared copies?") },
         text = { Text("Shared images and logs will be removed. Previously shared file links may stop working. Original messages and media will stay.") },
         confirmButton = { TextButton(onClick = { confirmCopies = false; refresh {

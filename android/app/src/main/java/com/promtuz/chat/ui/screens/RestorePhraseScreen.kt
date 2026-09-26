@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.AppAlertDialog
 import android.app.Activity
 import android.view.WindowManager
 import androidx.compose.foundation.layout.Arrangement
@@ -151,7 +152,7 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
     }
 
     historyWarning?.let { message ->
-        AlertDialog(
+        AppAlertDialog(
             // Not dismissible: entering the app on an empty history must be a
             // deliberate acknowledgement, not a stray tap.
             onDismissRequest = {},

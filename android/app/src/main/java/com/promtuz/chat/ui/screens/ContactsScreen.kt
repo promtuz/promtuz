@@ -173,7 +173,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
     GroupNameDialog(visible = naming, heading = "Create group", value = title, onValueChange = actions.setTitle,
         work = work, confirmLabel = "Create", onConfirm = { actions.create { naming = false } },
         onDismiss = { naming = false; actions.clearGroupError() }, summary = selectedPeople.joinToString { it.name })
-    deleting?.let { person -> GroupDialog(
+    deleting?.let { person -> AppAlertDialog(
         onDismissRequest = { if (!busy) deleting = null },
         title = { Text("Delete ${person.name}?") },
         text = { Column {

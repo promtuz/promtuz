@@ -310,7 +310,7 @@ fun DeleteChatDialog(
 ) {
     val error = MaterialTheme.colorScheme.error
     if (chat.ownerIsStuck) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("You’re the group admin") },
             text = {
@@ -323,7 +323,7 @@ fun DeleteChatDialog(
         )
         return
     }
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (chat.isGroup) "Delete this group chat?" else "Delete chat") },
         text = {
@@ -363,7 +363,7 @@ fun DeleteChatDialog(
  */
 @Composable
 fun ClearHistoryDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Clear history?") },
         text = {

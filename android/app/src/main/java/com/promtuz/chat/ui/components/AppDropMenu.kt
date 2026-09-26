@@ -228,7 +228,7 @@ fun MenuCard(
     Surface(
         shape = shape,
         color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 3.dp,
+        tonalElevation = 0.dp,
         shadowElevation = 8.dp,
         modifier = modifier,
     ) {

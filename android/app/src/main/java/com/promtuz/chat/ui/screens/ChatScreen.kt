@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.AppAlertDialog
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -454,7 +455,7 @@ private fun menuActionsFor(
 
 @Composable
 private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Delete message?") },
         text = {
