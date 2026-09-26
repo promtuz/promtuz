@@ -208,39 +208,42 @@ pub fn accept() -> Result<()> {
 
 /// Refuse the call that is ringing.
 pub fn reject() {
-    let ended = with_call(|call| {
-        if call.phase != Phase::Ringing {
-            return None;
-        }
-        signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
-        Some(CallEndReason::Declined)
-    });
-    if let Some(reason) = ended {
-        end(reason);
+    let ended = {
+        let mut current = CURRENT.lock();
+        current.as_mut().filter(|c| c.phase == Phase::Ringing).map(|call| {
+            signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
+            (call.id, CallEndReason::Declined)
+        })
+    };
+    if let Some((id, reason)) = ended {
+        end(id, reason);
     }
 }
 
 /// Hang up whatever is going on: cancel a ring, refuse a ring, or end a call.
 pub fn hangup() {
-    let ended = with_call(|call| {
-        let reason = match call.phase {
-            Phase::Offering => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
-                CallEndReason::Cancelled
-            },
-            Phase::Ringing => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
-                CallEndReason::Declined
-            },
-            _ => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
-                CallEndReason::Hangup
-            },
-        };
-        Some(reason)
-    });
-    if let Some(reason) = ended {
-        end(reason);
+    let ended = {
+        let mut current = CURRENT.lock();
+        current.as_mut().map(|call| {
+            let reason = match call.phase {
+                Phase::Offering => {
+                    signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
+                    CallEndReason::Cancelled
+                },
+                Phase::Ringing => {
+                    signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
+                    CallEndReason::Declined
+                },
+                _ => {
+                    signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
+                    CallEndReason::Hangup
+                },
+            };
+            (call.id, reason)
+        })
+    };
+    if let Some((id, reason)) = ended {
+        end(id, reason);
     }
 }
 
@@ -426,7 +429,7 @@ pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
             });
             if let Some(reason) = ended {
                 info!("CALL[{}]: ended by peer: {reason:?}", short(&call));
-                end(reason);
+                end(call, reason);
             }
         },
     }
@@ -466,6 +469,7 @@ fn on_offer(
                 info!("CALL[{}]: crossed offers, taking theirs", short(&call));
                 let audio = c.audio.clone();
                 let cert = c.cert.clone();
+                let old_id = c.id;
                 if let Some(s) = c.session.take() {
                     let _ = s.send(rtc::Cmd::Stop);
                 }
@@ -486,6 +490,13 @@ fn on_offer(
                     restart_gen: 0,
                 };
                 drop(current);
+                // Tell the platform its outgoing call is now this incoming one
+                // under a new id, before any event keyed by the new id.
+                emit(CallEvent::Switched {
+                    from:  old_id.to_vec(),
+                    to:    call.to_vec(),
+                    video,
+                });
                 emit(CallEvent::Connecting { call: call.to_vec() });
                 RUNTIME.spawn(spawn_session(call, rtc::Role::Callee, video));
                 arm(CONNECT_TIMEOUT, call, Phase::Connecting, |c| {
@@ -552,7 +563,7 @@ fn arm(
         tokio::time::sleep(delay).await;
         let ended = with_call(|call| if call.id == id && call.phase == phase { f(call) } else { None });
         if let Some(reason) = ended {
-            end(reason);
+            end(id, reason);
         }
     });
 }
@@ -728,13 +739,22 @@ fn on_session_event(id: [u8; 16], ev: rtc::Event) {
         }
     });
     if let Some(reason) = ended {
-        end(reason);
+        end(id, reason);
     }
 }
 
-/// Tear the call down, record it, and tell the platform.
-fn end(reason: CallEndReason) {
-    let Some(call) = CURRENT.lock().take() else { return };
+/// Tear the call down, record it, and tell the platform. A no-op unless `id`
+/// is still the current call: a stale timer or a late signal that validated
+/// the old call, released the lock, then raced a replacement must not end the
+/// new one under the old reason.
+fn end(id: [u8; 16], reason: CallEndReason) {
+    let call = {
+        let mut current = CURRENT.lock();
+        match current.as_ref() {
+            Some(c) if c.id == id => current.take().unwrap(),
+            _ => return,
+        }
+    };
     if let Some(s) = &call.session {
         let _ = s.send(rtc::Cmd::Stop);
     }
@@ -791,7 +811,7 @@ fn signal(conversation: [u8; 16], msg: CallMsg) {
             if is_offer {
                 let ended = with_call(|c| (c.id == id).then_some(CallEndReason::Failed));
                 if let Some(reason) = ended {
-                    end(reason);
+                    end(id, reason);
                 }
             }
         }

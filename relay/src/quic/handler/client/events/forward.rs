@@ -197,7 +197,7 @@ fn retire_local_copy(store: &Store, fwd: &DispatchP) -> Result<()> {
         let (key, value) = entry.into_inner()?;
         let Some(key_fields) = MessageKey::parse(&key) else { continue };
         if key_fields.id == fwd.id.0
-            && let Ok(queued) = DeliverP::deser(&value)
+            && let Ok(queued) = DeliverP::deser_compat(&value)
             && queued.from == fwd.from
             && queued.payload == fwd.payload
             && queued.sig == fwd.sig
@@ -326,6 +326,7 @@ pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
         sig:     d.sig,
         accepted_at_ms: d.accepted_at_ms,
         ttl_ms:  d.ttl_ms,
+        wake:    d.wake,
     }
 }
 
@@ -344,7 +345,7 @@ async fn store_in_rocks(
     );
 
     match admit_to_queue(&store.messages, &recipient.0, &delivery.id.0, &delivery.from.0, |v| {
-        DeliverP::deser(v).ok().map(|d| d.from.0)
+        DeliverP::deser_compat(v).ok().map(|d| d.from.0)
     }) {
         QueueAdmission::Insert => {},
         QueueAdmission::AlreadyQueued => {

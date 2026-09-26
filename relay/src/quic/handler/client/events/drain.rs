@@ -46,6 +46,7 @@ use anyhow::Result;
 use common::proto::Sender;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::Wake;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::NodeDescriptor;
@@ -240,8 +241,9 @@ pub(crate) async fn handle_drain_queue_with(
         }
         let deliver = dispatch_to_deliver(dispatch);
         // Past its life: the home keeps it until its own sweep, the client
-        // never sees it.
-        if deliver.is_expired(now_ms) {
+        // never sees it — except a dead call offer, delivered once so the
+        // recipient records the missed call (it reads the expiry, does not ring).
+        if deliver.is_expired(now_ms) && deliver.wake != Wake::Call {
             continue;
         }
         if !batch.admit(deliver.id.0, deliver.payload.0.len()) {
@@ -488,11 +490,11 @@ impl DrainBatch {
 }
 
 fn decode_deliver(value: &[u8]) -> Option<DeliverP> {
-    DeliverP::deser(value).ok()
+    DeliverP::deser_compat(value).ok()
 }
 
 fn decode_dispatch(value: &[u8]) -> Option<DeliverP> {
-    DispatchP::deser(value).ok().map(dispatch_to_deliver)
+    DispatchP::deser_compat(value).ok().map(dispatch_to_deliver)
 }
 
 /// Walk `ks` for `recipient`, sending each decoded entry to the client as it is
@@ -520,11 +522,15 @@ async fn stream_keyspace(
             warn!("DRAIN: malformed queue value; skipping");
             continue;
         };
-        if deliver.is_expired(now_ms) {
+        if deliver.is_expired(now_ms) && deliver.wake != Wake::Call {
             trace!("DRAIN: dropping expired message id={}", hex::encode(deliver.id));
             let _ = ks.remove(key.as_bytes());
             continue;
         }
+        // A live message, or a dead call offer. The offer is worth one more
+        // delivery: the recipient reads its expiry, records the missed call
+        // (keyed by call id, so re-delivery stays one row) and does not ring.
+        // The client's ack then clears it like any drained message.
         keys.push(key);
         if !batch.admit(deliver.id.0, value.len()) {
             continue;
@@ -565,6 +571,7 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
         sig:     d.sig,
         accepted_at_ms: d.accepted_at_ms,
         ttl_ms:  d.ttl_ms,
+        wake:    d.wake,
     }
 }
 
@@ -627,6 +634,7 @@ fn default_remote_fetcher() -> RemoteFetcher {
 mod tests {
 
     use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::Wake;
 
     use super::DRAIN_MAX_BATCH_BYTES;
     use super::DrainBatch;
@@ -641,8 +649,8 @@ mod tests {
             payload: vec![4u8, 5, 6].into(),
             sig:     [7u8; 64].into(),
             accepted_at_ms: 1,
-            wake:    common::proto::client_rel::Wake::No,
-            ttl_ms:  0,
+            wake:    Wake::Call,
+            ttl_ms:  40_000,
         };
         let deliver = dispatch_to_deliver(dispatch.clone());
         assert_eq!(deliver.id, dispatch.id);
@@ -650,6 +658,10 @@ mod tests {
         assert_eq!(deliver.payload.0, dispatch.payload.0);
         assert_eq!(deliver.sig, dispatch.sig);
         assert_eq!(deliver.accepted_at_ms, dispatch.accepted_at_ms);
+        assert_eq!(deliver.ttl_ms, dispatch.ttl_ms);
+        // The wake class rides onto the queued record so a drain can tell a
+        // dead call offer (delivered once for the missed call) from the rest.
+        assert_eq!(deliver.wake, Wake::Call);
     }
 
     #[test]

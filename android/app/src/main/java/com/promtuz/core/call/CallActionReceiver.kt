@@ -10,10 +10,13 @@ class CallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             ACTION_ANSWER -> {
-                CoreBridge.callAccept()
+                // Answering needs permission and a foreground start, so route it
+                // through the call screen rather than accepting here: a stale or
+                // repeated Answer must not throw an uncaught Refused from core.
+                CallController.requestAnswer()
                 CallActivity.launch(context.applicationContext)
             }
-            ACTION_HANGUP -> CoreBridge.callHangup()
+            ACTION_HANGUP -> runCatching { CoreBridge.callHangup() }
         }
     }
 

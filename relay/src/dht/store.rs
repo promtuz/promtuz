@@ -207,7 +207,7 @@ pub(crate) fn plan_drift_migrations(
         let Some(key) = MessageKey::parse(&key_bytes) else {
             continue;
         };
-        let Ok(dispatch) = DispatchP::deser(&value) else {
+        let Ok(dispatch) = DispatchP::deser_compat(&value) else {
             continue;
         };
         out.push((key, dispatch));
@@ -276,7 +276,7 @@ pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
     match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0, |v| {
-        DispatchP::deser(v).ok().map(|d| d.from.0)
+        DispatchP::deser_compat(v).ok().map(|d| d.from.0)
     }) {
         QueueAdmission::Insert => {},
         QueueAdmission::AlreadyQueued => return ForwardOutcome::Stored,
@@ -384,7 +384,7 @@ pub(crate) fn queue_batch_for_user(
             exhausted = false;
             break;
         }
-        let Ok(dispatch) = DispatchP::deser(&value) else {
+        let Ok(dispatch) = DispatchP::deser_compat(&value) else {
             continue;
         };
         used += value.len();
@@ -655,6 +655,7 @@ mod tests {
             sig:            [0u8; 64].into(),
             accepted_at_ms: 0,
             ttl_ms:         0,
+            wake:           common::proto::client_rel::Wake::No,
         };
 
         for i in 0..MAX_QUEUED_PER_SENDER {

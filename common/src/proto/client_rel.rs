@@ -7,6 +7,8 @@ use serde::Serialize;
 
 use crate::PROTOCOL_VERSION;
 use crate::proto::Sender;
+use crate::proto::pack::UnpackError;
+use crate::proto::pack::Unpacker;
 use crate::types::bytes::ByteVec;
 use crate::types::bytes::Bytes;
 
@@ -209,6 +211,10 @@ pub struct DeliverP {
     pub accepted_at_ms: u64,
     /// Copied from [`DispatchP::ttl_ms`]; zero means default retention.
     pub ttl_ms:         u64,
+    /// Copied from [`DispatchP::wake`]. Carried onto the queued record so a
+    /// drain can tell a dead call offer (worth one delivery, for the missed
+    /// call it becomes) from any other expired dispatch (dropped unsent).
+    pub wake:           Wake,
 }
 
 impl DeliverP {
@@ -216,6 +222,58 @@ impl DeliverP {
     /// the store's retention sweep still bounds it.
     pub fn is_expired(&self, now_ms: u64) -> bool {
         self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
+    }
+
+    /// Decode a queued record, tolerating layouts an older relay wrote before
+    /// a field was appended. postcard is positional, so an older record is
+    /// this struct minus its tail; try the current shape, then each older one.
+    pub fn deser_compat(bytes: &[u8]) -> Result<Self, UnpackError> {
+        Self::deser(bytes)
+            .or_else(|_| -> Result<Self, UnpackError> {
+                // v10 as first shipped: `ttl_ms` but no `wake`.
+                #[derive(Deserialize)]
+                struct NoWake {
+                    id: Bytes<16>, from: Bytes<32>, payload: ByteVec, sig: Bytes<64>,
+                    accepted_at_ms: u64, ttl_ms: u64,
+                }
+                let v = NoWake::deser(bytes)?;
+                Ok(DeliverP {
+                    id: v.id, from: v.from, payload: v.payload, sig: v.sig,
+                    accepted_at_ms: v.accepted_at_ms, ttl_ms: v.ttl_ms, wake: Wake::No,
+                })
+            })
+            .or_else(|_| -> Result<Self, UnpackError> {
+                // Pre-v10: no `ttl_ms`, no `wake`.
+                #[derive(Deserialize)]
+                struct Legacy {
+                    id: Bytes<16>, from: Bytes<32>, payload: ByteVec, sig: Bytes<64>,
+                    accepted_at_ms: u64,
+                }
+                let v = Legacy::deser(bytes)?;
+                Ok(DeliverP {
+                    id: v.id, from: v.from, payload: v.payload, sig: v.sig,
+                    accepted_at_ms: v.accepted_at_ms, ttl_ms: 0, wake: Wake::No,
+                })
+            })
+    }
+}
+
+impl DispatchP {
+    /// Decode a queued dispatch, tolerating the pre-v10 layout that had no
+    /// `ttl_ms`. See [`DeliverP::deser_compat`].
+    pub fn deser_compat(bytes: &[u8]) -> Result<Self, UnpackError> {
+        Self::deser(bytes).or_else(|_| {
+            #[derive(Deserialize)]
+            struct Legacy {
+                to: Bytes<32>, from: Bytes<32>, id: Bytes<16>, payload: ByteVec,
+                sig: Bytes<64>, accepted_at_ms: u64, wake: Wake,
+            }
+            let v = Legacy::deser(bytes)?;
+            Ok(DispatchP {
+                to: v.to, from: v.from, id: v.id, payload: v.payload, sig: v.sig,
+                accepted_at_ms: v.accepted_at_ms, wake: v.wake, ttl_ms: 0,
+            })
+        })
     }
 }
 
@@ -727,6 +785,7 @@ mod tests {
     #[test]
     fn delivery_expires_by_its_own_life_only() {
         use super::DeliverP;
+        use super::Wake;
         let mut d = DeliverP {
             id:             [1u8; 16].into(),
             from:           [2u8; 32].into(),
@@ -734,12 +793,65 @@ mod tests {
             sig:            [4u8; 64].into(),
             accepted_at_ms: 1_000,
             ttl_ms:         30_000,
+            wake:           Wake::No,
         };
         assert!(!d.is_expired(31_000), "still within its life");
         assert!(d.is_expired(31_001), "one ms past it");
         assert!(!d.is_expired(0), "a clock behind acceptance is not expiry");
         d.ttl_ms = 0;
         assert!(!d.is_expired(u64::MAX), "default retention never expires here");
+    }
+
+    #[test]
+    fn queued_records_decode_across_the_layout_change() {
+        use super::DeliverP;
+        use super::DispatchP;
+        use super::Wake;
+        use crate::proto::pack::Unpacker;
+        use crate::types::bytes::ByteVec;
+        use crate::types::bytes::Bytes;
+
+        // A pre-v10 delivery: the fields before `ttl_ms` and `wake` existed.
+        #[derive(serde::Serialize)]
+        struct LegacyDeliver {
+            id: Bytes<16>, from: Bytes<32>, payload: ByteVec, sig: Bytes<64>,
+            accepted_at_ms: u64,
+        }
+        let legacy = LegacyDeliver {
+            id: [1u8; 16].into(), from: [2u8; 32].into(), payload: vec![3u8, 4].into(),
+            sig: [5u8; 64].into(), accepted_at_ms: 9,
+        };
+        let bytes = postcard::to_allocvec(&legacy).unwrap();
+        assert!(DeliverP::deser(&bytes).is_err(), "the new shape cannot read the old bytes");
+        let d = DeliverP::deser_compat(&bytes).unwrap();
+        assert_eq!(d.id.0, [1u8; 16]);
+        assert_eq!(d.accepted_at_ms, 9);
+        assert_eq!(d.ttl_ms, 0, "an old record defaults to relay retention");
+        assert_eq!(d.wake, Wake::No);
+
+        // The current shape still round-trips through the compat path.
+        let now = DeliverP {
+            id: [7u8; 16].into(), from: [8u8; 32].into(), payload: vec![9u8].into(),
+            sig: [1u8; 64].into(), accepted_at_ms: 5, ttl_ms: 40_000, wake: Wake::Call,
+        };
+        let round = DeliverP::deser_compat(&now.ser().unwrap()).unwrap();
+        assert_eq!(round, now);
+
+        // A pre-v10 dispatch had no `ttl_ms`.
+        #[derive(serde::Serialize)]
+        struct LegacyDispatch {
+            to: Bytes<32>, from: Bytes<32>, id: Bytes<16>, payload: ByteVec,
+            sig: Bytes<64>, accepted_at_ms: u64, wake: Wake,
+        }
+        let ld = LegacyDispatch {
+            to: [1u8; 32].into(), from: [2u8; 32].into(), id: [3u8; 16].into(),
+            payload: vec![4u8].into(), sig: [5u8; 64].into(), accepted_at_ms: 1, wake: Wake::Message,
+        };
+        let bytes = postcard::to_allocvec(&ld).unwrap();
+        assert!(DispatchP::deser(&bytes).is_err());
+        let dp = DispatchP::deser_compat(&bytes).unwrap();
+        assert_eq!(dp.wake, Wake::Message);
+        assert_eq!(dp.ttl_ms, 0);
     }
 
     #[test]

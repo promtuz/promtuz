@@ -1489,7 +1489,7 @@ mod tests {
         use common::proto::pack::Packer;
         let packet = SRelayPacket::Deliver(DeliverP {
             id: [1; 16].into(), from: [2; 32].into(), payload: vec![3; 16].into(),
-            sig: [0; 64].into(), accepted_at_ms: 100, ttl_ms: 0,
+            sig: [0; 64].into(), accepted_at_ms: 100, ttl_ms: 0, wake: common::proto::client_rel::Wake::No,
         });
         let frame = packet.pack().unwrap();
         let mut stream = frame.as_slice();
@@ -1605,6 +1605,7 @@ mod gate_tests {
             sig:            sig.into(),
             accepted_at_ms: 0,
             ttl_ms:         0,
+            wake:           common::proto::client_rel::Wake::No,
         }
     }
 

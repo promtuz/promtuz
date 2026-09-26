@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import com.promtuz.chat.R
+import com.promtuz.chat.utils.extensions.toHex
 
 /**
  * The call's presence in the shade and on the lock screen. A ringing call is a
@@ -84,9 +85,21 @@ object CallNotifications {
             .setContentTitle("Missed call")
             .setContentText(who)
             .setAutoCancel(true)
-            .setContentIntent(fullScreenIntent(context))
+            .setContentIntent(openChat(context, conversation, who))
             .build()
         post(context, MISSED_ID + (call.firstOrNull()?.toInt() ?: 0), notif)
+    }
+
+    /** Open the conversation (not the call screen, which self-finishes when no
+     *  call is live) so a tapped missed call lands in its chat. */
+    private fun openChat(context: Context, conversation: ByteArray, name: String): PendingIntent {
+        val intent = Intent(context, com.promtuz.chat.LauncherActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(com.promtuz.core.push.PushNotifier.EXTRA_CONVERSATION, conversation.toHex())
+            .putExtra(com.promtuz.core.push.PushNotifier.EXTRA_CONV_NAME, name)
+        return PendingIntent.getActivity(
+            context, conversation.contentHashCode(), intent, pendingFlags(),
+        )
     }
 
     private fun fullScreenIntent(context: Context): PendingIntent {

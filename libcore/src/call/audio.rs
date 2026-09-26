@@ -102,6 +102,9 @@ pub struct Jitter {
     deep_since: Option<Instant>,
     /// Frames played since the depth last changed.
     since_change: u32,
+    /// Consecutive concealed frames with nothing queued behind them: a true
+    /// underflow, as when the peer muted or the stream fell far behind.
+    starved: u32,
     pub stats: JitterStats,
 }
 
@@ -123,6 +126,7 @@ impl Jitter {
             depth: MIN_DEPTH,
             deep_since: None,
             since_change: 0,
+            starved: 0,
             stats: JitterStats::default(),
         })
     }
@@ -132,18 +136,27 @@ impl Jitter {
         self.stats.received += 1;
         if let Some(next) = self.next {
             if seq < next {
-                // Its slot has played. Every late arrival argues for more
-                // delay, up to the ceiling.
-                self.stats.late += 1;
-                if self.depth < MAX_DEPTH && self.since_change > 10 {
-                    self.depth += 1;
-                    self.since_change = 0;
+                // Behind the play cursor. After a real drain (the peer muted
+                // and playback kept advancing the cursor over silence, or a
+                // network delay step set the whole stream back) the cursor has
+                // run past where the sender resumed: re-prime on this packet
+                // rather than rejecting it and every one after. A mere
+                // reordering blip, where the buffer only just emptied, is still
+                // treated as late.
+                if self.starved >= MIN_DEPTH as u32 {
+                    self.next = None;
+                    self.starved = 0;
+                } else {
+                    self.stats.late += 1;
+                    if self.depth < MAX_DEPTH && self.since_change > 10 {
+                        self.depth += 1;
+                        self.since_change = 0;
+                    }
+                    return;
                 }
-                return;
-            }
-            // A jump of a second or more is a new talkspurt after a long
-            // silence or a restart: resync instead of concealing 50 frames.
-            if seq > next + 50 {
+            } else if seq > next + 50 {
+                // A jump of a second or more is a new talkspurt after a long
+                // silence or a restart: resync instead of concealing 50 frames.
                 self.queue.clear();
                 self.next = Some(seq);
             }
@@ -188,6 +201,7 @@ impl Jitter {
 
         match self.queue.remove(&next) {
             Some(packet) => {
+                self.starved = 0;
                 if self.decoder.decode(&packet, &mut pcm, false).is_err() {
                     self.conceal(&mut pcm);
                 }
@@ -198,9 +212,21 @@ impl Jitter {
                 Some(following)
                     if self.decoder.decode(following, &mut pcm, true).is_ok() =>
                 {
+                    self.starved = 0;
                     self.stats.fec += 1;
                 },
-                _ => self.conceal(&mut pcm),
+                _ => {
+                    self.conceal(&mut pcm);
+                    // Concealment with nothing queued behind it is a true
+                    // underflow: count it so a resumed stream re-primes rather
+                    // than being rejected as late for good. A gap with later
+                    // packets waiting is just a hole, not starvation.
+                    if self.queue.is_empty() {
+                        self.starved += 1;
+                    } else {
+                        self.starved = 0;
+                    }
+                },
             },
         }
         self.next = Some(next + 1);
@@ -301,16 +327,19 @@ mod tests {
         let path = AudioPath::new().unwrap();
         let mut phase = 0.0;
         let mut jitter = path.jitter.lock();
-        let mut seq = 0u64;
-        for _ in 0..MIN_DEPTH {
+        // A steady stream, one push per pop, so the buffer stays fed (never
+        // starves) and more than ten frames play, the gate for deepening.
+        for seq in 0..3u64 {
             jitter.push(seq, path.encode(&tone(&mut phase)).unwrap());
-            seq += 1;
         }
-        for _ in 0..12 {
+        for seq in 3..15u64 {
+            jitter.push(seq, path.encode(&tone(&mut phase)).unwrap());
             jitter.pop();
         }
-        // Everything up to here has played; something from the past shows up.
-        jitter.push(0, path.encode(&tone(&mut phase)).unwrap());
+        // A packet arrives behind the cursor while the buffer is still fed: a
+        // genuine reordering, not a resume after a drain, so it deepens.
+        let late = jitter.next.unwrap() - 1;
+        jitter.push(late, path.encode(&tone(&mut phase)).unwrap());
         assert_eq!(jitter.depth, MIN_DEPTH + 1, "a late packet buys a frame of delay");
         assert_eq!(jitter.stats.late, 1);
 
@@ -322,6 +351,41 @@ mod tests {
         jitter.deep_since = Some(Instant::now() - std::time::Duration::from_secs(3));
         jitter.pop();
         assert_eq!(jitter.depth, MIN_DEPTH, "two steady seconds shed the extra frame");
+    }
+
+    #[test]
+    fn playout_recovers_after_a_mute_gap() {
+        // The peer mutes: contiguous sequence numbers resume where they left
+        // off, but the receiver kept popping silence and marched its cursor far
+        // ahead. The resumed packets must play, not be rejected as late.
+        let path = AudioPath::new().unwrap();
+        let mut phase = 0.0;
+        let mut jitter = path.jitter.lock();
+        for seq in 0..4u64 {
+            jitter.push(seq, path.encode(&tone(&mut phase)).unwrap());
+        }
+        // Play the four, then two seconds (100 frames) of muted silence.
+        for _ in 0..104 {
+            jitter.pop();
+        }
+        assert!(jitter.stats.concealed > 50, "the mute played as concealment");
+        assert!(jitter.next.unwrap() > 100, "the cursor advanced through the silence");
+        let played_before = jitter.stats.played;
+
+        // Unmute: the sender resumes with the next contiguous number, far below
+        // the cursor.
+        for i in 0..12u64 {
+            jitter.push(4 + i, path.encode(&tone(&mut phase)).unwrap());
+        }
+        let mut out = Vec::new();
+        for _ in 0..12 {
+            for s in jitter.pop() {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        assert!(jitter.stats.played > played_before, "playback resumed");
+        let pcm: Vec<i16> = out.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        assert!(energy(&pcm) > 100_000.0, "resumed audio came out silent");
     }
 
     #[test]

@@ -3,16 +3,19 @@ package com.promtuz.core.call
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
+import androidx.core.content.ContextCompat
 import com.promtuz.core.call.CallController.Phase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -36,16 +39,9 @@ class CallService : Service() {
         instance = this
         audio = CallAudio(getSystemService(AUDIO_SERVICE) as AudioManager)
         watchNetwork()
-        // Post the foreground notification at once, from current state, so the
-        // service is promoted within the OS window even before the first
-        // collect tick.
-        val state = CallController.state.value
-        startForeground(
-            CallNotifications.ONGOING_ID,
-            if (state != null && !state.outgoing && state.phase == Phase.Incoming)
-                CallNotifications.build(this, state, ringing = true)
-            else CallNotifications.build(this, state, ringing = false),
-        )
+        // Promote at once, from current state, so the service is foreground
+        // within the OS window even before the first collect tick.
+        promote()
         scope.launch {
             CallController.state.collectLatest { ui ->
                 if (ui == null) {
@@ -69,24 +65,50 @@ class CallService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Foreground already posted in onCreate; the type is declared here for
-        // Android 14+, which wants it named at promotion.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val state = CallController.state.value
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            if (state?.video == true) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-            runCatching {
-                startForeground(
-                    CallNotifications.ONGOING_ID,
-                    CallNotifications.build(this, state, ringing = state?.phase == Phase.Incoming),
-                    type,
-                )
-            }.onFailure { Timber.tag("Call").w(it, "call foreground type refused") }
-        }
+        promote()
         return START_NOT_STICKY
     }
 
+    /** Post the foreground notification with a capture type that matches the
+     *  call and the permissions actually held. The service starts only after a
+     *  call is answered or placed, so the type it needs is always granted; an
+     *  audio call promotes with microphone alone, never the camera it lacks. */
+    private fun promote() {
+        val state = CallController.state.value
+        val ringing = state != null && !state.outgoing && state.phase == Phase.Incoming
+        val notif = CallNotifications.build(this, state, ringing = ringing)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = captureType(state)
+            runCatching {
+                if (type != 0) startForeground(CallNotifications.ONGOING_ID, notif, type)
+                else startForeground(CallNotifications.ONGOING_ID, notif)
+            }.onFailure { Timber.tag("Call").w(it, "call foreground failed") }
+        } else {
+            startForeground(CallNotifications.ONGOING_ID, notif)
+        }
+    }
+
+    private fun captureType(state: CallController.Ui?): Int {
+        var type = 0
+        if (granted(android.Manifest.permission.RECORD_AUDIO)) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        if (state?.video == true &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            granted(android.Manifest.permission.CAMERA)
+        ) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+        return type
+    }
+
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
     override fun onDestroy() {
+        // Cancel the state collector; without this a destroyed instance keeps
+        // observing and can restart its old audio device alongside a new call.
+        scope.cancel()
         if (audioRunning) audio.stop()
         unwatchNetwork()
         instance = null
