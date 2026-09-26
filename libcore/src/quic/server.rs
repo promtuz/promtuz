@@ -1198,6 +1198,11 @@ async fn process_deliver(
                 }
             });
         },
+        Ok(Some(crate::messaging::InboundDecoded::WelcomeDropped)) => {
+            // Permanent gate rejection: dedup and ack so one poisoned Welcome
+            // cannot block the offline drain. Do not reply to the sender.
+            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
+        },
         Ok(Some(crate::messaging::InboundDecoded::WelcomeRejected { sender_ipk, reason })) => {
             crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
             warn!("PAIR: could not accept welcome from {}; declining", hex::encode(&msg.from[..4]));

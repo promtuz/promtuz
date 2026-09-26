@@ -1878,6 +1878,7 @@ pub async fn process_inbound_envelope<C: DhtClient>(
     match envelope {
         MlsEnvelopeP::Welcome(env) => match process_welcome_inbound(ctx, sender_ipk, env)? {
             WelcomeOutcome::Accepted => Ok(Some(InboundDecoded::Welcome)),
+            WelcomeOutcome::Dropped => Ok(Some(InboundDecoded::WelcomeDropped)),
             WelcomeOutcome::Rejected(reason) => {
                 Ok(Some(InboundDecoded::WelcomeRejected { sender_ipk, reason }))
             },
@@ -1996,6 +1997,9 @@ pub enum InboundDecoded {
     /// Welcome processed; group activated. The caller probably wants
     /// to emit an "added to group" UI event (future work).
     Welcome,
+    /// Welcome permanently rejected by the sender/recipient or invite gate.
+    /// Ack and discard without sending a pairing response to the sender.
+    WelcomeDropped,
     /// Application message decrypted. `group_id` names the MLS group it
     /// arrived in, which the caller resolves to a conversation; `author` is
     /// the member who wrote it, taken from the authenticated leaf credential
@@ -2025,12 +2029,13 @@ pub enum InboundDecoded {
     PairDeclined,
 }
 
-/// Outcome of accepting a pairing Welcome. A gate/auth failure is still an
-/// `Err` (bogus welcome — bail, no decline); only a *post-gate* accept failure
-/// is `Rejected`, which the caller turns into a `PairDecline` back to the
-/// inviter.
+/// Outcome of accepting a pairing Welcome. Permanent gate failures are
+/// `Dropped`: acknowledge them without replying so queued junk cannot block
+/// inbox sync. A *post-gate* accept failure is `Rejected`, which the caller
+/// turns into a `PairDecline` back to the inviter.
 enum WelcomeOutcome {
     Accepted,
+    Dropped,
     Rejected(u8),
 }
 
@@ -2160,15 +2165,16 @@ fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP,
 ) -> Result<WelcomeOutcome> {
     if env.sender_ipk.0 != sender_ipk {
-        bail!("welcome envelope sender_ipk mismatch with DispatchP.from");
+        warn!("MLS: dropped Welcome with sender_ipk mismatch with DispatchP.from");
+        return Ok(WelcomeOutcome::Dropped);
     }
 
     // Defensive check that the envelope is addressed to *us*. The
     // outer `sender_sig` transcript already binds `recipient_ipk`,
     // so a malicious sender cannot address-spoof another recipient.
     // But a delivery-layer bug could deliver an envelope intended for
-    // a different device to this one; surface that as a typed error
-    // instead of silently activating a group we don't belong to.
+    // a different device to this one; drop and acknowledge it rather than
+    // activating a group we don't belong to or retrying it forever.
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     if env.recipient_ipk.0 != our_ipk {
         warn!(
@@ -2176,7 +2182,7 @@ fn process_welcome_inbound<C: DhtClient>(
             hex::encode(&env.recipient_ipk.0[..4]),
             hex::encode(&our_ipk[..4])
         );
-        bail!("welcome envelope recipient_ipk does not match self");
+        return Ok(WelcomeOutcome::Dropped);
     }
 
     // Contact-or-invite gate: accept a Welcome from a stranger only if it
@@ -2194,7 +2200,7 @@ fn process_welcome_inbound<C: DhtClient>(
                 "MLS: dropped Welcome from unknown sender {} (no valid invite)",
                 hex::encode(&sender_ipk[..4])
             );
-            bail!("unknown sender and no valid invite");
+            return Ok(WelcomeOutcome::Dropped);
         };
         (
             Some(pairing.sender_name.chars().take(32).collect::<String>()),
@@ -2533,11 +2539,12 @@ static WELCOME_RETRY_COUNTS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<[u
 ///
 /// Returns the count of welcomes successfully processed.
 ///
-/// Distinguishes three outcome classes per welcome:
+/// Distinguishes four outcome classes per welcome:
 ///   - **Success**: ack immediately (the welcome did its job).
+///   - **Permanent gate rejection**: ack and drop without a pairing response.
 ///   - **Known sender, bad processing**: ack (a known contact sending us malformed welcomes is a
 ///     contact-flow bug, not abuse).
-///   - **Unknown sender or bad sig**: hold without acking; bump a per-`welcome_id` retry counter.
+///   - **Other errors from unknown senders**: hold without acking; bump a per-`welcome_id` retry counter.
 ///     Ack-and-drop only after `POLL_WELCOMES_MAX_RETRY` failed attempts. This preserves the
 ///     evidence the future anti-abuse spec (HANDOFF priority 2) wants while still bounding queue
 ///     growth.
@@ -2582,6 +2589,10 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
                 crate::RUNTIME.spawn(async move {
                     let _ = send_pair_decline(sender_ipk, reason).await;
                 });
+                ack_ids.push(welcome_id);
+                WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
+            },
+            Ok(WelcomeOutcome::Dropped) => {
                 ack_ids.push(welcome_id);
                 WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
             },
