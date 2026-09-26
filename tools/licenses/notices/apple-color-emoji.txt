@@ -1,0 +1,7 @@
+Apple Color Emoji
+
+The emoji artwork bundled in this app is Apple Color Emoji, extracted from
+the Linux build published by github.com/samuelngs/apple-emoji-ttf. All Apple
+Color Emoji assets and designs belong to Apple Inc. Apple is a registered
+trademark of Apple Inc. in the U.S. and other countries. This app is not
+affiliated with or endorsed by Apple Inc.
