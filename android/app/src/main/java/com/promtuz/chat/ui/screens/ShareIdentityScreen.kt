@@ -168,7 +168,7 @@ private fun ColumnScope.ScanQRButton(onClick: () -> Unit, modifier: Modifier = M
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                painter = painterResource(R.drawable.i_qr_code_scanner),
+                painter = painterResource(R.drawable.oi_qr_code_scanner),
                 contentDescription = "QR Code Scanner Icon"
             )
 

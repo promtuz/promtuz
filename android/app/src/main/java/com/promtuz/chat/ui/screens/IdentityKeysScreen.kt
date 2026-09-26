@@ -29,7 +29,7 @@ fun IdentityKeysScreen(onShareIdentity: () -> Unit, onRecoveryPhrase: () -> Unit
             item {
                 GroupedActionRow(stringResource(R.string.identity_qr_title), 0, 2, onShareIdentity,
                     supportingText = stringResource(R.string.identity_qr_body)) {
-                    DrawableIcon(R.drawable.i_qr_code, size = 26.dp)
+                    DrawableIcon(R.drawable.oi_qr_code, size = 26.dp)
                 }
             }
             item {

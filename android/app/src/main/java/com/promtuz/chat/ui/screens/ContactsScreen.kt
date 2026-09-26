@@ -110,7 +110,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
             selectionCount = selectedPeople.size.takeIf { selecting && it > 0 },
             close = selecting, onBack = ::back, enabled = !busy,
             actions = { if (!selecting) IconButton(onClick = onShareIdentity) {
-                Icon(painterResource(R.drawable.i_qr_code), "My QR code", Modifier.size(22.dp))
+                Icon(painterResource(R.drawable.oi_qr_code), "My QR code", Modifier.size(22.dp))
             } else if (selectedPeople.size == 1) IconButton(
                 onClick = { deleting = selectedPeople.single(); actions.clearContactError() }, enabled = !busy,
             ) { Icon(painterResource(R.drawable.i_delete), "Delete contact", Modifier.size(22.dp)) } },
