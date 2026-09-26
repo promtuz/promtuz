@@ -120,6 +120,7 @@ fn init_inner(
 /// post-disconnect backoff against this so a reconnect fires immediately instead
 /// of waiting out the 2 s retry sleep.
 static FOREGROUND: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
+static FOREGROUND_PROBE: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 static TASK_REMOVED: AtomicBool = AtomicBool::new(false);
 
 /// Client hook: call from the platform's app-foreground lifecycle event.
@@ -129,6 +130,44 @@ pub fn on_foreground() {
     // `notify_one` retains a permit when the relay loop has not started waiting.
     FOREGROUND.notify_one();
     crate::push::request_registration();
+    // Probe the captured connection only. A delayed probe must never close its
+    // replacement, and repeated lifecycle/network callbacks share one probe.
+    let connection = crate::state::RELAY.read().as_ref().and_then(|r| r.connection.clone());
+    if let Some(connection) = connection {
+        RUNTIME.spawn(async move {
+            let Ok(_probe) = FOREGROUND_PROBE.try_lock() else { return };
+            if connection.close_reason().is_some() { return; }
+            if !relay_responds(&connection).await {
+                connection.close(0u32.into(), b"foreground liveness timeout");
+                FOREGROUND.notify_one();
+            }
+        });
+    }
+}
+
+async fn relay_responds(connection: &quinn::Connection) -> bool {
+    use common::proto::client_rel::{CRelayPacket, QueryP, QueryResultP, SRelayPacket};
+    use common::proto::Sender;
+    use common::proto::pack::Unpacker;
+    bounded_probe(async {
+        let (mut tx, mut rx) = connection.open_bi().await?;
+        CRelayPacket::Query(QueryP::PubAddress).send(&mut tx).await?;
+        tx.finish()?;
+        anyhow::ensure!(matches!(SRelayPacket::unpack(&mut rx).await?,
+            SRelayPacket::QueryResult(QueryResultP::PubAddress { .. })), "unexpected liveness reply");
+        Ok(())
+    }).await
+}
+
+async fn bounded_probe(probe: impl std::future::Future<Output = anyhow::Result<()>>) -> bool {
+    matches!(tokio::time::timeout(Duration::from_secs(3), probe).await, Ok(Ok(())))
+}
+
+async fn wait_to_retry(delay: Duration) {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = FOREGROUND.notified() => trace!("foreground: reconnecting now"),
+    }
 }
 
 /// Client hook: call when the OS task is removed. Best-effort close makes the
@@ -169,7 +208,7 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
         loop {
             // No identity yet (pre-enrollment): idle until there is one.
             let Ok(ipk) = Identity::public_key() else {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                wait_to_retry(Duration::from_secs(2)).await;
                 continue;
             };
 
@@ -181,7 +220,7 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
 
             if !crate::utils::has_internet() {
                 ConnectionState::NoInternet.emit();
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                wait_to_retry(Duration::from_secs(5)).await;
                 continue;
             }
 
@@ -227,16 +266,38 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                     // Short backoff: a fresh resolve may have just populated the
                     // table, or all known relays are circuit-open and will reset.
                     // (Was 30s — too slow for a cold-boot fresh install.)
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    wait_to_retry(Duration::from_secs(5)).await;
                     continue;
                 },
                 Err(err) => error!("failed to fetch relay: {err}"),
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                _ = FOREGROUND.notified() => trace!("foreground: reconnecting now"),
-            }
+            wait_to_retry(Duration::from_secs(2)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod foreground_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_probe_is_bounded_but_healthy_and_failed_probes_finish_immediately() {
+        let start = tokio::time::Instant::now();
+        assert!(bounded_probe(async { Ok(()) }).await);
+        assert!(!bounded_probe(async { anyhow::bail!("closed") }).await);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert!(!bounded_probe(std::future::pending()).await);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_wakes_all_retry_delays() {
+        for seconds in [2, 5] {
+            let start = tokio::time::Instant::now();
+            FOREGROUND.notify_one();
+            wait_to_retry(Duration::from_secs(seconds)).await;
+            assert_eq!(start.elapsed(), Duration::ZERO);
+        }
+    }
 }
