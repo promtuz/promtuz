@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
@@ -29,7 +30,8 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
 
 /** How much of the line an emoji glyph takes, relative to the font size; a touch over 1 matches how system emoji sit. */
-private val EmojiEm = 1.2.em
+internal const val EmojiSizeEm = 1.2f
+private val EmojiEm = EmojiSizeEm.em
 
 /**
  * [Text] that draws emoji from the bundled pack, so a message or a reaction
@@ -50,33 +52,65 @@ fun EmojiText(
     overflow: TextOverflow = TextOverflow.Clip,
     softWrap: Boolean = true,
     onTextLayout: ((TextLayoutResult) -> Unit)? = null,
+) = EmojiText(
+    AnnotatedString(text), modifier, style, color, fontSize, fontStyle,
+    maxLines, overflow, softWrap, onTextLayout,
+)
+
+/** Preserve caller annotations and inline content, including a caption's timestamp reservation. */
+@Composable
+fun EmojiText(
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    color: Color = Color.Unspecified,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    fontStyle: FontStyle? = null,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
+    inlineContent: Map<String, InlineTextContent> = emptyMap(),
 ) {
     val context = LocalContext.current
     EmojiPack.ensureLoaded(context)
     val index by EmojiPack.index.collectAsState()
     val runs = remember(text, index) {
-        index?.let { EmojiSequences.split(text, it.keys, it.aliases) } ?: emptyList()
+        index?.let { EmojiSequences.split(text.text, it.keys, it.aliases) } ?: emptyList()
     }
     if (EmojiSequences.isPlain(runs)) {
         Text(
             text, modifier, color = color, fontSize = fontSize, fontStyle = fontStyle,
             maxLines = maxLines, overflow = overflow, softWrap = softWrap,
-            onTextLayout = onTextLayout, style = style,
+            onTextLayout = onTextLayout ?: {}, style = style, inlineContent = inlineContent,
         )
         return
     }
-    val annotated = remember(runs) {
+    val annotated = remember(text, runs) {
         buildAnnotatedString {
-            for (run in runs) when (run) {
-                is EmojiRun.Text -> append(run.text)
-                is EmojiRun.Emoji -> appendInlineContent(run.key, run.cluster)
+            append(text)
+            var offset = 0
+            for (run in runs) {
+                val length = when (run) {
+                    is EmojiRun.Text -> run.text.length
+                    is EmojiRun.Emoji -> run.cluster.length
+                }
+                if (run is EmojiRun.Emoji) {
+                    // Use appendInlineContent's public annotation contract, retaining the
+                    // original spans, offsets and Unicode rather than rebuilding the text.
+                    val marker = buildAnnotatedString { appendInlineContent("emoji:${run.key}", run.cluster) }
+                    for (annotation in marker.getStringAnnotations(0, marker.length)) {
+                        addStringAnnotation(annotation.tag, annotation.item, offset, offset + length)
+                    }
+                }
+                offset += length
             }
         }
     }
     val glyphStyle = style.merge(TextStyle(color = color, fontSize = fontSize, fontStyle = fontStyle))
-    val inline = remember(runs, glyphStyle) {
-        runs.filterIsInstance<EmojiRun.Emoji>().associate { run ->
-            run.key to InlineTextContent(
+    val inline = remember(runs, glyphStyle, inlineContent) {
+        inlineContent + runs.filterIsInstance<EmojiRun.Emoji>().associate { run ->
+            "emoji:${run.key}" to InlineTextContent(
                 Placeholder(EmojiEm, EmojiEm, PlaceholderVerticalAlign.TextCenter),
             ) { cluster -> EmojiGlyph(run.key, cluster, glyphStyle) }
         }

@@ -20,14 +20,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,11 +33,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.content.MediaType
-import androidx.compose.foundation.content.consume
-import androidx.compose.foundation.content.contentReceiver
-import androidx.compose.foundation.content.hasMediaType
+import com.promtuz.chat.ui.text.EmojiTextField
+import com.promtuz.chat.ui.text.EmojiFieldController
+import com.promtuz.chat.ui.text.EmojiText
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -60,15 +53,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.Manifest
@@ -134,9 +123,7 @@ fun ChatBottomBar(
     val stickersOpen = openPanel == ComposerPanelKind.Stickers
     // Hold the panel until the keyboard covers it when restoring input.
     var closingToKeyboard by remember { mutableStateOf(false) }
-    val focusManager = LocalFocusManager.current
-    val keyboard = LocalSoftwareKeyboardController.current
-    val fieldFocus = remember { FocusRequester() }
+    val field = remember { EmojiFieldController() }
     val imeVisible = WindowInsets.isImeVisible
     var restoreKeyboard by remember { mutableStateOf(false) }
     val open = { panel: ComposerPanelKind ->
@@ -150,8 +137,7 @@ fun ChatBottomBar(
         closingToKeyboard = restoreKeyboard
         openPanel = null
         if (restoreKeyboard) {
-            fieldFocus.requestFocus()
-            keyboard?.show()
+            field.showKeyboard()
         }
     }
     val toggle = { panel: ComposerPanelKind -> if (openPanel == panel) closeRestoring() else open(panel) }
@@ -182,7 +168,7 @@ fun ChatBottomBar(
     val beginRecording = {
         if (!viewModel.startRecording()) {
             Toast.makeText(context, "Microphone is busy", Toast.LENGTH_SHORT).show()
-        } else { closeFlat(); focusManager.clearFocus() }
+        } else { closeFlat(); field.clearFocus() }
     }
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) beginRecording()
@@ -271,7 +257,7 @@ fun ChatBottomBar(
                         attachOpen = attachOpen,
                         stickersOpen = stickersOpen,
                         metrics = metrics,
-                        fieldFocus = fieldFocus,
+                        field = field,
                         onToggleAttach = { toggle(ComposerPanelKind.Attach) },
                         onToggleStickers = { toggle(ComposerPanelKind.Stickers) },
                         onFieldFocused = {
@@ -290,7 +276,7 @@ fun ChatBottomBar(
             open = openPanel != null,
             closingToKeyboard = closingToKeyboard,
             haze = haze,
-            onHideKeyboard = { keyboard?.hide() },
+            onHideKeyboard = { field.hideKeyboard() },
         ) {
             when (shownPanel) {
                 ComposerPanelKind.Attach -> AttachPanelBody(
@@ -501,7 +487,7 @@ private fun ComposerActionBlock(
                 },
                 label = "actionSnippet",
             ) { s ->
-                Text(
+                EmojiText(
                     s,
                     style = MaterialTheme.typography.bodyMedium,
                     // The edit line is an affordance, not a quote, tinted so it
@@ -534,7 +520,7 @@ private fun ComposerRow(
     attachOpen: Boolean,
     stickersOpen: Boolean,
     metrics: ComposerMetrics,
-    fieldFocus: FocusRequester,
+    field: EmojiFieldController,
     onToggleAttach: () -> Unit,
     onToggleStickers: () -> Unit,
     onFieldFocused: () -> Unit,
@@ -558,7 +544,6 @@ private fun ComposerRow(
     val canClearCaption = editing?.msg?.content is MessageContent.Image || editing?.msg?.content is MessageContent.Attachment
     val hasContent = input.isNotBlank() || staged.isNotEmpty()
     val hasDraft = (hasContent || canClearCaption) && staged.all { it.ready } && !busy
-    val panelOpen = attachOpen || stickersOpen
 
     Row(
         modifier.fillMaxWidth(),
@@ -591,29 +576,20 @@ private fun ComposerRow(
                 )
             }
         }
-        BasicTextField(
+        EmojiTextField(
             value = input,
             onValueChange = { if (!busy) viewModel.input.value = it },
+            acceptChanges = !busy,
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
-            cursorBrush = SolidColor(chat.accent),
+            cursorColor = chat.accent,
+            controller = field,
+            onFieldFocused = onFieldFocused,
+            onReceiveImages = viewModel::attachPhotos,
             maxLines = 6,
             // Tapping the field to type raises the keyboard, so close the panel it replaces.
             modifier = Modifier.weight(1f)
-                .contentReceiver { content ->
-                    if (!content.hasMediaType(MediaType.Image)) return@contentReceiver content
-                    val uris = ArrayList<android.net.Uri>()
-                    val rest = content.consume { item -> item.uri?.let { uris += it; true } ?: false }
-                    if (uris.isNotEmpty()) viewModel.attachPhotos(uris)
-                    rest
-                }
                 .then(textExit.modifier)
-                .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart)
-                .pointerInput(panelOpen) {
-                    if (panelOpen) awaitEachGesture { awaitFirstDown(requireUnconsumed = false); onFieldFocused() }
-                }
-                .focusRequester(fieldFocus)
-                .onFocusChanged { if (it.isFocused) onFieldFocused() }
-                .semantics { contentDescription = "Message input" },
+                .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart),
             // Floored at the button size and centred within it, so a single line sits
             // level with the icons rather than riding the row's Bottom alignment. Past
             // one line the box grows and Bottom keeps the buttons at the last line.

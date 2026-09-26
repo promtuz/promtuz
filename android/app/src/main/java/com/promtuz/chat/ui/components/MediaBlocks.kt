@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.text.EmojiText
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -499,7 +501,7 @@ private fun Caption(
     val inline = mapOf(
         "meta" to InlineTextContent(Placeholder(metaWidth, metaHeight, PlaceholderVerticalAlign.TextBottom)) {}
     )
-    Text(
+    EmojiText(
         annotated,
         // A bleeding media block waives the bubble's inset, so the caption puts it
         // back for itself — and the meta lands in the gap the placeholder reserves.
