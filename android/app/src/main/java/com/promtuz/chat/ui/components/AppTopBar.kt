@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +35,11 @@ fun AppTopBar(
     connectionStatus: Boolean = true,
 ) {
     TopAppBar(
-        title = { if (connectionStatus) ConnectionAwareTitle(title) else ProvideTextStyle(screenTitleStyle(), title) },
+        title = {
+            Box(Modifier.centerBarTitle(screenTitleStyle())) {
+                if (connectionStatus) ConnectionAwareTitle(title) else ProvideTextStyle(screenTitleStyle(), title)
+            }
+        },
         modifier = modifier,
         navigationIcon = navigationIcon,
         actions = actions,
