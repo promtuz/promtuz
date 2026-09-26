@@ -35,14 +35,14 @@ fun chatMediaItems(
         when (val c = msg.content) {
             is MessageContent.Image -> items += MediaItem(
                 key = did, thumb = c.bitmap, width = c.width, height = c.height,
-                title = title, subtitle = subtitle, caption = c.caption, actions = delete,
+                title = title, subtitle = subtitle, caption = c.caption, actions = delete, mime = "image/avif",
             )
             is MessageContent.Album -> c.items.forEachIndexed { i, item ->
                 val image = item.content as? MessageContent.Image ?: return@forEachIndexed
                 items += MediaItem(
                     key = item.dispatchIdHex, thumb = image.bitmap, width = image.width, height = image.height,
                     title = title, subtitle = subtitle, caption = if (i == 0) c.caption else "", actions = delete,
-                    group = did,
+                    group = did, mime = "image/avif",
                 )
             }
             is MessageContent.Attachment -> {
@@ -52,7 +52,7 @@ fun chatMediaItems(
                 items += MediaItem(
                     key = did, thumb = c.thumb, width = c.thumb?.width ?: 1, height = c.thumb?.height ?: 1,
                     title = title, subtitle = subtitle, caption = c.caption, actions = delete,
-                    shareName = c.name.substringBeforeLast('.'), mime = c.mime, filePath = path,
+                    shareName = c.name, mime = c.mime, filePath = path, byteSize = c.size,
                     videoPath = if (video) path else null,
                     load = if (video) ({ c.thumb }) else ({ decodeDownscaled(context, Uri.fromFile(File(path)), 4096)?.asImageBitmap() ?: c.thumb }),
                 )
@@ -70,4 +70,4 @@ private fun whenSent(timestampMs: Long): String {
 
 /** A single picture with no chat behind it, such as a profile photo. */
 fun pictureItem(key: String, image: ImageBitmap, title: String, actions: List<List<MenuAction>> = emptyList()) =
-    MediaItem(key = key, thumb = image, width = image.width, height = image.height, title = title, actions = actions)
+    MediaItem(key = key, thumb = image, width = image.width, height = image.height, title = title, actions = actions, mime = "image/avif")

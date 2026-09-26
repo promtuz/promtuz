@@ -76,6 +76,11 @@ fun AppNavigation(
                 }
                 ChatScreen(key.name, chatVM)
             }
+            entry<Routes.ContactCard> { key -> com.promtuz.chat.ui.screens.ContactCardScreen(key) }
+            entry<Routes.ContactRequests> { com.promtuz.chat.ui.screens.ContactRequestsScreen() }
+            entry<Routes.ContactRequest> { key -> com.promtuz.chat.ui.screens.ContactRequestScreen(key.peer, key.outgoing) }
+            entry<Routes.ContactInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(key.conversation, key.peer) }
+            entry<Routes.SharedMedia> { key -> com.promtuz.chat.ui.screens.SharedMediaScreen(key.conversation, key.name) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
                 ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
@@ -100,7 +105,8 @@ fun AppNavigation(
             entry<Routes.ProfilePhoto> { key ->
                 ProfilePhotoScreen(
                     uri = key.uri,
-                    viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
+                    viewModel = if (key.group == null) koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner)
+                        else androidx.lifecycle.viewmodel.compose.viewModel(viewModelStoreOwner = profileOwner, key = "group-photo:${key.group}") { ProfileVM(key.group) },
                     onSaved = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
                 )
             }

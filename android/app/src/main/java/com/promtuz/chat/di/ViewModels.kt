@@ -13,6 +13,7 @@ import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import org.koin.core.module.dsl.singleOf
+import org.koin.core.module.dsl.viewModel
 import org.koin.core.module.dsl.viewModelOf
 import org.koin.dsl.module
 
@@ -23,7 +24,7 @@ val vmModule = module {
     viewModelOf(::ShareIdentityVM)
     viewModelOf(::QrScannerVM)
     viewModelOf(::ContactsVM)
-    viewModelOf(::ProfileVM)
+    viewModel { ProfileVM() }
     viewModelOf(::ChatVM)
     viewModelOf(::RelaysVM)
     viewModelOf(::UpdateVM)

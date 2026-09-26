@@ -44,6 +44,7 @@ class AppVM(
 
     /** Invite that arrived before onboarding finished; raised once enroll completes. */
     var pendingInvite: ByteArray? = null
+    var pendingContactCard: String? = null
 
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
@@ -57,6 +58,24 @@ class AppVM(
         observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
             loadSummaries()
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Latest unread arrival not yet exposed in the Home viewport. */
+    val unseenOnHome = observeQuery(setOf("messages", "prefs")) {
+        bridge.unreadCounts().mapNotNull { unread ->
+            val conv = unread.conversationId.toHex()
+            val newest = bridge.recentIncoming(unread.conversationId, 1).lastOrNull()?.id
+            if (newest != null && bridge.pref("home_seen:$conv") != newest) conv to newest else null
+        }.toMap()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    fun sawHomeRows(conversations: Set<String>) {
+        val arrivals = unseenOnHome.value.filterKeys { it in conversations }
+        if (arrivals.isEmpty()) return
+        viewModelScope.launch {
+            // Capture the exact IDs shown; an arrival during this write stays unseen.
+            arrivals.forEach { (conv, id) -> bridge.setPref("home_seen:$conv", id) }
+        }
+    }
 
     /** Live presence per contact (hex IPK) for the whole app — home dots + chat header. */
     val presenceByPeer: StateFlow<Map<String, Presence>> get() = bridge.presenceByPeer
@@ -266,6 +285,7 @@ class AppVM(
     fun completeOnboarding() {
         navigator.reset(Routes.App)
         pendingInvite?.let { showInvite(it); pendingInvite = null }
+        pendingContactCard?.let { navigator.openExternal(Routes.ContactCard(encoded = it)); pendingContactCard = null }
     }
 
     private suspend fun loadSummaries(): List<ChatSummary> = try {

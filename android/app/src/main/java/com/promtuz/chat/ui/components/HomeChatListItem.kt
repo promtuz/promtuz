@@ -165,8 +165,8 @@ fun HomeChatListItem(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (chat.isGroup) GroupAvatar(title = chat.name, members = emptyList())
-            else Avatar(chat.name, statusColor = presenceColor(presence), image = rememberAvatar(chat.peerHex))
+            if (chat.isGroup) GroupAvatar(title = chat.name, members = emptyList(), conversation = chat.conversationHex)
+            else Avatar(chat.name, identityKey = chat.peerHex ?: chat.conversationHex, statusColor = presenceColor(presence), image = rememberAvatar(chat.peerHex))
 
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(

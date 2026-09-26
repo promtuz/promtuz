@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -26,18 +28,34 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 
 @Composable
 fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: HomeMenuState) {
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
+    val arrivals by appViewModel.unseenOnHome.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(listState, lifecycle, arrivals, foreground) {
+        if (!foreground) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            androidx.compose.runtime.snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+            }.collect { appViewModel.sawHomeRows(it) }
+        }
+    }
+    val requests by androidx.compose.runtime.remember {
+        com.promtuz.core.observeQuery(setOf("contact_requests", "contacts")) { com.promtuz.core.CoreBridge.contactRequests() }
+    }.collectAsState(emptyList())
     val direction = LocalLayoutDirection.current
     val chats by appViewModel.chats.collectAsState()
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByChat.collectAsState()
 
-    if (chats.isEmpty()) {
+    if (chats.isEmpty() && requests.isEmpty()) {
         HomeEmpty(innerPadding)
         return
     }
 
     LazyColumn(
-        Modifier.padding(
+        state = listState,
+        modifier = Modifier.padding(
             start = innerPadding.calculateLeftPadding(direction),
             end = innerPadding.calculateRightPadding(direction),
         ).fillMaxSize(),
@@ -47,6 +65,14 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         ),
     ) {
 
+        if (requests.isNotEmpty()) item(key = "contact-requests") {
+            androidx.compose.material3.ListItem(
+                modifier = Modifier.clickable { appViewModel.navigator.push(com.promtuz.chat.navigation.Routes.ContactRequests) },
+                headlineContent = { Text("Contact requests") },
+                supportingContent = { Text("${requests.count { !it.outgoing }} incoming · ${requests.count { it.outgoing }} sent") },
+                leadingContent = { DrawableIcon(com.promtuz.chat.R.drawable.i_user_add, size = 28.dp) },
+            )
+        }
         itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
             // Presence is per-person, so a group — which has no single
             // counterpart — shows none. Typing is per-chat, so a group has it.

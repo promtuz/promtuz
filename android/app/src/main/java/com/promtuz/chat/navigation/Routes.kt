@@ -28,10 +28,23 @@ object Routes : NavKey {
     data object Profile : NavKey
 
     @Serializable
-    data class ProfilePhoto(val uri: String) : NavKey
+    data class ProfilePhoto(val uri: String, val group: String? = null) : NavKey
 
     @Serializable
     data object Settings : NavKey
+
+    @Serializable
+    data class ContactCard(val peer: String = "", val name: String = "", val sharing: Boolean = false, val encoded: String? = null) : NavKey
+    @Serializable
+    data object ContactRequests : NavKey
+    @Serializable
+    data class ContactRequest(val peer: String, val outgoing: Boolean) : NavKey
+
+    @Serializable
+    data class ContactInfo(val conversation: String, val peer: String) : NavKey
+
+    @Serializable
+    data class SharedMedia(val conversation: String, val name: String) : NavKey
 
     @Serializable
     data object Storage : NavKey

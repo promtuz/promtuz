@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.utils.extensions.fromHex
+import kotlinx.coroutines.launch
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -54,7 +56,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
             removeMember = viewModel::removeMember,
             leave = { viewModel.leave() },
             deleteAnyway = { viewModel.deleteAnyway() },
-        ),
+        ), conversation = conversationHex,
     )
 }
 
@@ -90,7 +92,18 @@ internal data class GroupInfoActions(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) = with(state) {
+internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, conversation: String? = null) = with(state) {
+    val app = org.koin.compose.koinInject<AppVM>()
+    val scope = rememberCoroutineScope()
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null && conversation != null) app.navigator.push(com.promtuz.chat.navigation.Routes.ProfilePhoto(uri.toString(), conversation))
+    }
+    val picture = rememberAvatar(conversation?.let { "group:$it" })
+    val media by remember(conversation) {
+        com.promtuz.core.observeQuery(setOf("messages", "message_media")) {
+            conversation?.let { com.promtuz.core.CoreBridge.sharedMedia(it.fromHex()).size } ?: 0
+        }
+    }.collectAsState(0)
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(notice) { notice?.let { snackbar.showSnackbar(it); actions.clearNotice() } }
     var editing by rememberSaveable { mutableStateOf(false) }
@@ -113,7 +126,22 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
     val direction = LocalLayoutDirection.current
     val colors = MaterialTheme.colorScheme
 
-    SimpleScreen({ Text("Group info") }) { padding ->
+    SimpleScreen({ Text("Group info") }, actions = {
+        if (canManage && conversation != null) AppDropMenu(
+            anchor = { DrawableIcon(com.promtuz.chat.R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Group options") },
+            groups = listOf(buildList {
+                add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
+                    picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                })
+                if (picture != null) add(MenuAction("Remove group photo", com.promtuz.chat.R.drawable.oi_trash, destructive = true) {
+                    scope.launch {
+                        runCatching { com.promtuz.core.CoreBridge.setGroupPicture(conversation.fromHex(), null) }
+                            .onFailure { snackbar.showSnackbar("Couldn't remove group photo") }
+                    }
+                })
+            }),
+        )
+    }) { padding ->
         Box(Modifier.fillMaxSize()) {
             if (loading || loadError) {
                 Column(Modifier.fillMaxWidth().padding(padding).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -128,7 +156,8 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
                 item {
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = 88.dp)
+                        GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = 88.dp, conversation = conversation,
+                            onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
                         Text(displayName.ifBlank { "Group" }, style = MaterialTheme.typography.headlineSmall)
                         Text(memberTally(active.size), color = colors.onSurfaceVariant)
                         if (canManage) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
@@ -150,6 +179,10 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions) 
                             Text("Add members")
                         }
                     }
+                }
+                if (media > 0 && conversation != null) item {
+                    ListItem(headlineContent = { Text("Shared media") }, supportingContent = { Text("$media attachments") },
+                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
                 }
                 items(active, key = { it.ipkHex }) { member ->
                     GroupMemberRow(member, !busy) { person = member }
@@ -264,7 +297,7 @@ private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Un
         leadingContent = {
             val avatar = rememberAvatar(member.ipkHex)
             Avatar(
-                member.name, size = 44.dp, image = avatar, originKey = "avatar-${member.ipkHex}",
+                member.name, size = 44.dp, image = avatar, identityKey = member.ipkHex, originKey = "avatar-${member.ipkHex}",
                 onClick = avatar?.let { { MediaViewer.open(listOf(pictureItem("avatar-${member.ipkHex}", it, member.name))) } },
             )
         },

@@ -107,9 +107,14 @@ private fun openAttachment(context: Context, path: String) {
 
 @Composable
 fun ChatScreen(routeName: String, viewModel: ChatVM) {
-    androidx.lifecycle.compose.LifecycleResumeEffect(viewModel) {
+    val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
+    if (foreground) androidx.lifecycle.compose.LifecycleResumeEffect(viewModel) {
+        com.promtuz.core.push.PushNotifier.viewing(viewModel.conversationHex, true)
         viewModel.setChatForeground(true)
-        onPauseOrDispose { viewModel.setChatForeground(false) }
+        onPauseOrDispose {
+            com.promtuz.core.push.PushNotifier.viewing(viewModel.conversationHex, false)
+            viewModel.setChatForeground(false)
+        }
     }
     // Capture once: Scaffold must receive rows and load state from the same snapshot.
     val messageSnapshot = viewModel.messages.collectAsState().value

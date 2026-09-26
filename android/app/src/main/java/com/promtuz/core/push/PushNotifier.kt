@@ -16,6 +16,7 @@ import android.graphics.Paint
 import android.graphics.Shader
 import android.graphics.Typeface
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.toArgb
 import android.os.Bundle
 import android.os.SystemClock
 import android.net.Uri
@@ -60,6 +61,10 @@ import timber.log.Timber
 /** Reconciles the notification shade with unread messages and persisted alert state. */
 object PushNotifier {
     private const val SUMMARY_ID = 1
+    private const val REQUESTS_ID = 2
+    @Volatile private var requestsVisible = false
+
+    fun viewingRequests(visible: Boolean) { requestsVisible = visible; scope.launch { reconcileSafely() } }
 
     /** RemoteInput result key; shared with [ReplyReceiver]. */
     const val KEY_REPLY = "reply_text"
@@ -100,9 +105,19 @@ object PushNotifier {
         val image: Uri?,
     )
 
-    /** Gates posting — reconcile still runs foregrounded, but only to clear read chats' notifs. */
+    /** Activity state and the resumed conversation are separate: other chats still alert. */
     @Volatile
     private var foreground = false
+
+    @Volatile private var visibleConversation: String? = null
+
+    fun viewing(conversation: String, visible: Boolean) {
+        if (visible) visibleConversation = conversation
+        else if (visibleConversation == conversation) visibleConversation = null
+        scope.launch { reconcileSafely() }
+    }
+
+    private fun viewing(conversation: String): Boolean = foreground && visibleConversation == conversation
 
     fun start(application: Application) {
         app = application
@@ -128,7 +143,7 @@ object PushNotifier {
         // Subscribe before core starts. Alerts come from durable message state,
         // so a cold start or a dropped transient event cannot lose an arrival.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it }
+            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it || "contact_requests" in it }
                 .debounce(150L).collect { reconcileSafely() }
         }
         scope.launch { reconcileSafely() }
@@ -157,6 +172,7 @@ object PushNotifier {
         // Master off: nuke our whole group (children + summary) and post nothing — flipping the switch
         // off should silence AND clear the shade, not just stop future buzzes.
         val enabled = ChatPrefs.notifEnabled
+        reconcileRequests(enabled)
         if (!enabled) {
             nm.activeNotifications
                 .filter { it.notification.group == Notifications.GROUP_KEY }
@@ -177,9 +193,9 @@ object PushNotifier {
         mutedConvs = convs.filter { it.muted }.map { it.id.toHex() }.toSet()
         rendered.keys.retainAll(counts.keys)
         for (conv in counts.keys) {
-            if (!enabled || foreground || conv in mutedConvs) {
+            if (!enabled || viewing(conv) || conv in mutedConvs) {
                 val pending = CoreBridge.pendingNotificationIds(conv.fromHex())
-                if (pending.isNotEmpty() && (!enabled || foreground || conv in mutedConvs)) {
+                if (pending.isNotEmpty() && (!enabled || viewing(conv) || conv in mutedConvs)) {
                     CoreBridge.markNotified(pending)
                 }
             }
@@ -189,7 +205,7 @@ object PushNotifier {
 
         // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
         // clears any notif it already had.
-        val visible = counts.filterKeys { it !in mutedConvs }
+        val visible = counts.filterKeys { it !in mutedConvs && !viewing(it) }
 
         // Dismiss per-chat notifs whose chat is no longer unread (read from any surface) or now muted.
         // Unconditional (runs foregrounded too), so an in-app read or a mute clears the shade. GROUP_KEY
@@ -206,9 +222,28 @@ object PushNotifier {
             return
         }
 
-        if (!foreground) {
-            for ((convHex, n) in visible) postChat(convHex, n)
+        for ((convHex, n) in visible) postChat(convHex, n)
+    }
+
+    private suspend fun reconcileRequests(enabled: Boolean) {
+        val requests = CoreBridge.contactRequests().filterNot { it.outgoing }
+        if (!enabled || requests.isEmpty() || requestsVisible) {
+            nm().cancel(REQUESTS_ID)
+            if (requestsVisible) requests.forEach { CoreBridge.setPref("request_alert:${it.ipk.toHex()}", it.expiresMs.toString()) }
+            return
         }
+        val pending = requests.filter { CoreBridge.pref("request_alert:${it.ipk.toHex()}") != it.expiresMs.toString() }
+        if (pending.isEmpty() && nm().activeNotifications.none { it.id == REQUESTS_ID }) return
+        val intent = Intent(app, LauncherActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra("open_contact_requests", true)
+        val open = PendingIntent.getActivity(app, REQUESTS_ID, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
+            .setSmallIcon(R.drawable.i_logo_mono).setContentTitle("Contact request")
+            .setContentText(if (ChatPrefs.notifPreview) if (requests.size == 1) "${requests.first().name} wants to connect" else "${requests.size} people want to connect" else "You have a new contact request")
+            .setContentIntent(open).setAutoCancel(true).setSilent(pending.isEmpty()).build()
+        if (requestsVisible || !ChatPrefs.notifEnabled) return
+        nm().notify(REQUESTS_ID, notification)
+        pending.forEach { CoreBridge.setPref("request_alert:${it.ipk.toHex()}", it.expiresMs.toString()) }
     }
 
     private suspend fun postChat(convHex: String, n: Int) {
@@ -220,7 +255,7 @@ object PushNotifier {
         // otherwise write the same filter-and-sort over a full page of rows.
         val pending = CoreBridge.pendingNotificationIds(conv)
         val recent = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
-        if (foreground) return
+        if (viewing(convHex)) return
         // All newest-window rows deleted-for-everyone while count>0: nothing to paint, so clear this
         // chat's own notif (a bare return would strand a stale one reconcile can't repaint or cancel).
         if (recent.isEmpty()) { nm().cancel(notifId(convHex)); return }
@@ -248,7 +283,7 @@ object PushNotifier {
             } }.awaitAll().toMap()
         } else emptyMap()
         // A read, mute or privacy change may have happened while a sticker was fetched.
-        if (foreground || !ChatPrefs.notifEnabled || ChatPrefs.notifPreview != previewEnabled ||
+        if (viewing(convHex) || !ChatPrefs.notifEnabled || ChatPrefs.notifPreview != previewEnabled ||
             CoreBridge.conversation(conv)?.muted == true ||
             CoreBridge.unreadCounts().none { it.conversationId.contentEquals(conv) && it.count.toInt() == n }) return
         val current = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
@@ -285,7 +320,7 @@ object PushNotifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
             // Their own picture for a direct chat, when they told us one; initials otherwise, like the app.
-            val avatar = (if (isGroup) null else peerAvatar(conv)) ?: letterAvatar(displayName)
+            val avatar = (if (isGroup) null else peerAvatar(conv)) ?: letterAvatar(displayName, CoreBridge.conversation(conv)?.peer?.toHex() ?: convHex)
             val avatarIcon = IconCompat.createWithBitmap(avatar)
             chat.setLargeIcon(avatar)
             val them = Person.Builder().setName(displayName).setKey(convHex).setIcon(avatarIcon).build()
@@ -440,13 +475,13 @@ object PushNotifier {
         return out
     }
 
-    private fun letterAvatar(name: String, px: Int = 128): Bitmap {
+    private fun letterAvatar(name: String, identity: String, px: Int = 128): Bitmap {
         val initials = name.split(" ").filter { it.isNotBlank() }
             .take(2).joinToString("") { it.first().uppercase() }.ifEmpty { "?" }
         val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawCircle(px / 2f, px / 2f, px / 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AVATAR_COLORS[(name.hashCode() and 0x7FFF_FFFF) % AVATAR_COLORS.size]
+            color = com.promtuz.chat.ui.components.avatarColor(identity).toArgb()
         })
         val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
@@ -457,11 +492,6 @@ object PushNotifier {
         canvas.drawText(initials, px / 2f, px / 2f - (text.descent() + text.ascent()) / 2f, text)
         return bmp
     }
-
-    private val AVATAR_COLORS = intArrayOf(
-        0xFF0F66FF.toInt(), 0xFF00B2FF.toInt(), 0xFF7C4DFF.toInt(),
-        0xFFEF5350.toInt(), 0xFF26A69A.toInt(), 0xFFFFA726.toInt(),
-    )
 
     private val lastBuzz = mutableMapOf<String, Long>()
 

@@ -205,6 +205,21 @@ object CoreBridge {
     /** Our display name, as enrolled or last restored. */
     suspend fun profileName(): String = withContext(Dispatchers.IO) { ffiProfileName() }
 
+    suspend fun contactCard(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.contactCard(ipk) }
+    suspend fun previewContactCard(bytes: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.previewContactCard(bytes) }
+    suspend fun requestContact(bytes: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.requestContact(bytes) }
+    suspend fun contactRequests() = withContext(Dispatchers.IO) { uniffi.core.contactRequests() }
+    suspend fun acceptContactRequest(ipk: ByteArray) = uniffi.core.acceptContactRequest(ipk)
+    suspend fun dismissContactRequest(ipk: ByteArray, outgoing: Boolean) = withContext(Dispatchers.IO) { uniffi.core.dismissContactRequest(ipk, outgoing) }
+
+    suspend fun profileBio(): String = withContext(Dispatchers.IO) { uniffi.core.profileBio() }
+    suspend fun setProfileDetails(name: String, bio: String) = withContext(Dispatchers.IO) { uniffi.core.setProfileDetails(name, bio) }
+    suspend fun personProfile(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.personProfile(ipk) }
+    suspend fun setContactNickname(ipk: ByteArray, name: String) = withContext(Dispatchers.IO) { uniffi.core.setContactNickname(ipk, name) }
+    suspend fun groupPicture(conv: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.groupPicture(conv) }
+    suspend fun setGroupPicture(conv: ByteArray, rgba: ByteArray?, width: Int = 0, height: Int = 0) =
+        uniffi.core.setGroupPicture(conv, rgba, width.toUInt(), height.toUInt())
+
     /** Our profile picture as AVIF bytes, or null when we have none. */
     suspend fun profilePicture(): ByteArray? = withContext(Dispatchers.IO) { ffiProfilePicture() }
 
@@ -396,6 +411,8 @@ object CoreBridge {
     }
 
     /** Media rows for a conversation (inline blob/thumb + transfer progress in chunks). */
+    suspend fun sharedMedia(conversationId: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.sharedMedia(conversationId) }
+
     suspend fun getMedia(conversationId: ByteArray): List<MediaRecord> =
         withContext(Dispatchers.IO) { ffiGetMedia(conversationId) }
 

@@ -109,7 +109,7 @@ private fun SelectableContactAvatar(name: String, ipkHex: String, selecting: Boo
     val fill by animateColorAsState(if (selected) colors.primary else colors.surfaceContainerHigh,
         ChatMotion.spec(), label = "contact selection fill")
     Box(Modifier.size(48.dp)) {
-        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp, image = rememberAvatar(ipkHex)) }
+        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp, identityKey = ipkHex, image = rememberAvatar(ipkHex)) }
         AnimatedVisibility(selected, Modifier.align(Alignment.BottomEnd),
             enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.4f),
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {

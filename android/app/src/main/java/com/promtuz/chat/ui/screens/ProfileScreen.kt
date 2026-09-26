@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.AppAlertDialog
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -21,6 +22,12 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ProfileWork
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.DrawableIcon
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.viewmodel.AppVM
+import org.koin.compose.koinInject
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.SimpleScreen
@@ -30,6 +37,10 @@ import com.promtuz.chat.ui.media.pictureItem
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
+    val app = koinInject<AppVM>()
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var draftName by rememberSaveable { mutableStateOf("") }
+    var draftBio by rememberSaveable { mutableStateOf("") }
     val profile by viewModel.profile.collectAsState()
     val work by viewModel.work.collectAsState()
     val busy = work == ProfileWork.Busy
@@ -61,7 +72,7 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
             item {
                 val tile: @Composable (onClick: (() -> Unit)?) -> Unit = { onClick ->
                     Box(Modifier.semantics { contentDescription = editLabel }) {
-                        Avatar(profile.name, size = 96.dp, image = profile.picture, onClick = onClick, originKey = "profile-photo")
+                        Avatar(profile.name, size = 96.dp, identityKey = profile.identity, image = profile.picture, onClick = onClick, originKey = "profile-photo")
                         Box(
                             Modifier.align(Alignment.BottomEnd).size(30.dp).clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary),
@@ -88,9 +99,54 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
                 } else tile(if (busy) null else choose)
             }
             item { Text(profile.name, style = MaterialTheme.typography.titleLargeEmphasized) }
+            item {
+                if (profile.bio.isNotBlank()) Text(profile.bio, style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    GroupedActionRow("Edit profile", 0, 2, enabled = !busy,
+                        supportingText = "Name and bio", onClick = {
+                            draftName = profile.name; draftBio = profile.bio; editing = true
+                        }) { DrawableIcon(R.drawable.i_user, size = 26.dp) }
+                    GroupedActionRow("Share my identity", 1, 2,
+                        supportingText = "Your QR code and invite link",
+                        onClick = { app.navigator.push(Routes.ShareIdentity) }) { DrawableIcon(R.drawable.oi_qr_code, size = 26.dp) }
+                }
+            }
+            item {
+                Text("ACCOUNT", Modifier.fillMaxWidth().padding(top = 18.dp),
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    GroupedActionRow("Identity & keys", 0, 2,
+                        supportingText = "Public identity and recovery phrase",
+                        onClick = { app.navigator.push(Routes.IdentityKeys) }) { DrawableIcon(R.drawable.i_key, size = 26.dp) }
+                    GroupedActionRow("Backup & restore", 1, 2,
+                        supportingText = "Keep a copy of your chats",
+                        onClick = { app.navigator.push(Routes.BackupRestore) }) { DrawableIcon(R.drawable.i_chat_backup, size = 26.dp) }
+                }
+            }
             (work as? ProfileWork.Failed)?.let { failure ->
                 item { Text(failure.reason, color = MaterialTheme.colorScheme.error) }
             }
         }
     }
+    if (editing) AppAlertDialog(
+        onDismissRequest = { if (!busy) editing = false },
+        title = { Text("Edit profile") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(draftName, { if (it.length <= 32) draftName = it },
+                label = { Text("Name") }, singleLine = true, enabled = !busy)
+            OutlinedTextField(draftBio, { if (it.length <= 160) draftBio = it },
+                label = { Text("Bio") }, minLines = 2, maxLines = 4, enabled = !busy,
+                supportingText = { Text("${draftBio.length}/160") })
+            if (work is ProfileWork.Failed) Text((work as ProfileWork.Failed).reason, color = MaterialTheme.colorScheme.error)
+        } },
+        confirmButton = { TextButton(enabled = !busy && draftName.isNotBlank(), onClick = {
+            viewModel.saveDetails(draftName.trim(), draftBio.trim()) { editing = false }
+        }) { Text(if (busy) "Saving…" else "Save") } },
+        dismissButton = { TextButton(enabled = !busy, onClick = { editing = false }) { Text("Cancel") } },
+    )
 }

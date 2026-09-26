@@ -82,7 +82,8 @@ object AvatarImages {
                     _generation.value
                 }
                 val bytes = try {
-                    CoreBridge.avatarOf(ipkHex.fromHex())
+                    if (ipkHex.startsWith("group:")) CoreBridge.groupPicture(ipkHex.removePrefix("group:").fromHex())
+                    else CoreBridge.avatarOf(ipkHex.fromHex())
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

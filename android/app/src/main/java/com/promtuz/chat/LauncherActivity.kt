@@ -1,5 +1,7 @@
 package com.promtuz.chat
 
+import androidx.compose.foundation.layout.fillMaxSize
+
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -36,6 +38,7 @@ class LauncherActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
+        consumeContactCard(intent)
         consumeInvite(intent)
         consumeChatOpen(intent)
         consumeUpdateOpen(intent)
@@ -43,11 +46,13 @@ class LauncherActivity : ComponentActivity() {
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
             PromtuzTheme(appearance = appearance) {
+                androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize()) {
                 AppNavigation(viewModel)
                 MediaViewerHost()
                 com.promtuz.chat.ui.camera.CameraOverlayHost()
                 InviteBottomSheet(viewModel)
                 RequiredUpdateHost()
+                }
             }
         }
     }
@@ -55,9 +60,24 @@ class LauncherActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        consumeContactCard(intent)
         consumeInvite(intent)
         consumeChatOpen(intent)
         consumeUpdateOpen(intent)
+    }
+
+    private fun consumeContactCard(intent: Intent) {
+        if (intent.getBooleanExtra("open_contact_requests", false)) {
+            intent.removeExtra("open_contact_requests")
+            if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.ContactRequests)
+        }
+        val uri = intent.data ?: return
+        if (!((uri.scheme == "https" && uri.host == "promtuz.dev" && uri.path == "/contact") ||
+            (uri.scheme == "promtuz" && uri.host == "contact"))) return
+        val encoded = uri.fragment?.takeIf { it.length <= 1024 && it.matches(Regex("[A-Za-z0-9_-]+")) } ?: return
+        intent.data = null
+        if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.ContactCard(encoded = encoded))
+        else viewModel.pendingContactCard = encoded
     }
 
     private fun consumeUpdateOpen(intent: Intent) {
@@ -91,6 +111,6 @@ class LauncherActivity : ComponentActivity() {
         val name = intent.getStringExtra(PushNotifier.EXTRA_CONV_NAME).orEmpty()
         intent.removeExtra(PushNotifier.EXTRA_CONVERSATION) // one-shot; survive recreation
         intent.removeExtra(PushNotifier.EXTRA_CONV_NAME)
-        if (CoreBridge.shouldLaunchApp()) viewModel.openChat(convHex, name)
+        if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.Chat(convHex, name))
     }
 }

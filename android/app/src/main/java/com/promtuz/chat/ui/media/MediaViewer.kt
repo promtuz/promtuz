@@ -39,6 +39,7 @@ data class MediaItem(
     val group: String? = null,
     val load: suspend () -> ImageBitmap? = { thumb },
     val shareName: String = key,
+    val byteSize: Long? = null,
     /** Extra overflow entries after the built-in Save and Share. Each list is one group. */
     val actions: List<List<MenuAction>> = emptyList(),
 )

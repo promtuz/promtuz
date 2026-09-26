@@ -52,6 +52,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * True for a card that is being animated off (mid back-swipe or sliding off after commit). Read by
  * [com.promtuz.chat.ui.util.freezeOnExit] to freeze live blur before the scale hits it.
  */
+/** Only the current entry owns read/notification visibility, never a revealed back-preview. */
+val LocalNavForeground = compositionLocalOf { true }
+
 val LocalNavCardExiting = compositionLocalOf { false }
 
 /**
@@ -289,6 +292,7 @@ fun NavStage(
                 ) {
                     CompositionLocalProvider(
                         LocalNavCardExiting provides exit,
+                        LocalNavForeground provides (isTop && !exit && !showPush),
                         LocalNavEnterSettled provides (!isTop || !showPush),
                     ) {
                         entry.Content()

@@ -546,6 +546,8 @@ private fun Chrome(
     onShare: (MediaItem) -> Unit,
 ) {
     if (item == null || alpha == 0f) return
+    var showInfo by remember(item.key) { mutableStateOf(false) }
+    if (showInfo) MediaInfoDialog(item) { showInfo = false }
     val white = Color.White
     val slide = with(LocalDensity.current) { 40.dp.toPx() }
     Box(Modifier.fillMaxSize()) {
@@ -580,6 +582,7 @@ private fun Chrome(
                     add(listOf(
                         MenuAction("Save", R.drawable.oi_image_save) { onSave(item) },
                         MenuAction("Share", R.drawable.oi_export) { onShare(item) },
+                        MenuAction("Info", R.drawable.oi_info) { showInfo = true },
                     ))
                     addAll(item.actions)
                 },

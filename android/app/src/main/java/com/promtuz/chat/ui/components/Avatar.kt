@@ -47,12 +47,14 @@ fun Avatar(
     image: ImageBitmap? = null,
     onClick: (() -> Unit)? = null,
     originKey: String? = null,
+    identityKey: String = originKey ?: name,
 ) {
     val clip = RoundedCornerShape(size / clipRatio)
     val fallbackChars = name.split(" ")
         .filter { it.isNotBlank() }
         .map { it.first() }
-        .joinToString("")
+        .take(2)
+        .joinToString("").uppercase()
     val interactionSource = remember { MutableInteractionSource() }
 
     Box(Modifier.size(size).then(if (originKey != null) Modifier.mediaOrigin(originKey, size / clipRatio) else Modifier)) {
@@ -60,7 +62,7 @@ fun Avatar(
             Modifier
                 .fillMaxSize()
                 .clip(clip)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(0.5f))
+                .background(avatarColor(identityKey))
                 .clickable(
                     enabled = onClick != null,
                     interactionSource = interactionSource,
@@ -76,7 +78,7 @@ fun Avatar(
                 fallbackChars,
                 fontWeight = FontWeight.Bold,
                 fontSize = (size.value / 2.6f).sp,
-                color = MaterialTheme.colorScheme.onBackground.copy(0.85f)
+                color = Color.White
             )
         }
 
@@ -112,9 +114,17 @@ fun GroupAvatar(
     members: List<String>,
     size: Dp = 52.dp,
     clipRatio: Float = AVATAR_RADIUS_RATIO,
+    conversation: String? = null,
+    onClick: (() -> Unit)? = null,
 ) {
+    val image = com.promtuz.chat.utils.media.rememberAvatar(conversation?.let { "group:$it" })
+    if (image != null) {
+        Avatar(title, size, clipRatio, image = image, onClick = onClick,
+            originKey = conversation?.let { "group:$it" }, identityKey = conversation ?: title)
+        return
+    }
     if (title.isNotBlank()) {
-        Avatar(name = title, size = size, clipRatio = clipRatio)
+        Avatar(name = title, size = size, clipRatio = clipRatio, identityKey = conversation ?: title, onClick = onClick)
         return
     }
 
@@ -124,7 +134,7 @@ fun GroupAvatar(
         Modifier
             .size(size)
             .clip(clip)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(0.5f)),
+            .background(avatarColor(conversation ?: title)).clickable(enabled = onClick != null) { onClick?.invoke() },
     ) {
         if (pair.isEmpty()) {
             Text(
@@ -132,7 +142,7 @@ fun GroupAvatar(
                 Modifier.align(Alignment.Center),
                 fontWeight = FontWeight.Bold,
                 fontSize = (size.value / 2.6f).sp,
-                color = MaterialTheme.colorScheme.onBackground.copy(0.85f),
+                color = Color.White,
             )
         } else {
             // Two initials on a diagonal — legible at list size, where a 2x2
@@ -145,9 +155,16 @@ fun GroupAvatar(
                         .padding(size * 0.16f),
                     fontWeight = FontWeight.Bold,
                     fontSize = (size.value / 3.6f).sp,
-                    color = MaterialTheme.colorScheme.onBackground.copy(if (i == 0) 0.85f else 0.6f),
+                    color = Color.White.copy(if (i == 0) 1f else 0.8f),
                 )
             }
         }
     }
+}
+
+/** Stable across renames and restores; the key never leaves this device. */
+fun avatarColor(identityKey: String): Color {
+    val palette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
+        0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)
+    return Color(palette[Math.floorMod(identityKey.hashCode(), palette.size)])
 }

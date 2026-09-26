@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,8 @@ import com.promtuz.chat.ui.media.pictureItem
 @Composable
 fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val appVM = koinInject<AppVM>()
+    val unseen by appVM.unseenOnHome.collectAsState()
+    val hasUnseen = unseen.keys.any { it != chatVM.conversationHex }
     val navigator = appVM.navigator
     val backHandle = LocalOnBackPressedDispatcherOwner.current
     val colors = MaterialTheme.colorScheme
@@ -114,7 +117,16 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 },
             contentAlignment = Alignment.Center,
         ) {
-            TopBarMorphIcon(navigationMorph, if (searching) "Close search" else "Back")
+            TopBarMorphIcon(navigationMorph, if (searching) "Close search" else if (hasUnseen) "Back, new messages in other chats" else "Back")
+            androidx.compose.animation.AnimatedVisibility(
+                visible = hasUnseen && !searching,
+                modifier = Modifier.align(Alignment.TopEnd),
+                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(),
+                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+            ) {
+                Box(Modifier.padding(top = 3.dp).size(6.dp).clip(CircleShape)
+                    .background(chatTheme.accent))
+            }
         }
     }
 
@@ -155,12 +167,12 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp)
+                if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp, conversation = chatVM.conversationHex)
                 else {
                     val peerHex = summary?.peerHex
                     val avatar = rememberAvatar(peerHex)
                     Avatar(
-                        name, 40.dp, image = avatar,
+                        name, 40.dp, image = avatar, identityKey = peerHex ?: name,
                         originKey = peerHex?.let { "avatar-$it" },
                         onClick = if (avatar != null && peerHex != null) {
                             { MediaViewer.open(listOf(pictureItem("avatar-$peerHex", avatar, name))) }
@@ -175,7 +187,9 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     modifier = Modifier.weight(1f, fill = false),
                     onClick = if (isGroup) {
                         { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) }
-                    } else null,
+                    } else summary?.peerHex?.let { peer ->
+                        { navigator.push(Routes.ContactInfo(chatVM.conversationHex, peer)) }
+                    },
                 )
             }
         },

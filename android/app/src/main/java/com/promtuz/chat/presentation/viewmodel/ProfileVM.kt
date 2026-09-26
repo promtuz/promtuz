@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.utils.media.PhotoCrop
 import com.promtuz.chat.utils.media.decodeAvatar
 import com.promtuz.chat.utils.media.toRgba
+import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-data class OwnProfile(val name: String = "", val picture: ImageBitmap? = null)
+data class OwnProfile(val name: String = "", val picture: ImageBitmap? = null, val bio: String = "", val identity: String = "")
 
 sealed interface ProfileWork {
     data object Idle : ProfileWork
@@ -26,7 +28,7 @@ sealed interface ProfileWork {
 }
 
 /** Shared by Profile and its editor so leaving the editor cannot interrupt an accepted save. */
-class ProfileVM : ViewModel() {
+class ProfileVM(private val group: String? = null) : ViewModel() {
     private val _profile = MutableStateFlow(OwnProfile())
     val profile = _profile.asStateFlow()
     private val _work = MutableStateFlow<ProfileWork>(ProfileWork.Idle)
@@ -51,9 +53,9 @@ class ProfileVM : ViewModel() {
     }
 
     private suspend fun readProfile() {
-        val name = CoreBridge.profileName()
-        val picture = CoreBridge.profilePicture()?.let { decodeAvatar(it) }
-        _profile.value = OwnProfile(name, picture)
+        val name = if (group == null) CoreBridge.profileName() else CoreBridge.conversation(group.fromHex())?.displayName.orEmpty()
+        val picture = (if (group == null) CoreBridge.profilePicture() else CoreBridge.groupPicture(group.fromHex()))?.let { decodeAvatar(it) }
+        _profile.value = OwnProfile(name, picture, if (group == null) CoreBridge.profileBio() else "", if (group == null) withContext(Dispatchers.IO) { uniffi.core.profileIdentity().toHex() } else group)
     }
 
     fun savePicture(source: Bitmap, crop: PhotoCrop, requestId: String) = change({ _savedPhoto.value = requestId }) {
@@ -61,10 +63,17 @@ class ProfileVM : ViewModel() {
             val bitmap = crop.render(source)
             try { bitmap.toRgba() } finally { bitmap.recycle() }
         }
-        CoreBridge.setProfilePicture(rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
+        if (group == null) CoreBridge.setProfilePicture(rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
+        else CoreBridge.setGroupPicture(group.fromHex(), rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
     }
 
-    fun removePicture() = change { CoreBridge.clearProfilePicture() }
+    fun removePicture() = change {
+        if (group == null) CoreBridge.clearProfilePicture() else CoreBridge.setGroupPicture(group.fromHex(), null)
+    }
+
+    fun saveDetails(name: String, bio: String, onSaved: () -> Unit) = change(onSaved) {
+        CoreBridge.setProfileDetails(name, bio)
+    }
 
     private fun change(onSaved: () -> Unit = {}, write: suspend () -> Unit) {
         if (_work.value == ProfileWork.Busy) return
@@ -80,7 +89,7 @@ class ProfileVM : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 Timber.tag("Profile").w(e, "Picture change failed")
-                _work.value = ProfileWork.Failed("Couldn't update your photo. Try again.")
+                _work.value = ProfileWork.Failed("Couldn't save your changes. Try again.")
             }
         }
     }
