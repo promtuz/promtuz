@@ -171,7 +171,10 @@ def rust_libraries(artifacts):
 
 
 def bundled_assets():
-    """Artwork shipped in the APK's assets rather than pulled in as a dependency."""
+    """Bundled artwork and data that are not pulled in as dependencies."""
+    yield dict(id="data:unicode-emoji", name="Unicode Emoji Data", version="17.0",
+               url="https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-data.txt", license="Unicode-3.0",
+               notices=[("Unicode Emoji Data", (NOTICES / "unicode.txt").read_text())])
     yield dict(id="assets:apple-color-emoji", name="Apple Color Emoji", version="macOS 26 (20260722)",
                url="https://github.com/samuelngs/apple-emoji-ttf", license="Apple Inc. artwork · MIT (build tooling)",
                notices=[("Apple Color Emoji", (NOTICES / "apple-color-emoji.txt").read_text()),

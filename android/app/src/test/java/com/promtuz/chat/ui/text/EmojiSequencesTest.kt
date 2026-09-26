@@ -7,7 +7,7 @@ import org.junit.Test
 class EmojiSequencesTest {
     private val pack = setOf(
         "1f600", "2764", "1f469_200d_1f4bb", "1f44b_1f3fd", "1f1fa_1f1f8", "0023_20e3", "00a9",
-        "1f1f3_1f1f4",
+        "1f1f3_1f1f4", "231a", "1f170", "1f5a5",
     )
     private val aliases = mapOf("1f1e7_1f1fb" to "1f1f3_1f1f4")
 
@@ -32,6 +32,22 @@ class EmojiSequencesTest {
     fun `a symbol the pack happens to hold stays text unless asked for as emoji`() {
         assertEquals(listOf(EmojiRun.Text("© 2026")), split("© 2026"))
         assertEquals(listOf(emoji("©️", "00a9")), split("©️"))
+    }
+
+    @Test
+    fun `text selectors override emoji defaults and joined sequences`() {
+        for (text in listOf("⌚\uFE0E", "😀\uFE0E", "🅰\uFE0E", "🖥\uFE0E", "👩‍💻\uFE0E")) {
+            assertEquals(text, listOf(EmojiRun.Text(text)), split(text))
+        }
+    }
+
+    @Test
+    fun `supplementary text defaults require an emoji selector`() {
+        for ((text, key) in listOf("🅰" to "1f170", "🖥" to "1f5a5")) {
+            assertEquals(listOf(EmojiRun.Text(text)), split(text))
+            assertEquals(listOf(emoji("$text\uFE0F", key)), split("$text\uFE0F"))
+        }
+        assertEquals(listOf(emoji("⌚", "231a"), emoji("😀", "1f600")), split("⌚😀"))
     }
 
     @Test

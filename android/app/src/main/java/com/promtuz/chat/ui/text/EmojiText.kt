@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.text
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
@@ -9,8 +10,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -70,11 +73,12 @@ fun EmojiText(
             }
         }
     }
-    val inline = remember(runs) {
+    val glyphStyle = style.merge(TextStyle(color = color, fontSize = fontSize, fontStyle = fontStyle))
+    val inline = remember(runs, glyphStyle) {
         runs.filterIsInstance<EmojiRun.Emoji>().associate { run ->
             run.key to InlineTextContent(
                 Placeholder(EmojiEm, EmojiEm, PlaceholderVerticalAlign.TextCenter),
-            ) { EmojiGlyph(run.key, run.cluster) }
+            ) { cluster -> EmojiGlyph(run.key, cluster, glyphStyle) }
         }
     }
     Text(
@@ -86,10 +90,18 @@ fun EmojiText(
 
 /** One glyph from the pack, or the system's rendering of [cluster] until it has decoded. */
 @Composable
-private fun EmojiGlyph(key: String, cluster: String) {
+private fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle) {
     val context = LocalContext.current
-    val glyph by produceState(EmojiPack.peek(key), key) { value = EmojiPack.glyph(context, key) }
-    val bitmap = glyph
-    if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-    else Text(cluster, maxLines = 1, softWrap = false)
+    // produceState's initial value is remembered, even when its producer key changes.
+    // Give each asset its own state so an edit cannot display the previous emoji.
+    key(assetKey) {
+        val glyph by produceState(EmojiPack.peek(assetKey), assetKey) {
+            value = EmojiPack.glyph(context, assetKey)
+        }
+        val bitmap = glyph
+        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(cluster, style = style, maxLines = 1, softWrap = false)
+        }
+    }
 }
