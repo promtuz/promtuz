@@ -23,6 +23,9 @@ DRY_RUN=0
 NOTIFY=1
 NOTIFY_ONLY=0
 NOTES=""
+SKIP_NOTES=0
+NOTES_DRAFT=""
+SCRATCH=""
 
 _info() { print -r -- "  $*" }
 _ok()   { print -r -- "✓ $*" }
@@ -39,6 +42,7 @@ Usage: release-android.zsh [options]
   --version-name VERSION       Skip the version prompt
   --version-code CODE          Use an explicit code above published versions
   --notes FILE                 Markdown release notes shown in the app (optional)
+  --no-notes                   Publish without notes; skip the collected draft
   --no-publish                 Build, sign, and stage locally
   --no-notify                  Publish without a release announcement
   --notify-only                Announce the current live release; skip the build
@@ -52,6 +56,22 @@ EOF
 
 _value() {
     [[ -n "$2" && "$2" != --* ]] || _die "$1 needs a value (see --help)"
+}
+
+_cleanup() {
+    rm -rf "$SCRATCH" 2>/dev/null
+    rm -f "$NOTES_DRAFT" 2>/dev/null
+    return 0
+}
+
+# Where the last release ended, for collecting this one's notes. A tag is
+# authoritative; repos from before tagging have only their release commits to
+# go on, and one with neither marker gets its whole history.
+_release_base() {
+    local base
+    base="$(git -C "$REPO" describe --tags --abbrev=0 2>/dev/null || true)"
+    [[ -n "$base" ]] || base="$(git -C "$REPO" log --format=%H -i --grep='^chore.*release' -1 || true)"
+    print -r -- "$base"
 }
 
 # Interactive yes/no. Anything but an explicit yes aborts — these gates guard
@@ -87,6 +107,7 @@ while (( $# )); do
         --version-name) _value "$1" "${2-}"; VERSION_NAME="$2"; shift 2 ;;
         --version-code) _value "$1" "${2-}"; VERSION_CODE="$2"; shift 2 ;;
         --notes)        _value "$1" "${2-}"; NOTES="$2"; shift 2 ;;
+        --no-notes)     SKIP_NOTES=1; shift ;;
         --no-publish)   PUBLISH=0; shift ;;
         --no-notify)    NOTIFY=0; shift ;;
         --notify-only)  NOTIFY_ONLY=1; shift ;;
@@ -129,7 +150,11 @@ if (( DRY_RUN )); then
     _info "version: ${VERSION_NAME:-prompt at release time}"
     _info "versionCode: ${VERSION_CODE:-next code above local and published versions}"
     _info "build and sign: ${ABIS[*]}"
-    _info "release notes: ${NOTES:-none}"
+    if (( SKIP_NOTES )); then
+        _info "release notes: none (--no-notes)"
+    else
+        _info "release notes: ${NOTES:-collected from Notes: trailers since the last release}"
+    fi
     if (( ! PUBLISH )); then
         _info "stage locally: $REPO/android/app/build/release-staging (no upload or announcement)"
     elif (( NOTIFY )); then
@@ -293,10 +318,35 @@ NOTES_NAME="notes-${VERSION_CODE}.md"
 print -r -- ""
 _info "version   $VERSION_NAME (versionCode $VERSION_CODE)"
 _info "artefact  $APK_NAME"
+
+# A `Notes:` trailer carries the user-facing line for a commit that changes
+# something visible. Drafted here, before the long build, so the file is ready
+# by the time it has to be signed — and so an empty draft is noticed now.
+if [[ -z "$NOTES" ]] && (( ! SKIP_NOTES )); then
+    trap _cleanup EXIT
+    NOTES_BASE="$(_release_base)"
+    NOTES_DRAFT="$(mktemp -t promtuz-notes)"
+    # sed does the filtering as well as the bullets: `grep -v` on an empty run
+    # exits 1, and pipefail would take the whole release down with it.
+    git -C "$REPO" log --format='%(trailers:key=Notes,valueonly,unfold)' \
+        ${NOTES_BASE:+"${NOTES_BASE}..HEAD"} \
+        | sed '/^[[:space:]]*$/d; s/^/- /' > "$NOTES_DRAFT"
+    if [[ -s "$NOTES_DRAFT" ]]; then
+        _info "notes     $(wc -l < "$NOTES_DRAFT" | tr -d ' ') collected since ${NOTES_BASE:-the start of history}"
+        if [[ -t 0 ]]; then
+            _info "          opening ${EDITOR:-vi}: group them, cut what nobody would notice, save to publish"
+            ${=EDITOR:-vi} "$NOTES_DRAFT" || _die "editor exited non-zero; nothing was published"
+        fi
+        [[ -s "$NOTES_DRAFT" ]] && NOTES="$NOTES_DRAFT"
+    else
+        _warn "no Notes: trailers since ${NOTES_BASE:-the start of history}"
+    fi
+fi
+
 if [[ -n "$NOTES" ]]; then
     _info "notes     $NOTES_NAME (from $NOTES)"
 else
-    _warn "no --notes: the app will show this release without notes"
+    _warn "no release notes: the app will show this release without them"
 fi
 
 # ── unlock ───────────────────────────────────────────────────────────────
@@ -304,7 +354,7 @@ _step "Unlock"
 
 SCRATCH="$(mktemp -d)"; chmod 700 "$SCRATCH"
 STAGE="$SCRATCH/stage"; mkdir -p "$STAGE"
-trap 'rm -rf "$SCRATCH"' EXIT
+trap _cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -547,7 +597,10 @@ done
 print -r -- "  Most phones are arm64-v8a; x86_64 is emulators."
 
 print -r -- ""
-_info "commit the bump so the repo matches what shipped:"
-_info "  git add android/gradle.properties && git commit -m 'chore: release $VERSION_NAME'"
+_info "commit the bump and tag it, so the repo matches what shipped and the next"
+_info "release knows where this one ended:"
+_info "  git add android/gradle.properties \\"
+_info "    && git commit -m 'chore: release $VERSION_NAME' \\"
+_info "    && git tag v$VERSION_NAME"
 
 (( notify_failed == 0 )) || exit 2
