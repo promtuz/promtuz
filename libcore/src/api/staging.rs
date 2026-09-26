@@ -135,3 +135,26 @@ pub fn revise_with_staged(
     });
     Ok(())
 }
+
+/// Share sheet waits for durable message creation before releasing its staged files.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn commit_shared(conversation_id: Vec<u8>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
+    let to = to_conv16(&conversation_id)?;
+    crate::RUNTIME.spawn(async move {
+        if ids.is_empty() {
+            anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
+            let message = crate::data::message::Message::save_outgoing(to, &caption, None)?;
+            let payload = crate::messaging::rebuild_pending_payload(&to, &message)?;
+            crate::RUNTIME.spawn(async move {
+                if let Err(e) = crate::messaging::send_prepared(to, &message, payload).await {
+                    log::debug!("SHARE: text remains pending: {e}");
+                }
+            });
+            Ok(())
+        } else {
+            crate::staging::commit(to, ids, caption, None).await
+        }
+    })
+        .await.map_err(anyhow::Error::from)??;
+    Ok(())
+}

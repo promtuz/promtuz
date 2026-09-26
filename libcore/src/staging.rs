@@ -309,7 +309,13 @@ pub async fn commit(
             crate::data::media::save_outgoing_with_media(&conversation, cap, reply_to, &media)?;
         discard(s.id);
         let payload = crate::messaging::rebuild_pending_payload(&conversation, &msg)?;
-        crate::messaging::send_prepared(conversation, &msg, payload).await?;
+        // Ownership has moved to the durable message. A network failure must
+        // not stop the rest of an album being queued or hold a share activity open.
+        crate::RUNTIME.spawn(async move {
+            if let Err(e) = crate::messaging::send_prepared(conversation, &msg, payload).await {
+                log::debug!("STAGING: message remains pending: {e}");
+            }
+        });
     }
     Ok(())
 }
