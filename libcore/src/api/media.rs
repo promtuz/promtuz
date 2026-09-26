@@ -387,3 +387,37 @@ mod tests {
         assert_eq!(record.transfer_have, record.transfer_total, "all chunks present");
     }
 }
+
+/// Lightweight browsing index. Read bytes only for a visible preview or opened item.
+#[derive(uniffi::Record)]
+pub struct SharedMediaItem {
+    pub sender_name: String,
+    pub dispatch_id: Vec<u8>,
+    pub kind: u8,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub timestamp: u64,
+}
+
+#[uniffi::export]
+pub fn shared_media(conversation_id: Vec<u8>) -> Result<Vec<SharedMediaItem>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let result = (|| -> anyhow::Result<_> {
+        let rows = {
+            let db = crate::db::messages::MESSAGES_DB.lock();
+            let mut query = db.prepare("SELECT mm.dispatch_id, mm.kind, mm.name, mm.mime, mm.size, m.timestamp, m.sender_ipk, m.outgoing
+                FROM message_media mm JOIN messages m ON m.conversation_id=mm.conversation_id AND m.dispatch_id=mm.dispatch_id
+                WHERE m.conversation_id=?1 AND m.deleted=0 ORDER BY m.id DESC")?;
+            query.query_map([conv.as_slice()], |r| Ok((SharedMediaItem {
+                sender_name: String::new(), dispatch_id: r.get(0)?, kind: r.get(1)?, name: r.get(2)?, mime: r.get(3)?, size: r.get(4)?, timestamp: r.get(5)?
+            }, r.get::<_, Option<[u8; 32]>>(6)?, r.get::<_, bool>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Name resolution owns its own locks. Never call it under the messages lock.
+        Ok(rows.into_iter().map(|(mut row, sender, outgoing)| {
+            row.sender_name = if outgoing { "You".into() } else { sender.map(|who| crate::data::peer_name::resolve(&who)).unwrap_or_default() };
+            row
+        }).collect::<Vec<_>>())
+    })();
+    result.map_err(Into::into)
+}

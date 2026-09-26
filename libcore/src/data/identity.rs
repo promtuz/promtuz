@@ -95,8 +95,8 @@ impl Identity {
 
         conn.execute(
             "INSERT INTO identity (
-                    id, ipk, enc_isk, created_at, name, avatar, avatar_revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                    id, ipk, enc_isk, created_at, name, avatar, avatar_revision, bio, profile_revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
             (
                 identity.id,
                 identity.ipk,
@@ -105,6 +105,8 @@ impl Identity {
                 identity.name.clone(),
                 identity.avatar.clone(),
                 identity.avatar_revision,
+                identity.bio.clone(),
+                identity.profile_revision,
             ),
         )?;
 
@@ -130,7 +132,7 @@ impl Identity {
             created_at: systime().as_millis() as u64,
             name,
             avatar: None,
-            avatar_revision: 0,
+            avatar_revision: 0, bio: String::new(), profile_revision: 0,
         })?;
         Ok(())
     }
@@ -141,6 +143,26 @@ impl Identity {
         let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
         let conn = IDENTITY_DB.lock();
         conn.execute("UPDATE identity SET name = ?1 WHERE id = 0", [name])?;
+        Ok(())
+    }
+
+    pub fn details(&self) -> crate::data::peer_profile::ProfileUpdate {
+        crate::data::peer_profile::ProfileUpdate {
+            revision: self.inner.profile_revision, name: self.name(), bio: self.inner.bio.clone(),
+            card: secret_key_signing(&self.ipk()).and_then(|key| crate::contact_requests::make_card(&key, self.name())).unwrap_or_default(),
+        }
+    }
+
+    pub fn set_details(name: &str, bio: &str) -> Result<()> {
+        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
+        anyhow::ensure!(bio.chars().count() <= 160, "Bio is limited to 160 characters");
+        let conn = IDENTITY_DB.lock();
+        let old: u64 = conn.query_row("SELECT profile_revision FROM identity WHERE id = 0", [], |r| r.get(0))?;
+        let revision = old.max(systime().as_millis() as u64).checked_add(1).ok_or_else(|| anyhow!("revision overflow"))?;
+        conn.execute("UPDATE identity SET name = ?1, bio = ?2, profile_revision = ?3 WHERE id = 0",
+            (name, bio.trim(), revision))?;
+        drop(conn);
+        crate::data::peer_avatar::notify_changed();
         Ok(())
     }
 
@@ -189,7 +211,7 @@ impl Identity {
             created_at: systime().as_millis() as u64,
             name,
             avatar: None,
-            avatar_revision: 0,
+            avatar_revision: 0, bio: String::new(), profile_revision: 0,
         })?;
         Ok(())
     }

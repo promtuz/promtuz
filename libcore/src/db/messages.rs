@@ -458,6 +458,24 @@ const MIGRATION_ARRAY: &[M] = &[
         revision INTEGER CHECK(revision >= 0),
         PRIMARY KEY(owner_ipk, peer_ipk)
     ) WITHOUT ROWID;"),
+    M::up("CREATE TABLE peer_profiles (
+        ipk BLOB PRIMARY KEY CHECK(length(ipk) = 32), name TEXT NOT NULL,
+        bio TEXT NOT NULL, card BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 0)
+    ) WITHOUT ROWID;
+    CREATE TABLE profile_acks (
+        owner_ipk BLOB NOT NULL CHECK(length(owner_ipk) = 32),
+        peer_ipk BLOB NOT NULL CHECK(length(peer_ipk) = 32), revision INTEGER,
+        PRIMARY KEY(owner_ipk, peer_ipk)
+    ) WITHOUT ROWID;
+    CREATE TABLE group_pictures (
+        conversation_id BLOB PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL, avif BLOB
+    ) WITHOUT ROWID;
+    CREATE TABLE contact_requests (
+        peer BLOB NOT NULL CHECK(length(peer)=32), outgoing INTEGER NOT NULL,
+        name TEXT NOT NULL, card BLOB NOT NULL, expires_ms INTEGER NOT NULL,
+        status INTEGER NOT NULL DEFAULT 0, wire BLOB, PRIMARY KEY(peer, outgoing)
+    ) WITHOUT ROWID;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -475,6 +493,9 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
         "conversation_members",
         "peer_names",
         "peer_avatars",
+        "peer_profiles",
+        "contact_requests",
+        "group_pictures",
         "sticker_packs",
         "stickers",
         "sticker_recents",

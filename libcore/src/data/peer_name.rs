@@ -46,6 +46,10 @@ pub fn get(who: &[u8; 32]) -> Option<String> {
 /// Resolved here rather than in each client so every surface agrees, and so
 /// the precedence is stated once instead of re-derived per screen.
 pub fn resolve(who: &[u8; 32]) -> String {
+    if let Some(nickname) = crate::data::app_prefs::get(&format!("nickname:{}", hex::encode(who))).filter(|s| !s.is_empty()) {
+        return nickname;
+    }
+    if let Some(profile) = crate::data::peer_profile::get(who) { return profile.name; }
     if let Some(c) = crate::data::contact::Contact::get(who) {
         if !c.inner.name.is_empty() {
             return c.inner.name.clone();

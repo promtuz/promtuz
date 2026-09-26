@@ -229,6 +229,12 @@ pub enum AppPayload {
     /// end-to-end and authenticated for free; routed to the call engine and
     /// never shown as a message. Appended last so postcard ordinals hold.
     Call(CallMsg),
+    /// Versioned profile metadata, authenticated by the MLS author.
+    ProfileDetails { revision: u64, name: String, bio: String, card: Vec<u8> },
+    ProfileDetailsSync { known_revision: Option<u64>, reply: bool },
+    ProfileDetailsAck { revision: u64 },
+    /// Only the group's active founder may change its picture.
+    GroupPicture { revision: u64, avif: Option<Vec<u8>> },
 }
 
 /// One step of a call. Every variant names its call, so a message that
@@ -596,6 +602,11 @@ pub enum MlsEnvelopeP {
     /// the same dispatch/queue channel; the relay treats it as opaque payload.
     /// Appended last so postcard's ordinal tags for Application/Welcome hold.
     PairDecline(PairDeclineP),
+    /// HPKE-encrypted, independently signed request. Never creates a contact.
+    ContactRequest {
+        sender: Bytes<32>, recipient: Bytes<32>, id: Bytes<16>, expires_ms: u64,
+        encapsulated: ByteVec, ciphertext: ByteVec, signature: Bytes<64>,
+    },
 }
 
 /// Application-tier envelope: encrypted MLS message addressed to a

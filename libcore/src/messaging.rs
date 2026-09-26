@@ -470,7 +470,7 @@ async fn send_control_inner(
         AppPayload::Call(_) => crate::call::SIGNAL_TTL_MS,
         _ => 0,
     };
-    let outbox = (ttl_ms == 0 && !matches!(payload, AppPayload::AvatarSync { .. }))
+    let outbox = (ttl_ms == 0 && !matches!(payload, AppPayload::AvatarSync { .. } | AppPayload::ProfileDetailsSync { .. }))
         .then_some(OpType::Control);
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
@@ -552,7 +552,7 @@ async fn send_control_inner(
 /// outlives a failed attempt and the reconciler re-sends it on the next
 /// reconnect, retiring only on a durable ack. `None` sends once and lets the
 /// payload die with the attempt.
-async fn dispatch_envelope(
+pub(crate) async fn dispatch_envelope(
     to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey, env_bytes: Vec<u8>, wake: Wake,
     outbox: Option<OpType>,
 ) -> Result<()> {
@@ -853,6 +853,10 @@ pub async fn reassert_presence() -> Result<()> {
 /// contact behind. `peer_name` is the invitee's self-asserted name for the
 /// saved row. Entry point for `api::identity::pair_from_qr`.
 pub async fn pair(to: [u8; 32], peer_name: String, pairing: PairingP) -> Result<()> {
+    pair_with_consent(to, peer_name, Some(pairing)).await
+}
+
+pub(crate) async fn pair_with_consent(to: [u8; 32], peer_name: String, pairing: Option<PairingP>) -> Result<()> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -873,7 +877,7 @@ pub async fn pair(to: [u8; 32], peer_name: String, pairing: PairingP) -> Result<
     };
 
     // `?` on a KP-fetch miss returns before any save — no bricked contact.
-    let group = lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, Some(pairing)).await?;
+    let group = lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, pairing).await?;
     Contact::save_pending(to, peer_name)?;
     if let Err(e) = Contact::set_mls_group_id(&to, &group.group_id()) {
         warn!("PAIR: persist mls_group_id failed: {e}");
@@ -1873,6 +1877,9 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             }
         },
         MlsEnvelopeP::PairDecline(_) => {}, // fixed-size, no cap
+        MlsEnvelopeP::ContactRequest { ciphertext, encapsulated, .. } => {
+            anyhow::ensure!(ciphertext.0.len() <= 2048 && encapsulated.0.len() == 32, "request size");
+        },
     }
 
     match envelope {
@@ -1889,6 +1896,10 @@ pub async fn process_inbound_envelope<C: DhtClient>(
                 heal_dead_group(ctx, sender_ipk, group_id).await;
             }
             Ok(Some(decoded))
+        },
+        request @ MlsEnvelopeP::ContactRequest { .. } => {
+            crate::contact_requests::receive(sender_ipk, request)?;
+            Ok(None)
         },
         MlsEnvelopeP::PairDecline(d) => {
             process_pair_decline_inbound(sender_ipk, d)?;
@@ -2051,6 +2062,7 @@ fn own_introduction() -> Vec<AppPayload> {
     }
     // Include removals too, so introductions cannot revive a stale picture.
     out.push(identity.avatar_update().into_payload());
+    out.push(identity.details().into_payload());
     out
 }
 
@@ -2077,7 +2089,12 @@ pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
 /// Tell one member what we call ourselves — for someone who joined after us,
 /// and so never heard the introduction we made on the way in.
 pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
-    let payloads = own_introduction();
+    let mut payloads = own_introduction();
+    if Identity::get().is_some_and(|me| Conversation::is_admin(&conversation, &me.ipk())) {
+        if let Some((revision, avif)) = crate::data::group_picture::snapshot(&conversation) {
+            payloads.push(AppPayload::GroupPicture { revision, avif });
+        }
+    }
     if payloads.is_empty() {
         return;
     }
@@ -2090,15 +2107,9 @@ pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
     });
 }
 
-/// Our picture alone, for a chat that already knows our name. A pair carries
-/// the name in the invite, so saying it again would tell them nothing.
+/// Introduce profile details and picture after a direct pairing.
 pub(crate) fn introduce_avatar(conversation: [u8; 16]) {
-    let Some(update) = Identity::get().map(|i| i.avatar_update()) else { return };
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = send_control(conversation, update.into_payload()).await {
-            debug!("PROFILE: could not send our picture: {e}");
-        }
-    });
+    introduce_ourselves(conversation);
 }
 
 /// Our picture changed, or went: tell every chat we can still speak in. `None`
@@ -2106,6 +2117,10 @@ pub(crate) fn introduce_avatar(conversation: [u8; 16]) {
 /// down. Outboxed like any control message, so a chat we are offline for
 /// hears it on reconnect.
 pub(crate) fn broadcast_avatar(update: crate::data::peer_avatar::AvatarUpdate) {
+    broadcast_profile(update.into_payload());
+}
+
+pub(crate) fn broadcast_profile(payload: AppPayload) {
     let Some(me) = Identity::get().map(|i| i.ipk()) else { return };
     let chats: Vec<[u8; 16]> = Conversation::list()
         .into_iter()
@@ -2115,7 +2130,7 @@ pub(crate) fn broadcast_avatar(update: crate::data::peer_avatar::AvatarUpdate) {
         .collect();
     crate::RUNTIME.spawn(async move {
         for id in chats {
-            if let Err(e) = send_control(id, update.clone().into_payload()).await {
+            if let Err(e) = send_control(id, payload.clone()).await {
                 debug!("PROFILE: could not send our picture to {}: {e}", hex::encode(&id[..4]));
             }
         }
@@ -2161,6 +2176,10 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     Ok(id)
 }
 
+fn valid_initial_pair(roster: &[[u8; 32]], has_group_meta: bool, ours: &[u8; 32], peer: &[u8; 32]) -> bool {
+    !has_group_meta && roster.len() == 2 && ours != peer && roster.contains(ours) && roster.contains(peer)
+}
+
 fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP,
 ) -> Result<WelcomeOutcome> {
@@ -2190,8 +2209,11 @@ fn process_welcome_inbound<C: DhtClient>(
     // save yet — the save moves after a successful accept so a failed accept
     // leaves no bricked contact (symmetric to the inviter's no-brick fix).
     // Welcomes from existing contacts skip the invite check.
+    let _consent = crate::contact_requests::CONSENT.lock();
     let (new_contact_name, redeemed_invite) = if Contact::exists(&sender_ipk) {
         (None, None)
+    } else if let Some(name) = crate::contact_requests::outgoing_consent(&sender_ipk) {
+        (Some(name), None)
     } else {
         let Some(pairing) =
             env.pairing.as_ref().filter(|p| Identity::verify_invite(&p.invite))
@@ -2210,7 +2232,7 @@ fn process_welcome_inbound<C: DhtClient>(
 
     // Post-gate accept failure = a decline, not a bail: we were invited, we
     // just couldn't build the group (KP already consumed, malformed welcome).
-    let group = match process_welcome_inbound_no_contacts(ctx, sender_ipk, env) {
+    let mut group = match process_welcome_inbound_no_contacts(ctx, sender_ipk, env) {
         Ok(g) => g,
         Err(e) => {
             warn!("MLS: welcome accept failed from {}: {e}", hex::encode(&sender_ipk[..4]));
@@ -2219,6 +2241,15 @@ fn process_welcome_inbound<C: DhtClient>(
             ));
         },
     };
+
+    // A stranger may only answer discovery/invite consent with a direct chat.
+    // Otherwise a signed Welcome could grant a multi-person group access to a
+    // conversation the user believed was private.
+    if new_contact_name.is_some() && !valid_initial_pair(&group.roster(), group.group_meta().is_some(), &our_ipk, &sender_ipk) {
+        let _ = group.delete(ctx.provider);
+        warn!("MLS: initial pairing Welcome was not a two-person direct chat");
+        return Ok(WelcomeOutcome::Rejected(common::proto::mls_wire::DECLINE_GROUP_BUILD_FAILED));
+    }
 
     // Success: now save the contact (defaults PAIRED) and bind the group.
     if let Some(name) = new_contact_name {
@@ -2229,6 +2260,10 @@ fn process_welcome_inbound<C: DhtClient>(
         if let Some(invite) = redeemed_invite {
             Identity::spend_invite(&invite);
         }
+    }
+    if Contact::is_paired(&sender_ipk) {
+        let _ = crate::db::messages::MESSAGES_DB.lock().execute(
+            "UPDATE contact_requests SET status=2,wire=NULL WHERE peer=?1", [sender_ipk.as_slice()]);
     }
     if let Err(e) = home_for_group(&group, &sender_ipk) {
         // The MLS state is sound; we just have nowhere to show it. Say so
@@ -2301,6 +2336,16 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(payload @ (AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. })) => {
+                crate::profile_details_sync::receive(conversation, sender_ipk, payload);
+                continue;
+},
+            Ok(AppPayload::GroupPicture { revision, avif }) => {
+                if let Err(e) = crate::data::group_picture::receive(conversation, sender_ipk, revision, avif) {
+                    log::warn!("GROUP: picture rejected: {e}");
+                }
+                continue;
+},
             Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
                 crate::profile_sync::receive(conversation, sender_ipk, payload);
                 continue;
@@ -3470,7 +3515,7 @@ mod tests {
         let bob = Node::new(0xD2);
         Identity::save(crate::db::identity::IdentityRow {
             id: 0, ipk: bob.ipk, enc_isk: vec![], created_at: 0,
-            name: "Bob".into(), avatar: None, avatar_revision: 9,
+            name: "Bob".into(), avatar: None, avatar_revision: 9, bio: String::new(), profile_revision: 0,
         }).unwrap();
         let dht = FakeDhtClient::new_arc();
         let kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
@@ -3536,4 +3581,18 @@ mod tests {
         assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod initial_pair_consent_tests {
+    use super::valid_initial_pair;
+    #[test]
+    fn discovery_consent_cannot_be_used_to_join_a_room_or_a_different_peer() {
+        let me = [1u8;32]; let peer = [2u8;32]; let third = [3u8;32];
+        assert!(valid_initial_pair(&[peer,me], false, &me, &peer));
+        assert!(!valid_initial_pair(&[peer,me], true, &me, &peer));
+        assert!(!valid_initial_pair(&[peer,me,third], false, &me, &peer));
+        assert!(!valid_initial_pair(&[third,me], false, &me, &peer));
+        assert!(!valid_initial_pair(&[me,me], false, &me, &me));
+    }
 }

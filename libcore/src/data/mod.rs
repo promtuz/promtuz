@@ -7,6 +7,8 @@ pub mod media;
 pub mod message;
 pub mod app_prefs;
 pub mod peer_avatar;
+pub mod peer_profile;
+pub mod group_picture;
 pub mod peer_name;
 pub mod reaction;
 pub mod recovery;

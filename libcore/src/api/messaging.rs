@@ -749,7 +749,7 @@ pub fn get_contacts() -> Vec<ContactInfo> {
         .into_iter()
         .map(|c| ContactInfo {
             ipk: c.ipk.to_vec(),
-            name: c.name,
+            name: crate::data::peer_name::resolve(&c.ipk),
             added_at: c.added_at,
             status: c.status,
             reject_reason: c.reject_reason,
@@ -828,7 +828,7 @@ pub fn list_contacts_diag() -> Vec<ContactDiag> {
                     .and_then(|conv| Message::last_status_in(&conv)),
                 pending_ops: crate::delivery::pending_ops_for(&c.ipk),
                 ipk: c.ipk.to_vec(),
-                name: c.name,
+                name: crate::data::peer_name::resolve(&c.ipk),
             }
         })
         .collect()

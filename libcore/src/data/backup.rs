@@ -98,10 +98,13 @@ fn import_extra(extra: &BackupExtra) -> Result<()> {
 struct BackupProfile {
     /// Our profile picture, AVIF. The name travels in [`BackupPayload`].
     avatar: Option<Vec<u8>>,
+    // Encoded as a separate optional suffix so pre-photo backups remain readable.
+    #[serde(skip)]
+    groups: Vec<crate::data::group_picture::Backup>,
 }
 
 fn profile_now() -> BackupProfile {
-    BackupProfile { avatar: Identity::get().and_then(|i| i.avatar()) }
+    BackupProfile { avatar: Identity::get().and_then(|i| i.avatar()), groups: crate::data::group_picture::dump() }
 }
 
 /// Our own read watermark for a conversation.
@@ -136,6 +139,7 @@ fn encode(
     let mut plain = postcard::to_allocvec(payload).map_err(|e| anyhow!("encode payload: {e}"))?;
     plain.extend(postcard::to_allocvec(extra).map_err(|e| anyhow!("encode extra: {e}"))?);
     plain.extend(postcard::to_allocvec(profile).map_err(|e| anyhow!("encode profile: {e}"))?);
+    plain.extend(postcard::to_allocvec(&profile.groups)?);
     let compressed = lz4_flex::compress_prepend_size(&plain);
 
     let mut nonce = [0u8; 24];
@@ -189,7 +193,9 @@ fn split_plain(plain: &[u8]) -> Result<(BackupPayload, BackupExtra, BackupProfil
     let profile = if rest.is_empty() {
         BackupProfile::default()
     } else {
-        postcard::from_bytes(rest).map_err(|e| anyhow!("decode profile: {e}"))?
+        let (mut profile, rest) = postcard::take_from_bytes::<BackupProfile>(rest).map_err(|e| anyhow!("decode profile: {e}"))?;
+        if !rest.is_empty() { profile.groups = postcard::from_bytes(rest)?; }
+        profile
     };
     Ok((payload, extra, profile))
 }
@@ -211,7 +217,12 @@ pub fn export() -> Result<Vec<u8>> {
         media: crate::data::media::dump_all(),
         read_state,
         member_read,
-        prefs: crate::data::app_prefs::dump_all(),
+        prefs: {
+            let mut prefs = crate::data::app_prefs::dump_all();
+            prefs.retain(|(k, _)| k != "profile_bio");
+            prefs.push(("profile_bio".into(), identity.details().bio));
+            prefs
+        },
     };
     let secret = Identity::secret_key_with_manager()?;
     encode(&backup_key(&secret), &payload, &extra_now(), &profile_now())
@@ -232,9 +243,11 @@ pub fn import(blob: &[u8]) -> Result<()> {
     import_extra(&extra)?;
     crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
-    Identity::set_name(&payload.name)?;
+    Identity::set_details(&payload.name,
+        payload.prefs.iter().find(|(k, _)| k == "profile_bio").map(|(_, v)| v.as_str()).unwrap_or(""))?;
     // The picture is the one profile field that can fail its own gate; a
     // restore should not lose the history over it.
+    crate::data::group_picture::restore(&profile.groups)?;
     if let Err(e) = Identity::set_avatar(profile.avatar.as_deref()) {
         log::warn!("BACKUP: could not restore the profile picture: {e}");
     }
@@ -293,6 +306,7 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let reactions_added = Reaction::merge_rows(&payload.reactions)?;
     let media_added = crate::data::media::import_rows(&payload.media)?;
     import_extra(&extra)?;
+    crate::data::group_picture::restore(&_profile.groups)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
 
     let report = MergeReport {
@@ -442,7 +456,7 @@ mod tests {
         let picture = vec![0, 0, 0, 0x1c, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', 9];
         let mut with_profile = with_extra.clone();
         with_profile
-            .extend(postcard::to_allocvec(&BackupProfile { avatar: Some(picture.clone()) }).unwrap());
+            .extend(postcard::to_allocvec(&BackupProfile { avatar: Some(picture.clone()), ..Default::default() }).unwrap());
         let (back, _, profile) = split_plain(&with_profile).unwrap();
         assert_eq!(back.name, "bhuv", "the payload in front is untouched");
         assert_eq!(profile.avatar, Some(picture), "and the picture comes back");
@@ -450,10 +464,12 @@ mod tests {
         let key = backup_key(&[7u8; 32]);
         let blob = encode(&key, &payload(), &BackupExtra::default(), &BackupProfile {
             avatar: Some(vec![1, 2, 3]),
+            groups: vec![crate::data::group_picture::Backup { conversation: [9;16], revision: 7, avif: None }]
         })
         .unwrap();
         let (_, _, profile) = decode(&key, &blob).unwrap();
         assert_eq!(profile.avatar, Some(vec![1, 2, 3]), "sealed and opened whole");
+        assert_eq!(profile.groups, vec![crate::data::group_picture::Backup { conversation: [9;16], revision: 7, avif: None }]);
     }
 
     #[test]

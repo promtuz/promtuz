@@ -567,6 +567,8 @@ impl Relay {
         // Reconcile profile state after draining stored updates. The task shares
         // the connection's cancellation token, and never gates inbox readiness.
         tokio::spawn(crate::profile_sync::run(mls_cancel.clone()));
+        tokio::spawn(crate::profile_details_sync::run(mls_cancel.clone()));
+        tokio::spawn(crate::contact_requests::retry_outgoing());
 
         // Offline backlog is in the local DB — synced and live. (A drain-setup
         // failure returns above → Disconnected, so we never stick on Syncing.)
@@ -1120,7 +1122,15 @@ async fn process_deliver(
                         warn!("PROFILE: could not record a self-asserted name: {e}");
                     }
                 },
-                Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
+                Ok(payload @ (AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. })) => {
+                crate::profile_details_sync::receive(conv, author, payload);
+            },
+            Ok(AppPayload::GroupPicture { revision, avif }) => {
+                if let Err(e) = crate::data::group_picture::receive(conv, author, revision, avif) {
+                    log::warn!("GROUP: picture rejected: {e}");
+                }
+            },
+            Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
                     crate::profile_sync::receive(conv, author, payload);
                 },
                 Ok(AppPayload::PairAck) => {
