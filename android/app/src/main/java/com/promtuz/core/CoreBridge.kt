@@ -378,6 +378,9 @@ object CoreBridge {
     /** Drop one buffered item. Safe mid-encode — the running pass discards its result. */
     suspend fun discardStaged(id: ULong) = withContext(Dispatchers.IO) { ffiDiscardStaged(id) }
 
+    suspend fun commitShared(conversationId: ByteArray, ids: List<ULong>, caption: String) =
+        uniffi.core.commitShared(conversationId, ids, caption)
+
     suspend fun clearStaged() = withContext(Dispatchers.IO) { ffiClearStaged() }
 
     suspend fun stagedItems(): List<StagedRecord> = withContext(Dispatchers.IO) { ffiStagedItems() }

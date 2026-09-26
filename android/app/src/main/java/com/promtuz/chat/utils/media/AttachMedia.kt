@@ -55,14 +55,16 @@ suspend fun decodeDownscaled(context: Context, uri: Uri, maxEdge: Int): Bitmap? 
 suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, Long>? =
     withContext(Dispatchers.IO) {
         runCatching {
-            android.media.MediaMetadataRetriever().use { r ->
+            val r = android.media.MediaMetadataRetriever()
+            try {
                 r.setDataSource(context, uri)
                 val duration = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val frame = r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return@use null
+                val frame = r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return@runCatching null
                 val (w, h) = fit(frame.width, frame.height, maxEdge)
-                val bmp = if (w == frame.width) frame else Bitmap.createScaledBitmap(frame, w, h, true)
+                val bmp = if (w == frame.width && h == frame.height) frame else
+                    Bitmap.createScaledBitmap(frame, w, h, true).also { frame.recycle() }
                 bmp to duration
-            }
+            } finally { r.release() }
         }.getOrNull()
     }
 
@@ -78,9 +80,12 @@ suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
         // Prefix keeps the on-disk path unique so a same-named later pick can't clobber a file
         // still being streamed by an in-flight P2P transfer. The copy is core's from here: it
         // unlinks it once no message (or staged item) names it.
-        val file = File(dir, "${System.nanoTime()}_$name")
-        cr.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
-            ?: return@withContext null
+        val safeName = name.substringAfterLast('/').substringAfterLast('\\').filter { !it.isISOControl() }.take(180).ifBlank { "file" }
+        val file = File(dir, "${java.util.UUID.randomUUID()}_$safeName")
+        try {
+            cr.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
+                ?: return@withContext null
+        } catch (e: Exception) { file.delete(); throw e }
         PickedFile(file.absolutePath, name, mime)
     }
 
