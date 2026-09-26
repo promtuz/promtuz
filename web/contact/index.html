@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Promtuz contact</title></head>
+<body><p id="message">Open this contact in Promtuz to send a request.</p><a id="open" hidden>Open Promtuz</a>
+<script>
+const code = location.hash.slice(1);
+if (/^[A-Za-z0-9_-]{1,1024}$/.test(code)) {
+  const link = document.getElementById('open');
+  link.href = 'promtuz://contact#' + code;
+  link.hidden = false;
+} else document.getElementById('message').textContent = 'This contact link is incomplete.';
+</script></body></html>

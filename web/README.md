@@ -6,6 +6,7 @@ App Links, iOS Universal Links later). Deploy them so the paths line up:
 | File | URL |
 |------|-----|
 | `.well-known/assetlinks.json` | `https://promtuz.dev/.well-known/assetlinks.json` |
+| `contact/index.html` | `https://promtuz.dev/contact` |
 | `pair/index.html`             | `https://promtuz.dev/pair`                        |
 
 Serve `assetlinks.json` as `Content-Type: application/json` over HTTPS with no
@@ -30,3 +31,5 @@ keytool -list -v -keystore ~/.android/debug.keystore \
 
 The invite `<code>` lives in the URL `#fragment`, so it never reaches the
 server logs — it's a bearer capability.
+
+Contact cards use `/contact#<base64url-card>`. The page offers an explicit Open in Promtuz button. Deploy this new path alongside `/pair`; sharing a contact card does not grant pairing permission.
