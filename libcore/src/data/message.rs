@@ -498,7 +498,7 @@ impl Message {
     pub fn count_in(conversation_id: &[u8; 16]) -> u32 {
         let conn = MESSAGES_DB.lock();
         conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND deleted = 0",
             [conversation_id.as_slice()],
             |r| r.get::<_, i64>(0),
         )
@@ -510,7 +510,7 @@ impl Message {
     pub fn last_status_in(conversation_id: &[u8; 16]) -> Option<u8> {
         let conn = MESSAGES_DB.lock();
         conn.query_row(
-            "SELECT status FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
+            "SELECT status FROM messages WHERE conversation_id = ?1 AND deleted = 0 ORDER BY id DESC LIMIT 1",
             [conversation_id.as_slice()],
             |r| r.get::<_, i64>(0),
         )
@@ -529,7 +529,7 @@ impl Message {
         if !before_id.is_empty() {
             let mut stmt = conn
                 .prepare(
-                    "SELECT * FROM messages WHERE conversation_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+                    "SELECT * FROM messages WHERE conversation_id = ?1 AND deleted = 0 AND id < ?2 ORDER BY id DESC LIMIT ?3",
                 )
                 .expect("failed to prepare");
             let mut rows: Vec<MessageRow> = stmt
@@ -542,7 +542,7 @@ impl Message {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2",
+                    "SELECT * FROM messages WHERE conversation_id = ?1 AND deleted = 0 ORDER BY id DESC LIMIT ?2",
                 )
                 .expect("failed to prepare");
             let mut rows: Vec<MessageRow> = stmt
@@ -576,7 +576,7 @@ impl Message {
         let mut stmt = match conn.prepare(
             "SELECT m.dispatch_id, \
                     (SELECT COUNT(*) FROM messages n \
-                      WHERE n.conversation_id = m.conversation_id AND n.id > m.id) \
+                      WHERE n.conversation_id = m.conversation_id AND n.deleted = 0 AND n.id > m.id) \
              FROM messages m \
              WHERE m.conversation_id = ?1 AND m.deleted = 0 AND m.system = 0 \
                AND m.dispatch_id IS NOT NULL AND m.content LIKE ?2 ESCAPE '\\' \
@@ -628,7 +628,7 @@ impl Message {
             .prepare(
                 "SELECT m.* FROM messages m
                  INNER JOIN (
-                     SELECT conversation_id, MAX(id) AS max_id FROM messages GROUP BY conversation_id
+                     SELECT conversation_id, MAX(id) AS max_id FROM messages WHERE deleted = 0 GROUP BY conversation_id
                  ) latest ON m.id = latest.max_id
                  ORDER BY m.id DESC",
             )
@@ -698,8 +698,8 @@ impl Message {
 fn position_at_time(conn: &rusqlite::Connection, conversation: &[u8; 16], timestamp: u64) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
     use rusqlite::OptionalExtension;
     Ok(conn.query_row(
-        "SELECT m.id, m.dispatch_id, (SELECT COUNT(*) FROM messages n WHERE n.conversation_id = m.conversation_id AND n.id > m.id) \
-         FROM messages m WHERE m.conversation_id = ?1 \
+        "SELECT m.id, m.dispatch_id, (SELECT COUNT(*) FROM messages n WHERE n.conversation_id = m.conversation_id AND n.deleted = 0 AND n.id > m.id) \
+         FROM messages m WHERE m.conversation_id = ?1 AND m.deleted = 0 \
          ORDER BY CASE WHEN m.timestamp >= ?2 THEN 0 ELSE 1 END, \
                   CASE WHEN m.timestamp >= ?2 THEN m.timestamp END ASC, \
                   m.timestamp DESC, m.id ASC LIMIT 1",

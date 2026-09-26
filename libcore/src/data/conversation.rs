@@ -370,7 +370,7 @@ impl Conversation {
         let conn = MESSAGES_DB.lock();
         let Ok(mut stmt) = conn.prepare(
             "SELECT c.* FROM conversations c \
-             LEFT JOIN (SELECT conversation_id, MAX(id) AS last FROM messages GROUP BY conversation_id) m \
+             LEFT JOIN (SELECT conversation_id, MAX(id) AS last FROM messages WHERE deleted = 0 GROUP BY conversation_id) m \
                ON m.conversation_id = c.id \
              ORDER BY c.pinned DESC, COALESCE(m.last, '') DESC, c.created_at DESC",
         ) else {
