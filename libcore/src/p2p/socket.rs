@@ -51,7 +51,7 @@ pub type Poke = (SocketAddr, Vec<u8>);
 
 /// A relay's STUN echo: the query's tx-id and the public address it saw us
 /// from.
-pub type StunReply = ([u8; 8], SocketAddr);
+pub type StunReply = (SocketAddr, [u8; 8], SocketAddr);
 
 /// Where quinn packets for one synthetic peer address really go: wrapped to
 /// the TURN relay (the default), or raw to a punch-validated direct address.
@@ -71,7 +71,10 @@ enum Egress {
 #[derive(Debug, Default)]
 pub struct TurnRoutes {
     by_synth: HashMap<SocketAddr, Egress>,
-    by_token: HashMap<[u8; 16], SocketAddr>,
+    // A delayed offer can register the same bridge while its original link is
+    // still alive. Each registration owns one reference, so a timed-out newer
+    // attempt cannot remove the first connection's route.
+    by_token: HashMap<[u8; 16], (SocketAddr, usize)>,
     /// Peer's punch-validated real address → synth, for the inbound relabel
     /// once a session goes direct.
     by_real:  HashMap<SocketAddr, SocketAddr>,
@@ -79,12 +82,12 @@ pub struct TurnRoutes {
 }
 
 impl TurnRoutes {
-    /// Register (idempotently) a bridge to `relay` under `token`, returning
-    /// the synthetic, unreachable peer address quinn should dial/accept for
-    /// it.
+    /// Lease a bridge to `relay` under `token`, returning its shared synthetic
+    /// address. Every call must be paired with one `unregister`.
     pub fn register(&mut self, token: [u8; 16], relay: SocketAddr) -> SocketAddr {
-        if let Some(&synth) = self.by_token.get(&token) {
-            return synth;
+        if let Some((synth, owners)) = self.by_token.get_mut(&token) {
+            *owners += 1;
+            return *synth;
         }
         self.next += 1;
         let n = self.next;
@@ -95,12 +98,16 @@ impl TurnRoutes {
             9,
         );
         self.by_synth.insert(synth, Egress::Relay { relay, token });
-        self.by_token.insert(token, synth);
+        self.by_token.insert(token, (synth, 1));
         synth
     }
 
     pub fn unregister(&mut self, token: &[u8; 16]) {
-        if let Some(synth) = self.by_token.remove(token) {
+        if let Some((_, owners)) = self.by_token.get_mut(token) && *owners > 1 {
+            *owners -= 1;
+            return;
+        }
+        if let Some((synth, _)) = self.by_token.remove(token) {
             self.by_synth.remove(&synth);
             self.by_real.retain(|_, s| *s != synth);
         }
@@ -112,9 +119,9 @@ impl TurnRoutes {
     /// The relay ingress stays live, so nothing in flight is dropped.
     /// `false` if the route is already gone (its connection died first).
     pub fn set_direct(&mut self, token: &[u8; 16], addr: SocketAddr) -> bool {
-        let Some(&synth) = self.by_token.get(token) else { return false };
+        let Some(&(synth, _)) = self.by_token.get(token) else { return false };
         self.by_synth.insert(synth, Egress::Direct { addr });
-        self.by_real.insert(addr, synth);
+        self.by_real.insert(super::reflexive::canonical(addr), synth);
         true
     }
 
@@ -131,8 +138,8 @@ impl TurnRoutes {
     /// alone: they egress direct, we egress relayed, and both ends still see
     /// the one synthetic address. `false` if the route is already gone.
     pub fn accept_from(&mut self, token: &[u8; 16], src: SocketAddr) -> bool {
-        let Some(&synth) = self.by_token.get(token) else { return false };
-        self.by_real.insert(src, synth);
+        let Some(&(synth, _)) = self.by_token.get(token) else { return false };
+        self.by_real.insert(super::reflexive::canonical(src), synth);
         true
     }
 
@@ -144,13 +151,17 @@ impl TurnRoutes {
     /// The synth for a peer's punch-validated real address, if any — the
     /// inbound half of a direct upgrade.
     fn synth_for_real(&self, src: &SocketAddr) -> Option<SocketAddr> {
-        self.by_real.get(src).copied()
+        self.by_real.get(&super::reflexive::canonical(*src)).copied()
     }
 
     /// The synthetic address for an inbound TURN datagram's token, if we
     /// have a session for it.
     fn synth_for(&self, token: &[u8; 16]) -> Option<SocketAddr> {
-        self.by_token.get(token).copied()
+        self.by_token.get(token).map(|(synth, _)| *synth)
+    }
+
+    pub(super) fn is_direct(&self, addr: SocketAddr) -> bool {
+        !matches!(self.egress(addr), Some(Egress::Relay { .. }))
     }
 }
 
@@ -173,8 +184,8 @@ impl PokeSender {
 #[derive(Debug)]
 pub struct PunchSocket {
     io:       Arc<UdpSocket>,
-    inbox_tx: mpsc::UnboundedSender<Poke>,
-    stun_tx:  mpsc::UnboundedSender<StunReply>,
+    inbox_tx: mpsc::Sender<Poke>,
+    stun_tx:  mpsc::Sender<StunReply>,
     turn:     Arc<Mutex<TurnRoutes>>,
 }
 
@@ -184,8 +195,8 @@ pub struct PunchSocket {
 pub struct Bound {
     pub socket:  Arc<PunchSocket>,
     pub pokes:   PokeSender,
-    pub inbox:   mpsc::UnboundedReceiver<Poke>,
-    pub stun_rx: mpsc::UnboundedReceiver<StunReply>,
+    pub inbox:   mpsc::Receiver<Poke>,
+    pub stun_rx: mpsc::Receiver<StunReply>,
     pub turn:    Arc<Mutex<TurnRoutes>>,
 }
 
@@ -196,8 +207,8 @@ impl PunchSocket {
         let std_sock = std::net::UdpSocket::bind(addr)?;
         std_sock.set_nonblocking(true)?;
         let io = Arc::new(UdpSocket::from_std(std_sock)?);
-        let (inbox_tx, inbox) = mpsc::unbounded_channel();
-        let (stun_tx, stun_rx) = mpsc::unbounded_channel();
+        let (inbox_tx, inbox) = mpsc::channel(128);
+        let (stun_tx, stun_rx) = mpsc::channel(32);
         let turn = Arc::new(Mutex::new(TurnRoutes::default()));
         Ok(Bound {
             socket: Arc::new(Self { io: io.clone(), inbox_tx, stun_tx, turn: turn.clone() }),
@@ -218,7 +229,7 @@ impl AsyncUdpSocket for PunchSocket {
         // max_transmit_segments defaults to 1, so quinn never sets a GSO
         // segment_size — contents is a single datagram.
         let egress = self.turn.lock().egress(transmit.destination);
-        match egress {
+        let result = match egress {
             // TURN path: wrap the QUIC datagram so the relay forwards it to
             // the peer under this bridge's token.
             Some(Egress::Relay { relay, token }) => {
@@ -229,7 +240,13 @@ impl AsyncUdpSocket for PunchSocket {
             // Upgraded: same synth for quinn, raw UDP underneath.
             Some(Egress::Direct { addr }) => self.io.try_send_to(transmit.contents, addr).map(|_| ()),
             None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),
+        };
+        if result.is_ok() {
+            super::diagnostics::sent_datagram(
+                matches!(egress, Some(Egress::Relay { .. })), transmit.contents.len(),
+            );
         }
+        result
     }
 
     fn poll_recv(
@@ -237,7 +254,7 @@ impl AsyncUdpSocket for PunchSocket {
     ) -> Poll<io::Result<usize>> {
         // Drain disco + TURN; return on the first real QUIC datagram (or
         // Pending).
-        loop {
+        for _ in 0..64 {
             let (len, src) = {
                 let mut rb = tokio::io::ReadBuf::new(&mut bufs[0]);
                 match self.io.poll_recv_from(cx, &mut rb) {
@@ -248,7 +265,7 @@ impl AsyncUdpSocket for PunchSocket {
             };
             if disco::peek_channel(&bufs[0][..len]).is_some() {
                 // A poke — hand it to the punch layer, keep it from quinn.
-                let _ = self.inbox_tx.send((src, bufs[0][..len].to_vec()));
+                let _ = self.inbox_tx.try_send((src, bufs[0][..len].to_vec()));
                 continue;
             }
             // Relay-assist? Only TURN data is a QUIC datagram bound for
@@ -257,7 +274,7 @@ impl AsyncUdpSocket for PunchSocket {
             let turn = match RelayMsg::decode(&bufs[0][..len]) {
                 Some(RelayMsg::TurnData { token, payload }) => Some((token, payload.len())),
                 Some(RelayMsg::StunResp { tx, seen }) => {
-                    let _ = self.stun_tx.send((tx, seen));
+                    let _ = self.stun_tx.try_send((src, tx, seen));
                     continue;
                 },
                 Some(_) => continue, // StunReq/TurnAlloc — never sent to a client
@@ -282,6 +299,9 @@ impl AsyncUdpSocket for PunchSocket {
             meta[0] = udp::RecvMeta { addr: src, len, stride: len, ecn: None, dst_ip: None };
             return Poll::Ready(Ok(1));
         }
+        // Yield even under a continuous stream of assist/poke datagrams.
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -305,8 +325,8 @@ impl UdpPoller for PokePoller {
 pub struct BuiltEndpoint {
     pub endpoint: Endpoint,
     pub pokes:    PokeSender,
-    pub inbox:    mpsc::UnboundedReceiver<Poke>,
-    pub stun_rx:  mpsc::UnboundedReceiver<StunReply>,
+    pub inbox:    mpsc::Receiver<Poke>,
+    pub stun_rx:  mpsc::Receiver<StunReply>,
     pub turn:     Arc<Mutex<TurnRoutes>>,
 }
 
@@ -369,6 +389,8 @@ mod tests {
         assert_eq!(r.synth_for(&[1; 16]), Some(s1));
         // a real (non-synthetic) address passes straight through
         assert_eq!(r.egress("1.2.3.4:5".parse().unwrap()), None);
+        r.unregister(&[1; 16]);
+        assert_eq!(r.synth_for(&[1; 16]), Some(s1), "the other route owner must survive");
         r.unregister(&[1; 16]);
         assert_eq!(r.egress(s1), None);
         assert_eq!(r.synth_for(&[1; 16]), None);
@@ -450,6 +472,38 @@ mod tests {
         driver.abort();
     }
 
+    /// A copied transaction/address cannot hide the datagram's real source.
+    /// Correlation happens above the socket, so preserve all three fields.
+    #[tokio::test]
+    async fn demux_preserves_reflexive_response_source() {
+        let mut bound = PunchSocket::bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let dest = bound.socket.local_addr().unwrap();
+        let relay = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let unrelated = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let tx = [19; 8];
+        let seen: SocketAddr = "9.9.9.9:5100".parse().unwrap();
+        let packet = RelayMsg::StunResp { tx, seen }.encode();
+
+        for source in [&relay, &unrelated] {
+            source.send_to(&packet, dest).await.unwrap();
+            let mut store = [0u8; 2048];
+            let mut bufs = [io::IoSliceMut::new(&mut store)];
+            let mut meta = [empty_meta()];
+            let reply = tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    reply = bound.stun_rx.recv() => reply.expect("STUN channel closed"),
+                    unexpected = std::future::poll_fn(|cx| {
+                        bound.socket.poll_recv(cx, &mut bufs, &mut meta)
+                    }) => panic!("STUN response reached QUIC: {unexpected:?}"),
+                }
+            })
+            .await
+            .expect("STUN response not demuxed");
+            assert_eq!(reply, (source.local_addr().unwrap(), tx, seen));
+            assert!(bound.inbox.try_recv().is_err(), "STUN response reached disco inbox");
+        }
+    }
+
     /// Stub relay: forward each TurnData to the other source seen under its
     /// token — the minimal version of the real bridge.
     async fn stub_relay() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -465,9 +519,10 @@ mod tests {
                     _ => continue,
                 };
                 let list = ends.entry(token).or_default();
-                if !list.contains(&src) {
+                if !list.contains(&src) && list.len() < 2 {
                     list.push(src);
                 }
+                if !list.contains(&src) { continue; }
                 if is_data
                     && let Some(&dst) = list.iter().find(|&&a| a != src)
                 {
@@ -598,6 +653,48 @@ mod tests {
         .await;
 
         run.expect("direct upgrade broke the connection");
+    }
+
+    /// A network change binds a new UDP endpoint and uses a fresh bridge
+    /// token. One relay is sufficient even while the old two-address bridge
+    /// remains occupied, and old route cleanup cannot remove the new route.
+    #[tokio::test]
+    async fn fresh_socket_and_token_reconnect_through_one_occupied_relay() {
+        let _ = common::quic::config::setup_crypto_provider();
+        let (relay, relay_task) = stub_relay().await;
+        let (old_a, old_pokes, old_routes) = peer_endpoint();
+        let (b, b_pokes, b_routes) = peer_endpoint();
+        let old_token = [45; 16];
+        let old_synth = old_routes.lock().register(old_token, relay);
+        b_routes.lock().register(old_token, relay);
+        old_pokes.send(relay, &RelayMsg::TurnAlloc { token: old_token }.encode()).await.unwrap();
+        b_pokes.send(relay, &RelayMsg::TurnAlloc { token: old_token }.encode()).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let (old_conn, old_remote) = tokio::join!(
+                async { old_a.connect(old_synth, "peer").unwrap().await.unwrap() },
+                async { b.accept().await.unwrap().await.unwrap() },
+            );
+            roundtrip(&old_conn, &old_remote, b"before network change").await;
+            old_a.close(0u32.into(), b"network changed");
+            old_remote.close(0u32.into(), b"reconnect");
+
+            let (new_a, new_pokes, new_routes) = peer_endpoint();
+            assert_ne!(new_a.local_addr().unwrap(), old_a.local_addr().unwrap());
+            let fresh_token = [46; 16];
+            let new_synth = new_routes.lock().register(fresh_token, relay);
+            let new_remote_synth = b_routes.lock().register(fresh_token, relay);
+            new_pokes.send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode()).await.unwrap();
+            b_pokes.send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode()).await.unwrap();
+            b_routes.lock().unregister(&old_token);
+            assert_eq!(b_routes.lock().synth_for(&fresh_token), Some(new_remote_synth));
+            let (new_conn, new_remote) = tokio::join!(
+                async { new_a.connect(new_synth, "peer").unwrap().await.unwrap() },
+                async { b.accept().await.unwrap().await.unwrap() },
+            );
+            roundtrip(&new_conn, &new_remote, b"after network change").await;
+        }).await;
+        relay_task.abort();
+        result.expect("new network failed to establish fresh relay route");
     }
 
     /// Registering a heard-from source repairs inbound only: the route keeps

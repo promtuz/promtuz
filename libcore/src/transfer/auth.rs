@@ -39,6 +39,10 @@ pub fn verify_auth(a: &wire::Auth, expected: [u8; 32], conn_tls_pub: [u8; 32]) -
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("transfer authentication failed: {0}")]
+pub(crate) struct AuthenticationFailed(String);
+
 /// Run the mutual handshake on a fresh bi-stream: write `local`, read the
 /// peer's, verify it against the live connection. `local` is a parameter
 /// rather than `local_auth()` inline so a test can drive two distinct
@@ -48,10 +52,11 @@ pub async fn exchange(
     expected: [u8; 32], local: &wire::Auth,
 ) -> Result<()> {
     wire::write_frame(s, local).await?;
-    let peer: wire::Auth = wire::read_frame(r).await?;
-    let conn_tls_pub =
-        extract_peer_tls_pubkey(conn).ok_or_else(|| anyhow!("no verifiable peer cert"))?;
+    let peer: wire::Auth = wire::read_frame_limited(r, wire::AUTH_FRAME_LIMIT).await?;
+    let conn_tls_pub = extract_peer_tls_pubkey(conn)
+        .ok_or_else(|| AuthenticationFailed("no verifiable peer cert".into()))?;
     verify_auth(&peer, expected, conn_tls_pub)
+        .map_err(|e| AuthenticationFailed(e.to_string()).into())
 }
 
 #[cfg(test)]

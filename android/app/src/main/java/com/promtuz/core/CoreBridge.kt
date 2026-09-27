@@ -42,6 +42,7 @@ import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
+import uniffi.core.onNetworkChanged as ffiOnNetworkChanged
 import uniffi.core.onTaskRemoved as ffiOnTaskRemoved
 import uniffi.core.syncMessages as ffiSyncMessages
 import uniffi.core.registerPushToken as ffiRegisterPushToken
@@ -132,6 +133,9 @@ import com.promtuz.core.adapter.PresenceSignal
 object CoreBridge {
     /** App returned to foreground — wake the relay loop for an instant reconnect. */
     fun onForeground() = ffiOnForeground()
+
+    /** Default network routes changed — recover transports without changing presence. */
+    fun onNetworkChanged() = ffiOnNetworkChanged()
 
     /** App task was removed from recents — best-effort close so relay marks us offline. */
     fun onTaskRemoved() = ffiOnTaskRemoved()

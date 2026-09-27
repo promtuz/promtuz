@@ -5,6 +5,42 @@ use crate::api::messaging::to_fid32;
 use crate::api::messaging::to_conv16;
 use crate::platform::CoreError;
 
+/// Process-local debug evidence, deliberately separate from ordinary media
+/// cards. Events contain fixed categories only, without peer/file identifiers.
+#[derive(uniffi::Record)]
+pub struct TransferDiagnosticEvent {
+    pub at_ms: u64,
+    pub category: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct TransferDiagnostics {
+    pub events: Vec<TransferDiagnosticEvent>,
+    /// QUIC payload bytes accepted by the local UDP socket, including protocol
+    /// overhead/retransmissions but excluding IP/relay envelopes. These are
+    /// local egress counters, not measured remote relay delivery or billing.
+    pub direct_datagram_bytes_sent: u64,
+    pub relay_datagram_bytes_sent: u64,
+    /// File chunk payload accepted by the send stream, including re-sends.
+    pub content_bytes_sent: u64,
+    /// Chunk payload verified by this receiver, including re-verification.
+    pub verified_content_bytes_received: u64,
+}
+
+#[uniffi::export]
+pub fn get_transfer_diagnostics() -> TransferDiagnostics {
+    let snapshot = crate::p2p::diagnostics::snapshot();
+    TransferDiagnostics {
+        events: snapshot.events.into_iter().map(|(at_ms, event)| TransferDiagnosticEvent {
+            at_ms, category: format!("{event:?}"),
+        }).collect(),
+        direct_datagram_bytes_sent: snapshot.direct_sent,
+        relay_datagram_bytes_sent: snapshot.relay_sent,
+        content_bytes_sent: snapshot.content_sent,
+        verified_content_bytes_received: snapshot.verified_received,
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct MediaRecord {
     pub dispatch_id: Vec<u8>,

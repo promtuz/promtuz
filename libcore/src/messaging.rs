@@ -459,6 +459,23 @@ pub(crate) async fn send_control_wake_to(
     send_control_inner(conversation, payload, Wake::Message, Some(to)).await
 }
 
+/// A control send owns its temporary outbox copies even while an ACK is
+/// pending. Cancellation must not turn an expired offer into a durable retry.
+struct ControlDispatchGuard {
+    id: [u8; 16],
+    ephemeral: bool,
+}
+
+impl Drop for ControlDispatchGuard {
+    fn drop(&mut self) {
+        if self.ephemeral {
+            delivery::retire_all(&self.id);
+        }
+        // Control sends have no Message row whose sent timestamp consumes this.
+        LAST_ACCEPTED_AT.lock().remove(&self.id);
+    }
+}
+
 async fn send_control_inner(
     conversation: [u8; 16], payload: AppPayload, wake: Wake, only: Option<[u8; 32]>,
 ) -> Result<()> {
@@ -510,6 +527,7 @@ async fn send_control_inner(
         .map_err(|e| anyhow!("seal control: {e}"))?;
 
     let id = crate::data::message::next_dispatch_id();
+    let _dispatch = ControlDispatchGuard { id, ephemeral: outbox.is_none() };
     let mut delivered = 0usize;
     for to in &recipients {
         let env = sealed
@@ -529,10 +547,6 @@ async fn send_control_inner(
         if matches!(outcome, LastOutcome::Durable) {
             delivered += 1;
         }
-    }
-    // A control op with no outbox dies with the attempt; drop any row it left.
-    if outbox.is_none() {
-        delivery::retire_all(&id);
     }
     if delivered == 0 && !recipients.is_empty() {
         // Every member is queued rather than delivered — fine when outboxed,
@@ -3583,6 +3597,46 @@ mod tests {
         assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod control_dispatch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_control_retires_only_ephemeral_fanout_and_ack_bookkeeping() {
+        if std::env::var_os("PROMTUZ_DATA_DIR").is_none() {
+            let dir = std::env::temp_dir().join("promtuz-control-dispatch-test");
+            std::fs::create_dir_all(&dir).unwrap();
+            unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        }
+        // Use real persisted per-recipient rows, but suspend at the ACK
+        // boundary instead of changing the process-global relay connection.
+        for ephemeral in [true, false] {
+            let id = crate::data::message::next_dispatch_id();
+            let (ready, received) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _dispatch = ControlDispatchGuard { id, ephemeral };
+                for peer in [[0xf1; 32], [0xf2; 32], [0xf3; 32]] {
+                    delivery::enqueue(&id, OpType::Control, Some(peer), b"pending control");
+                }
+                // One member acknowledged; two members' copies still await ACKs.
+                delivery::retire(&id, Some([0xf1; 32]));
+                LAST_ACCEPTED_AT.lock().insert(id, 123);
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            received.await.unwrap();
+            let copies = || delivery::due(u64::MAX).iter().filter(|row| row.id == id).count();
+            assert_eq!(copies(), 2);
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(copies(), if ephemeral { 0 } else { 2 },
+                "only ephemeral controls lose their queued copies on cancellation");
+            assert!(!LAST_ACCEPTED_AT.lock().contains_key(&id), "control ACK bookkeeping leaked");
+            delivery::retire_all(&id);
+        }
+    }
 }
 
 #[cfg(test)]

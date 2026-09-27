@@ -3,6 +3,11 @@
 //! [`crate::p2p`] rather than the store-and-forward relay.
 
 use std::collections::HashSet;
+use std::time::Duration;
+
+use crate::p2p::diagnostics::{self, Event};
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -20,6 +25,118 @@ const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 /// Don't re-wake a still-offline sender on every reconnect: only re-send the
 /// reverse-wake if the held partial hasn't been poked within this window.
 const WAKE_BACKOFF_SECS: u64 = 60;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+const CHUNK_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+const RETRY_COOLDOWN_SECS: u64 = 60;
+const SERVES_PER_LINK: usize = 4;
+static SERVING: Semaphore = Semaphore::const_new(16);
+static PULLING: Semaphore = Semaphore::const_new(4);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureKind {
+    Transport,
+    Authentication,
+    InvalidData,
+    Storage,
+    Unavailable,
+    Cancelled,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{kind:?}: {source}")]
+struct Failure {
+    kind: FailureKind,
+    #[source]
+    source: anyhow::Error,
+}
+impl Failure {
+    fn new(kind: FailureKind, source: impl Into<anyhow::Error>) -> Self {
+        Self { kind, source: source.into() }
+    }
+    fn wire(e: anyhow::Error) -> Self {
+        let kind = if e.is::<auth::AuthenticationFailed>() {
+            FailureKind::Authentication
+        } else if e.is::<wire::InvalidFrame>() {
+            FailureKind::InvalidData
+        } else {
+            FailureKind::Transport
+        };
+        Self::new(kind, e)
+    }
+    fn storage(e: impl Into<anyhow::Error>) -> Self {
+        let e = e.into();
+        let kind =
+            if e.is::<store::Cancelled>() { FailureKind::Cancelled } else { FailureKind::Storage };
+        Self::new(kind, e)
+    }
+}
+
+async fn bounded<T>(
+    limit: Duration, work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<T, Failure> {
+    timeout(limit, work)
+        .await
+        .map_err(|_| Failure::new(FailureKind::Transport, anyhow::anyhow!("transfer stalled")))?
+        .map_err(Failure::wire)
+}
+
+/// Count stream progress rather than requiring an entire 256 KiB chunk within
+/// the idle timeout. A slow but healthy path still advances; a drip-fed chunk
+/// has a separate absolute ceiling so it cannot hold a worker indefinitely.
+async fn read_chunk(
+    r: &mut quinn::RecvStream, buf: &mut [u8], idle: Duration,
+) -> Result<(), Failure> {
+    let deadline = tokio::time::Instant::now() + CHUNK_DEADLINE;
+    let mut filled = 0;
+    while filled < buf.len() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Failure::new(
+                FailureKind::Transport,
+                anyhow::anyhow!("chunk progress deadline exceeded"),
+            ));
+        }
+        let n = bounded(idle.min(remaining), async {
+            r.read(&mut buf[filled..])
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("attachment stream ended before chunk completed"))
+        })
+        .await?;
+        filled += n;
+    }
+    Ok(())
+}
+
+async fn write_chunk(s: &mut quinn::SendStream, buf: &[u8]) -> Result<(), Failure> {
+    let deadline = tokio::time::Instant::now() + CHUNK_DEADLINE;
+    let mut written = 0;
+    while written < buf.len() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Failure::new(
+                FailureKind::Transport,
+                anyhow::anyhow!("chunk progress deadline exceeded"),
+            ));
+        }
+        written +=
+            bounded(CHUNK_TIMEOUT.min(remaining), async { Ok(s.write(&buf[written..]).await?) })
+                .await?;
+    }
+    Ok(())
+}
+
+fn report_failure(kind: FailureKind) {
+    let event = match kind {
+        FailureKind::Authentication => Event::AuthenticationFailed,
+        FailureKind::InvalidData => Event::ValidationFailed,
+        FailureKind::Storage => Event::StorageFailed,
+        FailureKind::Unavailable => Event::Unavailable,
+        FailureKind::Transport | FailureKind::Cancelled => return,
+    };
+    diagnostics::record(event);
+}
 
 /// Periodic housekeeping: reap abandoned receiver partials, unlinking only
 /// their junk `.part` bytes; a delivered `DONE` partial (the file the user
@@ -101,8 +218,12 @@ fn offered_to(file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32]) -> bool {
             AND ((c.kind = ?4 AND mine.active = 1) OR (c.kind = ?5 AND ?6))
           LIMIT 1",
         rusqlite::params![
-            file_id.as_slice(), peer.as_slice(), me.as_slice(),
-            crate::data::conversation::KIND_GROUP, crate::data::conversation::KIND_DIRECT, paired,
+            file_id.as_slice(),
+            peer.as_slice(),
+            me.as_slice(),
+            crate::data::conversation::KIND_GROUP,
+            crate::data::conversation::KIND_DIRECT,
+            paired,
         ],
         |_| Ok(()),
     )
@@ -112,59 +233,97 @@ fn offered_to(file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32]) -> bool {
 /// [`serve_link`] minus the process-global identity, so a test can drive two
 /// in-process endpoints with distinct constructed identities.
 async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
+    let mut streams = tokio::task::JoinSet::new();
     loop {
-        let (mut s, mut r) = match link.accept_stream().await {
-            Ok(x) => x,
-            Err(_) => break,
-        };
-        if let Err(e) = auth::exchange(&link.conn, &mut s, &mut r, link.ipk, &local).await {
-            log::warn!("transfer: stream auth failed: {e}");
-            continue;
-        }
-        let pull: wire::Pull = match wire::read_frame(&mut r).await {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let now = crate::utils::systime().as_secs();
-        let retained = store::retention_get(&pull.file_id)
-            .filter(|r| r.expires_at > now && offered_to(&pull.file_id, &link.ipk, &local.ipk));
-        match retained {
-            None => {
-                let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
-                let _ = s.finish();
-            },
-            Some(ret) => {
-                // A stored manifest that won't decode is our corruption, not the
-                // peer's; treat it as gone rather than panic this detached loop.
-                let manifest: wire::Manifest = match postcard::from_bytes(&ret.manifest) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log::warn!("transfer: undecodable retained manifest: {e}");
-                        let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
-                        let _ = s.finish();
-                        continue;
-                    },
-                };
-                let _ = wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest)).await;
-                if let Ok(mut f) = std::fs::File::open(&ret.path) {
-                    use std::io::{Read, Seek, SeekFrom};
-                    let _ = f.seek(SeekFrom::Start(pull.have as u64 * ret.chunk_size as u64));
-                    let mut buf = vec![0u8; ret.chunk_size as usize];
-                    loop {
-                        let n = match f.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => n,
-                            Err(_) => break,
-                        };
-                        if s.write_all(&buf[..n]).await.is_err() {
-                            break;
+        tokio::select! {
+            _ = streams.join_next(), if !streams.is_empty() => {},
+            accepted = link.accept_stream(), if streams.len() < SERVES_PER_LINK => {
+                let Ok((s, r)) = accepted else { break };
+                // Don't queue unbounded authenticated/unauthenticated work. A
+                // busy stream resets; its caller can retry within its budget.
+                let Ok(slot) = SERVING.try_acquire() else { drop((s, r)); continue };
+                let link = link.clone();
+                let local = local.clone();
+                streams.spawn(async move {
+                    let _slot = slot;
+                    if let Err(e) = serve_stream(&link, &local, s, r).await {
+                        if e.kind == FailureKind::Authentication {
+                            link.conn.close(0u32.into(), b"transfer authentication failed");
                         }
+                        report_failure(e.kind);
+                        log::debug!("transfer: serve ended: {e}");
                     }
-                }
-                let _ = s.finish();
+                });
             },
         }
     }
+    // JoinSet drop cancels remaining work when the connection ends.
+}
+
+async fn serve_stream(
+    link: &crate::p2p::PeerLink, local: &wire::Auth, mut s: quinn::SendStream,
+    mut r: quinn::RecvStream,
+) -> Result<(), Failure> {
+    bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
+    let pull: wire::Pull =
+        bounded(CONTROL_TIMEOUT, wire::read_frame_limited(&mut r, wire::PULL_FRAME_LIMIT)).await?;
+    let now = crate::utils::systime().as_secs();
+    let retained = store::retention_get(&pull.file_id)
+        .filter(|r| r.expires_at > now && offered_to(&pull.file_id, &link.ipk, &local.ipk));
+    let Some(ret) = retained else {
+        bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::ServeResp::Gone)).await?;
+        let _ = s.finish();
+        return Ok(());
+    };
+    let manifest: wire::Manifest = postcard::from_bytes(&ret.manifest).map_err(Failure::storage)?;
+    if manifest.chunk_size == 0
+        || manifest.chunk_size as usize > wire::CHUNK_SIZE
+        || manifest.file_id() != pull.file_id
+        || pull.have as usize > manifest.chunks.len()
+        || manifest.chunks.len() as u64 != manifest.total_size.div_ceil(manifest.chunk_size as u64)
+    {
+        return Err(Failure::new(
+            FailureKind::InvalidData,
+            anyhow::anyhow!("invalid retained manifest or prefix"),
+        ));
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(&ret.path) {
+        Ok(f) => f,
+        Err(_) => {
+            bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::ServeResp::Gone)).await?;
+            let _ = s.finish();
+            return Ok(());
+        },
+    };
+    f.seek(SeekFrom::Start(pull.have as u64 * manifest.chunk_size as u64))
+        .map_err(Failure::storage)?;
+    bounded(
+        CONTROL_TIMEOUT,
+        wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest.clone())),
+    )
+    .await?;
+    let mut buf = vec![0u8; manifest.chunk_size as usize];
+    for idx in pull.have as usize..manifest.chunks.len() {
+        // Revocation/deletion is rechecked between chunks. Bytes already sent
+        // cannot be recalled, but an open fd is not unlimited serving consent.
+        if !offered_to(&pull.file_id, &link.ipk, &local.ipk)
+            || store::retention_get(&pull.file_id)
+                .is_none_or(|r| r.expires_at <= crate::utils::systime().as_secs())
+        {
+            return Err(Failure::new(
+                FailureKind::Unavailable,
+                anyhow::anyhow!("attachment no longer available"),
+            ));
+        }
+        let count = (manifest.total_size - idx as u64 * manifest.chunk_size as u64)
+            .min(manifest.chunk_size as u64) as usize;
+        f.read_exact(&mut buf[..count]).map_err(Failure::storage)?;
+        write_chunk(&mut s, &buf[..count]).await?;
+        diagnostics::sent_content(count as u64);
+    }
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    Ok(())
 }
 
 /// Pulls in flight by `file_id`. Two concurrent `download`s (auto-download
@@ -185,83 +344,169 @@ impl Drop for PullGuard {
 /// the media row, dial (or reuse) the P2P link, and run the resumable pull.
 /// No-op when the file is already downloaded or a pull is in flight.
 pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
-    if store::partial_get(&file_id).is_some_and(|p| p.is_complete()) {
-        return Ok(());
-    }
+    download_with_policy(file_id, DownloadTrigger::Requested).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadTrigger {
+    Requested,
+    Reconnect,
+    NetworkChange,
+    WakeResponse,
+}
+
+async fn download_with_policy(file_id: [u8; 32], trigger: DownloadTrigger) -> anyhow::Result<()> {
     if !DOWNLOADING.lock().insert(file_id) {
         return Ok(());
     }
     let _guard = PullGuard(file_id);
-    // No message names this file: its chat was cleared or deleted. A partial
-    // left behind (a pull that was mid-flight when the rows went, re-inserted
-    // by its own progress writes) would otherwise be re-driven to this same
-    // dead end on every reconnect, since nothing downstream ever marks it
-    // FAILED for the gc to reap.
-    let Some((peer, offered_size)) = crate::data::media::attachment_offer(&file_id)? else {
-        store::forget_file(&file_id);
-        anyhow::bail!("no media row for that file_id");
-    };
-    // The card shows "Connecting" from the tap, not from the first chunk: a
-    // connect takes seconds and a tap that changes nothing reads as broken.
-    set_state(&file_id, peer, store::CONNECTING);
-    let link = match crate::p2p::link(peer).await {
-        Ok(l) => l,
-        Err(e) => {
-            // Sender unreachable — offline, or the punch/TURN path is exhausted
-            // for a large file. Reverse-wake them and hold; the receiver retries
-            // on reconnect or a user tap. Not an error: the UI reads HELD. But a
-            // sender we poked seconds ago won't have come up yet, so on a fresh
-            // reconnect re-drive we suppress the wake within the backoff (the row
-            // stays HELD with its wake time); a first-time hold always wakes.
-            let woke_recently = store::partial_get(&file_id)
-                .filter(|p| p.state == store::HELD)
-                .is_some_and(|p| {
-                    crate::utils::systime().as_secs().saturating_sub(p.updated_at)
-                        < WAKE_BACKOFF_SECS
-                });
-            log::warn!(
-                "transfer: {} unreachable ({e}); holding {}{}",
-                hex::encode(&peer[..4]),
-                hex::encode(&file_id[..4]),
-                if woke_recently { " (wake suppressed)" } else { ", reverse-waking" },
-            );
-            if !woke_recently {
-                // Wake only the sender, including when our only encrypted
-                // channel with them is the group containing the attachment.
-                let paired = crate::data::contact::Contact::is_paired(&peer);
-                if let Some(conversation) = crate::data::conversation::Conversation::for_peer_transport(&peer, paired) {
-                    let _ = crate::messaging::send_control_wake_to(
-                        conversation,
-                        common::proto::mls_wire::AppPayload::FileWant { file_id },
-                        peer,
-                    )
-                    .await;
-                }
-                hold(&file_id, peer);
-            }
+    // Scans/spawns can race another worker finishing. Recheck terminal state
+    // after owning the writer slot; only a new requested download may retry a
+    // validation/authentication/storage failure.
+    let current = store::partial_get(&file_id);
+    if current.as_ref().is_some_and(|p| p.is_complete()) {
+        return Ok(());
+    }
+    if matches!(trigger, DownloadTrigger::Reconnect | DownloadTrigger::NetworkChange) {
+        if current.as_ref().is_none_or(|p| p.state == store::FAILED) {
             return Ok(());
+        }
+        if trigger == DownloadTrigger::Reconnect
+            && store::retry_after(&file_id) > crate::utils::systime().as_secs()
+        {
+            return Ok(());
+        }
+    }
+    if trigger == DownloadTrigger::WakeResponse && !store::claim_ready_retry(&file_id)? {
+        return Ok(());
+    }
+    // Register before looking up the message: deletion before registration is
+    // caught by the lookup, deletion after it cancels this generation.
+    let lease = store::receiver_lease(file_id);
+    let _slot = tokio::select! {
+        slot = PULLING.acquire() => slot?,
+        _ = lease.cancel.cancelled() => return Ok(()),
+    };
+    let Some((peer, offered_size)) = crate::data::media::attachment_offer(&file_id)? else {
+        if lease.cancel.is_cancelled() {
+            return Ok(());
+        }
+        // No incoming provider does not imply no holder: an outgoing message
+        // or staged composer may still own this content-addressed file.
+        if let Some(p) = store::partial_get(&file_id) {
+            set_state(&file_id, p.source_ipk, store::FAILED, &lease)?;
+        }
+        crate::data::media::unlink_orphaned(&crate::db::messages::MESSAGES_DB.lock(), &[file_id]);
+        anyhow::bail!("no incoming offer for that file_id");
+    };
+    let local = match auth::local_auth() {
+        Ok(local) => local,
+        Err(e) => {
+            set_state(&file_id, peer, store::FAILED, &lease)?;
+            report_failure(FailureKind::Authentication);
+            return Err(e);
         },
     };
-    // A mid-pull failure (network drop, or the sender edited/deleted the source
-    // so a chunk hash mismatches) must land the partial in FAILED — not leave it
-    // spinning ACTIVE, which gc never reaps. A re-tap resumes from `have`.
-    let r = pull(&link, file_id, offered_size, &auth::local_auth()?).await;
-    if r.is_err() {
-        fail(&file_id);
+    let held =
+        drive_download(file_id, peer, offered_size, &local, &lease, &RETRY_DELAYS, || async {
+            crate::p2p::link(peer).await.map_err(Failure::wire)
+        })
+        .await?;
+    // Release the writer before sending FileWant. A fast dial-back can now
+    // start its pull immediately instead of losing on_link_ready to our guard.
+    drop(_slot);
+    drop(lease);
+    drop(_guard);
+    if held
+        && trigger != DownloadTrigger::WakeResponse
+        && store::claim_wake(&file_id, crate::utils::systime().as_secs(), WAKE_BACKOFF_SECS)?
+    {
+        let paired = crate::data::contact::Contact::is_paired(&peer);
+        if let Some(conversation) =
+            crate::data::conversation::Conversation::for_peer_transport(&peer, paired)
+        {
+            let _ = timeout(
+                CONTROL_TIMEOUT,
+                crate::messaging::send_control_wake_to(
+                    conversation,
+                    common::proto::mls_wire::AppPayload::FileWant { file_id },
+                    peer,
+                ),
+            )
+            .await;
+        }
     }
-    r
+    Ok(())
 }
 
-/// Mark a pull as HELD (sender offline, reverse-wake sent): upsert the partial
-/// so `get_media` surfaces the held state to the UI. Mirrors [`pull`]'s upsert
-/// but with no manifest yet — the real bytes arrive once the sender comes back.
-fn hold(file_id: &[u8; 32], peer: [u8; 32]) {
-    set_state(file_id, peer, store::HELD);
+async fn drive_download<F, Fut>(
+    file_id: [u8; 32], peer: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease, retry_delays: &[Duration], mut connect: F,
+) -> anyhow::Result<bool>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::p2p::PeerLink, Failure>>,
+{
+    for attempt in 0..=retry_delays.len() {
+        if lease.cancel.is_cancelled() {
+            return Ok(false);
+        }
+        if matches!(crate::p2p::consent::may_connect(&peer), crate::p2p::consent::Decision::No) {
+            set_state(&file_id, peer, store::FAILED, &lease)?;
+            report_failure(FailureKind::Unavailable);
+            anyhow::bail!("attachment sender is no longer permitted");
+        }
+        set_state(&file_id, peer, store::CONNECTING, &lease)?;
+        let attempt_result = tokio::select! {
+            _ = lease.cancel.cancelled() => return Ok(false),
+            result = async {
+                let link = connect().await?;
+                let result = pull_live(&link, file_id, offered_size, &local, &lease, CHUNK_TIMEOUT).await;
+                if result.as_ref().is_err_and(|e| matches!(e.kind, FailureKind::Transport | FailureKind::Authentication)) {
+                    // Close only this connection; another worker may already
+                    // have established a newer one for the same peer.
+                    link.conn.close(0u32.into(), b"transfer link invalidated");
+                }
+                result
+            } => result,
+        };
+        match attempt_result {
+            Ok(()) => {
+                diagnostics::record(Event::TransferComplete);
+                return Ok(false);
+            },
+            Err(e) if e.kind == FailureKind::Cancelled => return Ok(false),
+            Err(e) if e.kind != FailureKind::Transport => {
+                report_failure(e.kind);
+                set_state(&file_id, peer, store::FAILED, &lease)?;
+                return Err(e.into());
+            },
+            Err(e) => {
+                log::debug!("transfer: transient failure, attempt {}: {e}", attempt + 1);
+                set_state(&file_id, peer, store::HELD, &lease)?;
+                if let Some(delay) = retry_delays.get(attempt) {
+                    diagnostics::record(Event::TransportRetry);
+                    tokio::select! {
+                        _ = lease.cancel.cancelled() => return Ok(false),
+                        _ = tokio::time::sleep(*delay) => {},
+                    }
+                } else {
+                    diagnostics::record(Event::RetryExhausted);
+                    store::defer_retry(
+                        &file_id,
+                        crate::utils::systime().as_secs() + RETRY_COOLDOWN_SECS,
+                    )?;
+                }
+            },
+        }
+    }
+    Ok(true)
 }
 
-/// Upsert the partial's state, keeping whatever progress it has. A row that
-/// does not exist yet is created empty, as the tap's first trace.
-fn set_state(file_id: &[u8; 32], peer: [u8; 32], state: u8) {
+/// Update progress without replacing independently persisted wake/retry history.
+fn set_state(
+    file_id: &[u8; 32], peer: [u8; 32], state: u8, lease: &store::ReceiverLease,
+) -> anyhow::Result<()> {
     let mut p = store::partial_get(file_id).unwrap_or(store::Partial {
         file_id: *file_id,
         source_ipk: peer,
@@ -276,7 +521,7 @@ fn set_state(file_id: &[u8; 32], peer: [u8; 32], state: u8) {
     p.state = state;
     p.source_ipk = peer;
     p.updated_at = crate::utils::systime().as_secs();
-    let _ = store::partial_put(&p);
+    store::partial_put_live(&p, lease)
 }
 
 /// Re-drive every incomplete pull from `peer`: they just became reachable,
@@ -286,7 +531,7 @@ fn set_state(file_id: &[u8; 32], peer: [u8; 32], state: u8) {
 pub fn resume_for_peer(peer: [u8; 32]) {
     for file_id in store::incomplete_file_ids_for(&peer) {
         crate::RUNTIME.spawn(async move {
-            if let Err(e) = download(file_id).await {
+            if let Err(e) = download_with_policy(file_id, DownloadTrigger::Reconnect).await {
                 log::warn!("transfer: resume {} failed: {e}", hex::encode(&file_id[..4]));
             }
         });
@@ -295,19 +540,15 @@ pub fn resume_for_peer(peer: [u8; 32]) {
 
 /// A direct link to `peer` just opened, in either direction.
 pub fn on_link_ready(peer: [u8; 32]) {
-    resume_for_peer(peer);
-}
-
-/// Flip an existing partial to FAILED, preserving `have` so a later re-tap
-/// resumes where it stopped. No-op when there's no partial yet — a failure
-/// before the first chunk landed left nothing to clean. `gc` only reaps
-/// FAILED/HELD, so an ACTIVE partial left by a mid-pull error would spin the
-/// UI and leak its `.part` forever.
-fn fail(file_id: &[u8; 32]) {
-    if let Some(mut p) = store::partial_get(file_id) {
-        p.state = store::FAILED;
-        p.updated_at = crate::utils::systime().as_secs();
-        let _ = store::partial_put(&p);
+    // Permit one early resume after a claimed wake. Otherwise retain the
+    // cooldown: concurrent failing files must not restart one another each
+    // time either one reconnects the shared peer link.
+    for file_id in store::incomplete_file_ids_for(&peer) {
+        crate::RUNTIME.spawn(async move {
+            if let Err(e) = download_with_policy(file_id, DownloadTrigger::WakeResponse).await {
+                log::debug!("transfer: ready-link resume failed: {e}");
+            }
+        });
     }
 }
 
@@ -317,7 +558,9 @@ fn fail(file_id: &[u8; 32]) {
 /// forms, their side pulls whatever it was holding for us.
 pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
     let Some(me) = crate::data::identity::Identity::get().map(|i| i.ipk()) else { return };
-    if !offered_to(&file_id, &peer, &me) { return; }
+    if !offered_to(&file_id, &peer, &me) {
+        return;
+    }
     log::info!(
         "transfer: FileWant from {} for {}",
         hex::encode(&peer[..4]),
@@ -340,8 +583,22 @@ pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
 pub async fn resume_incomplete_downloads() {
     for file_id in store::incomplete_file_ids() {
         crate::RUNTIME.spawn(async move {
-            if let Err(e) = download(file_id).await {
+            if let Err(e) = download_with_policy(file_id, DownloadTrigger::Reconnect).await {
                 log::warn!("transfer: resume {} failed: {e}", hex::encode(&file_id[..4]));
+            }
+        });
+    }
+}
+
+/// A confirmed platform network change makes the previous path's cooldown
+/// obsolete. It may start a new bounded episode for incomplete work, while
+/// terminal failures and live writers remain excluded. LinkReady cannot call
+/// this path and therefore cannot recursively replenish retry budgets.
+pub(crate) async fn on_network_changed() {
+    for file_id in store::incomplete_file_ids() {
+        crate::RUNTIME.spawn(async move {
+            if let Err(e) = download_with_policy(file_id, DownloadTrigger::NetworkChange).await {
+                log::debug!("transfer: network-change resume failed: {e}");
             }
         });
     }
@@ -354,94 +611,98 @@ pub async fn resume_incomplete_downloads() {
 /// Crash-safety contract: a chunk's bytes are synced to disk BEFORE the
 /// `have` watermark covering them is persisted, so a resume never trusts a
 /// watermark ahead of real bytes — the worst crash re-pulls one chunk.
+#[cfg(test)]
 async fn pull(
     link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
-) -> anyhow::Result<()> {
-    // A watermark is only as good as the bytes beneath it. Clearing a chat
-    // unlinks the `.part` under a live pull, and a resume trusting `have` would
-    // ask for the tail alone and promote a file with nothing in front of it.
-    // The same rule as the crash-safety contract above, at its limit.
-    let have0 = store::partial_get(&file_id)
-        .map(|p| {
-            let on_disk = std::fs::metadata(&p.path).map(|m| m.len()).unwrap_or(0);
-            (p.have as u64).min(on_disk / p.chunk_size.max(1) as u64) as u32
-        })
-        .unwrap_or(0);
-    let (mut s, mut r) = link.open_stream().await?;
-    auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local).await?;
-    wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }).await?;
-    s.finish()?;
-    let manifest = match wire::read_frame::<wire::ServeResp>(&mut r).await? {
-        wire::ServeResp::Manifest(m) => m,
-        wire::ServeResp::Gone => {
-            fail(&file_id);
-            anyhow::bail!("sender no longer retains the file");
-        },
-    };
-    // Fail closed before any bytes land: the manifest must be the exact one
-    // the content-addressed file_id commits to, and self-consistent so a bad
-    // peer can't drive the chunk math to over-allocate or mis-index.
-    anyhow::ensure!(manifest.file_id() == file_id, "manifest does not match file_id");
-    anyhow::ensure!(
-        manifest.chunk_size > 0 && manifest.chunk_size as usize <= wire::CHUNK_SIZE,
-        "bad chunk_size"
-    );
-    anyhow::ensure!(
-        manifest.chunks.len() as u64 == manifest.total_size.div_ceil(manifest.chunk_size as u64),
-        "chunk count does not match total_size"
-    );
-    anyhow::ensure!(have0 as usize <= manifest.chunks.len(), "partial ahead of manifest");
-    // Fail closed on a disk-fill DoS: a hostile contact can offer a tiny `size`
-    // (passing the auto-download policy and the size shown to the user) while
-    // the manifest describes gigabytes. The offer is the ceiling we consented to.
-    anyhow::ensure!(
-        manifest.total_size == offered_size,
-        "manifest size {} belies the offered {offered_size}",
-        manifest.total_size,
-    );
+) -> Result<(), Failure> {
+    let lease = store::receiver_lease(file_id);
+    pull_live(link, file_id, offered_size, local, &lease, CHUNK_TIMEOUT).await
+}
 
-    let path = store::partial_path(&file_id);
+async fn pull_live(
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease, chunk_timeout: Duration,
+) -> Result<(), Failure> {
+    // Resume into the exact file whose prefix was validated. Recomputing the
+    // canonical path could otherwise publish DONE over a different file after
+    // a data-root change. A missing old path restarts at the current location.
+    let (path, have0) = store::partial_get(&file_id)
+        .and_then(|p| {
+            let on_disk = std::fs::metadata(&p.path).ok()?.len();
+            let have = (p.have as u64).min(on_disk / p.chunk_size.max(1) as u64) as u32;
+            Some((p.path, have))
+        })
+        .unwrap_or_else(|| (store::partial_path(&file_id), 0));
+    let (mut s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
+    bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
+    bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }))
+        .await?;
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    let manifest =
+        match bounded(CONTROL_TIMEOUT, wire::read_frame::<wire::ServeResp>(&mut r)).await? {
+            wire::ServeResp::Manifest(m) => m,
+            wire::ServeResp::Gone => {
+                return Err(Failure::new(
+                    FailureKind::Unavailable,
+                    anyhow::anyhow!("sender no longer retains the file"),
+                ));
+            },
+        };
+    if manifest.file_id() != file_id
+        || manifest.chunk_size == 0
+        || manifest.chunk_size as usize > wire::CHUNK_SIZE
+        || manifest.chunks.len() as u64 != manifest.total_size.div_ceil(manifest.chunk_size as u64)
+        || have0 as usize > manifest.chunks.len()
+        || manifest.total_size != offered_size
+    {
+        return Err(Failure::new(
+            FailureKind::InvalidData,
+            anyhow::anyhow!("manifest does not match the attachment offer"),
+        ));
+    }
     let mut part = store::Partial {
         file_id,
         source_ipk: link.ipk,
         total: manifest.total_size,
         chunk_size: manifest.chunk_size,
-        manifest: Some(postcard::to_allocvec(&manifest)?),
+        manifest: Some(postcard::to_allocvec(&manifest).map_err(Failure::storage)?),
         have: have0,
         state: store::ACTIVE,
         path: path.clone(),
         updated_at: crate::utils::systime().as_secs(),
     };
-    store::partial_put(&part)?;
-
+    store::partial_put_live(&part, lease).map_err(Failure::storage)?;
     use std::io::{Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).read(true).open(&path)?;
-    f.seek(SeekFrom::Start(have0 as u64 * manifest.chunk_size as u64))?;
+    let mut f = store::open_partial(lease, &path).map_err(Failure::storage)?;
+    f.seek(SeekFrom::Start(have0 as u64 * manifest.chunk_size as u64)).map_err(Failure::storage)?;
     let mut buf = vec![0u8; manifest.chunk_size as usize];
     for idx in have0 as usize..manifest.chunks.len() {
-        let expect = if idx + 1 == manifest.chunks.len() {
-            (manifest.total_size - idx as u64 * manifest.chunk_size as u64) as usize
-        } else {
-            manifest.chunk_size as usize
-        };
-        r.read_exact(&mut buf[..expect]).await?;
-        anyhow::ensure!(
-            *blake3::hash(&buf[..expect]).as_bytes() == manifest.chunks[idx],
-            "chunk {idx} hash mismatch"
-        );
-        f.write_all(&buf[..expect])?;
-        f.flush()?;
-        f.sync_data()?;
+        let expect = (manifest.total_size - idx as u64 * manifest.chunk_size as u64)
+            .min(manifest.chunk_size as u64) as usize;
+        tokio::select! {
+            _ = lease.cancel.cancelled() => return Err(Failure::new(FailureKind::Cancelled, store::Cancelled)),
+            got = read_chunk(&mut r, &mut buf[..expect], chunk_timeout) => got?,
+        }
+        if *blake3::hash(&buf[..expect]).as_bytes() != manifest.chunks[idx] {
+            return Err(Failure::new(
+                FailureKind::InvalidData,
+                anyhow::anyhow!("chunk hash mismatch"),
+            ));
+        }
+        f.write_all(&buf[..expect]).map_err(Failure::storage)?;
+        f.flush().map_err(Failure::storage)?;
+        f.sync_data().map_err(Failure::storage)?;
         part.have = idx as u32 + 1;
         part.updated_at = crate::utils::systime().as_secs();
-        store::partial_put(&part)?; // doorbell → UI progress
+        store::partial_put_live(&part, lease).map_err(Failure::storage)?;
+        diagnostics::received_verified(expect as u64);
     }
-    // No rename on completion: state==DONE over the .part path IS the promote —
-    // a single DB flip with no rename/DB-ordering crash window; get_media only
-    // exposes local_path once DONE.
+    f.set_len(manifest.total_size).map_err(Failure::storage)?;
+    f.sync_data().map_err(Failure::storage)?;
     part.state = store::DONE;
     part.updated_at = crate::utils::systime().as_secs();
-    store::partial_put(&part)?;
+    store::partial_put_live(&part, lease).map_err(Failure::storage)?;
+    store::defer_retry(&file_id, 0).map_err(Failure::storage)?;
     Ok(())
 }
 
@@ -507,35 +768,58 @@ mod tests {
         assert!(download(fid).await.is_err(), "no message names it");
         assert!(store::partial_get(&fid).is_none(), "ghost row reaped");
     }
-
-    #[test]
-    fn fail_flips_active_to_failed_preserving_have() {
+    #[tokio::test]
+    async fn confirmed_network_change_bypasses_cooldown_but_not_terminal_or_owned_work() {
         let dir = std::env::temp_dir().join("promtuz-transfers-test");
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let fid = [0xda; 32];
+        store::forget_partial(&fid);
+        let lease = store::receiver_lease(fid);
+        set_state(&fid, [0xdb; 32], store::HELD, &lease).unwrap();
+        store::defer_retry(&fid, crate::utils::systime().as_secs() + 60).unwrap();
+        download_with_policy(fid, DownloadTrigger::Reconnect).await.unwrap();
+        assert_eq!(store::partial_get(&fid).unwrap().state, store::HELD);
+        assert!(DOWNLOADING.lock().insert(fid));
+        let guard = PullGuard(fid);
+        download_with_policy(fid, DownloadTrigger::NetworkChange).await.unwrap();
+        assert_eq!(store::partial_get(&fid).unwrap().state, store::HELD, "live writer retained");
+        drop(guard);
+        set_state(&fid, [0xdb; 32], store::FAILED, &lease).unwrap();
+        download_with_policy(fid, DownloadTrigger::NetworkChange).await.unwrap();
+        assert_eq!(
+            store::partial_get(&fid).unwrap().state,
+            store::FAILED,
+            "terminal failure retained"
+        );
+        set_state(&fid, [0xdb; 32], store::HELD, &lease).unwrap();
+        drop(lease);
+        // With no incoming offer in this fixture, reaching the lookup proves
+        // this confirmed external event began its episode despite cooldown.
+        let error = download_with_policy(fid, DownloadTrigger::NetworkChange).await.unwrap_err();
+        assert!(error.to_string().contains("no incoming offer"));
+        assert!(store::partial_get(&fid).is_none(), "orphan cleanup actually ran");
+    }
 
-        let fid = [0xf1u8; 32];
-        store::partial_put(&store::Partial {
-            file_id: fid,
-            source_ipk: [1u8; 32],
-            total: 100,
-            chunk_size: 50,
-            manifest: None,
-            have: 3,
-            state: store::ACTIVE,
-            path: store::partial_path(&fid),
-            updated_at: 0,
-        })
-        .unwrap();
-
-        fail(&fid);
-        let p = store::partial_get(&fid).unwrap();
-        assert_eq!(p.state, store::FAILED);
-        assert_eq!(p.have, 3, "have preserved so a re-tap resumes");
-
-        // Nothing to fail (offline→HELD path never wrote a row) → no-op, no panic.
-        fail(&[0xf2u8; 32]);
-        assert!(store::partial_get(&[0xf2u8; 32]).is_none());
+    #[tokio::test]
+    async fn racing_ready_callback_does_not_spend_an_active_writers_wake_allowance() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let fid = [0xcd; 32];
+        store::forget_partial(&fid);
+        let lease = store::receiver_lease(fid);
+        set_state(&fid, [0xce; 32], store::HELD, &lease).unwrap();
+        assert!(store::claim_wake(&fid, 100, 60).unwrap());
+        assert!(DOWNLOADING.lock().insert(fid));
+        let guard = PullGuard(fid);
+        download_with_policy(fid, DownloadTrigger::WakeResponse).await.unwrap();
+        assert!(
+            store::claim_ready_retry(&fid).unwrap(),
+            "the losing callback must not consume the allowance"
+        );
+        drop(guard);
+        store::forget_partial(&fid);
     }
 }
 
@@ -567,6 +851,9 @@ mod download_resume {
     }
 
     fn paired_identity(ipk_seed: [u8; 32]) -> wire::Auth {
+        let dir = std::env::temp_dir().join("promtuz-download-resume-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
         let a = identity(ipk_seed);
         crate::data::contact::Contact::save_pending(a.ipk, "peer".into()).unwrap();
         crate::data::contact::Contact::mark_paired(&a.ipk);
@@ -584,16 +871,16 @@ mod download_resume {
 
     fn offer_in(conv: [u8; 16], file_id: [u8; 32]) {
         let row = crate::data::media::MediaRow {
-            kind:     crate::data::media::KIND_ATTACHMENT,
+            kind: crate::data::media::KIND_ATTACHMENT,
             group_id: None,
-            mime:     "application/octet-stream".into(),
-            name:     "f.bin".into(),
-            size:     0,
-            width:    0,
-            height:   0,
-            blob:     None,
-            thumb:    None,
-            file_id:  Some(file_id.to_vec()),
+            mime: "application/octet-stream".into(),
+            name: "f.bin".into(),
+            size: 0,
+            width: 0,
+            height: 0,
+            blob: None,
+            thumb: None,
+            file_id: Some(file_id.to_vec()),
             duration_ms: 0,
             sticker: None,
         };
@@ -623,6 +910,268 @@ mod download_resume {
             ep_a,
             ep_b,
         )
+    }
+
+    fn recovery_identity(id: u8) -> wire::Auth {
+        let mut seed = [0xd7; 32];
+        seed[0] = id;
+        paired_identity(seed)
+    }
+
+    async fn wait_for_prefix(fid: [u8; 32], have: u32) {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if store::partial_get(&fid).is_some_and(|p| p.have >= have) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_pull_reconnects_and_resumes_verified_prefix_automatically() {
+        let id_a = recovery_identity(81);
+        let id_b = recovery_identity(82);
+        let (server1, client1, _ep1, _ep2) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let (server2, client2, _ep3, _ep4) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let src = std::env::temp_dir().join("promtuz-recovery-resume.bin");
+        let mut bytes = vec![0x81; wire::CHUNK_SIZE * 2 + 128];
+        bytes[wire::CHUNK_SIZE..].fill(0x82);
+        std::fs::write(&src, &bytes).unwrap();
+        let (fid, size) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(id_b.ipk, fid);
+        store::forget_partial(&fid);
+        let manifest = wire::Manifest::from_file(src.to_str().unwrap()).unwrap();
+        let first_bytes = bytes[..wire::CHUNK_SIZE + 19].to_vec();
+        let auth_a = id_a.clone();
+        let first = tokio::spawn(async move {
+            let (mut s, mut r) = server1.accept_stream().await.unwrap();
+            auth::exchange(&server1.conn, &mut s, &mut r, server1.ipk, &auth_a).await.unwrap();
+            let request: wire::Pull = wire::read_frame(&mut r).await.unwrap();
+            assert_eq!(request.have, 0);
+            wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest)).await.unwrap();
+            s.write_all(&first_bytes).await.unwrap();
+            wait_for_prefix(fid, 1).await;
+            server1.conn.close(0u32.into(), b"test network interruption");
+        });
+        let second = tokio::spawn(serve_streams(server2, id_a.clone()));
+        let mut links = std::collections::VecDeque::from([client1, client2]);
+        let lease = store::receiver_lease(fid);
+        let mut attempts = 0;
+        drive_download(
+            fid,
+            id_a.ipk,
+            size,
+            &id_b,
+            &lease,
+            &[Duration::ZERO, Duration::ZERO],
+            || {
+                attempts += 1;
+                if attempts == 2 {
+                    assert_eq!(
+                        store::partial_get(&fid).unwrap().have,
+                        1,
+                        "verified prefix survives broken connection"
+                    );
+                }
+                let next = links.pop_front().unwrap();
+                async move { Ok(next) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+        first.await.unwrap();
+        let completed = store::partial_get(&fid).unwrap();
+        assert_eq!(completed.state, store::DONE);
+        assert_eq!(std::fs::read(&completed.path).unwrap(), bytes);
+        second.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_incoming_offer_preserves_an_outgoing_copy() {
+        let peer = recovery_identity(91);
+        let src = std::env::temp_dir().join("promtuz-recovery-shared.bin");
+        std::fs::write(&src, [0x91; 100]).unwrap();
+        let (fid, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(peer.ipk, fid);
+        assert!(download(fid).await.is_err(), "there is no incoming provider");
+        assert!(store::retention_get(&fid).is_some());
+        assert_eq!(std::fs::read(&src).unwrap(), vec![0x91; 100]);
+    }
+
+    #[tokio::test]
+    async fn stalled_chunk_is_transient_and_deletion_cancels_waiting_pull() {
+        let id_a = recovery_identity(83);
+        let id_b = recovery_identity(84);
+        let (server, client, _ep1, _ep2) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let src = std::env::temp_dir().join("promtuz-recovery-stall.bin");
+        std::fs::write(&src, vec![0x83; 100]).unwrap();
+        let manifest = wire::Manifest::from_file(src.to_str().unwrap()).unwrap();
+        let fid = manifest.file_id();
+        store::forget_partial(&fid);
+        let serving = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut s, mut r) = server.accept_stream().await.unwrap();
+                auth::exchange(&server.conn, &mut s, &mut r, server.ipk, &id_a).await.unwrap();
+                let _: wire::Pull = wire::read_frame(&mut r).await.unwrap();
+                wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest.clone()))
+                    .await
+                    .unwrap();
+                // Keep the connection alive and the data stream unfinished.
+                held.push((s, r));
+            }
+        });
+        let lease = store::receiver_lease(fid);
+        let err = pull_live(&client, fid, 100, &id_b, &lease, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, FailureKind::Transport);
+        assert_eq!(store::partial_get(&fid).unwrap().have, 0);
+        let delete = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let deleted_path = store::partial_get(&fid).unwrap().path;
+            store::forget_partial(&fid);
+            deleted_path
+        };
+        let pull = pull_live(&client, fid, 100, &id_b, &lease, Duration::from_secs(60));
+        let (result, deleted_path) = tokio::join!(pull, delete);
+        assert_eq!(result.unwrap_err().kind, FailureKind::Cancelled);
+        assert!(store::partial_get(&fid).is_none());
+        assert!(!std::path::Path::new(&deleted_path).exists());
+        serving.abort();
+    }
+
+    #[tokio::test]
+    async fn slow_chunk_progress_does_not_trigger_idle_timeout() {
+        let id_a = recovery_identity(89);
+        let id_b = recovery_identity(90);
+        let (server, client, _ep1, _ep2) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let src = std::env::temp_dir().join("promtuz-recovery-slow.bin");
+        let bytes = vec![0x89; 100];
+        std::fs::write(&src, &bytes).unwrap();
+        let manifest = wire::Manifest::from_file(src.to_str().unwrap()).unwrap();
+        let fid = manifest.file_id();
+        store::forget_partial(&fid);
+        let serving = tokio::spawn(async move {
+            let (mut s, mut r) = server.accept_stream().await.unwrap();
+            auth::exchange(&server.conn, &mut s, &mut r, server.ipk, &id_a).await.unwrap();
+            let _: wire::Pull = wire::read_frame(&mut r).await.unwrap();
+            wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest)).await.unwrap();
+            for chunk in bytes.chunks(10) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                s.write_all(chunk).await.unwrap();
+            }
+            s.finish().unwrap();
+            s.stopped().await.unwrap();
+        });
+        let lease = store::receiver_lease(fid);
+        // The entire chunk takes ~200ms; no idle gap is anywhere near100ms.
+        pull_live(&client, fid, 100, &id_b, &lease, Duration::from_millis(100)).await.unwrap();
+        let completed = store::partial_get(&fid).unwrap();
+        assert_eq!(completed.state, store::DONE);
+        assert_eq!(std::fs::read(&completed.path).unwrap(), vec![0x89; 100]);
+        serving.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_auth_header_is_rejected_without_waiting_for_payload() {
+        let id_a = recovery_identity(92);
+        let id_b = recovery_identity(93);
+        let (server, client, _ep1, _ep2) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let authenticating = tokio::spawn(async move {
+            let (mut s, mut r) = server.accept_stream().await.unwrap();
+            auth::exchange(&server.conn, &mut s, &mut r, server.ipk, &id_a).await
+        });
+        let (mut s, r) = client.open_stream().await.unwrap();
+        s.write_all(&((wire::AUTH_FRAME_LIMIT + 1) as u32).to_le_bytes()).await.unwrap();
+        // No payload or FIN: waiting for the claimed bytes would hang here.
+        let error =
+            timeout(Duration::from_secs(2), authenticating).await.unwrap().unwrap().unwrap_err();
+        assert!(error.is::<wire::InvalidFrame>());
+        drop((s, r));
+    }
+
+    #[tokio::test]
+    async fn stalled_auth_does_not_block_another_stream_on_the_link() {
+        let id_a = recovery_identity(85);
+        let id_b = recovery_identity(86);
+        let (server, client, _ep1, _ep2) = linked_pair(id_b.ipk, id_a.ipk).await;
+        let serving = tokio::spawn(serve_streams(server, id_a));
+        let (mut stalled_s, stalled_r) = client.open_stream().await.unwrap();
+        // QUIC exposes the stream only after bytes are sent. Deliberately
+        // provide only one of the four frame-length bytes.
+        stalled_s.write_all(&[1]).await.unwrap();
+        let src = std::env::temp_dir().join("promtuz-recovery-concurrent.bin");
+        std::fs::write(&src, [0x84; 100]).unwrap();
+        let (fid, size) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        offer_to(id_b.ipk, fid);
+        store::forget_partial(&fid);
+        timeout(Duration::from_secs(2), pull(&client, fid, size, &id_b)).await.unwrap().unwrap();
+        let completed = store::partial_get(&fid).unwrap();
+        assert_eq!(std::fs::read(&completed.path).unwrap(), vec![0x84; 100]);
+        drop((stalled_s, stalled_r));
+        serving.abort();
+    }
+
+    #[tokio::test]
+    async fn only_transient_failures_retry_and_retry_budget_is_finite() {
+        let peer = recovery_identity(87).ipk;
+        let local = identity([88; 32]);
+        for (offset, kind) in [
+            FailureKind::Transport,
+            FailureKind::Authentication,
+            FailureKind::InvalidData,
+            FailureKind::Storage,
+            FailureKind::Unavailable,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fid = [0xb0 + offset as u8; 32];
+            store::forget_partial(&fid);
+            let lease = store::receiver_lease(fid);
+            let mut attempts = 0;
+            let result = drive_download(
+                fid,
+                peer,
+                100,
+                &local,
+                &lease,
+                &[Duration::ZERO, Duration::ZERO],
+                || {
+                    attempts += 1;
+                    async move { Err(Failure::new(kind, anyhow::anyhow!("injected failure"))) }
+                },
+            )
+            .await;
+            assert_eq!(attempts, if kind == FailureKind::Transport { 3 } else { 1 });
+            let state = store::partial_get(&fid).unwrap().state;
+            if kind == FailureKind::Transport {
+                assert!(result.is_ok());
+                assert_eq!(state, store::HELD);
+                assert!(store::retry_after(&fid) > crate::utils::systime().as_secs());
+                // A reconnect during the persisted cooldown never reaches a
+                // lookup/dial; this fixture deliberately has no incoming offer.
+                download_with_policy(fid, DownloadTrigger::Reconnect).await.unwrap();
+                assert!(store::partial_get(&fid).is_some());
+            } else {
+                assert!(result.is_err());
+                assert_eq!(state, store::FAILED);
+                download_with_policy(fid, DownloadTrigger::Reconnect).await.unwrap();
+                download_with_policy(fid, DownloadTrigger::WakeResponse).await.unwrap();
+                assert_eq!(
+                    store::partial_get(&fid).unwrap().state,
+                    store::FAILED,
+                    "a stale automatic scan cannot retry a terminal failure"
+                );
+            }
+            store::forget_partial(&fid);
+        }
     }
 
     #[tokio::test]
@@ -665,7 +1214,8 @@ mod download_resume {
         let (file_id2, _) = prepare_send(src2.to_str().unwrap(), 3600).unwrap();
         offer_to(id_b.ipk, file_id2);
         store::forget_partial(&file_id2);
-        let path2 = store::partial_path(&file_id2);
+        let path2 =
+            std::env::temp_dir().join("promtuz-resume-stored-prefix.part").display().to_string();
         std::fs::write(&path2, vec![0x99u8; wire::CHUNK_SIZE]).unwrap();
         store::partial_put(&store::Partial {
             file_id: file_id2,
@@ -692,13 +1242,17 @@ mod download_resume {
     /// endpoint as a contact, then revoke access while the link stays open.
     #[tokio::test]
     async fn group_media_without_pairing_is_scoped_and_revocable() {
-        use crate::data::conversation::Conversation;
         use crate::data::contact::Contact;
+        use crate::data::conversation::Conversation;
         let dir = std::env::temp_dir().join("promtuz-download-resume-test");
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
-        let sender = identity([81; 32]);
-        let receiver = identity([82; 32]);
+        let mut sender_seed = [0xe8; 32];
+        sender_seed[0] = 81;
+        let mut receiver_seed = [0xe8; 32];
+        receiver_seed[0] = 82;
+        let sender = identity(sender_seed);
+        let receiver = identity(receiver_seed);
         assert!(!Contact::is_paired(&sender.ipk));
         assert!(!Contact::is_paired(&receiver.ipk));
         let group = Conversation::join_group(&sender.ipk, &[sender.ipk, receiver.ipk]).unwrap();
@@ -709,9 +1263,10 @@ mod download_resume {
         std::fs::write(&src, &bytes).unwrap();
         let (fid, size) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
         // Remove prior runs' references before establishing this test's scope.
-        crate::db::messages::MESSAGES_DB.lock().execute(
-            "DELETE FROM message_media WHERE file_id = ?1", [fid.as_slice()],
-        ).unwrap();
+        crate::db::messages::MESSAGES_DB
+            .lock()
+            .execute("DELETE FROM message_media WHERE file_id = ?1", [fid.as_slice()])
+            .unwrap();
         store::forget_partial(&fid);
         offer_in(group, fid);
         assert!(offered_to(&fid, &receiver.ipk, &sender.ipk));
@@ -724,7 +1279,8 @@ mod download_resume {
         let other = Conversation::join_group(&sender.ipk, &[sender.ipk, [83; 32]]).unwrap();
         let private_src = dir.join("other-group-media.bin");
         std::fs::write(&private_src, vec![0x82; 300 * 1024]).unwrap();
-        let (private_fid, private_size) = prepare_send(private_src.to_str().unwrap(), 3600).unwrap();
+        let (private_fid, private_size) =
+            prepare_send(private_src.to_str().unwrap(), 3600).unwrap();
         store::forget_partial(&private_fid);
         offer_in(other, private_fid);
         assert!(pull(&receive, private_fid, private_size, &receiver).await.is_err());
@@ -733,10 +1289,16 @@ mod download_resume {
         // Even an old direct offer must not authorize an unpaired peer.
         offer_to(receiver.ipk, fid);
         Conversation::deactivate_member(&group, &receiver.ipk).unwrap();
-        assert!(pull(&receive, fid, size, &receiver).await.is_err(), "removed member denied on existing link");
+        assert!(
+            pull(&receive, fid, size, &receiver).await.is_err(),
+            "removed member denied on existing link"
+        );
         Conversation::add_member(&group, &receiver.ipk, 0).unwrap();
         Conversation::deactivate_member(&group, &sender.ipk).unwrap();
-        assert!(pull(&receive, fid, size, &receiver).await.is_err(), "sender who left must stop serving");
+        assert!(
+            pull(&receive, fid, size, &receiver).await.is_err(),
+            "sender who left must stop serving"
+        );
         assert!(store::retention_get(&fid).is_some(), "revocation preserves the sender's file");
         server.abort();
     }

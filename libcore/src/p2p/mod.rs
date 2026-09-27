@@ -23,8 +23,10 @@
 
 pub(crate) mod candidate;
 pub(crate) mod consent;
+pub(crate) mod diagnostics;
 mod disco;
 mod punch;
+mod reflexive;
 mod signal;
 mod socket;
 
@@ -42,7 +44,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use common::proto::p2p_relay::RelayMsg;
 use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use quinn::Connection;
 use quinn::Endpoint;
@@ -57,8 +58,8 @@ use crate::utils::addrs_short;
 use disco::DiscoKey;
 use socket::Poke;
 use socket::PokeSender;
-use socket::StunReply;
 use socket::TurnRoutes;
+use diagnostics::Event;
 
 /// Inbound P2P candidate offer, routed from the MLS dispatch
 /// (`quic/server.rs`) to the session waiting for that peer.
@@ -89,6 +90,7 @@ const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// connects over the bridge as soon as its offer is out, so the inbound
 /// lands about one relay round trip after our `TurnAlloc`.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(8);
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a session delays its offer waiting for the reflexive probe, so
 /// the offer can carry the reflexive candidate. Immediate once probed.
 const REFLEXIVE_WAIT: Duration = Duration::from_millis(600);
@@ -115,9 +117,24 @@ pub enum Disclosure {
 /// auto-accept below) racing a button-initiated one for the same peer.
 static CONNECTING: Lazy<Mutex<HashSet<[u8; 32]>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+/// Cancellation (network change, timeout or caller drop) must release the
+/// single-flight slot just as an ordinary return does.
+struct ConnectingGuard([u8; 32]);
+impl ConnectingGuard {
+    fn acquire(peer: [u8; 32]) -> Result<Self> {
+        if !CONNECTING.lock().insert(peer) { bail!("{ALREADY_CONNECTING}"); }
+        Ok(Self(peer))
+    }
+}
+impl Drop for ConnectingGuard {
+    fn drop(&mut self) {
+        CONNECTING.lock().remove(&self.0);
+    }
+}
+
 /// Disco channel → the session waiting on pokes for it. The receive loop
 /// routes each inbound poke to the right session by its channel tag.
-type Sessions = Arc<Mutex<HashMap<[u8; 8], mpsc::UnboundedSender<Poke>>>>;
+type Sessions = Arc<Mutex<HashMap<[u8; 8], mpsc::Sender<Poke>>>>;
 
 /// Routes each inbound connection to the session expecting it, by source
 /// address. A session registers the addresses only its peer can produce (the
@@ -133,7 +150,7 @@ struct InboundRouter {
 
 impl InboundRouter {
     fn route(&mut self, incoming: quinn::Incoming) {
-        if let Some(tx) = self.waiting.get(&incoming.remote_address()) {
+        if let Some(tx) = self.waiting.get(&reflexive::canonical(incoming.remote_address())) {
             let _ = tx.send(incoming);
             return;
         }
@@ -153,30 +170,57 @@ impl InboundRouter {
     }
 
     fn claim(&mut self, addrs: &[SocketAddr], tx: mpsc::UnboundedSender<quinn::Incoming>) {
+        let addrs: Vec<_> = addrs.iter().copied().map(reflexive::canonical).collect();
         let mut held = std::mem::take(&mut self.backlog);
         while let Some((at, incoming)) = held.pop_front() {
-            if addrs.contains(&incoming.remote_address()) {
+            if at.elapsed() > INBOUND_BACKLOG_TTL {
+                incoming.refuse();
+            } else if addrs.contains(&reflexive::canonical(incoming.remote_address())) {
                 let _ = tx.send(incoming);
             } else {
                 self.backlog.push_back((at, incoming));
             }
         }
         for addr in addrs {
-            self.waiting.insert(*addr, tx.clone());
+            self.waiting.insert(addr, tx.clone());
         }
     }
 
     fn release(&mut self, addrs: &[SocketAddr], tx: &mpsc::UnboundedSender<quinn::Incoming>) {
         for addr in addrs {
-            if self.waiting.get(addr).is_some_and(|t| t.same_channel(tx)) {
-                self.waiting.remove(addr);
+            let addr = reflexive::canonical(*addr);
+            if self.waiting.get(&addr).is_some_and(|t| t.same_channel(tx)) {
+                self.waiting.remove(&addr);
             }
         }
     }
 }
 
-/// Our server-reflexive address and when the relay echoed it.
-type Reflexive = Option<(SocketAddr, Instant)>;
+struct LinkState {
+    generation: u64,
+    links: HashMap<[u8; 32], PeerLink>,
+}
+
+impl LinkState {
+    fn publish(&mut self, generation: u64, link: PeerLink) -> Result<()> {
+        if self.generation != generation {
+            link.conn.close(0u32.into(), b"network changed during setup");
+            bail!("network changed before peer link publication");
+        }
+        if let Some(previous) = self.links.insert(link.ipk, link.clone())
+            && previous.conn.stable_id() != link.conn.stable_id()
+        {
+            previous.conn.close(0u32.into(), b"peer connection replaced");
+        }
+        Ok(())
+    }
+
+    fn remove_closed(&mut self, peer: &[u8; 32], connection_id: usize) {
+        if self.links.get(peer).is_some_and(|l| l.conn.stable_id() == connection_id) {
+            self.links.remove(peer);
+        }
+    }
+}
 
 /// The one P2P endpoint (built lazily on first [`connect`]), its poke
 /// sender, and the routing table its receive loop feeds.
@@ -190,21 +234,26 @@ struct P2pEndpoint {
     turn:     Arc<Mutex<TurnRoutes>>,
     /// The latest STUN echo from a relay, published by the socket's
     /// receive loop. A session probes when it is missing or old.
-    reflexive: watch::Receiver<Reflexive>,
+    reflexive: Arc<Mutex<reflexive::Reflexive>>,
     /// Live links keyed by peer IPK, so signaling and transfer reuse one
     /// connection instead of re-dialing. See [`link`].
-    links: Mutex<HashMap<[u8; 32], PeerLink>>,
+    links: Mutex<LinkState>,
+    /// In-flight sessions subscribe before starting. Network changes cancel
+    /// them, while the locked generation prevents late link publication.
+    network: watch::Sender<u64>,
     /// Where the permanent acceptor delivers each inbound connection.
     inbound: Arc<Mutex<InboundRouter>>,
 }
 
-static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
+static P2P: Lazy<Mutex<Option<Arc<P2pEndpoint>>>> = Lazy::new(|| Mutex::new(None));
 
-/// Build the P2P endpoint once and spawn the loop that routes each inbound
-/// poke to the session owning its channel. Must be called from the tokio
-/// runtime.
-fn endpoint() -> Result<&'static P2pEndpoint> {
-    P2P.get_or_try_init(|| {
+/// Build one P2P endpoint for the current network and route each inbound poke
+/// to its session. A network change retires the socket; the next attempt binds
+/// a fresh one. Must be called from the tokio runtime.
+fn endpoint() -> Result<Arc<P2pEndpoint>> {
+    let mut current = P2P.lock();
+    if let Some(ep) = current.as_ref() { return Ok(ep.clone()); }
+    let built = (|| -> Result<P2pEndpoint> {
         let built = socket::build_endpoint()?;
         let local = built.endpoint.local_addr()?;
         let port = local.port();
@@ -218,19 +267,17 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
                 if let Some(chan) = disco::peek_channel(&bytes)
                     && let Some(tx) = routes.lock().get(&chan)
                 {
-                    let _ = tx.send((src, bytes));
+                    let _ = tx.try_send((src, bytes));
                 }
             }
         });
 
-        // Every STUN echo lands here, stamped with when it arrived, so a
-        // session can tell a fresh answer from the one before its probe.
-        let (reflexive_tx, reflexive) = watch::channel(None);
-        let mut stun_rx: mpsc::UnboundedReceiver<StunReply> = built.stun_rx;
+        let reflexive = Arc::new(Mutex::new(reflexive::Reflexive::default()));
+        let observations = reflexive.clone();
+        let mut stun_rx = built.stun_rx;
         RUNTIME.spawn(async move {
-            while let Some((_, seen)) = stun_rx.recv().await {
-                log::info!("P2P: reflexive address {}", addr_short(seen));
-                let _ = reflexive_tx.send(Some((seen, Instant::now())));
+            while let Some(reply) = stun_rx.recv().await {
+                observations.lock().accept(reply);
             }
         });
 
@@ -252,10 +299,14 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
             sessions,
             turn: built.turn,
             reflexive,
-            links: Mutex::new(HashMap::new()),
+            links: Mutex::new(LinkState { generation: 0, links: HashMap::new() }),
+            network: watch::channel(0).0,
             inbound,
         })
-    })
+    })()?;
+    let ep = Arc::new(built);
+    *current = Some(ep.clone());
+    Ok(ep)
 }
 
 /// The disco routing channel for a peer pair — a *public* tag (only the
@@ -316,33 +367,22 @@ fn assist_relay() -> Option<SocketAddr> {
 /// when we have none or the one we have is old. Peer-independent; a stale
 /// mapping self-heals through the punch ping exchange, and TURN covers
 /// whatever the reflexive candidate can't.
-async fn refresh_reflexive(ep: &'static P2pEndpoint) -> Option<SocketAddr> {
-    let cached: Reflexive = *ep.reflexive.borrow();
-    if let Some((addr, at)) = cached
-        && at.elapsed() < REFLEXIVE_MAX_AGE
-    {
+async fn refresh_reflexive(ep: Arc<P2pEndpoint>) -> Option<SocketAddr> {
+    let relay = assist_relay()?;
+    if let Some(addr) = ep.reflexive.lock().cached(relay, REFLEXIVE_MAX_AGE) {
         return Some(addr);
     }
-    let relay = assist_relay()?;
-    let sent = Instant::now();
-    ep.pokes.send(relay, &RelayMsg::StunReq { tx: rand_bytes::<8>() }.encode()).await.ok()?;
-    let mut rx = ep.reflexive.clone();
+    let tx = rand_bytes::<8>();
+    let reply = ep.reflexive.lock().begin(tx, relay, REFLEXIVE_WAIT)?;
+    struct ProbeGuard(Arc<P2pEndpoint>, [u8; 8]);
+    impl Drop for ProbeGuard {
+        fn drop(&mut self) { self.0.reflexive.lock().cancel(&self.1); }
+    }
+    let _guard = ProbeGuard(ep.clone(), tx);
     timeout(REFLEXIVE_WAIT, async {
-        loop {
-            let current: Reflexive = *rx.borrow();
-            if let Some((addr, at)) = current
-                && at >= sent
-            {
-                return Some(addr);
-            }
-            if rx.changed().await.is_err() {
-                return None;
-            }
-        }
-    })
-    .await
-    .ok()
-    .flatten()
+        ep.pokes.send(relay, &RelayMsg::StunReq { tx }.encode()).await.ok()?;
+        reply.await.ok()
+    }).await.ok().flatten()
 }
 
 /// Aborts a background task when dropped — bounds the TURN keepalive to
@@ -356,7 +396,7 @@ impl Drop for AbortGuard {
 
 /// Deregisters a TURN route when dropped, across every return path (the
 /// token is decided inside the session, not the caller).
-struct TurnGuard(&'static P2pEndpoint, [u8; 16]);
+struct TurnGuard(Arc<P2pEndpoint>, [u8; 16]);
 impl Drop for TurnGuard {
     fn drop(&mut self) {
         self.0.turn.lock().unregister(&self.1);
@@ -369,7 +409,7 @@ type RouteGuards = (AbortGuard, TurnGuard);
 /// Returns the synthetic address quinn dials/accepts for it, plus the
 /// guards that tear the route down.
 fn open_turn_route(
-    ep: &'static P2pEndpoint, token: [u8; 16], relay: SocketAddr,
+    ep: Arc<P2pEndpoint>, token: [u8; 16], relay: SocketAddr,
 ) -> (SocketAddr, RouteGuards) {
     let synth = ep.turn.lock().register(token, relay);
     // Re-send the TurnAlloc every few seconds to keep the NAT mapping to
@@ -393,16 +433,22 @@ fn open_turn_route(
 /// Quinn egresses to the synth for the connection's whole life, so the
 /// route (and its keepalive) must outlive `run_session` — park the guards
 /// on a task bound to the connection.
-fn hold_route_while_open(conn: Connection, guards: Vec<RouteGuards>) {
+fn hold_route_while_open(
+    ep: Arc<P2pEndpoint>, conn: Connection, guards: Vec<RouteGuards>, tasks: Vec<AbortGuard>,
+) {
     RUNTIME.spawn(async move {
         conn.closed().await;
+        diagnostics::record(if ep.turn.lock().is_direct(conn.remote_address()) {
+            Event::DirectLost
+        } else { Event::RelayLost });
         drop(guards);
+        drop(tasks);
     });
 }
 
 /// Deregisters a session's expected inbound sources when dropped.
 struct InboundGuard {
-    ep:    &'static P2pEndpoint,
+    ep:    Arc<P2pEndpoint>,
     addrs: Vec<SocketAddr>,
     tx:    mpsc::UnboundedSender<quinn::Incoming>,
 }
@@ -415,7 +461,7 @@ impl Drop for InboundGuard {
 /// Wait for an inbound connection from one of `addrs` — the only sources this
 /// session's peer can dial from. Anything else stays with the router.
 fn expect_inbound(
-    ep: &'static P2pEndpoint, addrs: Vec<SocketAddr>,
+    ep: Arc<P2pEndpoint>, addrs: Vec<SocketAddr>,
 ) -> (mpsc::UnboundedReceiver<quinn::Incoming>, InboundGuard) {
     let (tx, rx) = mpsc::unbounded_channel();
     ep.inbound.lock().claim(&addrs, tx.clone());
@@ -427,9 +473,9 @@ fn expect_inbound(
 /// peer reuses the same chan, so the route is only removed if it is still
 /// ours.
 struct PokeGuard {
-    ep:   &'static P2pEndpoint,
+    ep:   Arc<P2pEndpoint>,
     chan: [u8; 8],
-    tx:   mpsc::UnboundedSender<Poke>,
+    tx:   mpsc::Sender<Poke>,
 }
 impl Drop for PokeGuard {
     fn drop(&mut self) {
@@ -457,7 +503,7 @@ impl Drop for OfferGuard {
 /// egress to direct. `set_direct` returning false means the route (and its
 /// connection) died first — nothing to upgrade.
 async fn punch_upgrade(
-    ep: &'static P2pEndpoint, mut poke_rx: mpsc::UnboundedReceiver<Poke>, key: DiscoKey,
+    ep: Arc<P2pEndpoint>, mut poke_rx: mpsc::Receiver<Poke>, key: DiscoKey,
     cands: Vec<SocketAddr>, token: [u8; 16], peer: [u8; 32],
 ) {
     // Accept the peer's datagrams at every address they reach us from, as
@@ -469,10 +515,14 @@ async fn punch_upgrade(
     };
     match punch::punch(&ep.pokes, &mut poke_rx, key, cands, PUNCH_TIMEOUT, accept_from).await {
         Some(addr) if ep.turn.lock().set_direct(&token, addr) => {
+            diagnostics::record(Event::DirectReady);
             log::info!("P2P[{}]: upgraded to direct {}", hex::encode(&peer[..4]), addr_short(addr));
         },
         Some(_) => {},
-        None => log::debug!("P2P[{}]: no direct path — staying relayed", hex::encode(&peer[..4])),
+        None => {
+            diagnostics::record(Event::PunchTimeout);
+            log::debug!("P2P[{}]: no direct path — staying relayed", hex::encode(&peer[..4]));
+        },
     }
 }
 
@@ -560,18 +610,22 @@ pub async fn connect_with(
         consent::Decision::RelayedOnly => Disclosure::RelayOnly,
         consent::Decision::Direct => want,
     };
-    if !CONNECTING.lock().insert(peer) {
-        bail!("{ALREADY_CONNECTING}");
+    let _guard = ConnectingGuard::acquire(peer)?;
+    let ep = endpoint()?;
+    let mut network = ep.network.subscribe();
+    let generation = *network.borrow_and_update();
+    anyhow::ensure!(generation == 0, "network changed before peer connection");
+    tokio::select! {
+        biased;
+        _ = network.changed() => bail!("network changed during peer connection"),
+        result = connect_inner(ep, generation, peer, disclosure, answering) => result,
     }
-    let result = connect_inner(peer, disclosure, answering).await;
-    CONNECTING.lock().remove(&peer);
-    result
 }
 
 async fn connect_inner(
+    ep: Arc<P2pEndpoint>, generation: u64,
     peer: [u8; 32], disclosure: Disclosure, answering: Option<[u8; 16]>,
 ) -> Result<PeerLink> {
-    let ep = endpoint()?;
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
     let chan = channel_for(&our_ipk, &peer);
 
@@ -581,14 +635,14 @@ async fn connect_inner(
     // comes with the offer). Each route has a guard: the poke route rides
     // with whichever task runs the punch, the offer listener with whichever
     // still reads offers.
-    let (poke_tx, poke_rx) = mpsc::unbounded_channel();
+    let (poke_tx, poke_rx) = mpsc::channel(64);
     ep.sessions.lock().insert(chan, poke_tx.clone());
-    let poke_guard = PokeGuard { ep, chan, tx: poke_tx };
+    let poke_guard = PokeGuard { ep: ep.clone(), chan, tx: poke_tx };
     let (offers, offer_tx) = signal::listen(peer);
     let offer_guard = OfferGuard { peer, tx: offer_tx };
 
     let session = Session {
-        ep,
+        ep: ep.clone(),
         peer,
         chan,
         id: rand_bytes::<16>(),
@@ -612,7 +666,19 @@ async fn connect_inner(
     };
     // Prove the link both ways (dialer pings, acceptor answers) so the connect
     // is self-verifying before we hand it out.
-    if let Err(e) = link.verify_roundtrip().await {
+    // Until publication this connection belongs to this attempt. A cancelled
+    // verify must close it and release its bridge/upgrade tasks too.
+    struct Unpublished(Option<Connection>);
+    impl Drop for Unpublished {
+        fn drop(&mut self) {
+            if let Some(conn) = self.0.take() { conn.close(0u32.into(), b"setup cancelled"); }
+        }
+    }
+    let mut pending = Unpublished(Some(link.conn.clone()));
+    if let Err(e) = timeout(VERIFY_TIMEOUT, link.verify_roundtrip()).await
+        .map_err(|_| anyhow!("peer verification timed out")).and_then(|r| r)
+    {
+        diagnostics::record(Event::VerificationFailed);
         log::warn!("P2P[{}]: link verify failed — {e}", hex::encode(&peer[..4]));
         link.conn.close(0u32.into(), b"verify failed");
         return Err(e);
@@ -626,7 +692,15 @@ async fn connect_inner(
         link.conn.close(0u32.into(), b"consent revoked");
         bail!("consent: revoked during connection setup");
     }
-    ep.links.lock().insert(peer, link.clone());
+    ep.links.lock().publish(generation, link.clone())?;
+    pending.0 = None;
+    diagnostics::record(Event::LinkReady);
+    let closed = link.conn.clone();
+    RUNTIME.spawn(async move {
+        closed.closed().await;
+        // An old connection closing must never evict its replacement.
+        ep.links.lock().remove_closed(&peer, closed.stable_id());
+    });
     // Both ends serve pulls for whatever they retain, so a file offered either
     // direction is fetchable over this one link.
     RUNTIME.spawn(crate::transfer::serve_link(link.clone()));
@@ -650,7 +724,8 @@ pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
     // a revoked one; drop a dead one. A separate get-then-remove could evict a
     // link a concurrent dialer just inserted.
     {
-        let mut links = ep.links.lock();
+        let mut state = ep.links.lock();
+        let links = &mut state.links;
         if let Some(l) = links.get(&peer).cloned() {
             if l.conn.close_reason().is_none() {
                 // Re-gate on reuse: a live QUIC link must not outlive consent.
@@ -659,7 +734,7 @@ pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
                     return Ok(l);
                 }
                 links.remove(&peer);
-                drop(links);
+                drop(state);
                 l.conn.close(0u32.into(), b"consent revoked");
                 bail!("consent: not permitted to connect to that peer");
             }
@@ -682,10 +757,11 @@ pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
 /// its link. ponytail: fixed-interval poll of the link cache; a shared
 /// dial-future would drop the wakeup latency, worth it only if cold-dial
 /// contention gets common.
-async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Result<PeerLink> {
+async fn wait_for_cached_link(ep: Arc<P2pEndpoint>, peer: [u8; 32]) -> Result<PeerLink> {
     let deadline = tokio::time::Instant::now() + SIGNAL_TIMEOUT + DIAL_TIMEOUT + ACCEPT_TIMEOUT;
     loop {
-        if let Some(l) = ep.links.lock().get(&peer).cloned()
+        anyhow::ensure!(*ep.network.borrow() == 0, "network changed while waiting for peer");
+        if let Some(l) = ep.links.lock().links.get(&peer).cloned()
             && l.conn.close_reason().is_none() && l.still_permitted()
         {
             return Ok(l);
@@ -696,7 +772,7 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
         // dial failed. Without this re-check a loser that sampled the cache just
         // before the winner's insert-then-clear would bail on a live link.
         if !CONNECTING.lock().contains(&peer) {
-            if let Some(l) = ep.links.lock().get(&peer).cloned()
+            if let Some(l) = ep.links.lock().links.get(&peer).cloned()
                 && l.conn.close_reason().is_none() && l.still_permitted()
             {
                 return Ok(l);
@@ -714,24 +790,47 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
 /// cascade, so a revoked contact's open QUIC connection dies with the pairing.
 /// Best-effort: a no-op if the endpoint was never built or no link is open.
 pub(crate) fn drop_link(peer: &[u8; 32]) {
-    if let Some(ep) = P2P.get() {
-        if let Some(link) = ep.links.lock().remove(peer) {
+    if let Some(ep) = P2P.lock().clone() {
+        if let Some(link) = ep.links.lock().links.remove(peer) {
             link.conn.close(0u32.into(), b"contact forgotten");
         }
     }
 }
 
+/// Restart attachment transport on the new default network. Existing bridge
+/// tokens bind exact source addresses, so reuse would strand a mobile peer.
+/// Fresh sessions allocate fresh tokens; the relay's admission policy stays
+/// intact. No endpoint is created just because Android reported a network.
+pub(crate) async fn network_changed() {
+    diagnostics::record(Event::NetworkChanged);
+    let retired = P2P.lock().take();
+    if let Some(ep) = retired {
+        let links = {
+            let mut state = ep.links.lock();
+            state.generation = state.generation.wrapping_add(1);
+            ep.reflexive.lock().invalidate();
+            ep.network.send_replace(state.generation);
+            std::mem::take(&mut state.links)
+        };
+        ep.endpoint.close(0u32.into(), b"network changed");
+        for (_, link) in links {
+            link.conn.close(0u32.into(), b"network changed");
+        }
+    }
+    crate::transfer::on_network_changed().await;
+}
+
 /// One connect attempt toward one peer: its identity on the wire, what it
 /// may disclose, and the routes it holds open while it runs.
 struct Session {
-    ep:          &'static P2pEndpoint,
+    ep:          Arc<P2pEndpoint>,
     peer:        [u8; 32],
     chan:        [u8; 8],
     id:          [u8; 16],
     /// The peer's session this one answers, if any.
     answering:   Option<[u8; 16]>,
     disclosure:  Disclosure,
-    poke_rx:     mpsc::UnboundedReceiver<Poke>,
+    poke_rx:     mpsc::Receiver<Poke>,
     poke_guard:  PokeGuard,
     offers:      mpsc::UnboundedReceiver<Offer>,
     offer_guard: OfferGuard,
@@ -758,10 +857,11 @@ impl Session {
     }
 
     async fn run(mut self) -> Result<(PeerLink, &'static str)> {
-        let ep = self.ep;
+        let ep = self.ep.clone();
         let peer = self.peer;
         let disclosure = self.disclosure;
         let direct = disclosure == Disclosure::Direct;
+        if !direct { diagnostics::record(Event::RelayOnlyPolicy); }
         let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
 
         // Publish our candidates (local + reflexive), the relay whose bridge
@@ -771,7 +871,7 @@ impl Session {
         // only the punch waits on the peer's candidates. A relay-only
         // session publishes the relay alone: its address is the relay's,
         // ours stays private.
-        let reflexive = if direct { refresh_reflexive(ep).await } else { None };
+        let reflexive = if direct { refresh_reflexive(ep.clone()).await } else { None };
         let our_relay = assist_relay();
         let my_token = rand_bytes::<16>();
         let my_disco_key = rand_bytes::<32>();
@@ -791,7 +891,12 @@ impl Session {
             token:         my_token,
             disco_key:     my_disco_key,
         };
-        signal::send_offer(peer, &mine).await?;
+        if let Err(e) = timeout(SIGNAL_TIMEOUT, signal::send_offer(peer, &mine)).await
+            .map_err(|_| anyhow!("sending peer offer timed out")).and_then(|r| r)
+        {
+            diagnostics::record(Event::SignalingFailed);
+            return Err(e);
+        }
 
         let dialer = our_ipk < peer;
 
@@ -800,11 +905,12 @@ impl Session {
             // round trip; the punch runs behind it and upgrades the socket's
             // egress in place when a direct path validates.
             log::info!("P2P[{}]: dialer, connecting via relay bridge", self.short());
-            let (synth, guards) = open_turn_route(ep, my_token, tr);
+            let (synth, guards) = open_turn_route(ep.clone(), my_token, tr);
             let key = DiscoKey::new(&my_disco_key, self.chan);
             let Session { poke_rx, poke_guard, offer_guard, mut offers, id, answering, .. } = self;
             let short = hex::encode(&peer[..4]);
-            RUNTIME.spawn(async move {
+            let upgrade_ep = ep.clone();
+            let upgrade = AbortGuard(RUNTIME.spawn(async move {
                 let _guards = (poke_guard, offer_guard);
                 let deadline = tokio::time::Instant::now() + SIGNAL_TIMEOUT;
                 let offer = loop {
@@ -822,32 +928,38 @@ impl Session {
                     // attempt is all they need to join it.
                     if offer.in_reply_to.is_none() && answering.is_none() {
                         let reply = Offer { in_reply_to: Some(offer.session), ..mine.clone() };
-                        if let Err(e) = signal::send_offer(peer, &reply).await {
+                        if let Err(e) = timeout(SIGNAL_TIMEOUT, signal::send_offer(peer, &reply)).await
+                            .map_err(|_| anyhow!("crossing peer offer timed out")).and_then(|r| r) {
                             log::debug!("P2P[{short}]: reply to a crossing offer failed — {e}");
                         }
                     }
                     break offer;
                 };
-                if !direct {
+                if !direct || offer.candidates.is_empty() {
+                    if direct { diagnostics::record(Event::MissingCandidates); }
                     return;
                 }
                 log::info!(
                     "P2P[{short}]: peer offers [{}], punching in background",
                     addrs_short(&offer.candidates)
                 );
-                punch_upgrade(ep, poke_rx, key, offer.candidates, my_token, peer).await;
-            });
+                punch_upgrade(upgrade_ep, poke_rx, key, offer.candidates, my_token, peer).await;
+            }));
             let conn = timeout(DIAL_TIMEOUT, ep.endpoint.connect(synth, PEER_SNI)?)
                 .await
-                .map_err(|_| anyhow!("bridge dial timed out after {}s", DIAL_TIMEOUT.as_secs()))??;
-            hold_route_while_open(conn.clone(), vec![guards]);
+                .map_err(|_| anyhow!("bridge dial timed out after {}s", DIAL_TIMEOUT.as_secs()))
+                .and_then(|r| r.map_err(Into::into))
+                .inspect_err(|_| diagnostics::record(Event::HandshakeFailed))?;
+            hold_route_while_open(ep.clone(), conn.clone(), vec![guards], vec![upgrade]);
             return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "relay"));
         }
 
         // Both remaining roles need the peer's offer first: the no-relay dialer
         // for the punch targets, the acceptor for the dialer's secrets.
-        let offer =
-            self.next_offer().await.ok_or_else(|| anyhow!("timed out waiting for peer candidates"))?;
+        let offer = self.next_offer().await.ok_or_else(|| {
+            diagnostics::record(Event::SignalingFailed);
+            anyhow!("timed out waiting for peer candidates")
+        })?;
         log::info!(
             "P2P[{}]: {}, peer offers [{}]",
             self.short(),
@@ -872,11 +984,18 @@ impl Session {
                     |_| {},
                 )
                 .await
-                .ok_or_else(|| anyhow!("no relay and no direct path"))?;
+                .ok_or_else(|| {
+                    diagnostics::record(Event::PunchTimeout);
+                    anyhow!("no relay and no direct path")
+                })?;
             log::info!("P2P[{}]: hole punched, dialing {}", self.short(), addr_short(addr));
             let conn = timeout(DIAL_TIMEOUT, ep.endpoint.connect(addr, PEER_SNI)?)
                 .await
-                .map_err(|_| anyhow!("direct dial timed out after {}s", DIAL_TIMEOUT.as_secs()))??;
+                .map_err(|_| anyhow!("direct dial timed out after {}s", DIAL_TIMEOUT.as_secs()))
+                .and_then(|r| r.map_err(Into::into))
+                .inspect_err(|_| diagnostics::record(Event::HandshakeFailed))?;
+            diagnostics::record(Event::DirectReady);
+            hold_route_while_open(ep.clone(), conn.clone(), vec![], vec![]);
             return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "direct"));
         }
 
@@ -888,14 +1007,16 @@ impl Session {
         let key = DiscoKey::new(&offer.disco_key, self.chan);
         let token = offer.token;
         let mut routes: Vec<RouteGuards> = Vec::new();
+        let mut bridged_tokens = HashSet::new();
         let mut sources: Vec<SocketAddr> = Vec::new();
         match offer.relay {
             // Bridged, the dialer's packets reach quinn labelled with the
             // token's synthetic address, and only the holder of that MLS-
             // carried token can produce it.
             Some(tr) => {
-                let (synth, guards) = open_turn_route(ep, token, tr);
+                let (synth, guards) = open_turn_route(ep.clone(), token, tr);
                 routes.push(guards);
+                bridged_tokens.insert(token);
                 sources.push(synth);
             },
             // Direct, the dialer arrives from one of its own candidates.
@@ -903,21 +1024,23 @@ impl Session {
             None => bail!("relay required for this peer"),
         }
         if sources.is_empty() {
+            diagnostics::record(Event::MissingCandidates);
             bail!("peer offers neither a relay nor candidates");
         }
         // Registering exactly that set is what keeps someone else's inbound
         // connection out of this peer's link slot.
-        let (mut inbound, mut inbound_guard) = expect_inbound(ep, sources);
+        let (mut inbound, mut inbound_guard) = expect_inbound(ep.clone(), sources);
 
         let Session { poke_rx, poke_guard, mut offers, offer_guard, id, answering, .. } = self;
         let short = hex::encode(&peer[..4]);
         let peer_cands = offer.candidates.clone();
-        RUNTIME.spawn(async move {
+        let upgrade_ep = ep.clone();
+        let upgrade = AbortGuard(RUNTIME.spawn(async move {
             let _poke_guard = poke_guard;
-            if direct {
-                punch_upgrade(ep, poke_rx, key, peer_cands, token, peer).await;
+            if direct && !peer_cands.is_empty() {
+                punch_upgrade(upgrade_ep, poke_rx, key, peer_cands, token, peer).await;
             }
-        });
+        }));
         log::info!("P2P[{short}]: acceptor waiting for inbound");
         let deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
         let incoming = loop {
@@ -933,8 +1056,12 @@ impl Session {
                     if !again.matches(id, answering, now_ms()) || again.token == token {
                         continue;
                     }
-                    if let Some(tr) = again.relay {
-                        let (synth, guards) = open_turn_route(ep, again.token, tr);
+                    // A retry offer may arrive repeatedly; only a small
+                    // bounded set of distinct bridge tokens may own work.
+                    if let Some(tr) = again.relay
+                        && bridged_tokens.len() < 3 && bridged_tokens.insert(again.token)
+                    {
+                        let (synth, guards) = open_turn_route(ep.clone(), again.token, tr);
                         routes.push(guards);
                         ep.inbound.lock().claim(&[synth], inbound_guard.tx.clone());
                         inbound_guard.addrs.push(synth);
@@ -958,7 +1085,71 @@ impl Session {
                 anyhow!("inbound handshake timed out after {}s", ACCEPT_TIMEOUT.as_secs())
             })??;
         drop(inbound_guard);
-        hold_route_while_open(conn.clone(), routes);
+        hold_route_while_open(ep.clone(), conn.clone(), routes, vec![upgrade]);
         Ok((PeerLink { conn, dialer: false, disclosure, ipk: peer }, "inbound"))
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_attempt_releases_peer_slot_and_background_work() {
+        let peer = [0xe8; 32];
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let (finished, done) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _attempt = ConnectingGuard::acquire(peer).unwrap();
+            let _background = AbortGuard(tokio::spawn(async move {
+                let _finished = finished;
+                std::future::pending::<()>().await;
+            }));
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        received.await.unwrap();
+        assert!(ConnectingGuard::acquire(peer).is_err());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(timeout(Duration::from_secs(1), done).await.unwrap().is_err(), "background task leaked");
+        assert!(ConnectingGuard::acquire(peer).is_ok(), "cancelled attempt held the peer slot");
+    }
+
+    async fn pair() -> (Endpoint, Endpoint, Connection, Connection) {
+        use std::net::Ipv4Addr;
+        let _ = common::quic::config::setup_crypto_provider();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0xe9; 32]);
+        let (server, client) = crate::quic::peer_config::test_peer_configs(&key).unwrap();
+        let remote = Endpoint::server(server, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let mut local = Endpoint::client((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        local.set_default_client_config(client);
+        let (a, b) = tokio::join!(
+            async { local.connect(remote.local_addr().unwrap(), PEER_SNI).unwrap().await.unwrap() },
+            async { remote.accept().await.unwrap().await.unwrap() },
+        );
+        (local, remote, a, b)
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_publish_or_remove_a_replacement_link() {
+        timeout(Duration::from_secs(5), async {
+            let (_ep_a, _ep_b, old, _remote_old) = pair().await;
+            let (_ep_c, _ep_d, current, _remote_current) = pair().await;
+            let peer = [0xea; 32];
+            let mut state = LinkState { generation: 0, links: HashMap::new() };
+            state.publish(0, test_link(old.clone(), peer)).unwrap();
+            state.publish(0, test_link(current.clone(), peer)).unwrap();
+            assert!(old.close_reason().is_some(), "replacement left the old connection alive");
+            state.generation = 1;
+            assert!(state.publish(0, test_link(old.clone(), peer)).is_err());
+            assert!(old.close_reason().is_some(), "stale setup must close its own connection");
+            state.remove_closed(&peer, old.stable_id());
+            assert_eq!(state.links[&peer].conn.stable_id(), current.stable_id());
+            assert!(current.close_reason().is_none(), "old cleanup closed the replacement");
+            current.close(0u32.into(), b"test done");
+            state.remove_closed(&peer, current.stable_id());
+            assert!(state.links.is_empty());
+        }).await.unwrap();
     }
 }

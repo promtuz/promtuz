@@ -2,10 +2,14 @@
 //! (`retention`) and what a receiver has partially pulled (`partials`), plus
 //! the on-disk location of the partial bytes.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
+use tokio_util::sync::CancellationToken;
 
 /// Download states for a `partials` row.
 pub const PENDING: u8 = 0;
@@ -57,8 +61,9 @@ impl Partial {
     }
 }
 
-const MIGRATION_ARRAY: &[M] = &[M::up(
-    r#"--sql
+const MIGRATION_ARRAY: &[M] = &[
+    M::up(
+        r#"--sql
         CREATE TABLE retention (
           file_id     BLOB PRIMARY KEY CHECK(length(file_id) = 32),
           path        TEXT NOT NULL,
@@ -79,7 +84,13 @@ const MIGRATION_ARRAY: &[M] = &[M::up(
           updated_at  INTEGER NOT NULL
         );
     "#,
-)];
+    ),
+    M::up(
+        "ALTER TABLE partials ADD COLUMN last_wake_at INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE partials ADD COLUMN retry_after INTEGER NOT NULL DEFAULT 0;",
+    ),
+    M::up("ALTER TABLE partials ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 0;"),
+];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub static TRANSFERS_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
@@ -98,12 +109,7 @@ pub fn partial_path(file_id: &[u8; 32]) -> String {
 }
 
 pub fn retention_put(
-    file_id: &[u8; 32],
-    path: &str,
-    size: u64,
-    chunk_size: u32,
-    manifest: &[u8],
-    expires_at: u64,
+    file_id: &[u8; 32], path: &str, size: u64, chunk_size: u32, manifest: &[u8], expires_at: u64,
 ) -> rusqlite::Result<()> {
     TRANSFERS_DB.lock().execute(
         "INSERT OR REPLACE INTO retention
@@ -167,14 +173,136 @@ pub fn partial_get(file_id: &[u8; 32]) -> Option<Partial> {
 }
 
 pub fn partial_put(p: &Partial) -> rusqlite::Result<()> {
-    TRANSFERS_DB.lock().execute(
-        "INSERT OR REPLACE INTO partials
+    partial_put_locked(&TRANSFERS_DB.lock(), p)
+}
+
+fn partial_put_locked(conn: &Connection, p: &Partial) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO partials
            (file_id, source_ipk, total, chunk_size, manifest, have, state, path, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(file_id) DO UPDATE SET source_ipk=excluded.source_ipk,
+           total=excluded.total, chunk_size=excluded.chunk_size, manifest=excluded.manifest,
+           have=excluded.have, state=excluded.state, path=excluded.path, updated_at=excluded.updated_at",
         params![
             p.file_id, p.source_ipk, p.total, p.chunk_size, p.manifest, p.have, p.state, p.path,
             p.updated_at
         ],
+    )?;
+    Ok(())
+}
+
+/// One live receiver generation. Deletion cancels it under TRANSFERS_DB, the
+/// same lock used to open files and publish progress. A late worker can neither
+/// recreate an unlinked path nor reinsert its row, even if the same file is
+/// offered again before that worker observes cancellation.
+static RECEIVERS: Lazy<Mutex<HashMap<[u8; 32], Arc<CancellationToken>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) struct ReceiverLease {
+    file_id: [u8; 32],
+    pub(crate) cancel: Arc<CancellationToken>,
+}
+
+impl Drop for ReceiverLease {
+    fn drop(&mut self) {
+        let mut receivers = RECEIVERS.lock();
+        if receivers.get(&self.file_id).is_some_and(|token| Arc::ptr_eq(token, &self.cancel)) {
+            receivers.remove(&self.file_id);
+        }
+    }
+}
+
+pub(crate) fn receiver_lease(file_id: [u8; 32]) -> ReceiverLease {
+    let _db = TRANSFERS_DB.lock();
+    let cancel = Arc::new(CancellationToken::new());
+    if let Some(previous) = RECEIVERS.lock().insert(file_id, cancel.clone()) {
+        previous.cancel();
+    }
+    ReceiverLease { file_id, cancel }
+}
+
+pub(crate) fn partial_put_live(p: &Partial, lease: &ReceiverLease) -> anyhow::Result<()> {
+    let db = TRANSFERS_DB.lock();
+    ensure_live(lease)?;
+    partial_put_locked(&db, p)?;
+    Ok(())
+}
+
+pub(crate) fn open_partial(lease: &ReceiverLease, path: &str) -> anyhow::Result<std::fs::File> {
+    let _db = TRANSFERS_DB.lock();
+    ensure_live(lease)?;
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(path)?)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("attachment download cancelled")]
+pub(crate) struct Cancelled;
+
+fn ensure_live(lease: &ReceiverLease) -> anyhow::Result<()> {
+    if lease.cancel.is_cancelled() {
+        return Err(Cancelled.into());
+    }
+    Ok(())
+}
+
+/// Claim before sending, even when a wake fails: reconnects must not fan out
+/// repeated push traffic while the sender stays offline. State/progress updates
+/// deliberately leave this timestamp alone. Rate-limit by sender across all
+/// their pending files: one reverse-wake establishes the link for every offer.
+pub(crate) fn claim_wake(file_id: &[u8; 32], now: u64, backoff: u64) -> rusqlite::Result<bool> {
+    let mut db = TRANSFERS_DB.lock();
+    let tx = db.transaction()?;
+    let claimed = tx.execute(
+        "UPDATE partials SET last_wake_at = ?2 WHERE file_id = ?1 AND state = ?4
+         AND NOT EXISTS (
+           SELECT 1 FROM partials recent
+            WHERE recent.source_ipk = partials.source_ipk
+              AND recent.last_wake_at > 0 AND recent.last_wake_at > ?3
+         )",
+        params![file_id, now, now.saturating_sub(backoff), HELD],
+    )? != 0;
+    if claimed {
+        // A single dial-back can serve every waiting file from this sender.
+        // Grant one cooldown override, not one new budget on every ready link.
+        tx.execute(
+            "UPDATE partials SET wake_pending=1 WHERE state=?2 AND source_ipk =
+            (SELECT source_ipk FROM partials WHERE file_id=?1)",
+            params![file_id, HELD],
+        )?;
+    }
+    tx.commit()?;
+    Ok(claimed)
+}
+
+pub(crate) fn claim_ready_retry(file_id: &[u8; 32]) -> rusqlite::Result<bool> {
+    Ok(TRANSFERS_DB.lock().execute(
+        "UPDATE partials SET wake_pending=0
+        WHERE file_id=?1 AND state=?2 AND wake_pending=1",
+        params![file_id, HELD],
+    )? != 0)
+}
+
+pub(crate) fn retry_after(file_id: &[u8; 32]) -> u64 {
+    TRANSFERS_DB
+        .lock()
+        .query_row("SELECT retry_after FROM partials WHERE file_id = ?1", params![file_id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .expect("retry read")
+        .unwrap_or(0)
+}
+
+pub(crate) fn defer_retry(file_id: &[u8; 32], until: u64) -> rusqlite::Result<()> {
+    TRANSFERS_DB.lock().execute(
+        "UPDATE partials SET retry_after = ?2 WHERE file_id = ?1",
+        params![file_id, until],
     )?;
     Ok(())
 }
@@ -188,22 +316,32 @@ pub fn partial_put(p: &Partial) -> rusqlite::Result<()> {
 pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     let conn = TRANSFERS_DB.lock();
     let mut stmt = conn
-        .prepare("SELECT path FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4")
+        .prepare(
+            "SELECT file_id, path FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4",
+        )
         .expect("gc_dead_partials prepare");
-    let paths: Vec<String> = stmt
-        .query_map(params![FAILED, HELD, CONNECTING, older_than as i64], |r| r.get(0))
+    let rows: Vec<([u8; 32], String)> = stmt
+        .query_map(params![FAILED, HELD, CONNECTING, older_than as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .expect("gc_dead_partials query")
         .collect::<rusqlite::Result<_>>()
         .expect("gc_dead_partials rows");
     drop(stmt);
+    // A live receiver owns its partial even while waiting to retry. Do not
+    // reap it under an active worker; deletion uses explicit cancellation.
+    let active = RECEIVERS.lock();
+    let paths: Vec<String> = rows
+        .into_iter()
+        .filter(|(fid, _)| !active.contains_key(fid))
+        .map(|(_, path)| path)
+        .collect();
+    drop(active);
     for p in &paths {
         let _ = std::fs::remove_file(p);
+        conn.execute("DELETE FROM partials WHERE path = ?1", params![p])
+            .expect("gc_dead_partials delete");
     }
-    conn.execute(
-        "DELETE FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4",
-        params![FAILED, HELD, CONNECTING, older_than as i64],
-    )
-    .expect("gc_dead_partials delete");
     paths
 }
 
@@ -243,6 +381,11 @@ pub fn forget_retention(file_id: &[u8; 32]) {
 
 fn forget_row(table: &str, file_id: &[u8; 32], fallback: Option<String>) {
     let conn = TRANSFERS_DB.lock();
+    if table == "partials"
+        && let Some(cancel) = RECEIVERS.lock().get(file_id)
+    {
+        cancel.cancel();
+    }
     // The row's own `path` is what `get_media` hands out as `local_path`, so
     // that is the file to remove. Only "no such row" is a plain miss; a read
     // that failed says so. Either way a `.part`'s canonical location is where
@@ -259,7 +402,9 @@ fn forget_row(table: &str, file_id: &[u8; 32], fallback: Option<String>) {
     // The row goes first. A DELETE that failed after the unlink would leave a
     // row standing over bytes that are gone; a row dropped while the file
     // survives only leaks disk, which the doc already accepts.
-    if let Err(e) = conn.execute(&format!("DELETE FROM {table} WHERE file_id = ?1"), params![file_id]) {
+    if let Err(e) =
+        conn.execute(&format!("DELETE FROM {table} WHERE file_id = ?1"), params![file_id])
+    {
         log::warn!("transfer: {table} row for a forgotten file survives: {e}");
     }
     if let Some(path) = path
@@ -302,6 +447,147 @@ pub fn incomplete_file_ids_for(peer: &[u8; 32]) -> Vec<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_preserves_prefix_and_updates_preserve_retry_history() {
+        let mut db = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..1]).to_latest(&mut db).unwrap();
+        let mut p = Partial {
+            file_id: [0xc1; 32],
+            source_ipk: [0xc2; 32],
+            total: 100,
+            chunk_size: 50,
+            manifest: Some(vec![1]),
+            have: 1,
+            state: HELD,
+            path: "/not-opened".into(),
+            updated_at: 100,
+        };
+        partial_put_locked(&db, &p).unwrap();
+        MIGRATIONS.to_latest(&mut db).unwrap();
+        let initial: (u32, u64, u64) = db
+            .query_row("SELECT have, last_wake_at, retry_after FROM partials", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(initial, (1, 0, 0));
+        db.execute("UPDATE partials SET last_wake_at=110, retry_after=170", []).unwrap();
+        p.state = CONNECTING;
+        p.updated_at = 120;
+        partial_put_locked(&db, &p).unwrap();
+        let history: (u64, u64) = db
+            .query_row("SELECT last_wake_at, retry_after FROM partials", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(history, (110, 170), "UI transitions cannot reset wake/retry history");
+    }
+
+    #[test]
+    fn deletion_cancels_old_generation_without_poisoning_new_offer() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let fid = [0xc3; 32];
+        let p = Partial {
+            file_id: fid,
+            source_ipk: [0xc4; 32],
+            total: 100,
+            chunk_size: 50,
+            manifest: None,
+            have: 1,
+            state: ACTIVE,
+            path: partial_path(&fid),
+            updated_at: 9000,
+        };
+        let old = receiver_lease(fid);
+        partial_put_live(&p, &old).unwrap();
+        let _open = open_partial(&old, &p.path).unwrap();
+        forget_partial(&fid);
+        assert!(old.cancel.is_cancelled());
+        assert!(partial_put_live(&p, &old).is_err());
+        assert!(open_partial(&old, &p.path).is_err());
+        assert!(!std::path::Path::new(&p.path).exists());
+        assert!(partial_get(&fid).is_none());
+        let new = receiver_lease(fid);
+        partial_put_live(&p, &new).unwrap();
+        drop(old);
+        forget_partial(&fid);
+        assert!(new.cancel.is_cancelled(), "old lease drop must not detach the new lease");
+        assert!(partial_put_live(&p, &new).is_err());
+    }
+
+    #[test]
+    fn wake_claim_survives_connecting_and_is_atomic() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let fid = [0xc5; 32];
+        let lease = receiver_lease(fid);
+        let peer = [0xc6; 32];
+        super::super::set_state(&fid, peer, HELD, &lease).unwrap();
+        // A previous run may have left a timestamp; reset this fixture only.
+        TRANSFERS_DB
+            .lock()
+            .execute("UPDATE partials SET last_wake_at=0 WHERE file_id=?1", params![fid])
+            .unwrap();
+        assert!(claim_wake(&fid, 100, 60).unwrap());
+        super::super::set_state(&fid, peer, CONNECTING, &lease).unwrap();
+        assert!(!claim_wake(&fid, 101, 60).unwrap());
+        assert!(!claim_wake(&fid, 159, 60).unwrap());
+        super::super::set_state(&fid, peer, HELD, &lease).unwrap();
+        assert!(claim_wake(&fid, 160, 60).unwrap());
+        assert!(!claim_wake(&fid, 160, 60).unwrap());
+        let sibling = [0xc7; 32];
+        let sibling_lease = receiver_lease(sibling);
+        super::super::set_state(&sibling, peer, HELD, &sibling_lease).unwrap();
+        assert!(
+            !claim_wake(&sibling, 161, 60).unwrap(),
+            "one wake covers this sender's other files"
+        );
+        forget_partial(&fid);
+        forget_partial(&sibling);
+    }
+
+    #[test]
+    fn ready_link_cannot_reset_exhausted_files_indefinitely() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let peer = [0xca; 32];
+        let a = [0xcb; 32];
+        let b = [0xcc; 32];
+        forget_partial(&a);
+        forget_partial(&b);
+        let lease_a = receiver_lease(a);
+        let lease_b = receiver_lease(b);
+        for (fid, lease) in [(a, &lease_a), (b, &lease_b)] {
+            super::super::set_state(&fid, peer, HELD, lease).unwrap();
+            defer_retry(&fid, 160).unwrap();
+        }
+        assert!(!claim_ready_retry(&a).unwrap());
+        assert!(claim_wake(&a, 100, 60).unwrap());
+        assert!(claim_ready_retry(&a).unwrap());
+        assert!(claim_ready_retry(&b).unwrap(), "one wake enables other held files too");
+        for _ in 0..5 {
+            assert!(!claim_ready_retry(&a).unwrap());
+            assert!(!claim_ready_retry(&b).unwrap());
+            assert!(!claim_wake(&b, 102, 60).unwrap());
+        }
+        // Even after the cooldown expires, a sibling's internally-created
+        // ready link cannot replenish either file's exhausted attempt budget.
+        defer_retry(&a, 0).unwrap();
+        defer_retry(&b, 0).unwrap();
+        assert!(!claim_ready_retry(&a).unwrap());
+        assert!(!claim_ready_retry(&b).unwrap());
+        super::super::set_state(&a, peer, ACTIVE, &lease_a).unwrap();
+        assert!(
+            !claim_wake(&a, 200, 60).unwrap(),
+            "an older held worker cannot wake an active successor"
+        );
+        forget_partial(&a);
+        forget_partial(&b);
+    }
 
     #[test]
     fn incomplete_file_ids_lists_held_and_active() {

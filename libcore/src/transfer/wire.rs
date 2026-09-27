@@ -5,6 +5,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 256 * 1024;
+// Existing postcard encodings occupy129 bytes (Auth) and at most37 (Pull).
+// These limits prevent parallel unauthenticated streams allocating manifests'
+// much larger buffer allowance before identity/request validation.
+pub(crate) const AUTH_FRAME_LIMIT: usize = 256;
+pub(crate) const PULL_FRAME_LIMIT: usize = 64;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Manifest {
@@ -84,6 +89,10 @@ pub struct Auth {
 /// (a manifest this large already describes a multi-TB file).
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+#[error("invalid transfer frame: {0}")]
+pub(crate) struct InvalidFrame(pub(crate) String);
+
 pub async fn write_frame<T: Serialize>(w: &mut quinn::SendStream, v: &T) -> Result<()> {
     let bytes = postcard::to_allocvec(v)?;
     anyhow::ensure!(bytes.len() <= MAX_FRAME, "frame too large");
@@ -93,13 +102,21 @@ pub async fn write_frame<T: Serialize>(w: &mut quinn::SendStream, v: &T) -> Resu
 }
 
 pub async fn read_frame<T: DeserializeOwned>(r: &mut quinn::RecvStream) -> Result<T> {
+    read_frame_limited(r, MAX_FRAME).await
+}
+
+pub(crate) async fn read_frame_limited<T: DeserializeOwned>(
+    r: &mut quinn::RecvStream, limit: usize,
+) -> Result<T> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let n = u32::from_le_bytes(len) as usize;
-    anyhow::ensure!(n <= MAX_FRAME, "frame too large");
+    if n > limit.min(MAX_FRAME) {
+        return Err(InvalidFrame("frame too large".into()).into());
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf).await?;
-    Ok(postcard::from_bytes(&buf)?)
+    postcard::from_bytes(&buf).map_err(|e| InvalidFrame(e.to_string()).into())
 }
 
 #[cfg(test)]
@@ -146,15 +163,14 @@ mod tests {
 
     #[test]
     fn frame_types_roundtrip_through_postcard() {
+        let max_pull = Pull { file_id: [7u8; 32], have: u32::MAX };
+        assert_eq!(postcard::to_allocvec(&max_pull).unwrap().len(), 37);
+        assert!(postcard::to_allocvec(&max_pull).unwrap().len() <= PULL_FRAME_LIMIT);
         let pull = Pull { file_id: [7u8; 32], have: 3 };
         let got: Pull = postcard::from_bytes(&postcard::to_allocvec(&pull).unwrap()).unwrap();
         assert_eq!(pull, got);
 
-        let manifest = Manifest {
-            total_size: 1,
-            chunk_size: 1,
-            chunks: vec![[1u8; 32]],
-        };
+        let manifest = Manifest { total_size: 1, chunk_size: 1, chunks: vec![[1u8; 32]] };
         let resp = ServeResp::Manifest(manifest);
         let got: ServeResp = postcard::from_bytes(&postcard::to_allocvec(&resp).unwrap()).unwrap();
         assert_eq!(resp, got);
@@ -164,6 +180,8 @@ mod tests {
         assert_eq!(gone, got);
 
         let auth = Auth { ipk: [1u8; 32], tls_pub: [2u8; 32], sig: [3u8; 64] };
+        assert_eq!(postcard::to_allocvec(&auth).unwrap().len(), 129);
+        assert!(postcard::to_allocvec(&auth).unwrap().len() <= AUTH_FRAME_LIMIT);
         let got: Auth = postcard::from_bytes(&postcard::to_allocvec(&auth).unwrap()).unwrap();
         assert_eq!(auth, got);
     }

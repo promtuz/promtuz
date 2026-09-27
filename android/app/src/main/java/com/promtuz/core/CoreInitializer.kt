@@ -1,5 +1,6 @@
 package com.promtuz.core
 
+import android.content.Context
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.security.KeyManager
 import com.promtuz.core.adapter.CoreEventBus
@@ -26,12 +27,14 @@ object CoreInitializer {
     private var started = false
 
     @Synchronized
-    fun start() {
+    fun start(context: Context) {
         if (started) return
         started = true
+        val app = context.applicationContext
         scope.launch {
             try {
                 ffiInit(KeyManager, CoreEventBus, BuildConfig.RESOLVER_SEEDS)
+                CoreNetworkMonitor.start(app)
             } catch (e: Exception) {
                 Timber.tag("CoreInitializer").e(e, "libcore init failed")
             }

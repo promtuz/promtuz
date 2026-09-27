@@ -121,25 +121,48 @@ fn init_inner(
 /// post-disconnect backoff against this so a reconnect fires immediately instead
 /// of waiting out the 2 s retry sleep.
 static FOREGROUND: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
-static FOREGROUND_PROBE: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static RELAY_PROBE: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 static TASK_REMOVED: AtomicBool = AtomicBool::new(false);
+static NETWORK_CHANGE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Client hook: call from the platform's app-foreground lifecycle event.
 #[uniffi::export]
 pub fn on_foreground() {
-    TASK_REMOVED.store(false, Ordering::Relaxed);
+    TASK_REMOVED.store(false, Ordering::SeqCst);
     // `notify_one` retains a permit when the relay loop has not started waiting.
     FOREGROUND.notify_one();
     crate::push::request_registration();
+    probe_relay_liveness(b"foreground liveness timeout");
+    apply_pending_network_change();
+}
+
+/// Client hook: the default network or its usable addresses/routes changed.
+/// Does not change foreground/presence state or undo an OS task removal.
+#[uniffi::export]
+pub fn on_network_changed() {
+    NETWORK_CHANGE_PENDING.store(true, Ordering::SeqCst);
+    if TASK_REMOVED.load(Ordering::SeqCst) { return; }
+    FOREGROUND.notify_one();
+    probe_relay_liveness(b"network change liveness timeout");
+    apply_pending_network_change();
+}
+
+fn apply_pending_network_change() {
+    if NETWORK_CHANGE_PENDING.swap(false, Ordering::SeqCst) {
+        RUNTIME.spawn(crate::p2p::network_changed());
+    }
+}
+
+fn probe_relay_liveness(close_reason: &'static [u8]) {
     // Probe the captured connection only. A delayed probe must never close its
     // replacement, and repeated lifecycle/network callbacks share one probe.
     let connection = crate::state::RELAY.read().as_ref().and_then(|r| r.connection.clone());
     if let Some(connection) = connection {
         RUNTIME.spawn(async move {
-            let Ok(_probe) = FOREGROUND_PROBE.try_lock() else { return };
+            let Ok(_probe) = RELAY_PROBE.try_lock() else { return };
             if connection.close_reason().is_some() { return; }
             if !relay_responds(&connection).await {
-                connection.close(0u32.into(), b"foreground liveness timeout");
+                connection.close(0u32.into(), close_reason);
                 FOREGROUND.notify_one();
             }
         });
@@ -175,7 +198,7 @@ async fn wait_to_retry(delay: Duration) {
 /// relay mark us offline immediately instead of waiting for idle timeout.
 #[uniffi::export]
 pub fn on_task_removed() {
-    TASK_REMOVED.store(true, Ordering::Relaxed);
+    TASK_REMOVED.store(true, Ordering::SeqCst);
     if let Some(relay) = crate::state::RELAY.read().as_ref() {
         if let Some(conn) = &relay.connection {
             conn.close(quinn::VarInt::from_u32(0), b"task removed");
