@@ -20,11 +20,14 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Context;
 use std::task::Poll;
+use std::task::Waker;
 
 use anyhow::Result;
 use common::proto::p2p_relay::RelayMsg;
+use common::quic::tunnel::Channel;
 use parking_lot::Mutex;
 use quinn::AsyncUdpSocket;
 use quinn::Endpoint;
@@ -58,7 +61,37 @@ pub type StunReply = (SocketAddr, [u8; 8], SocketAddr);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Egress {
     Relay { relay: SocketAddr, token: [u8; 16] },
+    Tcp,
     Direct { addr: SocketAddr },
+}
+
+#[derive(Default)]
+struct TcpRoute {
+    channel: Option<Arc<Channel>>,
+    active: bool,
+    established: bool,
+    started: bool,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for TcpRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpRoute")
+            .field("active", &self.active)
+            .field("established", &self.established)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TcpRoute {
+    fn drop(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.abort();
+        }
+        if let Some(channel) = &self.channel {
+            channel.close();
+        }
+    }
 }
 
 /// Maps between TURN bridge tokens and the synthetic peer addresses quinn
@@ -77,8 +110,12 @@ pub struct TurnRoutes {
     by_token: HashMap<[u8; 16], (SocketAddr, usize)>,
     /// Peer's punch-validated real address → synth, for the inbound relabel
     /// once a session goes direct.
-    by_real:  HashMap<SocketAddr, SocketAddr>,
-    next:     u32,
+    by_real: HashMap<SocketAddr, SocketAddr>,
+    relays: HashMap<[u8; 16], SocketAddr>,
+    tcp: HashMap<SocketAddr, TcpRoute>,
+    recv_waker: Option<Waker>,
+    recv_cursor: usize,
+    next: u32,
 }
 
 impl TurnRoutes {
@@ -99,17 +136,23 @@ impl TurnRoutes {
         );
         self.by_synth.insert(synth, Egress::Relay { relay, token });
         self.by_token.insert(token, (synth, 1));
+        self.relays.insert(token, relay);
+        self.tcp.insert(synth, TcpRoute::default());
         synth
     }
 
     pub fn unregister(&mut self, token: &[u8; 16]) {
-        if let Some((_, owners)) = self.by_token.get_mut(token) && *owners > 1 {
+        if let Some((_, owners)) = self.by_token.get_mut(token)
+            && *owners > 1
+        {
             *owners -= 1;
             return;
         }
         if let Some((synth, _)) = self.by_token.remove(token) {
             self.by_synth.remove(&synth);
             self.by_real.retain(|_, s| *s != synth);
+            self.relays.remove(token);
+            self.tcp.remove(&synth);
         }
     }
 
@@ -145,7 +188,12 @@ impl TurnRoutes {
 
     /// If `dest` is a synthetic address, where its quinn packets really go.
     fn egress(&self, dest: SocketAddr) -> Option<Egress> {
-        self.by_synth.get(&dest).copied()
+        match self.by_synth.get(&dest).copied() {
+            Some(Egress::Relay { .. }) if self.tcp.get(&dest).is_some_and(|r| r.active) => {
+                Some(Egress::Tcp)
+            },
+            route => route,
+        }
     }
 
     /// The synth for a peer's punch-validated real address, if any — the
@@ -160,8 +208,99 @@ impl TurnRoutes {
         self.by_token.get(token).map(|(synth, _)| *synth)
     }
 
+    fn synth_for_relay(&self, token: &[u8; 16], relay: SocketAddr) -> Option<SocketAddr> {
+        (self.relays.get(token).map(|a| super::reflexive::canonical(*a))
+            == Some(super::reflexive::canonical(relay)))
+        .then(|| self.synth_for(token))
+        .flatten()
+    }
+
+    pub(super) fn begin_tcp(
+        &mut self, token: &[u8; 16], synth: SocketAddr, relay: SocketAddr,
+    ) -> bool {
+        if self.synth_for_relay(token, relay) != Some(synth) {
+            return false;
+        }
+        let Some(route) = self.tcp.get_mut(&synth) else { return false };
+        if route.started {
+            return false;
+        }
+        route.started = true;
+        true
+    }
+
+    pub(super) fn own_tcp_worker(
+        &mut self, synth: SocketAddr, worker: tokio::task::JoinHandle<()>,
+    ) {
+        if let Some(route) = self.tcp.get_mut(&synth) {
+            route.worker = Some(worker);
+        } else {
+            worker.abort();
+        }
+    }
+
+    pub(super) fn needs_tcp(&self, synth: SocketAddr) -> bool {
+        matches!(self.by_synth.get(&synth), Some(Egress::Relay { .. }))
+            && self.tcp.get(&synth).is_some_and(|r| !r.established || r.active)
+    }
+
+    pub(super) fn install_tcp(&mut self, synth: SocketAddr, channel: Arc<Channel>) -> bool {
+        if !self.needs_tcp(synth) {
+            channel.close();
+            return false;
+        }
+        let route = self.tcp.get_mut(&synth).unwrap();
+        if route.channel.is_some() {
+            channel.close();
+            return false;
+        }
+        route.channel = Some(channel);
+        if let Some(waker) = self.recv_waker.take() {
+            waker.wake();
+        }
+        true
+    }
+
+    pub(super) fn tcp_active(&self, synth: SocketAddr) -> bool {
+        self.tcp.get(&synth).is_some_and(|r| r.active)
+    }
+
+    pub(super) fn established(&mut self, synth: SocketAddr) {
+        if let Some(route) = self.tcp.get_mut(&synth) {
+            route.established = true;
+        }
+    }
+
+    fn tcp_channel(&self, synth: SocketAddr) -> Option<Arc<Channel>> {
+        self.tcp.get(&synth)?.channel.clone()
+    }
+
+    pub(super) fn remove_tcp(&mut self, synth: SocketAddr, channel: &Arc<Channel>) {
+        if let Some(route) = self.tcp.get_mut(&synth)
+            && route.channel.as_ref().is_some_and(|c| Arc::ptr_eq(c, channel))
+        {
+            route.channel.take().unwrap().close();
+            if route.active {
+                super::diagnostics::record(super::diagnostics::Event::TcpRelayLost);
+            }
+            route.active = false;
+        }
+    }
+
+    fn accept_tcp(&mut self, synth: SocketAddr, channel: &Arc<Channel>) -> bool {
+        let Some(route) = self.tcp.get_mut(&synth) else { return false };
+        if !route.channel.as_ref().is_some_and(|c| Arc::ptr_eq(c, channel)) {
+            return false;
+        }
+        if !route.active {
+            super::diagnostics::record(super::diagnostics::Event::TcpRelayReady);
+            route.active = true;
+        }
+        true
+    }
+
     pub(super) fn is_direct(&self, addr: SocketAddr) -> bool {
-        !matches!(self.egress(addr), Some(Egress::Relay { .. }))
+        matches!(self.egress(addr), Some(Egress::Direct { .. }) | None)
     }
 }
 
@@ -183,21 +322,22 @@ impl PokeSender {
 /// stream.
 #[derive(Debug)]
 pub struct PunchSocket {
-    io:       Arc<UdpSocket>,
+    io: Arc<UdpSocket>,
     inbox_tx: mpsc::Sender<Poke>,
-    stun_tx:  mpsc::Sender<StunReply>,
-    turn:     Arc<Mutex<TurnRoutes>>,
+    stun_tx: mpsc::Sender<StunReply>,
+    turn: Arc<Mutex<TurnRoutes>>,
+    tcp_first: AtomicBool,
 }
 
 /// What one bound P2P socket yields: the socket for quinn, a poke sender,
 /// the inbound-poke stream, the relay STUN-echo stream, and the shared TURN
 /// routing table.
 pub struct Bound {
-    pub socket:  Arc<PunchSocket>,
-    pub pokes:   PokeSender,
-    pub inbox:   mpsc::Receiver<Poke>,
+    pub socket: Arc<PunchSocket>,
+    pub pokes: PokeSender,
+    pub inbox: mpsc::Receiver<Poke>,
     pub stun_rx: mpsc::Receiver<StunReply>,
-    pub turn:    Arc<Mutex<TurnRoutes>>,
+    pub turn: Arc<Mutex<TurnRoutes>>,
 }
 
 impl PunchSocket {
@@ -211,7 +351,13 @@ impl PunchSocket {
         let (stun_tx, stun_rx) = mpsc::channel(32);
         let turn = Arc::new(Mutex::new(TurnRoutes::default()));
         Ok(Bound {
-            socket: Arc::new(Self { io: io.clone(), inbox_tx, stun_tx, turn: turn.clone() }),
+            socket: Arc::new(Self {
+                io: io.clone(),
+                inbox_tx,
+                stun_tx,
+                turn: turn.clone(),
+                tcp_first: AtomicBool::new(false),
+            }),
             pokes: PokeSender { io },
             inbox,
             stun_rx,
@@ -228,28 +374,137 @@ impl AsyncUdpSocket for PunchSocket {
     fn try_send(&self, transmit: &udp::Transmit) -> io::Result<()> {
         // max_transmit_segments defaults to 1, so quinn never sets a GSO
         // segment_size — contents is a single datagram.
-        let egress = self.turn.lock().egress(transmit.destination);
+        let (egress, tcp) = {
+            let routes = self.turn.lock();
+            (routes.egress(transmit.destination), routes.tcp_channel(transmit.destination))
+        };
         let result = match egress {
             // TURN path: wrap the QUIC datagram so the relay forwards it to
             // the peer under this bridge's token.
             Some(Egress::Relay { relay, token }) => {
                 let framed = RelayMsg::TurnData { token, payload: transmit.contents }.encode();
                 log::trace!("P2P: TURN send {}B -> {}", transmit.contents.len(), addr_short(relay));
-                self.io.try_send_to(&framed, relay).map(|_| ())
+                let udp = self.io.try_send_to(&framed, relay).map(|_| ());
+                if udp.is_ok() {
+                    super::diagnostics::sent_datagram(true, transmit.contents.len());
+                }
+                // The authenticated bridge namespace cannot join a legacy UDP
+                // bridge. Until TCP ingress proves both peers joined, retain
+                // UDP egress too; a new client can still reach an old peer.
+                let tcp = tcp.map(|channel| channel.try_send(transmit.contents));
+                if tcp.as_ref().is_some_and(|result| result.is_ok()) {
+                    super::diagnostics::sent_datagram(true, transmit.contents.len());
+                    return Ok(());
+                }
+                return udp;
+            },
+            Some(Egress::Tcp) => match tcp {
+                Some(channel) => match channel.try_send(transmit.contents) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        // Quinn gives this multi-peer socket no destination
+                        // when polling writability. Waiting on one TCP queue
+                        // would stall unrelated peer connections, so shed the
+                        // datagram like UDP packet loss; QUIC owns retransmit
+                        // and congestion recovery. The queue remains bounded.
+                        super::diagnostics::dropped_tcp_datagram();
+                        return Ok(());
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                        self.turn.lock().remove_tcp(transmit.destination, &channel);
+                        // Failure belongs to one route, not the shared peer
+                        // endpoint. Drop this packet; QUIC recovery/reconnect
+                        // will retry through the remaining route.
+                        return Ok(());
+                    },
+                    result => result,
+                },
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "TCP route retired")),
             },
             // Upgraded: same synth for quinn, raw UDP underneath.
-            Some(Egress::Direct { addr }) => self.io.try_send_to(transmit.contents, addr).map(|_| ()),
+            Some(Egress::Direct { addr }) => {
+                self.io.try_send_to(transmit.contents, addr).map(|_| ())
+            },
             None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),
         };
         if result.is_ok() {
             super::diagnostics::sent_datagram(
-                matches!(egress, Some(Egress::Relay { .. })), transmit.contents.len(),
+                matches!(egress, Some(Egress::Relay { .. } | Egress::Tcp)),
+                transmit.contents.len(),
             );
         }
         result
     }
 
     fn poll_recv(
+        &self, cx: &mut Context, bufs: &mut [io::IoSliceMut<'_>], meta: &mut [udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        self.turn.lock().recv_waker = Some(cx.waker().clone());
+        // Alternate ready sources so neither bulk TCP nor UDP can starve the
+        // other. Every new channel installation wakes this receive poll.
+        let tcp_first = self.tcp_first.fetch_xor(true, Ordering::Relaxed);
+        if tcp_first && let Poll::Ready(result) = self.poll_tcp(cx, bufs, meta) {
+            return Poll::Ready(result);
+        }
+        if let Poll::Ready(result) = self.poll_udp(cx, bufs, meta) {
+            return Poll::Ready(result);
+        }
+        if !tcp_first {
+            return self.poll_tcp(cx, bufs, meta);
+        }
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+}
+
+impl PunchSocket {
+    fn poll_tcp(
+        &self, cx: &mut Context, bufs: &mut [io::IoSliceMut<'_>], meta: &mut [udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        let channels = {
+            let mut routes = self.turn.lock();
+            let mut channels: Vec<_> = routes
+                .tcp
+                .iter()
+                .filter_map(|(&synth, route)| route.channel.clone().map(|c| (synth, c)))
+                .collect();
+            if !channels.is_empty() {
+                let offset = routes.recv_cursor % channels.len();
+                channels.rotate_left(offset);
+                routes.recv_cursor = routes.recv_cursor.wrapping_add(1);
+            }
+            channels
+        };
+        for (synth, channel) in channels {
+            match channel.poll_recv(cx) {
+                Poll::Ready(Ok(packet)) => {
+                    if packet.is_empty() || packet.len() > bufs[0].len() {
+                        cx.waker().wake_by_ref();
+                        continue;
+                    }
+                    if !self.turn.lock().accept_tcp(synth, &channel) {
+                        continue;
+                    }
+                    bufs[0][..packet.len()].copy_from_slice(&packet);
+                    meta[0] = udp::RecvMeta {
+                        addr: synth,
+                        len: packet.len(),
+                        stride: packet.len(),
+                        ecn: None,
+                        dst_ip: None,
+                    };
+                    return Poll::Ready(Ok(1));
+                },
+                Poll::Ready(Err(_)) => self.turn.lock().remove_tcp(synth, &channel),
+                Poll::Pending => {},
+            }
+        }
+        Poll::Pending
+    }
+
+    fn poll_udp(
         &self, cx: &mut Context, bufs: &mut [io::IoSliceMut<'_>], meta: &mut [udp::RecvMeta],
     ) -> Poll<io::Result<usize>> {
         // Drain disco + TURN; return on the first real QUIC datagram (or
@@ -281,7 +536,7 @@ impl AsyncUdpSocket for PunchSocket {
                 None => None,
             };
             if let Some((token, plen)) = turn {
-                let Some(synth) = self.turn.lock().synth_for(&token) else { continue };
+                let Some(synth) = self.turn.lock().synth_for_relay(&token, src) else { continue };
                 // Present the bridged QUIC payload to quinn as if it came
                 // direct from the peer's synthetic address.
                 let off = len - plen;
@@ -303,10 +558,6 @@ impl AsyncUdpSocket for PunchSocket {
         cx.waker().wake_by_ref();
         Poll::Pending
     }
-
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.io.local_addr()
-    }
 }
 
 /// Registers write-readiness for quinn after a `try_send` WouldBlock.
@@ -324,10 +575,10 @@ impl UdpPoller for PokePoller {
 /// A freshly built P2P endpoint and the handles the session manager needs.
 pub struct BuiltEndpoint {
     pub endpoint: Endpoint,
-    pub pokes:    PokeSender,
-    pub inbox:    mpsc::Receiver<Poke>,
-    pub stun_rx:  mpsc::Receiver<StunReply>,
-    pub turn:     Arc<Mutex<TurnRoutes>>,
+    pub pokes: PokeSender,
+    pub inbox: mpsc::Receiver<Poke>,
+    pub stun_rx: mpsc::Receiver<StunReply>,
+    pub turn: Arc<Mutex<TurnRoutes>>,
 }
 
 /// Build the P2P endpoint on a fresh punch socket. Client and server
@@ -360,6 +611,31 @@ pub fn build_endpoint() -> Result<BuiltEndpoint> {
     })
 }
 
+/// Attachment integration tests supply their real authenticated outer pipe
+/// and identity keys, then exercise the production peer socket and ALPNs.
+#[cfg(test)]
+pub(crate) fn test_tcp_endpoint(
+    channel: Arc<Channel>, key: &ed25519_dalek::SigningKey, relay: SocketAddr, token: [u8; 16],
+) -> Result<(Endpoint, SocketAddr)> {
+    let bound = PunchSocket::bind((Ipv6Addr::LOCALHOST, 0).into())?;
+    let synth = bound.turn.lock().register(token, relay);
+    anyhow::ensure!(bound.turn.lock().install_tcp(synth, channel), "test TCP route failed");
+    let (server, client) = crate::quic::peer_config::test_peer_configs_with_protocols(
+        key,
+        super::protocol::offered_alpns(),
+    )?;
+    let mut config = EndpointConfig::default();
+    config.grease_quic_bit(false);
+    let mut endpoint = Endpoint::new_with_abstract_socket(
+        config,
+        Some(server),
+        bound.socket,
+        Arc::new(TokioRuntime),
+    )?;
+    endpoint.set_default_client_config(client);
+    Ok((endpoint, synth))
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -369,10 +645,10 @@ mod tests {
 
     fn empty_meta() -> udp::RecvMeta {
         udp::RecvMeta {
-            addr:   (Ipv4Addr::UNSPECIFIED, 0).into(),
-            len:    0,
+            addr: (Ipv4Addr::UNSPECIFIED, 0).into(),
+            len: 0,
             stride: 0,
-            ecn:    None,
+            ecn: None,
             dst_ip: None,
         }
     }
@@ -394,6 +670,58 @@ mod tests {
         r.unregister(&[1; 16]);
         assert_eq!(r.egress(s1), None);
         assert_eq!(r.synth_for(&[1; 16]), None);
+    }
+
+    #[test]
+    fn relay_ingress_requires_the_registered_source_even_after_direct_upgrade() {
+        let mut routes = TurnRoutes::default();
+        let relay: SocketAddr = "203.0.113.1:443".parse().unwrap();
+        let unrelated: SocketAddr = "203.0.113.2:443".parse().unwrap();
+        let token = [81; 16];
+        let synth = routes.register(token, relay);
+        assert_eq!(routes.synth_for_relay(&token, unrelated), None);
+        assert_eq!(routes.synth_for_relay(&token, relay), Some(synth));
+        assert_eq!(
+            routes.synth_for_relay(&token, "[::ffff:203.0.113.1]:443".parse().unwrap()),
+            Some(synth)
+        );
+        routes.set_direct(&token, "198.51.100.9:5080".parse().unwrap());
+        assert_eq!(routes.synth_for_relay(&token, unrelated), None);
+        assert_eq!(routes.synth_for_relay(&token, relay), Some(synth));
+    }
+
+    #[tokio::test]
+    async fn final_route_lease_cancels_setup_and_old_synth_cannot_replace_new_route() {
+        let mut routes = TurnRoutes::default();
+        let relay: SocketAddr = "203.0.113.3:443".parse().unwrap();
+        let token = [82; 16];
+        let synth = routes.register(token, relay);
+        assert!(routes.begin_tcp(&token, synth, relay));
+        assert!(!routes.begin_tcp(&token, synth, relay));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        routes.own_tcp_worker(
+            synth,
+            tokio::spawn(async move {
+                let _alive = alive_tx;
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            }),
+        );
+        started_rx.await.unwrap();
+        assert_eq!(routes.register(token, relay), synth);
+        routes.unregister(&token);
+        assert!(routes.needs_tcp(synth), "one lease must retain setup");
+        routes.unregister(&token);
+        tokio::time::timeout(Duration::from_secs(1), alive_rx).await.unwrap().unwrap_err();
+        let replacement = routes.register(token, relay);
+        assert_ne!(replacement, synth);
+        assert!(!routes.begin_tcp(&token, synth, relay));
+        assert!(routes.begin_tcp(&token, replacement, relay));
+        routes.established(synth);
+        assert!(routes.needs_tcp(replacement), "old completion cannot suppress new setup");
+        routes.established(replacement);
+        assert!(!routes.needs_tcp(replacement), "verified UDP link does not need TCP setup");
     }
 
     #[test]
@@ -450,8 +778,8 @@ mod tests {
         });
 
         // Disco-shaped → punch inbox, never quinn.
-        let poke = disco::DiscoKey::new(&[3u8; 32], [4; 8])
-            .seal(&disco::DiscoMsg::Ping { tx: [1; 8] });
+        let poke =
+            disco::DiscoKey::new(&[3u8; 32], [4; 8]).seal(&disco::DiscoMsg::Ping { tx: [1; 8] });
         a.send_to(&poke, b_addr).await.unwrap();
         let (src, got) = tokio::time::timeout(Duration::from_secs(1), inbox.recv())
             .await
@@ -522,10 +850,10 @@ mod tests {
                 if !list.contains(&src) && list.len() < 2 {
                     list.push(src);
                 }
-                if !list.contains(&src) { continue; }
-                if is_data
-                    && let Some(&dst) = list.iter().find(|&&a| a != src)
-                {
+                if !list.contains(&src) {
+                    continue;
+                }
+                if is_data && let Some(&dst) = list.iter().find(|&&a| a != src) {
                     let _ = relay.send_to(&buf[..n], dst).await;
                 }
             }
@@ -536,6 +864,12 @@ mod tests {
     /// A peer endpoint on a fresh punch socket (throwaway key — the verifier
     /// accepts any valid self-signed Ed25519 cert).
     fn peer_endpoint() -> (Endpoint, PokeSender, Arc<Mutex<TurnRoutes>>) {
+        let (endpoint, pokes, routes, _) = peer_endpoint_with_socket();
+        (endpoint, pokes, routes)
+    }
+
+    fn peer_endpoint_with_socket()
+    -> (Endpoint, PokeSender, Arc<Mutex<TurnRoutes>>, Arc<PunchSocket>) {
         use ed25519_dalek::SigningKey;
 
         use crate::quic::peer_config::test_peer_configs;
@@ -548,12 +882,12 @@ mod tests {
         let mut ep = Endpoint::new_with_abstract_socket(
             ep_cfg,
             Some(server_cfg),
-            bound.socket,
+            bound.socket.clone(),
             Arc::new(TokioRuntime),
         )
         .unwrap();
         ep.set_default_client_config(client_cfg);
-        (ep, bound.pokes, bound.turn)
+        (ep, bound.pokes, bound.turn, bound.socket)
     }
 
     async fn roundtrip(a: &quinn::Connection, b: &quinn::Connection, msg: &[u8]) {
@@ -565,6 +899,184 @@ mod tests {
         bsend.write_all(b"ack").await.unwrap();
         bsend.finish().unwrap();
         assert_eq!(recv.read_to_end(64).await.unwrap(), b"ack");
+    }
+
+    /// Real TLS outer pipes carry real end-to-end QUIC. The UDP socket at
+    /// the relay address discards every packet, so it cannot accidentally
+    /// make the test pass via the legacy bearer bridge.
+    #[tokio::test]
+    async fn peer_quic_and_bytes_cross_one_authenticated_tcp_relay_without_udp_forwarding() {
+        use common::quic::tunnel::{self, AcceptedMode, Request};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let _ = common::quic::config::setup_crypto_provider();
+        let cert = rcgen::generate_simple_self_signed(vec!["relay.test".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let mut tls =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
+                        .into(),
+                )
+                .unwrap();
+        tls.alpn_protocols = vec![tunnel::ALPN.to_vec()];
+        let tls = Arc::new(tls);
+        let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+        let relay = listener.local_addr().unwrap();
+        let blackhole = UdpSocket::bind(relay).await.unwrap();
+        let udp_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = udp_seen.clone();
+        let blackhole_task = tokio::spawn(async move {
+            let mut packet = [0u8; 4096];
+            while blackhole.recv_from(&mut packet).await.is_ok() {
+                seen.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let key_a = SigningKey::from_bytes(&[91; 32]);
+        let key_b = SigningKey::from_bytes(&[92; 32]);
+        let ipk_a = key_a.verifying_key().to_bytes();
+        let ipk_b = key_b.verifying_key().to_bytes();
+        let token = [93; 16];
+        let relay_task = tokio::spawn(async move {
+            let first = tunnel::accept(
+                listener.accept().await.unwrap().0,
+                tls.clone(),
+                tunnel::FEATURE_ASSIST,
+            )
+            .await
+            .unwrap();
+            let second =
+                tunnel::accept(listener.accept().await.unwrap().0, tls, tunnel::FEATURE_ASSIST)
+                    .await
+                    .unwrap();
+            assert_eq!(first.mode, AcceptedMode::Assist { token, ipk: ipk_a, peer: ipk_b });
+            assert_eq!(second.mode, AcceptedMode::Assist { token, ipk: ipk_b, peer: ipk_a });
+            let a = first.channel;
+            let b = second.channel;
+            loop {
+                let (packet, target) = tokio::select! {
+                    packet = a.recv() => (packet, &b),
+                    packet = b.recv() => (packet, &a),
+                };
+                let Ok(packet) = packet else { break };
+                let mut writable = target.clone().create_io_poller();
+                loop {
+                    match target.try_send(&packet) {
+                        Ok(()) => break,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        },
+                        Err(_) => return,
+                    }
+                }
+            }
+        });
+        let a = tunnel::connect(
+            relay,
+            "relay.test",
+            &roots,
+            Request::Assist {
+                token,
+                ipk: ipk_a,
+                peer: ipk_b,
+                sign: Arc::new(move |message| Ok(key_a.sign(message).to_bytes())),
+            },
+        )
+        .await
+        .unwrap();
+        let b = tunnel::connect(
+            relay,
+            "relay.test",
+            &roots,
+            Request::Assist {
+                token,
+                ipk: ipk_b,
+                peer: ipk_a,
+                sign: Arc::new(move |message| Ok(key_b.sign(message).to_bytes())),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (ep_a, _, routes_a, socket_a) = peer_endpoint_with_socket();
+        let (ep_b, _, routes_b) = peer_endpoint();
+        let synth_a = routes_a.lock().register(token, relay);
+        let synth_b = routes_b.lock().register(token, relay);
+        assert!(routes_a.lock().install_tcp(synth_a, a.clone()));
+        assert!(routes_b.lock().install_tcp(synth_b, b.clone()));
+        let run = tokio::time::timeout(Duration::from_secs(8), async {
+            let (conn_a, conn_b) = tokio::join!(
+                async { ep_a.connect(synth_a, "peer").unwrap().await.unwrap() },
+                async { ep_b.accept().await.unwrap().await.unwrap() },
+            );
+            roundtrip(&conn_a, &conn_b, b"end-to-end bytes over authenticated TCP").await;
+            assert!(routes_a.lock().tcp_active(synth_a));
+            assert!(routes_b.lock().tcp_active(synth_b));
+            assert!(!routes_a.lock().is_direct(synth_a));
+            assert_eq!(conn_a.remote_address(), synth_a);
+
+            // This current-thread test does not yield while filling the
+            // queue, so its writer cannot drain behind the assertion. The
+            // shared socket sheds the overflow and still serves another UDP
+            // destination, rather than attaching its poller to this queue.
+            let unrelated = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+            for _ in 0..=tunnel::QUEUE_PACKETS {
+                if a.try_send(b"\x00").is_err() {
+                    break;
+                }
+            }
+            assert_eq!(a.try_send(b"\x00").unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            let drops = super::super::diagnostics::snapshot().tcp_queue_drops;
+            socket_a
+                .try_send(&udp::Transmit {
+                    destination: synth_a,
+                    ecn: None,
+                    contents: b"\x00",
+                    segment_size: None,
+                    src_ip: None,
+                })
+                .unwrap();
+            assert!(super::super::diagnostics::snapshot().tcp_queue_drops > drops);
+            socket_a
+                .try_send(&udp::Transmit {
+                    destination: unrelated.local_addr().unwrap(),
+                    ecn: None,
+                    contents: b"other peer",
+                    segment_size: None,
+                    src_ip: None,
+                })
+                .unwrap();
+            let mut other = [0u8; 32];
+            let (len, _) = unrelated.recv_from(&mut other).await.unwrap();
+            assert_eq!(&other[..len], b"other peer");
+
+            // Shared leases keep the pipe alive; final teardown closes it.
+            assert_eq!(routes_a.lock().register(token, relay), synth_a);
+            routes_a.lock().unregister(&token);
+            assert!(!a.is_closed());
+            roundtrip(&conn_a, &conn_b, b"one route lease remains").await;
+            routes_a.lock().unregister(&token);
+            a.closed().await;
+            assert!(a.is_closed());
+            ep_a.close(0u32.into(), b"test complete");
+            ep_b.close(0u32.into(), b"test complete");
+        })
+        .await;
+        relay_task.abort();
+        blackhole_task.abort();
+        run.expect("TCP-only peer QUIC timed out");
+        assert!(
+            udp_seen.load(Ordering::Relaxed) > 0,
+            "legacy UDP setup was attempted and discarded"
+        );
     }
 
     /// A full QUIC handshake + bidirectional stream complete end-to-end over
@@ -683,8 +1195,14 @@ mod tests {
             let fresh_token = [46; 16];
             let new_synth = new_routes.lock().register(fresh_token, relay);
             let new_remote_synth = b_routes.lock().register(fresh_token, relay);
-            new_pokes.send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode()).await.unwrap();
-            b_pokes.send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode()).await.unwrap();
+            new_pokes
+                .send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode())
+                .await
+                .unwrap();
+            b_pokes
+                .send(relay, &RelayMsg::TurnAlloc { token: fresh_token }.encode())
+                .await
+                .unwrap();
             b_routes.lock().unregister(&old_token);
             assert_eq!(b_routes.lock().synth_for(&fresh_token), Some(new_remote_synth));
             let (new_conn, new_remote) = tokio::join!(
@@ -692,7 +1210,8 @@ mod tests {
                 async { b.accept().await.unwrap().await.unwrap() },
             );
             roundtrip(&new_conn, &new_remote, b"after network change").await;
-        }).await;
+        })
+        .await;
         relay_task.abort();
         result.expect("new network failed to establish fresh relay route");
     }

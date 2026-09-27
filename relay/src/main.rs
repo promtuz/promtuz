@@ -21,6 +21,9 @@ mod quic;
 mod relay;
 mod storage;
 mod stunturn;
+mod tcpassist;
+#[cfg(test)]
+mod tcp_control_tests;
 mod turn;
 mod util;
 
@@ -58,6 +61,27 @@ async fn main() -> Result<()> {
     let control_sock = cfg.control_socket.clone();
     let relay = Arc::new(Relay::new(cfg));
     let acceptor = Acceptor::new(relay.endpoint.clone());
+
+    let tunnel_features = common::quic::tunnel::FEATURE_CONTROL
+        | if relay.cfg.assist.tcp_enabled { common::quic::tunnel::FEATURE_ASSIST } else { 0 };
+    let tunnel = common::quic::tunnel_listener::NodeTunnel::bind(&relay.cfg.network, tunnel_features)
+        .await?
+        .map(|listener| {
+            let control_relay = relay.clone();
+            let control_cancel = cancel.clone();
+            let assist = Arc::new(tcpassist::Assist::default());
+            listener.spawn(
+                move |connection| {
+                    let relay = control_relay.clone();
+                    let cancel = control_cancel.clone();
+                    async move { quic::handler::Handler::handle(connection, relay, cancel).await }
+                },
+                move |channel, mode| {
+                    let assist = assist.clone();
+                    async move { assist.serve(channel, mode).await }
+                },
+            )
+        });
 
     let acceptor_handle = tokio::spawn({
         let relay = relay.clone();
@@ -155,5 +179,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    cancel.cancel();
+    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
     Ok(())
 }

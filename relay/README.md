@@ -35,6 +35,31 @@ Edit `/etc/promtuz/relay.toml` — set the resolver seed key and your box's
 public address. Edits survive `apt upgrade` (it's a dpkg conffile). Log
 verbosity is `[log] level` (or the `PZ_LOG` env): `trace|debug|info|warn|error`.
 
+### TCP fallback for phones
+
+Current clients can carry messaging and attachment connections over TLS/TCP
+when UDP cannot reach a node. Enable `tcp_fallback = true` under `[network]`
+and open **TCP on the configured QUIC port** (normally 40432), alongside UDP.
+The listener uses the existing CA-issued node certificate and key.
+
+For attachment forwarding, also enable `tcp_enabled = true` under `[assist]`.
+This authenticates both participants and forwards opaque peer QUIC packets;
+it stores no attachment bytes. It is independent of the legacy UDP bridge's
+`enabled` switch, which can remain false. One relay is sufficient.
+
+Cold discovery also needs `[network] tcp_fallback = true` on resolvers
+(normally TCP 40433). Device push registration and sticker uploads need it
+on gateways (normally TCP 40434). Node-to-node traffic still requires UDP.
+The gateway's outer tunnel does not request the device's identity key.
+
+Existing config files default to disabled; package config examples enable it.
+Merge these settings into preserved conffiles and restart the affected
+services. This is raw TLS with ALPN `promtuz-tunnel/1`, not HTTP/WebSocket;
+an HTTP reverse proxy cannot terminate it. Networks that block the configured
+TCP ports still cannot use this path. Both attachment peers need current
+clients; older peers retain their UDP behavior. TCP may add head-of-line
+delay and is a reachability fallback, not a throughput improvement.
+
 ## Enroll (mint the cert)
 
 A relay is permissioned: it needs a cert signed by the Promtuz RootCA before it

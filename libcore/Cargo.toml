@@ -111,6 +111,8 @@ ravif = { version = "0.11", default-features = false, features = ["threading", "
 # dev-dependency feature so the in-tree tests compile without dragging
 # `test-utils` into release builds.
 [dev-dependencies]
+# Ephemeral localhost certificates for real TLS transport/security regressions.
+rcgen = "0.14.8"
 openmls = { version = "0.8.1", features = ["test-utils"] }
 # Tokio scheduler tests need `start_paused` + `tokio::time::advance`
 # (deterministic clock simulation). The `test-util` feature is dev-only;

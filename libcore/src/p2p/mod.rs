@@ -30,6 +30,7 @@ mod punch;
 mod reflexive;
 mod signal;
 mod socket;
+mod tcp;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -66,6 +67,8 @@ use diagnostics::Event;
 /// (`quic/server.rs`) to the session waiting for that peer.
 pub(crate) use signal::Offer;
 pub(crate) use signal::deliver as deliver_offer;
+#[cfg(test)]
+pub(crate) use socket::test_tcp_endpoint;
 
 /// How long an offer is worth answering: the life the relay gives the
 /// dispatch, and the expiry the receiver checks on the sealed payload. Past
@@ -342,22 +345,25 @@ fn now_ms() -> u64 {
 
 /// The relay whose bridge and STUN echo a session may use: the one we are
 /// connected to if it said it assists, else the best relay on record that
-/// did. `None` if no relay we know of assists — then the punch is the only
-/// path. Never a relay that stayed silent on the question: its QUIC
-/// endpoint drops assist datagrams unanswered.
+/// did. If neither advertised UDP assist, our connected, authenticated relay
+/// is a tentative TCP candidate. Only its authenticated tunnel Ready grants
+/// TCP assist; the old handshake's `assist` flag keeps its UDP-only meaning.
 fn assist_relay() -> Option<SocketAddr> {
     let live = {
         let guard = crate::state::RELAY.read();
         guard
             .as_ref()
-            .filter(|r| r.assist && r.connection.as_ref().is_some_and(|c| c.close_reason().is_none()))
-            .map(|r| (r.host.to_string(), r.port))
+            .filter(|r| r.connection.as_ref().is_some_and(|c| c.close_reason().is_none()))
+            .map(|r| (r.host.to_string(), r.port, r.assist))
     };
-    let (host, port) = match live {
-        Some(v) => v,
-        None => {
-            let r = crate::data::relay::Relay::fetch_assist_capable()?;
-            (r.host.to_string(), r.port)
+    let (host, port) = match live.as_ref().filter(|(_, _, assist)| *assist) {
+        Some((host, port, _)) => (host.clone(), *port),
+        None => match crate::data::relay::Relay::fetch_assist_capable() {
+            Some(r) => (r.host.to_string(), r.port),
+            None => {
+                let (host, port, _) = live?;
+                (host, port)
+            },
         },
     };
     let ip: IpAddr = host.parse().ok()?;
@@ -410,9 +416,10 @@ type RouteGuards = (AbortGuard, TurnGuard);
 /// Returns the synthetic address quinn dials/accepts for it, plus the
 /// guards that tear the route down.
 fn open_turn_route(
-    ep: Arc<P2pEndpoint>, token: [u8; 16], relay: SocketAddr,
+    ep: Arc<P2pEndpoint>, token: [u8; 16], relay: SocketAddr, peer: [u8; 32],
 ) -> (SocketAddr, RouteGuards) {
     let synth = ep.turn.lock().register(token, relay);
+    tcp::start(&ep.turn, synth, token, relay, peer);
     // Re-send the TurnAlloc every few seconds to keep the NAT mapping to
     // the relay warm. A symmetric NAT (the case that forces TURN) drops an
     // idle per-destination mapping — without this the return path is
@@ -699,6 +706,7 @@ async fn connect_inner(
         link.conn.close(0u32.into(), b"consent revoked");
         bail!("consent: revoked during connection setup");
     }
+    ep.turn.lock().established(link.remote_address());
     ep.links.lock().publish(generation, link.clone())?;
     pending.0 = None;
     diagnostics::record(Event::LinkReady);
@@ -912,7 +920,7 @@ impl Session {
             // round trip; the punch runs behind it and upgrades the socket's
             // egress in place when a direct path validates.
             log::info!("P2P[{}]: dialer, connecting via relay bridge", self.short());
-            let (synth, guards) = open_turn_route(ep.clone(), my_token, tr);
+            let (synth, guards) = open_turn_route(ep.clone(), my_token, tr, peer);
             let key = DiscoKey::new(&my_disco_key, self.chan);
             let Session { poke_rx, poke_guard, offer_guard, mut offers, id, answering, .. } = self;
             let short = hex::encode(&peer[..4]);
@@ -1021,7 +1029,7 @@ impl Session {
             // token's synthetic address, and only the holder of that MLS-
             // carried token can produce it.
             Some(tr) => {
-                let (synth, guards) = open_turn_route(ep.clone(), token, tr);
+                let (synth, guards) = open_turn_route(ep.clone(), token, tr, peer);
                 routes.push(guards);
                 bridged_tokens.insert(token);
                 sources.push(synth);
@@ -1068,7 +1076,7 @@ impl Session {
                     if let Some(tr) = again.relay
                         && bridged_tokens.len() < 3 && bridged_tokens.insert(again.token)
                     {
-                        let (synth, guards) = open_turn_route(ep.clone(), again.token, tr);
+                        let (synth, guards) = open_turn_route(ep.clone(), again.token, tr, peer);
                         routes.push(guards);
                         ep.inbound.lock().claim(&[synth], inbound_guard.tx.clone());
                         inbound_guard.addrs.push(synth);

@@ -5,6 +5,9 @@
 [network]
 # Bind — the port relays dial. 0.0.0.0 listens on all interfaces.
 address = "0.0.0.0:40433"
+# Phone discovery fallback. Open TCP40433 alongside UDP40433. Relay/node
+# registration still uses native UDP; this TLS listener accepts phones only.
+tcp_fallback = true
 
 # One Ed25519 key = the resolver's identity (its pubkey is the IPK relays seed)
 # + TLS server key. Auto-generated 0600 on first boot if absent.

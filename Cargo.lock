@@ -828,6 +828,8 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-rustls",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "zeroize",
 ]
@@ -898,6 +900,7 @@ dependencies = [
  "quinn",
  "rand 0.10.1",
  "ravif",
+ "rcgen",
  "reqwest",
  "rgb",
  "rusqlite",
@@ -4091,6 +4094,7 @@ dependencies = [
  "parking_lot",
  "quinn",
  "rand 0.10.1",
+ "rcgen",
  "ring",
  "rustls",
  "rustls-pemfile",
@@ -5158,6 +5162,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

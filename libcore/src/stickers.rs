@@ -50,7 +50,6 @@ use ravif::Encoder;
 use ravif::Img;
 use rgb::FromSlice;
 
-use crate::ENDPOINT;
 use crate::RESOLVER_SEEDS;
 use crate::data::identity::Identity;
 use crate::data::identity::IdentitySigner;
@@ -570,16 +569,13 @@ async fn upload(requests: &[StoreRequest]) -> Result<()> {
     let gateways = tokio::time::timeout(REQUEST_TIMEOUT, crate::push::fetch_gateways()).await??;
     let mut last_error = None;
     for gateway in gateways {
-        let attempt = tokio::time::timeout(CONNECT_TIMEOUT, async {
-            let endpoint = ENDPOINT.get().context("endpoint not initialized")?;
-            let conn = endpoint.connect(gateway.addr, &gateway.id.to_string())?.await?;
-            Ok::<_, anyhow::Error>(conn)
-        })
+        let attempt = tokio::time::timeout(CONNECT_TIMEOUT,
+            crate::quic::dialer::connect(gateway.addr, &gateway.id.to_string()))
         .await;
         let conn = match attempt {
             Ok(Ok(conn)) => conn,
             Ok(Err(e)) => {
-                last_error = Some(e);
+                last_error = Some(anyhow::Error::from(e));
                 continue;
             },
             Err(e) => {

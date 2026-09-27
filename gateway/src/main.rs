@@ -36,7 +36,21 @@ async fn main() -> Result<()> {
         common::node::enroll::spawn_config_reload(cli.config.clone());
     }
 
+    // Bind before cfg is consumed; disabled on existing operator configs.
+    let tunnel_listener = common::quic::tunnel_listener::NodeTunnel::bind(
+        &cfg.network, common::quic::tunnel::FEATURE_CONTROL,
+    ).await?;
     let gateway = Arc::new(Gateway::new(cfg));
+    let tunnel = tunnel_listener.map(|listener| {
+        let gateway = gateway.clone();
+        listener.spawn(
+            move |connection| {
+                let gateway = gateway.clone();
+                async move { quic::handler::Handler::handle(connection, gateway).await }
+            },
+            |channel, _mode| async move { channel.close(); },
+        )
+    });
     if gateway.store.is_some() {
         let gateway = gateway.clone();
         tokio::spawn(async move {
@@ -64,5 +78,6 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
     Ok(())
 }

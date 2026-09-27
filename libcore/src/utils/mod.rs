@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::net::TcpStream;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -35,12 +34,6 @@ pub fn addr_short(addr: SocketAddr) -> String {
 /// Comma-join a candidate list through [`addr_short`], for the P2P offer dumps.
 pub fn addrs_short(list: &[SocketAddr]) -> String {
     list.iter().map(|a| addr_short(*a)).collect::<Vec<_>>().join(", ")
-}
-
-/// ### TEMPORARY:
-/// uses google's dns to verify internet availability
-pub fn has_internet() -> bool {
-    TcpStream::connect_timeout(&"8.8.8.8:53".parse().unwrap(), Duration::from_secs(2)).is_ok()
 }
 
 pub fn systime() -> Duration {

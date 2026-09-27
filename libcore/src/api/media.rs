@@ -16,11 +16,15 @@ pub struct TransferDiagnosticEvent {
 #[derive(uniffi::Record)]
 pub struct TransferDiagnostics {
     pub events: Vec<TransferDiagnosticEvent>,
-    /// QUIC payload bytes accepted by the local UDP socket, including protocol
-    /// overhead/retransmissions but excluding IP/relay envelopes. These are
-    /// local egress counters, not measured remote relay delivery or billing.
+    /// QUIC payload bytes accepted by the local UDP socket or bounded TCP
+    /// queue, including protocol overhead/retransmissions and both copies
+    /// during route setup, but excluding IP/relay envelopes. These are local
+    /// egress counters, not measured remote relay delivery or billing.
     pub direct_datagram_bytes_sent: u64,
     pub relay_datagram_bytes_sent: u64,
+    /// Datagrams shed when a TCP attachment route's send queue is full.
+    /// QUIC retransmits them without blocking other peer connections.
+    pub tcp_queue_datagrams_dropped: u64,
     /// File chunk payload accepted by the send stream, including re-sends.
     pub content_bytes_sent: u64,
     /// Chunk payload verified by this receiver, including re-verification.
@@ -36,6 +40,7 @@ pub fn get_transfer_diagnostics() -> TransferDiagnostics {
         }).collect(),
         direct_datagram_bytes_sent: snapshot.direct_sent,
         relay_datagram_bytes_sent: snapshot.relay_sent,
+        tcp_queue_datagrams_dropped: snapshot.tcp_queue_drops,
         content_bytes_sent: snapshot.content_sent,
         verified_content_bytes_received: snapshot.verified_received,
     }

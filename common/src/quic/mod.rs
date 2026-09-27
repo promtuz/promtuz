@@ -8,6 +8,10 @@ pub mod id;
 pub mod p256;
 pub mod protorole;
 pub mod xor;
+#[cfg(feature = "crypto")]
+pub mod tunnel;
+#[cfg(all(feature = "crypto", feature = "server"))]
+pub mod tunnel_listener;
 
 pub use xor::xor32;
 

@@ -9,10 +9,14 @@ use std::net::Ipv6Addr;
 
 const TLS_SEED: [u8; 32] = [0xf4; 32];
 
-pub(super) fn identity(id: u8) -> wire::Auth {
+fn identity_key(id: u8) -> SigningKey {
     let mut seed = [0xf5; 32];
     seed[0] = id;
-    let key = SigningKey::from_bytes(&seed);
+    SigningKey::from_bytes(&seed)
+}
+
+pub(super) fn identity(id: u8) -> wire::Auth {
+    let key = identity_key(id);
     let tls_pub = SigningKey::from_bytes(&TLS_SEED).verifying_key().to_bytes();
     let auth = wire::Auth {
         ipk: key.verifying_key().to_bytes(),
@@ -22,6 +26,253 @@ pub(super) fn identity(id: u8) -> wire::Auth {
     crate::data::contact::Contact::save_pending(auth.ipk, "range test".into()).unwrap();
     crate::data::contact::Contact::mark_paired(&auth.ipk);
     auth
+}
+
+/// Production TLS admission, PunchSocket routing and peer QUIC. Only the relay
+/// pairing/forward loop is a fixture here; production registry generations and
+/// quotas have their own relay-side tests. No MLS offer exchange is simulated.
+struct TcpPair {
+    server: PeerLink,
+    client: PeerLink,
+    endpoints: [quinn::Endpoint; 2],
+    channels: [std::sync::Arc<common::quic::tunnel::Channel>; 2],
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    udp_packets: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for TcpPair {
+    fn drop(&mut self) {
+        for endpoint in &self.endpoints {
+            endpoint.close(0u32.into(), b"test complete");
+        }
+        for channel in &self.channels {
+            channel.close();
+        }
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+async fn linked_tcp(
+    sender_id: u8, receiver_id: u8, token_id: u8, pause_after_bytes: Option<usize>,
+) -> TcpPair {
+    use common::quic::tunnel::{self, AcceptedMode, Channel, Request};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let cert = rcgen::generate_simple_self_signed(vec!["relay.test".into()]).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.cert.der().clone()).unwrap();
+    let mut tls = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into(),
+        )
+        .unwrap();
+    tls.alpn_protocols = vec![tunnel::ALPN.to_vec()];
+    let tls = Arc::new(tls);
+    let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+    let relay = listener.local_addr().unwrap();
+    let blackhole = tokio::net::UdpSocket::bind(relay).await.unwrap();
+    let udp_packets = Arc::new(AtomicUsize::new(0));
+    let dropping = tokio::spawn({
+        let udp_packets = udp_packets.clone();
+        async move {
+            let mut bytes = [0u8; 4096];
+            while blackhole.recv_from(&mut bytes).await.is_ok() {
+                udp_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    let sender_key = identity_key(sender_id);
+    let receiver_key = identity_key(receiver_id);
+    let sender = sender_key.verifying_key().to_bytes();
+    let receiver = receiver_key.verifying_key().to_bytes();
+    let token = [token_id; 16];
+    async fn forward(from: &Arc<Channel>, to: &Arc<Channel>, pause_after_bytes: Option<usize>) {
+        let mut writable = to.clone().create_io_poller();
+        let mut forwarded = 0;
+        while let Ok(packet) = from.recv().await {
+            loop {
+                match to.try_send(&packet) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    },
+                    Err(_) => return,
+                }
+            }
+            forwarded += packet.len();
+            if pause_after_bytes.is_some_and(|budget| forwarded >= budget) {
+                // An opaque byte gate permits the first durable chunk but
+                // prevents finishing the file before the interruption task
+                // gets scheduled. It does not inspect or replace transfer frames.
+                from.closed().await;
+                return;
+            }
+        }
+    }
+    let serving = tokio::spawn(async move {
+        let first =
+            tunnel::accept(listener.accept().await.unwrap().0, tls.clone(), tunnel::FEATURE_ASSIST)
+                .await
+                .unwrap();
+        let second =
+            tunnel::accept(listener.accept().await.unwrap().0, tls, tunnel::FEATURE_ASSIST)
+                .await
+                .unwrap();
+        assert_eq!(first.mode, AcceptedMode::Assist { token, ipk: sender, peer: receiver });
+        assert_eq!(second.mode, AcceptedMode::Assist { token, ipk: receiver, peer: sender });
+        tokio::select! {
+            _ = forward(&first.channel, &second.channel, pause_after_bytes) => {},
+            _ = forward(&second.channel, &first.channel, None) => {},
+        }
+    });
+    let a = tunnel::connect(
+        relay,
+        "relay.test",
+        &roots,
+        Request::Assist {
+            token,
+            ipk: sender,
+            peer: receiver,
+            sign: Arc::new(move |message| Ok(sender_key.sign(message).to_bytes())),
+        },
+    )
+    .await
+    .unwrap();
+    let b = tunnel::connect(
+        relay,
+        "relay.test",
+        &roots,
+        Request::Assist {
+            token,
+            ipk: receiver,
+            peer: sender,
+            sign: Arc::new(move |message| Ok(receiver_key.sign(message).to_bytes())),
+        },
+    )
+    .await
+    .unwrap();
+    let key = SigningKey::from_bytes(&TLS_SEED);
+    let (server_endpoint, _) =
+        crate::p2p::test_tcp_endpoint(a.clone(), &key, relay, token).unwrap();
+    let (client_endpoint, synth) =
+        crate::p2p::test_tcp_endpoint(b.clone(), &key, relay, token).unwrap();
+    let (server_conn, client_conn) = timeout(Duration::from_secs(8), async {
+        tokio::join!(async { server_endpoint.accept().await.unwrap().await.unwrap() }, async {
+            client_endpoint.connect(synth, "peer").unwrap().await.unwrap()
+        },)
+    })
+    .await
+    .unwrap();
+    assert!(
+        udp_packets.load(Ordering::Relaxed) > 0,
+        "native UDP was attempted but never forwarded"
+    );
+    TcpPair {
+        server: crate::p2p::test_link(server_conn, receiver),
+        client: crate::p2p::test_link(client_conn, sender),
+        endpoints: [server_endpoint, client_endpoint],
+        channels: [a, b],
+        tasks: vec![dropping, serving],
+        udp_packets,
+    }
+}
+
+#[tokio::test]
+async fn attachment_ranges_resume_after_tcp_only_link_interruption_and_match_original_file() {
+    let sender = identity(91);
+    let receiver = identity(92);
+    let mut bytes = vec![0u8; wire::CHUNK_SIZE * 6 + 517];
+    for (index, chunk) in bytes.chunks_mut(wire::CHUNK_SIZE).enumerate() {
+        chunk.fill(0x91u8.wrapping_add(index as u8));
+    }
+    let path =
+        std::env::temp_dir().join(format!("promtuz-tcp-attachment-{}.bin", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    let (fid, size) = prepare_send(path.to_str().unwrap(), 3600).unwrap();
+    store::forget_partial(&fid);
+    offer(&receiver.ipk, &fid);
+    let manifest = wire::Manifest::from_file(path.to_str().unwrap()).unwrap();
+    let lease = store::receiver_lease(fid);
+    let mut partial =
+        ranges::Receiver::open(fid, sender.ipk, manifest.clone(), size, &lease).unwrap();
+    partial.commit(2, &bytes[2 * wire::CHUNK_SIZE..3 * wire::CHUNK_SIZE], &lease).unwrap();
+    drop(partial);
+
+    let first = linked_tcp(91, 92, 94, Some(wire::CHUNK_SIZE * 2)).await;
+    let second = linked_tcp(91, 92, 95, None).await;
+    assert_eq!(first.client.protocol().unwrap(), AttachmentProtocol::V2);
+    let serve_first = tokio::spawn(serve_streams(first.server.clone(), sender.clone()));
+    let serve_second = tokio::spawn(serve_streams(second.server.clone(), sender.clone()));
+    let cut = tokio::spawn({
+        let channel = first.channels[1].clone();
+        let endpoint = first.endpoints[1].clone();
+        async move {
+            timeout(Duration::from_secs(8), async {
+                while !store::partial_get(&fid).is_some_and(|p| p.have >= 1) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            // Emulate the A1 network-generation teardown after durable progress.
+            // Recovery detection/timer policy itself has separate tests.
+            channel.close();
+            endpoint.close(0u32.into(), b"test network generation changed");
+        }
+    });
+    let mut links = std::collections::VecDeque::from([first.client.clone(), second.client.clone()]);
+    let mut attempts = 0;
+    let exhausted = timeout(
+        Duration::from_secs(20),
+        drive_download(
+            fid,
+            sender.ipk,
+            size,
+            &receiver,
+            &lease,
+            &[Duration::from_millis(1)],
+            || {
+                attempts += 1;
+                if attempts == 2 {
+                    let partial = store::partial_get(&fid).unwrap();
+                    assert!(partial.have > 0 && partial.have < manifest.chunks.len() as u32);
+                    assert!(
+                        store::verified_count(&partial) >= 2,
+                        "sparse verified progress survived"
+                    );
+                }
+                std::future::ready(Ok(links.pop_front().expect("only one reconnect is allowed")))
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    cut.await.unwrap();
+    serve_first.abort();
+    serve_second.abort();
+    assert!(!exhausted);
+    assert_eq!(attempts, 2);
+    let partial = store::partial_get(&fid).unwrap();
+    assert_eq!(partial.state, store::DONE);
+    assert_eq!(store::verified_count(&partial), manifest.chunks.len() as u32);
+    let received = std::fs::read(&partial.path).unwrap();
+    assert_eq!(received, bytes);
+    assert_eq!(blake3::hash(&received), blake3::hash(&bytes));
+    assert!(first.udp_packets.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert!(second.udp_packets.load(std::sync::atomic::Ordering::Relaxed) > 0);
 }
 
 pub(super) async fn linked(

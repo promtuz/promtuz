@@ -40,6 +40,14 @@ journalctl -u pzresolver -f
 
 Check the bind address in `/etc/promtuz/resolver.toml` (a dpkg conffile).
 
+To let current phones discover relays when UDP is blocked, enable
+`tcp_fallback = true` under `[network]`, open TCP on the same configured port
+(normally 40433), and restart `pzresolver`. The existing certificate and key
+serve the TLS listener. Relay and gateway registration still uses UDP.
+Existing configs default to disabled; the packaged example enables it.
+See the [relay fallback guide](../relay/README.md#tcp-fallback-for-phones)
+for the corresponding relay and gateway settings and compatibility limits.
+
 ## Update
 
 ```sh

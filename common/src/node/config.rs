@@ -24,6 +24,11 @@ pub struct NetworkConfig {
     /// — a bad edit otherwise risks an unwanted restart.
     #[serde(default)]
     pub watch_reload: bool,
+
+    /// Accept phone connections over TLS/TCP on the same numeric port as
+    /// QUIC. Node-to-node registration continues to use native QUIC.
+    #[serde(default)]
+    pub tcp_fallback: bool,
 }
 
 impl NetworkConfig {
@@ -158,6 +163,7 @@ mod tests {
             key_path: PathBuf::new(),
             root_ca_path: PathBuf::new(),
             watch_reload: false,
+            tcp_fallback: false,
         }
     }
 

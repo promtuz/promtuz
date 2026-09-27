@@ -95,6 +95,7 @@ fn init_inner(
     ));
     client_cfg.transport_config(Arc::new(transport_cfg));
 
+    crate::quic::dialer::initialize(client_cfg.clone(), roots)?;
     endpoint.set_default_client_config(client_cfg);
     ENDPOINT.set(Arc::new(endpoint)).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
@@ -239,12 +240,6 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
             if TASK_REMOVED.load(Ordering::Relaxed) {
                 ConnectionState::Disconnected.emit();
                 FOREGROUND.notified().await;
-                continue;
-            }
-
-            if !crate::utils::has_internet() {
-                ConnectionState::NoInternet.emit();
-                wait_to_retry(Duration::from_secs(5)).await;
                 continue;
             }
 

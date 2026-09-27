@@ -58,6 +58,10 @@ pub struct AssistConfig {
     /// enabled relay will forward datagrams for anyone who guesses one.
     #[serde(default)]
     pub enabled: bool,
+    /// Authenticated attachment bridges over the TLS fallback listener.
+    /// Independent of the legacy UDP bearer-token service above.
+    #[serde(default)]
+    pub tcp_enabled: bool,
 }
 
 /// A standard TURN server for calls on its own UDP port (see [`crate::turn`]).

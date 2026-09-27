@@ -215,8 +215,7 @@ async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Resul
     // ponytail: Fcm-only for now (Android). Pass the provider from the app when
     // iOS / UnifiedPush land.
     let reg = RegisterToken::signed(&push_key()?, PushProvider::Fcm, token);
-    let endpoint = ENDPOINT.get().context("endpoint not initialized")?;
-    let conn = endpoint.connect(gateway.addr, &gateway.id.to_string())?.await?;
+    let conn = crate::quic::dialer::connect(gateway.addr, &gateway.id.to_string()).await?;
 
     // The resolver's gateway directory is unauthenticated — the device token
     // only goes to a node the CA stamped PUSH_GATEWAY (relay/src/dht/push_wake.rs

@@ -88,3 +88,4 @@ maintainer-scripts = "pkg/scripts/"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+rcgen = "0.14.8"

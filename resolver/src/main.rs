@@ -36,6 +36,18 @@ async fn main() -> Result<()> {
 
     let resolver = Arc::new(Resolver::new(cfg));
     let acceptor = Acceptor::new(resolver.endpoint.clone());
+    let tunnel = common::quic::tunnel_listener::NodeTunnel::bind(
+        &resolver.cfg.network, common::quic::tunnel::FEATURE_CONTROL,
+    ).await?.map(|listener| {
+        let resolver = resolver.clone();
+        listener.spawn(
+            move |connection| {
+                let resolver = resolver.clone();
+                async move { quic::handler::Handler::handle(connection, resolver).await }
+            },
+            |channel, _mode| async move { channel.close(); },
+        )
+    });
 
     let acceptor_handle = tokio::spawn({
         let resolver = resolver.clone();
@@ -67,5 +79,6 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
     Ok(())
 }

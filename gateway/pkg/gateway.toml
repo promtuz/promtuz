@@ -7,6 +7,10 @@
 [network]
 # Bind. 0.0.0.0:<port> is fine on a single-public-IP box. Default port 40434.
 address = "0.0.0.0:40434"
+# Device registration/store fallback. Open TCP40434 alongside UDP40434.
+# The outer TLS pipe is anonymous; device identity is not disclosed here.
+# Relay wake requests and node registration continue to use native UDP.
+tcp_fallback = true
 
 # One Ed25519 key = identity (signs GatewayHello, derives node id) + TLS server
 # key. Auto-generated 0600 on first boot if absent.
