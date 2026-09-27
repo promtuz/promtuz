@@ -85,16 +85,25 @@ pub async fn serve_link(link: crate::p2p::PeerLink) {
 /// `Manifest`/`Gone` answer — to who the file was actually sent to. In a group
 /// that is every active member of the conversation it was posted in, not one
 /// contact.
-fn offered_to(file_id: &[u8; 32], peer: &[u8; 32]) -> bool {
+fn offered_to(file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32]) -> bool {
+    let paired = crate::data::contact::Contact::is_paired(peer);
     let db = crate::db::messages::MESSAGES_DB.lock();
     db.query_row(
         "SELECT 1 FROM message_media mm
            JOIN messages m
              ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
+           JOIN conversations c ON c.id = mm.conversation_id
            JOIN conversation_members cm ON cm.conversation_id = mm.conversation_id
+           LEFT JOIN conversation_members mine
+             ON mine.conversation_id = mm.conversation_id AND mine.member_ipk = ?3
           WHERE mm.file_id = ?1 AND cm.member_ipk = ?2 AND cm.active = 1 AND m.outgoing = 1
+            AND m.deleted = 0
+            AND ((c.kind = ?4 AND mine.active = 1) OR (c.kind = ?5 AND ?6))
           LIMIT 1",
-        rusqlite::params![file_id.as_slice(), peer.as_slice()],
+        rusqlite::params![
+            file_id.as_slice(), peer.as_slice(), me.as_slice(),
+            crate::data::conversation::KIND_GROUP, crate::data::conversation::KIND_DIRECT, paired,
+        ],
         |_| Ok(()),
     )
     .is_ok()
@@ -118,7 +127,7 @@ async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
         };
         let now = crate::utils::systime().as_secs();
         let retained = store::retention_get(&pull.file_id)
-            .filter(|r| r.expires_at > now && offered_to(&pull.file_id, &link.ipk));
+            .filter(|r| r.expires_at > now && offered_to(&pull.file_id, &link.ipk, &local.ipk));
         match retained {
             None => {
                 let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
@@ -172,7 +181,7 @@ impl Drop for PullGuard {
     }
 }
 
-/// Pull `file_id` from the contact who offered it: resolve the sender from
+/// Pull `file_id` from the member who offered it: resolve the sender from
 /// the media row, dial (or reuse) the P2P link, and run the resumable pull.
 /// No-op when the file is already downloaded or a pull is in flight.
 pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
@@ -217,12 +226,14 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
                 if woke_recently { " (wake suppressed)" } else { ", reverse-waking" },
             );
             if !woke_recently {
-                // The reverse-wake targets the one device holding the bytes,
-                // so it goes to our direct conversation with them.
-                if let Ok(conversation) = crate::data::conversation::Conversation::for_peer(&peer) {
-                    let _ = crate::messaging::send_control_wake(
+                // Wake only the sender, including when our only encrypted
+                // channel with them is the group containing the attachment.
+                let paired = crate::data::contact::Contact::is_paired(&peer);
+                if let Some(conversation) = crate::data::conversation::Conversation::for_peer_transport(&peer, paired) {
+                    let _ = crate::messaging::send_control_wake_to(
                         conversation,
                         common::proto::mls_wire::AppPayload::FileWant { file_id },
+                        peer,
                     )
                     .await;
                 }
@@ -305,6 +316,8 @@ fn fail(file_id: &[u8; 32]) {
 /// gave up dialing when they sent this, so the link is ours to open: once it
 /// forms, their side pulls whatever it was holding for us.
 pub fn on_file_want(peer: [u8; 32], file_id: [u8; 32]) {
+    let Some(me) = crate::data::identity::Identity::get().map(|i| i.ipk()) else { return };
+    if !offered_to(&file_id, &peer, &me) { return; }
     log::info!(
         "transfer: FileWant from {} for {}",
         hex::encode(&peer[..4]),
@@ -540,18 +553,21 @@ mod download_resume {
     const TLS_SEED: [u8; 32] = [7u8; 32];
 
     /// A per-endpoint identity for the handshake: the IPK from `ipk_seed`
-    /// signing the binding over the shared loopback TLS key, saved as a
-    /// paired contact so `verify_auth`'s consent check passes.
-    fn paired_identity(ipk_seed: [u8; 32]) -> wire::Auth {
+    /// signing the binding over the shared loopback TLS key.
+    fn identity(ipk_seed: [u8; 32]) -> wire::Auth {
         use ed25519_dalek::Signer;
         let ipk_key = SigningKey::from_bytes(&ipk_seed);
         let tls_pub = SigningKey::from_bytes(&TLS_SEED).verifying_key().to_bytes();
         let msg = crate::quic::peer_config::ipk_binding_message(&tls_pub);
-        let a = wire::Auth {
+        wire::Auth {
             ipk: ipk_key.verifying_key().to_bytes(),
             tls_pub,
             sig: ipk_key.sign(&msg).to_bytes(),
-        };
+        }
+    }
+
+    fn paired_identity(ipk_seed: [u8; 32]) -> wire::Auth {
+        let a = identity(ipk_seed);
         crate::data::contact::Contact::save_pending(a.ipk, "peer".into()).unwrap();
         crate::data::contact::Contact::mark_paired(&a.ipk);
         a
@@ -561,6 +577,12 @@ mod download_resume {
     /// retention to `peer` — what `send_attachment` persists before the offer
     /// goes out, and what `serve_streams` answers a pull against.
     fn offer_to(peer: [u8; 32], file_id: [u8; 32]) {
+        let conv = crate::data::conversation::Conversation::for_peer(&peer).unwrap();
+        // Deliberately omit our roster entry, as pre-conversation migrations did.
+        offer_in(conv, file_id);
+    }
+
+    fn offer_in(conv: [u8; 16], file_id: [u8; 32]) {
         let row = crate::data::media::MediaRow {
             kind:     crate::data::media::KIND_ATTACHMENT,
             group_id: None,
@@ -575,9 +597,6 @@ mod download_resume {
             duration_ms: 0,
             sticker: None,
         };
-        // The media row is conversation-scoped; the peer only names who to
-        // pull from, which lives on the message row.
-        let conv = crate::data::conversation::Conversation::for_peer(&peer).unwrap();
         crate::data::media::save_outgoing_with_media(&conv, "", None, &row).unwrap();
     }
 
@@ -667,6 +686,59 @@ mod download_resume {
         assert_eq!(got.len(), 300 * 1024);
         assert!(got[..wire::CHUNK_SIZE].iter().all(|&b| b == 0x99), "chunk 0 was re-transferred");
         assert_eq!(&got[wire::CHUNK_SIZE..], &bytes2[wire::CHUNK_SIZE..]);
+    }
+
+    /// Exercise the real authenticated QUIC transfer without saving either
+    /// endpoint as a contact, then revoke access while the link stays open.
+    #[tokio::test]
+    async fn group_media_without_pairing_is_scoped_and_revocable() {
+        use crate::data::conversation::Conversation;
+        use crate::data::contact::Contact;
+        let dir = std::env::temp_dir().join("promtuz-download-resume-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let sender = identity([81; 32]);
+        let receiver = identity([82; 32]);
+        assert!(!Contact::is_paired(&sender.ipk));
+        assert!(!Contact::is_paired(&receiver.ipk));
+        let group = Conversation::join_group(&sender.ipk, &[sender.ipk, receiver.ipk]).unwrap();
+        let (serve, receive, _ep_a, _ep_b) = linked_pair(receiver.ipk, sender.ipk).await;
+        let server = tokio::spawn(serve_streams(serve, sender.clone()));
+        let src = dir.join("unpaired-group-media.bin");
+        let bytes = vec![0x81; 300 * 1024];
+        std::fs::write(&src, &bytes).unwrap();
+        let (fid, size) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
+        // Remove prior runs' references before establishing this test's scope.
+        crate::db::messages::MESSAGES_DB.lock().execute(
+            "DELETE FROM message_media WHERE file_id = ?1", [fid.as_slice()],
+        ).unwrap();
+        store::forget_partial(&fid);
+        offer_in(group, fid);
+        assert!(offered_to(&fid, &receiver.ipk, &sender.ipk));
+        pull(&receive, fid, size, &receiver).await.unwrap();
+        assert_eq!(std::fs::read(store::partial_get(&fid).unwrap().path).unwrap(), bytes);
+        assert!(!Contact::is_paired(&receiver.ipk), "transfer must not pair the members");
+
+        // A file in a different conversation is inaccessible even with a
+        // known hash and an authenticated connection to its sender.
+        let other = Conversation::join_group(&sender.ipk, &[sender.ipk, [83; 32]]).unwrap();
+        let private_src = dir.join("other-group-media.bin");
+        std::fs::write(&private_src, vec![0x82; 300 * 1024]).unwrap();
+        let (private_fid, private_size) = prepare_send(private_src.to_str().unwrap(), 3600).unwrap();
+        store::forget_partial(&private_fid);
+        offer_in(other, private_fid);
+        assert!(pull(&receive, private_fid, private_size, &receiver).await.is_err());
+        assert!(store::partial_get(&private_fid).is_none());
+
+        // Even an old direct offer must not authorize an unpaired peer.
+        offer_to(receiver.ipk, fid);
+        Conversation::deactivate_member(&group, &receiver.ipk).unwrap();
+        assert!(pull(&receive, fid, size, &receiver).await.is_err(), "removed member denied on existing link");
+        Conversation::add_member(&group, &receiver.ipk, 0).unwrap();
+        Conversation::deactivate_member(&group, &sender.ipk).unwrap();
+        assert!(pull(&receive, fid, size, &receiver).await.is_err(), "sender who left must stop serving");
+        assert!(store::retention_get(&fid).is_some(), "revocation preserves the sender's file");
+        server.abort();
     }
 
     #[tokio::test]

@@ -453,8 +453,10 @@ pub(crate) async fn send_control_to(
 /// Reverse-wake variant of [`send_control`]: the same row-less MLS control send,
 /// but flags the `DispatchP` for push-wake so an offline peer is revived. The
 /// attachment reverse-wake uses it to bring an offline sender back online.
-pub(crate) async fn send_control_wake(conversation: [u8; 16], payload: AppPayload) -> Result<()> {
-    send_control_inner(conversation, payload, Wake::Message, None).await
+pub(crate) async fn send_control_wake_to(
+    conversation: [u8; 16], payload: AppPayload, to: [u8; 32],
+) -> Result<()> {
+    send_control_inner(conversation, payload, Wake::Message, Some(to)).await
 }
 
 async fn send_control_inner(

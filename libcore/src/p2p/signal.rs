@@ -160,11 +160,12 @@ pub async fn send_offer(peer: [u8; 32], offer: &Offer) -> Result<()> {
         offer.relay.map(addr_short).unwrap_or_else(|| "none".into()),
         if offer.in_reply_to.is_some() { " (reply)" } else { "" },
     );
-    // Signalling is inherently point-to-point: a candidate path is between
-    // two devices, so it addresses the direct conversation with that peer
-    // rather than whatever group chat they happen to share with us.
-    let conversation = crate::data::conversation::Conversation::for_peer(&peer)?;
-    crate::messaging::send_control(
+    // Address only this member, using an existing shared group if there is
+    // no paired direct chat. No implicit pairing and no group-wide broadcast.
+    let paired = crate::data::contact::Contact::is_paired(&peer);
+    let conversation = crate::data::conversation::Conversation::for_peer_transport(&peer, paired)
+        .ok_or_else(|| anyhow::anyhow!("no shared chat for peer signaling"))?;
+    crate::messaging::send_control_to(
         conversation,
         AppPayload::P2pOffer {
             session:       offer.session,
@@ -175,6 +176,7 @@ pub async fn send_offer(peer: [u8; 32], offer: &Offer) -> Result<()> {
             token:         offer.token,
             disco_key:     offer.disco_key,
         },
+        peer,
     )
     .await
 }

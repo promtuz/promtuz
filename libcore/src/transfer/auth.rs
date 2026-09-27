@@ -1,6 +1,7 @@
 //! First-frame mutual IPK pin on every transfer stream. The peer cert's SPKI
 //! is a derived TLS sub-key, not the long-term IPK, so each side proves its
 //! IPK vouches for the TLS key this connection actually presented.
+//! This authenticates identity; the serving path authorizes each requested file.
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -25,7 +26,8 @@ pub fn local_auth() -> Result<wire::Auth> {
 /// Accept the peer's half only if the claimed IPK is the peer we expect, its
 /// vouched TLS key is the one THIS connection presented (a captured Auth
 /// replayed over another connection fails here), the binding signature
-/// verifies, and the IPK is a paired contact.
+/// verifies. Contact status is not identity: group members can transfer files
+/// without pairing, with access checked against the attachment conversation.
 pub fn verify_auth(a: &wire::Auth, expected: [u8; 32], conn_tls_pub: [u8; 32]) -> Result<()> {
     if a.ipk != expected {
         bail!("peer ipk mismatch");
@@ -34,9 +36,6 @@ pub fn verify_auth(a: &wire::Auth, expected: [u8; 32], conn_tls_pub: [u8; 32]) -
         bail!("tls_pub is not the connection's cert key");
     }
     verify_ipk_binding(&a.ipk, &a.tls_pub, &a.sig).map_err(|e| anyhow!("ipk binding: {e}"))?;
-    if !crate::data::contact::Contact::is_paired(&a.ipk) {
-        bail!("peer not a paired contact");
-    }
     Ok(())
 }
 
@@ -119,9 +118,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unpaired_peer() {
+    fn authenticates_unpaired_peer_without_granting_file_access() {
         test_db();
         let a = auth_for([40u8; 32], [41u8; 32]); // never saved as a contact
-        assert!(verify_auth(&a, a.ipk, a.tls_pub).is_err());
+        assert!(verify_auth(&a, a.ipk, a.tls_pub).is_ok());
     }
 }

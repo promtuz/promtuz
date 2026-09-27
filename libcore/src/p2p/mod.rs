@@ -481,10 +481,19 @@ async fn punch_upgrade(
 pub struct PeerLink {
     pub(crate) conn: Connection,
     dialer: bool,
+    disclosure: Disclosure,
     pub ipk: [u8; 32],
 }
 
 impl PeerLink {
+    fn still_permitted(&self) -> bool {
+        match consent::may_connect(&self.ipk) {
+            consent::Decision::Direct => true,
+            consent::Decision::RelayedOnly => self.disclosure == Disclosure::RelayOnly,
+            consent::Decision::No => false,
+        }
+    }
+
     pub fn remote_address(&self) -> SocketAddr {
         self.conn.remote_address()
     }
@@ -526,7 +535,7 @@ impl PeerLink {
 /// serve/pull over a direct loopback pair without the punch choreography.
 #[cfg(test)]
 pub(crate) fn test_link(conn: Connection, ipk: [u8; 32]) -> PeerLink {
-    PeerLink { conn, dialer: false, ipk }
+    PeerLink { conn, dialer: false, disclosure: Disclosure::RelayOnly, ipk }
 }
 
 /// The bail `connect` emits when a dial to this peer is already in flight;
@@ -613,6 +622,10 @@ async fn connect_inner(
         hex::encode(&peer[..4]),
         addr_short(link.remote_address())
     );
+    if !link.still_permitted() {
+        link.conn.close(0u32.into(), b"consent revoked");
+        bail!("consent: revoked during connection setup");
+    }
     ep.links.lock().insert(peer, link.clone());
     // Both ends serve pulls for whatever they retain, so a file offered either
     // direction is fetchable over this one link.
@@ -642,7 +655,7 @@ pub async fn link(peer: [u8; 32]) -> Result<PeerLink> {
             if l.conn.close_reason().is_none() {
                 // Re-gate on reuse: a live QUIC link must not outlive consent.
                 // Unpaired/forgotten since it opened → sever, don't hand back.
-                if matches!(consent::may_connect(&peer), consent::Decision::Direct) {
+                if l.still_permitted() {
                     return Ok(l);
                 }
                 links.remove(&peer);
@@ -673,7 +686,7 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
     let deadline = tokio::time::Instant::now() + SIGNAL_TIMEOUT + DIAL_TIMEOUT + ACCEPT_TIMEOUT;
     loop {
         if let Some(l) = ep.links.lock().get(&peer).cloned()
-            && l.conn.close_reason().is_none()
+            && l.conn.close_reason().is_none() && l.still_permitted()
         {
             return Ok(l);
         }
@@ -684,7 +697,7 @@ async fn wait_for_cached_link(ep: &'static P2pEndpoint, peer: [u8; 32]) -> Resul
         // before the winner's insert-then-clear would bail on a live link.
         if !CONNECTING.lock().contains(&peer) {
             if let Some(l) = ep.links.lock().get(&peer).cloned()
-                && l.conn.close_reason().is_none()
+                && l.conn.close_reason().is_none() && l.still_permitted()
             {
                 return Ok(l);
             }
@@ -747,7 +760,8 @@ impl Session {
     async fn run(mut self) -> Result<(PeerLink, &'static str)> {
         let ep = self.ep;
         let peer = self.peer;
-        let direct = self.disclosure == Disclosure::Direct;
+        let disclosure = self.disclosure;
+        let direct = disclosure == Disclosure::Direct;
         let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
 
         // Publish our candidates (local + reflexive), the relay whose bridge
@@ -827,7 +841,7 @@ impl Session {
                 .await
                 .map_err(|_| anyhow!("bridge dial timed out after {}s", DIAL_TIMEOUT.as_secs()))??;
             hold_route_while_open(conn.clone(), vec![guards]);
-            return Ok((PeerLink { conn, dialer: true, ipk: peer }, "relay"));
+            return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "relay"));
         }
 
         // Both remaining roles need the peer's offer first: the no-relay dialer
@@ -842,6 +856,7 @@ impl Session {
         );
 
         if dialer {
+            anyhow::ensure!(direct, "relay required for this peer");
             // No bridge to lean on: the punch is the only path (still serves
             // un-NATed global-IPv6 peers).
             let key = DiscoKey::new(&my_disco_key, self.chan);
@@ -862,7 +877,7 @@ impl Session {
             let conn = timeout(DIAL_TIMEOUT, ep.endpoint.connect(addr, PEER_SNI)?)
                 .await
                 .map_err(|_| anyhow!("direct dial timed out after {}s", DIAL_TIMEOUT.as_secs()))??;
-            return Ok((PeerLink { conn, dialer: true, ipk: peer }, "direct"));
+            return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "direct"));
         }
 
         // Acceptor: bridge through the dialer's relay under the dialer's token,
@@ -884,7 +899,8 @@ impl Session {
                 sources.push(synth);
             },
             // Direct, the dialer arrives from one of its own candidates.
-            None => sources.extend(offer.candidates.iter().copied()),
+            None if direct => sources.extend(offer.candidates.iter().copied()),
+            None => bail!("relay required for this peer"),
         }
         if sources.is_empty() {
             bail!("peer offers neither a relay nor candidates");
@@ -943,6 +959,6 @@ impl Session {
             })??;
         drop(inbound_guard);
         hold_route_while_open(conn.clone(), routes);
-        Ok((PeerLink { conn, dialer: false, ipk: peer }, "inbound"))
+        Ok((PeerLink { conn, dialer: false, disclosure, ipk: peer }, "inbound"))
     }
 }

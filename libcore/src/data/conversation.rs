@@ -242,6 +242,34 @@ impl Conversation {
         .and_then(|v| v.try_into().ok())
     }
 
+    /// An existing encrypted chat usable for peer transport signaling. Never
+    /// create a direct chat as a side effect of downloading group media.
+    /// Unpaired peers may use only a group we are both still members of.
+    pub(crate) fn for_peer_transport(peer: &[u8; 32], paired: bool) -> Option<[u8; 16]> {
+        let me = Identity::get()?.ipk();
+        Self::for_peer_transport_tx(&MESSAGES_DB.lock(), &me, peer, paired)
+    }
+
+    fn for_peer_transport_tx(
+        conn: &Connection, me: &[u8; 32], peer: &[u8; 32], paired: bool,
+    ) -> Option<[u8; 16]> {
+        if me == peer { return None; }
+        // Migrated direct chats may have only the peer's roster row. Pairing
+        // authorizes those; group transport always requires both active rows.
+        conn.query_row(
+            "SELECT c.id FROM conversations c
+             LEFT JOIN conversation_members mine
+               ON mine.conversation_id = c.id AND mine.member_ipk = ?1
+             JOIN conversation_members theirs ON theirs.conversation_id = c.id
+             WHERE theirs.member_ipk = ?2 AND theirs.active = 1
+               AND c.mls_group_id IS NOT NULL
+               AND ((c.kind = ?3 AND mine.active = 1) OR (c.kind = ?4 AND ?5))
+             ORDER BY c.kind, c.id LIMIT 1",
+            rusqlite::params![me.as_slice(), peer.as_slice(), KIND_GROUP, KIND_DIRECT, paired],
+            |r| r.get::<_, Vec<u8>>(0),
+        ).ok().and_then(|v| v.try_into().ok())
+    }
+
     /// Everyone we should address for this conversation — the active roster
     /// minus ourselves. One entry for a direct chat, N-1 for a group; the
     /// fan-out loop treats both the same.
@@ -601,6 +629,37 @@ mod tests {
         Conversation::bind_group_tx(&bob_db, &bob_dm, &[6u8; 32]).unwrap();
         assert_eq!(Conversation::for_activity_tx(&bob_db, &dm_group, &alice), None);
         assert_eq!(Conversation::for_activity_tx(&bob_db, &[6u8; 32], &alice), Some(bob_dm));
+    }
+
+    #[test]
+    fn transport_uses_only_existing_active_encrypted_chats() {
+        let conn = open_in_memory();
+        let me = [11; 32];
+        let peer = [12; 32];
+        let admin = [13; 32];
+        let resolve = |paired| Conversation::for_peer_transport_tx(&conn, &me, &peer, paired);
+        assert_eq!(resolve(false), None);
+        let dm = direct(&conn, &peer, me);
+        assert_eq!(resolve(true), None, "a chat without MLS cannot carry signaling");
+        Conversation::bind_group_tx(&conn, &dm, &[14; 32]).unwrap();
+        assert_eq!(resolve(false), None, "a stale DM does not grant unpaired access");
+        assert_eq!(resolve(true), Some(dm));
+        let group = Conversation::join_group_tx(&conn, &admin, &[admin, me, peer]).unwrap();
+        assert_eq!(resolve(false), None, "group must have an encrypted channel");
+        Conversation::bind_group_tx(&conn, &group, &[15; 32]).unwrap();
+        assert_eq!(resolve(false), Some(group));
+        assert_eq!(resolve(true), Some(dm), "prefer a paired private channel");
+        conn.execute(
+            "DELETE FROM conversation_members WHERE conversation_id = ?1 AND member_ipk = ?2",
+            (dm.as_slice(), me.as_slice()),
+        ).unwrap();
+        assert_eq!(resolve(true), Some(dm), "legacy direct chats may omit our roster row");
+        Conversation::deactivate_member_tx(&conn, &group, &peer).unwrap();
+        assert_eq!(resolve(false), None, "removed peer loses transport permission");
+        Conversation::put_member(&conn, &group, &peer, ROLE_MEMBER).unwrap();
+        Conversation::deactivate_member_tx(&conn, &group, &me).unwrap();
+        assert_eq!(resolve(false), None, "leaving ends our transport permission too");
+        assert_eq!(Conversation::for_peer_transport_tx(&conn, &me, &me, true), None);
     }
 
     /// `for_peer` is find-or-create: the second call for the same peer must

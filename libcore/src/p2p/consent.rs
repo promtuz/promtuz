@@ -1,5 +1,5 @@
-//! The single P2P connect gate. Contacts-only; `RelayedOnly` is defined for
-//! the Privacy editor to write later (v1 returns only `Direct` | `No`).
+//! Paired contacts may connect directly. Active group co-members may transfer
+//! through a relay without gaining access to our public or LAN addresses.
 
 use crate::data::contact::Contact;
 
@@ -11,7 +11,13 @@ pub enum Decision {
 }
 
 pub fn may_connect(ipk: &[u8; 32]) -> Decision {
-    if Contact::is_paired(ipk) { Decision::Direct } else { Decision::No }
+    if Contact::is_paired(ipk) {
+        Decision::Direct
+    } else if crate::data::conversation::Conversation::for_peer_transport(ipk, false).is_some() {
+        Decision::RelayedOnly
+    } else {
+        Decision::No
+    }
 }
 
 #[cfg(test)]
