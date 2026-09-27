@@ -13,7 +13,9 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 pub mod auth;
+pub(crate) mod ranges;
 pub mod store;
+pub(crate) mod v2;
 pub mod wire;
 
 /// Auto-download ceiling: bigger offers wait for a user tap even on wifi.
@@ -56,6 +58,9 @@ impl Failure {
         Self { kind, source: source.into() }
     }
     fn wire(e: anyhow::Error) -> Self {
+        if let Some(code) = e.downcast_ref::<v2::ErrorCode>() {
+            return remote_failure(*code);
+        }
         let kind = if e.is::<auth::AuthenticationFailed>() {
             FailureKind::Authentication
         } else if e.is::<wire::InvalidFrame>() {
@@ -70,6 +75,41 @@ impl Failure {
         let kind =
             if e.is::<store::Cancelled>() { FailureKind::Cancelled } else { FailureKind::Storage };
         Self::new(kind, e)
+    }
+}
+
+/// Quinn normally finishes a dropped sending half. An interrupted frame must
+/// reset instead, so a transport stall is not mistaken for malformed clean EOF.
+struct TransferSend {
+    stream: quinn::SendStream,
+    finished: bool,
+}
+impl TransferSend {
+    fn new(stream: quinn::SendStream) -> Self {
+        Self { stream, finished: false }
+    }
+    fn finish(&mut self) -> Result<(), quinn::ClosedStream> {
+        self.stream.finish()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+impl std::ops::Deref for TransferSend {
+    type Target = quinn::SendStream;
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+impl std::ops::DerefMut for TransferSend {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stream
+    }
+}
+impl Drop for TransferSend {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.stream.reset(0u32.into());
+        }
     }
 }
 
@@ -175,13 +215,9 @@ pub fn prepare_send(path: &str, ttl_secs: u64) -> anyhow::Result<([u8; 32], u64)
     Ok((file_id, size))
 }
 
-/// Answer pulls over `link` until the peer stops opening streams: read one
-/// [`wire::Pull`] per bi-stream, then either reply [`wire::ServeResp::Gone`]
-/// (we no longer retain it) or frame the [`wire::Manifest`] and stream the
-/// requested chunk bytes raw from `have` to EOF.
-///
-/// The framed manifest is the only length-delimited part; the chunk bytes ride
-/// after it unframed, since the puller sizes and counts them from that manifest.
+/// Answer requests in the grammar selected by this connection's TLS ALPN.
+/// Legacy peers receive a raw contiguous suffix; v2 peers request bounded
+/// missing ranges with indexed, verified chunks and explicit completion.
 ///
 /// Every stream starts with the mutual [`auth`] handshake pinning the peer's
 /// IPK to this connection's TLS key; a stream that fails it is dropped before
@@ -238,10 +274,14 @@ async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
         tokio::select! {
             _ = streams.join_next(), if !streams.is_empty() => {},
             accepted = link.accept_stream(), if streams.len() < SERVES_PER_LINK => {
-                let Ok((s, r)) = accepted else { break };
+                let Ok((mut s, mut r)) = accepted else { break };
                 // Don't queue unbounded authenticated/unauthenticated work. A
                 // busy stream resets; its caller can retry within its budget.
-                let Ok(slot) = SERVING.try_acquire() else { drop((s, r)); continue };
+                let Ok(slot) = SERVING.try_acquire() else {
+                    let _ = s.reset(0u32.into());
+                    let _ = r.stop(0u32.into());
+                    continue;
+                };
                 let link = link.clone();
                 let local = local.clone();
                 streams.spawn(async move {
@@ -261,10 +301,15 @@ async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
 }
 
 async fn serve_stream(
-    link: &crate::p2p::PeerLink, local: &wire::Auth, mut s: quinn::SendStream,
-    mut r: quinn::RecvStream,
+    link: &crate::p2p::PeerLink, local: &wire::Auth, s: quinn::SendStream, mut r: quinn::RecvStream,
 ) -> Result<(), Failure> {
+    let mut s = TransferSend::new(s);
     bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
+    if link.protocol().map_err(|e| Failure::new(FailureKind::InvalidData, e))?
+        == crate::p2p::protocol::AttachmentProtocol::V2
+    {
+        return serve_v2(link, local, &mut s, &mut r).await;
+    }
     let pull: wire::Pull =
         bounded(CONTROL_TIMEOUT, wire::read_frame_limited(&mut r, wire::PULL_FRAME_LIMIT)).await?;
     let now = crate::utils::systime().as_secs();
@@ -322,6 +367,120 @@ async fn serve_stream(
         write_chunk(&mut s, &buf[..count]).await?;
         diagnostics::sent_content(count as u64);
     }
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    Ok(())
+}
+
+fn protocol_failure(message: &'static str) -> Failure {
+    Failure::new(FailureKind::InvalidData, wire::InvalidFrame(message.into()))
+}
+
+fn remote_failure(code: v2::ErrorCode) -> Failure {
+    let kind = match code {
+        v2::ErrorCode::Unavailable => FailureKind::Unavailable,
+        v2::ErrorCode::Busy => FailureKind::Transport,
+        v2::ErrorCode::Storage => FailureKind::Storage,
+        v2::ErrorCode::InvalidRequest | v2::ErrorCode::Unsupported => FailureKind::InvalidData,
+    };
+    Failure::new(kind, code)
+}
+
+/// A Complete response is terminal: trailing bytes are a protocol error, and
+/// a kept-alive stream without FIN is bounded just like other control work.
+async fn expect_fin(r: &mut quinn::RecvStream) -> Result<(), Failure> {
+    bounded(CONTROL_TIMEOUT, async {
+        let mut byte = [0; 1];
+        if r.read(&mut byte).await?.is_some() {
+            return Err(wire::InvalidFrame("data after completed request".into()).into());
+        }
+        Ok(())
+    })
+    .await
+}
+
+async fn v2_error(s: &mut TransferSend, code: v2::ErrorCode) -> Result<(), Failure> {
+    bounded(CONTROL_TIMEOUT, v2::write_frame(s, &v2::Frame::Error(code))).await?;
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    Ok(())
+}
+
+/// V2 runs only after TLS-selected grammar and mutual identity verification.
+/// Each stream owns one authorized Describe/Pull and its cancellation scope.
+async fn serve_v2(
+    link: &crate::p2p::PeerLink, local: &wire::Auth, s: &mut TransferSend,
+    r: &mut quinn::RecvStream,
+) -> Result<(), Failure> {
+    let limits = bounded(CONTROL_TIMEOUT, v2::exchange_hello(s, r)).await?;
+    let request = bounded(CONTROL_TIMEOUT, v2::read_frame_for(r, v2::ReadPhase::Request)).await?;
+    expect_fin(r).await?;
+    let (file_id, requested) = match request {
+        v2::Frame::Describe { file_id } => (file_id, None),
+        v2::Frame::Pull { file_id, ranges } => (file_id, Some(ranges)),
+        _ => return v2_error(s, v2::ErrorCode::InvalidRequest).await,
+    };
+    if !offered_to(&file_id, &link.ipk, &local.ipk) {
+        return v2_error(s, v2::ErrorCode::Unavailable).await;
+    }
+    let Some(retained) = store::retention_get(&file_id)
+        .filter(|ret| ret.expires_at > crate::utils::systime().as_secs())
+    else {
+        return v2_error(s, v2::ErrorCode::Unavailable).await;
+    };
+    let manifest: wire::Manifest = match postcard::from_bytes(&retained.manifest) {
+        Ok(manifest) => manifest,
+        Err(_) => return v2_error(s, v2::ErrorCode::Storage).await,
+    };
+    if manifest.file_id() != file_id
+        || manifest.chunk_size == 0
+        || manifest.chunk_size as usize > wire::CHUNK_SIZE
+        || manifest.chunks.len() as u64 != manifest.total_size.div_ceil(manifest.chunk_size as u64)
+        || manifest.total_size != retained.size
+    {
+        return v2_error(s, v2::ErrorCode::Storage).await;
+    }
+    let Some(requested) = requested else {
+        bounded(CONTROL_TIMEOUT, v2::write_frame(s, &v2::Frame::Manifest(manifest))).await?;
+        bounded(CONTROL_TIMEOUT, v2::write_frame(s, &v2::Frame::Complete { chunks_sent: 0 }))
+            .await?;
+        s.finish().map_err(|e| Failure::wire(e.into()))?;
+        return Ok(());
+    };
+    let count = match v2::validate_ranges(&requested, &manifest, limits) {
+        Ok(count) => count,
+        Err(_) => return v2_error(s, v2::ErrorCode::InvalidRequest).await,
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(&retained.path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return v2_error(s, v2::ErrorCode::Unavailable).await;
+        },
+        Err(_) => return v2_error(s, v2::ErrorCode::Storage).await,
+    };
+    for range in requested {
+        for index in range.start..range.end {
+            if !offered_to(&file_id, &link.ipk, &local.ipk)
+                || store::retention_get(&file_id)
+                    .is_none_or(|ret| ret.expires_at <= crate::utils::systime().as_secs())
+            {
+                return v2_error(s, v2::ErrorCode::Unavailable).await;
+            }
+            let offset = index as u64 * manifest.chunk_size as u64;
+            let len = (manifest.total_size - offset).min(manifest.chunk_size as u64) as usize;
+            let mut bytes = vec![0; len];
+            if file.seek(SeekFrom::Start(offset)).is_err() || file.read_exact(&mut bytes).is_err() {
+                return v2_error(s, v2::ErrorCode::Storage).await;
+            }
+            // Detect an edited/truncated source before advertising bad data.
+            if blake3::hash(&bytes).as_bytes() != &manifest.chunks[index as usize] {
+                return v2_error(s, v2::ErrorCode::Storage).await;
+            }
+            bounded(CHUNK_DEADLINE, v2::write_frame(s, &v2::Frame::Chunk { index, bytes })).await?;
+            diagnostics::sent_content(len as u64);
+        }
+    }
+    bounded(CONTROL_TIMEOUT, v2::write_frame(s, &v2::Frame::Complete { chunks_sent: count }))
+        .await?;
     s.finish().map_err(|e| Failure::wire(e.into()))?;
     Ok(())
 }
@@ -462,9 +621,13 @@ where
             result = async {
                 let link = connect().await?;
                 let result = pull_live(&link, file_id, offered_size, &local, &lease, CHUNK_TIMEOUT).await;
-                if result.as_ref().is_err_and(|e| matches!(e.kind, FailureKind::Transport | FailureKind::Authentication)) {
+                if result.as_ref().is_err_and(|e|
+                    matches!(e.kind, FailureKind::Transport | FailureKind::Authentication)
+                        && e.source.downcast_ref::<v2::ErrorCode>() != Some(&v2::ErrorCode::Busy)
+                ) {
                     // Close only this connection; another worker may already
-                    // have established a newer one for the same peer.
+                    // have established a newer one for the same peer. Busy is
+                    // an explicit response, not a broken shared connection.
                     link.conn.close(0u32.into(), b"transfer link invalidated");
                 }
                 result
@@ -609,8 +772,8 @@ pub(crate) async fn on_network_changed() {
 /// (acquiring a real link needs the full punch choreography).
 ///
 /// Crash-safety contract: a chunk's bytes are synced to disk BEFORE the
-/// `have` watermark covering them is persisted, so a resume never trusts a
-/// watermark ahead of real bytes — the worst crash re-pulls one chunk.
+/// verified bitmap and contiguous prefix are persisted. Recovery rehashes
+/// those candidates before requesting the remaining bytes.
 #[cfg(test)]
 async fn pull(
     link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
@@ -623,17 +786,44 @@ async fn pull_live(
     link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
     lease: &store::ReceiverLease, chunk_timeout: Duration,
 ) -> Result<(), Failure> {
-    // Resume into the exact file whose prefix was validated. Recomputing the
-    // canonical path could otherwise publish DONE over a different file after
-    // a data-root change. A missing old path restarts at the current location.
-    let (path, have0) = store::partial_get(&file_id)
-        .and_then(|p| {
-            let on_disk = std::fs::metadata(&p.path).ok()?.len();
-            let have = (p.have as u64).min(on_disk / p.chunk_size.max(1) as u64) as u32;
-            Some((p.path, have))
-        })
-        .unwrap_or_else(|| (store::partial_path(&file_id), 0));
-    let (mut s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
+    tokio::select! {
+        biased;
+        _ = lease.cancel.cancelled() => Err(Failure::new(FailureKind::Cancelled, store::Cancelled)),
+        result = async {
+            match link.protocol().map_err(|e| Failure::new(FailureKind::InvalidData, e))? {
+                crate::p2p::protocol::AttachmentProtocol::Legacy => {
+                    pull_legacy(link, file_id, offered_size, local, lease, chunk_timeout).await
+                },
+                crate::p2p::protocol::AttachmentProtocol::V2 => {
+                    pull_v2(link, file_id, offered_size, local, lease).await
+                },
+            }
+        } => result,
+    }
+}
+
+/// The old wire still means one contiguous prefix. Sparse local progress must
+/// never be advertised as that prefix; the shared coordinator revalidates it.
+async fn pull_legacy(
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease, chunk_timeout: Duration,
+) -> Result<(), Failure> {
+    let cached_manifest = store::partial_get(&file_id)
+        .and_then(|p| p.manifest)
+        .filter(|bytes| bytes.len() <= 8 * 1024 * 1024)
+        .and_then(|bytes| postcard::from_bytes::<wire::Manifest>(&bytes).ok())
+        .filter(|m| m.file_id() == file_id && m.total_size == offered_size);
+    let mut cached = match cached_manifest {
+        Some(ref manifest) => Some(
+            ranges::Receiver::open_async(file_id, link.ipk, manifest.clone(), offered_size, lease)
+                .await
+                .map_err(coordinator_failure)?,
+        ),
+        None => None,
+    };
+    let have0 = cached.as_ref().map_or(0, |receiver| receiver.prefix());
+    let (s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
+    let mut s = TransferSend::new(s);
     bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
     bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }))
         .await?;
@@ -655,53 +845,115 @@ async fn pull_live(
         || have0 as usize > manifest.chunks.len()
         || manifest.total_size != offered_size
     {
-        return Err(Failure::new(
-            FailureKind::InvalidData,
-            anyhow::anyhow!("manifest does not match the attachment offer"),
-        ));
+        return Err(protocol_failure("manifest does not match the attachment offer"));
     }
-    let mut part = store::Partial {
-        file_id,
-        source_ipk: link.ipk,
-        total: manifest.total_size,
-        chunk_size: manifest.chunk_size,
-        manifest: Some(postcard::to_allocvec(&manifest).map_err(Failure::storage)?),
-        have: have0,
-        state: store::ACTIVE,
-        path: path.clone(),
-        updated_at: crate::utils::systime().as_secs(),
+    let mut receiver = match cached.take() {
+        Some(receiver) => receiver,
+        None => {
+            ranges::Receiver::open_async(file_id, link.ipk, manifest.clone(), offered_size, lease)
+                .await
+                .map_err(coordinator_failure)?
+        },
     };
-    store::partial_put_live(&part, lease).map_err(Failure::storage)?;
-    use std::io::{Seek, SeekFrom, Write};
-    let mut f = store::open_partial(lease, &path).map_err(Failure::storage)?;
-    f.seek(SeekFrom::Start(have0 as u64 * manifest.chunk_size as u64)).map_err(Failure::storage)?;
-    let mut buf = vec![0u8; manifest.chunk_size as usize];
-    for idx in have0 as usize..manifest.chunks.len() {
-        let expect = (manifest.total_size - idx as u64 * manifest.chunk_size as u64)
+    let mut buf = vec![0; manifest.chunk_size as usize];
+    for index in have0 as usize..manifest.chunks.len() {
+        let expected = (manifest.total_size - index as u64 * manifest.chunk_size as u64)
             .min(manifest.chunk_size as u64) as usize;
         tokio::select! {
+            biased;
             _ = lease.cancel.cancelled() => return Err(Failure::new(FailureKind::Cancelled, store::Cancelled)),
-            got = read_chunk(&mut r, &mut buf[..expect], chunk_timeout) => got?,
+            result = read_chunk(&mut r, &mut buf[..expected], chunk_timeout) => result?,
         }
-        if *blake3::hash(&buf[..expect]).as_bytes() != manifest.chunks[idx] {
-            return Err(Failure::new(
-                FailureKind::InvalidData,
-                anyhow::anyhow!("chunk hash mismatch"),
-            ));
+        let already_verified = receiver.contains(index as u32);
+        receiver.commit(index as u32, &buf[..expected], lease).map_err(coordinator_failure)?;
+        if !already_verified {
+            diagnostics::received_verified(expected as u64);
         }
-        f.write_all(&buf[..expect]).map_err(Failure::storage)?;
-        f.flush().map_err(Failure::storage)?;
-        f.sync_data().map_err(Failure::storage)?;
-        part.have = idx as u32 + 1;
-        part.updated_at = crate::utils::systime().as_secs();
-        store::partial_put_live(&part, lease).map_err(Failure::storage)?;
-        diagnostics::received_verified(expect as u64);
     }
-    f.set_len(manifest.total_size).map_err(Failure::storage)?;
-    f.sync_data().map_err(Failure::storage)?;
-    part.state = store::DONE;
-    part.updated_at = crate::utils::systime().as_secs();
-    store::partial_put_live(&part, lease).map_err(Failure::storage)?;
+    receiver.finish(lease).map_err(coordinator_failure)?;
+    store::defer_retry(&file_id, 0).map_err(Failure::storage)?;
+    Ok(())
+}
+
+fn coordinator_failure(error: anyhow::Error) -> Failure {
+    if error.is::<wire::InvalidFrame>() { Failure::wire(error) } else { Failure::storage(error) }
+}
+
+async fn open_v2_request(
+    link: &crate::p2p::PeerLink, local: &wire::Auth,
+) -> Result<(TransferSend, quinn::RecvStream, v2::Limits), Failure> {
+    let (s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
+    let mut s = TransferSend::new(s);
+    bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
+    let limits = bounded(CONTROL_TIMEOUT, v2::exchange_hello(&mut s, &mut r)).await?;
+    Ok((s, r, limits))
+}
+
+async fn pull_v2(
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease,
+) -> Result<(), Failure> {
+    let (mut s, mut r, _) = open_v2_request(link, local).await?;
+    bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &v2::Frame::Describe { file_id })).await?;
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    let manifest = match bounded(
+        CONTROL_TIMEOUT,
+        v2::read_frame_for(&mut r, v2::ReadPhase::Manifest),
+    )
+    .await?
+    {
+        v2::Frame::Manifest(manifest) => manifest,
+        v2::Frame::Error(code) => return Err(remote_failure(code)),
+        _ => return Err(protocol_failure("expected attachment manifest")),
+    };
+    if manifest.file_id() != file_id || manifest.total_size != offered_size {
+        return Err(protocol_failure("manifest does not match the attachment offer"));
+    }
+    match bounded(CONTROL_TIMEOUT, v2::read_frame_for(&mut r, v2::ReadPhase::Complete)).await? {
+        v2::Frame::Complete { chunks_sent: 0 } => {},
+        v2::Frame::Error(code) => return Err(remote_failure(code)),
+        _ => return Err(protocol_failure("invalid manifest completion")),
+    }
+    expect_fin(&mut r).await?;
+    let mut receiver =
+        ranges::Receiver::open_async(file_id, link.ipk, manifest.clone(), offered_size, lease)
+            .await
+            .map_err(coordinator_failure)?;
+    while receiver.prefix() < manifest.chunks.len() as u32 {
+        let (mut s, mut r, limits) = open_v2_request(link, local).await?;
+        let requested = receiver.missing(limits.max_ranges as usize, limits.max_chunks as u32);
+        let expected = v2::validate_ranges(&requested, &manifest, limits).map_err(Failure::wire)?;
+        let mut pending: Vec<u32> =
+            requested.iter().flat_map(|range| range.start..range.end).collect();
+        pending.reverse();
+        bounded(
+            CONTROL_TIMEOUT,
+            v2::write_frame(&mut s, &v2::Frame::Pull { file_id, ranges: requested }),
+        )
+        .await?;
+        s.finish().map_err(|e| Failure::wire(e.into()))?;
+        while let Some(expected_index) = pending.pop() {
+            match bounded(CHUNK_DEADLINE, v2::read_frame_for(&mut r, v2::ReadPhase::Chunk)).await? {
+                v2::Frame::Chunk { index, bytes } if index == expected_index => {
+                    receiver.commit(index, &bytes, lease).map_err(coordinator_failure)?;
+                    diagnostics::received_verified(bytes.len() as u64);
+                },
+                v2::Frame::Error(code) => return Err(remote_failure(code)),
+                _ => {
+                    return Err(protocol_failure(
+                        "unexpected, duplicate or missing attachment chunk",
+                    ));
+                },
+            }
+        }
+        match bounded(CONTROL_TIMEOUT, v2::read_frame_for(&mut r, v2::ReadPhase::Complete)).await? {
+            v2::Frame::Complete { chunks_sent } if chunks_sent == expected => {},
+            v2::Frame::Error(code) => return Err(remote_failure(code)),
+            _ => return Err(protocol_failure("invalid range completion")),
+        }
+        expect_fin(&mut r).await?;
+    }
+    receiver.finish(lease).map_err(coordinator_failure)?;
     store::defer_retry(&file_id, 0).map_err(Failure::storage)?;
     Ok(())
 }
@@ -869,7 +1121,7 @@ mod download_resume {
         offer_in(conv, file_id);
     }
 
-    fn offer_in(conv: [u8; 16], file_id: [u8; 32]) {
+    pub(super) fn offer_in(conv: [u8; 16], file_id: [u8; 32]) {
         let row = crate::data::media::MediaRow {
             kind: crate::data::media::KIND_ATTACHMENT,
             group_id: None,
@@ -1204,9 +1456,8 @@ mod download_resume {
         assert_eq!(std::fs::read(&p.path).unwrap(), bytes);
         assert_eq!(wire::Manifest::from_file(&p.path).unwrap().file_id(), file_id);
 
-        // Resumed pull moves ONLY the tail: pre-seed have=1 with garbage in
-        // chunk 0's region — re-transferring chunk 0 would either overwrite
-        // the garbage or fail the hash check on mis-aligned bytes.
+        // An old prefix watermark is only a candidate. Missing manifest
+        // metadata and corrupt bytes must be repaired before promotion.
         let src2 = std::env::temp_dir().join("promtuz-dl-src2.bin");
         let mut bytes2 = vec![0x11u8; 300 * 1024];
         bytes2[wire::CHUNK_SIZE..].fill(0x22);
@@ -1234,8 +1485,7 @@ mod download_resume {
         assert_eq!(store::partial_get(&file_id2).unwrap().state, store::DONE);
         let got = std::fs::read(&path2).unwrap();
         assert_eq!(got.len(), 300 * 1024);
-        assert!(got[..wire::CHUNK_SIZE].iter().all(|&b| b == 0x99), "chunk 0 was re-transferred");
-        assert_eq!(&got[wire::CHUNK_SIZE..], &bytes2[wire::CHUNK_SIZE..]);
+        assert_eq!(got, bytes2, "unverified prefix must be re-transferred");
     }
 
     /// Exercise the real authenticated QUIC transfer without saving either
@@ -1376,3 +1626,8 @@ mod download_resume {
         );
     }
 }
+
+#[cfg(test)]
+mod range_adversarial_tests;
+#[cfg(test)]
+mod range_tests;

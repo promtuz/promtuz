@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use common::quic::protorole::ProtoRole;
 use ed25519_dalek::Signature as Ed25519Signature;
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
@@ -32,6 +31,7 @@ use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 
 use crate::data::identity::IdentitySigner;
+use crate::p2p::protocol;
 use crate::quic::peer_identity::PeerIdentity;
 
 /// OID for Ed25519 signature/key algorithm (1.3.101.112 / id-Ed25519, RFC 8410).
@@ -384,7 +384,7 @@ pub fn build_peer_server_cfg(identity: &PeerIdentity) -> Result<ServerConfig> {
         .with_client_cert_verifier(Arc::new(PeerClientCertVerifier))
         .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
 
-    crypto.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    crypto.alpn_protocols = protocol::offered_alpns();
 
     let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
     cfg.transport_config(peer_transport_cfg());
@@ -406,7 +406,7 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
         .with_custom_certificate_verifier(Arc::new(PeerServerCertVerifier))
         .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)));
 
-    tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    tls.alpn_protocols = protocol::offered_alpns();
 
     let quic_config = QuicClientConfig::try_from(tls)?;
 
@@ -418,10 +418,20 @@ pub fn build_peer_client_cfg(identity: &PeerIdentity) -> Result<ClientConfig> {
 
 /// Test-only peer TLS configs (server + client) from an explicit signing
 /// key, so an in-process test can stand up two peer endpoints without the
-/// global `IdentitySigner`. Same verifiers, ALPN, and cert shape as the real
-/// builders — only the key source differs.
+/// global `IdentitySigner`. Keeps the legacy ALPN deliberately, so existing
+/// transfer fixtures continue to exercise the released protocol. Verifiers
+/// and certificate shape match production.
 #[cfg(test)]
 pub(crate) fn test_peer_configs(key: &SigningKey) -> Result<(ServerConfig, ClientConfig)> {
+    test_peer_configs_with_protocols(key, vec![protocol::LEGACY_ALPN.to_vec()])
+}
+
+/// Explicit protocol lists let tests model released and new endpoints in
+/// either TLS role without changing the production negotiation policy.
+#[cfg(test)]
+pub(crate) fn test_peer_configs_with_protocols(
+    key: &SigningKey, protocols: Vec<Vec<u8>>,
+) -> Result<(ServerConfig, ClientConfig)> {
     fn certified(key: &SigningKey) -> CertifiedKey {
         let public_key = key.verifying_key();
         let tbs = build_tbs_certificate(public_key.as_bytes());
@@ -435,7 +445,7 @@ pub(crate) fn test_peer_configs(key: &SigningKey) -> Result<(ServerConfig, Clien
     let mut server_tls = rustls::ServerConfig::builder()
         .with_client_cert_verifier(Arc::new(PeerClientCertVerifier))
         .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified(key))));
-    server_tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    server_tls.alpn_protocols = protocols.clone();
     let mut server = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls)?));
     server.transport_config(peer_transport_cfg());
     server.migration(false);
@@ -444,7 +454,7 @@ pub(crate) fn test_peer_configs(key: &SigningKey) -> Result<(ServerConfig, Clien
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PeerServerCertVerifier))
         .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified(key))));
-    client_tls.alpn_protocols = vec![ProtoRole::Peer.alpn().into()];
+    client_tls.alpn_protocols = protocols;
     let mut client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_tls)?));
     client.transport_config(peer_transport_cfg());
 

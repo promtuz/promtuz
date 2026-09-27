@@ -90,6 +90,9 @@ const MIGRATION_ARRAY: &[M] = &[
      ALTER TABLE partials ADD COLUMN retry_after INTEGER NOT NULL DEFAULT 0;",
     ),
     M::up("ALTER TABLE partials ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 0;"),
+    // NULL identifies an older prefix-only partial. The range receiver checks
+    // those bytes against the manifest before publishing a verified bitmap.
+    M::up("ALTER TABLE partials ADD COLUMN verified BLOB;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -199,12 +202,21 @@ fn partial_put_locked(conn: &Connection, p: &Partial) -> rusqlite::Result<()> {
 static RECEIVERS: Lazy<Mutex<HashMap<[u8; 32], Arc<CancellationToken>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone)]
 pub(crate) struct ReceiverLease {
     file_id: [u8; 32],
     pub(crate) cancel: Arc<CancellationToken>,
+    // Background recovery keeps this guard alive after its async caller is
+    // dropped. Deregister only when the last owner has actually stopped.
+    _owner: Arc<ReceiverOwner>,
 }
 
-impl Drop for ReceiverLease {
+struct ReceiverOwner {
+    file_id: [u8; 32],
+    cancel: Arc<CancellationToken>,
+}
+
+impl Drop for ReceiverOwner {
     fn drop(&mut self) {
         let mut receivers = RECEIVERS.lock();
         if receivers.get(&self.file_id).is_some_and(|token| Arc::ptr_eq(token, &self.cancel)) {
@@ -219,7 +231,13 @@ pub(crate) fn receiver_lease(file_id: [u8; 32]) -> ReceiverLease {
     if let Some(previous) = RECEIVERS.lock().insert(file_id, cancel.clone()) {
         previous.cancel();
     }
-    ReceiverLease { file_id, cancel }
+    let owner = Arc::new(ReceiverOwner { file_id, cancel: cancel.clone() });
+    ReceiverLease { file_id, cancel, _owner: owner }
+}
+
+#[cfg(test)]
+pub(super) fn receiver_registered(file_id: &[u8; 32]) -> bool {
+    RECEIVERS.lock().contains_key(file_id)
 }
 
 pub(crate) fn partial_put_live(p: &Partial, lease: &ReceiverLease) -> anyhow::Result<()> {
@@ -227,6 +245,82 @@ pub(crate) fn partial_put_live(p: &Partial, lease: &ReceiverLease) -> anyhow::Re
     ensure_live(lease)?;
     partial_put_locked(&db, p)?;
     Ok(())
+}
+
+/// Stored chunk bitmap, or NULL for a partial created by the prefix protocol.
+/// A set bit is only a recovery candidate until the receiver rechecks the
+/// corresponding bytes. In-memory workers publish only after syncing data.
+pub(crate) fn verified_bitmap(file_id: &[u8; 32]) -> rusqlite::Result<Option<Vec<u8>>> {
+    TRANSFERS_DB
+        .lock()
+        .query_row(
+            // An 8 MiB manifest cannot name more than 262144 hashes, so no
+            // valid bitmap exceeds 32 KiB. Return an empty candidate set for
+            // an oversized corrupt blob without allocating its full length.
+            "SELECT CASE WHEN length(verified)>32768 THEN x'' ELSE verified END
+             FROM partials WHERE file_id=?1",
+            params![file_id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+}
+
+/// Publish range progress and the contiguous legacy prefix together. A failed
+/// bitmap write must not leave a prefix/state claiming bytes from that write.
+pub(crate) fn partial_put_verified_live(
+    p: &Partial, verified: &[u8], lease: &ReceiverLease,
+) -> anyhow::Result<()> {
+    let mut db = TRANSFERS_DB.lock();
+    ensure_live(lease)?;
+    anyhow::ensure!(p.file_id == lease.file_id, "receiver lease belongs to another file");
+    partial_put_verified_locked(&mut db, p, verified)?;
+    Ok(())
+}
+
+fn partial_put_verified_locked(
+    db: &mut Connection, p: &Partial, verified: &[u8],
+) -> rusqlite::Result<()> {
+    let tx = db.transaction()?;
+    partial_put_locked(&tx, p)?;
+    tx.execute("UPDATE partials SET verified=?2 WHERE file_id=?1", params![p.file_id, verified])?;
+    tx.commit()
+}
+
+/// Advance a live receiver without rewriting its immutable manifest on every
+/// chunk. One UPDATE atomically publishes both progress representations; this
+/// path cannot insert a row removed by deletion.
+pub(crate) fn partial_progress_verified_live(
+    file_id: &[u8; 32], have: u32, state: u8, updated_at: u64, verified: &[u8],
+    lease: &ReceiverLease,
+) -> anyhow::Result<()> {
+    let db = TRANSFERS_DB.lock();
+    ensure_live(lease)?;
+    anyhow::ensure!(*file_id == lease.file_id, "receiver lease belongs to another file");
+    let changed = db.execute(
+        "UPDATE partials SET have=?2, state=?3, updated_at=?4, verified=?5 WHERE file_id=?1",
+        params![file_id, have, state, updated_at, verified],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+    Ok(())
+}
+
+/// UI progress counts verified chunks, while `Partial::have` deliberately
+/// remains the contiguous prefix required by old peers. Invalid local range
+/// metadata is handled by the receiver; it must not inflate UI progress.
+pub(crate) fn verified_count(p: &Partial) -> u32 {
+    let chunks = p.total.div_ceil(p.chunk_size.max(1) as u64);
+    let prefix = (p.have as u64).min(chunks) as u32;
+    let Ok(Some(bits)) = verified_bitmap(&p.file_id) else { return prefix };
+    if chunks > (8 * 1024 * 1024 / 32)
+        || bits.len() as u64 != chunks.div_ceil(8)
+        || (chunks % 8 != 0 && bits.last().is_some_and(|last| last >> (chunks % 8) != 0))
+    {
+        return 0;
+    }
+    bits.iter().map(|byte| byte.count_ones()).sum()
 }
 
 pub(crate) fn open_partial(lease: &ReceiverLease, path: &str) -> anyhow::Result<std::fs::File> {
@@ -465,22 +559,23 @@ mod tests {
         };
         partial_put_locked(&db, &p).unwrap();
         MIGRATIONS.to_latest(&mut db).unwrap();
-        let initial: (u32, u64, u64) = db
-            .query_row("SELECT have, last_wake_at, retry_after FROM partials", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        let initial: (u32, u64, u64, Option<Vec<u8>>) = db
+            .query_row("SELECT have, last_wake_at, retry_after, verified FROM partials", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .unwrap();
-        assert_eq!(initial, (1, 0, 0));
-        db.execute("UPDATE partials SET last_wake_at=110, retry_after=170", []).unwrap();
+        assert_eq!(initial, (1, 0, 0, None));
+        db.execute("UPDATE partials SET last_wake_at=110, retry_after=170, verified=x'01'", [])
+            .unwrap();
         p.state = CONNECTING;
         p.updated_at = 120;
         partial_put_locked(&db, &p).unwrap();
-        let history: (u64, u64) = db
-            .query_row("SELECT last_wake_at, retry_after FROM partials", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+        let history: (u64, u64, Vec<u8>) = db
+            .query_row("SELECT last_wake_at, retry_after, verified FROM partials", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
-        assert_eq!(history, (110, 170), "UI transitions cannot reset wake/retry history");
+        assert_eq!(history, (110, 170, vec![1]), "UI transitions retain retry and range history");
     }
 
     #[test]

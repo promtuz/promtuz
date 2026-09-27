@@ -24,6 +24,7 @@
 pub(crate) mod candidate;
 pub(crate) mod consent;
 pub(crate) mod diagnostics;
+pub(crate) mod protocol;
 mod disco;
 mod punch;
 mod reflexive;
@@ -536,6 +537,12 @@ pub struct PeerLink {
 }
 
 impl PeerLink {
+    /// The immutable TLS-negotiated attachment grammar for this connection.
+    /// Transfer authentication still binds the connection's key to `ipk`.
+    pub(crate) fn protocol(&self) -> Result<protocol::AttachmentProtocol> {
+        protocol::AttachmentProtocol::from_conn(&self.conn)
+    }
+
     fn still_permitted(&self) -> bool {
         match consent::may_connect(&self.ipk) {
             consent::Decision::Direct => true,

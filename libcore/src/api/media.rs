@@ -247,7 +247,7 @@ fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
                 if p.state == store::DONE && !complete { store::PENDING } else { p.state };
             (
                 state,
-                p.have,
+                store::verified_count(&p),
                 p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
                 complete.then(|| p.path.clone()),
             )
