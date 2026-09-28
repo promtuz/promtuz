@@ -173,6 +173,16 @@ const MIGRATION_ARRAY: &[M] = &[
         ALTER TABLE mls_epoch_ahead ADD COLUMN accepted_at_ms INTEGER NOT NULL DEFAULT 0;
     "#,
     ),
+    // Keep the signed dispatch identity separate from the buffer's dedup key.
+    // NULL preserves old entries whose original identity was never recorded.
+    M::up(
+        r#"--sql
+        ALTER TABLE mls_epoch_ahead ADD COLUMN original_dispatch_id BLOB
+            CHECK(original_dispatch_id IS NULL OR length(original_dispatch_id) = 16);
+        ALTER TABLE mls_epoch_ahead ADD COLUMN dispatch_sender BLOB
+            CHECK(dispatch_sender IS NULL OR length(dispatch_sender) = 32);
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -212,6 +222,24 @@ pub fn stash_db_handle() -> std::sync::Arc<parking_lot::Mutex<Connection>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_identity_migration_preserves_legacy_buffered_messages() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..MIGRATION_ARRAY.len() - 1])
+            .to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO mls_epoch_ahead (group_id,epoch,dispatch_id,msg_blob,received_at_ms,accepted_at_ms) VALUES (?1,2,?2,?3,456,123)",
+            (vec![1; 32], vec![2; 16], vec![3; 128]),
+        ).unwrap();
+        apply_mls_migrations(&mut conn);
+        let row = conn.query_row(
+            "SELECT dispatch_id,msg_blob,accepted_at_ms,original_dispatch_id,dispatch_sender FROM mls_epoch_ahead",
+            [], |r| Ok((r.get::<_,Vec<u8>>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,u64>(2)?,
+                r.get::<_,Option<Vec<u8>>>(3)?, r.get::<_,Option<Vec<u8>>>(4)?)),
+        ).unwrap();
+        assert_eq!(row, (vec![2; 16], vec![3; 128], 123, None, None));
+    }
 
     /// Apply the MLS migrations to a fresh `:memory:` connection.
     /// Asserts the table and index exist post-migration.

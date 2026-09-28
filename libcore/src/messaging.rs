@@ -1858,13 +1858,15 @@ pub fn leaf_signer_for_group(
 ///
 /// Called by `quic/server.rs::handle_deliver` after it has confirmed
 /// the outer `DispatchP::sig` is valid (the existing v2 path also did
-/// this — we keep that contract).
+/// this — we keep that contract). `sender_ipk` and `dispatch_id` must
+/// come from that verified dispatch, whose signature covers both and payload.
 ///
 /// **Generic over the dialer** so the test surface can drive
 /// process_inbound_envelope with a `FakeDhtClient` for the `on_consumed`
 /// callback path.
 pub async fn process_inbound_envelope<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], payload: &[u8], accepted_at_ms: u64,
+    dispatch_id: [u8; 16],
 ) -> Result<Option<InboundDecoded>> {
     let envelope =
         MlsEnvelopeP::deser(payload).map_err(|e| anyhow!("postcard deser MlsEnvelopeP: {e}"))?;
@@ -1907,7 +1909,7 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             },
         },
         MlsEnvelopeP::Application(env) => {
-            let decoded = process_application_inbound(ctx, sender_ipk, env, accepted_at_ms)?;
+            let decoded = process_application_inbound(ctx, sender_ipk, env, accepted_at_ms, dispatch_id)?;
             if let InboundDecoded::ApplicationNoGroup { group_id } = &decoded {
                 heal_dead_group(ctx, sender_ipk, group_id).await;
             }
@@ -2323,10 +2325,10 @@ pub fn process_welcome_inbound_no_contacts<C: DhtClient>(
 
 fn process_application_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: MlsApplicationEnvelopeP,
-    accepted_at_ms: u64,
+    accepted_at_ms: u64, dispatch_id: [u8; 16],
 ) -> Result<InboundDecoded> {
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
-    process_application_inbound_for(ctx, sender_ipk, &our_ipk, env, accepted_at_ms)
+    process_application_inbound_for(ctx, sender_ipk, &our_ipk, env, accepted_at_ms, dispatch_id)
 }
 
 /// Persist messages drained from the epoch-ahead buffer. These were
@@ -2337,16 +2339,18 @@ fn process_application_inbound<C: DhtClient>(
 /// message that waited out several epochs is still credited to whoever wrote
 /// it rather than to whoever's arrival unblocked the queue.
 ///
-/// ponytail: `m.dispatch_id` is the buffer's blake3(mls) key (push site
-/// below), not the sender's authoritative DispatchP.id: it dedups fine but
-/// won't sort by send-time, so delivery watermarks must thread the real id to
-/// the push before relying on ordering.
+/// New buffer rows retain the signed outer dispatch identity. Older rows
+/// still use their legacy ciphertext-derived ID: the original cannot be
+/// reconstructed after it was discarded.
 fn persist_drained(
     drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, conversation: [u8; 16],
 ) {
     for m in drained {
         let sender_ipk = m.sender;
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
+        if let Some(dispatch_sender) = m.dispatch_sender {
+            crate::data::seen::Seen::record(&dispatch_sender, &did, crate::utils::systime().as_secs());
+        }
         let ts = crate::quic::server::accepted_at_secs(m.accepted_at_ms);
         // Post carries the quote target alongside the body; pre-v12 payloads
         // reach the same persist through legacy_body.
@@ -2391,9 +2395,11 @@ fn persist_drained(
 /// `process_application_inbound` delegates here. The e2e harness uses
 /// this directly so each test client can assert against its own IPK
 /// without sharing a process-global identity row.
+/// Like the public ingress, this requires an already-verified outer dispatch
+/// identity; the inner envelope signature alone does not cover `dispatch_id`.
 pub fn process_application_inbound_for<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32], env: MlsApplicationEnvelopeP,
-    accepted_at_ms: u64,
+    accepted_at_ms: u64, dispatch_id: [u8; 16],
 ) -> Result<InboundDecoded> {
     // 1. Outer envelope sig verifies under sender's IPK.
     let transcript = envelope_signing_input(
@@ -2449,9 +2455,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
             );
         }
         // Buffer for catchup later.
-        let dispatch_id = blake3::hash(&env.mls_message.0).as_bytes()[..16].to_vec();
         ctx.buffer
-            .push(&group, env.mls_message.0.clone(), env.epoch, dispatch_id, accepted_at_ms)
+            .push_dispatch(&group, env.mls_message.0.clone(), env.epoch, sender_ipk, dispatch_id, accepted_at_ms)
             .map_err(|e| anyhow!("epoch-ahead buffer push: {e}"))?;
         return Ok(InboundDecoded::ApplicationBuffered);
     }
@@ -3120,6 +3125,59 @@ mod tests {
     }
 
     /// Epoch-ahead message gets buffered, then drained on commit-merge.
+    #[tokio::test]
+    async fn caught_up_attachment_retains_its_signed_message_id_for_references_and_deletion() {
+        let alice = Node::new(0xC5);
+        let bob = Node::new(0xC6);
+        let dht = FakeDhtClient::new_arc();
+        let kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
+        dht.publish_keypackages(&kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+        let mut group = lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk).await.unwrap();
+        let welcomes = dht.fetch_welcomes().await.unwrap();
+        process_welcome(&bob.provider, &welcomes[0].envelope).unwrap();
+        let conversation = Conversation::for_peer(&alice.ipk).unwrap();
+        Conversation::bind_group(&conversation, &group.group_id()).unwrap();
+        let leaf = leaf_signer_for_group(&alice.provider, &group, &alice.ipk).unwrap();
+        let before = group.epoch();
+        let commit = group.self_update(&alice.provider, &leaf).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let file_id = [0xC5; 32];
+        let body = AppPayload::Post { reply_to: None, body: Body::Attachment {
+            caption: "file after update".into(), group_id: None,
+            mime: "application/octet-stream".into(), name: "example.bin".into(),
+            size: 517, thumb: vec![], file_id,
+        }};
+        let bytes = build_application_envelope_bytes(
+            &alice.ctx(dht.as_ref()), &mut group, &leaf, &alice.ipk, &bob.ipk,
+            &body.ser().unwrap(), &alice.ipk_signer,
+        ).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+        let did = crate::data::message::next_dispatch_id();
+        let synthetic = blake3::hash(&env.mls_message.0).as_bytes()[..16].to_vec();
+        assert_ne!(synthetic, did);
+        for _ in 0..2 {
+            let result = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env.clone(), 123_000, did).unwrap();
+            assert!(matches!(result, InboundDecoded::ApplicationBuffered));
+        }
+        assert_eq!(bob.buffer.buffered_count(&group.group_id()).unwrap(), 1);
+        let mut forged = env;
+        forged.sender_sig.0[0] ^= 1;
+        assert!(process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, forged, 123_000, [0xFF;16]).is_err());
+        assert_eq!(bob.buffer.buffered_count(&group.group_id()).unwrap(), 1);
+        let bytes = SealedMessage::from_mls_out(&commit, group.group_id(), before).unwrap()
+            .address_to(&bob.ipk, &alice.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124_000, crate::data::message::next_dispatch_id()).unwrap();
+        let media = crate::data::media::get(&conversation, &did).unwrap().unwrap();
+        assert_eq!(media.file_id, Some(file_id.to_vec()));
+        assert!(crate::data::media::get(&conversation, &synthetic.try_into().unwrap()).unwrap().is_none());
+        assert!(crate::data::seen::Seen::contains(&alice.ipk, &did));
+        assert!(Message::apply_edit(&conversation, &did, "corrected caption", false, Some(&alice.ipk)).is_some());
+        assert!(Message::apply_delete(&conversation, &did, false, Some(&alice.ipk)).is_some());
+        assert!(crate::data::media::get(&conversation, &did).unwrap().is_none());
+        Conversation::delete(&conversation).unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn epoch_ahead_application_buffers_then_drains_after_commit_merge() {
         let alice = Node::new(0x77);
@@ -3326,7 +3384,7 @@ mod tests {
 
         let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0)
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0, crate::data::message::next_dispatch_id())
                 .expect("stale envelope returns ApplicationStale, not Err");
 
         match result {
@@ -3387,7 +3445,7 @@ mod tests {
         };
 
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0)
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0, crate::data::message::next_dispatch_id())
                 .expect("dead-group envelope must be a typed outcome, not Err");
 
         match result {
@@ -3452,7 +3510,7 @@ mod tests {
 
         let buffered_before = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         let result =
-            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0);
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 0, crate::data::message::next_dispatch_id());
         assert!(result.is_err(), "far-future envelope must be rejected");
         let buffered_after = bob.buffer.buffered_count(&alice_group.group_id()).unwrap_or(0);
         assert_eq!(buffered_before, buffered_after, "far-future envelope must not grow the buffer");
@@ -3484,7 +3542,7 @@ mod tests {
         let outer = MlsEnvelopeP::Welcome(env);
         let bytes = outer.ser().expect("ser");
 
-        let r = process_inbound_envelope(&bob.ctx(dht.as_ref()), [0u8; 32], &bytes, 0).await;
+        let r = process_inbound_envelope(&bob.ctx(dht.as_ref()), [0u8; 32], &bytes, 0, [0; 16]).await;
         assert!(r.is_err(), "oversize welcome must be rejected at decode");
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");
@@ -3550,7 +3608,7 @@ mod tests {
             &update.into_payload().ser().unwrap(), &alice.ipk_signer,
         ).unwrap();
         let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
-        let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123).unwrap();
+        let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123, crate::data::message::next_dispatch_id()).unwrap();
         assert!(matches!(received, InboundDecoded::ApplicationBuffered));
         assert!(crate::data::peer_avatar::get(&alice.ipk).is_none());
         // Sync and ACK controls must also survive a future epoch. Otherwise a
@@ -3564,13 +3622,13 @@ mod tests {
                 &payload.ser().unwrap(), &alice.ipk_signer,
             ).unwrap();
             let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
-            let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123).unwrap();
+            let received = process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 123, crate::data::message::next_dispatch_id()).unwrap();
             assert!(matches!(received, InboundDecoded::ApplicationBuffered));
         }
         let sealed = SealedMessage::from_mls_out(&commit, ga.group_id(), before).unwrap();
         let bytes = sealed.address_to(&bob.ipk, &alice.ipk_signer).unwrap();
         let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
-        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124).unwrap();
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124, crate::data::message::next_dispatch_id()).unwrap();
         assert_eq!(crate::data::peer_avatar::get(&alice.ipk), Some(image));
         let acknowledged: Option<u64> = crate::db::messages::MESSAGES_DB.lock().query_row(
             "SELECT revision FROM avatar_acks WHERE owner_ipk = ?1 AND peer_ipk = ?2",
@@ -3588,7 +3646,7 @@ mod tests {
             revision: 12, avif: None,
         }).unwrap();
         persist_drained(vec![crate::mls::epoch_catchup::ProcessedApplicationMessage {
-            dispatch_id: vec![0xDA; 16], epoch: ga.epoch(), accepted_at_ms: 123,
+            dispatch_id: vec![0xDA; 16], dispatch_sender: None, epoch: ga.epoch(), accepted_at_ms: 123,
             sender: alice.ipk,
             plaintext: crate::data::peer_avatar::AvatarUpdate {
                 revision: 11, avif: Some(b"\0\0\0\x0cftypavif".to_vec()),

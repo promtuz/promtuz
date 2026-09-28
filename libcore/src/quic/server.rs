@@ -794,7 +794,7 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms, msg.id.0).await
         },
         None => {
             let dht = crate::quic::dht_client::NotWiredDhtClient;
@@ -804,7 +804,7 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      &dht,
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms).await
+            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms, msg.id.0).await
         },
     };
 

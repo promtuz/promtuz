@@ -16,7 +16,7 @@
 //!
 //! # Storage
 //!
-//! Backed by a SQLite table `mls_epoch_ahead` (migration v2):
+//! Backed by the migrated SQLite table `mls_epoch_ahead`:
 //!
 //! ```sql
 //! CREATE TABLE mls_epoch_ahead (
@@ -26,13 +26,16 @@
 //!     msg_blob        BLOB    NOT NULL,
 //!     received_at_ms  INTEGER NOT NULL,
 //!     accepted_at_ms  INTEGER NOT NULL DEFAULT 0,
+//!     original_dispatch_id BLOB,
+//!     dispatch_sender BLOB,
 //!     PRIMARY KEY (group_id, dispatch_id)
 //! );
 //! ```
 //!
-//! `dispatch_id` is the outer `DispatchP::id` (UUIDv7) bytes — keeping
-//! the dedup boundary at the dispatch layer matches the rest of
-//! promtuz's idempotency discipline.
+//! New entries use a sender-scoped hash as the `dispatch_id` buffer key;
+//! `original_dispatch_id` and `dispatch_sender` retain the signed outer
+//! identity separately. One member's chosen ID cannot occupy another
+//! member's slot. Old entries retain their legacy key and remain drainable.
 //!
 //! # Bounded buffer
 //!
@@ -138,6 +141,9 @@ pub struct ProcessedApplicationMessage {
     /// The dispatch id of the buffered envelope. Caller may use this
     /// to ack the corresponding row in `cf_dht_queue`.
     pub dispatch_id: Vec<u8>,
+    /// Verified outer sender when the original dispatch identity was saved.
+    /// Distinct from the authenticated MLS author in `sender` below.
+    pub dispatch_sender: Option<[u8; 32]>,
     /// Plaintext bytes the application wrote at send time.
     pub plaintext: Vec<u8>,
     /// Epoch at which the message was encrypted. Always `<=`
@@ -183,9 +189,33 @@ impl EpochCatchupBuffer {
     ///   duplicate (idempotent),
     /// - [`PushOutcome::Discarded`] if the group's buffer count
     ///   already equals [`MAX_EPOCH_AHEAD_BUFFER`].
+    #[cfg(test)]
     pub fn push(
         &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
         dispatch_id: Vec<u8>, accepted_at_ms: u64,
+    ) -> Result<PushOutcome, MlsGroupError> {
+        self.push_inner(group, msg_bytes, msg_epoch, dispatch_id, accepted_at_ms, None)
+    }
+
+    /// The caller has verified DispatchP's signature over sender, ID and
+    /// payload. Preserve that identity through epoch catch-up, without
+    /// trusting a ciphertext hash as the message's logical ID.
+    pub fn push_dispatch(
+        &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
+        sender: [u8; 32], dispatch_id: [u8; 16], accepted_at_ms: u64,
+    ) -> Result<PushOutcome, MlsGroupError> {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"promtuz-epoch-dispatch-v1\0");
+        hash.update(&sender);
+        hash.update(&dispatch_id);
+        self.push_inner(group, msg_bytes, msg_epoch, hash.finalize().as_bytes().to_vec(),
+            accepted_at_ms, Some((sender, dispatch_id)))
+    }
+
+    fn push_inner(
+        &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
+        dispatch_id: Vec<u8>, accepted_at_ms: u64,
+        original: Option<([u8; 32], [u8; 16])>,
     ) -> Result<PushOutcome, MlsGroupError> {
         let group_id = group.group_id();
         let now_ms = unix_now_ms();
@@ -254,15 +284,17 @@ impl EpochCatchupBuffer {
 
         tx.execute(
             "INSERT INTO mls_epoch_ahead \
-             (group_id, epoch, dispatch_id, msg_blob, received_at_ms, accepted_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (group_id, epoch, dispatch_id, msg_blob, received_at_ms, accepted_at_ms, original_dispatch_id, dispatch_sender) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &group_id[..],
                 msg_epoch as i64,
                 &dispatch_id,
                 &msg_bytes,
                 now_ms as i64,
-                accepted_at_ms as i64
+                accepted_at_ms as i64,
+                original.as_ref().map(|(_, id)| id.as_slice()),
+                original.as_ref().map(|(sender, _)| sender.as_slice()),
             ],
         )
         .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
@@ -317,11 +349,12 @@ impl EpochCatchupBuffer {
             // Find a candidate row to process: epoch <= current.
             // We pick the *oldest* (lowest received_at_ms) to give
             // commits priority — they're most likely to unblock epoch advance.
-            let candidate: Option<(Vec<u8>, Vec<u8>, u64, u64)> = {
+            let candidate: Option<(Vec<u8>, Vec<u8>, u64, u64, Option<Vec<u8>>, Option<[u8; 32]>)> = {
                 let conn = self.conn.lock();
                 conn.query_row(
                     "SELECT dispatch_id, msg_blob, epoch, \
-                            COALESCE(NULLIF(accepted_at_ms, 0), received_at_ms) \
+                            COALESCE(NULLIF(accepted_at_ms, 0), received_at_ms), \
+                            original_dispatch_id, dispatch_sender \
                      FROM mls_epoch_ahead \
                      WHERE group_id = ?1 AND epoch <= ?2 \
                      ORDER BY epoch ASC, received_at_ms ASC LIMIT 1",
@@ -331,13 +364,13 @@ impl EpochCatchupBuffer {
                         let blob: Vec<u8> = r.get(1)?;
                         let ep: i64 = r.get(2)?;
                         let at: i64 = r.get(3)?;
-                        Ok((did, blob, ep as u64, at as u64))
+                        Ok((did, blob, ep as u64, at as u64, r.get(4)?, r.get(5)?))
                     },
                 )
                 .ok()
             };
 
-            let Some((dispatch_id, msg_blob, msg_epoch, accepted_at_ms)) = candidate else {
+            let Some((dispatch_id, msg_blob, msg_epoch, accepted_at_ms, original_id, dispatch_sender)) = candidate else {
                 break; // no progressable rows
             };
 
@@ -389,10 +422,11 @@ impl EpochCatchupBuffer {
                 Ok((sender, ProcessedMessageContent::ApplicationMessage(app))) => {
                     output.push(application_to_processed(
                         app,
-                        dispatch_id.clone(),
+                        original_id.unwrap_or_else(|| dispatch_id.clone()),
                         msg_epoch,
                         accepted_at_ms,
                         sender,
+                        dispatch_sender,
                     ));
                     delete_row(&dispatch_id)?;
                 }
@@ -471,10 +505,11 @@ impl EpochCatchupBuffer {
 /// struct.
 fn application_to_processed(
     app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64, accepted_at_ms: u64,
-    sender: [u8; 32],
+    sender: [u8; 32], dispatch_sender: Option<[u8; 32]>,
 ) -> ProcessedApplicationMessage {
     ProcessedApplicationMessage {
         dispatch_id,
+        dispatch_sender,
         plaintext: app.into_bytes(),
         epoch,
         accepted_at_ms,
@@ -614,6 +649,47 @@ mod tests {
     // Test 2: Process the commit; drain_when_ready returns the
     // buffered application message.
     // -------------------------------------------------------------
+    #[test]
+    fn dispatch_identity_survives_reload_without_cross_sender_collisions() {
+        let (provider_a, buffer, mut alice_group, _bob_group, alice, bob) = pair_setup();
+        let mut encode = |bytes: &[u8]| {
+            let msg = alice_group.create_application_message(&provider_a, &alice.sig_kp, bytes).unwrap();
+            mls_message_to_bytes(&msg).unwrap()
+        };
+        let first_bytes = encode(b"first");
+        let second = encode(b"forwarded by another member");
+        let legacy = encode(b"old buffer row");
+        let provider_b = PromtuzMlsProvider::new(buffer.conn.clone());
+        let group = MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
+        let epoch = group.epoch();
+        assert_eq!(buffer.push_dispatch(&group, first_bytes.clone(), epoch, alice.ipk, [9; 16], 123).unwrap(), PushOutcome::Inserted);
+        assert_eq!(buffer.push_dispatch(&group, second.clone(), epoch, alice.ipk, [9; 16], 999).unwrap(), PushOutcome::Replaced);
+        assert_eq!(buffer.push_dispatch(&group, second, epoch, bob.ipk, [9; 16], 124).unwrap(), PushOutcome::Inserted);
+        buffer.push(&group, legacy, epoch, vec![10; 16], 125).unwrap();
+        let conn = buffer.conn.clone();
+        drop(buffer);
+        drop(group);
+        let buffer = EpochCatchupBuffer::new(conn);
+        let mut group = MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
+        let drained = buffer.drain_when_ready(&mut group, &provider_b).unwrap();
+        assert_eq!(drained.len(), 3);
+        let first = drained.iter().find(|m| m.dispatch_sender == Some(alice.ipk)).unwrap();
+        assert_eq!(first.dispatch_id, vec![9; 16]);
+        assert_eq!(first.plaintext, b"first");
+        assert_eq!(first.accepted_at_ms, 123, "replay preserves original bytes and timestamp");
+        let forwarded = drained.iter().find(|m| m.dispatch_sender == Some(bob.ipk)).unwrap();
+        assert_eq!(forwarded.dispatch_id, vec![9; 16]);
+        assert_eq!(forwarded.sender, alice.ipk, "outer carrier does not become MLS author");
+        let legacy = drained.iter().find(|m| m.dispatch_sender.is_none()).unwrap();
+        assert_eq!(legacy.dispatch_id, vec![10; 16]);
+        assert_eq!(legacy.plaintext, b"old buffer row");
+        assert_eq!(buffer.buffered_count(&group.group_id()).unwrap(), 0);
+        // A post-drain replay consumes no new MLS generation and cannot
+        // produce a second application message even before upper-layer dedup.
+        buffer.push_dispatch(&group, first_bytes, epoch, alice.ipk, [9; 16], 123).unwrap();
+        assert!(buffer.drain_when_ready(&mut group, &provider_b).unwrap().is_empty());
+    }
+
     #[test]
     fn drain_when_ready_returns_now_processable_application() {
         let (provider_a, buffer, mut alice_group, mut bob_group, alice, _bob) = pair_setup();
