@@ -476,6 +476,19 @@ const MIGRATION_ARRAY: &[M] = &[
         name TEXT NOT NULL, card BLOB NOT NULL, expires_ms INTEGER NOT NULL,
         status INTEGER NOT NULL DEFAULT 0, wire BLOB, PRIMARY KEY(peer, outgoing)
     ) WITHOUT ROWID;"),
+    // A delete may arrive before its post, including across MLS catch-up.
+    // Scope by author so another member cannot reserve a victim's target ID.
+    // Like Seen, this compact ledger survives clearing visible history.
+    M::up("CREATE TABLE message_deletions (
+        conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+        sender_ipk BLOB NOT NULL CHECK(length(sender_ipk) = 32),
+        dispatch_id BLOB NOT NULL CHECK(length(dispatch_id) = 16),
+        PRIMARY KEY(conversation_id, sender_ipk, dispatch_id)
+    ) WITHOUT ROWID;
+    INSERT INTO message_deletions
+        SELECT conversation_id, sender_ipk, dispatch_id FROM messages
+        WHERE outgoing = 0 AND deleted = 1
+          AND length(sender_ipk) = 32 AND length(dispatch_id) = 16;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -509,4 +522,35 @@ pub(crate) fn open_in_memory() -> Connection {
     let mut conn = Connection::open_in_memory().expect("open in-memory db");
     PRAGMA!(conn, MIGRATIONS);
     conn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletion_ledger_migration_preserves_history_and_backfills_only_known_authors() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..MIGRATION_ARRAY.len() - 1])
+            .to_latest(&mut conn).unwrap();
+        for (id, outgoing, deleted, sender) in [
+            (1u8, false, true, Some(vec![1; 32])),
+            (2, false, false, Some(vec![1; 32])),
+            (3, true, true, None),
+            (4, false, true, None),
+        ] {
+            conn.execute(
+                "INSERT INTO messages (id,conversation_id,sender_ipk,content,outgoing,timestamp,dispatch_id,deleted)
+                 VALUES (?1,?2,?3,'existing',?4,123,?5,?6)",
+                (id.to_string(), vec![2; 16], sender, outgoing, vec![id; 16], deleted),
+            ).unwrap();
+        }
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let markers: Vec<Vec<u8>> = conn.prepare("SELECT dispatch_id FROM message_deletions").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(markers, vec![vec![1; 16]]);
+        let kept: u32 = conn.query_row("SELECT COUNT(*) FROM messages WHERE content='existing' AND timestamp=123",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 4);
+    }
 }

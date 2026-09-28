@@ -120,7 +120,10 @@ impl Message {
     ) -> Result<Option<Self>> {
         let id = Ulid::new();
         let changed = conn.execute(
-            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to, notification_seen) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, 0)
+            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, reply_to, notification_seen)
+             SELECT ?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, 0
+             WHERE NOT EXISTS (SELECT 1 FROM message_deletions
+                 WHERE conversation_id = ?2 AND sender_ipk = ?3 AND dispatch_id = ?7)
              ON CONFLICT(conversation_id, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
             (&id.to_string(), conversation_id.as_slice(), sender.as_slice(), content, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
@@ -244,6 +247,10 @@ impl Message {
     pub fn apply_delete(
         conversation_id: &[u8; 16], dispatch_id: &[u8], own: bool, author: Option<&[u8; 32]>,
     ) -> Option<MessageRow> {
+        if !own && let Some(author) = author {
+            return Self::receive_delete(conversation_id, &dispatch_id.try_into().ok()?, author)
+                .ok().flatten();
+        }
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction().ok()?;
         let n = tx
@@ -266,6 +273,47 @@ impl Message {
             MessageRow::from_row,
         )
         .ok()
+    }
+
+    /// Persist an authenticated author's deletion even when its post has not
+    /// arrived yet. Recording the marker, tombstoning the row and removing its
+    /// media are one transaction; file cleanup runs only after commit. No
+    /// phantom message/notification is created for an unknown target.
+    pub(crate) fn receive_delete(
+        conversation_id: &[u8; 16], dispatch_id: &[u8; 16], author: &[u8; 32],
+    ) -> Result<Option<MessageRow>> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let (row, orphan) = Self::receive_delete_tx(&tx, conversation_id, dispatch_id, author)?;
+        tx.commit()?;
+        crate::data::media::unlink_orphaned(&conn, orphan.as_slice());
+        Ok(row)
+    }
+
+    fn receive_delete_tx(
+        tx: &rusqlite::Transaction<'_>, conversation_id: &[u8; 16], dispatch_id: &[u8; 16],
+        author: &[u8; 32],
+    ) -> Result<(Option<MessageRow>, Option<[u8; 32]>)> {
+        tx.execute(
+            "INSERT OR IGNORE INTO message_deletions (conversation_id, sender_ipk, dispatch_id)
+             VALUES (?1, ?2, ?3)",
+            (conversation_id.as_slice(), author.as_slice(), dispatch_id.as_slice()),
+        )?;
+        let n = tx.execute(
+            "UPDATE messages SET content = '', deleted = 1, edited = 0
+             WHERE conversation_id = ?1 AND dispatch_id = ?2 AND outgoing = 0
+               AND sender_ipk = ?3 AND deleted = 0",
+            (conversation_id.as_slice(), dispatch_id.as_slice(), author.as_slice()),
+        )?;
+        if n == 0 {
+            return Ok((None, None));
+        }
+        let orphan = crate::data::media::drop_row_tx(tx, conversation_id, dispatch_id)?;
+        let row = tx.query_row(
+            "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
+            (conversation_id.as_slice(), dispatch_id.as_slice()), MessageRow::from_row,
+        )?;
+        Ok((Some(row), orphan))
     }
 
     /// Hard-delete a single message locally (delete-for-me; no wire signal),
@@ -710,6 +758,53 @@ fn position_at_time(conn: &rusqlite::Connection, conversation: &[u8; 16], timest
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_deletion_is_author_scoped_durable_and_transactional() {
+        let mut conn = crate::db::messages::open_in_memory();
+        let conv = [0xD3; 16];
+        let author = [0xD4; 32];
+        let other = [0xD5; 32];
+        let target = [0xD6; 16];
+        {
+            let tx = conn.transaction().unwrap();
+            assert!(Message::receive_delete_tx(&tx, &conv, &target, &author).unwrap().0.is_none());
+            tx.commit().unwrap();
+        }
+        // Reopen the persisted database, not an in-memory dedup set.
+        let path = std::env::temp_dir().join(format!("promtuz-deletions-{}.sqlite", uuid::Uuid::now_v7()));
+        conn.execute("VACUUM INTO ?1", [path.to_str().unwrap()]).unwrap();
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        assert!(Message::save_incoming_tx(&conn, conv, author, &target, "late post", 1, None).unwrap().is_none());
+        assert!(Message::save_incoming_tx(&conn, conv, other, &target, "another member", 1, None).unwrap().is_some());
+        {
+            let tx = conn.transaction().unwrap();
+            // A repeated deletion cannot affect another author's same ID.
+            assert!(Message::receive_delete_tx(&tx, &conv, &target, &author).unwrap().0.is_none());
+            tx.commit().unwrap();
+        }
+        let gone: bool = conn.query_row("SELECT deleted FROM messages WHERE conversation_id=?1 AND dispatch_id=?2",
+            (conv.as_slice(), target.as_slice()), |r| r.get(0)).unwrap();
+        assert!(!gone);
+        // A failed transaction must neither consume the future post nor leave
+        // a half-applied tombstone. A trigger simulates a storage-write error.
+        let failed = [0xD7; 16];
+        Message::save_incoming_tx(&conn, conv, author, &failed, "keep", 1, None).unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_delete BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            assert!(Message::receive_delete_tx(&tx, &conv, &failed, &author).is_err());
+        }
+        let count: u32 = conn.query_row("SELECT COUNT(*) FROM message_deletions WHERE dispatch_id=?1",
+            [failed.as_slice()], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+        conn.execute_batch("DROP TRIGGER reject_delete").unwrap();
+        crate::data::conversation::Conversation::clear_history_tx(&conn, &conv).unwrap();
+        assert!(Message::save_incoming_tx(&conn, conv, author, &target, "after clear", 1, None).unwrap().is_none());
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn calendar_depth_handles_late_arrivals_gaps_and_conversation_boundaries() {

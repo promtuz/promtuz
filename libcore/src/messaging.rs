@@ -1409,6 +1409,34 @@ pub(crate) fn apply_revise_body(
         .map(|row| (row, content)))
 }
 
+/// One mutation path for live delivery and messages released by MLS catch-up.
+/// The MLS leaf author, never the outer carrier, owns the target. Deletion is
+/// retained even before the target arrives; edits/revisions need its body to
+/// enforce the existing revision matrix.
+pub(crate) fn receive_message_mutation(
+    conversation: &[u8; 16], author: &[u8; 32], payload: AppPayload,
+) -> Result<()> {
+    match payload {
+        AppPayload::Edit { target, content } => {
+            if let Some(row) = Message::apply_edit(conversation, &target, &content, false, Some(author)) {
+                MessageEv::Edited { id: row.id, conversation: *conversation, content }.emit();
+            }
+        },
+        AppPayload::Revise { target, body } => {
+            if let Some((row, content)) = apply_revise_body(conversation, &target, body, false, Some(author))? {
+                MessageEv::Edited { id: row.id, conversation: *conversation, content }.emit();
+            }
+        },
+        AppPayload::Delete { target } => {
+            if let Some(row) = Message::receive_delete(conversation, &target, author)? {
+                MessageEv::Deleted { id: row.id, conversation: *conversation }.emit();
+            }
+        },
+        _ => bail!("not a message mutation"),
+    }
+    Ok(())
+}
+
 /// Pre-v12 content payload → the [`Body`] + quote target it was expressing.
 /// `None` for anything that isn't content (receipts, control, P2P).
 pub(crate) fn legacy_body(p: AppPayload) -> Option<(Option<[u8; 16]>, Body)> {
@@ -2356,6 +2384,12 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(payload @ (AppPayload::Edit { .. } | AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
+                if let Err(e) = receive_message_mutation(&conversation, &sender_ipk, payload) {
+                    warn!("MESSAGE: drained mutation rejected: {e}");
+                }
+                continue;
+            },
             Ok(payload @ (AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. })) => {
                 crate::profile_details_sync::receive(conversation, sender_ipk, payload);
                 continue;
@@ -2504,11 +2538,13 @@ pub fn process_application_inbound_for<C: DhtClient>(
             let plaintext = app.into_bytes();
             // After every successful processing, drain any buffered
             // ahead-of-epoch messages and persist them (not discard).
-            persist_drained(
-                ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
-                Conversation::for_group(&env.group_id.0).unwrap_or_default(),
-            );
+            let drained = ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default();
+            // A restored MLS group may outlive its messages-DB mapping. Resolve
+            // its real chat rather than filing buffered messages under zero.
+            // Homing can spawn an introduction, so finish all group mutations first.
+            let conversation = home_for_group(&group, &author)?;
             sync_roster_from(&group, &env.group_id.0);
+            persist_drained(drained, conversation);
             Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0, author })
         },
         ProcessedMessageContent::StagedCommitMessage(staged) => {
@@ -2525,11 +2561,13 @@ pub fn process_application_inbound_for<C: DhtClient>(
             // After commit-merge, drain any newly-processable buffered
             // messages and persist them (not discard). The roster is read off
             // the tree after that, since a drained commit may have moved it.
-            persist_drained(
-                ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
-                Conversation::for_group(&env.group_id.0).unwrap_or_default(),
-            );
+            let drained = ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default();
+            // A restored MLS group may outlive its messages-DB mapping. Resolve
+            // its real chat rather than filing buffered messages under zero.
+            // Homing can spawn an introduction, so finish all group mutations first.
+            let conversation = home_for_group(&group, &author)?;
             sync_roster_from(&group, &env.group_id.0);
+            persist_drained(drained, conversation);
             Ok(InboundDecoded::ApplicationBuffered)
         },
         ProcessedMessageContent::ProposalMessage(p) => {
@@ -3175,6 +3213,64 @@ mod tests {
         assert!(Message::apply_edit(&conversation, &did, "corrected caption", false, Some(&alice.ipk)).is_some());
         assert!(Message::apply_delete(&conversation, &did, false, Some(&alice.ipk)).is_some());
         assert!(crate::data::media::get(&conversation, &did).unwrap().is_none());
+        Conversation::delete(&conversation).unwrap();
+    }
+
+    #[tokio::test]
+    async fn caught_up_mutations_use_the_mls_author_and_prevent_late_attachment_resurrection() {
+        let alice = Node::new(0xC7);
+        let bob = Node::new(0xC8);
+        let dht = FakeDhtClient::new_arc();
+        let kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
+        dht.publish_keypackages(&kps[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+        let mut group = lazy_create_group(&alice.ctx(dht.as_ref()), &alice.ipk, &alice.ipk_signer, &bob.ipk).await.unwrap();
+        let welcomes = dht.fetch_welcomes().await.unwrap();
+        process_welcome(&bob.provider, &welcomes[0].envelope).unwrap();
+        let conversation = Conversation::for_peer(&alice.ipk).unwrap();
+        Conversation::bind_group(&conversation, &group.group_id()).unwrap();
+        let revised = crate::data::message::next_dispatch_id();
+        let edited = crate::data::message::next_dispatch_id();
+        let deleted = crate::data::message::next_dispatch_id();
+        let foreign = crate::data::message::next_dispatch_id();
+        for (did, who) in [(revised, alice.ipk), (edited, alice.ipk), (foreign, bob.ipk)] {
+            save_inbound_body(&conversation, &who, &did, 1, None, Body::Text("original".into())).unwrap();
+        }
+        let leaf = leaf_signer_for_group(&alice.provider, &group, &alice.ipk).unwrap();
+        let before = group.epoch();
+        let commit = group.self_update(&alice.provider, &leaf).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let payloads = [
+            AppPayload::Revise { target: revised, body: Body::Text("revised".into()) },
+            AppPayload::Edit { target: edited, content: "edited".into() },
+            AppPayload::Delete { target: deleted },
+            AppPayload::Delete { target: foreign },
+        ];
+        for payload in payloads {
+            // Bob is the verified outer carrier; Alice is the MLS author.
+            let sealed = seal_application_message(&alice.ctx(dht.as_ref()), &mut group, &leaf, &payload.ser().unwrap()).unwrap();
+            let bytes = sealed.address_to(&bob.ipk, &bob.ipk_signer).unwrap();
+            let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+            process_application_inbound_for(&bob.ctx(dht.as_ref()), bob.ipk, &bob.ipk, env, 123_000, crate::data::message::next_dispatch_id()).unwrap();
+        }
+        let bytes = SealedMessage::from_mls_out(&commit, group.group_id(), before).unwrap()
+            .address_to(&bob.ipk, &alice.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk, env, 124_000, crate::data::message::next_dispatch_id()).unwrap();
+        let stored = |did: &[u8; 16]| crate::db::messages::MESSAGES_DB.lock().query_row(
+            "SELECT content,deleted FROM messages WHERE conversation_id=?1 AND dispatch_id=?2",
+            (conversation.as_slice(), did.as_slice()), |r| Ok((r.get::<_,String>(0)?, r.get::<_,bool>(1)?)),
+        ).unwrap();
+        assert_eq!(stored(&revised), ("revised".into(), false));
+        assert_eq!(stored(&edited), ("edited".into(), false));
+        assert_eq!(stored(&foreign), ("original".into(), false));
+        // The original post arrives after its buffered deletion was processed.
+        // No message/media row can be observed or picked up by a downloader.
+        assert!(save_inbound_body(&conversation, &alice.ipk, &deleted, 1, None, Body::Attachment {
+            caption: "late".into(), group_id: None, mime: "application/octet-stream".into(),
+            name: "late.bin".into(), size: 1, thumb: vec![], file_id: [0xC7; 32],
+        }).unwrap().is_none());
+        assert!(crate::data::media::get(&conversation, &deleted).unwrap().is_none());
+        assert!(crate::data::media::attachment_offer(&[0xC7; 32]).unwrap().is_none());
         Conversation::delete(&conversation).unwrap();
     }
 

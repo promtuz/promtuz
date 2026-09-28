@@ -936,56 +936,8 @@ async fn process_deliver(
                             .emit();
                     }
                 },
-                Ok(AppPayload::Edit { target, content }) => {
-                    // own=false plus an author check: a member may only edit
-                    // messages IT sent (outgoing=0 AND sender_ipk = them), so
-                    // one member cannot rewrite another's words.
-                    match Message::apply_edit(&conv, &target, &content, false, Some(&author)) {
-                        Some(row) => {
-                            info!("MESSAGE: edit from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
-                        },
-                        // Out-of-order: target not stored yet. Rare in 1:1
-                        // same-epoch (the original precedes) — drop.
-                        None => debug!(
-                            "MESSAGE: edit for unknown target from {}",
-                            hex::encode(&msg.from[..4])
-                        ),
-                    }
-                },
-                Ok(AppPayload::Revise { target, body }) => {
-                    // own=false: a peer may only revise messages IT sent us. The
-                    // matrix check lives in apply_revise_body — a refused swap
-                    // errors rather than half-applying.
-                    match crate::messaging::apply_revise_body(&conv, &target, body, false, Some(&author)) {
-                        Ok(Some((row, content))) => {
-                            info!("MESSAGE: revise from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
-                        },
-                        // Out-of-order: target not stored yet. Rare in 1:1
-                        // same-epoch (the original precedes) — drop.
-                        Ok(None) => debug!(
-                            "MESSAGE: revise for unknown target from {}",
-                            hex::encode(&msg.from[..4])
-                        ),
-                        Err(e) => {
-                            warn!("MESSAGE: revise from {} rejected: {e}", hex::encode(&msg.from[..4]))
-                        },
-                    }
-                },
-                Ok(AppPayload::Delete { target }) => {
-                    // own=false plus an author check: a member may only delete
-                    // messages IT sent, never another member's.
-                    match Message::apply_delete(&conv, &target, false, Some(&author)) {
-                        Some(row) => {
-                            info!("MESSAGE: delete from {}", hex::encode(&msg.from[..4]));
-                            MessageEv::Deleted { id: row.id, conversation: conv }.emit();
-                        },
-                        None => debug!(
-                            "MESSAGE: delete for unknown target from {}",
-                            hex::encode(&msg.from[..4])
-                        ),
-                    }
+                Ok(payload @ (AppPayload::Edit { .. } | AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
+                    crate::messaging::receive_message_mutation(&conv, &author, payload)?;
                 },
                 Ok(AppPayload::React { target, emoji, add }) => {
                     // Reactor is the MLS sender (`msg.from`) — attributed to its

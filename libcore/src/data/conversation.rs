@@ -427,7 +427,8 @@ impl Conversation {
     /// `seen_dispatch` is deliberately spared: it is keyed on the sender, not
     /// the conversation, and dropping its rows would let a redelivered dispatch
     /// be decrypted a second time — which the MLS ratchet answers with a hard
-    /// SecretReuseError.
+    /// SecretReuseError. `message_deletions` is also spared: clearing history
+    /// must not allow a delayed, already-deleted post to reappear.
     pub fn clear_history_tx(conn: &Connection, id: &[u8; 16]) -> Result<Vec<[u8; 32]>> {
         // `message_media.file_id` is the only pointer at a received
         // attachment's bytes on disk, and the transfer store's GC reaps
@@ -457,6 +458,7 @@ impl Conversation {
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
         let orphaned = Self::clear_history_tx(&tx, id)?;
+        tx.execute("DELETE FROM message_deletions WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
