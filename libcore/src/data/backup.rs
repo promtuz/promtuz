@@ -101,10 +101,12 @@ struct BackupProfile {
     // Encoded as a separate optional suffix so pre-photo backups remain readable.
     #[serde(skip)]
     groups: Vec<crate::data::group_picture::Backup>,
+    #[serde(skip)]
+    receipts: crate::data::receipts::Backup,
 }
 
 fn profile_now() -> BackupProfile {
-    BackupProfile { avatar: Identity::get().and_then(|i| i.avatar()), groups: crate::data::group_picture::dump() }
+    BackupProfile { avatar: Identity::get().and_then(|i| i.avatar()), groups: crate::data::group_picture::dump(), receipts: Default::default() }
 }
 
 /// Our own read watermark for a conversation.
@@ -140,6 +142,7 @@ fn encode(
     plain.extend(postcard::to_allocvec(extra).map_err(|e| anyhow!("encode extra: {e}"))?);
     plain.extend(postcard::to_allocvec(profile).map_err(|e| anyhow!("encode profile: {e}"))?);
     plain.extend(postcard::to_allocvec(&profile.groups)?);
+    plain.extend(postcard::to_allocvec(&profile.receipts)?);
     let compressed = lz4_flex::compress_prepend_size(&plain);
 
     let mut nonce = [0u8; 24];
@@ -194,7 +197,11 @@ fn split_plain(plain: &[u8]) -> Result<(BackupPayload, BackupExtra, BackupProfil
         BackupProfile::default()
     } else {
         let (mut profile, rest) = postcard::take_from_bytes::<BackupProfile>(rest).map_err(|e| anyhow!("decode profile: {e}"))?;
-        if !rest.is_empty() { profile.groups = postcard::from_bytes(rest)?; }
+        if !rest.is_empty() {
+            let (groups, rest) = postcard::take_from_bytes(rest)?;
+            profile.groups = groups;
+            if !rest.is_empty() { profile.receipts = postcard::from_bytes(rest)?; }
+        }
         profile
     };
     Ok((payload, extra, profile))
@@ -225,7 +232,9 @@ pub fn export() -> Result<Vec<u8>> {
         },
     };
     let secret = Identity::secret_key_with_manager()?;
-    encode(&backup_key(&secret), &payload, &extra_now(), &profile_now())
+    let mut profile = profile_now();
+    profile.receipts = crate::data::receipts::dump()?;
+    encode(&backup_key(&secret), &payload, &extra_now(), &profile)
 }
 
 /// Restore a blob into the local DBs. Requires the identity to already be
@@ -242,6 +251,7 @@ pub fn import(blob: &[u8]) -> Result<()> {
     let media = crate::data::media::import_rows(&payload.media)?;
     import_extra(&extra)?;
     crate::data::message::import_read_state(&payload.read_state, &payload.member_read)?;
+    crate::data::receipts::restore(&profile.receipts)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
     Identity::set_details(&payload.name,
         payload.prefs.iter().find(|(k, _)| k == "profile_bio").map(|(_, v)| v.as_str()).unwrap_or(""))?;
@@ -307,6 +317,7 @@ pub fn import_merge(blob: &[u8]) -> Result<MergeReport> {
     let media_added = crate::data::media::import_rows(&payload.media)?;
     import_extra(&extra)?;
     crate::data::group_picture::restore(&_profile.groups)?;
+    crate::data::receipts::restore(&_profile.receipts)?;
     crate::data::app_prefs::import_rows(&payload.prefs)?;
 
     let report = MergeReport {
@@ -464,12 +475,37 @@ mod tests {
         let key = backup_key(&[7u8; 32]);
         let blob = encode(&key, &payload(), &BackupExtra::default(), &BackupProfile {
             avatar: Some(vec![1, 2, 3]),
-            groups: vec![crate::data::group_picture::Backup { conversation: [9;16], revision: 7, avif: None }]
+            groups: vec![crate::data::group_picture::Backup { conversation: [9;16], revision: 7, avif: None }],
+            ..Default::default()
         })
         .unwrap();
         let (_, _, profile) = decode(&key, &blob).unwrap();
         assert_eq!(profile.avatar, Some(vec![1, 2, 3]), "sealed and opened whole");
         assert_eq!(profile.groups, vec![crate::data::group_picture::Backup { conversation: [9;16], revision: 7, avif: None }]);
+    }
+
+    #[test]
+    fn receipt_suffix_is_optional_and_survives_encrypted_backup() {
+        // Encode a pre-receipt profile ending exactly after group pictures.
+        let mut old = postcard::to_allocvec(&payload()).unwrap();
+        old.extend(postcard::to_allocvec(&BackupExtra::default()).unwrap());
+        old.extend(postcard::to_allocvec(&BackupProfile::default()).unwrap());
+        old.extend(postcard::to_allocvec(&Vec::<crate::data::group_picture::Backup>::new()).unwrap());
+        let (_, _, previous) = split_plain(&old).unwrap();
+        assert_eq!(postcard::to_allocvec(&previous.receipts).unwrap(), vec![0,0,0,0]);
+        // Construct the stable tuple layout, including exact incoming state and
+        // original audiences, then pass through the actual sealed backup codec.
+        let receipt_bytes = postcard::to_allocvec(&(
+            vec![("message".to_string(), true)],
+            vec![("message".to_string(), [7u8;32], 1u8, Some(10u64), Some(11u64), Some(12u64), 0u8)],
+            vec![("incoming".to_string(), Some(13u64), Some(14u64), true, true)],
+            vec![([8u8;16], [7u8;32])],
+        )).unwrap();
+        let profile = BackupProfile { receipts: postcard::from_bytes(&receipt_bytes).unwrap(), ..Default::default() };
+        let key = backup_key(&[7u8;32]);
+        let sealed = encode(&key, &payload(), &BackupExtra::default(), &profile).unwrap();
+        let (_, _, restored) = decode(&key, &sealed).unwrap();
+        assert_eq!(postcard::to_allocvec(&restored.receipts).unwrap(), receipt_bytes);
     }
 
     #[test]

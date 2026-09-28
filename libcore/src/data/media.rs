@@ -138,9 +138,10 @@ pub fn save_incoming_with_media(
 pub fn save_outgoing_with_media(
     conv: &[u8; 16], caption: &str, reply_to: Option<[u8; 16]>, r: &MediaRow,
 ) -> Result<crate::data::message::Message> {
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
-    let msg = crate::data::message::Message::save_outgoing_tx(&tx, *conv, caption, reply_to)?;
+    let msg = crate::data::message::Message::save_outgoing_tx(&tx, *conv, caption, reply_to, me)?;
     let did: [u8; 16] = msg
         .inner
         .dispatch_id
@@ -506,7 +507,7 @@ mod tests {
         // Happy path: caption + media land in one committed transaction.
         let did: [u8; 16] = {
             let tx = conn.transaction().unwrap();
-            let msg = Message::save_outgoing_tx(&tx, conv, "cap", None).unwrap();
+            let msg = Message::save_outgoing_tx(&tx, conv, "cap", None, None).unwrap();
             let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
             save_tx(&tx, &conv, &d, &media).unwrap();
             tx.commit().unwrap();
@@ -519,7 +520,7 @@ mod tests {
         // inserted in the same transaction.
         let did2: [u8; 16] = {
             let tx = conn.transaction().unwrap();
-            let msg = Message::save_outgoing_tx(&tx, conv, "cap2", None).unwrap();
+            let msg = Message::save_outgoing_tx(&tx, conv, "cap2", None, None).unwrap();
             let d: [u8; 16] = msg.inner.dispatch_id.unwrap().try_into().unwrap();
             let bad = tx.execute(
                 "INSERT INTO message_media (conversation_id,dispatch_id,kind,mime) VALUES (?1,?2,NULL,?3)",

@@ -79,7 +79,6 @@ use common::proto::mls_wire::MlsApplicationEnvelopeP;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::PairDeclineP;
 use common::proto::mls_wire::PairingP;
-use common::proto::mls_wire::ReceiptKind;
 use common::proto::mls_wire::SystemEvent;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
@@ -369,15 +368,6 @@ pub async fn react(
     send_control(conversation, AppPayload::React { target, emoji, add }).await
 }
 
-/// Send a read/delivered receipt: tell `to` we've received-or-read their
-/// messages up to `upto` (a 16-byte dispatch_id). High-water-mark — one
-/// receipt supersedes earlier ones. Best-effort, like the other control sends.
-pub async fn send_receipt(
-    conversation: [u8; 16], kind: ReceiptKind, upto: [u8; 16],
-) -> Result<()> {
-    send_control(conversation, AppPayload::Receipt { kind, upto }).await
-}
-
 /// Narrate a membership or title change: store it locally so we see it
 /// immediately, then ship it to every member so it orders inline with the
 /// conversation on their side too.
@@ -471,8 +461,6 @@ impl Drop for ControlDispatchGuard {
         if self.ephemeral {
             delivery::retire_all(&self.id);
         }
-        // Control sends have no Message row whose sent timestamp consumes this.
-        LAST_ACCEPTED_AT.lock().remove(&self.id);
     }
 }
 
@@ -528,22 +516,20 @@ async fn send_control_inner(
 
     let id = crate::data::message::next_dispatch_id();
     let _dispatch = ControlDispatchGuard { id, ephemeral: outbox.is_none() };
-    let mut delivered = 0usize;
+    let mut copies = Vec::new();
     for to in &recipients {
         let env = sealed
             .address_to(to, &ipk_signer)
             .map_err(|e| anyhow!("address control envelope: {e}"))?;
-        let outcome = dispatch_to_member(
-            to,
-            &our_ipk,
-            &ipk_signer,
-            &id,
-            env,
-            outbox.unwrap_or(OpType::Control),
-            wake,
-            ttl_ms,
-        )
-        .await;
+        copies.push((*to, id, outbox.unwrap_or(OpType::Control),
+            prepare_dispatch(to, &our_ipk, &ipk_signer, &id, env, wake, ttl_ms)?));
+    }
+    // Return storage failures to the caller. In particular, a receipt ledger
+    // must not clear pending work that never reached the durable outbox.
+    delivery::enqueue_batch(&mut copies)?;
+    let mut delivered = 0usize;
+    for (to, dispatch, op, bytes) in copies {
+        let outcome = dispatch_queued(&to, &dispatch, op, &bytes).await;
         if matches!(outcome, LastOutcome::Durable) {
             delivered += 1;
         }
@@ -1642,13 +1628,10 @@ async fn group_for_conversation<C: DhtClient>(
     Ok(group)
 }
 
-/// Sign, frame, enqueue and send one member's copy of an already-sealed
-/// dispatch. Returns the relay's durability verdict; `Silence` covers every
-/// transport failure, which leaves the outbox row for the reconciler.
-pub(crate) async fn dispatch_to_member(
-    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
-    op: OpType, wake: Wake, ttl_ms: u64,
-) -> LastOutcome {
+fn prepare_dispatch(
+    to: &[u8;32], our_ipk: &[u8;32], ipk_signer: &SigningKey, id: &[u8;16],
+    payload: Vec<u8>, wake: Wake, ttl_ms:u64,
+) -> Result<Vec<u8>> {
     let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
     let sig = {
         use ed25519_dalek::Signer;
@@ -1668,11 +1651,30 @@ pub(crate) async fn dispatch_to_member(
     // length-prefixed bytes `send()` writes; the relay's read side is
     // length-prefixed, so storing raw postcard would desync every frame. Store
     // framed, send framed, reconciler re-sends framed — all byte-identical.
-    let Ok(bytes) = CRelayPacket::Dispatch(fwd).pack() else {
+    CRelayPacket::Dispatch(fwd).pack()
+        .map_err(|e| anyhow!("frame dispatch: {e}"))
+}
+
+/// Sign, frame, enqueue and send one member's copy of an already-sealed
+/// dispatch. Returns the relay's durability verdict; `Silence` covers every
+/// transport failure, which leaves the outbox row for the reconciler.
+pub(crate) async fn dispatch_to_member(
+    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
+    op: OpType, wake: Wake, ttl_ms: u64,
+) -> LastOutcome {
+    let Ok(bytes) = prepare_dispatch(to, our_ipk, ipk_signer, id, payload, wake, ttl_ms) else {
         return LastOutcome::Terminal;
     };
-    delivery::enqueue(id, op, Some(*to), &bytes);
+    let mut copies = [(*to, *id, op, bytes)];
+    if let Err(e) = delivery::enqueue_batch(&mut copies) {
+        warn!("MESSAGE: could not queue dispatch: {e}");
+        return LastOutcome::Silence;
+    }
+    dispatch_queued(to, id, op, &copies[0].3).await
+}
 
+async fn dispatch_queued(to: &[u8;32], id: &[u8;16], op: OpType, bytes:&[u8]) -> LastOutcome {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), async {
     let conn = {
         let relay = RELAY.read();
         relay.as_ref().and_then(|r| r.connection.clone())
@@ -1692,39 +1694,38 @@ pub(crate) async fn dispatch_to_member(
     match SRelayPacket::unpack(&mut recv).await {
         Ok(SRelayPacket::DispatchAck(ack)) => {
             let outcome = delivery::outcome_for_ack(&ack);
-            if matches!(outcome, LastOutcome::Durable) {
-                delivery::retire(id, Some(*to));
-                LAST_ACCEPTED_AT.lock().insert(*id, delivery::accepted_at_secs(&ack).unwrap_or(0));
-            } else if matches!(outcome, LastOutcome::Terminal) {
+            if matches!(outcome, LastOutcome::Durable | LastOutcome::Terminal) {
+                // Store the member outcome before retiring its durable outbox
+                // row. A crash or DB failure must not lose the only evidence.
+                if matches!(op, OpType::Message) {
+                    let status = if matches!(outcome, LastOutcome::Durable) {
+                        crate::data::message::STATUS_SENT
+                    } else { crate::data::message::STATUS_FAILED };
+                    if let Err(e) = crate::data::receipts::send_result(id, Some(*to), status, delivery::accepted_at_secs(&ack)) {
+                        warn!("MESSAGE: receipt persistence failed, retaining outbox: {e}");
+                        return LastOutcome::Silence;
+                    }
+                }
                 delivery::retire(id, Some(*to));
             }
             outcome
         },
-        _ => {
-            debug!("MESSAGE: {} no usable relay ack; left in outbox", hex::encode(&to[..4]));
-            LastOutcome::Silence
-        },
+        _ => LastOutcome::Silence,
     }
+    }).await;
+    outcome.unwrap_or(LastOutcome::Silence)
 }
-
-/// Relay acceptance timestamps observed during the current fan-out, keyed by
-/// dispatch id. The message's `sent` timestamp is the first member's ack; the
-/// rest of the fan-out is the same logical send at the same moment.
-static LAST_ACCEPTED_AT: Lazy<PlMutex<HashMap<[u8; 16], u64>>> =
-    Lazy::new(|| PlMutex::new(HashMap::new()));
 
 /// Encrypt an already-persisted message once and unicast it to every member.
 ///
-/// The message settles only when the whole fan-out has drained: one member's
-/// relay accepting is not a sent message when two others are still queued.
-/// Any member left unacked stays in the outbox for `delivery::reconcile`.
+/// Any durable recipient acceptance marks the aggregate sent; delivery/read
+/// require every original recipient. Remaining copies stay in the outbox.
 async fn send_payload<C: DhtClient>(
     ctx: &MlsContext<'_, C>, conversation: [u8; 16], msg: &Message, payload_bytes: Vec<u8>,
 ) -> Result<()> {
     let msg_id = msg.inner.id;
-    let content = &msg.inner.content;
-
-    let recipients = Conversation::recipients(&conversation);
+    let current_recipients = Conversation::recipients(&conversation);
+    let recipients = crate::data::receipts::audience(&msg_id.to_string(), &current_recipients)?;
     if recipients.is_empty() {
         Message::mark_failed(&msg_id);
         MessageEv::Failed { id: msg_id, conversation, reason: "conversation has no members".into() }
@@ -1792,50 +1793,36 @@ async fn send_payload<C: DhtClient>(
             .map_err(|e| anyhow!("seal sharing grant: {e}"))
     }).transpose()?;
 
-    let mut terminal = false;
+    // Queue the ENTIRE fan-out before the first network await. Once one
+    // recipient is sent, the aggregate is no longer pending; a restart must
+    // still find every remaining copy durably queued.
+    let mut copies = Vec::new();
     for to in &recipients {
+        if !current_recipients.contains(to) || !group.roster().contains(to) {
+            crate::data::receipts::send_result(&id, Some(*to), crate::data::message::STATUS_FAILED, None)?;
+            continue;
+        }
         if let (Some((control_id, offer)), Some(control)) = (&sharing, &sharing_sealed)
             && offer.recipients.contains(to)
         {
-            let payload = control.address_to(to, &ipk_signer).map_err(|e| anyhow!("address sharing grant: {e}"))?;
             let ttl = offer.expires_at.saturating_sub(crate::utils::systime().as_secs()).saturating_mul(1000);
             if ttl > 0 {
-                // This optional control must not indefinitely hold the post
-                // behind a silent relay. Dispatch persists before its first
-                // await; timeout leaves that exact envelope for reconciliation.
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(2),
-                    dispatch_to_member(to, &our_ipk, &ipk_signer, control_id, payload, OpType::Control, Wake::No, ttl)).await;
-                LAST_ACCEPTED_AT.lock().remove(control_id);
+                let payload = control.address_to(to, &ipk_signer).map_err(|e| anyhow!("address sharing grant: {e}"))?;
+                copies.push((*to, *control_id, OpType::Control,
+                    prepare_dispatch(to, &our_ipk, &ipk_signer, control_id, payload, Wake::No, ttl)?));
             }
         }
-        let payload = sealed
-            .address_to(to, &ipk_signer)
-            .map_err(|e| anyhow!("address envelope to member: {e}"))?;
-        // New content: push-wake an offline member.
-        let outcome = dispatch_to_member(
-            to, &our_ipk, &ipk_signer, &id, payload, OpType::Message, Wake::Message, 0,
-        )
-        .await;
-        terminal |= matches!(outcome, LastOutcome::Terminal);
+        let payload = sealed.address_to(to, &ipk_signer).map_err(|e| anyhow!("address envelope to member: {e}"))?;
+        copies.push((*to, id, OpType::Message,
+            prepare_dispatch(to, &our_ipk, &ipk_signer, &id, payload, Wake::Message, 0)?));
     }
-
-    // Settle only once no member's copy is left queued.
-    if delivery::any_pending(&id) {
-        return Ok(());
-    }
-    let accepted = LAST_ACCEPTED_AT.lock().remove(&id);
-    match accepted {
-        Some(timestamp) => {
-            Message::mark_sent(&msg_id, timestamp);
-            info!("MESSAGE: {} sent to {} member(s)", hex::encode(&id[..4]), recipients.len());
-            MessageEv::Sent { id: msg_id, conversation, content: content.clone(), timestamp }.emit();
-        },
-        None if terminal => {
-            Message::mark_failed(&msg_id);
-            warn!("MESSAGE: {} rejected by relay", hex::encode(&id[..4]));
-            MessageEv::Failed { id: msg_id, conversation, reason: "relay rejected".into() }.emit();
-        },
-        None => {},
+    delivery::enqueue_batch(&mut copies)?;
+    for (to, dispatch, op, bytes) in copies {
+        if op == OpType::Control {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch_queued(&to, &dispatch, op, &bytes)).await;
+        } else {
+            dispatch_queued(&to, &dispatch, op, &bytes).await;
+        }
     }
     Ok(())
 }
@@ -2412,6 +2399,12 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
+                if let Err(e) = crate::data::receipts::receive(&conversation, &sender_ipk, payload) {
+                    warn!("MESSAGE: buffered receipt rejected: {e}");
+                }
+                continue;
+            },
             Ok(AppPayload::AttachmentSharing(offer)) => {
                 if let Err(e) = crate::transfer::sharing::receive(conversation, sender_ipk, offer) {
                     warn!("TRANSFER: buffered sharing grant rejected: {e}");
@@ -2455,6 +2448,7 @@ fn persist_drained(
             Err(e) => warn!("MESSAGE: drained persist failed: {e}"),
         }
     }
+    crate::data::receipts::schedule();
 }
 
 /// Explicit-recipient variant of [`process_application_inbound`].
@@ -3681,6 +3675,77 @@ mod tests {
     /// participants also have independent stores. Exercise control/post order
     /// and author binding through encrypted epoch catch-up, not seeded grants.
     #[tokio::test(flavor = "current_thread")]
+    async fn exact_receipt_catches_up_and_uses_authenticated_member() {
+        const CHILD: &str = "PROMTUZ_RECEIPT_CATCHUP_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("promtuz-receipt-catchup-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "messaging::tests::exact_receipt_catches_up_and_uses_authenticated_member", "--nocapture"])
+                .env(CHILD, "1").env("PROMTUZ_DATA_DIR", &dir).output().unwrap();
+            assert!(result.status.success(), "{}\n{}\nprofile: {}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr), dir.display());
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let alice = Node::new(0xDA);
+        let bob = Node::new(0xDB);
+        let carol = Node::new(0xDC);
+        Identity::save(crate::db::identity::IdentityRow {
+            id: 0, ipk: bob.ipk, enc_isk: vec![], created_at: 0, name: "Bob".into(),
+            avatar: None, avatar_revision: 0, bio: String::new(), profile_revision: 0,
+        }).unwrap();
+        let dht = FakeDhtClient::new_arc();
+        let mut kps = Vec::new();
+        for node in [&bob, &carol] {
+            let records = node.stash.ensure_stash_full(&node.provider, &node.ipk_signer).unwrap();
+            dht.publish_keypackages(&records[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+            kps.push(fetch_verified_keypackage(&alice.ctx(dht.as_ref()), &node.ipk, true).await.unwrap());
+        }
+        let (leaf, credential) = build_self_credential(&alice.ipk_signer).unwrap();
+        leaf.store(alice.provider.storage()).unwrap();
+        let gid = [0xDD; 32];
+        let meta = crate::mls::GroupMeta { title: "Receipts".into(), founder: alice.ipk };
+        let mut group = MlsGroupHandle::create(&alice.provider, &leaf, credential, &gid, Some(&meta)).unwrap();
+        let (_, welcome) = group.add_members(&alice.provider, &leaf,
+            &kps.iter().map(|(kp, _)| kp.clone()).collect::<Vec<_>>()).unwrap();
+        let envelope = make_welcome_envelope(welcome, gid, alice.ipk, bob.ipk, kps[0].1, &alice.ipk_signer).unwrap();
+        process_welcome(&bob.provider, &envelope).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let conversation = Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk, carol.ipk]).unwrap();
+        Conversation::bind_group(&conversation, &gid).unwrap();
+        let previous = group.epoch();
+        let commit = group.self_update(&alice.provider, &leaf).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let message = Message::save_outgoing(conversation, "hello", None).unwrap();
+        let did: [u8;16] = message.inner.dispatch_id.unwrap().try_into().unwrap();
+        let payload = AppPayload::ReceiptDetails(common::proto::mls_wire::ReceiptDetails {
+            entries: vec![common::proto::mls_wire::ReceiptEntry {
+                message_id: did, delivered_at: Some(100), read_at: Some(101),
+            }],
+        });
+        let sealed = seal_application_message(&alice.ctx(dht.as_ref()), &mut group, &leaf, &payload.ser().unwrap()).unwrap();
+        // Carol carries Alice's authenticated MLS receipt through a future epoch.
+        let bytes = sealed.address_to(&bob.ipk, &carol.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+        assert!(matches!(process_application_inbound_for(&bob.ctx(dht.as_ref()), carol.ipk, &bob.ipk,
+            env, 900_000, crate::data::message::next_dispatch_id()).unwrap(), InboundDecoded::ApplicationBuffered));
+        assert!(crate::data::receipts::info(&conversation, &did).unwrap().recipients.iter().all(|r| r.status == 0));
+        let bytes = SealedMessage::from_mls_out(&commit, gid, previous).unwrap()
+            .address_to(&bob.ipk, &alice.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk,
+            env, 901_000, crate::data::message::next_dispatch_id()).unwrap();
+        let info = crate::data::receipts::info(&conversation, &did).unwrap();
+        assert!(info.complete);
+        assert_eq!(info.recipients.len(), 2);
+        let alice_receipt = info.recipients.iter().find(|r| r.member == alice.ipk).unwrap();
+        assert_eq!((alice_receipt.status, alice_receipt.delivered_at, alice_receipt.read_at), (4, Some(100), Some(101)));
+        assert_eq!(info.recipients.iter().find(|r| r.member == carol.ipk).unwrap().status, 0);
+        assert_eq!(Message::get_by_dispatch(&conversation, &did).unwrap().inner.status, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn sharing_grant_catches_up_with_original_post_and_authenticated_author() {
         const CHILD: &str = "PROMTUZ_GRANT_CATCHUP_TEST";
         if std::env::var_os(CHILD).is_none() {
@@ -3895,7 +3960,6 @@ mod control_dispatch_tests {
                 }
                 // One member acknowledged; two members' copies still await ACKs.
                 delivery::retire(&id, Some([0xf1; 32]));
-                LAST_ACCEPTED_AT.lock().insert(id, 123);
                 ready.send(()).unwrap();
                 std::future::pending::<()>().await;
             });
@@ -3906,7 +3970,6 @@ mod control_dispatch_tests {
             assert!(task.await.unwrap_err().is_cancelled());
             assert_eq!(copies(), if ephemeral { 0 } else { 2 },
                 "only ephemeral controls lose their queued copies on cancellation");
-            assert!(!LAST_ACCEPTED_AT.lock().contains_key(&id), "control ACK bookkeeping leaked");
             delivery::retire_all(&id);
         }
     }

@@ -6,8 +6,8 @@ use crate::db::messages::MESSAGES_DB;
 use crate::db::messages::MessageRow;
 use crate::utils::systime;
 
-/// Message status constants. Higher = further along; receipts only ever
-/// upgrade (never downgrade) an outgoing message's status.
+/// Message status constants. Failed is a separate send outcome, not progress
+/// beyond sent. Delivery and read evidence take precedence over send outcomes.
 pub const STATUS_PENDING: u8 = 0;
 pub const STATUS_SENT: u8 = 1;
 pub const STATUS_FAILED: u8 = 2;
@@ -55,8 +55,12 @@ impl Message {
     pub fn save_outgoing(
         conversation_id: [u8; 16], content: &str, reply_to: Option<[u8; 16]>,
     ) -> Result<Self> {
-        let conn = MESSAGES_DB.lock();
-        Self::save_outgoing_tx(&conn, conversation_id, content, reply_to)
+        let me = super::identity::Identity::get().map(|i| i.ipk());
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let row = Self::save_outgoing_tx(&tx, conversation_id, content, reply_to, me)?;
+        tx.commit()?;
+        Ok(row)
     }
 
     /// Transaction-scoped [`Self::save_outgoing`]: same insert against a
@@ -66,7 +70,7 @@ impl Message {
     /// caption-only orphan the send path can never repair.
     pub fn save_outgoing_tx(
         conn: &rusqlite::Connection, conversation_id: [u8; 16], content: &str,
-        reply_to: Option<[u8; 16]>,
+        reply_to: Option<[u8; 16]>, me: Option<[u8; 32]>,
     ) -> Result<Self> {
         let id = Ulid::new();
         let timestamp = systime().as_secs();
@@ -76,6 +80,13 @@ impl Message {
             (&id.to_string(), conversation_id.as_slice(), content, timestamp, STATUS_PENDING, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
+        // Snapshot failure must roll the message back, not freeze an empty
+        // audience. Resolve identity before locking this DB at the call site.
+        let recipients = conn.prepare("SELECT member_ipk FROM conversation_members
+            WHERE conversation_id=?1 AND member_ipk<>?2 AND active=1")?
+            .query_map((conversation_id.as_slice(), me.unwrap_or([0;32]).as_slice()), |r| r.get::<_,[u8;32]>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        super::receipts::snapshot_tx(conn, &id.to_string(), &recipients, true)?;
         Ok(Self {
             inner: MessageRow {
                 id: id.into(),
@@ -103,8 +114,11 @@ impl Message {
         conversation_id: [u8; 16], sender: [u8; 32], dispatch_id: &[u8; 16], content: &str,
         timestamp: u64, reply_to: Option<[u8; 16]>,
     ) -> Result<Option<Self>> {
-        let conn = MESSAGES_DB.lock();
-        Self::save_incoming_tx(&conn, conversation_id, sender, dispatch_id, content, timestamp, reply_to)
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let row = Self::save_incoming_tx(&tx, conversation_id, sender, dispatch_id, content, timestamp, reply_to)?;
+        tx.commit()?;
+        Ok(row)
     }
 
     /// Transaction-scoped [`Self::save_incoming`]: same insert, but against a
@@ -132,6 +146,7 @@ impl Message {
             return Ok(None);
         }
 
+        super::receipts::arrived_tx(conn, &id.to_string(), systime().as_secs())?;
         Ok(Some(Self {
             inner: MessageRow {
                 id: id.into(),
@@ -163,45 +178,11 @@ impl Message {
         .map(|inner| Self { inner })
     }
 
-    /// Mark an outgoing message as sent (relay accepted).
-    pub fn mark_sent(id: &Ulid, timestamp: u64) {
-        let conn = MESSAGES_DB.lock();
-        conn.execute(
-            "UPDATE messages SET status = ?1, timestamp = ?2 WHERE id = ?3",
-            (STATUS_SENT, timestamp, id.to_string()),
-        )
-            .ok();
-    }
-
-    /// Mark an outgoing message as failed.
+    /// Fail unaccepted recipients without overwriting anyone's receipt.
     pub fn mark_failed(id: &Ulid) {
-        let conn = MESSAGES_DB.lock();
-        conn.execute("UPDATE messages SET status = ?1 WHERE id = ?2", (STATUS_FAILED, id.to_string()))
-            .ok();
-    }
-
-    /// Set an outgoing message's status by its `dispatch_id`, returning the
-    /// updated row. The async reconciler holds the `dispatch_id` (the outbox
-    /// key), not the local ULID, so this is how it reflects a
-    /// delivered/failed outcome back onto the message the UI reads.
-    pub fn mark_by_dispatch_id(
-        dispatch_id: &[u8], status: u8, timestamp: Option<u64>,
-    ) -> Option<MessageRow> {
-        let conn = MESSAGES_DB.lock();
-        // Scope to outgoing rows: dispatch_id is globally monotonic among OUR
-        // sends (unique), but an incoming message carries a *peer's* dispatch_id
-        // and could in principle collide — never touch those.
-        conn.execute(
-            "UPDATE messages SET status = ?1, timestamp = COALESCE(?2, timestamp) WHERE dispatch_id = ?3 AND outgoing = 1",
-            (status, timestamp, dispatch_id),
-        )
-        .ok()?;
-        conn.query_row(
-            "SELECT * FROM messages WHERE dispatch_id = ?1 AND outgoing = 1",
-            [dispatch_id],
-            MessageRow::from_row,
-        )
-        .ok()
+        if let Err(e) = super::receipts::fail_pending(&id.to_string()) {
+            log::warn!("MESSAGE: could not persist failure: {e}");
+        }
     }
 
     /// Apply an edit — our own (optimistic) or an inbound peer `Edit`: replace
@@ -340,90 +321,9 @@ impl Message {
         Some(row)
     }
 
-    /// Apply a receipt high-water-mark: upgrade every outgoing message in
-    /// `conversation` with `dispatch_id <= upto` to at-least `status` (never
-    /// downgrades). One receipt clears a whole backlog. `dispatch_id` is
-    /// 16-byte big-endian, so the BLOB `<=` compare matches send order.
-    /// Returns `true` if any row changed.
-    ///
-    /// In a group this is the *weakest* member's view: [`Self::group_receipt_upto`]
-    /// records the per-member watermark first and only advances the message
-    /// status once every active member has crossed it.
-    pub fn mark_receipt_upto(conversation_id: &[u8; 16], upto: &[u8; 16], status: u8) -> bool {
-        let conn = MESSAGES_DB.lock();
-        conn.execute(
-            "UPDATE messages SET status = ?1 \
-             WHERE conversation_id = ?2 AND outgoing = 1 AND status < ?1 \
-             AND dispatch_id IS NOT NULL AND dispatch_id <= ?3",
-            (status, conversation_id.as_slice(), upto.as_slice()),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false)
-    }
-
-    /// Record `member`'s read/delivery watermark, then advance the shared
-    /// message status only as far as the slowest active member. A group's
-    /// "read" tick means everyone read it, not that someone did.
-    pub fn group_receipt_upto(
-        conversation_id: &[u8; 16], member: &[u8; 32], upto: &[u8; 16], status: u8,
-    ) -> bool {
-        {
-            let conn = MESSAGES_DB.lock();
-            let _ = conn.execute(
-                "INSERT INTO member_read_state (conversation_id, member_ipk, upto_dispatch_id) \
-                 VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(conversation_id, member_ipk) DO UPDATE SET upto_dispatch_id = excluded.upto_dispatch_id \
-                 WHERE excluded.upto_dispatch_id > member_read_state.upto_dispatch_id",
-                (conversation_id.as_slice(), member.as_slice(), upto.as_slice()),
-            );
-        }
-        let Some(slowest) = Self::slowest_member_watermark(conversation_id) else {
-            return false;
-        };
-        Self::mark_receipt_upto(conversation_id, &slowest, status)
-    }
-
-    /// The lowest watermark across every active member other than us, or
-    /// `None` while any of them has yet to report one.
-    pub fn slowest_member_watermark(conversation_id: &[u8; 16]) -> Option<[u8; 16]> {
-        let me = crate::data::identity::Identity::get().map(|i| i.ipk()).unwrap_or([0u8; 32]);
-        let conn = MESSAGES_DB.lock();
-        let (reported, expected, slowest) = conn
-            .query_row(
-                "SELECT COUNT(r.upto_dispatch_id), \
-                        (SELECT COUNT(*) FROM conversation_members \
-                          WHERE conversation_id = ?1 AND active = 1 AND member_ipk <> ?2), \
-                        MIN(r.upto_dispatch_id) \
-                 FROM conversation_members m \
-                 LEFT JOIN member_read_state r \
-                        ON r.conversation_id = m.conversation_id AND r.member_ipk = m.member_ipk \
-                 WHERE m.conversation_id = ?1 AND m.active = 1 AND m.member_ipk <> ?2",
-                (conversation_id.as_slice(), me.as_slice()),
-                |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<Vec<u8>>>(2)?))
-                },
-            )
-            .ok()?;
-        if expected == 0 || reported < expected {
-            return None;
-        }
-        slowest.and_then(|v| v.try_into().ok())
-    }
-
-    /// How many active members have read up to `dispatch_id` — the "seen by N"
-    /// aggregate.
+    /// Count only this message's original recipients with read evidence.
     pub fn seen_by_count(conversation_id: &[u8; 16], dispatch_id: &[u8; 16]) -> u32 {
-        let conn = MESSAGES_DB.lock();
-        conn.query_row(
-            "SELECT COUNT(*) FROM member_read_state r \
-             JOIN conversation_members m \
-               ON m.conversation_id = r.conversation_id AND m.member_ipk = r.member_ipk \
-             WHERE r.conversation_id = ?1 AND m.active = 1 AND r.upto_dispatch_id >= ?2",
-            (conversation_id.as_slice(), dispatch_id.as_slice()),
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n as u32)
-        .unwrap_or(0)
+        super::receipts::seen_count(conversation_id, dispatch_id)
     }
 
     /// Narrate a membership or title change inline with the conversation.
@@ -535,11 +435,9 @@ impl Message {
     /// peer never joined, so they can never arrive. Skips already-read/delivered
     /// (status > sent) defensively. Rides the reactive doorbell.
     pub fn mark_all_failed_in(conversation_id: &[u8; 16]) {
-        let conn = MESSAGES_DB.lock();
-        let _ = conn.execute(
-            "UPDATE messages SET status = ?1 WHERE conversation_id = ?2 AND outgoing = 1 AND status <= ?3",
-            (STATUS_FAILED, conversation_id.as_slice(), STATUS_SENT),
-        );
+        if let Err(e) = super::receipts::reject_conversation(conversation_id) {
+            log::warn!("MESSAGE: could not persist declined-message outcomes: {e}");
+        }
     }
 
     /// Count of messages in a conversation (cheap diagnostics read).
@@ -687,22 +585,6 @@ impl Message {
             .collect()
     }
 
-    /// Advance the local read high-water-mark for a conversation to `upto` (a
-    /// 16-byte dispatch id). Monotonic — a BLOB compare keeps it from moving
-    /// backwards (dispatch ids are big-endian, so memcmp == send order). Writes
-    /// MESSAGES_DB, so it rings the reactive doorbell and the home unread
-    /// count re-reads.
-    pub fn set_read_watermark(conversation_id: &[u8; 16], upto: &[u8; 16]) {
-        let conn = MESSAGES_DB.lock();
-        conn.execute(
-            "INSERT INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2)
-             ON CONFLICT(conversation_id) DO UPDATE SET upto_dispatch_id = excluded.upto_dispatch_id
-             WHERE excluded.upto_dispatch_id > read_state.upto_dispatch_id",
-            (conversation_id.as_slice(), upto.as_slice()),
-        )
-        .ok();
-    }
-
     /// Newest incoming (dispatch-bearing) message's id in a conversation — the
     /// watermark target when marking a whole conversation read.
     pub fn newest_incoming_dispatch(conversation_id: &[u8; 16]) -> Option<[u8; 16]> {
@@ -710,7 +592,7 @@ impl Message {
         conn.query_row(
             "SELECT dispatch_id FROM messages
              WHERE conversation_id = ?1 AND outgoing = 0 AND dispatch_id IS NOT NULL
-             ORDER BY dispatch_id DESC LIMIT 1",
+             ORDER BY id DESC LIMIT 1",
             [conversation_id.as_slice()],
             |r| r.get::<_, Vec<u8>>(0),
         )
@@ -726,9 +608,11 @@ impl Message {
         let mut stmt = conn
             .prepare(
                 "SELECT m.conversation_id, COUNT(*) FROM messages m
-                 LEFT JOIN read_state r ON r.conversation_id = m.conversation_id
-                 WHERE m.outgoing = 0 AND m.deleted = 0 AND m.dispatch_id IS NOT NULL
-                   AND (r.upto_dispatch_id IS NULL OR m.dispatch_id > r.upto_dispatch_id)
+                 LEFT JOIN incoming_receipts r ON r.message_id = m.id
+                 LEFT JOIN read_state legacy ON legacy.conversation_id = m.conversation_id
+                 WHERE m.outgoing = 0 AND m.deleted = 0 AND m.system = 0 AND m.dispatch_id IS NOT NULL
+                   AND CASE WHEN r.message_id IS NOT NULL THEN r.is_read=0
+                       ELSE legacy.upto_dispatch_id IS NULL OR m.dispatch_id>legacy.upto_dispatch_id END
                  GROUP BY m.conversation_id",
             )
             .expect("failed to prepare");
@@ -858,8 +742,7 @@ mod tests {
         insert([3; 16], 90);
         insert([2; 16], 100);
         assert_eq!(pending_notification_ids(&db, &conversation).unwrap().len(), 1);
-        db.execute("INSERT INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2)",
-            (conversation.as_slice(), [3u8; 16].as_slice())).unwrap();
+        crate::data::receipts::read_tx(&db, &conversation, &[3; 16], 110).unwrap();
         assert!(pending_notification_ids(&db, &conversation).unwrap().is_empty());
     }
 
@@ -930,49 +813,6 @@ mod tests {
         assert!(Message::search(&conv, "  ", 10).is_empty(), "blank finds nothing");
     }
 
-    #[test]
-    fn receipt_watermark_covers_backlog_without_downgrade() {
-        let conn = crate::db::messages::open_in_memory();
-        let conv = [7u8; 16];
-        let ids: [[u8; 16]; 3] = [[1u8; 16], [2u8; 16], [3u8; 16]];
-        for (i, did) in ids.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO messages (id, conversation_id, content, outgoing, timestamp, status, dispatch_id) \
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
-                (Ulid::new().to_string(), conv.as_slice(), "m", i as u64, STATUS_SENT, did.as_slice()),
-            )
-            .unwrap();
-        }
-        let mark = |upto: &[u8; 16], status: u8| {
-            conn.execute(
-                "UPDATE messages SET status = ?1 \
-                 WHERE conversation_id = ?2 AND outgoing = 1 AND status < ?1 \
-                 AND dispatch_id IS NOT NULL AND dispatch_id <= ?3",
-                (status, conv.as_slice(), upto.as_slice()),
-            )
-            .unwrap()
-        };
-        let status_of = |did: &[u8; 16]| -> u8 {
-            conn.query_row(
-                "SELECT status FROM messages WHERE dispatch_id = ?1",
-                [did.as_slice()],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|s| s as u8)
-            .unwrap()
-        };
-
-        assert_eq!(mark(&ids[1], STATUS_DELIVERED), 2, "covers ids[0] and ids[1]");
-        assert_eq!(status_of(&ids[0]), STATUS_DELIVERED);
-        assert_eq!(status_of(&ids[1]), STATUS_DELIVERED);
-        assert_eq!(status_of(&ids[2]), STATUS_SENT, "beyond watermark, untouched");
-
-        mark(&ids[2], STATUS_READ); // read the lot
-        assert_eq!(status_of(&ids[2]), STATUS_READ);
-        mark(&ids[2], STATUS_DELIVERED); // stale Delivered must not downgrade
-        assert_eq!(status_of(&ids[0]), STATUS_READ, "no downgrade below current");
-    }
-
     /// A row written before the `dispatch_id` column existed has NULL there.
     /// `MessageRow::from_row` must decode NULL → `None`, not error — otherwise
     /// the `filter_map(Result::ok)` readers silently drop every legacy row.
@@ -992,54 +832,7 @@ mod tests {
         assert_eq!(row.sender(&[5u8; 32]), [5u8; 32]);
     }
 
-    /// A group "read" tick must mean *everyone* read it. Until the slowest
-    /// member reports, the aggregate stays put.
-    #[test]
-    fn group_read_waits_for_the_slowest_member() {
-        let conn = crate::db::messages::open_in_memory();
-        let conv = [7u8; 16];
-        let (alice, bob) = ([0xA1u8; 32], [0xB2u8; 32]);
-        for m in [alice, bob] {
-            conn.execute(
-                "INSERT INTO conversation_members (conversation_id, member_ipk, role, joined_at, active) \
-                 VALUES (?1, ?2, 0, 0, 1)",
-                (conv.as_slice(), m.as_slice()),
-            )
-            .unwrap();
-        }
 
-        // Only Alice has reported — the slowest-member query must find the
-        // roster incomplete and yield nothing to advance to.
-        conn.execute(
-            "INSERT INTO member_read_state (conversation_id, member_ipk, upto_dispatch_id) VALUES (?1, ?2, ?3)",
-            (conv.as_slice(), alice.as_slice(), [9u8; 16].as_slice()),
-        )
-        .unwrap();
-
-        let slowest = |c: &rusqlite::Connection| -> Option<Vec<u8>> {
-            c.query_row(
-                "SELECT COUNT(r.upto_dispatch_id), \
-                        (SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ?1 AND active = 1), \
-                        MIN(r.upto_dispatch_id) \
-                 FROM conversation_members m \
-                 LEFT JOIN member_read_state r \
-                        ON r.conversation_id = m.conversation_id AND r.member_ipk = m.member_ipk \
-                 WHERE m.conversation_id = ?1 AND m.active = 1",
-                [conv.as_slice()],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<Vec<u8>>>(2)?)),
-            )
-            .ok()
-            .and_then(|(reported, expected, min)| (reported >= expected).then_some(min).flatten())
-        };
-        assert!(slowest(&conn).is_none(), "one member silent → no aggregate yet");
-
-        conn.execute(
-            "INSERT INTO member_read_state (conversation_id, member_ipk, upto_dispatch_id) VALUES (?1, ?2, ?3)",
-            (conv.as_slice(), bob.as_slice(), [4u8; 16].as_slice()),
-        )
-        .unwrap();
-        assert_eq!(slowest(&conn), Some(vec![4u8; 16]), "aggregate tracks the laggard, not the leader");
-    }
 }
 
 /// Both read-watermark tables, for the backup snapshot.
@@ -1146,10 +939,12 @@ impl Message {
 fn pending_notification_ids(conn: &rusqlite::Connection, conversation_id: &[u8; 16]) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT m.id FROM messages m
-         LEFT JOIN read_state r ON r.conversation_id = m.conversation_id
-         WHERE m.conversation_id = ?1 AND m.outgoing = 0 AND m.deleted = 0
+         LEFT JOIN incoming_receipts r ON r.message_id=m.id
+         LEFT JOIN read_state legacy ON legacy.conversation_id=m.conversation_id
+         WHERE m.conversation_id = ?1 AND m.outgoing = 0 AND m.deleted = 0 AND m.system=0
            AND m.notification_seen = 0 AND m.dispatch_id IS NOT NULL
-           AND (r.upto_dispatch_id IS NULL OR m.dispatch_id > r.upto_dispatch_id)",
+           AND CASE WHEN r.message_id IS NOT NULL THEN r.is_read=0
+               ELSE legacy.upto_dispatch_id IS NULL OR m.dispatch_id>legacy.upto_dispatch_id END",
     )?;
     Ok(stmt.query_map([conversation_id.as_slice()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }

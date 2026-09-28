@@ -5,6 +5,7 @@ pub mod idqr;
 pub mod backup;
 pub mod media;
 pub mod message;
+pub mod receipts;
 pub mod app_prefs;
 pub mod peer_avatar;
 pub mod peer_profile;

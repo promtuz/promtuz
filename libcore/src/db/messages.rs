@@ -514,6 +514,38 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("CREATE TABLE attachment_sharing_intents (
         message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE
     ) WITHOUT ROWID;"),
+    // Receipt history is per original recipient. The old combined member
+    // watermark cannot tell delivery from reading and is deliberately not copied.
+    M::up("CREATE TABLE message_audiences (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        complete INTEGER NOT NULL DEFAULT 1
+    ) WITHOUT ROWID;
+    CREATE TABLE message_recipients (
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        member BLOB NOT NULL CHECK(length(member)=32),
+        send_status INTEGER NOT NULL DEFAULT 0,
+        sent_at INTEGER,
+        delivered_at INTEGER,
+        read_at INTEGER,
+        legacy_status INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(message_id,member)
+    ) WITHOUT ROWID;
+    CREATE TABLE receipt_peers (
+        conversation_id BLOB NOT NULL CHECK(length(conversation_id)=16),
+        member BLOB NOT NULL CHECK(length(member)=32),
+        PRIMARY KEY(conversation_id,member)
+    ) WITHOUT ROWID;
+    CREATE TABLE incoming_receipts (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        delivered_at INTEGER,
+        read_at INTEGER,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        pending INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;
+    INSERT INTO incoming_receipts(message_id,is_read)
+        SELECT m.id, CASE WHEN r.upto_dispatch_id IS NOT NULL AND m.dispatch_id<=r.upto_dispatch_id THEN 1 ELSE 0 END
+        FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
+        WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -525,6 +557,10 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     PRAGMA!(conn, MIGRATIONS);
     super::register_change_hook(&conn, &[
         "messages",
+        "message_recipients",
+        "message_audiences",
+        "receipt_peers",
+        "incoming_receipts",
         "reactions",
         "message_media",
         "conversations",
@@ -552,6 +588,25 @@ pub(crate) fn open_in_memory() -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_migration_keeps_old_read_state_without_inventing_times_or_audiences() {
+        let mut conn=Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..26]).to_latest(&mut conn).unwrap();
+        for n in [1u8,2] {
+            conn.execute("INSERT INTO messages(id,conversation_id,sender_ipk,content,outgoing,timestamp,status,dispatch_id) VALUES (?1,?2,?3,'old',0,1,1,?4)",
+                (format!("{n:026}"),[9;16].as_slice(),[2;32].as_slice(),[n;16].as_slice())).unwrap();
+        }
+        conn.execute("INSERT INTO read_state VALUES (?1,?2)",([9;16].as_slice(),[1;16].as_slice())).unwrap();
+        conn.execute("INSERT INTO member_read_state VALUES (?1,?2,?3)",([9;16].as_slice(),[2;32].as_slice(),[2;16].as_slice())).unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let rows=conn.prepare("SELECT is_read,delivered_at,read_at,pending FROM incoming_receipts ORDER BY message_id").unwrap()
+            .query_map([],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,Option<u64>>(1)?,r.get::<_,Option<u64>>(2)?,r.get::<_,bool>(3)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(rows,vec![(true,None,None,false),(false,None,None,false)]);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM message_audiences",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM message_recipients",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+    }
 
     #[test]
     fn deletion_ledger_migration_preserves_history_and_backfills_only_known_authors() {

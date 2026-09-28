@@ -52,6 +52,7 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.StickersVM
+import com.promtuz.chat.ui.components.MessageInfoSheet
 import com.promtuz.chat.ui.components.StickerPackSheet
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.LocalMediaClip
@@ -171,6 +172,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
 
     val menu = remember { MessageMenuState() }
     var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
+    var pendingInfo by remember { mutableStateOf<UiMessage?>(null) }
+    var infoMessage by remember { mutableStateOf<UiMessage?>(null) }
+    // Finish lowering the selected bubble before presenting the sheet.
+    LaunchedEffect(menu.isOpen, pendingInfo) {
+        if (!menu.isOpen && pendingInfo != null) {
+            infoMessage = pendingInfo
+            pendingInfo = null
+        }
+    }
     // A tapped sticker opens the pack it came from.
     var packSheet by remember { mutableStateOf<StickerRef?>(null) }
     val appVM = koinInject<AppVM>()
@@ -381,9 +391,14 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 state = menu,
                 quickReactions = QuickReactions,
                 anchorOffsetY = { stage.pinnedOffsetY },
-                actionGroups = menuActionsFor(anchor.msg, viewModel, onDelete = { confirmDelete = it }) { menu.close() },
+                actionGroups = menuActionsFor(anchor.msg, viewModel,
+                    onDelete = { confirmDelete = it }, onInfo = { pendingInfo = it }) { menu.close() },
                 onReact = { viewModel.toggleReaction(anchor.msg, it); menu.close() },
             )
+        }
+
+        infoMessage?.let { msg ->
+            MessageInfoSheet(viewModel.conversationHex, msg, onDismiss = { infoMessage = null })
         }
 
         packSheet?.let { ref ->
@@ -425,6 +440,7 @@ private fun menuActionsFor(
     msg: UiMessage,
     viewModel: ChatVM,
     onDelete: (UiMessage) -> Unit,
+    onInfo: (UiMessage) -> Unit,
     close: () -> Unit,
 ): List<List<MenuAction>> {
     val clipboard = LocalClipboard.current
@@ -435,6 +451,9 @@ private fun menuActionsFor(
             viewModel.beginReply(msg); close()
         })
         if (actionable) add(MenuAction("Forward", R.drawable.oi_forward) { close() })
+        if (actionable && msg.outgoing) add(MenuAction("Message info", R.drawable.oi_info) {
+            onInfo(msg); close()
+        })
         // Only prose copies: a voice note or a sticker has no text to put on the clipboard.
         if (!msg.deleted && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
             add(MenuAction("Copy", R.drawable.oi_copy) {

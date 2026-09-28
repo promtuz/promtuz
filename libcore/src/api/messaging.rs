@@ -236,48 +236,29 @@ pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, Co
         .collect())
 }
 
-/// Tell `peer` we've read their messages up to `upto_dispatch_id` (a 16-byte
-/// dispatch id). High-water-mark — one call clears the whole unread backlog.
-/// Sends a Read receipt; the peer sees it as a status bump via `on_message`
-/// (Receipt). Delivered receipts are automatic on message arrival.
+/// Mark messages through the selected local arrival read, recording event
+/// times before asynchronous encrypted receipt dispatch.
 #[uniffi::export]
 pub fn mark_read(conversation_id: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let upto = to_did16(&upto_dispatch_id)?;
-    // Persist locally first so the home unread count clears the moment the user
-    // reads in-chat (the write rings the reactive doorbell); then tell the others.
-    Message::set_read_watermark(&conv, &upto);
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::send_receipt(
-            conv, common::proto::mls_wire::ReceiptKind::Read, upto,
-        )
-        .await
-        {
-            log::debug!("MESSAGE: mark_read failed: {e}");
-        }
-    });
+    crate::data::receipts::read(&to_conv16(&conversation_id)?, &to_did16(&upto_dispatch_id)?)?;
+    crate::data::receipts::schedule();
     Ok(())
 }
 
-/// Mark the whole conversation with `peer` read: advance the local watermark to
-/// the newest incoming message and send a Read receipt. No-op if nothing's
-/// incoming. For the home-list "Mark read" action, where the caller has no
-/// specific dispatch id in hand.
 #[uniffi::export]
 pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError> {
     let conv = to_conv16(&conversation_id)?;
-    let Some(upto) = Message::newest_incoming_dispatch(&conv) else { return Ok(()) };
-    Message::set_read_watermark(&conv, &upto);
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::send_receipt(
-            conv, common::proto::mls_wire::ReceiptKind::Read, upto,
-        )
-        .await
-        {
-            log::debug!("MESSAGE: mark_conversation_read failed: {e}");
-        }
-    });
+    if let Some(upto) = Message::newest_incoming_dispatch(&conv) {
+        crate::data::receipts::read(&conv, &upto)?;
+        crate::data::receipts::schedule();
+    }
     Ok(())
+}
+
+#[uniffi::export]
+pub fn message_receipt_info(conversation_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>) -> Result<crate::data::receipts::MessageReceiptInfo, CoreError> {
+    let ids = dispatch_ids.iter().map(|id| to_did16(id)).collect::<Result<Vec<_>,_>>()?;
+    Ok(crate::data::receipts::info_many(&to_conv16(&conversation_id)?, &ids)?)
 }
 
 /// Unread incoming count per peer (only peers with unread > 0). Home-list badges.
@@ -464,6 +445,8 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
         if j - i > 1 {
             rows[i].album_items =
                 rows[i..j].iter().filter_map(|r| r.dispatch_id.clone()).collect();
+            let statuses: Vec<u8> = rows[i..j].iter().map(|r| r.status).collect();
+            rows[i].status = crate::data::receipts::combined_status(&statuses, true);
             rows[i + 1..j].iter_mut().for_each(|r| r.in_album = true);
         }
         i = j;

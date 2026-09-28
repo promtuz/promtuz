@@ -33,6 +33,7 @@ import uniffi.core.sendMessage as ffiSendMessage
 import uniffi.core.shouldLaunchApp as ffiShouldLaunchApp
 import uniffi.core.deleteMessage as ffiDeleteMessage
 import uniffi.core.editMessage as ffiEditMessage
+import uniffi.core.messageReceiptInfo as ffiMessageReceiptInfo
 import uniffi.core.markRead as ffiMarkRead
 import uniffi.core.markConversationRead as ffiMarkConversationRead
 import uniffi.core.unreadCounts as ffiUnreadCounts
@@ -483,7 +484,11 @@ object CoreBridge {
     suspend fun reactions(conversationId: ByteArray): List<ReactionRecord> =
         withContext(Dispatchers.IO) { ffiReactionsFor(conversationId) }
 
-    /** High-water-mark read receipt: mark everything up to this dispatch id as read. */
+    /** Per-recipient receipt history for a message or the parts of an album. */
+    suspend fun messageReceiptInfo(conversationId: ByteArray, dispatchIds: List<ByteArray>) =
+        withContext(Dispatchers.IO) { ffiMessageReceiptInfo(conversationId, dispatchIds) }
+
+    /** Mark local incoming messages through this visible arrival as read. */
     suspend fun markRead(conversationId: ByteArray, uptoDispatchId: ByteArray) =
         withContext(Dispatchers.IO) { ffiMarkRead(conversationId, uptoDispatchId) }
 

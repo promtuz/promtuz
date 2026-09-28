@@ -166,9 +166,9 @@ pub enum MessageEvent {
     Failed { id: String, conversation: Vec<u8>, reason: String },
     Edited { id: String, conversation: Vec<u8>, content: String },
     Deleted { id: String, conversation: Vec<u8> },
-    /// A member acknowledged our messages up to `upto` (dispatch_id) at
-    /// `status` (3 = delivered, 4 = read). UI bumps all rendered messages
-    /// ≤ upto; in a group the status only advances once every member has.
+    /// Legacy receipt event retained for binding compatibility. Current receipt
+    /// updates notify through on_db_changed; readers query persisted per-member
+    /// evidence and aggregate status instead of inferring a watermark.
     Receipt { conversation: Vec<u8>, member: Vec<u8>, upto: Vec<u8>, status: u8 },
 }
 

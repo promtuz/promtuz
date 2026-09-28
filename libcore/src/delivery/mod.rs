@@ -6,14 +6,11 @@ use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Unpacker;
 use rusqlite::params;
 
-use crate::data::message::Message;
 use crate::data::message::STATUS_FAILED;
 use crate::data::message::STATUS_SENT;
 use crate::db::outbox::OUTBOX_DB;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
-use crate::events::Emittable;
-use crate::events::messaging::MessageEv;
 use crate::quic::dht_client::DhtClient;
 use crate::quic::dht_client::KpOutcomeFilter;
 
@@ -66,21 +63,36 @@ fn ms_i64(ms: u64) -> i64 {
 }
 
 pub fn enqueue(id: &[u8], op: OpType, target_ipk: Option<[u8; 32]>, payload: &[u8]) {
-    OUTBOX_DB
-        .lock()
-        .execute(
-            "INSERT INTO outbox (id, op_type, target_ipk, payload, created_at, next_attempt)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)
-             ON CONFLICT(id, COALESCE(target_ipk, X'')) DO NOTHING",
-            params![
-                id,
-                op as u8,
-                target_ipk.as_ref().map(|a| a.as_slice()),
-                payload,
-                ms_i64(crate::utils::systime().as_millis() as u64),
-            ],
-        )
-        .ok();
+    if let Err(e) = enqueue_checked(id, op, target_ipk, payload) {
+        warn!("OUTBOX: enqueue failed: {e}");
+    }
+}
+
+fn enqueue_tx(conn: &rusqlite::Connection, id: &[u8], op: OpType, target: Option<[u8;32]>, payload:&[u8]) -> anyhow::Result<()> {
+    conn.execute("INSERT INTO outbox(id,op_type,target_ipk,payload,created_at,next_attempt)
+        VALUES (?1,?2,?3,?4,?5,0) ON CONFLICT(id,COALESCE(target_ipk,X'')) DO NOTHING",
+        params![id,op as u8,target.as_ref().map(|p|p.as_slice()),payload,ms_i64(crate::utils::systime().as_millis() as u64)])?;
+    Ok(())
+}
+
+pub(crate) fn enqueue_checked(id:&[u8],op:OpType,target:Option<[u8;32]>,payload:&[u8])->anyhow::Result<()> {
+    enqueue_tx(&OUTBOX_DB.lock(),id,op,target,payload)
+}
+
+pub(crate) fn enqueue_batch(copies:&mut [([u8;32],[u8;16],OpType,Vec<u8>)])->anyhow::Result<()> {
+    enqueue_batch_in(&mut OUTBOX_DB.lock(), copies)
+}
+
+fn enqueue_batch_in(conn: &mut rusqlite::Connection, copies: &mut [([u8;32],[u8;16],OpType,Vec<u8>)]) -> anyhow::Result<()> {
+    let tx=conn.transaction()?;
+    for (to,id,op,bytes) in copies {
+        enqueue_tx(&tx,id,*op,Some(*to),bytes)?;
+        // A concurrent/replayed enqueue keeps the first envelope. Live sends
+        // must use the same bytes the reconciler will replay.
+        *bytes = tx.query_row("SELECT payload FROM outbox WHERE id=?1 AND target_ipk=?2",
+            params![id.as_slice(),to.as_slice()],|r|r.get(0))?;
+    }
+    tx.commit()?;Ok(())
 }
 
 /// Retire one member's copy of a dispatch. The rest of the fan-out is
@@ -100,8 +112,8 @@ pub fn retire_all(id: &[u8]) {
     OUTBOX_DB.lock().execute("DELETE FROM outbox WHERE id = ?1", params![id]).ok();
 }
 
-/// Is any member's copy of this dispatch still queued? The message stays
-/// "sending" until the fan-out has fully drained.
+/// Is any member's copy still queued? Used to keep the pending-send recovery
+/// pass from rebuilding a dispatch already owned by the outbox reconciler.
 pub fn any_pending(id: &[u8]) -> bool {
     OUTBOX_DB
         .lock()
@@ -245,7 +257,7 @@ pub async fn reconcile() {
             // framed bytes verbatim (already `.pack()`-framed from Task 6). Any
             // open/write/finish/read error, or a non-DispatchAck reply, reads as
             // Silence (transport drop / no answer).
-            _ => match conn.open_bi().await {
+            _ => tokio::time::timeout(std::time::Duration::from_secs(15), async { match conn.open_bi().await {
                 Ok((mut send, mut recv)) => {
                     if send.write_all(&row.payload).await.is_ok()
                         && send.finish().is_ok()
@@ -259,41 +271,29 @@ pub async fn reconcile() {
                     }
                 },
                 Err(_) => LastOutcome::Silence,
-            },
+            }}).await.unwrap_or(LastOutcome::Silence),
         };
 
         let age = now.saturating_sub(row.created_at);
         match classify(op, outcome, row.attempts, age) {
             Next::Retire => {
-                retire(&row.id, target);
-                // Mirror the live send path onto the message the UI reads: a
-                // row retired on the async path must leave its message `sent`
-                // (Durable/Queued) or `failed` (Terminal), else an
-                // offline-then-delivered message stays pending forever and a
-                // rejected one fails silently. KpPublish has no message row.
-                // Only settle the message once every member's copy has left the
-                // queue — a three-member fan-out that reached one relay is not
-                // a sent message yet.
-                if matches!(op, OpType::Message) && !any_pending(&row.id) {
-                    let id = hex::encode(&row.id[..row.id.len().min(4)]);
-                    if matches!(outcome, LastOutcome::Terminal) {
-                        warn!("MESSAGE: {id} rejected on retry — {outcome:?}");
-                        mark_message_failed(&row.id, "relay rejected the message");
-                    } else {
-                        debug!("MESSAGE: {id} delivered on retry — {outcome:?}");
-                        mark_message_sent(
-                            &row.id,
-                            accepted_timestamp.expect("durable dispatch ack has timestamp"),
-                        );
+                if op == OpType::Message {
+                    let status = if outcome == LastOutcome::Terminal { STATUS_FAILED } else { STATUS_SENT };
+                    if let Err(e) = crate::data::receipts::send_result(&row.id, target, status, accepted_timestamp) {
+                        warn!("MESSAGE: outcome persistence failed, retaining outbox: {e}");
+                        continue;
                     }
                 }
+                retire(&row.id, target);
             },
             Next::Dead => {
-                mark_dead(&row.id, target);
-                if matches!(op, OpType::Message) && !any_pending(&row.id) {
-                    warn!("MESSAGE: {} failed after {} attempts", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
-                    mark_message_failed(&row.id, "undeliverable after repeated retries");
+                if op == OpType::Message {
+                    if let Err(e) = crate::data::receipts::send_result(&row.id, target, STATUS_FAILED, None) {
+                        warn!("MESSAGE: failure persistence failed, retaining outbox: {e}");
+                        continue;
+                    }
                 }
+                mark_dead(&row.id, target);
             },
             Next::KeepRetrying => {
                 if matches!(op, OpType::Message) {
@@ -305,34 +305,28 @@ pub async fn reconcile() {
     }
 }
 
-/// Flip the message keyed by `dispatch_id` (the outbox row id) to `sent` and
-/// emit the UI event, mirroring the live send path's Durable arm. No-op if no
-/// such message (e.g. a non-Message op).
-fn mark_message_sent(dispatch_id: &[u8], timestamp: u64) {
-    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_SENT, Some(timestamp)) {
-        MessageEv::Sent {
-            id:           m.id,
-            conversation: m.conversation_id,
-            content:      m.content,
-            timestamp:    m.timestamp,
-        }
-        .emit();
-    }
-}
-
-/// Flip the message keyed by `dispatch_id` to `failed` and emit `Failed`,
-/// mirroring the live send path's Terminal arm so a rejected/undeliverable
-/// message doesn't fail silently.
-fn mark_message_failed(dispatch_id: &[u8], reason: &str) {
-    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_FAILED, None) {
-        MessageEv::Failed { id: m.id, conversation: m.conversation_id, reason: reason.into() }
-            .emit();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fanout_enqueue_is_atomic_and_replay_keeps_the_original_envelope() {
+        let mut conn=rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE outbox(id BLOB,op_type INTEGER,target_ipk BLOB,payload BLOB,created_at INTEGER,next_attempt INTEGER);
+            CREATE UNIQUE INDEX k ON outbox(id,COALESCE(target_ipk,X''));
+            CREATE TRIGGER refuse BEFORE INSERT ON outbox WHEN length(NEW.payload)=3 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+        let mut copies = [([2;32],[1;16],OpType::Message,b"first".to_vec()),
+            ([3;32],[1;16],OpType::Message,b"bad".to_vec())];
+        assert!(enqueue_batch_in(&mut conn,&mut copies).is_err());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM outbox",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+        conn.execute_batch("DROP TRIGGER refuse;").unwrap();
+        copies[1].3 = b"first".to_vec();
+        enqueue_batch_in(&mut conn,&mut copies).unwrap();
+        copies[0].3 = b"retry".to_vec();
+        enqueue_batch_in(&mut conn,&mut copies).unwrap();
+        assert_eq!(copies[0].3,b"first", "the live attempt reuses the durable envelope");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM outbox WHERE payload=?1",[b"first".as_slice()],|r|r.get::<_,u32>(0)).unwrap(),2);
+    }
 
     #[test]
     fn outcome_for_ack_maps_all_variants() {

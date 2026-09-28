@@ -43,11 +43,9 @@ pub enum MessageEv {
         #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
     },
-    /// A member acknowledged our outgoing messages up to `upto` (a 16-byte
-    /// dispatch_id) at `status` (Delivered/Read). High-water-mark: the UI
-    /// bumps every rendered message with `dispatch_id <= upto` to `status`.
-    /// `member` names who acknowledged — in a group the tick only advances
-    /// once the slowest of them has.
+    /// Legacy receipt event retained for binding compatibility. Current receipt
+    /// updates notify through on_db_changed; readers query persisted per-member
+    /// evidence and aggregate status instead of inferring a watermark.
     Receipt {
         #[serde(with = "serde_bytes")]
         conversation: [u8; 16],

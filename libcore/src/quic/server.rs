@@ -24,7 +24,6 @@ use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::Body;
-use common::proto::mls_wire::ReceiptKind;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
 use common::quic::id::NodeId;
@@ -511,6 +510,7 @@ impl Relay {
             // a restart). Spawns per file_id; the DOWNLOADING guard dedups a
             // racing user tap or a live pull.
             tokio::spawn(crate::transfer::resume_incomplete_downloads());
+            crate::data::receipts::schedule();
 
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
@@ -877,17 +877,9 @@ async fn process_deliver(
                             }
                             .emit();
                             info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
-                            // Auto-Delivered receipt (high-water-mark = this id).
-                            // Spawned so we don't delay the relay's DeliverAck.
+                            // Event time was persisted with the incoming message.
+                            crate::data::receipts::schedule();
                             let from = *msg.from;
-                            crate::RUNTIME.spawn(async move {
-                                let _ = crate::messaging::send_receipt(
-                                    conv,
-                                    ReceiptKind::Delivered,
-                                    did,
-                                )
-                                .await;
-                            });
                             // Fetch the bytes without a tap only from a paired contact
                             // over a trusted network; otherwise the UI drives the pull.
                             // ponytail: on_wifi is hardcoded false until the platform
@@ -928,18 +920,8 @@ async fn process_deliver(
                         warn!("TRANSFER: sharing grant rejected: {e}");
                     }
                 },
-                Ok(AppPayload::Receipt { kind, upto }) => {
-                    let status = match kind {
-                        ReceiptKind::Delivered => crate::data::message::STATUS_DELIVERED,
-                        ReceiptKind::Read => crate::data::message::STATUS_READ,
-                    };
-                    // Record this member's watermark; the shared status only
-                    // advances once the slowest member has crossed it, so a
-                    // group tick means everyone, not anyone.
-                    if Message::group_receipt_upto(&conv, &author, &upto, status) {
-                        MessageEv::Receipt { conversation: conv, member: author, upto, status }
-                            .emit();
-                    }
+                Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
+                    crate::data::receipts::receive(&conv, &author, payload)?;
                 },
                 Ok(payload @ (AppPayload::Edit { .. } | AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
                     crate::messaging::receive_message_mutation(&conv, &author, payload)?;

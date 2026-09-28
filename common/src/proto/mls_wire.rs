@@ -239,6 +239,44 @@ pub enum AppPayload {
     /// post's attachment. Authenticated by the MLS author and group; receiving
     /// this control alone never grants access without the matching live post.
     AttachmentSharing(AttachmentSharing),
+    /// Exact message acknowledgements with recipient-observed event times.
+    /// Sent only to the original author; old clients ignore this optional control.
+    ReceiptDetails(ReceiptDetails),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptEntry {
+    pub message_id: [u8; 16],
+    pub delivered_at: Option<u64>,
+    pub read_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptDetails {
+    #[serde(deserialize_with = "receipt_entries")]
+    pub entries: Vec<ReceiptEntry>,
+}
+
+fn receipt_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ReceiptEntry>, D::Error> {
+    struct Entries;
+    impl<'de> serde::de::Visitor<'de> for Entries {
+        type Value = Vec<ReceiptEntry>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("1 to 128 receipt entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            if seq.size_hint().is_some_and(|n| n > 128) { return Err(A::Error::custom("too many receipts")); }
+            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(128));
+            while let Some(entry) = seq.next_element()? {
+                if entries.len() == 128 { return Err(A::Error::custom("too many receipts")); }
+                entries.push(entry);
+            }
+            if entries.is_empty() { return Err(A::Error::custom("empty receipts")); }
+            Ok(entries)
+        }
+    }
+    d.deserialize_seq(Entries)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1609,6 +1647,21 @@ pub fn welcome_publish_wrap_signing_input(
 
 #[cfg(all(test, feature = "crypto"))]
 mod tests {
+    #[test]
+    fn exact_receipts_are_bounded_and_append_without_rewriting_legacy_receipts() {
+        use crate::proto::pack::{Packer,Unpacker};
+        let entry=ReceiptEntry {message_id:[7;16],delivered_at:Some(100),read_at:Some(110)};
+        let payload=AppPayload::ReceiptDetails(ReceiptDetails {entries:vec![entry.clone();128]});
+        assert_eq!(AppPayload::deser(&payload.ser().unwrap()).unwrap(),payload);
+        for count in [0,129] {
+            let oversized=AppPayload::ReceiptDetails(ReceiptDetails {entries:vec![entry.clone();count]});
+            assert!(AppPayload::deser(&oversized.ser().unwrap()).is_err());
+        }
+        let old=AppPayload::Receipt {kind:ReceiptKind::Delivered,upto:[9;16]}.ser().unwrap();
+        assert_eq!(&old[..2],&[1,0]);
+        assert_eq!(&old[2..],&[9;16]);
+    }
+
     #[test]
     fn sharing_grants_append_without_changing_post_ordinals_and_bound_audience_decode() {
         use crate::proto::pack::{Packer, Unpacker};

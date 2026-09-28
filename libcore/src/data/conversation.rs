@@ -443,7 +443,7 @@ impl Conversation {
         drop(stmt);
 
         for table in
-            ["messages", "reactions", "read_state", "member_read_state", "message_media", "attachment_sharing"]
+            ["messages", "reactions", "read_state", "member_read_state", "message_media", "attachment_sharing", "receipt_peers"]
         {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
