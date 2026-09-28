@@ -329,7 +329,7 @@ class AppVM(
                 rawTitle = c.title,
                 request = c.request,
             )
-        }.sortedByDescending { it.timestampMs }
+        }
     } catch (e: Exception) {
         Timber.tag(TAG).e(e, "Failed to load chats")
         emptyList()

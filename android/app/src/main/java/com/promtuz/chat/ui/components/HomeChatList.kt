@@ -15,8 +15,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -44,6 +48,17 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     val all by appViewModel.chats.collectAsState()
     val chats = androidx.compose.runtime.remember(all) { all.filterNot { it.request } }
     val requests = androidx.compose.runtime.remember(all) { all.filter { it.request } }
+    val pins = remember(chats) { chats.associate { it.conversationHex to it.pinned } }
+    var previousPins by remember { mutableStateOf(pins) }
+    SideEffect {
+        if (pins.any { (id, pinned) -> previousPins[id]?.let { it != pinned } == true }) {
+            // A pin reorders keyed rows. Keep the viewport at its current index/offset
+            // instead of following the old first row to its new position. Request this
+            // with the updated data, before measurement; animateItem still moves rows.
+            listState.requestScrollToItem(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        }
+        previousPins = pins
+    }
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByChat.collectAsState()
 

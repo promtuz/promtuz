@@ -188,6 +188,10 @@ fun HomeChatListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (muted) DrawableIcon(
+                        R.drawable.i_volume_off, size = 14.dp, desc = "Muted",
+                        tint = colors.onSurfaceVariant,
+                    )
                     if (chat.timestampMs > 0) Row(
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -232,6 +236,10 @@ fun HomeChatListItem(
                         color = lineColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                    if (pinned) DrawableIcon(
+                        R.drawable.i_pin, size = 14.dp, desc = "Pinned",
+                        tint = colors.onSurfaceVariant,
                     )
                     if (unread) UnreadBadge(chat.unreadCount, muted, colors)
                 }
