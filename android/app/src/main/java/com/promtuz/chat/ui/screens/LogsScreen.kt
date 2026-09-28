@@ -6,26 +6,30 @@ import android.content.Intent
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CornerSize
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -33,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,7 +52,13 @@ import com.promtuz.chat.ui.components.AppBottomSheet
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.ScreenScaffold
+import com.promtuz.chat.ui.components.ContactPickerHeader
+import com.promtuz.chat.ui.components.AppDropMenu
+import com.promtuz.chat.ui.components.MenuAction
+import com.promtuz.chat.ui.components.MorphGlyph
+import com.promtuz.chat.ui.components.AppAlertDialog
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
 import kotlinx.coroutines.launch
@@ -58,26 +69,67 @@ import java.util.Locale
 
 @Composable
 fun LogsScreen() {
-    var showExport by remember { mutableStateOf(false) }
-
-    val listState = rememberLazyListState()
-    SimpleScreen({ Text("App Logs") }, scrollableState = listState, actions = {
-        IconButton({ showExport = true }) {
-            DrawableIcon(R.drawable.oi_export, desc = "Export logs", size = 20.dp)
-        }
-    }) { padding ->
-        LogsContainer(Modifier, padding, listState)
+    val live by AppLogger.logs.collectAsState()
+    var paused by remember { mutableStateOf<List<AppLog>?>(null) }
+    var export by remember { mutableStateOf<List<AppLog>?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var searching by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var severity by rememberSaveable { mutableStateOf(0) }
+    val source = paused ?: live
+    val logs = remember(source, query, severity) {
+        source.filter { log -> log.priority >= severity && (query.isBlank() ||
+            "${log.tag.orEmpty()} ${log.message} ${log.t?.stackTraceToString().orEmpty()}".contains(query.trim(), true)) }
     }
-
-    if (showExport) LogExportSheet { showExport = false }
+    val listState = rememberLazyListState()
+    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+    ScreenScaffold(scrollableState = listState, topBar = { scroll ->
+        ContactPickerHeader(
+            title = "App logs", close = false, searching = searching, query = query,
+            onQuery = { query = it }, onSearch = { searching = true }, searchLabel = "Search logs",
+            onBack = { if (searching) { searching = false; query = "" } else back?.onBackPressed() },
+            scrollBehavior = scroll, windowInsets = TopAppBarDefaults.windowInsets,
+            showActionsWhileSearching = true,
+            actions = {
+                AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Log options") },
+                    groups = buildList {
+                        add(listOf(MenuAction(if (paused == null) "Pause updates" else "Resume updates",
+                            glyph = if (paused == null) MorphGlyph.Pause else MorphGlyph.Play) {
+                            paused = if (paused == null) live.toList() else null
+                        }))
+                        if (logs.isNotEmpty()) add(listOf(MenuAction("Export logs", R.drawable.oi_export) { export = logs.toList() }))
+                        if (live.isNotEmpty() || paused?.isNotEmpty() == true)
+                            add(listOf(MenuAction("Clear logs", R.drawable.oi_broom, destructive = true) { confirmClear = true }))
+                    })
+            },
+        )
+    }) { padding ->
+        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("All" to 0, "Info" to 4, "Warnings" to 5, "Errors" to 6).forEach { (label, value) ->
+                    FilterChip(selected = severity == value, onClick = { severity = value }, label = { Text(label) })
+                }
+            }
+            if (paused != null) Text("Updates paused", Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+            if (logs.isEmpty()) Text(if (query.isNotBlank() || severity > 0) "No matching logs" else "No logs yet",
+                Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else LogsContainer(logs, Modifier.weight(1f), PaddingValues(bottom = padding.calculateBottomPadding()), listState)
+        }
+    }
+    export?.let { LogExportSheet(it) { export = null } }
+    if (confirmClear) AppAlertDialog(onDismissRequest = { confirmClear = false },
+        title = { Text("Clear logs?") }, text = { Text("This removes the current diagnostic logs. Your chats and settings stay on this device.") },
+        confirmButton = { TextButton(onClick = { AppLogger.clear(); paused = paused?.let { emptyList() }; confirmClear = false }) { Text("Clear") } },
+        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
 }
 
 @Composable
-private fun LogExportSheet(onDismiss: () -> Unit) {
+private fun LogExportSheet(logs: List<AppLog>, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val logs by AppLogger.logs.collectAsState()
 
     AppBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -111,7 +163,7 @@ private fun LogExportSheet(onDismiss: () -> Unit) {
 }
 
 private fun shareLogFile(context: Context, text: String) {
-    val file = File(context.cacheDir, "logs").apply { mkdirs() }.resolve("promtuz-logs.txt")
+    val file = File.createTempFile("promtuz-logs-", ".txt", File(context.cacheDir, "logs").apply { mkdirs() })
     file.writeText(text)
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
     val send = Intent(Intent.ACTION_SEND).apply {
@@ -148,35 +200,30 @@ private fun formatLogs(logs: List<AppLog>): String {
 
 @Composable
 fun LogsContainer(
+    logs: List<AppLog>,
     modifier: Modifier = Modifier,
     padding: PaddingValues = PaddingValues(0.dp),
     listState: LazyListState = rememberLazyListState(),
 ) {
-    val logs by AppLogger.logs.collectAsState()
-
     LazyColumn(
         modifier
-            .padding(padding)
-            .padding(horizontal = 16.dp)
-            .clip(MaterialTheme.shapes.largeIncreased)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .fillMaxWidth()
-            .fillMaxHeight()
-            .padding(3.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.Bottom),
+            .fillMaxHeight(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = padding.calculateBottomPadding() + 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
         state = listState,
         reverseLayout = true
     ) {
-        itemsIndexed(logs, key = { _, it -> it.id }) { i, log ->
+        items(logs, key = { it.id }) { log ->
             SelectionContainer(Modifier.fillMaxWidth()) {
-                LogEntry(log, i == 0)
+                LogEntry(log)
             }
         }
     }
 }
 
 @Composable
-fun LogEntry(log: AppLog, isLast: Boolean = false) {
+fun LogEntry(log: AppLog) {
     val color = when (prioLabel(log.priority)) {
         "V" -> Color(0xFF9E9E9E)
         "D" -> Color(0xFF42A5F5)
@@ -187,22 +234,12 @@ fun LogEntry(log: AppLog, isLast: Boolean = false) {
         else -> Color.Unspecified
     }
 
-    val cz0 = CornerSize(0)
-
     Column(
         Modifier
-            .let { mfr ->
-                if (isLast) mfr.clip(
-                    // FIXME: innerRounding = outerRounding - padding
-                    MaterialTheme.shapes.largeIncreased.copy(
-                        topEnd = cz0,
-                        topStart = cz0
-                    )
-                ) else mfr
-            }
-            .background(color.copy(0.15f))
             .fillMaxWidth()
-            .padding(5.dp, 2.dp)
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(12.dp, 10.dp)
     ) {
         Row(verticalAlignment = Alignment.Top) {
             Text(

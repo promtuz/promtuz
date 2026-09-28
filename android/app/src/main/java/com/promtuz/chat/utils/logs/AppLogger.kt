@@ -30,12 +30,18 @@ data class AppLog(
             'I' -> 4
             'W' -> 5
             'E' -> 6
+            'F' -> 7
             else -> 3
         }
     }
 }
 
 object AppLogger : Timber.Tree() {
+    private const val MAX_ENTRIES = 2_000
+    @Volatile var minimumPriority = 4
+
+    override fun isLoggable(tag: String?, priority: Int) = priority >= minimumPriority
+
     override fun log(
         priority: Int,
         tag: String?,
@@ -49,8 +55,11 @@ object AppLogger : Timber.Tree() {
     }
 
     fun push(log: AppLog) {
-        _logs.update { listOf(log) + it }
+        if (log.priority < minimumPriority) return
+        _logs.update { listOf(log) + it.take(MAX_ENTRIES - 1) }
     }
+
+    fun clear() { _logs.value = emptyList() }
 
     private var _logs = MutableStateFlow(emptyList<AppLog>())
     val logs = _logs.asStateFlow()

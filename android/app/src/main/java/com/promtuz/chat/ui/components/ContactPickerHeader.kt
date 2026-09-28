@@ -44,6 +44,7 @@ fun ContactPickerHeader(
     scrollBehavior: TopAppBarScrollBehavior? = null,
     windowInsets: WindowInsets = WindowInsets(0),
     topBarColors: TopAppBarColors = appTopBarColors(),
+    showActionsWhileSearching: Boolean = false,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
@@ -117,13 +118,14 @@ fun ContactPickerHeader(
         colors = topBarColors,
         connectionStatus = false,
         actions = {
+            if (showActionsWhileSearching) actions()
             AnimatedVisibility(!searching, enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
                 exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec())) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    actions()
                     if (onSearch != null) IconButton(onClick = onSearch, enabled = enabled && !searching) {
                         Icon(painterResource(R.drawable.oi_search), searchLabel, Modifier.size(22.dp))
                     }
+                    if (!showActionsWhileSearching) actions()
                 }
             }
         },

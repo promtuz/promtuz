@@ -31,40 +31,38 @@ import org.koin.android.ext.koin.androidContext
 import org.koin.android.ext.koin.androidLogger
 import org.koin.core.context.startKoin
 import timber.log.Timber
-import java.util.Calendar
 
 class Promtuz : Application() {
     private fun readJNILogs() {
         CoroutineScope(Dispatchers.IO).launch {
             val pid = android.os.Process.myPid()
-            val proc = Runtime.getRuntime().exec(
-                arrayOf("logcat", "--pid=$pid")
-            )
-
-            proc.inputStream.bufferedReader().forEachLine { line ->
-                val head = line.substringBefore(" : ")
-                var msg = line.substringAfter(" : ")
-                if (!msg.startsWith("core:")) return@forEachLine
-
-                val parts = head.split(Regex("\\s+"))
-
-                val priority = AppLog.charPriority(parts[4][0])
-                val tag = msg.substringBefore(": ")
-                msg = msg.substringAfter(": ")
-
-                val time = Calendar.getInstance().timeInMillis
-
-                AppLogger.push(AppLog(time, priority, tag, msg, null))
+            // Collect only this process's native core tag. Release keeps info/warnings/errors;
+            // the full device log and other apps never enter the in-app diagnostic buffer.
+            val pattern = Regex("^([VDIWEF])/core\\s*\\(\\s*\\d+\\):\\s?(.*)$")
+            runCatching {
+                val proc = Runtime.getRuntime().exec(
+                    arrayOf("logcat", "--pid=$pid", "-v", "brief", if (isDebuggable()) "core:D" else "core:I", "*:S")
+                )
+                try {
+                    proc.inputStream.bufferedReader().useLines { lines -> lines.forEach { line ->
+                        val match = pattern.matchEntire(line) ?: return@forEach
+                        AppLogger.push(AppLog(System.currentTimeMillis(), AppLog.charPriority(match.groupValues[1][0]),
+                            "core", match.groupValues[2], null))
+                    } }
+                } finally {
+                    proc.destroy()
+                }
+            }.onFailure {
+                AppLogger.push(AppLog(System.currentTimeMillis(), 5, "Logs", "Native logs unavailable", it))
             }
         }
     }
 
     override fun onCreate() {
-        // Security: no DebugTree / logcat scraper in release builds.
-        if (isDebuggable()) {
-            Timber.plant(Timber.DebugTree(), AppLogger)
-            readJNILogs()
-        }
+        AppLogger.minimumPriority = if (isDebuggable()) 2 else 4
+        Timber.plant(AppLogger)
+        if (isDebuggable()) Timber.plant(Timber.DebugTree())
+        readJNILogs()
 
         // Seed the last-known presence before core starts firing deltas, so a
         // cold start shows last-seens instead of a blank; then persist changes
