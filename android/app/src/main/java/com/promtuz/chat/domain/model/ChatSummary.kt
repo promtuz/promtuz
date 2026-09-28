@@ -48,6 +48,8 @@ data class ChatSummary(
     val ownerIsStuck: Boolean = false,
     /** Preserve the group's actual name when seeding a newly opened chat header. */
     val rawTitle: String = "",
+    /** A message request we have not accepted. Listed apart, with no composer. */
+    val request: Boolean = false,
 ) {
     val isGroup: Boolean get() = kind == 1
 }

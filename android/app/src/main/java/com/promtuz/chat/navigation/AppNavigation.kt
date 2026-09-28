@@ -77,8 +77,8 @@ fun AppNavigation(
                 ChatScreen(key.name, chatVM)
             }
             entry<Routes.ContactCard> { key -> com.promtuz.chat.ui.screens.ContactCardScreen(key) }
-            entry<Routes.ContactRequests> { com.promtuz.chat.ui.screens.ContactRequestsScreen() }
-            entry<Routes.ContactRequest> { key -> com.promtuz.chat.ui.screens.ContactRequestScreen(key.peer, key.outgoing) }
+            entry<Routes.MessageRequests> { com.promtuz.chat.ui.screens.MessageRequestsScreen() }
+            entry<Routes.PrivacySettings> { com.promtuz.chat.ui.screens.PrivacySettingsScreen() }
             entry<Routes.ContactInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(key.conversation, key.peer) }
             entry<Routes.SharedMedia> { key -> com.promtuz.chat.ui.screens.SharedMediaScreen(key.conversation, key.name) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }

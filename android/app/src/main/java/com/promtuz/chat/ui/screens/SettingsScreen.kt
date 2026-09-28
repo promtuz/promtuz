@@ -28,6 +28,7 @@ import com.promtuz.chat.ui.text.avgSizeInStyle
 private enum class SettingsIcon(@param:DrawableRes val drawable: Int) {
     Profile(R.drawable.i_user),
     Identity(R.drawable.i_key),
+    Privacy(R.drawable.i_shield_lock),
     Notifications(R.drawable.i_notifications),
     Appearance(R.drawable.i_chat_settings),
     Stickers(R.drawable.i_sticker),
@@ -61,6 +62,7 @@ fun SettingsScreen(appViewModel: AppVM) {
             ),
         )),
         SettingGroup("Chats", listOf(
+            SettingItem("Privacy", "Who can message you, and blocked people", SettingsIcon.Privacy, Routes.PrivacySettings),
             SettingItem(
                 "Notifications", "Alerts and message previews",
                 SettingsIcon.Notifications, Routes.NotificationsSettings,

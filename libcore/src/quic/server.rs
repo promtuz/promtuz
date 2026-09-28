@@ -528,7 +528,6 @@ impl Relay {
         // the connection's cancellation token, and never gates inbox readiness.
         tokio::spawn(crate::profile_sync::run(mls_cancel.clone()));
         tokio::spawn(crate::profile_details_sync::run(mls_cancel.clone()));
-        tokio::spawn(crate::contact_requests::retry_outgoing());
 
         // Offline backlog is in the local DB — synced and live. (A drain-setup
         // failure returns above → Disconnected, so we never stick on Syncing.)
@@ -1094,18 +1093,11 @@ async fn process_deliver(
             crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
             info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
             // Accepting the welcome built the group → prove it works back to
-            // the inviter so their contact flips PENDING → PAIRED.
-            let to = *msg.from;
-            crate::RUNTIME.spawn(async move {
-                if let Err(e) = crate::messaging::send_pair_ack(to).await {
-                    warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
-                    return;
-                }
-                // They hold our name from the invite; the picture is new to them.
-                if let Ok(conv) = Conversation::for_peer(&to) {
-                    crate::messaging::introduce_avatar(conv);
-                }
-            });
+            // the inviter so their contact flips PENDING → PAIRED. A request
+            // waits for the user to accept it.
+            if !crate::requests::is_request(&msg.from) {
+                crate::messaging::confirm_pair(*msg.from);
+            }
         },
         Ok(Some(crate::messaging::InboundDecoded::WelcomeDropped)) => {
             // Permanent gate rejection: dedup and ack so one poisoned Welcome

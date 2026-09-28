@@ -111,6 +111,8 @@ pub struct ConversationRecord {
     /// Newest message already alerted for, unix seconds.
     pub alerted_at: u64,
     pub created_at: u64,
+    /// A message request we have not accepted: its own list, and no composer.
+    pub request: bool,
 }
 
 /// One member's standing in a conversation.
@@ -491,6 +493,7 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
         others:         others.into_iter().map(|p| p.to_vec()).collect(),
         id:             c.id.to_vec(),
         kind:           c.kind,
+        request:        !is_group && crate::requests::is_request_chat(&c.id),
         title:          c.title,
         created_at:     c.created_at,
     }
@@ -727,11 +730,12 @@ fn with_media_kind(row: MessageRow) -> MessageRecord {
     rec
 }
 
-/// All contacts, newest first.
+/// All contacts, newest first. Unaccepted requests are not contacts.
 #[uniffi::export]
 pub fn get_contacts() -> Vec<ContactInfo> {
     Contact::list()
         .into_iter()
+        .filter(|c| c.status != crate::data::contact::PAIR_STATUS_REQUEST)
         .map(|c| ContactInfo {
             ipk: c.ipk.to_vec(),
             name: crate::data::peer_name::resolve(&c.ipk),

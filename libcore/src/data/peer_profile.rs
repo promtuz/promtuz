@@ -37,7 +37,7 @@ pub fn apply_tx(conn: &Connection, who: &[u8; 32], update: &ProfileUpdate) -> Re
         "invalid profile"
     );
     if !update.card.is_empty() {
-        let card = crate::contact_requests::verify_card(&update.card)?;
+        let card = crate::contact_card::verify_card(&update.card)?;
         anyhow::ensure!(card.ipk == *who && card.name == update.name, "profile card mismatch");
     }
     let revision = i64::try_from(update.revision)?;

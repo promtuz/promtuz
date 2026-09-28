@@ -20,8 +20,9 @@ pub struct ContactRow {
     /// `Contact::shared_key()` derivation.
     pub mls_group_id:  Option<[u8; 32]>,
     /// Pairing state: 0 = pending (welcome published, not yet confirmed),
-    /// 1 = paired (proven by an inbound MLS message), 2 = rejected. Legacy
-    /// rows default to paired — they already work.
+    /// 1 = paired (proven by an inbound MLS message), 2 = rejected, 3 = an
+    /// unaccepted message request. Legacy rows default to paired — they
+    /// already work.
     pub status:        u8,
     /// Why the pair was rejected (a `DECLINE_*` reason), when `status = 2`.
     pub reject_reason: Option<u8>,

@@ -216,10 +216,14 @@ object CoreBridge {
 
     suspend fun contactCard(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.contactCard(ipk) }
     suspend fun previewContactCard(bytes: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.previewContactCard(bytes) }
-    suspend fun requestContact(bytes: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.requestContact(bytes) }
-    suspend fun contactRequests() = withContext(Dispatchers.IO) { uniffi.core.contactRequests() }
-    suspend fun acceptContactRequest(ipk: ByteArray) = uniffi.core.acceptContactRequest(ipk)
-    suspend fun dismissContactRequest(ipk: ByteArray, outgoing: Boolean) = withContext(Dispatchers.IO) { uniffi.core.dismissContactRequest(ipk, outgoing) }
+    suspend fun chatFromCard(bytes: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.chatFromCard(bytes) }
+    suspend fun acceptMessageRequest(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.acceptMessageRequest(ipk) }
+    suspend fun deleteMessageRequest(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.deleteMessageRequest(ipk) }
+    suspend fun blockMessageRequest(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.blockMessageRequest(ipk) }
+    suspend fun unblock(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.unblock(ipk) }
+    suspend fun blockedPeople() = withContext(Dispatchers.IO) { uniffi.core.blockedPeople() }
+    suspend fun messageRequestsEnabled() = withContext(Dispatchers.IO) { uniffi.core.messageRequestsEnabled() }
+    suspend fun setMessageRequestsEnabled(enabled: Boolean) = withContext(Dispatchers.IO) { uniffi.core.setMessageRequestsEnabled(enabled) }
 
     suspend fun profileBio(): String = withContext(Dispatchers.IO) { uniffi.core.profileBio() }
     suspend fun setProfileDetails(name: String, bio: String) = withContext(Dispatchers.IO) { uniffi.core.setProfileDetails(name, bio) }

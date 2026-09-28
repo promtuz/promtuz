@@ -115,7 +115,8 @@ pub(crate) fn receive(conversation: [u8; 16], peer: [u8; 32], payload: AppPayloa
             if changed {
                 peer_avatar::notify_changed();
             }
-            if responses.is_empty() {
+            // A requester may tell us about themselves; we answer once accepted.
+            if responses.is_empty() || crate::requests::is_request_chat(&conversation) {
                 return;
             }
             crate::RUNTIME.spawn(async move {
@@ -161,7 +162,10 @@ async fn reconcile(all: bool) -> Result<()> {
     let current = identity.avatar_update().revision;
     let mut peers = HashMap::new();
     // One shared active chat per peer is enough, even if we share many groups.
-    for chat in Conversation::list().into_iter().filter(|c| c.mls_group_id.is_some()) {
+    for chat in Conversation::list()
+        .into_iter()
+        .filter(|c| c.mls_group_id.is_some() && !crate::requests::is_request_chat(&c.id))
+    {
         let members = Conversation::members(&chat.id);
         if !members.iter().any(|m| m.active && m.member_ipk == owner) {
             continue;

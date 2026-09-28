@@ -237,6 +237,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                     viewModel, hazeState, metrics, onJumpTo = ::jumpToQuoted,
                     onManageStickers = { appVM.navigator.push(Routes.Stickers) },
                     onCreateStickerPack = { appVM.navigator.push(Routes.NewStickerPack()) },
+                    onRequestGone = { appVM.navigator.back() },
                 )
             },
         ) { padding ->

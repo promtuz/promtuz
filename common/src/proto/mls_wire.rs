@@ -677,7 +677,8 @@ pub enum MlsEnvelopeP {
     /// the same dispatch/queue channel; the relay treats it as opaque payload.
     /// Appended last so postcard's ordinal tags for Application/Welcome hold.
     PairDecline(PairDeclineP),
-    /// HPKE-encrypted, independently signed request. Never creates a contact.
+    /// Retired contact request (HPKE-sealed card). Nothing sends it any more;
+    /// receivers still decode it so a queued one can be acknowledged and dropped.
     ContactRequest {
         sender: Bytes<32>, recipient: Bytes<32>, id: Bytes<16>, expires_ms: u64,
         encapsulated: ByteVec, ciphertext: ByteVec, signature: Bytes<64>,

@@ -61,6 +61,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::ensure;
 use common::PROTOCOL_VERSION;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::CRelayPacket;
@@ -359,6 +360,7 @@ pub async fn delete(conversation: [u8; 16], target: [u8; 16], for_everyone: bool
 pub async fn react(
     conversation: [u8; 16], target: [u8; 16], emoji: String, add: bool,
 ) -> Result<()> {
+    ensure!(!crate::requests::is_request_chat(&conversation), "Accept the request first");
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ts = crate::utils::systime().as_secs();
     if Reaction::apply(&conversation, &target, &our_ipk, &emoji, add, ts) {
@@ -413,6 +415,20 @@ pub(crate) async fn announce(conversation: [u8; 16], event: SystemEvent) {
 pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
     let conversation = Conversation::for_peer(&to)?;
     send_control(conversation, AppPayload::PairAck).await
+}
+
+/// Confirm a working pair with `to`, then show them who we are. They hold our
+/// name from an invite; a requester learns it here.
+pub(crate) fn confirm_pair(to: [u8; 32]) {
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = send_pair_ack(to).await {
+            warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
+            return;
+        }
+        if let Ok(conv) = Conversation::for_peer(&to) {
+            introduce_avatar(conv);
+        }
+    });
 }
 
 /// Send a control `AppPayload` (Edit/Delete/React/Receipt) into the existing 1:1 group as an
@@ -479,6 +495,7 @@ async fn send_control_inner(
     };
     let outbox = (ttl_ms == 0 && !matches!(payload, AppPayload::AvatarSync { .. } | AppPayload::ProfileDetailsSync { .. }))
         .then_some(OpType::Control);
+    ensure!(!crate::requests::is_request_chat(&conversation), "request not accepted");
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
 
@@ -632,6 +649,10 @@ pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
 /// (`0` = present-idle). Fire-and-forget over the relay, cleartext (not MLS);
 /// dropped if we're offline or the peer isn't online. The relay never queues it.
 pub async fn set_activity(conversation: [u8; 16], activity: u16) -> Result<()> {
+    // Even "present" would tell a requester we opened their chat.
+    if crate::requests::is_request_chat(&conversation) {
+        return Ok(());
+    }
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
     // Before pairing establishes a group there is no shared chat to address.
     let Some(group_id) = Conversation::group_of(&conversation) else { return Ok(()) };
@@ -1592,6 +1613,7 @@ fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
 async fn group_for_conversation<C: DhtClient>(
     ctx: &MlsContext<'_, C>, conversation: &[u8; 16], our_ipk: &[u8; 32], ipk_signer: &SigningKey,
 ) -> Result<MlsGroupHandle> {
+    ensure!(!crate::requests::is_request_chat(conversation), "Accept the request first");
     let lock = group_create_lock(conversation);
     let _guard = lock.lock().await;
 
@@ -1621,11 +1643,29 @@ async fn group_for_conversation<C: DhtClient>(
 
     let group = lazy_create_group(ctx, our_ipk, ipk_signer, &peer).await?;
     Conversation::bind_group(conversation, &group.group_id())?;
-    // Keep the address book's shortcut in step so pairing-era lookups agree.
-    if let Err(e) = Contact::set_mls_group_id(&peer, &group.group_id()) {
-        warn!("MESSAGE: persist mls_group_id failed: {e}");
+    if Contact::exists(&peer) {
+        // Keep the address book's shortcut in step so pairing-era lookups agree.
+        if let Err(e) = Contact::set_mls_group_id(&peer, &group.group_id()) {
+            warn!("MESSAGE: persist mls_group_id failed: {e}");
+        }
+        return Ok(group);
     }
-    Ok(group)
+    // Our first message to someone who never added us: it lands as a request,
+    // and they accept it by acknowledging the pair. Introduce ourselves before
+    // it, so the request never shows them only a key.
+    Contact::save_pending(peer, String::new())?;
+    Contact::set_mls_group_id(&peer, &group.group_id())?;
+    let gid = group.group_id();
+    drop(group);
+    for payload in own_introduction() {
+        if let Err(e) = send_control(*conversation, payload).await {
+            debug!("PROFILE: could not introduce ourselves to a new chat: {e}");
+        }
+    }
+    // The introduction advanced the group's state; the handle we built is stale.
+    MlsGroupHandle::load(ctx.provider, &gid)
+        .map_err(|e| anyhow!("load group: {e}"))?
+        .ok_or_else(|| anyhow!("no local group state for {}", hex::encode(&gid[..4])))
 }
 
 fn prepare_dispatch(
@@ -1938,9 +1978,7 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             }
         },
         MlsEnvelopeP::PairDecline(_) => {}, // fixed-size, no cap
-        MlsEnvelopeP::ContactRequest { ciphertext, encapsulated, .. } => {
-            anyhow::ensure!(ciphertext.0.len() <= 2048 && encapsulated.0.len() == 32, "request size");
-        },
+        MlsEnvelopeP::ContactRequest { .. } => {},
     }
 
     match envelope {
@@ -1958,10 +1996,9 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             }
             Ok(Some(decoded))
         },
-        request @ MlsEnvelopeP::ContactRequest { .. } => {
-            crate::contact_requests::receive(sender_ipk, request)?;
-            Ok(None)
-        },
+        // Retired with message requests. Dropped like a refused Welcome, which
+        // acknowledges it, so a queued one cannot hold up the drain.
+        MlsEnvelopeP::ContactRequest { .. } => Ok(Some(InboundDecoded::WelcomeDropped)),
         MlsEnvelopeP::PairDecline(d) => {
             process_pair_decline_inbound(sender_ipk, d)?;
             Ok(Some(InboundDecoded::PairDeclined))
@@ -2188,6 +2225,7 @@ pub(crate) fn broadcast_profile(payload: AppPayload) {
         .filter(|c| c.mls_group_id.is_some())
         .map(|c| c.id)
         .filter(|id| Conversation::members(id).iter().any(|m| m.active && m.member_ipk == me))
+        .filter(|id| !crate::requests::is_request_chat(id))
         .collect();
     crate::RUNTIME.spawn(async move {
         for id in chats {
@@ -2265,30 +2303,39 @@ fn process_welcome_inbound<C: DhtClient>(
         return Ok(WelcomeOutcome::Dropped);
     }
 
-    // Contact-or-invite gate: accept a Welcome from a stranger only if it
-    // carries a valid pairing invite we minted. Capture the name here but DON'T
-    // save yet — the save moves after a successful accept so a failed accept
-    // leaves no bricked contact (symmetric to the inviter's no-brick fix).
-    // Welcomes from existing contacts skip the invite check.
-    let _consent = crate::contact_requests::CONSENT.lock();
-    let (new_contact_name, redeemed_invite) = if Contact::exists(&sender_ipk) {
-        (None, None)
-    } else if let Some(name) = crate::contact_requests::outgoing_consent(&sender_ipk) {
-        (Some(name), None)
-    } else {
-        let Some(pairing) =
-            env.pairing.as_ref().filter(|p| Identity::verify_invite(&p.invite))
-        else {
+    // Contact-or-invite gate. A stranger's Welcome needs a pairing invite we
+    // minted, or it opens a message request when the user allows those. The
+    // name is captured here but saved only after a successful accept, so a
+    // failed accept leaves no bricked contact. Contacts skip the check; an
+    // unaccepted request is still a stranger for anything but a direct chat.
+    if crate::requests::is_blocked(&sender_ipk) {
+        return Ok(WelcomeOutcome::Dropped);
+    }
+    let status = Contact::status(&sender_ipk);
+    let invite = env.pairing.as_ref().filter(|p| Identity::verify_invite(&p.invite));
+    let (new_contact_name, redeemed_invite, request) =
+        if status.is_some_and(|s| s != crate::data::contact::PAIR_STATUS_REQUEST) {
+            (None, None, false)
+        } else if let Some(pairing) = invite {
+            (
+                Some(pairing.sender_name.chars().take(32).collect::<String>()),
+                Some(pairing.invite.clone()),
+                false,
+            )
+        } else if status.is_some() || crate::requests::admits_stranger() {
+            (None, None, true)
+        } else {
             warn!(
                 "MLS: dropped Welcome from unknown sender {} (no valid invite)",
                 hex::encode(&sender_ipk[..4])
             );
             return Ok(WelcomeOutcome::Dropped);
         };
-        (
-            Some(pairing.sender_name.chars().take(32).collect::<String>()),
-            Some(pairing.invite.clone()),
-        )
+    // A request is turned down silently, so its sender learns nothing.
+    let refuse = if request {
+        WelcomeOutcome::Dropped
+    } else {
+        WelcomeOutcome::Rejected(common::proto::mls_wire::DECLINE_GROUP_BUILD_FAILED)
     };
 
     // Post-gate accept failure = a decline, not a bail: we were invited, we
@@ -2297,19 +2344,19 @@ fn process_welcome_inbound<C: DhtClient>(
         Ok(g) => g,
         Err(e) => {
             warn!("MLS: welcome accept failed from {}: {e}", hex::encode(&sender_ipk[..4]));
-            return Ok(WelcomeOutcome::Rejected(
-                common::proto::mls_wire::DECLINE_GROUP_BUILD_FAILED,
-            ));
+            return Ok(refuse);
         },
     };
 
     // A stranger may only answer discovery/invite consent with a direct chat.
     // Otherwise a signed Welcome could grant a multi-person group access to a
     // conversation the user believed was private.
-    if new_contact_name.is_some() && !valid_initial_pair(&group.roster(), group.group_meta().is_some(), &our_ipk, &sender_ipk) {
+    if (new_contact_name.is_some() || request)
+        && !valid_initial_pair(&group.roster(), group.group_meta().is_some(), &our_ipk, &sender_ipk)
+    {
         let _ = group.delete(ctx.provider);
         warn!("MLS: initial pairing Welcome was not a two-person direct chat");
-        return Ok(WelcomeOutcome::Rejected(common::proto::mls_wire::DECLINE_GROUP_BUILD_FAILED));
+        return Ok(refuse);
     }
 
     // Success: now save the contact (defaults PAIRED) and bind the group.
@@ -2322,9 +2369,14 @@ fn process_welcome_inbound<C: DhtClient>(
             Identity::spend_invite(&invite);
         }
     }
-    if Contact::is_paired(&sender_ipk) {
-        let _ = crate::db::messages::MESSAGES_DB.lock().execute(
-            "UPDATE contact_requests SET status=2,wire=NULL WHERE peer=?1", [sender_ipk.as_slice()]);
+    // Without its row the chat would open as an ordinary one, ungated.
+    if request && status.is_none() {
+        if let Err(e) = Contact::save_request(sender_ipk) {
+            let _ = group.delete(ctx.provider);
+            warn!("REQUEST: could not record a request from {}: {e}", hex::encode(&sender_ipk[..4]));
+            return Ok(WelcomeOutcome::Dropped);
+        }
+        info!("REQUEST: message request from {}", hex::encode(&sender_ipk[..4]));
     }
     if let Err(e) = home_for_group(&group, &sender_ipk) {
         // The MLS state is sound; we just have nowhere to show it. Say so
@@ -2705,16 +2757,11 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
                 WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
                 // Prove the pair to the inviter. This drain path bypasses
                 // process_deliver, so the ack must fire here too — otherwise an
-                // offline-received pair never confirms.
-                crate::RUNTIME.spawn(async move {
-                    // They hold our name from the invite; the picture is new
-                    // to them, and only worth sending once the pair works.
-                    if send_pair_ack(sender_ipk).await.is_ok()
-                        && let Ok(conv) = Conversation::for_peer(&sender_ipk)
-                    {
-                        introduce_avatar(conv);
-                    }
-                });
+                // offline-received pair never confirms. A request waits for
+                // the user to accept it.
+                if !crate::requests::is_request(&sender_ipk) {
+                    confirm_pair(sender_ipk);
+                }
             },
             Ok(WelcomeOutcome::Rejected(reason)) => {
                 // Couldn't accept — tell the inviter and ack (re-fetch won't help).
@@ -3671,6 +3718,78 @@ mod tests {
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");
     }
+    /// A stranger's Welcome opens a request only while the user allows them,
+    /// never a group, and nothing of ours reaches the requester until it is
+    /// accepted. Blocking drops their next Welcome. Separate process: the gate
+    /// reads the real contacts, conversations and prefs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stranger_welcome_is_a_silent_request_until_accepted() {
+        const CHILD: &str = "PROMTUZ_MESSAGE_REQUEST_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("promtuz-message-request-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "messaging::tests::stranger_welcome_is_a_silent_request_until_accepted", "--nocapture"])
+                .env(CHILD, "1").env("PROMTUZ_DATA_DIR", &dir).output().unwrap();
+            assert!(result.status.success(), "{}\n{}\nprofile: {}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr), dir.display());
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        async fn welcome(
+            from: &Node, to: &[u8; 32], dht: &FakeDhtClient, gid: [u8; 32], meta: Option<&crate::mls::GroupMeta>,
+        ) -> WelcomeEnvelopeP {
+            let (kp, kp_ref) = fetch_verified_keypackage(&from.ctx(dht), to, false).await.unwrap();
+            let (leaf, credential) = build_self_credential(&from.ipk_signer).unwrap();
+            leaf.store(from.provider.storage()).unwrap();
+            let mut group = MlsGroupHandle::create(&from.provider, &leaf, credential, &gid, meta).unwrap();
+            let (_, w) = group.add_members(&from.provider, &leaf, &[kp]).unwrap();
+            group.merge_pending_commit(&from.provider).unwrap();
+            make_welcome_envelope(w, gid, from.ipk, *to, kp_ref, &from.ipk_signer).unwrap()
+        }
+        let bob = Node::new(0xB1);
+        let alice = Node::new(0xA1);
+        let mallory = Node::new(0xE1);
+        Identity::save(crate::db::identity::IdentityRow {
+            id: 0, ipk: bob.ipk, enc_isk: vec![], created_at: 0, name: "Bob".into(),
+            avatar: None, avatar_revision: 0, bio: String::new(), profile_revision: 0,
+        }).unwrap();
+        let dht = FakeDhtClient::new_arc();
+        let records = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
+        dht.publish_keypackages(&records[..4], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+        let ctx = bob.ctx(dht.as_ref());
+
+        crate::requests::set_message_requests_enabled(false).unwrap();
+        let first = welcome(&alice, &bob.ipk, dht.as_ref(), [0xA2; 32], None).await;
+        assert!(matches!(process_welcome_inbound(&ctx, alice.ipk, first.clone()).unwrap(), WelcomeOutcome::Dropped));
+        assert_eq!(Contact::status(&alice.ipk), None);
+
+        crate::requests::set_message_requests_enabled(true).unwrap();
+        assert!(matches!(process_welcome_inbound(&ctx, alice.ipk, first).unwrap(), WelcomeOutcome::Accepted));
+        let chat = Conversation::for_peer(&alice.ipk).unwrap();
+        assert!(crate::requests::is_request_chat(&chat));
+        assert!(crate::api::messaging::get_conversation(chat.to_vec()).unwrap().unwrap().request);
+        assert!(crate::api::messaging::get_contacts().iter().all(|c| c.ipk != alice.ipk));
+        let refused = |e: anyhow::Error| e.to_string().contains("request") || panic!("not the request gate: {e}");
+        assert!(refused(send_control(chat, AppPayload::PairAck).await.unwrap_err()));
+        assert!(refused(react(chat, [1; 16], "👍".into(), true).await.unwrap_err()));
+
+        let meta = crate::mls::GroupMeta { title: "Spam".into(), founder: alice.ipk };
+        let group = welcome(&alice, &bob.ipk, dht.as_ref(), [0xA3; 32], Some(&meta)).await;
+        assert!(matches!(process_welcome_inbound(&ctx, alice.ipk, group).unwrap(), WelcomeOutcome::Dropped));
+
+        crate::requests::accept_message_request(alice.ipk.to_vec()).unwrap();
+        assert!(Contact::is_paired(&alice.ipk));
+        assert!(!crate::requests::is_request_chat(&chat));
+
+        let spam = welcome(&mallory, &bob.ipk, dht.as_ref(), [0xE2; 32], None).await;
+        assert!(matches!(process_welcome_inbound(&ctx, mallory.ipk, spam).unwrap(), WelcomeOutcome::Accepted));
+        crate::requests::block_message_request(mallory.ipk.to_vec()).unwrap();
+        assert_eq!(Contact::status(&mallory.ipk), None);
+        let again = welcome(&mallory, &bob.ipk, dht.as_ref(), [0xE3; 32], None).await;
+        assert!(matches!(process_welcome_inbound(&ctx, mallory.ipk, again).unwrap(), WelcomeOutcome::Dropped));
+    }
+
     /// Separate process for the real recipient identity and messages DB; MLS
     /// participants also have independent stores. Exercise control/post order
     /// and author binding through encrypted epoch catch-up, not seeded grants.

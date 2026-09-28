@@ -57,6 +57,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
+import uniffi.core.ConversationRecord
 
 /** Reconciles the notification shade with unread messages and persisted alert state. */
 object PushNotifier {
@@ -143,7 +144,7 @@ object PushNotifier {
         // Subscribe before core starts. Alerts come from durable message state,
         // so a cold start or a dropped transient event cannot lose an arrival.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it || "contact_requests" in it }
+            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it }
                 .debounce(150L).collect { reconcileSafely() }
         }
         scope.launch { reconcileSafely() }
@@ -172,7 +173,6 @@ object PushNotifier {
         // Master off: nuke our whole group (children + summary) and post nothing — flipping the switch
         // off should silence AND clear the shade, not just stop future buzzes.
         val enabled = ChatPrefs.notifEnabled
-        reconcileRequests(enabled)
         if (!enabled) {
             nm.activeNotifications
                 .filter { it.notification.group == Notifications.GROUP_KEY }
@@ -200,12 +200,15 @@ object PushNotifier {
                 }
             }
         }
+        val requests = convs.filter { it.request && (counts[it.id.toHex()] ?: 0) > 0 }
+        reconcileRequests(enabled, requests)
 
         if (!enabled) return
 
         // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
-        // clears any notif it already had.
-        val visible = counts.filterKeys { it !in mutedConvs && !viewing(it) }
+        // clears any notif it already had. Requests share one notification of their own.
+        val requestConvs = requests.map { it.id.toHex() }.toSet()
+        val visible = counts.filterKeys { it !in mutedConvs && !viewing(it) && it !in requestConvs }
 
         // Dismiss per-chat notifs whose chat is no longer unread (read from any surface) or now muted.
         // Unconditional (runs foregrounded too), so an in-app read or a mute clears the shade. GROUP_KEY
@@ -225,25 +228,32 @@ object PushNotifier {
         for ((convHex, n) in visible) postChat(convHex, n)
     }
 
-    private suspend fun reconcileRequests(enabled: Boolean) {
-        val requests = CoreBridge.contactRequests().filterNot { it.outgoing }
+    /**
+     * One quiet notification for every unread message request, on its own channel so it
+     * can be silenced apart from chats. No per-chat reply action: replying is accepting.
+     */
+    private suspend fun reconcileRequests(enabled: Boolean, requests: List<ConversationRecord>) {
+        val fresh = requests.flatMap { CoreBridge.pendingNotificationIds(it.id) }
         if (!enabled || requests.isEmpty() || requestsVisible) {
             nm().cancel(REQUESTS_ID)
-            if (requestsVisible) requests.forEach { CoreBridge.setPref("request_alert:${it.ipk.toHex()}", it.expiresMs.toString()) }
+            if (fresh.isNotEmpty()) CoreBridge.markNotified(fresh)
             return
         }
-        val pending = requests.filter { CoreBridge.pref("request_alert:${it.ipk.toHex()}") != it.expiresMs.toString() }
-        if (pending.isEmpty() && nm().activeNotifications.none { it.id == REQUESTS_ID }) return
+        if (fresh.isEmpty() && nm().activeNotifications.none { it.id == REQUESTS_ID }) return
         val intent = Intent(app, LauncherActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra("open_contact_requests", true)
+            .putExtra("open_message_requests", true)
         val open = PendingIntent.getActivity(app, REQUESTS_ID, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val notification = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
-            .setSmallIcon(R.drawable.i_logo_mono).setContentTitle("Contact request")
-            .setContentText(if (ChatPrefs.notifPreview) if (requests.size == 1) "${requests.first().name} wants to connect" else "${requests.size} people want to connect" else "You have a new contact request")
-            .setContentIntent(open).setAutoCancel(true).setSilent(pending.isEmpty()).build()
-        if (requestsVisible || !ChatPrefs.notifEnabled) return
+        val text = when {
+            !ChatPrefs.notifPreview -> "You have a new message request"
+            requests.size == 1 -> "${requests.first().displayName} sent you a message"
+            else -> "${requests.size} people sent you messages"
+        }
+        val notification = NotificationCompat.Builder(app, Notifications.REQUESTS_CHANNEL)
+            .setSmallIcon(R.drawable.i_logo_mono).setContentTitle("Message request")
+            .setContentText(text).setContentIntent(open).setAutoCancel(true)
+            .setSilent(fresh.isEmpty()).build()
         nm().notify(REQUESTS_ID, notification)
-        pending.forEach { CoreBridge.setPref("request_alert:${it.ipk.toHex()}", it.expiresMs.toString()) }
+        if (fresh.isNotEmpty()) CoreBridge.markNotified(fresh)
     }
 
     private suspend fun postChat(convHex: String, n: Int) {

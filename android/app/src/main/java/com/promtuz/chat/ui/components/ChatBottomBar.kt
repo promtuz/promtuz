@@ -6,6 +6,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -36,9 +38,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.promtuz.chat.ui.text.EmojiTextField
 import com.promtuz.chat.ui.text.EmojiFieldController
 import com.promtuz.chat.ui.text.EmojiText
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
@@ -108,6 +112,7 @@ fun ChatBottomBar(
     onJumpTo: (String) -> Unit = {},
     onManageStickers: () -> Unit = {},
     onCreateStickerPack: () -> Unit = {},
+    onRequestGone: () -> Unit = {},
 ) {
     val input by viewModel.input.collectAsState()
     val action by viewModel.composerAction.collectAsState()
@@ -224,47 +229,61 @@ fun ChatBottomBar(
                 .hazeEffect(haze, chatBarHaze())
                 .padding(BarPad),
         ) {
-            ComposerSlots(metrics) {
-                Reveal(actionProgress) {
-                    lastAction?.let {
-                        ComposerActionBlock(
-                            it,
-                            onCancel = { if (!busy && action != null) viewModel.cancelComposerAction() },
-                            // Editing can't reach the body's media from the field, so
-                            // the block's line opens the picker, narrowed to whatever
-                            // the target may legally become.
-                            onAddMedia = { if (!busy && action != null) open(ComposerPanelKind.Attach) },
-                            onJumpTo = { if (action != null) onJumpTo(it) },
+            // A request has nothing to reply with until it is accepted.
+            val request by viewModel.request.collectAsState()
+            // Bottom-aligned, so the composer appears where it settles while the pill's top
+            // edge glides down; the request fades out before it fades in, never across it.
+            AnimatedContent(
+                targetState = request,
+                transitionSpec = {
+                    (fadeIn(tween(150, delayMillis = 70, easing = ChatMotion.Easing)) togetherWith fadeOut(tween(70)))
+                        .using(SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> ChatMotion.spec() }))
+                },
+                contentAlignment = Alignment.BottomStart,
+                label = "requestOrComposer",
+            ) { isRequest ->
+                if (isRequest) RequestRow(viewModel, onRequestGone) else ComposerSlots(metrics) {
+                    Reveal(actionProgress) {
+                        lastAction?.let {
+                            ComposerActionBlock(
+                                it,
+                                onCancel = { if (!busy && action != null) viewModel.cancelComposerAction() },
+                                // Editing can't reach the body's media from the field, so
+                                // the block's line opens the picker, narrowed to whatever
+                                // the target may legally become.
+                                onAddMedia = { if (!busy && action != null) open(ComposerPanelKind.Attach) },
+                                onJumpTo = { if (action != null) onJumpTo(it) },
+                            )
+                        }
+                    }
+                    Reveal(stripProgress) {
+                        StagedStrip(lastStaged, viewModel::unstage)
+                    }
+                    // The recorder takes the input row's place, not a row of its own:
+                    // the pill keeps one height and the stage under it never moves.
+                    AnimatedContent(
+                        targetState = recording != null,
+                        transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
+                        label = "composerOrRecorder",
+                    ) { isRecording ->
+                        if (isRecording) RecordingRow(
+                            viewModel,
+                            onCancel = viewModel::cancelRecording,
+                            onSend = viewModel::finishRecording,
+                        ) else ComposerRow(
+                            viewModel, input, action,
+                            attachOpen = attachOpen,
+                            stickersOpen = stickersOpen,
+                            metrics = metrics,
+                            field = field,
+                            onToggleAttach = { toggle(ComposerPanelKind.Attach) },
+                            onToggleStickers = { toggle(ComposerPanelKind.Stickers) },
+                            onFieldFocused = {
+                                if (openPanel != null) { closingToKeyboard = true; openPanel = null } // keyboard taking over
+                            },
+                            onMic = onMic,
                         )
                     }
-                }
-                Reveal(stripProgress) {
-                    StagedStrip(lastStaged, viewModel::unstage)
-                }
-                // The recorder takes the input row's place, not a row of its own:
-                // the pill keeps one height and the stage under it never moves.
-                AnimatedContent(
-                    targetState = recording != null,
-                    transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
-                    label = "composerOrRecorder",
-                ) { isRecording ->
-                    if (isRecording) RecordingRow(
-                        viewModel,
-                        onCancel = viewModel::cancelRecording,
-                        onSend = viewModel::finishRecording,
-                    ) else ComposerRow(
-                        viewModel, input, action,
-                        attachOpen = attachOpen,
-                        stickersOpen = stickersOpen,
-                        metrics = metrics,
-                        field = field,
-                        onToggleAttach = { toggle(ComposerPanelKind.Attach) },
-                        onToggleStickers = { toggle(ComposerPanelKind.Stickers) },
-                        onFieldFocused = {
-                            if (openPanel != null) { closingToKeyboard = true; openPanel = null } // keyboard taking over
-                        },
-                        onMic = onMic,
-                    )
                 }
             }
         }
@@ -323,6 +342,29 @@ fun ChatBottomBar(
             pill.placeRelative(0, 0)
             region.placeRelative(0, pill.height)
         }
+    }
+}
+
+/** Stands in for the composer while a message request waits for a decision. */
+@Composable
+private fun RequestRow(viewModel: ChatVM, onGone: () -> Unit) {
+    val name by viewModel.title.collectAsState()
+    var confirming by remember { mutableStateOf<RequestDecision?>(null) }
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 6.dp)) {
+        Text("They won’t know you’ve read this until you accept.",
+            style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { confirming = RequestDecision.Block }) { Text("Block", color = colors.error) }
+            TextButton(onClick = { confirming = RequestDecision.Delete }) { Text("Delete") }
+            Spacer(Modifier.weight(1f))
+            Button(onClick = { viewModel.acceptRequest() }) { Text("Accept") }
+        }
+    }
+    confirming?.let { decision ->
+        RequestConfirmDialog(decision, name,
+            onConfirm = { confirming = null; viewModel.dismissRequest(decision == RequestDecision.Block, onGone) },
+            onDismiss = { confirming = null })
     }
 }
 

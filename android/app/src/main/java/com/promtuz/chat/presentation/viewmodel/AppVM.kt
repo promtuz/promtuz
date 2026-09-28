@@ -50,9 +50,10 @@ class AppVM(
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
 
     /**
-     * Home chat list — reactive. Core orders it (pinned first, then most recent
-     * activity), so a pin toggle arrives as a row change like anything else and
-     * the list has no ordering rule of its own to keep in sync.
+     * Every chat, message requests included, kept live. Core orders it (pinned
+     * first, then most recent activity), so a pin toggle arrives as a row change
+     * like anything else and the list has no ordering rule of its own to keep in
+     * sync. Home shows the rest; requests have their own screen.
      */
     val chats: StateFlow<List<ChatSummary>> =
         observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
@@ -293,15 +294,17 @@ class AppVM(
         val lastByConv = bridge.conversations().associateBy { it.conversationId.toList() }
         val unread = bridge.unreadCounts().associate { it.conversationId.toList() to it.count.toInt() }
 
-        bridge.listConversations().map { c ->
+        bridge.listConversations().mapNotNull { c ->
             val key = c.id.toList()
             val last = lastByConv[key]
             // A direct chat titles itself from the address book. Core resolves
             // which member is the peer, so the app never needs its own IPK.
             val contact = c.peer?.let { contactByIpk[it.toList()] }
+            // Opened to message someone, then left without writing anything.
+            if (c.kind.toInt() == 0 && contact == null && !c.request && last == null) return@mapNotNull null
             ChatSummary(
                 conversationHex = c.id.toHex(),
-                name = if (c.kind.toInt() == 1) c.displayName
+                name = if (c.kind.toInt() == 1 || c.request) c.displayName
                        else contact?.name.orEmpty(),
                 kind = c.kind.toInt(),
                 peerHex = c.peer?.toHex(),
@@ -324,6 +327,7 @@ class AppVM(
                 canLeave = c.canLeave,
                 ownerIsStuck = c.ownerIsStuck,
                 rawTitle = c.title,
+                request = c.request,
             )
         }.sortedByDescending { it.timestampMs }
     } catch (e: Exception) {

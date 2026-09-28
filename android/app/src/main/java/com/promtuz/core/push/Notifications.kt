@@ -7,6 +7,7 @@ import android.content.Context
 /** Notification channels + the message group key, created once. minSdk 26, so channels always exist. */
 object Notifications {
     const val MESSAGES_CHANNEL = "messages"
+    const val REQUESTS_CHANNEL = "message_requests"
     const val SYNC_CHANNEL = "sync"
     const val UPDATES_CHANNEL = "app_updates"
     const val GROUP_KEY = "com.promtuz.chat.MESSAGES"
@@ -15,6 +16,10 @@ object Notifications {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(MESSAGES_CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH)
+        )
+        // Strangers don't get to buzz by default; the user can raise it in Android's settings.
+        nm.createNotificationChannel(
+            NotificationChannel(REQUESTS_CHANNEL, "Message requests", NotificationManager.IMPORTANCE_DEFAULT)
         )
         // Low-key channel for the brief foreground notice the drain worker shows on API < 31,
         // where expedited work runs as a foreground service.

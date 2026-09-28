@@ -10,6 +10,8 @@ use crate::db::peers::ContactRow;
 pub const PAIR_STATUS_PENDING: u8 = 0;
 pub const PAIR_STATUS_PAIRED: u8 = 1;
 pub const PAIR_STATUS_REJECTED: u8 = 2;
+/// Someone we never added messaged us and we have not accepted. See `requests`.
+pub const PAIR_STATUS_REQUEST: u8 = 3;
 
 /// Promtuz "address book" entry — the long-term identity (`ipk`) plus the
 /// nullable handle of the implicit 1:1 MLS group with this contact.
@@ -67,8 +69,9 @@ impl Contact {
         conn.execute(
             "INSERT INTO contacts (ipk, name, added_at, mls_group_id) \
              VALUES (?1, ?2, ?3, NULL) \
-             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name",
-            params![ipk, name, added_at],
+             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name, \
+             status = CASE WHEN status = ?4 THEN ?5 ELSE status END",
+            params![ipk, name, added_at, PAIR_STATUS_REQUEST, PAIR_STATUS_PAIRED],
         )?;
 
         // Give every contact its direct conversation up front. The home list
@@ -177,14 +180,45 @@ impl Contact {
         conn.execute(
             "INSERT INTO contacts (ipk, name, added_at, mls_group_id, status) \
              VALUES (?1, ?2, ?3, NULL, ?4) \
-             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name",
-            params![ipk, name, added_at, PAIR_STATUS_PENDING],
+             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name, \
+             status = CASE WHEN status = ?5 THEN ?4 ELSE status END",
+            params![ipk, name, added_at, PAIR_STATUS_PENDING, PAIR_STATUS_REQUEST],
         )?;
         drop(conn);
         if let Err(e) = crate::data::conversation::Conversation::for_peer(&ipk) {
             log::warn!("CONTACT: could not open a conversation for a pending contact: {e}");
         }
         Ok(())
+    }
+
+    /// Record an unaccepted request from `ipk`. The row gives their messages
+    /// standing and their chat a home; nothing we send reaches them until
+    /// [`Self::accept_request`].
+    pub fn save_request(ipk: [u8; 32]) -> Result<()> {
+        let conn = CONTACTS_DB.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO contacts (ipk, name, added_at, mls_group_id, status) \
+             VALUES (?1, '', ?2, NULL, ?3)",
+            params![ipk, crate::utils::systime().as_secs(), PAIR_STATUS_REQUEST],
+        )?;
+        drop(conn);
+        crate::data::conversation::Conversation::for_peer(&ipk)?;
+        Ok(())
+    }
+
+    /// REQUEST → PAIRED. False when there was no request to accept.
+    pub fn accept_request(ipk: &[u8; 32]) -> Result<bool> {
+        let conn = CONTACTS_DB.lock();
+        Ok(conn.execute(
+            "UPDATE contacts SET status = ?1 WHERE ipk = ?2 AND status = ?3",
+            params![PAIR_STATUS_PAIRED, ipk, PAIR_STATUS_REQUEST],
+        )? == 1)
+    }
+
+    pub fn count_requests() -> u32 {
+        let conn = CONTACTS_DB.lock();
+        conn.query_row("SELECT COUNT(*) FROM contacts WHERE status = ?1", [PAIR_STATUS_REQUEST], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     /// Flip PENDING → PAIRED (proof arrived). Idempotent; a no-op unless the

@@ -119,6 +119,26 @@ class ChatVM(
     private val _muted = MutableStateFlow(initialSummary?.muted == true)
     val muted: StateFlow<Boolean> = _muted.asStateFlow()
 
+    /** An unaccepted message request: the composer gives way to accept, delete and block. */
+    private val _request = MutableStateFlow(initialSummary?.request == true)
+    val request: StateFlow<Boolean> = _request.asStateFlow()
+    private var peer: ByteArray? = null
+
+    fun acceptRequest() = viewModelScope.launch {
+        val who = peer ?: return@launch
+        runCatching { CoreBridge.acceptMessageRequest(who) }
+            .onSuccess { _request.value = false }
+            .onFailure { composerError.value = "Couldn't accept the request" }
+    }
+
+    /** Delete or block the request; [onGone] runs once its chat no longer exists. */
+    fun dismissRequest(block: Boolean, onGone: () -> Unit) = viewModelScope.launch {
+        val who = peer ?: return@launch
+        runCatching { if (block) CoreBridge.blockMessageRequest(who) else CoreBridge.deleteMessageRequest(who) }
+            .onSuccess { onGone() }
+            .onFailure { composerError.value = if (block) "Couldn't block" else "Couldn't delete the request" }
+    }
+
     /**
      * Member IPK hex → display name, for attributing bubbles in a group.
      * Departed members stay in here — their old messages still need a name.
@@ -405,6 +425,8 @@ class ChatVM(
             _title.value = record.displayName
             _rawTitle.value = record.title
             _muted.value = record.muted
+            _request.value = record.request
+            peer = record.peer
             others = record.others
             _memberNames.value = names
             _memberCount.value = roster.count { it.active }
@@ -579,6 +601,7 @@ class ChatVM(
 
     /** Tap on a quick-reaction or an existing chip: mine → remove, else add. */
     fun toggleReaction(msg: UiMessage, emoji: String) {
+        if (_request.value) { composerError.value = "Accept the request to react"; return }
         val id = msg.dispatchIdHex ?: return
         val mine = msg.reactions.any { it.emoji == emoji && it.mine }
         react(id, emoji, add = !mine)

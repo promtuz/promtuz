@@ -196,7 +196,8 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         navigationIcon = navigationIcon,
         actions = {
             if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else {
-            if (!isGroup) summary?.peerHex?.let {
+            // Calls need a working pair, which a request doesn't have yet on either side.
+            if (!isGroup && summary?.status == 1 && summary?.request != true) summary?.peerHex?.let {
                 CallButton(it, video = true)
                 CallButton(it, video = false)
             }

@@ -35,10 +35,12 @@ object Routes : NavKey {
 
     @Serializable
     data class ContactCard(val peer: String = "", val name: String = "", val sharing: Boolean = false, val encoded: String? = null) : NavKey
+    /** Chats from people who aren't contacts, waiting to be accepted. */
     @Serializable
-    data object ContactRequests : NavKey
+    data object MessageRequests : NavKey
+
     @Serializable
-    data class ContactRequest(val peer: String, val outgoing: Boolean) : NavKey
+    data object PrivacySettings : NavKey
 
     @Serializable
     data class ContactInfo(val conversation: String, val peer: String) : NavKey

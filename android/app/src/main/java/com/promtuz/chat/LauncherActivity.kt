@@ -67,9 +67,9 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun consumeContactCard(intent: Intent) {
-        if (intent.getBooleanExtra("open_contact_requests", false)) {
-            intent.removeExtra("open_contact_requests")
-            if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.ContactRequests)
+        if (intent.getBooleanExtra("open_message_requests", false)) {
+            intent.removeExtra("open_message_requests")
+            if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.MessageRequests)
         }
         val uri = intent.data ?: return
         if (!((uri.scheme == "https" && uri.host == "promtuz.dev" && uri.path == "/contact") ||

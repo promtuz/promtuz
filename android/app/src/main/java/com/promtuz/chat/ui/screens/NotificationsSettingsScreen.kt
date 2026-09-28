@@ -87,7 +87,7 @@ fun NotificationsSettingsScreen() {
                 ),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            NotificationSettingRow(
+            SettingsRow(
                 title = "Message notifications",
                 detail = if (enabled) "Notify me about new messages" else "Off for all chats. Calls are unaffected.",
                 checked = enabled,
@@ -99,13 +99,13 @@ fun NotificationsSettingsScreen() {
 
             AnimatedVisibility(visible = enabled) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    NotificationSection("Alert frequency")
+                    SettingsSection("Alert frequency")
                     Column(
                         Modifier.selectableGroup(),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         NotifBuzz.entries.forEachIndexed { index, mode ->
-                            NotificationSettingRow(
+                            SettingsRow(
                                 title = when (mode) {
                                     NotifBuzz.EveryMessage -> "Every message"
                                     NotifBuzz.Throttled -> "Fewer alerts"
@@ -126,8 +126,8 @@ fun NotificationsSettingsScreen() {
                             ) { RadioButton(selected = mode == buzz, onClick = null) }
                         }
                     }
-                    NotificationSection("Privacy")
-                    NotificationSettingRow(
+                    SettingsSection("Privacy")
+                    SettingsRow(
                         title = "Message previews",
                         detail = if (preview) "Show sender names and message text" else "Show only “New message”, without names or text",
                         checked = preview,
@@ -139,8 +139,8 @@ fun NotificationsSettingsScreen() {
                 }
             }
 
-            NotificationSection("Android settings")
-            NotificationSettingRow(
+            SettingsSection("Android settings")
+            SettingsRow(
                 title = "Message sound & vibration",
                 detail = when {
                     !systemEnabled -> "Blocked by Android. Allow notifications below."
@@ -154,8 +154,8 @@ fun NotificationsSettingsScreen() {
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                         .putExtra(Settings.EXTRA_CHANNEL_ID, Notifications.MESSAGES_CHANNEL))
                 },
-            ) { NotificationSettingsChevron() }
-            NotificationSettingRow(
+            ) { SettingsChevron() }
+            SettingsRow(
                 title = "All notification settings",
                 detail = if (systemEnabled) "Messages, calls and app updates" else "Notifications are blocked for Promtuz. Tap to enable.",
                 index = 1,
@@ -164,13 +164,13 @@ fun NotificationsSettingsScreen() {
                     context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
                 },
-            ) { NotificationSettingsChevron() }
+            ) { SettingsChevron() }
         }
     }
 }
 
 @Composable
-private fun NotificationSection(title: String) {
+internal fun SettingsSection(title: String) {
     Text(
         title.uppercase(),
         Modifier.padding(top = 20.dp, bottom = 3.dp, start = 2.dp).semantics { heading() },
@@ -181,9 +181,9 @@ private fun NotificationSection(title: String) {
 
 /** One semantic control per row, with the same press feedback on the label and trailing control. */
 @Composable
-private fun NotificationSettingRow(
+internal fun SettingsRow(
     title: String,
-    detail: String,
+    detail: String?,
     index: Int = 0,
     count: Int = 1,
     checked: Boolean? = null,
@@ -223,13 +223,13 @@ private fun NotificationSettingRow(
             Text(title,
                 style = avgSizeInStyle(typography.labelLargeEmphasized, typography.bodyLargeEmphasized, 0.75f),
                 color = colors.onBackground)
-            Text(detail, style = typography.bodyMedium, color = colors.onSurfaceVariant)
+            if (detail != null) Text(detail, style = typography.bodyMedium, color = colors.onSurfaceVariant)
         }
         control()
     }
 }
 
 @Composable
-private fun NotificationSettingsChevron() {
+internal fun SettingsChevron() {
     MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
 }

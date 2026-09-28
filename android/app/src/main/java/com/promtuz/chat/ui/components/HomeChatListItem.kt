@@ -72,6 +72,7 @@ fun HomeChatListItem(
     onDelete: () -> Unit,
     onLeaveAndDelete: () -> Unit,
     modifier: Modifier = Modifier,
+    onRequestDecision: (RequestDecision) -> Unit = {},
 ) {
     val type = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
@@ -80,10 +81,14 @@ fun HomeChatListItem(
 
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    var confirmRequest by remember { mutableStateOf<RequestDecision?>(null) }
     val interaction = remember { MutableInteractionSource() }
     val rowCoord = remember { object { var c: LayoutCoordinates? = null } }
 
-    val groups = listOf(
+    val groups = if (chat.request) listOf(listOf(
+        MenuAction("Block", iconPlaceholder = "block", destructive = true) { confirmRequest = RequestDecision.Block },
+        MenuAction("Delete", R.drawable.oi_trash, destructive = true) { confirmRequest = RequestDecision.Delete },
+    )) else listOf(
         buildList {
             add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
             add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
@@ -239,6 +244,11 @@ fun HomeChatListItem(
             onLeaveAndDelete = { confirmDelete = false; onLeaveAndDelete() },
             onDismiss = { confirmDelete = false },
         )
+        confirmRequest?.let { decision ->
+            RequestConfirmDialog(decision, chat.name,
+                onConfirm = { confirmRequest = null; onRequestDecision(decision) },
+                onDismiss = { confirmRequest = null })
+        }
         if (confirmClear) ClearHistoryDialog(
             name = chat.name,
             onConfirm = { confirmClear = false; onClearHistory() },
@@ -250,7 +260,7 @@ fun HomeChatListItem(
 /** The preview/status line: live typing beats pairing state beats last message. */
 private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme): Pair<String, Color> = when {
     typing -> "typing…" to colors.primary
-    chat.status == 0 -> "Waiting to connect…" to colors.primary.copy(0.8f)
+    chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to colors.primary.copy(0.8f)
     chat.status == 2 -> declineText(chat.rejectReason) to colors.error.copy(0.85f)
     chat.lastDeleted -> "deleted message" to colors.onSurfaceVariant.copy(0.6f)
     chat.lastPreview.isNullOrEmpty() && chat.lastMediaKind == 0 ->
@@ -301,6 +311,28 @@ private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
  * you and nobody there learns you have gone — so offering only that would be a
  * trapdoor for someone who meant to say goodbye.
  */
+enum class RequestDecision { Delete, Block }
+
+/** Deleting or blocking a request removes its chat. Neither tells the requester. */
+@Composable
+fun RequestConfirmDialog(decision: RequestDecision, name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val block = decision == RequestDecision.Block
+    AppAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (block) "Block $name?" else "Delete request?") },
+        text = {
+            Text(
+                if (block) "They can’t send you another request, and they won’t be told. Groups you share aren’t affected."
+                else "The chat with $name is deleted. They won’t be told.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(if (block) "Block" else "Delete", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 fun DeleteChatDialog(
     chat: ChatSummary,

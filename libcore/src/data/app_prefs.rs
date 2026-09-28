@@ -26,6 +26,19 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn remove(key: &str) -> Result<()> {
+    MESSAGES_DB.lock().execute("DELETE FROM app_prefs WHERE key = ?1", [key])?;
+    Ok(())
+}
+
+/// `(key, value)` for every key starting with `prefix`.
+pub fn with_prefix(prefix: &str) -> Vec<(String, String)> {
+    let conn = MESSAGES_DB.lock();
+    conn.prepare("SELECT key, value FROM app_prefs WHERE substr(key, 1, length(?1)) = ?1")
+        .and_then(|mut s| s.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?))).map(|r| r.flatten().collect()))
+        .unwrap_or_default()
+}
+
 /// Every setting, for the backup snapshot.
 pub fn dump_all() -> Vec<(String, String)> {
     let conn = MESSAGES_DB.lock();

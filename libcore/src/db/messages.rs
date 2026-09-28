@@ -546,6 +546,7 @@ const MIGRATION_ARRAY: &[M] = &[
         SELECT m.id, CASE WHEN r.upto_dispatch_id IS NOT NULL AND m.dispatch_id<=r.upto_dispatch_id THEN 1 ELSE 0 END
         FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
         WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;"),
+    M::up("DROP TABLE contact_requests;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -568,7 +569,7 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
         "peer_names",
         "peer_avatars",
         "peer_profiles",
-        "contact_requests",
+        "prefs",
         "group_pictures",
         "sticker_packs",
         "stickers",

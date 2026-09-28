@@ -40,11 +40,10 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
             }.collect { appViewModel.sawHomeRows(it) }
         }
     }
-    val requests by androidx.compose.runtime.remember {
-        com.promtuz.core.observeQuery(setOf("contact_requests", "contacts")) { com.promtuz.core.CoreBridge.contactRequests() }
-    }.collectAsState(emptyList())
     val direction = LocalLayoutDirection.current
-    val chats by appViewModel.chats.collectAsState()
+    val all by appViewModel.chats.collectAsState()
+    val chats = androidx.compose.runtime.remember(all) { all.filterNot { it.request } }
+    val requests = androidx.compose.runtime.remember(all) { all.filter { it.request } }
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByChat.collectAsState()
 
@@ -65,11 +64,11 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         ),
     ) {
 
-        if (requests.isNotEmpty()) item(key = "contact-requests") {
+        if (requests.isNotEmpty()) item(key = "message-requests") {
             androidx.compose.material3.ListItem(
-                modifier = Modifier.clickable { appViewModel.navigator.push(com.promtuz.chat.navigation.Routes.ContactRequests) },
-                headlineContent = { Text("Contact requests") },
-                supportingContent = { Text("${requests.count { !it.outgoing }} incoming · ${requests.count { it.outgoing }} sent") },
+                modifier = Modifier.clickable { appViewModel.navigator.push(com.promtuz.chat.navigation.Routes.MessageRequests) },
+                headlineContent = { Text("Message requests") },
+                supportingContent = { Text(requesters(requests), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
                 leadingContent = { DrawableIcon(com.promtuz.chat.R.drawable.i_user_add, size = 28.dp) },
             )
         }
@@ -95,6 +94,15 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
             )
         }
 
+    }
+}
+
+private fun requesters(requests: List<com.promtuz.chat.domain.model.ChatSummary>): String {
+    val first = requests.first().name
+    return when (requests.size) {
+        1 -> first
+        2 -> "$first and ${requests[1].name}"
+        else -> "$first and ${requests.size - 1} others"
     }
 }
 

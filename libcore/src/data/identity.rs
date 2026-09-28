@@ -149,7 +149,7 @@ impl Identity {
     pub fn details(&self) -> crate::data::peer_profile::ProfileUpdate {
         crate::data::peer_profile::ProfileUpdate {
             revision: self.inner.profile_revision, name: self.name(), bio: self.inner.bio.clone(),
-            card: secret_key_signing(&self.ipk()).and_then(|key| crate::contact_requests::make_card(&key, self.name())).unwrap_or_default(),
+            card: secret_key_signing(&self.ipk()).and_then(|key| crate::contact_card::make_card(&key, self.name())).unwrap_or_default(),
         }
     }
 

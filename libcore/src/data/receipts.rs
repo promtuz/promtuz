@@ -326,13 +326,16 @@ struct Pending {
 }
 fn pending(skip: &std::collections::HashSet<([u8; 16], [u8; 32])>) -> Result<Vec<Pending>> {
     let conn = MESSAGES_DB.lock();
-    let groups=conn.prepare("SELECT m.conversation_id,m.sender_ipk FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
+    let groups: Vec<([u8; 16], [u8; 32])> = conn.prepare("SELECT m.conversation_id,m.sender_ipk FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
         JOIN conversations c ON c.id=m.conversation_id WHERE r.pending=1 AND m.deleted=0 AND c.mls_group_id IS NOT NULL
         AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.member_ipk=m.sender_ipk AND cm.active=1)
         GROUP BY m.conversation_id,m.sender_ipk ORDER BY MIN(m.id)")?
         .query_map([],|r|Ok((r.get::<_,[u8;16]>(0)?,r.get::<_,[u8;32]>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let first = groups.into_iter().find(|group| !skip.contains(group));
+    drop(conn);
+    // A request's receipts wait until it is accepted.
+    let first = groups.into_iter().find(|group| !skip.contains(group) && !crate::requests::is_request_chat(&group.0));
     let Some((conv, author)) = first else { return Ok(Vec::new()) };
+    let conn = MESSAGES_DB.lock();
     Ok(conn.prepare("SELECT m.id,m.dispatch_id,r.delivered_at,r.read_at FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
         WHERE r.pending=1 AND m.deleted=0 AND m.conversation_id=?1 AND m.sender_ipk=?2 ORDER BY m.id LIMIT 128")?
         .query_map((conv.as_slice(),author.as_slice()),|r|Ok(Pending {id:r.get(0)?,conv,author,
