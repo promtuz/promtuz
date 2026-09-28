@@ -190,7 +190,7 @@ fun HomeChatListItem(
                     )
                     if (muted) DrawableIcon(
                         R.drawable.i_volume_off, size = 14.dp, desc = "Muted",
-                        tint = colors.onSurfaceVariant,
+                        tint = colors.onSurfaceVariant.copy(0.7f),
                     )
                     if (chat.timestampMs > 0) Row(
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -239,7 +239,7 @@ fun HomeChatListItem(
                     )
                     if (pinned) DrawableIcon(
                         R.drawable.i_pin, size = 14.dp, desc = "Pinned",
-                        tint = colors.onSurfaceVariant,
+                        tint = colors.onSurfaceVariant.copy(0.7f),
                     )
                     if (unread) UnreadBadge(chat.unreadCount, muted, colors)
                 }
