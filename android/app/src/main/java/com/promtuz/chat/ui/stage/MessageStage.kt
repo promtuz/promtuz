@@ -112,10 +112,19 @@ class MessageStageState {
 
     /** Glide until [key]'s row sits in the upper half of the viewport. */
     suspend fun scrollToKey(key: Any) {
+        // A history jump can add rows in the caller's composition before Scaffold's
+        // subcomposed stage has measured them. Wait for that layout's scroll extent.
+        withFrameNanos { }
         if (pinnedKey != null) return
-        val stack = stackOf?.invoke(key) ?: return
-        val target = (stack - innerViewport * 0.4f).coerceIn(0f, maxScroll)
-        animate(scroll, target, animationSpec = ChatMotion.spec()) { v, _ -> scroll = v }
+        if (stackOf?.invoke(key) == null) return
+        val start = scroll
+        animate(0f, 1f, animationSpec = ChatMotion.spec()) { progress, _ ->
+            // Rows encountered during a long glide replace estimated heights with
+            // real ones. Follow the message's current position as those settle.
+            val stack = stackOf?.invoke(key) ?: return@animate
+            val target = (stack - innerViewport * 0.4f).coerceIn(0f, maxScroll)
+            scroll = start + (target - start) * progress
+        }
     }
 }
 

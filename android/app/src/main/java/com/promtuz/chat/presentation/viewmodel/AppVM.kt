@@ -41,6 +41,20 @@ class AppVM(
 
     var backStack = NavBackStack<NavKey>(if (CoreBridge.shouldLaunchApp()) Routes.App else Routes.Welcome)
     val navigator = AppNavigator(backStack)
+    private val _messageToShow = MutableStateFlow<com.promtuz.chat.domain.model.MessageLocation?>(null)
+    val messageToShow = _messageToShow.asStateFlow()
+
+    fun showMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
+        _messageToShow.value = message
+        // Reuse the existing chat entry and its scroll/draft state when it is already in the stack.
+        val route = backStack.filterIsInstance<Routes.Chat>().lastOrNull { it.conversation == message.conversation }
+            ?: Routes.Chat(message.conversation, message.chatName)
+        navigator.openExternal(route)
+    }
+
+    fun consumeMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
+        _messageToShow.compareAndSet(message, null)
+    }
 
     /** Invite that arrived before onboarding finished; raised once enroll completes. */
     var pendingInvite: ByteArray? = null

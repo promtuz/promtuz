@@ -79,19 +79,20 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                 error = null
                                 try {
                                     val media = CoreBridge.getMessageMedia(conversation.fromHex(), row.dispatchId) ?: error("Attachment unavailable")
+                                    val location = com.promtuz.chat.domain.model.MessageLocation(conversation, name, did, row.timestamp.toLong() * 1000)
                                     if (media.kind.toInt() == 1) {
                                         val image = media.blob?.let { withContext(Dispatchers.Default) { decodeAvif(it) } } ?: error("Image unavailable")
                                         MediaViewer.open(listOf(pictureItem(did, image, row.senderName.ifBlank { name }).copy(mime = media.mime,
-                                            subtitle = DateFormat.getDateTimeInstance().format(Date(row.timestamp.toLong() * 1000)), byteSize = media.blob?.size?.toLong())))
+                                            subtitle = DateFormat.getDateTimeInstance().format(Date(row.timestamp.toLong() * 1000)), byteSize = media.blob?.size?.toLong(), message = location)))
                                     } else if (media.kind.toInt() == 4 && media.sticker != null) {
                                         val image = withContext(Dispatchers.Default) { decodeAvif(CoreBridge.stickerImage(media.sticker!!)) } ?: error("Sticker unavailable")
-                                        MediaViewer.open(listOf(pictureItem(did, image, row.senderName.ifBlank { name })))
+                                        MediaViewer.open(listOf(pictureItem(did, image, row.senderName.ifBlank { name }).copy(message = location)))
                                     } else if (media.localPath != null) {
                                         val file = File(media.localPath!!)
                                         if (media.mime.startsWith("video/") || media.mime.startsWith("image/")) {
                                             MediaViewer.open(listOf(MediaItem(did, thumb, media.width.toInt().coerceAtLeast(1), media.height.toInt().coerceAtLeast(1),
                                                 title = row.senderName.ifBlank { name }, subtitle = DateFormat.getDateTimeInstance().format(Date(row.timestamp.toLong() * 1000)), mime = media.mime, filePath = file.absolutePath,
-                                                shareName = media.name, byteSize = media.size.toLong(),
+                                                shareName = media.name, byteSize = media.size.toLong(), message = location,
                                                 videoPath = file.absolutePath.takeIf { media.mime.startsWith("video/") },
                                                 load = { decodeDownscaled(context, Uri.fromFile(file), 4096)?.let { it.asImageBitmap() } })))
                                         } else {

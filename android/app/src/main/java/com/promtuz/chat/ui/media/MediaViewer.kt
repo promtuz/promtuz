@@ -42,6 +42,7 @@ data class MediaItem(
     val byteSize: Long? = null,
     /** Extra overflow entries after the built-in Save and Share. Each list is one group. */
     val actions: List<List<MenuAction>> = emptyList(),
+    val message: com.promtuz.chat.domain.model.MessageLocation? = null,
 )
 
 /** The one bubble video playing in place, if any. A second play, or the viewer, takes it over. */

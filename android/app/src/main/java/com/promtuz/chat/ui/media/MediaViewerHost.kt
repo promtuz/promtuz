@@ -149,6 +149,7 @@ fun MediaViewerHost() {
 
 @Composable
 private fun Viewer(session: MediaSession) {
+    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -208,8 +209,8 @@ private fun Viewer(session: MediaSession) {
         return r
     }
 
-    fun close() {
-        val item = current ?: return MediaViewer.close()
+    fun close(afterClose: () -> Unit = {}) {
+        val item = current ?: run { MediaViewer.close(); afterClose(); return }
         if (phase == Phase.Closing) return
         val from = currentRect()
         val target = originRect(item)
@@ -232,6 +233,7 @@ private fun Viewer(session: MediaSession) {
             progress.snapTo(0f)
             progress.animateTo(1f, tween(CLOSE_MS, easing = flightEase))
             MediaViewer.close()
+            afterClose()
         }
     }
 
@@ -340,7 +342,7 @@ private fun Viewer(session: MediaSession) {
                     dismissY = dismissY,
                     dismissThreshold = dismissThresholdPx,
                     onTap = { chrome = !chrome },
-                    onDismiss = ::close,
+                    onDismiss = { close() },
                     active = pager.settledPage == index,
                     chrome = chrome,
                     bottomChrome = { bottomChromePx },
@@ -374,7 +376,8 @@ private fun Viewer(session: MediaSession) {
             onSelect = { i -> scope.launch { pager.animateScrollToPage(i) } },
             alpha = if (phase == Phase.Opening) chromeAlpha * progress.value else chromeAlpha,
             onBottomHeight = { bottomChromePx = it },
-            onBack = ::close,
+            onBack = { close() },
+            onShowInChat = { item -> item.message?.let { message -> close { app.showMessage(message) } } },
             onSave = { item ->
                 scope.launch {
                     val file = item.filePath
@@ -544,6 +547,7 @@ private fun Chrome(
     onBack: () -> Unit,
     onSave: (MediaItem) -> Unit,
     onShare: (MediaItem) -> Unit,
+    onShowInChat: (MediaItem) -> Unit,
 ) {
     if (item == null || alpha == 0f) return
     var showInfo by remember(item.key) { mutableStateOf(false) }
@@ -583,6 +587,9 @@ private fun Chrome(
                         MenuAction("Save", R.drawable.oi_image_save) { onSave(item) },
                         MenuAction("Share", R.drawable.oi_export) { onShare(item) },
                         MenuAction("Info", R.drawable.oi_info) { showInfo = true },
+                    ))
+                    if (item.message != null) add(listOf(
+                        MenuAction("Show in chat", iconPlaceholder = "show in chat") { onShowInChat(item) },
                     ))
                     addAll(item.actions)
                 },

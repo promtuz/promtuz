@@ -21,6 +21,7 @@ import java.util.Calendar
 fun chatMediaItems(
     context: Context,
     messages: List<UiMessage>,
+    conversation: String,
     chatName: String,
     startKey: String,
     onDelete: (UiMessage) -> Unit,
@@ -31,18 +32,19 @@ fun chatMediaItems(
         val did = msg.dispatchIdHex ?: continue
         val title = if (msg.outgoing) "You" else msg.senderName ?: chatName
         val subtitle = whenSent(msg.timestampMs)
+        val location = com.promtuz.chat.domain.model.MessageLocation(conversation, chatName, did, msg.timestampMs)
         val delete = listOf(listOf(MenuAction("Delete", R.drawable.oi_trash, destructive = true) { onDelete(msg) }))
         when (val c = msg.content) {
             is MessageContent.Image -> items += MediaItem(
                 key = did, thumb = c.bitmap, width = c.width, height = c.height,
-                title = title, subtitle = subtitle, caption = c.caption, actions = delete, mime = "image/avif",
+                title = title, subtitle = subtitle, caption = c.caption, actions = delete, mime = "image/avif", message = location,
             )
             is MessageContent.Album -> c.items.forEachIndexed { i, item ->
                 val image = item.content as? MessageContent.Image ?: return@forEachIndexed
                 items += MediaItem(
                     key = item.dispatchIdHex, thumb = image.bitmap, width = image.width, height = image.height,
                     title = title, subtitle = subtitle, caption = if (i == 0) c.caption else "", actions = delete,
-                    group = did, mime = "image/avif",
+                    group = did, mime = "image/avif", message = location,
                 )
             }
             is MessageContent.Attachment -> {
@@ -52,7 +54,7 @@ fun chatMediaItems(
                 items += MediaItem(
                     key = did, thumb = c.thumb, width = c.thumb?.width ?: 1, height = c.thumb?.height ?: 1,
                     title = title, subtitle = subtitle, caption = c.caption, actions = delete,
-                    shareName = c.name, mime = c.mime, filePath = path, byteSize = c.size,
+                    shareName = c.name, mime = c.mime, filePath = path, byteSize = c.size, message = location,
                     videoPath = if (video) path else null,
                     load = if (video) ({ c.thumb }) else ({ decodeDownscaled(context, Uri.fromFile(File(path)), 4096)?.asImageBitmap() ?: c.thumb }),
                 )

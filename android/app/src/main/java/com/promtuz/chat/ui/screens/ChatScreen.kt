@@ -213,6 +213,21 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     // A search hit names a message that may still be loading in: hold the
     // id until its row is on the stage, then make the same glide a quote does.
     var pendingJump by remember { mutableStateOf<String?>(null) }
+    val messageToShow by appVM.messageToShow.collectAsState()
+    LaunchedEffect(messageToShow, foreground) {
+        val target = messageToShow?.takeIf { it.conversation == viewModel.conversationHex && foreground }
+            ?: return@LaunchedEffect
+        try {
+            pendingJump = viewModel.revealMessage(target.dispatchId, target.timestampMs)
+            if (pendingJump == null) android.widget.Toast.makeText(context, "Message no longer available", android.widget.Toast.LENGTH_SHORT).show()
+            appVM.consumeMessage(target)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            appVM.consumeMessage(target)
+            android.widget.Toast.makeText(context, "Couldn't open this message", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
     LaunchedEffect(Unit) { viewModel.jump.collect { pendingJump = it } }
     LaunchedEffect(pendingJump, rows) {
         val did = pendingJump ?: return@LaunchedEffect
@@ -333,7 +348,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                     onDownload = viewModel::download,
                                     onOpen = { openAttachment(context, it) },
                                     onMediaTap = { did ->
-                                        val (items, index) = chatMediaItems(context, messages, name, did) { confirmDelete = it }
+                                        val (items, index) = chatMediaItems(context, messages, viewModel.conversationHex, name, did) { confirmDelete = it }
                                         MediaViewer.open(items, index)
                                     },
                                     onTap = (chatRow.msg.content as? MessageContent.Sticker)?.let { s ->

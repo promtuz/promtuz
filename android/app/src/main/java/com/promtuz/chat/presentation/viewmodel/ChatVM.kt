@@ -226,6 +226,24 @@ class ChatVM(
     fun nextHit() = stepHit(1)
     fun prevHit() = stepHit(-1)
 
+    /** Locate a media message outside the loaded window, including a child of a folded album. */
+    suspend fun revealMessage(dispatchId: String, timestampMs: Long): String? {
+        fun target(rows: List<UiMessage>) = rows.firstOrNull { message ->
+            !message.deleted && (message.dispatchIdHex == dispatchId ||
+                (message.content as? MessageContent.Album)?.items?.any { it.dispatchIdHex == dispatchId } == true)
+        }
+        target(_messages.value.orEmpty())?.let { return it.key }
+        val position = CoreBridge.messageAtTime(conversation, timestampMs / 1000) ?: return null
+        limit = maxOf(limit, position.newer.toInt() + PAGE)
+        var loaded = load()
+        while (target(loaded) == null && !exhausted) {
+            limit += PAGE
+            loaded = load()
+        }
+        _messages.value = loaded
+        return target(loaded)?.key
+    }
+
     /** Resolve against all stored history, then widen the same window used by search. */
     suspend fun jumpToDate(date: java.time.LocalDate, zone: java.time.ZoneId): Boolean {
         val start = date.atStartOfDay(zone).toEpochSecond()
