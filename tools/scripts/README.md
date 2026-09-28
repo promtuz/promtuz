@@ -157,41 +157,47 @@ Don't:
 
 ### Example
 
-Of these commits, four carry a trailer and three do not:
+Of these commits, four carry a trailer and two do not:
 
 ```
-feat(web): add contact-card link fallback
-feat(android): receive shared text and media from other apps
-    Notes: Send text, photos and files to Promtuz straight from any other app.
-feat(android): add contact profiles, requests and shared media
-    Notes: Everyone you chat with now has a profile, with their picture and the
-      media you have shared.
-refactor(android): unify dialogs and refine modal presentation
-style(android): use outlined QR code and scanner icons
-feat(core): add signed contact requests and synchronized profiles
-    Notes: Adding someone sends them a request, so nobody lands in your chats
-      uninvited.
-fix(core): exclude deleted messages from visible history
-    Notes: Deleted messages no longer come back when a chat reloads its history.
+feat(requests): let people who aren't contacts message you
+    Notes: People who aren't in your contacts can now message you. Their chats
+      wait in Message requests until you accept, delete or block them. Choose
+      who can message you in Settings > Privacy.
+feat(android): add per-recipient message receipt details
+    Notes: Long-press a message you sent and choose Message info to see each
+      recipient's delivery and read times.
+fix(core): recover interrupted attachment transfers
+    Notes: Interrupted file and video downloads reconnect and resume
+      automatically after brief connection loss or network changes.
+fix(core): allow attachment transfers between unpaired group members
+    Notes: Download files and videos shared in groups even when the sender is
+      not in your contacts.
+feat(skills): publish personal rounded stroke icon skill
+chore(design): add outlined QR code icon sources
 ```
 
-The web commit is not this app. The dialog refactor and the icon change are
-invisible to anyone who was not already looking for them, so they say nothing.
-
-The script hands you those four as a flat list. Grouping them, and seeing that two
-of them are one feature from the outside, is the editing pass:
+The icon sources and the authoring skill change nothing anyone can see, so they
+say nothing. The four that remain arrive as a flat list, and the editing pass is
+where they become a release:
 
 ```markdown
-### Contacts
-- Everyone you chat with now has a profile, with their picture and the media you have shared.
-- Adding someone sends them a request, so nobody lands in your chats uninvited.
+### Message requests
+- People who aren't in your contacts can now message you. Their chats wait in Message requests until you accept, delete or block them.
+- Choose who can message you in Settings > Privacy.
 
-### Sharing
-- Send text, photos and files to Promtuz straight from any other app.
+### Downloads
+- Interrupted file and video downloads now reconnect and resume on their own.
+- Files shared in a group download even when you have not added the sender.
 
-### Fixes
-- Deleted messages no longer come back when a chat reloads its history.
+### Messages
+- Long-press a message you sent and choose Message info for each recipient's delivery and read times.
 ```
+
+Three things happened there. One trailer held two separate ideas and became two
+bullets. Two unrelated commits about transfers turned out to be one thing from the
+outside, Downloads, and lost the wording that only means something to whoever
+wrote them. Nothing gained a heading it did not need.
 
 ## Server packages
 
