@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rounded Stroke Icons"
+  short_description: "Create consistent rounded SVG icons and combinations"
+  default_prompt: "Use $rounded-stroke-icons to create a rounded SVG icon from my description or references."
