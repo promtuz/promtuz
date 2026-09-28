@@ -307,6 +307,8 @@ pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
 /// foreground. Fire-and-forget; contacts see us go idle/active (PRESENCE.md).
 #[uniffi::export]
 pub fn set_presence(idle: bool) {
+    // Apply the local upload policy synchronously, before any relay work.
+    crate::transfer::sharing::set_foreground(!idle);
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::set_presence(idle).await {
             log::debug!("PRESENCE: set_presence failed: {e}");

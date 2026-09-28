@@ -489,6 +489,31 @@ const MIGRATION_ARRAY: &[M] = &[
         SELECT conversation_id, sender_ipk, dispatch_id FROM messages
         WHERE outgoing = 0 AND deleted = 1
           AND length(sender_ipk) = 32 AND length(dispatch_id) = 16;"),
+    M::up("CREATE TABLE attachment_sharing (
+        grant_id BLOB PRIMARY KEY CHECK(length(grant_id) = 32),
+        conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+        group_id BLOB NOT NULL CHECK(length(group_id) = 32),
+        author BLOB NOT NULL CHECK(length(author) = 32),
+        message_id BLOB NOT NULL CHECK(length(message_id) = 16),
+        file_id BLOB NOT NULL CHECK(length(file_id) = 32),
+        size INTEGER NOT NULL CHECK(size >= 0),
+        expires_at INTEGER NOT NULL CHECK(expires_at >= 0),
+        recipients BLOB NOT NULL,
+        control_id BLOB CHECK(control_id IS NULL OR length(control_id) = 16),
+        UNIQUE(conversation_id, author, message_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX attachment_sharing_file ON attachment_sharing(file_id);
+    CREATE TABLE attachment_sharing_revocations (
+        conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+        author BLOB NOT NULL CHECK(length(author) = 32),
+        message_id BLOB NOT NULL CHECK(length(message_id) = 16),
+        PRIMARY KEY(conversation_id, author, message_id)
+    ) WITHOUT ROWID;"),
+    // No backfill: an older partially-sent attachment has no provable original
+    // recipient snapshot. Consuming this intent is part of the first send.
+    M::up("CREATE TABLE attachment_sharing_intents (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE
+    ) WITHOUT ROWID;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -531,7 +556,9 @@ mod tests {
     #[test]
     fn deletion_ledger_migration_preserves_history_and_backfills_only_known_authors() {
         let mut conn = Connection::open_in_memory().unwrap();
-        Migrations::from_slice(&MIGRATION_ARRAY[..MIGRATION_ARRAY.len() - 1])
+        // Version 24 introduced the deletion ledger. Keep the pre-migration
+        // fixture pinned even as later migrations are appended.
+        Migrations::from_slice(&MIGRATION_ARRAY[..23])
             .to_latest(&mut conn).unwrap();
         for (id, outgoing, deleted, sender) in [
             (1u8, false, true, Some(vec![1; 32])),

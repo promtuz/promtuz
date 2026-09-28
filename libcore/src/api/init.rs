@@ -199,6 +199,7 @@ async fn wait_to_retry(delay: Duration) {
 /// relay mark us offline immediately instead of waiting for idle timeout.
 #[uniffi::export]
 pub fn on_task_removed() {
+    crate::transfer::sharing::set_foreground(false);
     TASK_REMOVED.store(true, Ordering::SeqCst);
     if let Some(relay) = crate::state::RELAY.read().as_ref() {
         if let Some(conn) = &relay.connection {

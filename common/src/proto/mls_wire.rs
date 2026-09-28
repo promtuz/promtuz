@@ -235,6 +235,43 @@ pub enum AppPayload {
     ProfileDetailsAck { revision: u64 },
     /// Only the group's active founder may change its picture.
     GroupPicture { revision: u64, avif: Option<Vec<u8>> },
+    /// Optional permission for original group recipients to help deliver a
+    /// post's attachment. Authenticated by the MLS author and group; receiving
+    /// this control alone never grants access without the matching live post.
+    AttachmentSharing(AttachmentSharing),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentSharing {
+    pub message_id: [u8; 16],
+    pub file_id: [u8; 32],
+    pub size: u64,
+    pub expires_at: u64,
+    /// Sorted, unique IPKs from the original send, excluding its author.
+    /// Bound allocation at decode as well as validating the live group in core.
+    #[serde(deserialize_with = "sharing_recipients")]
+    pub recipients: Vec<[u8; 32]>,
+}
+
+fn sharing_recipients<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[u8; 32]>, D::Error> {
+    struct Recipients;
+    impl<'de> serde::de::Visitor<'de> for Recipients {
+        type Value = Vec<[u8; 32]>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most 255 original recipients")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            if seq.size_hint().is_some_and(|n| n > 255) { return Err(A::Error::custom("sharing audience too large")); }
+            let mut peers = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(255));
+            while let Some(peer) = seq.next_element()? {
+                if peers.len() == 255 { return Err(A::Error::custom("sharing audience too large")); }
+                peers.push(peer);
+            }
+            Ok(peers)
+        }
+    }
+    d.deserialize_seq(Recipients)
 }
 
 /// One step of a call. Every variant names its call, so a message that
@@ -1572,6 +1609,21 @@ pub fn welcome_publish_wrap_signing_input(
 
 #[cfg(all(test, feature = "crypto"))]
 mod tests {
+    #[test]
+    fn sharing_grants_append_without_changing_post_ordinals_and_bound_audience_decode() {
+        use crate::proto::pack::{Packer, Unpacker};
+        let offer = AttachmentSharing { message_id: [1; 16], file_id: [2; 32], size: 123,
+            expires_at: 456, recipients: vec![[3; 32], [4; 32]] };
+        let bytes = AppPayload::AttachmentSharing(offer.clone()).ser().unwrap();
+        assert_eq!(AppPayload::deser(&bytes).unwrap(), AppPayload::AttachmentSharing(offer.clone()));
+        let previous = AppPayload::GroupPicture { revision: 0, avif: None }.ser().unwrap();
+        assert_eq!(bytes[0], previous[0] + 1);
+        assert_eq!(AppPayload::Post { reply_to: None, body: Body::Text("hi".into()) }.ser().unwrap(), vec![11, 0, 0, 2, b'h', b'i']);
+        let mut oversized = offer;
+        oversized.recipients = vec![[3; 32]; 256];
+        assert!(AppPayload::deser(&AppPayload::AttachmentSharing(oversized).ser().unwrap()).is_err());
+    }
+
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::ed25519::signature::rand_core::OsRng;

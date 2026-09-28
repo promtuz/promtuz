@@ -43,6 +43,7 @@ import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
 import uniffi.core.onNetworkChanged as ffiOnNetworkChanged
+import uniffi.core.setAttachmentSharingNetwork as ffiSetAttachmentSharingNetwork
 import uniffi.core.onTaskRemoved as ffiOnTaskRemoved
 import uniffi.core.syncMessages as ffiSyncMessages
 import uniffi.core.registerPushToken as ffiRegisterPushToken
@@ -136,6 +137,9 @@ object CoreBridge {
 
     /** Default network routes changed — recover transports without changing presence. */
     fun onNetworkChanged() = ffiOnNetworkChanged()
+
+    internal fun setAttachmentSharingNetwork(unmeteredWifi: Boolean) =
+        ffiSetAttachmentSharingNetwork(unmeteredWifi)
 
     /** App task was removed from recents — best-effort close so relay marks us offline. */
     fun onTaskRemoved() = ffiOnTaskRemoved()

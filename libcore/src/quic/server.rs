@@ -923,6 +923,11 @@ async fn process_deliver(
                         },
                     }
                 },
+                Ok(AppPayload::AttachmentSharing(offer)) => {
+                    if let Err(e) = crate::transfer::sharing::receive(conv, author, offer) {
+                        warn!("TRANSFER: sharing grant rejected: {e}");
+                    }
+                },
                 Ok(AppPayload::Receipt { kind, upto }) => {
                     let status = match kind {
                         ReceiptKind::Delivered => crate::data::message::STATUS_DELIVERED,

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -33,6 +34,7 @@ internal object CoreNetworkMonitor {
             override fun onAvailable(network: Network) {
                 if (currentNetwork == network) return
                 currentNetwork = network
+                CoreBridge.setAttachmentSharingNetwork(false)
                 currentRoute = null
                 deliveredRoute = null
                 handler.removeCallbacks(deliver)
@@ -57,9 +59,22 @@ internal object CoreNetworkMonitor {
                 handler.postDelayed(deliver, 400)
             }
 
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                if (network != currentNetwork) return
+                // This controls uploads from recipient copies, independently
+                // of route changes. Loss of eligibility is never debounced.
+                CoreBridge.setAttachmentSharingNetwork(
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                )
+            }
+
             override fun onLost(network: Network) {
                 // A delayed loss for the previous network must not erase its replacement.
                 if (network != currentNetwork) return
+                CoreBridge.setAttachmentSharingNetwork(false)
                 currentNetwork = null
                 currentRoute = null
                 deliveredRoute = null

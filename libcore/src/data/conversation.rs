@@ -443,7 +443,7 @@ impl Conversation {
         drop(stmt);
 
         for table in
-            ["messages", "reactions", "read_state", "member_read_state", "message_media"]
+            ["messages", "reactions", "read_state", "member_read_state", "message_media", "attachment_sharing"]
         {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
@@ -459,6 +459,7 @@ impl Conversation {
         let tx = conn.transaction()?;
         let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.execute("DELETE FROM message_deletions WHERE conversation_id = ?1", [id.as_slice()])?;
+        tx.execute("DELETE FROM attachment_sharing_revocations WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;

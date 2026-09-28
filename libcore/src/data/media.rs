@@ -149,6 +149,10 @@ pub fn save_outgoing_with_media(
         .try_into()
         .expect("dispatch_id is 16 bytes");
     save_tx(&tx, conv, &did, r)?;
+    if r.kind == KIND_ATTACHMENT {
+        tx.execute("INSERT INTO attachment_sharing_intents (message_id) VALUES (?1)",
+            [msg.inner.id.to_string()])?;
+    }
     tx.commit()?;
     Ok(msg)
 }

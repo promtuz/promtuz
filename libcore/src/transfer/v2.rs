@@ -15,6 +15,7 @@ use super::wire::{CHUNK_SIZE, InvalidFrame, Manifest};
 const HEADER_LEN: usize = 7;
 const REQUIRED: u8 = 1;
 const RANGE_CAPABILITY: u64 = 1;
+const SHARING_CAPABILITY: u64 = 2;
 pub(crate) const MAX_RANGES: u16 = 16;
 pub(crate) const MAX_CHUNKS: u16 = 64;
 const MAX_MANIFEST: usize = 8 * 1024 * 1024;
@@ -32,7 +33,7 @@ pub(crate) struct Hello {
 impl Hello {
     pub(crate) fn local() -> Self {
         Self {
-            supported: RANGE_CAPABILITY,
+            supported: RANGE_CAPABILITY | SHARING_CAPABILITY,
             required: RANGE_CAPABILITY,
             max_ranges: MAX_RANGES,
             max_chunks: MAX_CHUNKS,
@@ -54,6 +55,7 @@ impl Hello {
             return Err(invalid("zero attachment range limit"));
         }
         Ok(Limits {
+            sharing: self.supported & SHARING_CAPABILITY != 0,
             max_ranges: self.max_ranges.min(local.max_ranges),
             max_chunks: self.max_chunks.min(local.max_chunks),
         })
@@ -62,6 +64,7 @@ impl Hello {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Limits {
+    pub sharing: bool,
     pub max_ranges: u16,
     pub max_chunks: u16,
 }
@@ -105,6 +108,8 @@ pub(crate) enum Frame {
     Chunk { index: u32, bytes: Vec<u8> },
     Complete { chunks_sent: u32 },
     Error(ErrorCode),
+    DescribeShared { file_id: [u8; 32], grant: [u8; 32] },
+    PullShared { file_id: [u8; 32], grant: [u8; 32], ranges: Vec<ChunkRange> },
 }
 
 /// Constrain allocations to frames meaningful at the current protocol step.
@@ -124,7 +129,7 @@ impl ReadPhase {
         kind == 7
             || match self {
                 Self::Hello => kind == 1,
-                Self::Request => kind == 2 || kind == 4,
+                Self::Request => matches!(kind, 2 | 4 | 8 | 9),
                 Self::Manifest => kind == 3,
                 Self::Chunk => kind == 5,
                 Self::Complete => kind == 6,
@@ -150,6 +155,8 @@ fn validate_header(kind: u16, flags: u8, len: usize) -> Result<()> {
         5 => (4..=4 + CHUNK_SIZE).contains(&len),
         6 => len == 4,
         7 => len == 2,
+        8 => len == 64,
+        9 => (74..=66 + 8 * MAX_RANGES as usize).contains(&len) && (len - 66).is_multiple_of(8),
         _ => {
             if flags == REQUIRED {
                 return Err(invalid("unknown required attachment frame"));
@@ -219,7 +226,7 @@ pub(crate) fn validate_ranges(
 }
 
 fn max_limits() -> Limits {
-    Limits { max_ranges: MAX_RANGES, max_chunks: MAX_CHUNKS }
+    Limits { sharing: true, max_ranges: MAX_RANGES, max_chunks: MAX_CHUNKS }
 }
 
 /// Validates sizes before constructing the buffer, including for local writes.
@@ -247,6 +254,11 @@ fn encode_body(frame: &Frame) -> Result<(u16, Vec<u8>)> {
         ),
         Frame::Complete { .. } => (6, 4),
         Frame::Error(_) => (7, 2),
+        Frame::DescribeShared { .. } => (8, 64),
+        Frame::PullShared { ranges, .. } => {
+            check_ranges(ranges, max_limits())?;
+            (9, 66 + ranges.len() * 8)
+        },
     };
     validate_header(kind, REQUIRED, len)?;
     let mut body = Vec::with_capacity(len);
@@ -258,6 +270,10 @@ fn encode_body(frame: &Frame) -> Result<(u16, Vec<u8>)> {
             body.extend_from_slice(&hello.max_chunks.to_le_bytes());
         },
         Frame::Describe { file_id } => body.extend_from_slice(file_id),
+        Frame::DescribeShared { file_id, grant } => {
+            body.extend_from_slice(file_id);
+            body.extend_from_slice(grant);
+        },
         Frame::Manifest(manifest) => {
             body.extend_from_slice(&manifest.total_size.to_le_bytes());
             body.extend_from_slice(&manifest.chunk_size.to_le_bytes());
@@ -266,8 +282,9 @@ fn encode_body(frame: &Frame) -> Result<(u16, Vec<u8>)> {
                 body.extend_from_slice(hash);
             }
         },
-        Frame::Pull { file_id, ranges } => {
+        Frame::Pull { file_id, ranges } | Frame::PullShared { file_id, ranges, .. } => {
             body.extend_from_slice(file_id);
+            if let Frame::PullShared { grant, .. } = frame { body.extend_from_slice(grant); }
             body.extend_from_slice(&(ranges.len() as u16).to_le_bytes());
             for range in ranges {
                 body.extend_from_slice(&range.start.to_le_bytes());
@@ -312,13 +329,14 @@ fn decode_body(kind: u16, body: &[u8]) -> Result<Frame> {
             let chunks = body[16..].chunks_exact(32).map(|hash| hash.try_into().unwrap()).collect();
             Frame::Manifest(Manifest { total_size, chunk_size, chunks })
         },
-        4 => {
+        4 | 9 => {
             let file_id = body[..32].try_into().unwrap();
-            let count = u16::from_le_bytes(body[32..34].try_into().unwrap()) as usize;
-            if count != (body.len() - 34) / 8 {
+            let base = if kind == 9 { 64 } else { 32 };
+            let count = u16::from_le_bytes(body[base..base+2].try_into().unwrap()) as usize;
+            if count != (body.len() - base - 2) / 8 {
                 return Err(invalid("attachment range count disagrees with length"));
             }
-            let ranges: Vec<_> = body[34..]
+            let ranges: Vec<_> = body[base+2..]
                 .chunks_exact(8)
                 .map(|range| ChunkRange {
                     start: u32::from_le_bytes(range[..4].try_into().unwrap()),
@@ -326,7 +344,11 @@ fn decode_body(kind: u16, body: &[u8]) -> Result<Frame> {
                 })
                 .collect();
             check_ranges(&ranges, max_limits())?;
-            Frame::Pull { file_id, ranges }
+            if kind == 9 {
+                Frame::PullShared { file_id, grant: body[32..64].try_into().unwrap(), ranges }
+            } else {
+                Frame::Pull { file_id, ranges }
+            }
         },
         5 => Frame::Chunk {
             index: u32::from_le_bytes(body[..4].try_into().unwrap()),
@@ -334,6 +356,7 @@ fn decode_body(kind: u16, body: &[u8]) -> Result<Frame> {
         },
         6 => Frame::Complete { chunks_sent: u32::from_le_bytes(body.try_into().unwrap()) },
         7 => Frame::Error(ErrorCode::try_from(u16::from_le_bytes(body.try_into().unwrap()))?),
+        8 => Frame::DescribeShared { file_id: body[..32].try_into().unwrap(), grant: body[32..].try_into().unwrap() },
         _ => return Err(invalid("unknown attachment frame")),
     })
 }
@@ -401,7 +424,7 @@ async fn read_frame_with_phase_from<R: AsyncRead + Unpin>(
         let flags = header[2];
         let len = u32::from_le_bytes(header[3..].try_into().unwrap()) as usize;
         validate_header(kind, flags, len)?;
-        if !(1..=7).contains(&kind) {
+        if !(1..=9).contains(&kind) {
             if optional == MAX_OPTIONAL_FRAMES {
                 return Err(invalid("too many optional attachment frames"));
             }
@@ -505,7 +528,7 @@ mod tests {
         assert_eq!(&bytes[..HEADER_LEN], &[1, 0, 1, 20, 0, 0, 0]);
         assert_eq!(
             &bytes[HEADER_LEN..],
-            &[1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 64, 0]
+            &[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 64, 0]
         );
         assert_eq!(parsed(&bytes).await.unwrap(), hello);
         let manifest = Manifest {
@@ -515,6 +538,8 @@ mod tests {
         };
         let frames = [
             Frame::Describe { file_id: manifest.file_id() },
+            Frame::DescribeShared { file_id: manifest.file_id(), grant: [7; 32] },
+            Frame::PullShared { file_id: manifest.file_id(), grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 2 }] },
             Frame::Manifest(manifest.clone()),
             Frame::Manifest(Manifest {
                 total_size: 0,
@@ -543,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn hostile_headers_fail_without_consuming_or_allocating_the_body() {
-        for kind in 1..=7 {
+        for kind in 1..=9 {
             assert_invalid(parsed(&header(kind, REQUIRED, u32::MAX)).await);
             assert_invalid(parsed(&header(kind, 0, 20)).await);
         }
@@ -603,6 +628,8 @@ mod tests {
                 ReadPhase::Request,
                 Frame::Pull { file_id: [1; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
             ),
+            (ReadPhase::Request, Frame::DescribeShared { file_id: [1; 32], grant: [7; 32] }),
+            (ReadPhase::Request, Frame::PullShared { file_id: [1; 32], grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] }),
             (ReadPhase::Manifest, Frame::Manifest(manifest(1))),
             (ReadPhase::Chunk, Frame::Chunk { index: 0, bytes: vec![1] }),
             (ReadPhase::Complete, Frame::Complete { chunks_sent: 1 }),
@@ -669,6 +696,8 @@ mod tests {
             Frame::Hello(Hello::local()),
             Frame::Manifest(manifest(2)),
             Frame::Pull { file_id: [1; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
+            Frame::DescribeShared { file_id: [1; 32], grant: [7; 32] },
+            Frame::PullShared { file_id: [1; 32], grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
             Frame::Chunk { index: 0, bytes: vec![4; 16] },
             Frame::Complete { chunks_sent: 0 },
             Frame::Error(ErrorCode::Unavailable),
@@ -710,19 +739,22 @@ mod tests {
 
     #[test]
     fn capabilities_negotiate_minima_without_downgrading_required_features() {
+        assert!(!Hello { supported: 1, required: 1, ..Hello::local() }.negotiate().unwrap().sharing,
+            "old v2 remains range-only");
+        assert!(Hello { supported: 3, required: 3, ..Hello::local() }.negotiate().unwrap().sharing);
         let mut peer = Hello::local();
         peer.supported |= 1 << 63;
         peer.max_ranges = 3;
         peer.max_chunks = 9;
-        assert_eq!(peer.negotiate().unwrap(), Limits { max_ranges: 3, max_chunks: 9 });
+        assert_eq!(peer.negotiate().unwrap(), Limits { sharing: true, max_ranges: 3, max_chunks: 9 });
         peer.required = 0;
         peer.max_ranges = u16::MAX;
         peer.max_chunks = u16::MAX;
         assert_eq!(peer.negotiate().unwrap(), max_limits());
         for peer in [
             Hello { supported: 0, ..Hello::local() },
-            Hello { required: 2, ..Hello::local() },
-            Hello { supported: 3, required: 3, ..Hello::local() },
+            Hello { required: 4, ..Hello::local() },
+            Hello { supported: 5, required: 5, ..Hello::local() },
             Hello { supported: 2, required: 2, ..Hello::local() },
             Hello { max_ranges: 0, ..Hello::local() },
             Hello { max_chunks: 0, ..Hello::local() },
@@ -755,11 +787,11 @@ mod tests {
         for ranges in invalid_ranges {
             assert_invalid(validate_ranges(&ranges, &mf, max_limits()));
         }
-        assert_invalid(validate_ranges(&valid, &mf, Limits { max_ranges: 1, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { max_ranges: 16, max_chunks: 4 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { max_ranges: 0, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { max_ranges: 17, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { max_ranges: 16, max_chunks: 65 }));
+        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 1, max_chunks: 64 }));
+        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 16, max_chunks: 4 }));
+        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 0, max_chunks: 64 }));
+        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 17, max_chunks: 64 }));
+        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 16, max_chunks: 65 }));
         assert_invalid(validate_ranges(&[ChunkRange { start: 99, end: 101 }], &mf, max_limits()));
         assert_invalid(validate_ranges(
             &[ChunkRange { start: 0, end: 1 }],

@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 
 pub mod auth;
 pub(crate) mod ranges;
+pub(crate) mod sharing;
 pub mod store;
 pub(crate) mod v2;
 pub mod wire;
@@ -34,6 +35,7 @@ const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs
 const RETRY_COOLDOWN_SECS: u64 = 60;
 const SERVES_PER_LINK: usize = 4;
 static SERVING: Semaphore = Semaphore::const_new(16);
+static HELPING: Semaphore = Semaphore::const_new(2);
 static PULLING: Semaphore = Semaphore::const_new(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +187,7 @@ fn report_failure(kind: FailureKind) {
 /// message does and expiry only closes *serving* (see [`serve`]).
 pub fn gc(now: u64) {
     let _ = store::gc_dead_partials(now.saturating_sub(DEAD_PARTIAL_TTL_SECS));
+    sharing::gc(now);
 }
 
 /// Once at startup: drop retention nothing names. The live paths release a
@@ -413,19 +416,45 @@ async fn serve_v2(
     let limits = bounded(CONTROL_TIMEOUT, v2::exchange_hello(s, r)).await?;
     let request = bounded(CONTROL_TIMEOUT, v2::read_frame_for(r, v2::ReadPhase::Request)).await?;
     expect_fin(r).await?;
-    let (file_id, requested) = match request {
-        v2::Frame::Describe { file_id } => (file_id, None),
-        v2::Frame::Pull { file_id, ranges } => (file_id, Some(ranges)),
+    let (file_id, requested, grant) = match request {
+        v2::Frame::Describe { file_id } => (file_id, None, None),
+        v2::Frame::Pull { file_id, ranges } => (file_id, Some(ranges), None),
+        v2::Frame::DescribeShared { file_id, grant } if limits.sharing => (file_id, None, Some(grant)),
+        v2::Frame::PullShared { file_id, grant, ranges } if limits.sharing => (file_id, Some(ranges), Some(grant)),
+        v2::Frame::DescribeShared { .. } | v2::Frame::PullShared { .. } => return v2_error(s, v2::ErrorCode::Unsupported).await,
         _ => return v2_error(s, v2::ErrorCode::InvalidRequest).await,
     };
-    if !offered_to(&file_id, &link.ipk, &local.ipk) {
+    if grant.is_some() {
+        let Some(scope) = sharing::serving_scope() else { return v2_error(s, v2::ErrorCode::Unavailable).await };
+        let Ok(_slot) = HELPING.try_acquire() else { return v2_error(s, v2::ErrorCode::Busy).await };
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => Err(Failure::new(FailureKind::Unavailable, anyhow::anyhow!("recipient uploads suspended"))),
+            result = serve_v2_file(link, local, s, limits, file_id, requested, grant, Some(&scope)) => result,
+        }
+    } else {
+        serve_v2_file(link, local, s, limits, file_id, requested, None, None).await
+    }
+}
+
+fn can_serve(file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32], grant: Option<&[u8; 32]>) -> bool {
+    match grant {
+        Some(id) => sharing::permitted(id, file_id, me, peer).is_some(),
+        None => offered_to(file_id, peer, me) && store::retention_get(file_id)
+            .is_some_and(|ret| ret.expires_at > crate::utils::systime().as_secs()),
+    }
+}
+
+async fn serve_v2_file(
+    link: &crate::p2p::PeerLink, local: &wire::Auth, s: &mut TransferSend, limits: v2::Limits,
+    file_id: [u8; 32], requested: Option<Vec<ranges::ChunkRange>>, grant: Option<[u8; 32]>,
+    helper_cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), Failure> {
+    if helper_cancel.is_some_and(|c| c.is_cancelled()) || !can_serve(&file_id, &link.ipk, &local.ipk, grant.as_ref()) {
         return v2_error(s, v2::ErrorCode::Unavailable).await;
     }
-    let Some(retained) = store::retention_get(&file_id)
-        .filter(|ret| ret.expires_at > crate::utils::systime().as_secs())
-    else {
-        return v2_error(s, v2::ErrorCode::Unavailable).await;
-    };
+    let retained = if grant.is_some() { sharing::completed_copy(&file_id) } else { store::retention_get(&file_id) };
+    let Some(retained) = retained else { return v2_error(s, v2::ErrorCode::Unavailable).await };
     let manifest: wire::Manifest = match postcard::from_bytes(&retained.manifest) {
         Ok(manifest) => manifest,
         Err(_) => return v2_error(s, v2::ErrorCode::Storage).await,
@@ -459,10 +488,7 @@ async fn serve_v2(
     };
     for range in requested {
         for index in range.start..range.end {
-            if !offered_to(&file_id, &link.ipk, &local.ipk)
-                || store::retention_get(&file_id)
-                    .is_none_or(|ret| ret.expires_at <= crate::utils::systime().as_secs())
-            {
+            if helper_cancel.is_some_and(|c| c.is_cancelled()) || !can_serve(&file_id, &link.ipk, &local.ipk, grant.as_ref()) {
                 return v2_error(s, v2::ErrorCode::Unavailable).await;
             }
             let offset = index as u64 * manifest.chunk_size as u64;
@@ -566,17 +592,38 @@ async fn download_with_policy(file_id: [u8; 32], trigger: DownloadTrigger) -> an
             return Err(e);
         },
     };
-    let held =
-        drive_download(file_id, peer, offered_size, &local, &lease, &RETRY_DELAYS, || async {
-            crate::p2p::link(peer).await.map_err(Failure::wire)
-        })
-        .await?;
+    let helpers = sharing::candidates(&file_id, &peer, &local.ipk)?;
+    let original = drive_download_inner(file_id, peer, offered_size, &local, &lease, &RETRY_DELAYS,
+        !helpers.is_empty(), || async { crate::p2p::link(peer).await.map_err(Failure::wire) }).await;
+    let needs_help = matches!(original, Ok(true)) || original.as_ref().is_err_and(|e|
+        e.downcast_ref::<Failure>().is_some_and(|e| e.kind == FailureKind::Unavailable));
+    let wake_original = matches!(original, Ok(true));
+    let helped = if needs_help {
+        try_helpers(file_id, offered_size, &local, &lease, helpers.clone(), |peer| async move {
+            bounded(Duration::from_secs(30), crate::p2p::link(peer)).await
+        }).await?
+    } else { false };
+    let helpers_remain = helpers.iter().any(|(provider, grant)|
+        sharing::permitted(grant, &file_id, &local.ipk, provider).is_some());
+    let held = if helped { false } else if needs_help && helpers_remain {
+        // An unavailable original does not make an unexpired recipient copy
+        // permanently failed just because its provider is currently offline.
+        set_state(&file_id, peer, store::HELD, &lease)?;
+        store::defer_retry(&file_id, crate::utils::systime().as_secs() + RETRY_COOLDOWN_SECS)?;
+        true
+    } else {
+        if needs_help {
+            set_state(&file_id, peer, if original.is_ok() { store::HELD } else { store::FAILED }, &lease)?;
+        }
+        original?
+    };
     // Release the writer before sending FileWant. A fast dial-back can now
     // start its pull immediately instead of losing on_link_ready to our guard.
     drop(_slot);
     drop(lease);
     drop(_guard);
     if held
+        && wake_original
         && trigger != DownloadTrigger::WakeResponse
         && store::claim_wake(&file_id, crate::utils::systime().as_secs(), WAKE_BACKOFF_SECS)?
     {
@@ -598,9 +645,21 @@ async fn download_with_policy(file_id: [u8; 32], trigger: DownloadTrigger) -> an
     Ok(())
 }
 
+#[cfg(test)]
 async fn drive_download<F, Fut>(
     file_id: [u8; 32], peer: [u8; 32], offered_size: u64, local: &wire::Auth,
-    lease: &store::ReceiverLease, retry_delays: &[Duration], mut connect: F,
+    lease: &store::ReceiverLease, retry_delays: &[Duration], connect: F,
+) -> anyhow::Result<bool>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::p2p::PeerLink, Failure>>,
+{
+    drive_download_inner(file_id, peer, offered_size, local, lease, retry_delays, false, connect).await
+}
+
+async fn drive_download_inner<F, Fut>(
+    file_id: [u8; 32], peer: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease, retry_delays: &[Duration], may_help: bool, mut connect: F,
 ) -> anyhow::Result<bool>
 where
     F: FnMut() -> Fut,
@@ -640,8 +699,10 @@ where
             },
             Err(e) if e.kind == FailureKind::Cancelled => return Ok(false),
             Err(e) if e.kind != FailureKind::Transport => {
-                report_failure(e.kind);
-                set_state(&file_id, peer, store::FAILED, &lease)?;
+                if !(may_help && e.kind == FailureKind::Unavailable) {
+                    report_failure(e.kind);
+                    set_state(&file_id, peer, store::FAILED, &lease)?;
+                }
                 return Err(e.into());
             },
             Err(e) => {
@@ -664,6 +725,51 @@ where
         }
     }
     Ok(true)
+}
+
+/// Helpers are independent authenticated sources. A remote provider error
+/// discards that provider, preserving verified chunks; local disk errors and
+/// cancellation still stop the single receiver coordinator.
+async fn try_helpers<F, Fut>(
+    file: [u8; 32], size: u64, local: &wire::Auth, lease: &store::ReceiverLease,
+    candidates: Vec<([u8; 32], [u8; 32])>, mut connect: F,
+) -> anyhow::Result<bool>
+where
+    F: FnMut([u8; 32]) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::p2p::PeerLink, Failure>>,
+{
+    for (peer, grant) in candidates.into_iter().take(sharing::MAX_PROVIDERS) {
+        if lease.cancel.is_cancelled() { return Ok(true); }
+        if sharing::permitted(&grant, &file, &local.ipk, &peer).is_none() { continue; }
+        set_state(&file, peer, store::CONNECTING, lease)?;
+        let result = tokio::select! {
+            biased;
+            _ = lease.cancel.cancelled() => return Ok(true),
+            result = async {
+                let link = connect(peer).await?;
+                if link.protocol().map_err(Failure::wire)? != crate::p2p::protocol::AttachmentProtocol::V2 {
+                    return Err(remote_failure(v2::ErrorCode::Unsupported));
+                }
+                let result = pull_v2_from(&link, file, size, local, lease, Some(grant)).await;
+                if result.as_ref().is_err_and(|e| matches!(e.kind, FailureKind::Authentication | FailureKind::InvalidData)
+                    && e.source.downcast_ref::<v2::ErrorCode>() != Some(&v2::ErrorCode::Unsupported)) {
+                    link.conn.close(0u32.into(), b"invalid attachment provider");
+                }
+                result
+            } => result,
+        };
+        match result {
+            Ok(()) => { diagnostics::record(Event::TransferComplete); return Ok(true); },
+            Err(e) if e.kind == FailureKind::Cancelled => return Ok(true),
+            Err(e) if e.kind == FailureKind::Storage && !e.source.is::<v2::ErrorCode>() => {
+                set_state(&file, peer, store::FAILED, lease)?;
+                report_failure(e.kind);
+                return Err(e.into());
+            },
+            Err(e) => log::debug!("transfer: helper unavailable: {e}"),
+        }
+    }
+    Ok(false)
 }
 
 /// Update progress without replacing independently persisted wake/retry history.
@@ -893,8 +999,20 @@ async fn pull_v2(
     link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
     lease: &store::ReceiverLease,
 ) -> Result<(), Failure> {
-    let (mut s, mut r, _) = open_v2_request(link, local).await?;
-    bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &v2::Frame::Describe { file_id })).await?;
+    pull_v2_from(link, file_id, offered_size, local, lease, None).await
+}
+
+async fn pull_v2_from(
+    link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
+    lease: &store::ReceiverLease, grant: Option<[u8; 32]>,
+) -> Result<(), Failure> {
+    let (mut s, mut r, limits) = open_v2_request(link, local).await?;
+    if grant.is_some() && !limits.sharing { return Err(remote_failure(v2::ErrorCode::Unsupported)); }
+    let describe = match grant {
+        Some(grant) => v2::Frame::DescribeShared { file_id, grant },
+        None => v2::Frame::Describe { file_id },
+    };
+    bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &describe)).await?;
     s.finish().map_err(|e| Failure::wire(e.into()))?;
     let manifest = match bounded(
         CONTROL_TIMEOUT,
@@ -921,20 +1039,28 @@ async fn pull_v2(
             .map_err(coordinator_failure)?;
     while receiver.prefix() < manifest.chunks.len() as u32 {
         let (mut s, mut r, limits) = open_v2_request(link, local).await?;
+        if let Some(id) = &grant {
+            if !limits.sharing || sharing::permitted(id, &file_id, &local.ipk, &link.ipk).is_none() {
+                return Err(remote_failure(v2::ErrorCode::Unavailable));
+            }
+        }
         let requested = receiver.missing(limits.max_ranges as usize, limits.max_chunks as u32);
         let expected = v2::validate_ranges(&requested, &manifest, limits).map_err(Failure::wire)?;
         let mut pending: Vec<u32> =
             requested.iter().flat_map(|range| range.start..range.end).collect();
         pending.reverse();
-        bounded(
-            CONTROL_TIMEOUT,
-            v2::write_frame(&mut s, &v2::Frame::Pull { file_id, ranges: requested }),
-        )
-        .await?;
+        let request = match grant {
+            Some(grant) => v2::Frame::PullShared { file_id, grant, ranges: requested },
+            None => v2::Frame::Pull { file_id, ranges: requested },
+        };
+        bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &request)).await?;
         s.finish().map_err(|e| Failure::wire(e.into()))?;
         while let Some(expected_index) = pending.pop() {
             match bounded(CHUNK_DEADLINE, v2::read_frame_for(&mut r, v2::ReadPhase::Chunk)).await? {
                 v2::Frame::Chunk { index, bytes } if index == expected_index => {
+                    if grant.as_ref().is_some_and(|id| sharing::permitted(id, &file_id, &local.ipk, &link.ipk).is_none()) {
+                        return Err(remote_failure(v2::ErrorCode::Unavailable));
+                    }
                     receiver.commit(index, &bytes, lease).map_err(coordinator_failure)?;
                     diagnostics::received_verified(bytes.len() as u64);
                 },
@@ -952,6 +1078,9 @@ async fn pull_v2(
             _ => return Err(protocol_failure("invalid range completion")),
         }
         expect_fin(&mut r).await?;
+    }
+    if grant.as_ref().is_some_and(|id| sharing::permitted(id, &file_id, &local.ipk, &link.ipk).is_none()) {
+        return Err(remote_failure(v2::ErrorCode::Unavailable));
     }
     receiver.finish(lease).map_err(coordinator_failure)?;
     store::defer_retry(&file_id, 0).map_err(Failure::storage)?;
@@ -1631,3 +1760,5 @@ mod download_resume {
 mod range_adversarial_tests;
 #[cfg(test)]
 mod range_tests;
+#[cfg(test)]
+mod sharing_tests;

@@ -1423,6 +1423,7 @@ pub(crate) fn receive_message_mutation(
             }
         },
         AppPayload::Revise { target, body } => {
+            crate::transfer::sharing::revoke(conversation, author, &target)?;
             if let Some((row, content)) = apply_revise_body(conversation, &target, body, false, Some(author))? {
                 MessageEv::Edited { id: row.id, conversation: *conversation, content }.emit();
             }
@@ -1761,6 +1762,21 @@ async fn send_payload<C: DhtClient>(
     // The leaf signing key for our seat in this group.
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
+    let id: [u8; 16] = msg
+        .inner
+        .dispatch_id
+        .as_deref()
+        .expect("save_outgoing always mints a dispatch_id")
+        .try_into()
+        .expect("dispatch_id is 16 bytes");
+
+    let sharing = match AppPayload::deser(&payload_bytes) {
+        Ok(AppPayload::Post { body: Body::Attachment { file_id, size, .. }, .. }) =>
+            crate::transfer::sharing::for_outgoing(&conversation, &group.group_id(), &our_ipk,
+                id, file_id, size, &recipients, &group.roster())?,
+        _ => None,
+    };
+
     // Encrypt once. The caller (attempt_send / finish_image / finish_attachment)
     // rebuilds `payload_bytes` from the row on every retry, so a resend reuses
     // the same dispatch id below and recipients dedup it.
@@ -1770,16 +1786,28 @@ async fn send_payload<C: DhtClient>(
             anyhow!("seal message: {e}")
         })?;
 
-    let id: [u8; 16] = msg
-        .inner
-        .dispatch_id
-        .as_deref()
-        .expect("save_outgoing always mints a dispatch_id")
-        .try_into()
-        .expect("dispatch_id is 16 bytes");
+    let sharing_sealed = sharing.as_ref().map(|(_, offer)| {
+        seal_application_message(ctx, &mut group, &leaf_kp,
+            &AppPayload::AttachmentSharing(offer.clone()).ser().map_err(|e| anyhow!("encode sharing: {e}"))?)
+            .map_err(|e| anyhow!("seal sharing grant: {e}"))
+    }).transpose()?;
 
     let mut terminal = false;
     for to in &recipients {
+        if let (Some((control_id, offer)), Some(control)) = (&sharing, &sharing_sealed)
+            && offer.recipients.contains(to)
+        {
+            let payload = control.address_to(to, &ipk_signer).map_err(|e| anyhow!("address sharing grant: {e}"))?;
+            let ttl = offer.expires_at.saturating_sub(crate::utils::systime().as_secs()).saturating_mul(1000);
+            if ttl > 0 {
+                // This optional control must not indefinitely hold the post
+                // behind a silent relay. Dispatch persists before its first
+                // await; timeout leaves that exact envelope for reconciliation.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2),
+                    dispatch_to_member(to, &our_ipk, &ipk_signer, control_id, payload, OpType::Control, Wake::No, ttl)).await;
+                LAST_ACCEPTED_AT.lock().remove(control_id);
+            }
+        }
         let payload = sealed
             .address_to(to, &ipk_signer)
             .map_err(|e| anyhow!("address envelope to member: {e}"))?;
@@ -2384,6 +2412,12 @@ fn persist_drained(
         // reach the same persist through legacy_body.
         let parsed = match AppPayload::deser(&m.plaintext) {
             Ok(AppPayload::Post { reply_to, body }) => Some((reply_to, body)),
+            Ok(AppPayload::AttachmentSharing(offer)) => {
+                if let Err(e) = crate::transfer::sharing::receive(conversation, sender_ipk, offer) {
+                    warn!("TRANSFER: buffered sharing grant rejected: {e}");
+                }
+                continue;
+            },
             Ok(payload @ (AppPayload::Edit { .. } | AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
                 if let Err(e) = receive_message_mutation(&conversation, &sender_ipk, payload) {
                     warn!("MESSAGE: drained mutation rejected: {e}");
@@ -3643,6 +3677,91 @@ mod tests {
         let msg = format!("{:?}", r.unwrap_err());
         assert!(msg.contains("MAX_WELCOME_BYTES"), "error must cite MAX_WELCOME_BYTES, got: {msg}");
     }
+    /// Separate process for the real recipient identity and messages DB; MLS
+    /// participants also have independent stores. Exercise control/post order
+    /// and author binding through encrypted epoch catch-up, not seeded grants.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sharing_grant_catches_up_with_original_post_and_authenticated_author() {
+        const CHILD: &str = "PROMTUZ_GRANT_CATCHUP_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("promtuz-grant-catchup-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "messaging::tests::sharing_grant_catches_up_with_original_post_and_authenticated_author", "--nocapture"])
+                .env(CHILD, "1").env("PROMTUZ_DATA_DIR", &dir).output().unwrap();
+            assert!(result.status.success(), "{}\n{}\nprofile: {}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr), dir.display());
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let alice = Node::new(0xDA);
+        let bob = Node::new(0xDB);
+        let carol = Node::new(0xDC);
+        Identity::save(crate::db::identity::IdentityRow {
+            id: 0, ipk: bob.ipk, enc_isk: vec![], created_at: 0, name: "Bob".into(),
+            avatar: None, avatar_revision: 0, bio: String::new(), profile_revision: 0,
+        }).unwrap();
+        let dht = FakeDhtClient::new_arc();
+        let mut kps = Vec::new();
+        for node in [&bob, &carol] {
+            let records = node.stash.ensure_stash_full(&node.provider, &node.ipk_signer).unwrap();
+            dht.publish_keypackages(&records[..1], crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+            kps.push(fetch_verified_keypackage(&alice.ctx(dht.as_ref()), &node.ipk, true).await.unwrap());
+        }
+        let (leaf, credential) = build_self_credential(&alice.ipk_signer).unwrap();
+        leaf.store(alice.provider.storage()).unwrap();
+        let gid = [0xDD; 32];
+        let meta = crate::mls::GroupMeta { title: "Sharing".into(), founder: alice.ipk };
+        let mut group = MlsGroupHandle::create(&alice.provider, &leaf, credential, &gid, Some(&meta)).unwrap();
+        let (_, welcome) = group.add_members(&alice.provider, &leaf,
+            &kps.iter().map(|(kp, _)| kp.clone()).collect::<Vec<_>>()).unwrap();
+        let envelope = make_welcome_envelope(welcome, gid, alice.ipk, bob.ipk, kps[0].1, &alice.ipk_signer).unwrap();
+        process_welcome(&bob.provider, &envelope).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let conversation = Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk, carol.ipk]).unwrap();
+        Conversation::bind_group(&conversation, &gid).unwrap();
+        let previous = group.epoch();
+        let commit = group.self_update(&alice.provider, &leaf).unwrap();
+        group.merge_pending_commit(&alice.provider).unwrap();
+        let did = crate::data::message::next_dispatch_id();
+        let file_id = [0xDE; 32];
+        let post = AppPayload::Post { reply_to: None, body: Body::Attachment {
+            caption: "file".into(), group_id: None, mime: "application/octet-stream".into(),
+            name: "file.bin".into(), size: 1, thumb: vec![], file_id,
+        }};
+        let mut recipients = vec![bob.ipk, carol.ipk];
+        recipients.sort_unstable();
+        let offer = common::proto::mls_wire::AttachmentSharing {
+            message_id: did, file_id, size: 1,
+            expires_at: crate::utils::systime().as_secs() + 3600, recipients: recipients.clone(),
+        };
+        // Seal in production order but deliver the control first. Bob forwards
+        // Alice's envelopes: the MLS leaf, not the carrier, must own the grant.
+        let sealed_post = seal_application_message(&alice.ctx(dht.as_ref()), &mut group, &leaf, &post.ser().unwrap()).unwrap();
+        let sealed_grant = seal_application_message(&alice.ctx(dht.as_ref()), &mut group, &leaf,
+            &AppPayload::AttachmentSharing(offer.clone()).ser().unwrap()).unwrap();
+        for (sealed, dispatch) in [(sealed_grant, crate::data::message::next_dispatch_id()), (sealed_post, did)] {
+            let bytes = sealed.address_to(&bob.ipk, &bob.ipk_signer).unwrap();
+            let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("application") };
+            assert!(matches!(process_application_inbound_for(&bob.ctx(dht.as_ref()), bob.ipk, &bob.ipk,
+                env, 123_000, dispatch).unwrap(), InboundDecoded::ApplicationBuffered));
+        }
+        assert!(crate::data::media::get(&conversation, &did).unwrap().is_none());
+        let bytes = SealedMessage::from_mls_out(&commit, gid, previous).unwrap()
+            .address_to(&bob.ipk, &alice.ipk_signer).unwrap();
+        let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&bytes).unwrap() else { panic!("commit") };
+        process_application_inbound_for(&bob.ctx(dht.as_ref()), alice.ipk, &bob.ipk,
+            env, 124_000, crate::data::message::next_dispatch_id()).unwrap();
+        assert_eq!(crate::data::media::get(&conversation, &did).unwrap().unwrap().file_id, Some(file_id.to_vec()));
+        let stored: (Vec<u8>, Vec<u8>, Vec<u8>) = crate::db::messages::MESSAGES_DB.lock().query_row(
+            "SELECT author,group_id,recipients FROM attachment_sharing WHERE conversation_id=?1 AND message_id=?2",
+            (conversation.as_slice(), did.as_slice()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(stored.0, alice.ipk);
+        assert_eq!(stored.1, gid);
+        assert_eq!(postcard::from_bytes::<Vec<[u8; 32]>>(&stored.2).unwrap(), recipients);
+    }
+
     /// Run in a child process so the real persistence/notification path can use
     /// its global DB without racing other tests' PROMTUZ_DATA_DIR or event sink.
     #[tokio::test(flavor = "current_thread")]

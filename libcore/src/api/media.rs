@@ -5,6 +5,13 @@ use crate::api::messaging::to_fid32;
 use crate::api::messaging::to_conv16;
 use crate::platform::CoreError;
 
+/// Eligibility for recipient uploads only. Unknown/lost/metered networks
+/// must report false; this never restricts the original sender's transfers.
+#[uniffi::export]
+pub fn set_attachment_sharing_network(unmetered_wifi: bool) {
+    crate::transfer::sharing::set_network(unmetered_wifi);
+}
+
 /// Process-local debug evidence, deliberately separate from ordinary media
 /// cards. Events contain fixed categories only, without peer/file identifiers.
 #[derive(uniffi::Record)]
