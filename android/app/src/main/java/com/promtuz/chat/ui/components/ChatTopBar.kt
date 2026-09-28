@@ -167,7 +167,13 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (isGroup) GroupAvatar(title = rawTitle, members = memberNames.values.toList(), size = 40.dp, conversation = chatVM.conversationHex)
+                if (isGroup) GroupAvatar(
+                    title = rawTitle, members = memberNames.values.toList(), size = 40.dp,
+                    conversation = chatVM.conversationHex,
+                    onPhotoClick = { image ->
+                        MediaViewer.open(listOf(pictureItem("group:${chatVM.conversationHex}", image, name)))
+                    },
+                )
                 else {
                     val peerHex = summary?.peerHex
                     val avatar = rememberAvatar(peerHex)

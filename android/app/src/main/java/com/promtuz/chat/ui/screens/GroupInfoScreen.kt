@@ -4,6 +4,7 @@ import com.promtuz.chat.utils.extensions.fromHex
 import kotlinx.coroutines.launch
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -126,7 +127,10 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     val direction = LocalLayoutDirection.current
     val colors = MaterialTheme.colorScheme
 
-    SimpleScreen({ Text("Group info") }, actions = {
+    ProfileScaffold(name = displayName.ifBlank { "Group" }, photo = { size ->
+        GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = size, conversation = conversation,
+            onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
+    }, actions = {
         if (canManage && conversation != null) AppDropMenu(
             anchor = { DrawableIcon(com.promtuz.chat.R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Group options") },
             groups = listOf(buildList {
@@ -156,9 +160,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 item {
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = 88.dp, conversation = conversation,
-                            onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
-                        Text(displayName.ifBlank { "Group" }, style = MaterialTheme.typography.headlineSmall)
                         Text(memberTally(active.size), color = colors.onSurfaceVariant)
                         if (canManage) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
                             Text("Edit group name")
@@ -181,18 +182,26 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     }
                 }
                 if (media > 0 && conversation != null) item {
-                    ListItem(headlineContent = { Text("Shared media") }, supportingContent = { Text("$media attachments") },
+                    ListItem(headlineContent = { Text("Shared media") }, supportingContent = { Text(if (media == 1) "1 attachment" else "$media attachments") },
                         modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
                 }
                 items(active, key = { it.ipkHex }) { member ->
-                    GroupMemberRow(member, !busy) { person = member }
+                    GroupMemberRow(member, !busy,
+                        onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
+                            else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
+                        onLongClick = { person = member },
+                    )
                 }
                 if (past.isNotEmpty()) {
                     item { TextButton(onClick = { showPast = !showPast }, modifier = Modifier.padding(horizontal = 12.dp)) {
                         Text(if (showPast) "Hide past members" else "Past members (${past.size})")
                     } }
                     if (showPast) items(past, key = { "past:${it.ipkHex}" }) { member ->
-                        GroupMemberRow(member, !busy) { person = member }
+                        GroupMemberRow(member, !busy,
+                            onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
+                                else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
+                            onLongClick = { person = member },
+                        )
                     }
                 }
                 item {
@@ -291,19 +300,19 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
 }
 
 @Composable
-private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Unit) {
+private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         leadingContent = {
             val avatar = rememberAvatar(member.ipkHex)
             Avatar(
                 member.name, size = 44.dp, image = avatar, identityKey = member.ipkHex, originKey = "avatar-${member.ipkHex}",
-                onClick = avatar?.let { { MediaViewer.open(listOf(pictureItem("avatar-${member.ipkHex}", it, member.name))) } },
+                onClick = onClick.takeIf { enabled },
             )
         },
         supportingContent = if (!member.active) {{ Text("Past member") }} else null,
         trailingContent = if (member.admin && member.active) {{ Text("Admin", color = MaterialTheme.colorScheme.onSurfaceVariant) }} else null,
-        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier.combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onLongClick),
     )
 }
 

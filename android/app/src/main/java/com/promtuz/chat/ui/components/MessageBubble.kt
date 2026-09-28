@@ -60,7 +60,6 @@ import kotlin.math.ceil
 import com.promtuz.chat.domain.model.MessageContent
 import androidx.compose.ui.text.font.FontWeight
 import com.promtuz.chat.domain.model.Quote
-import kotlin.math.absoluteValue
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -133,6 +132,7 @@ fun MessageBubble(
     onMediaTap: ((String) -> Unit)? = null,
     onDownload: ((String) -> Unit)? = null,
     onOpen: ((String) -> Unit)? = null,
+    onSenderClick: (() -> Unit)? = null,
     peerName: String = "",
 ) {
     val appearance = LocalChatAppearance.current
@@ -141,6 +141,7 @@ fun MessageBubble(
     // Name the author only in a group, only on an incoming message, and only
     // at the head of a run — the rest of the run is visibly the same person.
     val showSender = msg.senderName != null && !outgoing && !mergedTop
+    val groupIncoming = msg.senderName != null && !outgoing
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
     val haptic = LocalHapticFeedback.current
@@ -194,6 +195,16 @@ fun MessageBubble(
             .padding(horizontal = 12.dp),
         contentAlignment = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
+        if (groupIncoming && !mergedBottom) {
+            Box(Modifier.align(Alignment.BottomStart)) {
+                Avatar(
+                    msg.senderName.orEmpty(), size = 30.dp,
+                    identityKey = msg.senderHex ?: msg.senderName.orEmpty(),
+                    image = com.promtuz.chat.utils.media.rememberAvatar(msg.senderHex),
+                    onClick = onSenderClick,
+                )
+            }
+        }
         Layout(
             content = {
                 // Only the first bubble of a run is labelled — repeating the
@@ -202,6 +213,7 @@ fun MessageBubble(
                     SenderLabel(
                         msg.senderName ?: "Unknown",
                         msg.senderHex,
+                        onClick = onSenderClick,
                         modifier = if (bleeds)
                             Modifier.padding(start = BubblePadH, end = BubblePadH, top = BubblePadV)
                         else Modifier,
@@ -273,6 +285,7 @@ fun MessageBubble(
                 MetaRow(msg, textColor, metaOnMedia, pill = if (bare && !metaOnMedia) bubbleColor else null)
             },
             modifier = Modifier
+                .then(if (groupIncoming) Modifier.padding(start = 40.dp) else Modifier)
                 .typingMorphSurface(shape, bubbleColor, textColor, enabled = !bare)
                 // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
                 // the .clip below. Both clip to the node's rectangular bounds, which would
@@ -781,14 +794,14 @@ private fun MessageBubbleMergedPreview() {
  * across the conversation without anyone assigning one.
  */
 @Composable
-private fun SenderLabel(name: String, key: String?, modifier: Modifier = Modifier) {
+private fun SenderLabel(name: String, key: String?, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val palette = LocalChatColors.current.senderPalette
     val color = remember(key, palette) {
-        palette[((key?.hashCode() ?: 0).absoluteValue) % palette.size]
+        palette[Math.floorMod(key?.hashCode() ?: 0, palette.size)]
     }
     Text(
         name,
-        modifier = modifier.padding(bottom = 2.dp),
+        modifier = modifier.then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier).padding(bottom = 2.dp),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.SemiBold,
         color = color,

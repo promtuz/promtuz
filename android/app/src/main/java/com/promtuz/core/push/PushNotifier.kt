@@ -43,7 +43,6 @@ import com.promtuz.chat.data.NotifBuzz
 import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
-import com.promtuz.chat.utils.media.decodeAvatar
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CancellationException
@@ -281,6 +280,8 @@ object PushNotifier {
             .build()
 
         val isGroup = groupConvs.contains(convHex)
+        val authors = if (isGroup) senderNames + CoreBridge.members(conv).associate { it.ipk.toHex() to it.name }
+                      else senderNames
         val newest = recent.last().timestamp.toLong()
         val mode = ChatPrefs.notifBuzz
         val alertThisChat = pending.isNotEmpty()
@@ -302,7 +303,7 @@ object PushNotifier {
         val snapshot = ChatSnapshot(displayName, n, isGroup, ChatPrefs.notifPreview, mode,
             recent.map { message ->
                 LineSnapshot(message.id, message.content, message.mediaKind.toInt(), message.timestamp,
-                    message.senderIpk?.toHex()?.let(senderNames::get), images[message.id])
+                    message.senderIpk?.toHex()?.let(authors::get), images[message.id])
             })
         if (!alertThisChat && rendered[convHex] == snapshot) return
         val silent = when (mode) {
@@ -329,8 +330,9 @@ object PushNotifier {
             .setContentIntent(openChat(convHex, displayName)) // peer rides in the extras even when hidden
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
-            // Their own picture for a direct chat, when they told us one; initials otherwise, like the app.
-            val avatar = (if (isGroup) null else peerAvatar(conv)) ?: letterAvatar(displayName, CoreBridge.conversation(conv)?.peer?.toHex() ?: convHex)
+            val identity = CoreBridge.conversation(conv)?.peer?.toHex() ?: convHex
+            val avatar = notificationAvatar(if (isGroup) "group:$convHex" else identity)
+                ?: letterAvatar(displayName, identity)
             val avatarIcon = IconCompat.createWithBitmap(avatar)
             chat.setLargeIcon(avatar)
             val them = Person.Builder().setName(displayName).setKey(convHex).setIcon(avatarIcon).build()
@@ -356,9 +358,13 @@ object PushNotifier {
                 .setConversationTitle(displayName.takeIf { isGroup })
                 .setGroupConversation(isGroup)
             recent.forEach { m ->
-                val who = m.senderIpk?.toHex()?.let { senderNames[it] }
-                val author = if (!isGroup || who == null) them
-                             else Person.Builder().setName(who).setKey(who).build()
+                val sender = m.senderIpk?.toHex()
+                val who = sender?.let { authors[it] ?: it.take(8) }
+                val author = if (!isGroup || sender == null) them
+                             else Person.Builder().setName(who).setKey(sender).apply {
+                                 setIcon(IconCompat.createWithBitmap(notificationAvatar(sender)
+                                     ?: letterAvatar(who.orEmpty(), sender)))
+                             }.build()
                 val line = m.content.ifEmpty { mediaLabel(m.mediaKind.toInt()) }
                 val message = NotificationCompat.MessagingStyle.Message(line, m.timestamp.toLong() * 1000, author)
                 images[m.id]?.let { message.setData("image/png", it) }
@@ -466,16 +472,9 @@ object PushNotifier {
     internal fun cancelChat(context: Context, convHex: String) =
         NotificationManagerCompat.from(context).cancel(notifId(convHex))
 
-    /** Colored initials avatar — contacts carry no photo, so this mirrors the in-app letter avatar
-     *  (a distinguishing hue per name beats the system's flat-gray fallback). */
-    /**
-     * The peer's picture for a direct chat's notification, rounded to match the
-     * initials tile. Null when we hold none for them, or the chat has no single peer.
-     */
-    private suspend fun peerAvatar(conv: ByteArray, px: Int = 128): Bitmap? {
-        val peer = runCatching { CoreBridge.conversation(conv)?.peer }.getOrNull() ?: return null
-        val bytes = runCatching { CoreBridge.avatarOf(peer) }.getOrNull() ?: return null
-        val src = decodeAvatar(bytes)?.asAndroidBitmap() ?: return null
+    /** Share the app's contact/group photo cache, rounded for Android's conversation icon. */
+    private suspend fun notificationAvatar(key: String, px: Int = 128): Bitmap? {
+        val src = com.promtuz.chat.utils.media.AvatarImages.load(key)?.asAndroidBitmap() ?: return null
         val scaled = Bitmap.createScaledBitmap(src, px, px, true)
         val out = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

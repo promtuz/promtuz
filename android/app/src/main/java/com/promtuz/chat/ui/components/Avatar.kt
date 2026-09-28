@@ -116,10 +116,11 @@ fun GroupAvatar(
     clipRatio: Float = AVATAR_RADIUS_RATIO,
     conversation: String? = null,
     onClick: (() -> Unit)? = null,
+    onPhotoClick: ((ImageBitmap) -> Unit)? = null,
 ) {
     val image = com.promtuz.chat.utils.media.rememberAvatar(conversation?.let { "group:$it" })
     if (image != null) {
-        Avatar(title, size, clipRatio, image = image, onClick = onClick,
+        Avatar(title, size, clipRatio, image = image, onClick = onPhotoClick?.let { { it(image) } } ?: onClick,
             originKey = conversation?.let { "group:$it" }, identityKey = conversation ?: title)
         return
     }

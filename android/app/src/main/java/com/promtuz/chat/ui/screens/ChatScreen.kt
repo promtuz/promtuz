@@ -340,6 +340,9 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                         { packSheet = s.sticker }
                                     },
                                     peerName = name,
+                                    onSenderClick = chatRow.msg.senderHex?.takeIf { isGroup }?.let { peer ->
+                                        { appVM.navigator.push(Routes.PersonInfo(peer, chatRow.msg.senderName.orEmpty())) }
+                                    },
                                     onDoubleTap = when {
                                         !actionable -> null
                                         interaction.doubleTapAction == DoubleTapAction.React ->

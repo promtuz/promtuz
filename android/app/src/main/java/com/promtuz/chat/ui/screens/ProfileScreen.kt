@@ -30,7 +30,6 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import org.koin.compose.koinInject
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.MenuAction
-import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
 
@@ -58,47 +57,45 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
     val chooseLabel = stringResource(R.string.profile_photo_choose)
     val removeLabel = stringResource(R.string.profile_photo_remove)
 
-    SimpleScreen({ Text("Profile") }) { padding ->
+    com.promtuz.chat.ui.components.ProfileScaffold(name = profile.name, photo = { size ->
+        val tile: @Composable (onClick: (() -> Unit)?) -> Unit = { onClick ->
+            Box(Modifier.semantics { contentDescription = editLabel }) {
+                Avatar(profile.name, size = size, identityKey = profile.identity, image = profile.picture, onClick = onClick, originKey = "profile-photo")
+                Box(
+                    Modifier.align(Alignment.BottomEnd).size(size * 0.27f).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (busy) CircularProgressIndicator(
+                        Modifier.size(size * 0.15f), color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp,
+                    ) else Icon(
+                        painterResource(R.drawable.oi_camera), null, Modifier.size(size * 0.15f),
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+            }
+        }
+        val picture = profile.picture
+        if (picture != null && !busy) tile {
+            MediaViewer.open(listOf(pictureItem("profile-photo", picture, profile.name, actions = listOf(
+                listOf(MenuAction(chooseLabel, R.drawable.oi_image) { MediaViewer.close(); choose() }),
+                listOf(MenuAction(removeLabel, R.drawable.oi_trash, destructive = true) {
+                    MediaViewer.close(); viewModel.removePicture()
+                }),
+            ))))
+        } else tile(if (busy) null else choose)
+    }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = 18.dp, end = 18.dp,
-                top = padding.calculateTopPadding() + 20.dp,
+                top = padding.calculateTopPadding() + 8.dp,
                 bottom = padding.calculateBottomPadding() + 24.dp,
             ),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item {
-                val tile: @Composable (onClick: (() -> Unit)?) -> Unit = { onClick ->
-                    Box(Modifier.semantics { contentDescription = editLabel }) {
-                        Avatar(profile.name, size = 96.dp, identityKey = profile.identity, image = profile.picture, onClick = onClick, originKey = "profile-photo")
-                        Box(
-                            Modifier.align(Alignment.BottomEnd).size(30.dp).clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (busy) CircularProgressIndicator(
-                                Modifier.size(16.dp), color = MaterialTheme.colorScheme.onPrimary,
-                                strokeWidth = 2.dp,
-                            ) else Icon(
-                                painterResource(R.drawable.oi_camera), null, Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        }
-                    }
-                }
-                val picture = profile.picture
-                if (picture != null && !busy) tile {
-                    MediaViewer.open(listOf(pictureItem("profile-photo", picture, profile.name, actions = listOf(
-                        listOf(MenuAction(chooseLabel, R.drawable.oi_image) { MediaViewer.close(); choose() }),
-                        listOf(MenuAction(removeLabel, R.drawable.oi_trash, destructive = true) {
-                            MediaViewer.close(); viewModel.removePicture()
-                        }),
-                    ))))
-                } else tile(if (busy) null else choose)
-            }
-            item { Text(profile.name, style = MaterialTheme.typography.titleLargeEmphasized) }
             item {
                 if (profile.bio.isNotBlank()) Text(profile.bio, style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)

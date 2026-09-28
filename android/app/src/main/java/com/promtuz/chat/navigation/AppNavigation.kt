@@ -80,6 +80,7 @@ fun AppNavigation(
             entry<Routes.MessageRequests> { com.promtuz.chat.ui.screens.MessageRequestsScreen() }
             entry<Routes.PrivacySettings> { com.promtuz.chat.ui.screens.PrivacySettingsScreen() }
             entry<Routes.ContactInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(key.conversation, key.peer) }
+            entry<Routes.PersonInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(null, key.peer, key.name) }
             entry<Routes.SharedMedia> { key -> com.promtuz.chat.ui.screens.SharedMediaScreen(key.conversation, key.name) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.ShareIdentity> {

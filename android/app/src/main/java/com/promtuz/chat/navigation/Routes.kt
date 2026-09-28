@@ -46,6 +46,9 @@ object Routes : NavKey {
     data class ContactInfo(val conversation: String, val peer: String) : NavKey
 
     @Serializable
+    data class PersonInfo(val peer: String, val name: String) : NavKey
+
+    @Serializable
     data class SharedMedia(val conversation: String, val name: String) : NavKey
 
     @Serializable
