@@ -78,11 +78,13 @@ import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.STAGED_ATTACHMENT
 import com.promtuz.chat.domain.model.STAGED_IMAGE
 import com.promtuz.chat.domain.model.acceptsStaged
+import com.promtuz.chat.navigation.LocalNavForeground
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ComposerAction
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.chatBarHaze
+import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.util.freezeOnExit
 import com.promtuz.chat.utils.media.StickerImages
 import dev.chrisbanes.haze.HazeState
@@ -129,6 +131,15 @@ fun ChatBottomBar(
     // Hold the panel until the keyboard covers it when restoring input.
     var closingToKeyboard by remember { mutableStateOf(false) }
     val field = remember { EmojiFieldController() }
+    val inputActive = LocalNavForeground.current && MediaViewer.session == null
+    DisposableEffect(field, inputActive) {
+        onDispose {
+            // Navigation retains the outgoing chat for its animation; the viewer retains it
+            // underneath the overlay. End native input as soon as the chat loses the foreground.
+            // Compose's keyboard controller cannot hide an AndroidView editor's IME.
+            if (inputActive) field.clearFocus()
+        }
+    }
     val imeVisible = WindowInsets.isImeVisible
     var restoreKeyboard by remember { mutableStateOf(false) }
     val open = { panel: ComposerPanelKind ->

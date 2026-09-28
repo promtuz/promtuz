@@ -29,12 +29,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 @Stable
 class EmojiFieldController {
     internal var editor: EmojiEditText? = null
+    private var keyboardRequest = 0
 
     fun showKeyboard() {
+        val request = ++keyboardRequest
         editor?.let { view ->
             view.requestFocus()
             view.post {
-                if (view.isAttachedToWindow && view.hasFocus()) {
+                if (request == keyboardRequest && editor === view && view.isAttachedToWindow && view.hasFocus()) {
                     view.context.getSystemService(InputMethodManager::class.java)
                         .showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
                 }
@@ -43,6 +45,8 @@ class EmojiFieldController {
     }
 
     fun hideKeyboard() {
+        // A panel may have queued a restore just before navigation dismissed the composer.
+        ++keyboardRequest
         editor?.let { view ->
             view.context.getSystemService(InputMethodManager::class.java)
                 .hideSoftInputFromWindow(view.windowToken, 0)
