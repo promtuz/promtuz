@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -27,6 +28,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.text.LocalMessageLinkGestures
+import com.promtuz.chat.ui.text.MessageLinkGestures
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -54,6 +57,7 @@ fun SwipeToReply(
     val clampPx = with(density) { 80.dp.toPx() }
     val commitPx = with(density) { 50.dp.toPx() }
     val accent = LocalChatColors.current.accent
+    val linkGestures = remember { MessageLinkGestures() }
 
     Box(modifier.fillMaxWidth()) {
         DrawableIcon(
@@ -81,6 +85,7 @@ fun SwipeToReply(
                     // list's scroll never loses a frame to this gesture.
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        if (linkGestures.owns(down)) return@awaitEachGesture
                         var dx = 0f
                         var dy = 0f
                         val slop = viewConfiguration.touchSlop
@@ -133,6 +138,8 @@ fun SwipeToReply(
                         }
                     }
                 },
-        ) { content() }
+        ) {
+            CompositionLocalProvider(LocalMessageLinkGestures provides linkGestures) { content() }
+        }
     }
 }

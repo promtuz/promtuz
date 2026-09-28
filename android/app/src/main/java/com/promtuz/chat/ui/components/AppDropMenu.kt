@@ -12,8 +12,14 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.Indication
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +50,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -81,6 +89,7 @@ val MenuIconSize = 24.dp
  *
  * Tap the anchor -> menu opens and stays for normal tapping.
  * Press-and-drag -> hover items, release over one to pick it, release anywhere else to cancel.
+ * With [onClick], a short tap performs that action; hold to open the same menu and drag-select.
  */
 @Composable
 fun AppDropMenu(
@@ -93,6 +102,10 @@ fun AppDropMenu(
     offset: DpOffset = DpOffset(0.dp, 0.dp),
     shape: Shape = RoundedCornerShape(20.dp),
     iconSize: Dp = MenuIconSize,
+    onClick: (() -> Unit)? = null,
+    onClickLabel: String? = null,
+    onLongClickLabel: String? = null,
+    indication: Indication? = LocalIndication.current,
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
@@ -101,7 +114,9 @@ fun AppDropMenu(
             ?.isTouchExplorationEnabled == true
     }
     val haptic = LocalHapticFeedback.current
-    val flat = remember(groups) { groups.flatten() }
+    val flat by rememberUpdatedState(groups.flatten())
+    val click by rememberUpdatedState(onClick)
+    val pressSource = remember { MutableInteractionSource() }
 
     var expanded by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
@@ -116,7 +131,7 @@ fun AppDropMenu(
     Box(modifier) {
         Box(
             Modifier
-                .pointerInput(groups, dragSelect, touchExploration) {
+                .pointerInput(onClick != null, dragSelect, touchExploration, itemHeight, verticalPadding, offset) {
                     val itemPx = itemHeight.toPx()
                     val vpadPx = verticalPadding.toPx()
                     val offX = offset.x.toPx()
@@ -139,9 +154,44 @@ fun AppDropMenu(
                     }
 
                     awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val longPressOnly = click != null
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = if (longPressOnly) PointerEventPass.Initial else PointerEventPass.Main,
+                        )
                         if (!vis.isIdle) { down.consume(); return@awaitEachGesture } // ignore spam mid-animation
                         if (expanded) { close(); down.consume(); return@awaitEachGesture }
+                        if (longPressOnly) {
+                            // Own the touch stream before the clickable below or a parent
+                            // bubble sees it. Clickable still supplies keyboard/accessibility
+                            // actions and draws feedback from this shared interaction source.
+                            down.consume()
+                            val press = PressInteraction.Press(down.position)
+                            pressSource.tryEmit(press)
+                            var released = false
+                            try {
+                                awaitPointerEvent(PointerEventPass.Final)
+                                val held = awaitLongPressOrCancellation(down.id)
+                                if (held == null) {
+                                    val up = currentEvent.changes.firstOrNull { it.id == down.id }
+                                    if (up != null && !up.pressed && !up.isConsumed &&
+                                        (up.position - down.position).getDistance() <= viewConfiguration.touchSlop
+                                    ) {
+                                        up.consume()
+                                        pressSource.tryEmit(PressInteraction.Release(press))
+                                        released = true
+                                        click?.invoke()
+                                    }
+                                    return@awaitEachGesture
+                                }
+                                if ((held.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                                    return@awaitEachGesture
+                                }
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            } finally {
+                                if (!released) pressSource.tryEmit(PressInteraction.Cancel(press))
+                            }
+                        }
                         expanded = true; dragging = false; hovered = -1
                         if (!dragSelect || touchExploration) { tapHeld = true; return@awaitEachGesture }
 
@@ -172,6 +222,15 @@ fun AppDropMenu(
                         }
                     }
                 }
+                .then(if (onClick == null) Modifier else Modifier.combinedClickable(
+                    interactionSource = pressSource,
+                    indication = indication,
+                    role = Role.Button,
+                    onClickLabel = onClickLabel,
+                    onLongClickLabel = onLongClickLabel,
+                    onLongClick = { expanded = true; tapHeld = true },
+                    onClick = { click?.invoke() },
+                ))
         ) { anchor() }
 
         if (vis.currentState || vis.targetState) {

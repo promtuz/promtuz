@@ -501,7 +501,7 @@ private fun Caption(
     val inline = mapOf(
         "meta" to InlineTextContent(Placeholder(metaWidth, metaHeight, PlaceholderVerticalAlign.TextBottom)) {}
     )
-    EmojiText(
+    com.promtuz.chat.ui.text.MessageText(
         annotated,
         // A bleeding media block waives the bubble's inset, so the caption puts it
         // back for itself — and the meta lands in the gap the placeholder reserves.

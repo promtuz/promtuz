@@ -24,7 +24,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import com.promtuz.chat.ui.text.EmojiText
+import com.promtuz.chat.ui.text.MessageText
+import com.promtuz.chat.ui.text.MessageLinkGestures
+import com.promtuz.chat.ui.text.LocalMessageLinkGestures
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -188,6 +193,7 @@ fun MessageBubble(
     // bubble, real weight on every bubble birth. The width cap is applied inside
     // the bubble Layout's own measure from its incoming constraints.
     val widthFraction = appearance.layout.maxWidthFraction
+    val linkGestures = LocalMessageLinkGestures.current ?: remember { MessageLinkGestures() }
     Box(
         modifier
             .fillMaxWidth()
@@ -231,42 +237,44 @@ fun MessageBubble(
                 // One content child in a fixed slot: the bubble Layout hardcodes child
                 // indices, so a deleted-or-text bubble and a media bubble must emit exactly
                 // one measurable here. The meta corner is reserved inside each variant.
-                val content = msg.content
-                when {
-                    msg.deleted || content is MessageContent.Text ->
-                        BubbleText(
-                            msg, textColor,
-                            appearance.type.fontScale * (if (jumboEmoji) JumboEmojiScale else 1f),
-                        ) { coords.text = it }
-                    content is MessageContent.Image ->
-                        ImageBlock(
-                            content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
-                            originKey = msg.dispatchIdHex,
-                            onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
-                        )
-                    content is MessageContent.Album ->
-                        AlbumBlock(
-                            content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
-                            onOpen = onMediaTap,
-                        )
-                    content is MessageContent.Attachment && tile ->
-                        MediaTileBlock(
-                            content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), outgoing,
-                            originKey = msg.dispatchIdHex, onDownload = onDownload,
-                            onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
-                        )
-                    content is MessageContent.Attachment ->
-                        AttachmentBlock(
-                            content, textColor, appearance.type.fontScale,
-                            BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
-                        )
-                    content is MessageContent.Voice ->
-                        VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
-                    content is MessageContent.Sticker ->
-                        StickerBlock(content, textColor)
+                CompositionLocalProvider(LocalMessageLinkGestures provides linkGestures) {
+                    val content = msg.content
+                    when {
+                        msg.deleted || content is MessageContent.Text ->
+                            BubbleText(
+                                msg, textColor,
+                                appearance.type.fontScale * (if (jumboEmoji) JumboEmojiScale else 1f),
+                            ) { coords.text = it }
+                        content is MessageContent.Image ->
+                            ImageBlock(
+                                content, textColor, appearance.type.fontScale,
+                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                originKey = msg.dispatchIdHex,
+                                onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
+                            )
+                        content is MessageContent.Album ->
+                            AlbumBlock(
+                                content, textColor, appearance.type.fontScale,
+                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                onOpen = onMediaTap,
+                            )
+                        content is MessageContent.Attachment && tile ->
+                            MediaTileBlock(
+                                content, textColor, appearance.type.fontScale,
+                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                originKey = msg.dispatchIdHex, onDownload = onDownload,
+                                onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
+                            )
+                        content is MessageContent.Attachment ->
+                            AttachmentBlock(
+                                content, textColor, appearance.type.fontScale,
+                                BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
+                            )
+                        content is MessageContent.Voice ->
+                            VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
+                        content is MessageContent.Sticker ->
+                            StickerBlock(content, textColor)
+                    }
                 }
 
                 if (msg.reactions.isNotEmpty()) {
@@ -307,6 +315,7 @@ fun MessageBubble(
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             coords.longPressed = false
+                            if (linkGestures.owns(down)) return@awaitEachGesture
                             if (menuState?.isOpen == true) return@awaitEachGesture
                             val press =
                                 awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
@@ -524,11 +533,11 @@ private fun BubbleText(
     val text = BubbleTextLayouts.contentOf(msg)
 
     val base = MaterialTheme.typography.bodyLarge
-    EmojiText(
-        text,
+    MessageText(
+        AnnotatedString(text),
         Modifier.fadeOnChange(text),
-        style = base.copy(fontSize = base.fontSize * fontScale, color = color),
-        fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal,
+        style = base.copy(fontSize = base.fontSize * fontScale, color = color,
+            fontStyle = if (msg.deleted) FontStyle.Italic else FontStyle.Normal),
         color = color,
         onTextLayout = onLayout,
     )
