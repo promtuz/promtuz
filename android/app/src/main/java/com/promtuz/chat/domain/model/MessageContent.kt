@@ -103,6 +103,22 @@ fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
 /** What a [MessageContent.System] row is narrating. */
 enum class SystemEventKind { Added, Left, Removed, Titled }
 
+/**
+ * A system row as core stores it. [target] is a member's hex for the membership
+ * events and the new name for a rename; [names] maps member hex to what to call them.
+ */
+fun systemContent(code: Int, actorHex: String?, target: String, names: Map<String, String>) =
+    MessageContent.System(
+        event = when (code) {
+            1 -> SystemEventKind.Added
+            2 -> SystemEventKind.Left
+            3 -> SystemEventKind.Removed
+            else -> SystemEventKind.Titled
+        },
+        actor = actorHex?.let { names[it] } ?: "Someone",
+        target = if (code == 4) target else names[target] ?: "someone",
+    )
+
 /** One member of an [MessageContent.Album], still addressable by its own id. */
 @Immutable
 data class AlbumItem(val dispatchIdHex: String, val content: MessageContent)

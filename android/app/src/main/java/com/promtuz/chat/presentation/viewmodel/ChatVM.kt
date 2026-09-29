@@ -12,7 +12,7 @@ import com.promtuz.chat.domain.model.acceptsStaged
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.AlbumItem
 import com.promtuz.chat.domain.model.MessageContent
-import com.promtuz.chat.domain.model.SystemEventKind
+import com.promtuz.chat.domain.model.systemContent
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
@@ -902,18 +902,7 @@ private fun MessageRecord.toUi(
                 .takeIf { content.startsWith("answered:") },
             missed = content == "missed",
         )
-        // A system row's `content` carries its target: a member's hex for the
-        // membership events, the new name for a rename.
-        system.toInt() != 0 -> MessageContent.System(
-            event = when (system.toInt()) {
-                1 -> SystemEventKind.Added
-                2 -> SystemEventKind.Left
-                3 -> SystemEventKind.Removed
-                else -> SystemEventKind.Titled
-            },
-            actor = senderHex?.let { memberNames[it] } ?: "Someone",
-            target = if (system.toInt() == 4) content else memberNames[content] ?: "someone",
-        )
+        system.toInt() != 0 -> systemContent(system.toInt(), senderHex, content, memberNames)
         albumItems.size > 1 -> MessageContent.Album(
             caption = content,
             items = albumItems.asReversed().map { did ->

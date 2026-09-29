@@ -11,10 +11,12 @@ import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.domain.model.systemContent
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.chat.security.RecoveryStore
+import com.promtuz.chat.ui.components.BubbleTextLayouts
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.chat.utils.extensions.toHex
@@ -32,6 +34,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import uniffi.core.MessageRecord
 import com.promtuz.chat.presentation.state.ConnectionState as CS
 
 class AppVM(
@@ -323,7 +326,7 @@ class AppVM(
                 kind = c.kind.toInt(),
                 peerHex = c.peer?.toHex(),
                 memberCount = c.members.size,
-                lastPreview = last?.let { if (it.system.toInt() == 5) "Call" else it.content },
+                lastPreview = last?.let { preview(c.id, it) },
                 lastMessageId = last?.id,
                 lastDispatchId = last?.dispatchId?.toHex(),
                 lastMediaKind = last?.mediaKind?.toInt() ?: 0,
@@ -331,7 +334,8 @@ class AppVM(
                 status = contact?.status?.toInt() ?: 1,
                 rejectReason = contact?.rejectReason?.toInt(),
                 unreadCount = unread[key] ?: 0,
-                lastOutgoing = last?.outgoing == true,
+                // A membership line already names who did it.
+                lastOutgoing = last?.outgoing == true && last.system.toInt() !in 1..4,
                 lastDeleted = last?.deleted == true,
                 lastStatus = last?.status?.toInt() ?: 1,
                 pinned = c.pinned,
@@ -348,4 +352,15 @@ class AppVM(
         Timber.tag(TAG).e(e, "Failed to load chats")
         emptyList()
     }
+
+    /** A membership or title line reads as it does in the chat, with names rather than keys. */
+    private suspend fun preview(conversation: ByteArray, last: MessageRecord): String =
+        when (val code = last.system.toInt()) {
+            0 -> last.content
+            5 -> "Call"
+            else -> {
+                val names = bridge.members(conversation).associate { it.ipk.toHex() to if (it.me) "You" else it.name }
+                BubbleTextLayouts.systemLine(systemContent(code, last.senderIpk?.toHex(), last.content, names))
+            }
+        }
 }
