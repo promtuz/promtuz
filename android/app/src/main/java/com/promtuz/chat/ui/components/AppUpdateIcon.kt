@@ -18,7 +18,7 @@ import org.koin.androidx.compose.koinViewModel
 fun AppUpdateIcon(onClick: () -> Unit, modifier: Modifier = Modifier, updates: UpdateVM = koinViewModel()) {
     val state by updates.state.collectAsState()
     val pending = state is UpdateState.Available || state is UpdateState.Downloading ||
-        state is UpdateState.Ready || state is UpdateState.PermissionNeeded
+        state is UpdateState.Ready || state is UpdateState.Installing || state is UpdateState.PermissionNeeded
     if (!pending) return
 
     IconButton(onClick, modifier) {

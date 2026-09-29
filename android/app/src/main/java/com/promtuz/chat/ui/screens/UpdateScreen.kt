@@ -80,7 +80,8 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
         ) {
             if (option != channel) {
                 when (state) {
-                    is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.PermissionNeeded -> pendingChannel = option
+                    is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.Installing,
+                    is UpdateState.PermissionNeeded -> pendingChannel = option
                     else -> viewModel.switchChannel(option)
                 }
             }
@@ -156,7 +157,13 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                             is UpdateState.Ready -> {
                                 UpdateTitle("Ready to install")
                                 UpdateDetail(versionLine(shown.manifest))
+                                UpdateDetail("Promtuz closes while the update installs.")
                                 UpdateAction("Install update", active) { viewModel.install(shown.manifest, shown.apk) }
+                            }
+                            is UpdateState.Installing -> {
+                                UpdateTitle("Installing update")
+                                UpdateDetail(versionLine(shown.manifest))
+                                LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
                             }
                             is UpdateState.PermissionNeeded -> {
                                 UpdateTitle("Allow installs")

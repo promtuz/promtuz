@@ -1,13 +1,14 @@
 package com.promtuz.chat.update
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import androidx.core.content.FileProvider
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.core.CoreBridge
@@ -41,6 +42,7 @@ sealed interface UpdateState {
     data class Available(val manifest: UpdateManifest) : UpdateState
     data class Downloading(val manifest: UpdateManifest, val progress: Float) : UpdateState
     data class Ready(val manifest: UpdateManifest, val apk: File) : UpdateState
+    data class Installing(val manifest: UpdateManifest, val apk: File) : UpdateState
     data class PermissionNeeded(val manifest: UpdateManifest, val apk: File) : UpdateState
     data class Error(val message: String) : UpdateState
 }
@@ -51,6 +53,7 @@ val UpdateState.offered: UpdateManifest?
         is UpdateState.Available -> manifest
         is UpdateState.Downloading -> manifest
         is UpdateState.Ready -> manifest
+        is UpdateState.Installing -> manifest
         is UpdateState.PermissionNeeded -> manifest
         else -> null
     }
@@ -184,7 +187,8 @@ class UpdateRepository(private val context: Context) {
                 if (selectedChannel != channel) return@notify
                 accept(offer)
                 if (offer == null || screenVisible || _state.value is UpdateState.Downloading ||
-                    _state.value is UpdateState.Ready || _state.value is UpdateState.PermissionNeeded) {
+                    _state.value is UpdateState.Ready || _state.value is UpdateState.Installing ||
+                    _state.value is UpdateState.PermissionNeeded) {
                     notifier.clear()
                 } else {
                     notifier.show(offer.manifest, selectedChannel, isRequired(offer.manifest))
@@ -236,7 +240,8 @@ class UpdateRepository(private val context: Context) {
         // A foreground auto-check must not stomp an update the user is already
         // downloading or about to install — the verified APK is on disk; don't send them back to "Download".
         when (_state.value) {
-            is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.PermissionNeeded -> return
+            is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.Installing,
+            is UpdateState.PermissionNeeded -> return
             else -> {}
         }
         if (checkJob?.isActive == true) return
@@ -339,14 +344,70 @@ class UpdateRepository(private val context: Context) {
             _state.value = UpdateState.PermissionNeeded(manifest, apk)
             return
         }
-        // Permission is ours — leave PermissionNeeded so a resume doesn't re-launch the installer in a loop.
-        _state.value = UpdateState.Ready(manifest, apk)
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, "application/vnd.android.package-archive")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+        if (_state.value is UpdateState.Installing) return
+        // Leaving PermissionNeeded also stops a resume from starting the install again.
+        _state.value = UpdateState.Installing(manifest, apk)
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { commitInstall(apk) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                log().w(error, "Update install did not start")
+                _state.value = UpdateState.Error("Couldn't install the update.")
+            }
+        }
+    }
+
+    /**
+     * Android 12+ installs our own update without asking. Older versions, and any
+     * install Android decides needs the user, report STATUS_PENDING_USER_ACTION to
+     * [InstallStatusReceiver], which shows Android's install screen instead. Either
+     * way Android closes the app to replace it.
+     */
+    private fun commitInstall(apk: File) {
+        val installer = context.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+            setAppPackageName(context.packageName)
+            setSize(apk.length())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+            }
+        }
+        val id = installer.createSession(params)
+        installer.openSession(id).use { session ->
+            try {
+                session.openWrite("promtuz.apk", 0, apk.length()).use { output ->
+                    apk.inputStream().use { it.copyTo(output) }
+                    session.fsync(output)
+                }
+                // Mutable so the installer can attach the result.
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+                val result = Intent(context, InstallStatusReceiver::class.java)
+                session.commit(PendingIntent.getBroadcast(context, id, result, flags).intentSender)
+            } catch (error: Exception) {
+                session.abandon()
+                throw error
+            }
+        }
+    }
+
+    /** Android's install screen takes over; the update stays ready if they back out. */
+    internal fun installNeedsConfirmation() {
+        (_state.value as? UpdateState.Installing)?.let { _state.value = UpdateState.Ready(it.manifest, it.apk) }
+    }
+
+    internal fun installFailed(status: Int, message: String?) {
+        log().w("Update install failed: $status $message")
+        val pending = _state.value
+        _state.value = when {
+            status == PackageInstaller.STATUS_FAILURE_ABORTED && pending is UpdateState.Installing ->
+                UpdateState.Ready(pending.manifest, pending.apk)
+            status == PackageInstaller.STATUS_FAILURE_ABORTED -> pending
+            status == PackageInstaller.STATUS_FAILURE_STORAGE -> UpdateState.Error("Not enough storage to install the update.")
+            else -> UpdateState.Error("Couldn't install the update.")
+        }
     }
 
     fun requestInstallPermission() {

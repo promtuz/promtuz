@@ -28,6 +28,7 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -122,6 +123,11 @@
             android:name=".ui.activities.ManageSpace"
             android:exported="false"
             android:label="@string/title_activity_manage_space" />
+
+        <!-- Update install results; sent only through our own PendingIntent. -->
+        <receiver
+            android:name="com.promtuz.chat.update.InstallStatusReceiver"
+            android:exported="false" />
 
         <!-- Message wakes and app-release hints (see push/PushService). -->
         <service

@@ -134,7 +134,14 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
                         LinearProgressIndicator({ shown.progress }, Modifier.fillMaxWidth())
                         Detail("Downloading · ${(shown.progress * 100).toInt()}% of ${formatSize(shown.manifest.size)}")
                     }
-                    is UpdateState.Ready -> Action("Install", active) { viewModel.install(shown.manifest, shown.apk) }
+                    is UpdateState.Ready -> {
+                        Detail("Promtuz closes while the update installs.")
+                        Action("Install", active) { viewModel.install(shown.manifest, shown.apk) }
+                    }
+                    is UpdateState.Installing -> {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        Detail("Installing")
+                    }
                     is UpdateState.PermissionNeeded -> {
                         Detail("Allow Promtuz to install updates in Android settings.")
                         Action("Open settings", active, viewModel::requestInstallPermission)
