@@ -215,6 +215,16 @@ impl Contact {
         )? == 1)
     }
 
+    /// They deleted our pair. The contact stays, pending the fresh pair our next
+    /// message starts; until they accept it, they are no longer confirmed.
+    pub fn unpair(ipk: &[u8; 32]) -> Result<bool> {
+        let conn = CONTACTS_DB.lock();
+        Ok(conn.execute(
+            "UPDATE contacts SET mls_group_id = NULL, status = ?1 WHERE ipk = ?2 AND status IN (?1, ?3)",
+            params![PAIR_STATUS_PENDING, ipk, PAIR_STATUS_PAIRED],
+        )? == 1)
+    }
+
     pub fn count_requests() -> u32 {
         let conn = CONTACTS_DB.lock();
         conn.query_row("SELECT COUNT(*) FROM contacts WHERE status = ?1", [PAIR_STATUS_REQUEST], |r| r.get(0))

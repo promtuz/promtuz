@@ -575,7 +575,7 @@ pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), 
 /// openmls hands the provider, while `purge_group` matches `mls_epoch_ahead`
 /// on the raw 32 bytes promtuz stores there. Making one look like the other
 /// makes it match nothing.
-fn purge_mls_group(gid: &[u8; 32]) {
+pub(crate) fn purge_mls_group(gid: &[u8; 32]) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     match crate::mls::MlsGroupHandle::load(&provider, gid) {
         Ok(Some(mut g)) =>
@@ -768,10 +768,21 @@ pub struct ContactDiag {
 /// is consumed). Best-effort — a failing store is logged and the cascade
 /// continues; partial cleanup beats aborting on stale state. Idempotent:
 /// forgetting an absent contact is success.
-#[uniffi::export]
-pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
     let ipk = to_ipk32(&ipk)?;
     let Some(contact) = Contact::get(&ipk) else { return Ok(()) };
+
+    // Their copies still queued for this pair are moot, and dropping them first
+    // keeps the notice below: sealed into the group before it goes, it tells a
+    // paired contact to start fresh, so their next message arrives as a request.
+    crate::delivery::forget_target(&ipk);
+    if contact.inner.status == crate::data::contact::PAIR_STATUS_PAIRED && contact.inner.mls_group_id.is_some()
+        && let Ok(conv) = Conversation::for_peer(&ipk)
+        && let Err(e) = crate::messaging::send_control(conv, common::proto::mls_wire::AppPayload::Unpaired).await
+    {
+        log::debug!("FORGET: could not tell them the pair ended: {e}");
+    }
 
     // Read off the contact row before anything below drops it, and cleared to
     // the same depth as a conversation delete — a re-scan of this peer's QR is
@@ -786,7 +797,6 @@ pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
             log::error!("FORGET: conversation delete failed: {e}");
         }
     }
-    crate::delivery::forget_target(&ipk);
     // Sever any live direct link so a forgotten contact can't keep talking
     // over an already-open P2P connection.
     crate::p2p::drop_link(&ipk);

@@ -62,20 +62,20 @@ pub fn accept_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
 }
 
 /// Remove the request and its chat. The requester is not told.
-#[uniffi::export]
-pub fn delete_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn delete_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
     let peer = to_ipk32(&ipk)?;
     ensure_request(&peer)?;
-    crate::api::messaging::forget_contact(ipk)
+    crate::api::messaging::forget_contact(ipk).await
 }
 
 /// Delete the request and drop anything they send us directly from now on.
-#[uniffi::export]
-pub fn block_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn block_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
     let peer = to_ipk32(&ipk)?;
     ensure_request(&peer)?;
     app_prefs::set(&blocked_key(&peer), &crate::data::peer_name::resolve(&peer))?;
-    crate::api::messaging::forget_contact(ipk)
+    crate::api::messaging::forget_contact(ipk).await
 }
 
 #[uniffi::export]

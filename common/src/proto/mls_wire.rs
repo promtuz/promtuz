@@ -242,6 +242,9 @@ pub enum AppPayload {
     /// Exact message acknowledgements with recipient-observed event times.
     /// Sent only to the original author; old clients ignore this optional control.
     ReceiptDetails(ReceiptDetails),
+    /// The sender deleted this direct chat and its pair group. The receiver drops
+    /// its copy too, so its next message starts a fresh pair. Old clients ignore it.
+    Unpaired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

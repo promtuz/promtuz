@@ -214,6 +214,11 @@ impl Conversation {
         Ok(())
     }
 
+    pub fn unbind_group(id: &[u8; 16]) -> Result<()> {
+        MESSAGES_DB.lock().execute("UPDATE conversations SET mls_group_id = NULL WHERE id = ?1", [id.as_slice()])?;
+        Ok(())
+    }
+
     /// The MLS group backing this conversation, if one has been created.
     pub fn group_of(id: &[u8; 16]) -> Option<[u8; 32]> {
         Self::get(id).and_then(|c| c.mls_group_id).and_then(|v| v.try_into().ok())

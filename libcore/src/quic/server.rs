@@ -1031,6 +1031,7 @@ async fn process_deliver(
             Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
                     crate::profile_sync::receive(conv, author, payload);
                 },
+                Ok(AppPayload::Unpaired) => crate::messaging::unpaired(conv, author),
                 Ok(AppPayload::PairAck) => {
                     // Proof-of-pair — its whole job was the mark_paired above.
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));

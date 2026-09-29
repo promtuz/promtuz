@@ -417,6 +417,29 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
     send_control(conversation, AppPayload::PairAck).await
 }
 
+/// `from` deleted our direct chat and its pair group. Drop our copy of the group
+/// but keep the history: our next message starts a fresh pair, which reaches
+/// them as a message request.
+pub(crate) fn unpaired(conversation: [u8; 16], from: [u8; 32]) {
+    let direct = Conversation::get(&conversation)
+        .is_some_and(|c| c.kind == crate::data::conversation::KIND_DIRECT);
+    let Some(gid) = Conversation::group_of(&conversation) else { return };
+    if !direct || Conversation::peer_of(&conversation) != Some(from) {
+        return;
+    }
+    match Contact::unpair(&from) {
+        Ok(true) => {},
+        Ok(false) => return,
+        Err(e) => return warn!("PAIR: could not drop the pair {} ended: {e}", hex::encode(&from[..4])),
+    }
+    if let Err(e) = Conversation::unbind_group(&conversation) {
+        warn!("PAIR: could not unbind the ended pair group: {e}");
+    }
+    crate::p2p::drop_link(&from);
+    crate::api::messaging::purge_mls_group(&gid);
+    info!("PAIR: {} deleted our chat; the next message starts a fresh pair", hex::encode(&from[..4]));
+}
+
 /// Confirm a working pair with `to`, then show them who we are. They hold our
 /// name from an invite; a requester learns it here.
 pub(crate) fn confirm_pair(to: [u8; 32]) {
@@ -1643,17 +1666,20 @@ async fn group_for_conversation<C: DhtClient>(
 
     let group = lazy_create_group(ctx, our_ipk, ipk_signer, &peer).await?;
     Conversation::bind_group(conversation, &group.group_id())?;
-    if Contact::exists(&peer) {
+    let status = Contact::status(&peer);
+    if status.is_some_and(|s| s != crate::data::contact::PAIR_STATUS_PENDING) {
         // Keep the address book's shortcut in step so pairing-era lookups agree.
         if let Err(e) = Contact::set_mls_group_id(&peer, &group.group_id()) {
             warn!("MESSAGE: persist mls_group_id failed: {e}");
         }
         return Ok(group);
     }
-    // Our first message to someone who never added us: it lands as a request,
-    // and they accept it by acknowledging the pair. Introduce ourselves before
-    // it, so the request never shows them only a key.
-    Contact::save_pending(peer, String::new())?;
+    // Our first message to someone who never added us, or who has deleted our
+    // pair since: it lands as a request, and they accept it by acknowledging the
+    // pair. Introduce ourselves before it, so the request never shows only a key.
+    if status.is_none() {
+        Contact::save_pending(peer, String::new())?;
+    }
     Contact::set_mls_group_id(&peer, &group.group_id())?;
     let gid = group.group_id();
     drop(group);
@@ -2481,6 +2507,10 @@ fn persist_drained(
 },
             Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
                 crate::profile_sync::receive(conversation, sender_ipk, payload);
+                continue;
+            },
+            Ok(AppPayload::Unpaired) => {
+                unpaired(conversation, sender_ipk);
                 continue;
             },
             Ok(p) => legacy_body(p),
@@ -3720,8 +3750,9 @@ mod tests {
     }
     /// A stranger's Welcome opens a request only while the user allows them,
     /// never a group, and nothing of ours reaches the requester until it is
-    /// accepted. Blocking drops their next Welcome. Separate process: the gate
-    /// reads the real contacts, conversations and prefs.
+    /// accepted. Only the peer can end an accepted pair. Blocking drops their
+    /// next Welcome. Separate process: the gate reads the real contacts,
+    /// conversations and prefs.
     #[tokio::test(flavor = "current_thread")]
     async fn stranger_welcome_is_a_silent_request_until_accepted() {
         const CHILD: &str = "PROMTUZ_MESSAGE_REQUEST_TEST";
@@ -3782,9 +3813,22 @@ mod tests {
         assert!(Contact::is_paired(&alice.ipk));
         assert!(!crate::requests::is_request_chat(&chat));
 
+        // Only the other member of a direct chat can end its pair.
+        let group_chat = Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk]).unwrap();
+        Conversation::bind_group(&group_chat, &[0xA4; 32]).unwrap();
+        let carol = [0xC1; 32];
+        Contact::save(carol, "Carol".into()).unwrap();
+        unpaired(group_chat, alice.ipk);
+        unpaired(chat, carol);
+        assert!(Contact::is_paired(&alice.ipk) && Contact::is_paired(&carol));
+        assert!(Conversation::group_of(&chat).is_some());
+        unpaired(chat, alice.ipk);
+        assert_eq!(Contact::status(&alice.ipk), Some(crate::data::contact::PAIR_STATUS_PENDING));
+        assert!(Conversation::group_of(&chat).is_none() && Conversation::group_of(&group_chat).is_some());
+
         let spam = welcome(&mallory, &bob.ipk, dht.as_ref(), [0xE2; 32], None).await;
         assert!(matches!(process_welcome_inbound(&ctx, mallory.ipk, spam).unwrap(), WelcomeOutcome::Accepted));
-        crate::requests::block_message_request(mallory.ipk.to_vec()).unwrap();
+        crate::requests::block_message_request(mallory.ipk.to_vec()).await.unwrap();
         assert_eq!(Contact::status(&mallory.ipk), None);
         let again = welcome(&mallory, &bob.ipk, dht.as_ref(), [0xE3; 32], None).await;
         assert!(matches!(process_welcome_inbound(&ctx, mallory.ipk, again).unwrap(), WelcomeOutcome::Dropped));
