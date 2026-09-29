@@ -378,25 +378,15 @@ pub async fn react(
 /// membership changed is still correct if one member's "X was added" line
 /// never lands; the Commit is what actually moves them.
 pub(crate) async fn announce(conversation: [u8; 16], event: SystemEvent) {
-    use crate::db::messages::SYSTEM_ADDED;
-    use crate::db::messages::SYSTEM_LEFT;
-    use crate::db::messages::SYSTEM_REMOVED;
-    use crate::db::messages::SYSTEM_TITLED;
-
     let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else { return };
-    let (code, target) = match &event {
-        SystemEvent::Added { who } => (SYSTEM_ADDED, hex::encode(who.0)),
-        SystemEvent::Left { who } => (SYSTEM_LEFT, hex::encode(who.0)),
-        SystemEvent::Removed { who } => (SYSTEM_REMOVED, hex::encode(who.0)),
-        SystemEvent::Titled { title } => (SYSTEM_TITLED, title.clone()),
-    };
+    let (code, actor, target) = system_row(&event, our_ipk);
     let did = crate::data::message::next_dispatch_id();
     let ts = crate::utils::systime().as_secs();
-    match Message::save_system(conversation, our_ipk, &did, code, &target, ts, true) {
+    match Message::save_system(conversation, actor, &did, code, &target, ts, true) {
         Ok(Some(row)) => MessageEv::Received {
             id: row.inner.id,
             conversation,
-            sender: our_ipk,
+            sender: actor,
             content: target,
             timestamp: ts,
         }
@@ -406,6 +396,23 @@ pub(crate) async fn announce(conversation: [u8; 16], event: SystemEvent) {
     }
     if let Err(e) = send_control(conversation, AppPayload::System(event)).await {
         warn!("GROUP: system event not delivered: {e}");
+    }
+}
+
+/// How a system event is stored: its code, who did it, and its target, which
+/// is a member's hex for the membership events and the new name for a rename.
+pub(crate) fn system_row(event: &SystemEvent, author: [u8; 32]) -> (u8, [u8; 32], String) {
+    use crate::db::messages::SYSTEM_ADDED;
+    use crate::db::messages::SYSTEM_LEFT;
+    use crate::db::messages::SYSTEM_REMOVED;
+    use crate::db::messages::SYSTEM_TITLED;
+    match event {
+        SystemEvent::Added { who } => (SYSTEM_ADDED, author, hex::encode(who.0)),
+        SystemEvent::AddedBy { who, by } => (SYSTEM_ADDED, by.0, hex::encode(who.0)),
+        SystemEvent::Left { who } => (SYSTEM_LEFT, author, hex::encode(who.0)),
+        SystemEvent::Removed { who } => (SYSTEM_REMOVED, author, hex::encode(who.0)),
+        SystemEvent::RemovedBy { who, by } => (SYSTEM_REMOVED, by.0, hex::encode(who.0)),
+        SystemEvent::Titled { title } => (SYSTEM_TITLED, author, title.clone()),
     }
 }
 
@@ -2214,10 +2221,15 @@ pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
 /// and so never heard the introduction we made on the way in.
 pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
     let mut payloads = own_introduction();
-    if Identity::get().is_some_and(|me| Conversation::is_admin(&conversation, &me.ipk())) {
-        if let Some((revision, avif)) = crate::data::group_picture::snapshot(&conversation) {
-            payloads.push(AppPayload::GroupPicture { revision, avif });
-        }
+    let me = Identity::get().map(|i| i.ipk()).unwrap_or_default();
+    if Conversation::is_admin(&conversation, &me)
+        && let Some((revision, avif)) = crate::data::group_picture::snapshot(&conversation)
+    {
+        payloads.push(AppPayload::GroupPicture { revision, avif });
+    }
+    let admins = Conversation::admins(&conversation);
+    if Conversation::is_owner(&conversation, &me) && !admins.is_empty() {
+        payloads.push(AppPayload::GroupAdmins { admins: admins.into_iter().map(Into::into).collect() });
     }
     if payloads.is_empty() {
         return;
@@ -2289,6 +2301,17 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     let id = Conversation::join_group(&meta.founder, &roster)?;
     Conversation::bind_group(&id, &gid)?;
     introduce_ourselves(id);
+    // Another member delivered the founder's Welcome, so whatever the founder
+    // sent us before it arrived was dropped. Ask again.
+    if *from != meta.founder {
+        let founder = meta.founder;
+        crate::RUNTIME.spawn(async move {
+            let ask = AppPayload::GroupRequest(common::proto::mls_wire::GroupRequest::Sync);
+            if let Err(e) = send_control_to(id, ask, founder).await {
+                debug!("GROUP: could not ask the founder to catch us up: {e}");
+            }
+        });
+    }
     if !meta.title.is_empty() {
         let _ = Conversation::set_title(&id, &meta.title);
     }
@@ -2511,6 +2534,18 @@ fn persist_drained(
             },
             Ok(AppPayload::Unpaired) => {
                 unpaired(conversation, sender_ipk);
+                continue;
+            },
+            Ok(AppPayload::GroupRequest(request)) => {
+                crate::groups::requested(conversation, sender_ipk, request);
+                continue;
+            },
+            Ok(AppPayload::GroupAdmins { admins }) => {
+                crate::groups::receive_admins(conversation, sender_ipk, admins);
+                continue;
+            },
+            Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
+                crate::groups::forward_welcome(conversation, sender_ipk, who.0, kp_ref.0, welcome);
                 continue;
             },
             Ok(p) => legacy_body(p),

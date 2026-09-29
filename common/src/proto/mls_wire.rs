@@ -233,7 +233,7 @@ pub enum AppPayload {
     ProfileDetails { revision: u64, name: String, bio: String, card: Vec<u8> },
     ProfileDetailsSync { known_revision: Option<u64>, reply: bool },
     ProfileDetailsAck { revision: u64 },
-    /// Only the group's active founder may change its picture.
+    /// Only the group's active admins may change its picture.
     GroupPicture { revision: u64, avif: Option<Vec<u8>> },
     /// Optional permission for original group recipients to help deliver a
     /// post's attachment. Authenticated by the MLS author and group; receiving
@@ -245,6 +245,28 @@ pub enum AppPayload {
     /// The sender deleted this direct chat and its pair group. The receiver drops
     /// its copy too, so its next message starts a fresh pair. Old clients ignore it.
     Unpaired,
+    /// A member asks the group's founder to change its membership. Only the
+    /// founder's device commits, so every member sees one order of changes.
+    /// Sent to the founder alone; old clients ignore it.
+    GroupRequest(GroupRequest),
+    /// The founder's list of the other admins, whole. Sent to every member when
+    /// it changes and to each new member. Old clients ignore it.
+    GroupAdmins { admins: Vec<Bytes<32>> },
+    /// The founder's encoded Welcome for `who`, sent to the member who asked to
+    /// add them. That member seals and delivers it, because `who` refuses a
+    /// group Welcome from anyone who isn't their contact. Old clients ignore it.
+    GroupWelcome { who: Bytes<32>, kp_ref: Bytes<32>, welcome: Vec<u8> },
+}
+
+/// What a member asks of the founder's device. Anyone may ask to add; only an
+/// admin may ask to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupRequest {
+    Add { who: Bytes<32> },
+    Remove { who: Bytes<32> },
+    /// A new member asks for what reached them before their Welcome did, and
+    /// so was dropped: the group's name, its admins and the founder's profile.
+    Sync,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,9 +414,10 @@ pub enum CallEnd {
     Failed,
 }
 
-/// What happened to a group. The *actor* is implicit — the MLS sender of the
-/// payload — so these need only name the target, exactly as [`AppPayload::React`]
-/// leaves the reactor implicit.
+/// What happened to a group. The *actor* is the MLS sender of the payload, so
+/// these need only name the target, exactly as [`AppPayload::React`] leaves the
+/// reactor implicit. The `By` variants are the exception: the founder made a
+/// change someone else asked for, and names them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SystemEvent {
     /// The sender added `who` to the group.
@@ -405,6 +428,10 @@ pub enum SystemEvent {
     Removed { who: Bytes<32> },
     /// The sender renamed the group.
     Titled { title: String },
+    /// The founder added `who` because `by` asked. Old clients ignore it.
+    AddedBy { who: Bytes<32>, by: Bytes<32> },
+    /// The founder removed `who` because `by`, an admin, asked. Old clients ignore it.
+    RemovedBy { who: Bytes<32>, by: Bytes<32> },
 }
 
 /// What a message IS, split from what it's doing so `reply_to` and a revision

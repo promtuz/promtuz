@@ -352,10 +352,10 @@ fun DeleteChatDialog(
     if (chat.ownerIsStuck) {
         AppAlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("You’re the group admin") },
+            title = { Text("You own this group") },
             text = {
                 Text(
-                    "You’re the only admin. Remove the other members before leaving. " +
+                    "Remove the other members before leaving. " +
                         "To delete only your copy, open Group info.",
                 )
             },

@@ -87,8 +87,8 @@ pub struct ConversationRecord {
     /// Same list the client needs for presence and typing, which are
     /// per-person and so can never key off the conversation.
     pub others: Vec<Vec<u8>>,
-    /// Whether *we* may change this group's membership. v1 grants that to the
-    /// creator alone; resolved here because only core knows our own IPK.
+    /// We are an admin: we may remove members, rename the group and change its
+    /// picture. Resolved here because only core knows our own IPK.
     pub can_manage: bool,
     /// True once an MLS group backs this conversation — i.e. it can send.
     pub has_group: bool,
@@ -119,8 +119,11 @@ pub struct ConversationRecord {
 #[derive(uniffi::Record)]
 pub struct MemberRecord {
     pub ipk: Vec<u8>,
-    /// 0 = member, 1 = admin. v1 mints exactly one admin: the creator.
+    /// 0 = member, 1 = admin.
     pub role: u8,
+    /// Founded the group: always an admin, appoints the others and can't be
+    /// removed.
+    pub owner: bool,
     pub joined_at: u64,
     /// False once they left or were removed; their old messages still attribute.
     pub active: bool,
@@ -472,7 +475,7 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
     let is_group = c.kind == crate::data::conversation::KIND_GROUP;
     let am_member = me.is_some_and(|k| roster.iter().any(|m| m.active && m.member_ipk == k));
     let can_manage = me.is_some_and(|k| Conversation::is_admin(&c.id, &k));
-    let owner_is_stuck = is_group && can_manage && am_member && !others.is_empty();
+    let owner_is_stuck = me.is_some_and(|k| Conversation::is_owner(&c.id, &k)) && !others.is_empty();
 
     ConversationRecord {
         members: roster
@@ -669,9 +672,13 @@ pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationR
 pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord>, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let founder = Conversation::get(&conv)
+        .filter(|c| c.kind == crate::data::conversation::KIND_GROUP)
+        .and_then(|c| c.created_by);
     Ok(Conversation::members(&conv)
         .into_iter()
         .map(|m| MemberRecord {
+            owner:           founder.as_deref() == Some(m.member_ipk.as_slice()),
             me:              me.is_some_and(|k| k == m.member_ipk),
             name:            crate::data::peer_name::resolve(&m.member_ipk),
             name_is_claimed: crate::data::peer_name::is_self_asserted(&m.member_ipk),
@@ -910,25 +917,38 @@ pub async fn create_group(title: String, members: Vec<Vec<u8>>) -> Result<Vec<u8
     Ok(id.to_vec())
 }
 
-/// Add someone to a group. Admin-only; they get no pre-join history.
+/// Add someone to a group; they get no pre-join history. Any member may. Only
+/// the owner's device commits the change, so `false` means we asked it to and
+/// they join once it has.
 #[uniffi::export]
 pub async fn add_group_member(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>,
-) -> Result<(), CoreError> {
+) -> Result<bool, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let who = to_ipk32(&member_ipk)?;
     on_runtime(crate::groups::add_member(conv, who)).await
 }
 
 /// Remove someone from a group, rotating keys afterwards so their device can't
-/// read what follows. Admin-only.
+/// read what follows. Admins only; `false` means the owner's device was asked,
+/// as with an add.
 #[uniffi::export]
 pub async fn remove_group_member(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>,
-) -> Result<(), CoreError> {
+) -> Result<bool, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let who = to_ipk32(&member_ipk)?;
     on_runtime(crate::groups::remove_member(conv, who)).await
+}
+
+/// Make a member an admin, or stop them being one. Owner only.
+#[uniffi::export]
+pub async fn set_group_admin(
+    conversation_id: Vec<u8>, member_ipk: Vec<u8>, admin: bool,
+) -> Result<(), CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let who = to_ipk32(&member_ipk)?;
+    on_runtime(crate::groups::set_admin(conv, who, admin)).await
 }
 
 /// Leave a group. The conversation and its history stay; it just can't send.

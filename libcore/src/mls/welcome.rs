@@ -101,10 +101,21 @@ pub fn make_welcome_envelope(
     // equivalent to "TLS-encoded Welcome"; the only difference is the
     // outer 1-byte `version` field that prefixes the message body.
     // Documented in the [`process_welcome`] doc comment.
-    let welcome_blob = welcome_msg
-        .tls_serialize_detached()
-        .map_err(MlsGroupError::from_codec)?;
+    seal_welcome_blob(encode_welcome(&welcome_msg)?, group_id, sender_ipk, recipient_ipk, kp_ref_used, signer)
+}
 
+/// The bytes a Welcome envelope carries.
+pub fn encode_welcome(welcome_msg: &MlsMessageOut) -> Result<Vec<u8>> {
+    welcome_msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)
+}
+
+/// Seal an already-encoded Welcome as `sender_ipk`'s envelope. A group member
+/// delivers the founder's Welcome this way to someone who knows them but not
+/// the founder.
+pub fn seal_welcome_blob(
+    welcome_blob: Vec<u8>, group_id: [u8; 32], sender_ipk: [u8; 32],
+    recipient_ipk: [u8; 32], kp_ref_used: [u8; 32], signer: &SigningKey,
+) -> Result<WelcomeEnvelopeP> {
     if welcome_blob.len() > MAX_WELCOME_BYTES {
         return Err(MlsGroupError::Internal(format!(
             "welcome_blob {} bytes exceeds MAX_WELCOME_BYTES = {}",

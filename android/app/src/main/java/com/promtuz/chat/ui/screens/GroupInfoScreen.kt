@@ -36,6 +36,8 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     val title by viewModel.groupTitle.collectAsStateWithLifecycle()
     val displayName by viewModel.displayName.collectAsStateWithLifecycle()
     val canManage by viewModel.canManage.collectAsStateWithLifecycle()
+    val canAdd by viewModel.canAdd.collectAsStateWithLifecycle()
+    val amOwner by viewModel.amOwner.collectAsStateWithLifecycle()
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val work by viewModel.work.collectAsStateWithLifecycle()
     val canLeave by viewModel.canLeave.collectAsStateWithLifecycle()
@@ -45,7 +47,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     LaunchedEffect(conversationHex) { viewModel.load(conversationHex) }
     GroupInfoContent(
         GroupInfoState(members, title, displayName, canManage, candidates, work, canLeave,
-            ownerIsStuck, muted, notice, loading, loadError, contactsLoading, contactsError),
+            ownerIsStuck, muted, notice, loading, loadError, contactsLoading, contactsError, canAdd, amOwner),
         GroupInfoActions(
             clearNotice = viewModel::clearNotice,
             clearError = viewModel::clearError,
@@ -55,6 +57,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
             setMuted = viewModel::setMuted,
             addMembers = viewModel::addMembers,
             removeMember = viewModel::removeMember,
+            setAdmin = viewModel::setAdmin,
             leave = { viewModel.leave() },
             deleteAnyway = { viewModel.deleteAnyway() },
         ), conversation = conversationHex,
@@ -76,6 +79,8 @@ internal data class GroupInfoState(
     val loadError: Boolean = false,
     val contactsLoading: Boolean = false,
     val contactsError: Boolean = false,
+    val canAdd: Boolean = false,
+    val amOwner: Boolean = false,
 )
 
 internal data class GroupInfoActions(
@@ -87,6 +92,7 @@ internal data class GroupInfoActions(
     val setMuted: (Boolean) -> Unit,
     val addMembers: (List<UiMember>, (String) -> Unit, () -> Unit) -> Unit,
     val removeMember: (UiMember, () -> Unit) -> Unit,
+    val setAdmin: (UiMember, Boolean) -> Unit,
     val leave: () -> Unit,
     val deleteAnyway: () -> Unit,
 )
@@ -176,7 +182,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Members", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                        if (canManage) TextButton(onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() }, enabled = !busy) {
+                        if (canAdd) TextButton(onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() }, enabled = !busy) {
                             Text("Add members")
                         }
                     }
@@ -207,7 +213,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 item {
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     if (ownerIsStuck) {
-                        Text("You’re the only admin. To leave, first remove the other members.",
+                        Text("You own this group. To leave, first remove the other members.",
                             Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = colors.onSurfaceVariant)
                         TextButton(onClick = { deleting = true; actions.clearError() }, enabled = !busy,
                             modifier = Modifier.padding(horizontal = 12.dp)) { Text("Delete chat", color = colors.error) }
@@ -273,20 +279,32 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
             }
         }
     }
-    person?.let { member -> AppAlertDialog(
-        onDismissRequest = { person = null }, title = { Text(member.name) },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(when { !member.active -> "Past member"; member.admin -> "Group admin"; else -> "Group member" })
-            if (member.claimed) Text("This name was set by the member.", color = colors.onSurfaceVariant)
-        } },
-        confirmButton = {
-            if (canManage && member.active && !member.admin && !member.me) TextButton(onClick = {
-                removing = member; person = null; actions.clearError()
-            }) { Text("Remove from group", color = colors.error) }
-            else TextButton(onClick = { person = null }) { Text("Done") }
-        },
-        dismissButton = { if (canManage && member.active && !member.admin && !member.me) TextButton(onClick = { person = null }) { Text("Cancel") } },
-    ) }
+    person?.let { member ->
+        val canRemove = canManage && member.active && !member.me && !member.owner
+        val canPromote = amOwner && member.active && !member.me
+        AppAlertDialog(
+            onDismissRequest = { person = null }, title = { Text(member.name) },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(when {
+                    !member.active -> "Past member"
+                    member.owner -> "Group owner"
+                    member.admin -> "Group admin"
+                    else -> "Group member"
+                })
+                if (member.claimed) Text("This name was set by the member.", color = colors.onSurfaceVariant)
+            } },
+            confirmButton = {
+                if (canRemove) TextButton(onClick = { removing = member; person = null; actions.clearError() }) {
+                    Text("Remove", color = colors.error)
+                }
+                if (canPromote) TextButton(onClick = { person = null; actions.setAdmin(member, !member.admin) }) {
+                    Text(if (member.admin) "Dismiss as admin" else "Make admin")
+                }
+                if (!canRemove && !canPromote) TextButton(onClick = { person = null }) { Text("Done") }
+            },
+            dismissButton = if (canRemove || canPromote) {{ TextButton(onClick = { person = null }) { Text("Cancel") } }} else null,
+        )
+    }
     removing?.let { member -> GroupConfirmation(
         "Remove ${member.name}?", "They won’t receive new messages from this group.", "Remove", work,
         onDismiss = { removing = null; actions.clearError() },
@@ -295,7 +313,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     GroupConfirmation("Leave group?", "You won’t receive new messages. Your chat history stays on this device.",
         "Leave", work, { leaving = false; actions.clearError() }, { actions.leave() }, visible = leaving)
     GroupConfirmation("Delete chat?",
-        "This deletes your messages and group access from this device. Other members keep the group, but no one will be able to manage it. This can’t be undone.",
+        "This deletes your messages and group access from this device. Other members keep the group, but no one will be able to add or remove members. This can’t be undone.",
         "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
 }
 
@@ -311,7 +329,9 @@ private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Un
             )
         },
         supportingContent = if (!member.active) {{ Text("Past member") }} else null,
-        trailingContent = if (member.admin && member.active) {{ Text("Admin", color = MaterialTheme.colorScheme.onSurfaceVariant) }} else null,
+        trailingContent = if (member.admin && member.active) {{
+            Text(if (member.owner) "Owner" else "Admin", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }} else null,
         modifier = Modifier.combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onLongClick),
     )
 }

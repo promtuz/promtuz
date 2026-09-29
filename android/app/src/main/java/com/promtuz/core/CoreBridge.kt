@@ -350,13 +350,20 @@ object CoreBridge {
     suspend fun createGroup(title: String, members: List<ByteArray>): ByteArray =
         withContext(Dispatchers.IO) { ffiCreateGroup(title, members) }
 
-    /** Add someone. Admin-only; they see no history from before they joined. */
-    suspend fun addGroupMember(conversationId: ByteArray, memberIpk: ByteArray) =
+    /**
+     * Add someone; they see no history from before they joined. False means the
+     * owner's device was asked to add them, since only it changes the membership.
+     */
+    suspend fun addGroupMember(conversationId: ByteArray, memberIpk: ByteArray): Boolean =
         withContext(Dispatchers.IO) { ffiAddGroupMember(conversationId, memberIpk) }
 
-    /** Remove someone, rotating keys so their device can't read what follows. */
-    suspend fun removeGroupMember(conversationId: ByteArray, memberIpk: ByteArray) =
+    /** Remove someone, rotating keys so their device can't read what follows. False as for an add. */
+    suspend fun removeGroupMember(conversationId: ByteArray, memberIpk: ByteArray): Boolean =
         withContext(Dispatchers.IO) { ffiRemoveGroupMember(conversationId, memberIpk) }
+
+    /** Make a member an admin, or stop them being one. Owner only. */
+    suspend fun setGroupAdmin(conversationId: ByteArray, memberIpk: ByteArray, admin: Boolean) =
+        withContext(Dispatchers.IO) { uniffi.core.setGroupAdmin(conversationId, memberIpk, admin) }
 
     /** Leave. The chat and its history stay; it just can't send any more. */
     suspend fun leaveGroup(conversationId: ByteArray) =

@@ -10,7 +10,9 @@ import com.promtuz.core.observeQuery
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import timber.log.Timber
@@ -20,6 +22,8 @@ data class UiMember(
     val ipkHex: String,
     val name: String,
     val admin: Boolean = false,
+    /** Founded the group: appoints the admins and can't be removed. */
+    val owner: Boolean = false,
     val active: Boolean = true,
     val me: Boolean = false,
     /** They told us this name; we didn't choose it. Worth marking as such. */
@@ -157,9 +161,17 @@ class GroupVM(app: AppVM) : ViewModel() {
     private val _displayName = MutableStateFlow("")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
 
-    /** True when we may add and remove — v1 grants that to the creator alone. */
+    /** We are an admin: we may remove members, rename the group and change its photo. */
     private val _canManage = MutableStateFlow(false)
     val canManage: StateFlow<Boolean> = _canManage.asStateFlow()
+
+    /** Any member may add people. */
+    private val _canAdd = MutableStateFlow(false)
+    val canAdd: StateFlow<Boolean> = _canAdd.asStateFlow()
+
+    /** We founded the group, so we choose its admins. */
+    private val _amOwner = MutableStateFlow(false)
+    val amOwner: StateFlow<Boolean> = _amOwner.asStateFlow()
 
     /** Leaving is offered: we are in the group and wouldn't strand it. */
     private val _canLeave = MutableStateFlow(false)
@@ -206,6 +218,7 @@ class GroupVM(app: AppVM) : ViewModel() {
                         name = if (m.me) "You" else m.name,
                         claimed = !m.me && m.nameIsClaimed,
                         admin = m.role.toInt() == 1,
+                        owner = m.owner,
                         active = m.active,
                         me = m.me,
                     )
@@ -216,6 +229,8 @@ class GroupVM(app: AppVM) : ViewModel() {
                         .thenBy { it.name.lowercase() },
                 )
                 _canManage.value = record.canManage
+                _canAdd.value = record.amMember && record.hasGroup
+                _amOwner.value = roster.any { it.me && it.owner && it.active }
                 _canLeave.value = record.canLeave
                 _ownerIsStuck.value = record.ownerIsStuck
             }
@@ -226,10 +241,11 @@ class GroupVM(app: AppVM) : ViewModel() {
         if (people.isEmpty()) return
         perform("Adding members…", "Couldn’t finish adding members. Try again.") {
             val failed = mutableListOf<String>()
+            val asked = mutableListOf<UiMember>()
             for (person in people) {
                 _work.value = GroupWork.Busy("Adding ${person.name}…")
                 try {
-                    CoreBridge.addGroupMember(conversation, person.ipkHex.fromHex())
+                    if (!CoreBridge.addGroupMember(conversation, person.ipkHex.fromHex())) asked += person
                     onAdded(person.ipkHex)
                 } catch (e: CancellationException) {
                     throw e
@@ -238,9 +254,16 @@ class GroupVM(app: AppVM) : ViewModel() {
                     failed += person.name
                 }
             }
-            val added = people.size - failed.size
+            val joined = { person: UiMember, roster: List<UiMember> -> roster.any { it.ipkHex == person.ipkHex } }
+            if (asked.isNotEmpty()) awaitRoster { roster -> asked.all { joined(it, roster) } }
+            val waiting = asked.filterNot { joined(it, _members.value.filter { m -> m.active }) }
+            val added = people.size - failed.size - waiting.size
             if (failed.isEmpty()) {
-                _notice.value = if (added == 1) "Member added" else "$added members added"
+                _notice.value = when {
+                    waiting.isNotEmpty() -> "${waiting.joinToString { it.name }} will join when ${ownerName()} is next online"
+                    added == 1 -> "Member added"
+                    else -> "$added members added"
+                }
                 onComplete()
             } else {
                 // Keep only unsuccessful selections so retry cannot add someone twice.
@@ -253,10 +276,27 @@ class GroupVM(app: AppVM) : ViewModel() {
 
     fun removeMember(person: UiMember, onComplete: () -> Unit) =
         perform("Removing ${person.name}…", "Couldn’t remove ${person.name}. Try again.") {
-            CoreBridge.removeGroupMember(conversation, person.ipkHex.fromHex())
-            _notice.value = "${person.name} removed"
+            val done = CoreBridge.removeGroupMember(conversation, person.ipkHex.fromHex()) ||
+                awaitRoster { roster -> roster.none { it.ipkHex == person.ipkHex } }
+            _notice.value = if (done) "${person.name} removed"
+                            else "${person.name} will be removed when ${ownerName()} is next online"
             onComplete()
         }
+
+    fun setAdmin(person: UiMember, admin: Boolean) =
+        perform("Updating ${person.name}…", "Couldn’t update ${person.name}. Try again.") {
+            CoreBridge.setGroupAdmin(conversation, person.ipkHex.fromHex(), admin)
+            _notice.value = if (admin) "${person.name} is now an admin" else "${person.name} is no longer an admin"
+        }
+
+    /**
+     * Only the owner's device changes the membership, so a change we asked it for
+     * lands when it has run. Usually that's moments; give it those before saying so.
+     */
+    private suspend fun awaitRoster(done: (List<UiMember>) -> Boolean): Boolean =
+        withTimeoutOrNull(12_000) { members.first { roster -> done(roster.filter { it.active }) } } != null
+
+    private fun ownerName() = _members.value.firstOrNull { it.owner }?.name ?: "the owner"
 
     fun rename(value: String, onComplete: () -> Unit) {
         val name = value.trim()

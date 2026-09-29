@@ -50,7 +50,7 @@ pub use storage::PromtuzStorageProvider;
 #[allow(unused_imports)]
 pub use types::{MlsGroupError, PromtuzMlsStorageError};
 #[allow(unused_imports)]
-pub use welcome::{make_welcome_envelope, process_welcome};
+pub use welcome::{encode_welcome, make_welcome_envelope, process_welcome, seal_welcome_blob};
 
 /// Per-`group_id` ceiling on cumulative `mls_storage.value` bytes,
 /// before a write is rejected with

@@ -944,26 +944,20 @@ async fn process_deliver(
                 },
                 Ok(AppPayload::System(event)) => {
                     use common::proto::mls_wire::SystemEvent;
-                    use crate::db::messages::SYSTEM_ADDED;
-                    use crate::db::messages::SYSTEM_LEFT;
-                    use crate::db::messages::SYSTEM_REMOVED;
-                    use crate::db::messages::SYSTEM_TITLED;
 
                     let ts = accepted_at_secs(msg.accepted_at_ms);
-                    let (code, target) = match &event {
-                        SystemEvent::Added { who } => (SYSTEM_ADDED, hex::encode(who.0)),
-                        SystemEvent::Left { who } => (SYSTEM_LEFT, hex::encode(who.0)),
-                        SystemEvent::Removed { who } => (SYSTEM_REMOVED, hex::encode(who.0)),
-                        SystemEvent::Titled { title } => (SYSTEM_TITLED, title.clone()),
-                    };
+                    let (code, actor, target) = crate::messaging::system_row(&event, author);
                     // Narration may only come from whoever could have done the
-                    // deed: the admin for an add or a removal, the leaver for a
+                    // deed: an admin for an add or a removal, the founder for
+                    // one they made on someone's behalf, the leaver for a
                     // leave. The roster itself moves only on a merged Commit,
                     // so a forged line could not remove anyone — but it would
                     // still read as if it had.
                     let allowed = match &event {
                         SystemEvent::Added { .. } | SystemEvent::Removed { .. } =>
                             Conversation::is_admin(&conv, &author),
+                        SystemEvent::AddedBy { .. } | SystemEvent::RemovedBy { .. } =>
+                            Conversation::is_owner(&conv, &author),
                         SystemEvent::Left { who } => who.0 == author,
                         SystemEvent::Titled { .. } => true,
                     };
@@ -994,16 +988,16 @@ async fn process_deliver(
                     // Someone joined after us, so they never heard the
                     // introduction we made on our own way in. Say it again,
                     // to them alone.
-                    if let SystemEvent::Added { who } = &event {
+                    if let SystemEvent::Added { who } | SystemEvent::AddedBy { who, .. } = &event {
                         if who.0 != our_ipk.to_bytes() {
                             crate::messaging::introduce_ourselves_to(conv, who.0);
                         }
                     }
-                    match Message::save_system(conv, author, &msg.id.0, code, &target, ts, false) {
+                    match Message::save_system(conv, actor, &msg.id.0, code, &target, ts, false) {
                         Ok(Some(row)) => MessageEv::Received {
                             id: row.inner.id,
                             conversation: conv,
-                            sender: author,
+                            sender: actor,
                             content: target,
                             timestamp: ts,
                         }
@@ -1032,6 +1026,11 @@ async fn process_deliver(
                     crate::profile_sync::receive(conv, author, payload);
                 },
                 Ok(AppPayload::Unpaired) => crate::messaging::unpaired(conv, author),
+                Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
+                Ok(AppPayload::GroupAdmins { admins }) => crate::groups::receive_admins(conv, author, admins),
+                Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
+                    crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome)
+                },
                 Ok(AppPayload::PairAck) => {
                     // Proof-of-pair — its whole job was the mark_paired above.
                     info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));

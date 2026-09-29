@@ -125,7 +125,7 @@ pub struct MemberRow {
     pub conversation_id: [u8; 16],
     #[serde(with = "serde_bytes")]
     pub member_ipk: [u8; 32],
-    /// 0 = member, 1 = admin. v1: the creator is the sole admin.
+    /// 0 = member, 1 = admin. The founder is always an admin and appoints the rest.
     pub role: u8,
     pub joined_at: u64,
     /// Cleared on leave/remove; the row stays so past messages still attribute.

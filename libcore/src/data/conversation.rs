@@ -32,7 +32,8 @@ pub const KIND_GROUP: u8 = 1;
 
 /// Ordinary member: may speak and may leave.
 pub const ROLE_MEMBER: u8 = 0;
-/// Admin: may also add and remove. v1 mints exactly one, the creator.
+/// Admin: may also remove members, rename the group and change its picture.
+/// The founder is always one, and appoints the others.
 pub const ROLE_ADMIN: u8 = 1;
 
 /// Time-sortable, so an unordered conversation list still reads oldest-first.
@@ -352,6 +353,8 @@ impl Conversation {
 
     /// Replace the roster with `members`, marking anyone absent as departed.
     /// The shape an applied MLS Commit hands us: the new membership, whole.
+    /// A departed admin loses the role, so being added back makes them an
+    /// ordinary member again.
     pub fn sync_roster(id: &[u8; 16], members: &[[u8; 32]]) -> Result<()> {
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
@@ -362,6 +365,11 @@ impl Conversation {
         for m in members {
             Self::put_member(&tx, id, m, ROLE_MEMBER)?;
         }
+        tx.execute(
+            "UPDATE conversation_members SET role = ?2 WHERE conversation_id = ?1 AND active = 0 \
+             AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
+            (id.as_slice(), ROLE_MEMBER),
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -387,6 +395,63 @@ impl Conversation {
         )
         .map(|r| r as u8 == ROLE_ADMIN)
         .unwrap_or(false)
+    }
+
+    /// Whether `member` founded this group and is still in it. The founder's
+    /// device makes every membership commit and appoints the other admins.
+    pub fn is_owner(id: &[u8; 16], member: &[u8; 32]) -> bool {
+        let conn = MESSAGES_DB.lock();
+        Self::is_owner_tx(&conn, id, member)
+    }
+
+    pub fn is_owner_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM conversations c JOIN conversation_members m ON m.conversation_id = c.id \
+             WHERE c.id = ?1 AND c.kind = ?3 AND c.created_by = ?2 AND m.member_ipk = ?2 AND m.active = 1",
+            (id.as_slice(), member.as_slice(), KIND_GROUP),
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    /// The group's founder, while they are still in it.
+    pub fn owner(id: &[u8; 16]) -> Option<[u8; 32]> {
+        let founder: [u8; 32] = Self::get(id)?.created_by?.try_into().ok()?;
+        Self::is_owner(id, &founder).then_some(founder)
+    }
+
+    /// The admins the founder appointed who are still in the group.
+    pub fn admins(id: &[u8; 16]) -> Vec<[u8; 32]> {
+        let conn = MESSAGES_DB.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT member_ipk FROM conversation_members WHERE conversation_id = ?1 AND role = ?2 \
+             AND active = 1 AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map((id.as_slice(), ROLE_ADMIN), |r| r.get::<_, Vec<u8>>(0))
+            .map(|rows| rows.flatten().filter_map(|v| v.try_into().ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Make exactly `admins`, and the founder, this group's admins.
+    pub fn set_admins(id: &[u8; 16], admins: &[[u8; 32]]) -> Result<()> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE conversation_members SET role = ?2 WHERE conversation_id = ?1 \
+             AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
+            (id.as_slice(), ROLE_MEMBER),
+        )?;
+        for admin in admins {
+            tx.execute(
+                "UPDATE conversation_members SET role = ?3 \
+                 WHERE conversation_id = ?1 AND member_ipk = ?2 AND active = 1",
+                (id.as_slice(), admin.as_slice(), ROLE_ADMIN),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Capped like a peer's name: the title arrives from the wire, and a
