@@ -589,7 +589,7 @@ private fun Chrome(
                         MenuAction("Info", R.drawable.oi_info) { showInfo = true },
                     ))
                     if (item.message != null) add(listOf(
-                        MenuAction("Show in chat", iconPlaceholder = "show in chat") { onShowInChat(item) },
+                        MenuAction("Show in chat", R.drawable.oi_message_jump) { onShowInChat(item) },
                     ))
                     addAll(item.actions)
                 },
