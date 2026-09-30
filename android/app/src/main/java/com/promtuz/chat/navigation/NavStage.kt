@@ -43,6 +43,7 @@ import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.rememberDecoratedNavEntries
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import com.promtuz.chat.ui.util.deviceCornerRadius
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -181,19 +182,25 @@ fun NavStage(
     val showPush = forward || pushing
 
     // Back gesture on the live top: scale follows the finger; release detaches a ghost, cancel springs.
-    var backActive by remember { mutableStateOf(false) }
+    var backActive by remember(topKey) { mutableStateOf(false) }
     var touchY by remember { mutableFloatStateOf(heightPx / 2f) }
     var fromRight by remember { mutableStateOf(false) }
-    val progress = remember { Animatable(0f) }
+    val progress = remember(topKey) { Animatable(0f) }
+    var backGeneration by remember(topKey) { mutableIntStateOf(0) }
+    var backRecovery by remember(topKey) { mutableStateOf<Job?>(null) }
 
     PredictiveBackHandler(enabled = entries.size > 1) { events: Flow<BackEventCompat> ->
+        val generation = ++backGeneration
+        backRecovery?.cancel()
         backActive = true
-        progress.snapTo(0f) // a fresh gesture always takes over an un-scaled live top
         try {
+            // Stop an interrupted return animation at its current position.
+            progress.stop()
+            val startProgress = progress.value
             events.collect { e ->
                 touchY = e.touchY
                 fromRight = e.swipeEdge == BackEventCompat.EDGE_RIGHT
-                progress.snapTo(e.progress)
+                progress.snapTo(lerp(startProgress, 1f, e.progress))
             }
             // Released past threshold → the pop is decided NOW. Detach the card as a ghost, pop it off
             // the stack immediately, and slide it off in `scope` (survives the next gesture's coroutine).
@@ -206,17 +213,28 @@ fun NavStage(
                 commit = Animatable(0f),
             )
             exiting.add(leaving)
+            scope.launch {
+                try {
+                    leaving.commit.animateTo(1f, tween(COMMIT_DUR, easing = commitEase))
+                } finally {
+                    exiting.remove(leaving)
+                }
+            }
             onBack()
             backActive = false
-            progress.snapTo(0f)
-            scope.launch {
-                leaving.commit.animateTo(1f, tween(COMMIT_DUR, easing = commitEase))
-                exiting.remove(leaving)
+        } finally {
+            if (backActive && generation == backGeneration) {
+                // Android cancels the gesture coroutine itself. Returning from
+                // the preview must survive that cancellation, or the chat stays
+                // frozen and never resumes its read/notification lifecycle.
+                backRecovery = scope.launch {
+                    try {
+                        progress.animateTo(0f, tween(CANCEL_DUR, easing = fwdEase))
+                    } finally {
+                        if (generation == backGeneration) backActive = false
+                    }
+                }
             }
-        } catch (c: Throwable) {
-            progress.animateTo(0f, tween(CANCEL_DUR, easing = fwdEase)) // cancelled → spring back to rest
-            backActive = false
-            throw c
         }
     }
 

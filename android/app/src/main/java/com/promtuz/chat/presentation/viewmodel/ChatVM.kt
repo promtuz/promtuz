@@ -89,10 +89,14 @@ class ChatVM(
 
     private fun markVisibleMessagesRead() {
         if (!chatForeground) return
-        val did = _messages.value.orEmpty().firstOrNull { !it.outgoing }?.dispatchIdHex ?: return
+        val did = _messages.value.orEmpty().firstOrNull {
+            !it.outgoing && it.content !is MessageContent.System
+        }?.dispatchIdHex ?: return
         if (did == lastMarkedRead) return
-        lastMarkedRead = did
-        fire { CoreBridge.markRead(conversation, did.fromHex()) }
+        fire {
+            CoreBridge.markRead(conversation, did.fromHex())
+            lastMarkedRead = did
+        }
     }
 
     /** True once the roster is bigger than a pair — drives per-sender bubbles. */
