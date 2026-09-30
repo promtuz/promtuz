@@ -21,6 +21,7 @@ mod contact_card;
 mod requests;
 mod profile_sync;
 mod profile_details_sync;
+mod profile_reconciliation;
 pub mod push;
 pub mod quic;
 pub mod staging;

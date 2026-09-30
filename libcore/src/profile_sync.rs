@@ -2,18 +2,23 @@
 //! cannot tell us whether the receiving app understood and stored an avatar.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+use anyhow::bail;
 use common::proto::mls_wire::AppPayload;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use tokio_util::sync::CancellationToken;
 
-use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
-use crate::data::peer_avatar::{self, AvatarUpdate};
+use crate::data::peer_avatar::AvatarUpdate;
+use crate::data::peer_avatar::{
+    self,
+};
 use crate::db::messages::MESSAGES_DB;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -160,23 +165,10 @@ async fn reconcile(all: bool) -> Result<()> {
     let Some(identity) = Identity::get() else { return Ok(()) };
     let owner = identity.ipk();
     let current = identity.avatar_update().revision;
-    let mut peers = HashMap::new();
-    // One shared active chat per peer is enough, even if we share many groups.
-    for chat in Conversation::list()
-        .into_iter()
-        .filter(|c| c.mls_group_id.is_some() && !crate::requests::is_request_chat(&c.id))
-    {
-        let members = Conversation::members(&chat.id);
-        if !members.iter().any(|m| m.active && m.member_ipk == owner) {
-            continue;
-        }
-        for member in members.into_iter().filter(|m| m.active && m.member_ipk != owner) {
-            peers.entry(member.member_ipk).or_insert(chat.id);
-        }
-    }
+    let peers = crate::profile_reconciliation::routes(&owner);
     let now = Instant::now();
     PROBES.lock().retain(|(who, peer), _| *who == owner && peers.contains_key(peer));
-    for (peer, conversation) in peers {
+    for (peer, routes) in peers {
         let known = {
             let conn = MESSAGES_DB.lock();
             if !all && !should_retry(&conn, &owner, &peer, current)? {
@@ -187,14 +179,14 @@ async fn reconcile(all: bool) -> Result<()> {
         if !claim_probe(&mut PROBES.lock(), (owner, peer), now) {
             continue;
         }
-        if let Err(e) = crate::messaging::send_control_to(
-            conversation,
-            AppPayload::AvatarSync { known_revision: known, reply: false },
+        if let Err(e) = crate::profile_reconciliation::probe(
             peer,
+            &routes,
+            AppPayload::AvatarSync { known_revision: known, reply: false },
         )
         .await
         {
-            log::debug!("PROFILE: reconciliation probe failed: {e}");
+            log::debug!("PROFILE: avatar probe for {} failed: {e}", hex::encode(&peer[..4]));
         }
     }
     Ok(())
@@ -221,10 +213,13 @@ pub(crate) async fn run(cancel: CancellationToken) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use common::proto::pack::Packer;
+    use common::proto::pack::Unpacker;
+
     use super::*;
     use crate::db::messages::open_in_memory;
-    use common::proto::pack::{Packer, Unpacker};
-    use std::collections::VecDeque;
 
     fn photo(revision: u64) -> AvatarUpdate {
         AvatarUpdate { revision, avif: Some(b"\0\0\0\x0cftypavif".to_vec()) }
@@ -382,7 +377,8 @@ mod tests {
 
     #[test]
     fn reconnect_storms_share_one_probe_but_allow_later_reconciliation() {
-        use std::sync::{Arc, Barrier};
+        use std::sync::Arc;
+        use std::sync::Barrier;
         let probes = Arc::new(Mutex::new(HashMap::new()));
         let barrier = Arc::new(Barrier::new(8));
         let now = Instant::now();

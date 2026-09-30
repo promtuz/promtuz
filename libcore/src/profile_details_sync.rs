@@ -2,18 +2,24 @@
 //! cannot tell us whether the receiving app understood and stored profile details.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+use anyhow::bail;
 use common::proto::mls_wire::AppPayload;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use tokio_util::sync::CancellationToken;
 
 use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
-use crate::data::peer_profile::{self, ProfileUpdate};
+use crate::data::peer_profile::ProfileUpdate;
+use crate::data::peer_profile::{
+    self,
+};
 use crate::db::messages::MESSAGES_DB;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -162,26 +168,13 @@ async fn reconcile(all: bool) -> Result<()> {
     let Some(identity) = Identity::get() else { return Ok(()) };
     let owner = identity.ipk();
     let current = identity.details().revision;
-    let mut peers = HashMap::new();
-    // One shared active chat per peer is enough, even if we share many groups.
-    for chat in Conversation::list()
-        .into_iter()
-        .filter(|c| c.mls_group_id.is_some() && !crate::requests::is_request_chat(&c.id))
-    {
-        let members = Conversation::members(&chat.id);
-        if !members.iter().any(|m| m.active && m.member_ipk == owner) {
-            continue;
-        }
-        for member in members.into_iter().filter(|m| m.active && m.member_ipk != owner) {
-            peers.entry(member.member_ipk).or_insert(chat.id);
-        }
-    }
+    let peers = crate::profile_reconciliation::routes(&owner);
     if all {
         for chat in Conversation::list()
             .into_iter()
             .filter(|c| c.kind == crate::data::conversation::KIND_GROUP && c.mls_group_id.is_some())
         {
-            if Conversation::is_admin(&chat.id, &owner) {
+            if Conversation::may_edit(&chat.id, &owner) {
                 if let Some((revision, avif)) = crate::data::group_picture::snapshot(&chat.id) {
                     let _ = crate::messaging::send_control(
                         chat.id,
@@ -194,7 +187,7 @@ async fn reconcile(all: bool) -> Result<()> {
     }
     let now = Instant::now();
     PROBES.lock().retain(|(who, peer), _| *who == owner && peers.contains_key(peer));
-    for (peer, conversation) in peers {
+    for (peer, routes) in peers {
         let known = {
             let conn = MESSAGES_DB.lock();
             if !all && !should_retry(&conn, &owner, &peer, current)? {
@@ -205,14 +198,14 @@ async fn reconcile(all: bool) -> Result<()> {
         if !claim_probe(&mut PROBES.lock(), (owner, peer), now) {
             continue;
         }
-        if let Err(e) = crate::messaging::send_control_to(
-            conversation,
-            AppPayload::ProfileDetailsSync { known_revision: known, reply: false },
+        if let Err(e) = crate::profile_reconciliation::probe(
             peer,
+            &routes,
+            AppPayload::ProfileDetailsSync { known_revision: known, reply: false },
         )
         .await
         {
-            log::debug!("PROFILE: reconciliation probe failed: {e}");
+            log::debug!("PROFILE: details probe for {} failed: {e}", hex::encode(&peer[..4]));
         }
     }
     Ok(())
@@ -271,9 +264,9 @@ mod tests {
                 &who,
                 AppPayload::ProfileDetails {
                     revision: 30,
-                    name: "Failed".into(),
-                    bio: "x".into(),
-                    card: vec![]
+                    name:     "Failed".into(),
+                    bio:      "x".into(),
+                    card:     vec![],
                 }
             )
             .is_err()
