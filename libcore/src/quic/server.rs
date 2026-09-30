@@ -1312,7 +1312,7 @@ async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
 /// dialer, mirroring `poll_welcomes_once`) and re-drives every still-
 /// pending first-send whose contact has no group yet — the ones deferred
 /// earlier because the peer had no published KeyPackage.
-async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
+pub(crate) async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());

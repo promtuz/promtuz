@@ -237,6 +237,18 @@ const MIGRATION_ARRAY: &[M] = &[
         );
     "#,
     ),
+    M::up(r#"
+        CREATE TABLE mls_migration_consents (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            who BLOB NOT NULL, signature BLOB NOT NULL,
+            last_sent INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(group_id,who)
+        );
+        CREATE TABLE mls_group_migrations (
+            group_id BLOB PRIMARY KEY, target BLOB NOT NULL UNIQUE,
+            conversation BLOB NOT NULL
+        );
+    "#),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

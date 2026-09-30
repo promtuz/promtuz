@@ -1757,7 +1757,22 @@ async fn group_for_conversation<C: DhtClient>(
 
     if let Some(gid) = bound {
         match MlsGroupHandle::load(ctx.provider, &gid) {
-            Ok(Some(g)) => return Ok(g),
+            Ok(Some(g)) => {
+                if row.kind == crate::data::conversation::KIND_GROUP
+                    && crate::mls::migration::Source::read(&g)?.is_some() {
+                    crate::groups::resume(*conversation);
+                    return Err(crate::groups::migration::Pending.into());
+                }
+                // A damaged pair session is replaceable without removing its
+                // conversation. A real group must use its authenticated recovery.
+                if row.kind != crate::data::conversation::KIND_DIRECT
+                    || (Conversation::peer_of(conversation).is_some_and(|peer|
+                        valid_initial_pair(&g.roster(), g.is_group_chat(), our_ipk, &peer))
+                        && leaf_signer_for_group(ctx.provider, &g, our_ipk).is_ok()) {
+                    return Ok(g);
+                }
+                warn!("MESSAGE: repairing unusable direct-chat encryption");
+            },
             // The conversation points at a group we no longer hold state for
             // — openmls storage and SQLite drifted. Re-establish and repoint.
             // History is keyed on the conversation, so it rides through
@@ -1942,6 +1957,9 @@ async fn send_payload<C: DhtClient>(
     let mut group = match group_for_conversation(ctx, &conversation, &our_ipk, &ipk_signer).await {
         Ok(g) => g,
         Err(e) => {
+            if e.downcast_ref::<crate::groups::migration::Pending>().is_some() {
+                return Ok(());
+            }
             // A missing peer KeyPackage is transient (the peer republishes on
             // its own reconnect). Leave the message PENDING and let
             // retry_pending_sends re-run on the next reconnect — failing here
@@ -2169,7 +2187,7 @@ pub fn leaf_signer_for_group(
             .members()
             .any(|m| crate::mls::credential::member_ipk(&m, false) == Some(*our_ipk));
         if legacy {
-            anyhow!("this group predates a security upgrade and can't be used; create it again")
+            crate::groups::migration::Pending.into()
         } else {
             anyhow!("our IPK is not a member of group")
         }
@@ -2210,7 +2228,8 @@ pub async fn process_inbound_envelope<C: DhtClient>(
     // a malicious peer crafting an oversize Welcome/Application to
     // amplify recipient CPU on TLS deserialise.
     match &envelope {
-        MlsEnvelopeP::Welcome(env) | MlsEnvelopeP::GroupWelcome { welcome: env, .. } => {
+        MlsEnvelopeP::Welcome(env) | MlsEnvelopeP::GroupWelcome { welcome: env, .. }
+        | MlsEnvelopeP::GroupMigrationWelcome { welcome: env, .. } => {
             if env.welcome_blob.0.len() > MAX_WELCOME_BYTES {
                 bail!(
                     "inbound welcome_blob {} exceeds MAX_WELCOME_BYTES = {}",
@@ -2229,10 +2248,22 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             }
         },
         MlsEnvelopeP::GroupMemberRequest { .. } | MlsEnvelopeP::PairDecline(_) => {}, /* fixed-size, no cap */
+        MlsEnvelopeP::GroupMigrationReady { .. } => {},
         MlsEnvelopeP::ContactRequest { .. } => {},
     }
 
     match envelope {
+        MlsEnvelopeP::GroupMigrationReady { group, branch, approval } => {
+            crate::groups::migration::received(group.0, branch.0, approval)?;
+            Ok(Some(InboundDecoded::ApplicationBuffered))
+        },
+        MlsEnvelopeP::GroupMigrationWelcome { group, branch, approvals, welcome, history, signature } => {
+            crate::groups::migration::accept(group.0, branch.0, sender_ipk, &approvals,
+                &welcome, &history.0, &signature.0)?;
+            // This updates an existing group, not a contact pairing. Do not
+            // create a direct chat with its founder through the PairAck path.
+            Ok(Some(InboundDecoded::ApplicationBuffered))
+        },
         MlsEnvelopeP::GroupMemberRequest { group, request } => {
             crate::groups::member_requests::received(group.0, request)?;
             Ok(Some(InboundDecoded::ApplicationBuffered))
@@ -2350,7 +2381,9 @@ async fn heal_dead_group<C: DhtClient>(
     let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else { return };
     let Ok(ipk_signer) = crate::data::identity::secret_key_signing(&our_ipk) else { return };
 
-    let lock = group_create_lock(&sender_ipk);
+    let Some(conversation) = Conversation::for_group(dead_gid) else { return };
+    if Conversation::peer_of(&conversation) != Some(sender_ipk) { return; }
+    let lock = group_create_lock(&conversation);
     let _guard = lock.lock().await;
 
     // The dead id must still be the pair group on the contact row. Anything
@@ -2361,11 +2394,15 @@ async fn heal_dead_group<C: DhtClient>(
     // the worse mistake, so that case is left to our own first send, whose
     // lazy create heals it.
     let current = Contact::get(&sender_ipk).and_then(|c| c.inner.mls_group_id);
-    if current != Some(*dead_gid) {
+    if current != Some(*dead_gid) || Conversation::group_of(&conversation) != Some(*dead_gid) {
         return;
     }
     match lazy_create_group(ctx, &our_ipk, &ipk_signer, &sender_ipk).await {
         Ok(g) => {
+            if let Err(e) = Conversation::bind_group(&conversation, &g.group_id()) {
+                warn!("MLS: could not bind repaired direct chat: {e}");
+                return;
+            }
             let _ = Contact::set_mls_group_id(&sender_ipk, &g.group_id());
             info!(
                 "MLS: re-established group with {} after dead-group inbound",
@@ -2529,6 +2566,10 @@ pub(crate) fn broadcast_profile(payload: AppPayload) {
 /// encrypting into a room full of people.
 pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<[u8; 16]> {
     let gid = group.group_id();
+    ensure!(!crate::groups::migration::retired(&PromtuzMlsProvider::shared(), &gid)?, "group session was migrated");
+    if let Some(id) = crate::groups::migration::destination(&PromtuzMlsProvider::shared(), &gid)? {
+        return Ok(id);
+    }
     if let Some(id) = Conversation::for_group(&gid) {
         return Ok(id); // already homed; a redelivered Welcome mints no second one
     }
@@ -2583,6 +2624,9 @@ fn valid_initial_pair(
 fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP, history: Option<&[u8]>,
 ) -> Result<WelcomeOutcome> {
+    if crate::groups::migration::retired(ctx.provider, &env.group_id.0)? {
+        return Ok(WelcomeOutcome::Dropped);
+    }
     if env.sender_ipk.0 != sender_ipk {
         warn!("MLS: dropped Welcome with sender_ipk mismatch with DispatchP.from");
         return Ok(WelcomeOutcome::Dropped);
@@ -2830,7 +2874,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
 
     // A recovery-enabled group must publish every ratchet and commit through
     // its journal. The retired envelope cannot bypass branch validation.
-    if crate::mls::recovery::registered(ctx.provider, &env.group_id.0)? {
+    if crate::mls::recovery::registered(ctx.provider, &env.group_id.0)?
+        || crate::mls::migration::completed(ctx.provider, &env.group_id.0)?.is_some() {
         return Ok(InboundDecoded::ApplicationStale);
     }
 
@@ -3229,12 +3274,63 @@ mod tests {
         }
     }
 
-    /// Lazy-create flow end-to-end: founder publishes a Welcome via
-    /// the fake dialer, recipient activates the group via the
-    /// lower-level `process_welcome` (we bypass
-    /// `process_welcome_inbound` because its contact-first gate
-    /// touches the production CONTACTS_DB lazy static, unsuitable for
-    /// in-process unit tests).
+    /// Partial key loss and concurrent retries must preserve the direct chat.
+    #[tokio::test(flavor = "current_thread")]
+    async fn damaged_direct_session_repairs_once_without_replacing_the_chat() {
+        const CHILD: &str = "PROMTUZ_DIRECT_REPAIR_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("promtuz-direct-repair-{}",ulid::Ulid::new()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap()).args([
+                "--exact", "messaging::tests::damaged_direct_session_repairs_once_without_replacing_the_chat", "--nocapture",
+            ]).env(CHILD,"1").env("PROMTUZ_DATA_DIR",&dir).output().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(result.status.success(),"{}\n{}",String::from_utf8_lossy(&result.stdout),String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        let alice = Node::new(81);
+        let bob = Node::new(82);
+        Identity::save(crate::db::identity::IdentityRow {
+            id: 0, ipk: alice.ipk, enc_isk: vec![], created_at: 0, name: "Alice".into(),
+            avatar: None, avatar_revision: 0, bio: String::new(), profile_revision: 0,
+        }).unwrap();
+        Contact::save(bob.ipk,"Bob".into()).unwrap();
+        let conversation = Conversation::for_peer(&bob.ipk).unwrap();
+        let dht = FakeDhtClient::new_arc();
+        let keys = bob.stash.ensure_stash_full(&bob.provider,&bob.ipk_signer).unwrap();
+        dht.publish_keypackages(&keys[..2],crate::quic::dht_client::KpOutcomeFilter::Default).await.unwrap();
+        let ctx = alice.ctx(dht.as_ref());
+        let original = group_for_conversation(&ctx,&conversation,&alice.ipk,&alice.ipk_signer).await.unwrap();
+        let old = original.group_id();
+        let message = Message::save_outgoing(conversation,"Retain this history",None).unwrap();
+        // Simulate partial key loss: the MLS tree exists, its signing key does not.
+        alice.provider.storage().connection().lock().execute(
+            "DELETE FROM mls_storage WHERE group_id=X'' AND key_tag=?1",
+            [crate::mls::storage::tags::SIGNATURE_KEY_PAIR]).unwrap();
+        assert!(leaf_signer_for_group(&alice.provider,&original,&alice.ipk).is_err());
+        let (first,second) = tokio::join!(
+            group_for_conversation(&ctx,&conversation,&alice.ipk,&alice.ipk_signer),
+            group_for_conversation(&ctx,&conversation,&alice.ipk,&alice.ipk_signer),
+        );
+        let fresh = first.unwrap();
+        assert_ne!(fresh.group_id(),old);
+        assert_eq!(fresh.group_id(),second.unwrap().group_id(),"racing repairs must use one session");
+        assert_eq!(Conversation::for_peer(&bob.ipk).unwrap(),conversation);
+        assert_eq!(Conversation::group_of(&conversation),Some(fresh.group_id()));
+        assert_eq!(Contact::get(&bob.ipk).unwrap().inner.mls_group_id,Some(fresh.group_id()));
+        assert_eq!(Message::get_by_dispatch(&conversation,&message.inner.dispatch_id.unwrap().try_into().unwrap()).unwrap().inner.content,"Retain this history");
+        let welcome = dht.fetch_welcomes().await.unwrap().into_iter()
+            .find(|w|w.envelope.group_id.0 == fresh.group_id()).unwrap();
+        let mut receiving = process_welcome(&bob.provider,&welcome.envelope).unwrap();
+        let mut fresh = fresh;
+        let signer = leaf_signer_for_group(&alice.provider,&fresh,&alice.ipk).unwrap();
+        let sealed = seal_application_message(&ctx,&mut fresh,&signer,b"repaired pair").unwrap();
+        let decoded = receiving.process_incoming(&bob.provider,
+            crate::mls::group::mls_message_from_bytes(&sealed.mls_bytes).unwrap().try_into_protocol_message().unwrap()).unwrap();
+        assert_eq!(decoded.sender,alice.ipk);
+    }
+
+    /// Lazy-create and welcome acceptance with separate MLS stores.
     #[tokio::test(flavor = "current_thread")]
     async fn lazy_create_publishes_welcome_via_dialer() {
         let alice = Node::new(0x11);

@@ -64,6 +64,7 @@ use crate::state::RELAY;
 use crate::utils::systime;
 
 pub(crate) mod member_requests;
+pub(crate) mod migration;
 pub(crate) mod recovery;
 
 /// One commit at a time on this device. Two built from the same epoch would
@@ -815,6 +816,7 @@ pub(crate) fn on_reconnect() {
 /// the committer.
 async fn follow_up(conversation: [u8; 16]) -> Result<()> {
     let _one = FOLLOW_UP.lock().await;
+    if migration::follow_up(conversation).await? { return Ok(()); }
     // Backups preserve the public group anchor and roster, not epoch secrets.
     // Request fresh keys without waiting for someone to send into the lost epoch.
     if let Some(gid) = Conversation::group_of(&conversation)

@@ -449,7 +449,7 @@ impl PromtuzStorageProvider {
         tx.execute("DELETE FROM mls_storage WHERE group_id = ?1", params![&key])?;
         tx.execute("DELETE FROM mls_group_size WHERE group_id = ?1", params![&key])?;
         for table in ["mls_branches", "mls_recovery_roots", "mls_replay", "mls_dispatch_jobs",
-            "mls_dispatch_ids", "mls_branch_inbox", "mls_group_received", "mls_join_history", "mls_recovery_retries"] {
+            "mls_dispatch_ids", "mls_branch_inbox", "mls_group_received", "mls_join_history", "mls_recovery_retries", "mls_migration_consents"] {
             tx.execute(&format!("DELETE FROM {table} WHERE group_id=?1"), [group_id])?;
         }
         tx.commit()?;

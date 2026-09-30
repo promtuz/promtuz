@@ -21,6 +21,7 @@ pub mod credential;
 pub mod epoch_catchup;
 pub mod group;
 pub mod keypackage;
+pub(crate) mod migration;
 pub mod policy;
 pub mod provider;
 pub(crate) mod recovery;

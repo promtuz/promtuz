@@ -814,6 +814,12 @@ impl MlsGroupHandle {
         self.inner.members()
     }
 
+    /// Only migration uses the legacy identity at our own authenticated seat.
+    pub(crate) fn migration_identity(&self) -> Option<[u8; 32]> {
+        self.inner.member_at(self.inner.own_leaf_index())
+            .and_then(|m| super::credential::member_ipk(&m, false))
+    }
+
     /// Whether this is a group chat (founded with a [`GroupMeta`]) rather
     /// than a pair — the line along which the credential rule tightens.
     pub fn is_group_chat(&self) -> bool {
@@ -911,6 +917,7 @@ pub fn mls_message_from_bytes(bytes: &[u8]) -> Result<MlsMessageIn> {
 #[cfg(test)]
 mod tests {
     include!("recovery_tests.rs");
+    include!("migration_tests.rs");
     use std::sync::Arc;
 
     use openmls::prelude::tls_codec::Deserialize as _;

@@ -905,6 +905,43 @@ pub enum MlsEnvelopeP {
         group:   Bytes<32>,
         request: GroupMemberRequest,
     },
+    /// An identity authorizes upgrading exactly one legacy MLS state.
+    GroupMigrationReady {
+        group: Bytes<32>,
+        branch: Bytes<32>,
+        approval: GroupMigrationApproval,
+    },
+    /// Replacement keys for an existing conversation, authorized by every
+    /// member of its old state. Appended to preserve all existing ordinals.
+    GroupMigrationWelcome {
+        group: Bytes<32>,
+        branch: Bytes<32>,
+        #[serde(deserialize_with = "crate::proto::pack::bounded_vec::<_, _, 256>")]
+        approvals: Vec<GroupMigrationApproval>,
+        welcome: WelcomeEnvelopeP,
+        history: ByteVec,
+        signature: Bytes<64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMigrationApproval {
+    pub who: Bytes<32>,
+    pub signature: Bytes<64>,
+}
+
+pub fn group_migration_signing_input(group: &[u8; 32], branch: &[u8; 32]) -> Vec<u8> {
+    [b"promtuz legacy group migration v1".as_slice(), group, branch].concat()
+}
+
+pub fn group_migration_welcome_signing_input(
+    group: &[u8; 32], branch: &[u8; 32], approvals: &[GroupMigrationApproval],
+    welcome: &WelcomeEnvelopeP, history: &[u8],
+) -> Vec<u8> {
+    let mut input = b"promtuz legacy migration welcome v1".to_vec();
+    input.extend(postcard::to_allocvec(&(group, branch, approvals, welcome, history))
+        .expect("serializable migration invitation"));
+    input
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

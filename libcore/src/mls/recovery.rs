@@ -120,6 +120,27 @@ fn storage_key(group: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 impl Snapshot {
+    /// Merge only keys changed by an isolated operation. Other groups and a
+    /// concurrent KeyPackage refill retain ownership of their global rows.
+    fn apply_global_changes(&self, updated: &Self, conn: &Connection) -> Result<()> {
+        for old in &self.0 {
+            if updated.0.contains(old) { continue; }
+            let current: Option<Vec<u8>> = conn.query_row(
+                "SELECT value FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
+                params![old.tag, old.key], |r| r.get(0),
+            ).optional()?;
+            ensure!(current.as_ref() == Some(&old.value), "key changed concurrently");
+            conn.execute("DELETE FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
+                params![old.tag, old.key])?;
+        }
+        for row in &updated.0 {
+            if self.0.contains(row) { continue; }
+            conn.execute("INSERT INTO mls_storage(group_id,key_tag,sub_key,value) VALUES(X'',?1,?2,?3)",
+                params![row.tag, row.key, row.value])?;
+        }
+        Ok(())
+    }
+
     fn read(conn: &Connection, key: &[u8]) -> Result<Self> {
         let mut q = conn.prepare("SELECT key_tag, sub_key, value FROM mls_storage WHERE group_id=?1 ORDER BY key_tag, sub_key")?;
         Ok(Self(
@@ -214,6 +235,76 @@ pub struct Published {
     pub head:           Branch,
     pub canonical:      bool,
     pub needs_recovery: bool,
+}
+
+/// Build replacement keys without touching the source session or consuming
+/// live KeyPackages. Publication retires the old keys and saves the mapping
+/// and all invitations in the same transaction as the new session.
+pub(super) struct Replacement {
+    live: Arc<Mutex<Connection>>,
+    source: [u8; 32],
+    expected: Snapshot,
+    globals: Snapshot,
+    pub provider: PromtuzMlsProvider,
+}
+
+impl Replacement {
+    pub fn open(provider: &PromtuzMlsProvider, source: [u8; 32]) -> Result<Self> {
+        let live = provider.storage().connection();
+        let (expected, globals) = {
+            let conn = live.lock();
+            (Snapshot::read(&conn, &storage_key(&source)?)?, Snapshot::read(&conn, &[])?)
+        };
+        ensure!(!expected.0.is_empty(), "migration source is missing");
+        let mut conn = Connection::open_in_memory()?;
+        crate::db::mls::apply_mls_migrations(&mut conn);
+        globals.write(&conn, &[])?;
+        expected.write(&conn, &storage_key(&source)?)?;
+        Ok(Self { live, source, expected, globals,
+            provider: PromtuzMlsProvider::new(Arc::new(Mutex::new(conn))) })
+    }
+
+    pub fn publish(
+        self, group: &MlsGroupHandle, history: &[GroupBranch], conversation: [u8; 16],
+        jobs: &[DispatchJob], kp_ref: Option<[u8; 32]>,
+    ) -> Result<()> {
+        let gid = group.group_id();
+        super::branch_proof::verify_history(&gid, history, group)?;
+        let key = storage_key(&gid)?;
+        let source_key = storage_key(&self.source)?;
+        let connection = self.provider.storage().connection();
+        let fresh = connection.lock();
+        let snapshot = Snapshot::read(&fresh, &key)?;
+        let globals = Snapshot::read(&fresh, &[])?;
+        let mut conn = self.live.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(Snapshot::read(&tx, &source_key)? == self.expected, "migration source changed; retry");
+        ensure!(Snapshot::read(&tx, &key)?.0.is_empty(), "migration target already exists");
+        tx.execute("INSERT INTO mls_group_migrations(group_id,target,conversation) VALUES(?1,?2,?3)",
+            params![self.source,gid,conversation])?;
+        self.globals.apply_global_changes(&globals, &tx)?;
+        snapshot.write(&tx, &key)?;
+        let branch = group.branch_id();
+        tx.execute("INSERT INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)", params![gid,branch])?;
+        tx.execute("INSERT INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,X'',?4,?5)",
+            params![gid,branch,group.epoch(),snapshot.encode()?,postcard::to_allocvec(history.last().expect("verified history"))?])?;
+        tx.execute("INSERT INTO mls_join_history(group_id,inviter,history) VALUES(?1,?2,?3)",
+            params![gid,history[0].author.0,postcard::to_allocvec(history)?])?;
+        for job in jobs {
+            tx.execute("INSERT INTO mls_dispatch_ids(group_id,dispatch_id,logical_id) VALUES(?1,?2,?3)",
+                params![gid,job.id,job.logical_id])?;
+            tx.execute("INSERT INTO mls_dispatch_jobs(group_id,branch,recipient,dispatch_id,kind,frame) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![gid,branch,job.recipient,job.id,job.kind,job.frame])?;
+        }
+        if let Some(kp_ref) = kp_ref {
+            tx.execute("UPDATE mls_keypackage_stash SET consumed=1 WHERE kp_ref=?1", [kp_ref])?;
+        }
+        tx.execute("DELETE FROM mls_storage WHERE group_id=?1", [&source_key])?;
+        tx.execute("DELETE FROM mls_group_size WHERE group_id=?1", [&source_key])?;
+        tx.execute("DELETE FROM mls_migration_consents WHERE group_id=?1", [self.source])?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 impl Transaction {
@@ -575,38 +666,7 @@ pub fn accept_welcome(
     let mut conn = live.lock();
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     ensure!(Snapshot::read(&tx, &key)? == expected, "group changed while processing an invitation");
-    // Apply only the global keys this Welcome consumed or created. A concurrent
-    // stash refill and unrelated groups' signing keys must survive.
-    for old in &globals.0 {
-        if updated_globals
-            .0
-            .iter()
-            .any(|r| r.tag == old.tag && r.key == old.key && r.value == old.value)
-        {
-            continue;
-        }
-        let current: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT value FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
-                params![old.tag, old.key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        ensure!(current.as_ref() == Some(&old.value), "invitation key was consumed concurrently");
-        tx.execute(
-            "DELETE FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
-            params![old.tag, old.key],
-        )?;
-    }
-    for row in &updated_globals.0 {
-        if globals.0.contains(row) {
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO mls_storage(group_id,key_tag,sub_key,value) VALUES(X'',?1,?2,?3)",
-            params![row.tag, row.key, row.value],
-        )?;
-    }
+    globals.apply_global_changes(&updated_globals, &tx)?;
     snapshot.write(&tx, &key)?;
     let branch = group.branch_id();
     tx.execute(
