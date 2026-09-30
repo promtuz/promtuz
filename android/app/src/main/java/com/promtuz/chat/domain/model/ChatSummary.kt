@@ -42,10 +42,13 @@ data class ChatSummary(
     /** Leaving is offered — a group we are in and haven't stranded. */
     val canLeave: Boolean = false,
     /**
-     * We founded this group and others are still in it, so neither leaving nor
-     * deleting is allowed — the group would be left with nobody to manage it.
+     * We founded a group from before its rules were signed and others are still
+     * in it, so neither leaving nor deleting is allowed: the group would be left
+     * with nobody to manage it.
      */
     val ownerIsStuck: Boolean = false,
+    /** Our phone makes this group's changes, so deleting it has to hand that over by leaving. */
+    val commits: Boolean = false,
     /** Preserve the group's actual name when seeding a newly opened chat header. */
     val rawTitle: String = "",
     /** A message request we have not accepted. Listed apart, with no composer. */

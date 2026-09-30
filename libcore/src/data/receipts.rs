@@ -120,10 +120,11 @@ pub(crate) fn send_result(
     dispatch: &[u8], member: Option<[u8; 32]>, status: u8, at: Option<u64>,
 ) -> Result<()> {
     let Some(member) = member else { return Ok(()) };
+    let dispatch = crate::mls::recovery::logical_dispatch(dispatch)?;
     let at = at.filter(|time| *time > 0 && *time <= i64::MAX as u64);
     let mut conn = MESSAGES_DB.lock();
     let tx = conn.transaction()?;
-    send_result_tx(&tx, dispatch, &member, status, at)?;
+    send_result_tx(&tx, &dispatch, &member, status, at)?;
     tx.commit()?;
     Ok(())
 }

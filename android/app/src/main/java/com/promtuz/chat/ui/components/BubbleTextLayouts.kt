@@ -26,12 +26,31 @@ object BubbleTextLayouts {
             is MessageContent.Call, is MessageContent.Voice, is MessageContent.Sticker -> ""
         }
 
-    /** The narration for a membership or title change, in the past tense. */
-    fun systemLine(c: MessageContent.System): String = when (c.event) {
-        SystemEventKind.Added -> "${c.actor} added ${c.target}"
-        SystemEventKind.Removed -> "${c.actor} removed ${c.target}"
-        SystemEventKind.Left -> "${c.target} left"
-        SystemEventKind.Titled -> "${c.actor} named the group \"${c.target}\""
+    /** The narration for a group change, in the past tense. */
+    fun systemLine(c: MessageContent.System): String {
+        // Mid-sentence, we are "you".
+        val target = if (c.target == "You") "you" else c.target
+        return when (c.event) {
+            SystemEventKind.Added -> "${c.actor} added $target"
+            SystemEventKind.Removed -> "${c.actor} removed $target"
+            SystemEventKind.Left -> "${c.target} left"
+            SystemEventKind.Titled -> "${c.actor} named the group \"${c.target}\""
+            SystemEventKind.Role -> when (c.detail) {
+                "2" -> "${c.actor} made $target an owner"
+                "1" -> "${c.actor} made $target an admin"
+                else -> "${c.actor} dismissed $target as admin"
+            }
+            SystemEventKind.Rules -> "${c.actor} let " + when (c.target to (c.detail == "1")) {
+                "send" to true -> "everyone send messages"
+                "send" to false -> "only admins send messages"
+                "edit" to true -> "everyone edit group info"
+                "edit" to false -> "only admins edit group info"
+                "add" to true -> "everyone add members"
+                "add" to false -> "only admins add members"
+                "appoint" to true -> "admins make admins"
+                else -> "only owners make admins"
+            }
+        }
     }
 
     fun metaLabelOf(msg: UiMessage): String = buildString {

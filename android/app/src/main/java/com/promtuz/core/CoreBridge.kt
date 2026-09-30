@@ -94,7 +94,7 @@ import uniffi.core.conversationMembers as ffiConversationMembers
 import uniffi.core.seenByCount as ffiSeenByCount
 import uniffi.core.setConversationTitle as ffiSetConversationTitle
 import uniffi.core.createGroup as ffiCreateGroup
-import uniffi.core.addGroupMember as ffiAddGroupMember
+import uniffi.core.addGroupMembers as ffiAddGroupMembers
 import uniffi.core.removeGroupMember as ffiRemoveGroupMember
 import uniffi.core.leaveGroup as ffiLeaveGroup
 import uniffi.core.deleteConversation as ffiDeleteConversation
@@ -339,31 +339,34 @@ object CoreBridge {
     suspend fun seenBy(conversationId: ByteArray, dispatchId: ByteArray): Int =
         withContext(Dispatchers.IO) { ffiSeenByCount(conversationId, dispatchId).toInt() }
 
-    /** Rename a group locally. v1 does not broadcast the change. */
+    /** Rename a chat. A group's members are told. */
     suspend fun setConversationTitle(conversationId: ByteArray, title: String) =
         withContext(Dispatchers.IO) { ffiSetConversationTitle(conversationId, title) }
 
     // — Group membership. Each needs a live relay (a KeyPackage fetch and a
     //   Welcome), so these report failure rather than queueing like a message.
 
-    /** Create a group with us as admin. Returns the new conversation id. */
+    /** Create a group with us as its owner. Returns the new conversation id. */
     suspend fun createGroup(title: String, members: List<ByteArray>): ByteArray =
         withContext(Dispatchers.IO) { ffiCreateGroup(title, members) }
 
-    /**
-     * Add someone; they see no history from before they joined. False means the
-     * owner's device was asked to add them, since only it changes the membership.
-     */
-    suspend fun addGroupMember(conversationId: ByteArray, memberIpk: ByteArray): Boolean =
-        withContext(Dispatchers.IO) { ffiAddGroupMember(conversationId, memberIpk) }
+    // Only one member's phone changes a group. Each call below returns false
+    // when it asked that phone to, and the change lands once it has.
 
-    /** Remove someone, rotating keys so their device can't read what follows. False as for an add. */
+    /** Add people in one change; they see no history from before they joined. */
+    suspend fun addGroupMembers(conversationId: ByteArray, members: List<ByteArray>): Boolean =
+        withContext(Dispatchers.IO) { ffiAddGroupMembers(conversationId, members) }
+
+    /** Remove someone; their device can't read what follows. */
     suspend fun removeGroupMember(conversationId: ByteArray, memberIpk: ByteArray): Boolean =
         withContext(Dispatchers.IO) { ffiRemoveGroupMember(conversationId, memberIpk) }
 
-    /** Make a member an admin, or stop them being one. Owner only. */
-    suspend fun setGroupAdmin(conversationId: ByteArray, memberIpk: ByteArray, admin: Boolean) =
-        withContext(Dispatchers.IO) { uniffi.core.setGroupAdmin(conversationId, memberIpk, admin) }
+    /** Make a member a member (0), an admin (1) or an owner (2). */
+    suspend fun setGroupRole(conversationId: ByteArray, memberIpk: ByteArray, role: Int): Boolean =
+        withContext(Dispatchers.IO) { uniffi.core.setGroupRole(conversationId, memberIpk, role.toUByte()) }
+
+    suspend fun setGroupRules(conversationId: ByteArray, rules: uniffi.core.GroupRulesRecord): Boolean =
+        withContext(Dispatchers.IO) { uniffi.core.setGroupRules(conversationId, rules) }
 
     /** Leave. The chat and its history stay; it just can't send any more. */
     suspend fun leaveGroup(conversationId: ByteArray) =

@@ -60,12 +60,11 @@
 //! caller invokes [`EpochCatchupBuffer::drain_when_ready`] which:
 //!
 //! 1. Re-scans the table for rows where `epoch <= group.epoch()`.
-//! 2. Feeds each row's `msg_blob` to the group's
-//!    `process_incoming` — yielding either a decrypted Application,
-//!    a staged Commit (which advances epoch further), or an error
-//!    (msg too old / cipher invalid).
-//! 3. Applications are returned to the caller; staged commits are
-//!    auto-merged in the same loop iteration.
+//! 2. Feeds each row's `msg_blob` to the group's `process_incoming` — yielding either a decrypted
+//!    Application, a staged Commit (which advances epoch further), or an error (msg too old /
+//!    cipher invalid).
+//! 3. Applications are returned to the caller; staged commits are auto-merged in the same loop
+//!    iteration.
 //! 4. Repeats until no more progress.
 //!
 //! The drain is **bounded** — at most `EPOCH_CATCHUP_LIMIT = 1024`
@@ -81,14 +80,16 @@ use std::sync::Arc;
 use openmls::prelude::ApplicationMessage;
 use openmls::prelude::ProcessedMessageContent;
 use parking_lot::Mutex;
-use rusqlite::params;
 use rusqlite::Connection;
+use rusqlite::params;
 
-use super::group::mls_message_from_bytes;
+use super::MAX_EPOCH_AHEAD_BUFFER;
+use super::group::Changed;
+use super::group::CommitOutcome;
 use super::group::MlsGroupHandle;
+use super::group::mls_message_from_bytes;
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
-use super::MAX_EPOCH_AHEAD_BUFFER;
 
 /// Outcome of [`EpochCatchupBuffer::push`]. Mirrors the
 /// task-prompt's contract.
@@ -130,6 +131,27 @@ pub struct EpochCatchupBuffer {
 impl std::fmt::Debug for EpochCatchupBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EpochCatchupBuffer").finish()
+    }
+}
+
+/// What [`EpochCatchupBuffer::drain_when_ready`] produced, in order.
+#[derive(Debug)]
+pub enum Drained {
+    Message(ProcessedApplicationMessage),
+    /// A buffered commit merged and made this change.
+    Change {
+        changed:        Changed,
+        accepted_at_ms: u64,
+    },
+}
+
+impl Drained {
+    #[cfg(test)]
+    pub fn message(self) -> Option<ProcessedApplicationMessage> {
+        match self {
+            Self::Message(m) => Some(m),
+            Self::Change { .. } => None,
+        }
     }
 }
 
@@ -185,10 +207,9 @@ impl EpochCatchupBuffer {
     ///
     /// Returns:
     /// - [`PushOutcome::Inserted`] on a fresh row,
-    /// - [`PushOutcome::Replaced`] on a `(group_id, dispatch_id)`
-    ///   duplicate (idempotent),
-    /// - [`PushOutcome::Discarded`] if the group's buffer count
-    ///   already equals [`MAX_EPOCH_AHEAD_BUFFER`].
+    /// - [`PushOutcome::Replaced`] on a `(group_id, dispatch_id)` duplicate (idempotent),
+    /// - [`PushOutcome::Discarded`] if the group's buffer count already equals
+    ///   [`MAX_EPOCH_AHEAD_BUFFER`].
     #[cfg(test)]
     pub fn push(
         &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
@@ -208,8 +229,14 @@ impl EpochCatchupBuffer {
         hash.update(b"promtuz-epoch-dispatch-v1\0");
         hash.update(&sender);
         hash.update(&dispatch_id);
-        self.push_inner(group, msg_bytes, msg_epoch, hash.finalize().as_bytes().to_vec(),
-            accepted_at_ms, Some((sender, dispatch_id)))
+        self.push_inner(
+            group,
+            msg_bytes,
+            msg_epoch,
+            hash.finalize().as_bytes().to_vec(),
+            accepted_at_ms,
+            Some((sender, dispatch_id)),
+        )
     }
 
     fn push_inner(
@@ -238,8 +265,9 @@ impl EpochCatchupBuffer {
             )
             .ok();
         if existing.is_some() {
-            tx.commit()
-                .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
+            tx.commit().map_err(|e| {
+                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
+            })?;
             return Ok(PushOutcome::Replaced);
         }
 
@@ -250,9 +278,7 @@ impl EpochCatchupBuffer {
                 params![&group_id[..]],
                 |r| r.get(0),
             )
-            .map_err(|e| {
-                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
-            })?;
+            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
 
         let bytes: i64 = tx
             .query_row(
@@ -261,13 +287,10 @@ impl EpochCatchupBuffer {
                 params![&group_id[..]],
                 |r| r.get(0),
             )
-            .map_err(|e| {
-                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
-            })?;
+            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
 
         let over_rows = count as usize >= MAX_EPOCH_AHEAD_BUFFER;
-        let over_bytes =
-            bytes as u64 + msg_bytes.len() as u64 > super::MAX_EPOCH_AHEAD_BYTES;
+        let over_bytes = bytes as u64 + msg_bytes.len() as u64 > super::MAX_EPOCH_AHEAD_BYTES;
         if over_rows || over_bytes {
             // Drop newest (i.e. drop the incoming).
             log::warn!(
@@ -277,8 +300,9 @@ impl EpochCatchupBuffer {
                 count,
                 bytes
             );
-            tx.commit()
-                .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
+            tx.commit().map_err(|e| {
+                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
+            })?;
             return Ok(PushOutcome::Discarded);
         }
 
@@ -327,7 +351,7 @@ impl EpochCatchupBuffer {
     /// across reconnects would just amplify CPU cost).
     pub fn drain_when_ready(
         &self, group: &mut MlsGroupHandle, provider: &PromtuzMlsProvider,
-    ) -> Result<Vec<ProcessedApplicationMessage>, MlsGroupError> {
+    ) -> Result<Vec<Drained>, MlsGroupError> {
         let group_id = group.group_id();
         let mut output = Vec::new();
         let mut iterations = 0usize;
@@ -370,7 +394,15 @@ impl EpochCatchupBuffer {
                 .ok()
             };
 
-            let Some((dispatch_id, msg_blob, msg_epoch, accepted_at_ms, original_id, dispatch_sender)) = candidate else {
+            let Some((
+                dispatch_id,
+                msg_blob,
+                msg_epoch,
+                accepted_at_ms,
+                original_id,
+                dispatch_sender,
+            )) = candidate
+            else {
                 break; // no progressable rows
             };
 
@@ -399,74 +431,72 @@ impl EpochCatchupBuffer {
             let in_msg = match mls_message_from_bytes(&msg_blob) {
                 Ok(m) => m,
                 Err(e) => {
-                    log::warn!(
-                        "EpochCatchupBuffer: malformed buffered msg dropped: {e}"
-                    );
+                    log::warn!("EpochCatchupBuffer: malformed buffered msg dropped: {e}");
                     // Hard parse error → no point retrying; delete.
                     delete_row(&dispatch_id)?;
                     continue;
-                }
+                },
             };
             let proto = match in_msg.try_into_protocol_message() {
                 Ok(p) => p,
                 Err(e) => {
-                    log::warn!(
-                        "EpochCatchupBuffer: buffered msg is not a ProtocolMessage: {e:?}"
-                    );
+                    log::warn!("EpochCatchupBuffer: buffered msg is not a ProtocolMessage: {e:?}");
                     delete_row(&dispatch_id)?;
                     continue;
-                }
+                },
             };
 
             match group.process_incoming(provider, proto).map(|p| (p.sender, p.content)) {
                 Ok((sender, ProcessedMessageContent::ApplicationMessage(app))) => {
-                    output.push(application_to_processed(
+                    let message = application_to_processed(
                         app,
                         original_id.unwrap_or_else(|| dispatch_id.clone()),
                         msg_epoch,
                         accepted_at_ms,
                         sender,
                         dispatch_sender,
-                    ));
+                    );
+                    if group.application_is_permitted(&sender, &message.plaintext) {
+                        output.push(Drained::Message(message));
+                    }
                     delete_row(&dispatch_id)?;
-                }
+                },
                 Ok((sender, ProcessedMessageContent::StagedCommitMessage(staged))) => {
                     // The same gate as the live path: a commit that arrived
                     // early is no more trusted for having waited.
                     match group.merge_staged_commit_if_permitted(provider, *staged, sender) {
-                        Ok(_) => {
+                        Ok(outcome) => {
+                            if let CommitOutcome::Merged(Some(changed)) = outcome {
+                                output.push(Drained::Change { changed, accepted_at_ms });
+                            }
                             delete_row(&dispatch_id)?;
-                        }
+                        },
                         Err(e) => {
-                            log::warn!(
-                                "EpochCatchupBuffer: merge_staged_commit failed: {e}"
-                            );
+                            log::warn!("EpochCatchupBuffer: merge_staged_commit failed: {e}");
                             // Don't delete — let the next drain re-attempt
                             // (in case state catches up). The
                             // EPOCH_CATCHUP_LIMIT loop bound prevents
                             // an infinite spin on a permanently-stuck
                             // commit.
-                        }
+                        },
                     }
-                }
+                },
                 Ok((_, ProcessedMessageContent::ProposalMessage(_)))
                 | Ok((_, ProcessedMessageContent::ExternalJoinProposalMessage(_))) => {
                     // Proposals from the buffer have no caller; they
                     // should already have been rolled into a commit
                     // by the time they appear here. Drop silently.
                     delete_row(&dispatch_id)?;
-                }
+                },
                 Err(e) => {
-                    log::warn!(
-                        "EpochCatchupBuffer: process_incoming error on buffered msg: {e}"
-                    );
+                    log::warn!("EpochCatchupBuffer: process_incoming error on buffered msg: {e}");
                     // Permanent crypto failure → delete (re-trying
                     // won't help) — but log loudly so the user sees
                     // it. Soft failures (transient I/O during
                     // openmls processing) would loop here, bounded
                     // by EPOCH_CATCHUP_LIMIT.
                     delete_row(&dispatch_id)?;
-                }
+                },
             }
         }
 
@@ -476,11 +506,8 @@ impl EpochCatchupBuffer {
     /// Drop every buffered row for a group (forget-contact cascade).
     pub fn purge_group(&self, group_id: &[u8; 32]) -> Result<(), MlsGroupError> {
         let conn = self.conn.lock();
-        conn.execute(
-            "DELETE FROM mls_epoch_ahead WHERE group_id = ?1",
-            params![&group_id[..]],
-        )
-        .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
+        conn.execute("DELETE FROM mls_epoch_ahead WHERE group_id = ?1", params![&group_id[..]])
+            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
         Ok(())
     }
 
@@ -494,9 +521,7 @@ impl EpochCatchupBuffer {
                 params![&group_id[..]],
                 |r| r.get(0),
             )
-            .map_err(|e| {
-                MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
-            })?;
+            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
         Ok(n as usize)
     }
 }
@@ -523,20 +548,18 @@ fn application_to_processed(
 fn unix_now_ms() -> u64 {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::group::mls_message_to_bytes;
-    use crate::mls::group::PROMTUZ_CIPHERSUITE;
     use openmls::prelude::*;
     use rusqlite::Connection;
+
+    use super::*;
+    use crate::db::mls::apply_mls_migrations;
+    use crate::mls::group::PROMTUZ_CIPHERSUITE;
+    use crate::mls::group::mls_message_to_bytes;
 
     /// Build a single shared connection so the provider and the
     /// buffer point at the same DB. (Fresh cache per test; SQLite
@@ -553,8 +576,8 @@ mod tests {
     /// Test fixture identical to the one in `group::tests`.
     struct Party {
         ipk_signer: ed25519_dalek::SigningKey,
-        ipk: [u8; 32],
-        sig_kp: openmls_basic_credential::SignatureKeyPair,
+        ipk:        [u8; 32],
+        sig_kp:     openmls_basic_credential::SignatureKeyPair,
     }
     impl Party {
         fn new(provider: &PromtuzMlsProvider, seed: u8) -> Self {
@@ -569,7 +592,11 @@ mod tests {
         /// The leaf key under a credential its identity signed for.
         fn cwk(&self) -> CredentialWithKey {
             CredentialWithKey {
-                credential:    crate::mls::credential::bound_credential(&self.ipk_signer, self.sig_kp.public()).into(),
+                credential:    crate::mls::credential::bound_credential(
+                    &self.ipk_signer,
+                    self.sig_kp.public(),
+                )
+                .into(),
                 signature_key: self.sig_kp.public().into(),
             }
         }
@@ -593,8 +620,8 @@ mod tests {
     /// Build alice → adds bob → returns alice_group, bob_group at
     /// the same epoch. Both groups in *one* shared provider so
     /// alice can send and bob can receive without cross-DB plumbing.
-    fn pair_setup() -> (PromtuzMlsProvider, EpochCatchupBuffer, MlsGroupHandle, MlsGroupHandle, Party, Party)
-    {
+    fn pair_setup()
+    -> (PromtuzMlsProvider, EpochCatchupBuffer, MlsGroupHandle, MlsGroupHandle, Party, Party) {
         let (provider_a, buffer_a) = build_provider_and_buffer();
         // bob has his own provider (his KP bundle lives in his
         // storage so openmls can find his init/enc keys).
@@ -606,14 +633,12 @@ mod tests {
         let alice = Party::new(&provider_a, 1);
         let bob = Party::new(&provider_b, 2);
 
-        let mut alice_group = MlsGroupHandle::create(&provider_a, &alice.sig_kp, alice.cwk(), &[0xAA; 32],
-            None,
-        )
-        .expect("create alice group");
+        let mut alice_group =
+            MlsGroupHandle::create(&provider_a, &alice.sig_kp, alice.cwk(), &[0xAA; 32], None)
+                .expect("create alice group");
         let bob_kp = make_kp(&provider_b, &bob);
-        let (_commit, welcome) = alice_group
-            .add_members(&provider_a, &alice.sig_kp, &[bob_kp])
-            .expect("add bob");
+        let (_commit, welcome) =
+            alice_group.add_members(&provider_a, &alice.sig_kp, &[bob_kp]).expect("add bob");
         alice_group.merge_pending_commit(&provider_a).expect("merge");
 
         // Round-trip through tls_codec to extract the inner Welcome
@@ -629,8 +654,8 @@ mod tests {
             other => panic!("expected welcome, got {other:?}"),
         };
         let join = MlsGroupJoinConfig::default();
-        let staged = StagedWelcome::new_from_welcome(&provider_b, &join, welcome_msg, None)
-            .expect("staged");
+        let staged =
+            StagedWelcome::new_from_welcome(&provider_b, &join, welcome_msg, None).expect("staged");
         let bob_group = MlsGroupHandle::wrap(staged.into_group(&provider_b).expect("into"));
         // Move bob's group to alice's provider so we can use a
         // single buffer. We have to load it from alice's storage —
@@ -653,7 +678,8 @@ mod tests {
     fn dispatch_identity_survives_reload_without_cross_sender_collisions() {
         let (provider_a, buffer, mut alice_group, _bob_group, alice, bob) = pair_setup();
         let mut encode = |bytes: &[u8]| {
-            let msg = alice_group.create_application_message(&provider_a, &alice.sig_kp, bytes).unwrap();
+            let msg =
+                alice_group.create_application_message(&provider_a, &alice.sig_kp, bytes).unwrap();
             mls_message_to_bytes(&msg).unwrap()
         };
         let first_bytes = encode(b"first");
@@ -662,16 +688,33 @@ mod tests {
         let provider_b = PromtuzMlsProvider::new(buffer.conn.clone());
         let group = MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
         let epoch = group.epoch();
-        assert_eq!(buffer.push_dispatch(&group, first_bytes.clone(), epoch, alice.ipk, [9; 16], 123).unwrap(), PushOutcome::Inserted);
-        assert_eq!(buffer.push_dispatch(&group, second.clone(), epoch, alice.ipk, [9; 16], 999).unwrap(), PushOutcome::Replaced);
-        assert_eq!(buffer.push_dispatch(&group, second, epoch, bob.ipk, [9; 16], 124).unwrap(), PushOutcome::Inserted);
+        assert_eq!(
+            buffer
+                .push_dispatch(&group, first_bytes.clone(), epoch, alice.ipk, [9; 16], 123)
+                .unwrap(),
+            PushOutcome::Inserted
+        );
+        assert_eq!(
+            buffer.push_dispatch(&group, second.clone(), epoch, alice.ipk, [9; 16], 999).unwrap(),
+            PushOutcome::Replaced
+        );
+        assert_eq!(
+            buffer.push_dispatch(&group, second, epoch, bob.ipk, [9; 16], 124).unwrap(),
+            PushOutcome::Inserted
+        );
         buffer.push(&group, legacy, epoch, vec![10; 16], 125).unwrap();
         let conn = buffer.conn.clone();
         drop(buffer);
         drop(group);
         let buffer = EpochCatchupBuffer::new(conn);
-        let mut group = MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
-        let drained = buffer.drain_when_ready(&mut group, &provider_b).unwrap();
+        let mut group =
+            MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
+        let drained: Vec<_> = buffer
+            .drain_when_ready(&mut group, &provider_b)
+            .unwrap()
+            .into_iter()
+            .filter_map(Drained::message)
+            .collect();
         assert_eq!(drained.len(), 3);
         let first = drained.iter().find(|m| m.dispatch_sender == Some(alice.ipk)).unwrap();
         assert_eq!(first.dispatch_id, vec![9; 16]);
@@ -716,9 +759,12 @@ mod tests {
             .expect("push");
         assert_eq!(outcome, PushOutcome::Inserted);
 
-        let drained = buffer
+        let drained: Vec<_> = buffer
             .drain_when_ready(&mut bob_group, &provider_b)
-            .expect("drain");
+            .expect("drain")
+            .into_iter()
+            .filter_map(Drained::message)
+            .collect();
         assert_eq!(drained.len(), 1, "exactly one application drained");
         assert_eq!(drained[0].plaintext, plaintext);
         assert_eq!(drained[0].dispatch_id, dispatch_id);
@@ -743,20 +789,14 @@ mod tests {
         for i in 0..MAX_EPOCH_AHEAD_BUFFER {
             // Use a non-zero, distinct 4-byte id.
             let id = (i as u32).to_be_bytes().to_vec();
-            let outcome = buffer
-                .push(&bob_group, vec![0x42; 16], 999, id, 0)
-                .expect("push");
+            let outcome = buffer.push(&bob_group, vec![0x42; 16], 999, id, 0).expect("push");
             assert_eq!(outcome, PushOutcome::Inserted);
         }
-        assert_eq!(
-            buffer.buffered_count(&gid).unwrap(),
-            MAX_EPOCH_AHEAD_BUFFER
-        );
+        assert_eq!(buffer.buffered_count(&gid).unwrap(), MAX_EPOCH_AHEAD_BUFFER);
 
         // Push one more — should be Discarded.
-        let outcome = buffer
-            .push(&bob_group, vec![0x99; 16], 999, vec![0xFF; 4], 0)
-            .expect("push (cap)");
+        let outcome =
+            buffer.push(&bob_group, vec![0x99; 16], 999, vec![0xFF; 4], 0).expect("push (cap)");
         assert_eq!(outcome, PushOutcome::Discarded);
         assert_eq!(
             buffer.buffered_count(&gid).unwrap(),
@@ -776,9 +816,7 @@ mod tests {
         let gid = bob_group.group_id();
         let id = vec![0xBE, 0xEF];
 
-        let outcome = buffer
-            .push(&bob_group, vec![0x55; 32], 7, id.clone(), 0)
-            .expect("push");
+        let outcome = buffer.push(&bob_group, vec![0x55; 32], 7, id.clone(), 0).expect("push");
         assert_eq!(outcome, PushOutcome::Inserted);
 
         // Reconstruct a fresh EpochCatchupBuffer over the same
@@ -788,9 +826,7 @@ mod tests {
         assert_eq!(buffer2.buffered_count(&gid).unwrap(), 1);
 
         // Idempotent re-push of the same dispatch_id is Replaced.
-        let outcome2 = buffer2
-            .push(&bob_group, vec![0x55; 32], 7, id, 0)
-            .expect("push2");
+        let outcome2 = buffer2.push(&bob_group, vec![0x55; 32], 7, id, 0).expect("push2");
         assert_eq!(outcome2, PushOutcome::Replaced);
         assert_eq!(buffer2.buffered_count(&gid).unwrap(), 1);
     }
@@ -821,9 +857,7 @@ mod tests {
         assert_eq!(buffer.buffered_count(&bob_group.group_id()).unwrap(), 1);
 
         // Drain — the malformed row is silently dropped.
-        let drained = buffer
-            .drain_when_ready(&mut bob_group, &provider_b)
-            .expect("drain");
+        let drained = buffer.drain_when_ready(&mut bob_group, &provider_b).expect("drain");
         assert_eq!(drained.len(), 0, "malformed blob produces no application");
         assert_eq!(
             buffer.buffered_count(&bob_group.group_id()).unwrap(),

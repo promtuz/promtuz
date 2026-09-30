@@ -226,7 +226,10 @@ pub fn export() -> Result<Vec<u8>> {
         member_read,
         prefs: {
             let mut prefs = crate::data::app_prefs::dump_all();
-            prefs.retain(|(k, _)| k != "profile_bio");
+            // A restored device has no KeyPackage private keys. Reusing a
+            // pre-backup refresh nonce could ask peers for an already-consumed
+            // Welcome; keep anchors and departure requests, request fresh keys.
+            prefs.retain(|(k, _)| k != "profile_bio" && !k.starts_with("group_refresh:"));
             prefs.push(("profile_bio".into(), identity.details().bio));
             prefs
         },

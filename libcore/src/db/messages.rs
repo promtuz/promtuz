@@ -6,10 +6,9 @@ use rusqlite_migration::Migrations;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::db::utils::ulid::ULID;
-
 use super::macros::PRAGMA;
 use super::macros::from_row;
+use crate::db::utils::ulid::ULID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRow {
@@ -59,6 +58,11 @@ pub const SYSTEM_TITLED: u8 = 4;
 /// `unanswered`, `cancelled` or `failed`. `dispatch_id` is the call id, the
 /// same on both phones, so each records the call exactly once.
 pub const SYSTEM_CALL: u8 = 5;
+/// `sender_ipk` changed a member's role; `content` is `<member hex>:<role>`.
+pub const SYSTEM_ROLE: u8 = 6;
+/// `sender_ipk` changed a group rule; `content` is `<rule>:<0|1>`, the rule
+/// being `add`, `edit`, `send` or `appoint`.
+pub const SYSTEM_RULES: u8 = 7;
 
 from_row!(MessageRow { id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to, system });
 
@@ -124,10 +128,10 @@ pub struct MemberRow {
     #[serde(with = "serde_bytes")]
     pub conversation_id: [u8; 16],
     #[serde(with = "serde_bytes")]
-    pub member_ipk: [u8; 32],
-    /// 0 = member, 1 = admin. The founder is always an admin and appoints the rest.
-    pub role: u8,
-    pub joined_at: u64,
+    pub member_ipk:      [u8; 32],
+    /// 0 = member, 1 = admin, 2 = owner.
+    pub role:            u8,
+    pub joined_at:       u64,
     /// Cleared on leave/remove; the row stays so past messages still attribute.
     pub active: bool,
 }
@@ -547,6 +551,18 @@ const MIGRATION_ARRAY: &[M] = &[
         FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
         WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;"),
     M::up("DROP TABLE contact_requests;"),
+    // Groups name owners now, and a group with signed rules caches them here.
+    // Until a group converts, its founder is its one owner.
+    M::up("ALTER TABLE conversations ADD COLUMN group_state BLOB;
+        UPDATE conversation_members SET role = CASE WHEN member_ipk IS
+            (SELECT created_by FROM conversations c WHERE c.id = conversation_id) THEN 2 ELSE 0 END
+        WHERE conversation_id IN (SELECT id FROM conversations WHERE kind = 1);"),
+    M::up("ALTER TABLE messages ADD COLUMN group_change BLOB;
+        CREATE TABLE group_events (
+            conversation_id BLOB NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            change_id BLOB NOT NULL,
+            PRIMARY KEY(conversation_id, change_id)
+        ) WITHOUT ROWID;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already
@@ -556,25 +572,28 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     let mut conn = Connection::open(super::db("messages")).expect("db open failed");
     PRAGMA!(conn, MIGRATIONS);
-    super::register_change_hook(&conn, &[
-        "messages",
-        "message_recipients",
-        "message_audiences",
-        "receipt_peers",
-        "incoming_receipts",
-        "reactions",
-        "message_media",
-        "conversations",
-        "conversation_members",
-        "peer_names",
-        "peer_avatars",
-        "peer_profiles",
-        "prefs",
-        "group_pictures",
-        "sticker_packs",
-        "stickers",
-        "sticker_recents",
-    ]);
+    super::register_change_hook(
+        &conn,
+        &[
+            "messages",
+            "message_recipients",
+            "message_audiences",
+            "receipt_peers",
+            "incoming_receipts",
+            "reactions",
+            "message_media",
+            "conversations",
+            "conversation_members",
+            "peer_names",
+            "peer_avatars",
+            "peer_profiles",
+            "prefs",
+            "group_pictures",
+            "sticker_packs",
+            "stickers",
+            "sticker_recents",
+        ],
+    );
 
     Mutex::new(conn)
 });
@@ -592,21 +611,37 @@ mod tests {
 
     #[test]
     fn receipt_migration_keeps_old_read_state_without_inventing_times_or_audiences() {
-        let mut conn=Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         Migrations::from_slice(&MIGRATION_ARRAY[..26]).to_latest(&mut conn).unwrap();
-        for n in [1u8,2] {
+        for n in [1u8, 2] {
             conn.execute("INSERT INTO messages(id,conversation_id,sender_ipk,content,outgoing,timestamp,status,dispatch_id) VALUES (?1,?2,?3,'old',0,1,1,?4)",
                 (format!("{n:026}"),[9;16].as_slice(),[2;32].as_slice(),[n;16].as_slice())).unwrap();
         }
-        conn.execute("INSERT INTO read_state VALUES (?1,?2)",([9;16].as_slice(),[1;16].as_slice())).unwrap();
-        conn.execute("INSERT INTO member_read_state VALUES (?1,?2,?3)",([9;16].as_slice(),[2;32].as_slice(),[2;16].as_slice())).unwrap();
+        conn.execute(
+            "INSERT INTO read_state VALUES (?1,?2)",
+            ([9; 16].as_slice(), [1; 16].as_slice()),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO member_read_state VALUES (?1,?2,?3)",
+            ([9; 16].as_slice(), [2; 32].as_slice(), [2; 16].as_slice()),
+        )
+        .unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let rows=conn.prepare("SELECT is_read,delivered_at,read_at,pending FROM incoming_receipts ORDER BY message_id").unwrap()
             .query_map([],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,Option<u64>>(1)?,r.get::<_,Option<u64>>(2)?,r.get::<_,bool>(3)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert_eq!(rows,vec![(true,None,None,false),(false,None,None,false)]);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM message_audiences",[],|r|r.get::<_,u32>(0)).unwrap(),0);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM message_recipients",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+        assert_eq!(rows, vec![(true, None, None, false), (false, None, None, false)]);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM message_audiences", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM message_recipients", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -614,8 +649,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         // Version 24 introduced the deletion ledger. Keep the pre-migration
         // fixture pinned even as later migrations are appended.
-        Migrations::from_slice(&MIGRATION_ARRAY[..23])
-            .to_latest(&mut conn).unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..23]).to_latest(&mut conn).unwrap();
         for (id, outgoing, deleted, sender) in [
             (1u8, false, true, Some(vec![1; 32])),
             (2, false, false, Some(vec![1; 32])),
@@ -629,11 +663,21 @@ mod tests {
             ).unwrap();
         }
         MIGRATIONS.to_latest(&mut conn).unwrap();
-        let markers: Vec<Vec<u8>> = conn.prepare("SELECT dispatch_id FROM message_deletions").unwrap()
-            .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        let markers: Vec<Vec<u8>> = conn
+            .prepare("SELECT dispatch_id FROM message_deletions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
         assert_eq!(markers, vec![vec![1; 16]]);
-        let kept: u32 = conn.query_row("SELECT COUNT(*) FROM messages WHERE content='existing' AND timestamp=123",
-            [], |r| r.get(0)).unwrap();
+        let kept: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE content='existing' AND timestamp=123",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(kept, 4);
     }
 }

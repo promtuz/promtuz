@@ -13,18 +13,40 @@ pub(crate) fn snapshot(conv: &[u8; 16]) -> Option<(u64, Option<Vec<u8>>)> {
 pub(crate) fn receive(
     conv: [u8; 16], author: [u8; 32], revision: u64, avif: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::data::conversation::Conversation::may_edit(&conv, &author),
+        "they may not change the group's photo"
+    );
+    receive_authorized(conv, revision, avif)
+}
+
+/// Called after MLS checked the author's permission at the message's epoch.
+pub(crate) fn receive_authorized(
+    conv: [u8; 16], revision: u64, avif: Option<Vec<u8>>,
+) -> anyhow::Result<()> {
     let db = crate::db::messages::MESSAGES_DB.lock();
-    apply(&db, &conv, &author, revision, avif)?;
+    store(&db, &conv, revision, avif)?;
     drop(db);
     crate::data::peer_avatar::notify_changed();
     Ok(())
 }
 
+#[cfg(test)]
 fn apply(
     db: &rusqlite::Connection, conv: &[u8; 16], author: &[u8; 32], revision: u64,
     avif: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
-    use crate::data::conversation::{Conversation, KIND_GROUP};
+    anyhow::ensure!(
+        crate::data::conversation::Conversation::may_edit_tx(db, conv, author),
+        "they may not change the group's photo"
+    );
+    store(db, conv, revision, avif)
+}
+
+fn store(
+    db: &rusqlite::Connection, conv: &[u8; 16], revision: u64, avif: Option<Vec<u8>>,
+) -> anyhow::Result<()> {
+    use crate::data::conversation::KIND_GROUP;
     let kind: u8 =
         db.query_row("SELECT kind FROM conversations WHERE id=?1", [conv.as_slice()], |r| {
             r.get(0)
@@ -34,10 +56,6 @@ fn apply(
         crate::data::peer_avatar::check_avif(bytes)?;
     }
     let revision = i64::try_from(revision)?;
-    anyhow::ensure!(
-        Conversation::is_admin_tx(db, conv, author),
-        "only the active admin can change the picture"
-    );
     db.execute(
         "INSERT INTO group_pictures(conversation_id, revision, avif) VALUES (?1, ?2, ?3)
         ON CONFLICT(conversation_id) DO UPDATE SET revision=excluded.revision, avif=excluded.avif
@@ -59,7 +77,11 @@ pub fn dump() -> Vec<Backup> {
     db.prepare("SELECT conversation_id, revision, avif FROM group_pictures")
         .and_then(|mut q| {
             q.query_map([], |r| {
-                Ok(Backup { conversation: r.get(0)?, revision: r.get(1)?, avif: r.get(2)? })
+                Ok(Backup {
+                    conversation: r.get(0)?,
+                    revision:     r.get(1)?,
+                    avif:         r.get(2)?,
+                })
             })
             .map(|rows| rows.flatten().collect())
         })
@@ -95,7 +117,11 @@ mod tests {
         let conv = [1u8; 16];
         let admin = [2u8; 32];
         let member = [3u8; 32];
-        db.execute("INSERT INTO conversations(id,kind) VALUES (?1,1)", [conv.as_slice()]).unwrap();
+        db.execute(
+            "INSERT INTO conversations(id,kind,created_by) VALUES (?1,1,?2)",
+            (conv.as_slice(), admin.as_slice()),
+        )
+        .unwrap();
         for (peer, role) in [(admin, 1), (member, 0)] {
             db.execute("INSERT INTO conversation_members(conversation_id,member_ipk,role) VALUES (?1,?2,?3)",
                 (conv.as_slice(),peer.as_slice(),role)).unwrap();

@@ -87,16 +87,14 @@ const MIGRATION_ARRAY: &[M] = &[
     // schedule rotation and refill.
     //
     // Columns:
-    // - `kp_ref`: RFC 9420 §5.2 KeyPackageRef (label-prefixed SHA-256
-    //   over the TLS-encoded KP under suite 0x0003). PRIMARY KEY
-    //   because it's globally unique.
-    // - `generated_at_ms`: when the client minted this KP. Drives the
-    //   anti-pinning rotation cadence (`KP_SCHEDULED_ROTATION_MS`).
-    // - `expires_at_ms`: when the KP's lifetime extension elapses.
-    //   Used to prune ageing rows independent of consumption signal.
-    // - `consumed`: 0/1 flag; flips to 1 when libcore observes a
-    //   Welcome consuming this KP. The welcome-receipt path hooks
-    //   into this; until then we only write 0.
+    // - `kp_ref`: RFC 9420 §5.2 KeyPackageRef (label-prefixed SHA-256 over the TLS-encoded KP
+    //   under suite 0x0003). PRIMARY KEY because it's globally unique.
+    // - `generated_at_ms`: when the client minted this KP. Drives the anti-pinning rotation
+    //   cadence (`KP_SCHEDULED_ROTATION_MS`).
+    // - `expires_at_ms`: when the KP's lifetime extension elapses. Used to prune ageing rows
+    //   independent of consumption signal.
+    // - `consumed`: 0/1 flag; flips to 1 when libcore observes a Welcome consuming this KP. The
+    //   welcome-receipt path hooks into this; until then we only write 0.
     M::up(
         r#"--sql
         CREATE TABLE mls_keypackage_stash (
@@ -183,6 +181,62 @@ const MIGRATION_ARRAY: &[M] = &[
             CHECK(dispatch_sender IS NULL OR length(dispatch_sender) = 32);
     "#,
     ),
+    M::up(
+        r#"
+        CREATE TABLE mls_branches (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            parent BLOB, epoch INTEGER NOT NULL, rank INTEGER NOT NULL,
+            commit_hash BLOB NOT NULL, commit_blob BLOB,
+            snapshot BLOB NOT NULL, change_blob BLOB, proof BLOB,
+            archived_at INTEGER,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(group_id, branch)
+        );
+        CREATE INDEX mls_branches_parent ON mls_branches(group_id, parent, rank DESC, commit_hash);
+        CREATE TABLE mls_recovery_roots (
+            group_id BLOB PRIMARY KEY, branch BLOB NOT NULL
+        );
+        CREATE TABLE mls_join_history (
+            group_id BLOB PRIMARY KEY, inviter BLOB NOT NULL, history BLOB NOT NULL
+        );
+        CREATE TABLE mls_recovery_retries (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            PRIMARY KEY(group_id,branch)
+        );
+        CREATE TABLE mls_replay (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id BLOB NOT NULL, dispatch_id BLOB NOT NULL,
+            branch BLOB NOT NULL, payload BLOB NOT NULL, recipients BLOB NOT NULL,
+            wake INTEGER NOT NULL, kind INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            UNIQUE(group_id, dispatch_id)
+        );
+        CREATE TABLE mls_dispatch_jobs (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            recipient BLOB NOT NULL, dispatch_id BLOB NOT NULL,
+            kind INTEGER NOT NULL, frame BLOB NOT NULL,
+            PRIMARY KEY(recipient, dispatch_id)
+        );
+        CREATE TABLE mls_dispatch_ids (
+            group_id BLOB NOT NULL, dispatch_id BLOB PRIMARY KEY,
+            logical_id BLOB NOT NULL
+        );
+        CREATE TABLE mls_branch_inbox (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            sender BLOB NOT NULL, dispatch_id BLOB NOT NULL,
+            accepted_at_ms INTEGER NOT NULL, envelope BLOB NOT NULL,
+            received_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(group_id, sender, dispatch_id)
+        );
+        CREATE TABLE mls_group_received (
+            group_id BLOB NOT NULL, branch BLOB NOT NULL,
+            sender BLOB NOT NULL, dispatch_id BLOB NOT NULL,
+            accepted_at_ms INTEGER NOT NULL, payload BLOB NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(group_id,sender,dispatch_id)
+        );
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -226,8 +280,7 @@ mod tests {
     #[test]
     fn dispatch_identity_migration_preserves_legacy_buffered_messages() {
         let mut conn = Connection::open_in_memory().unwrap();
-        Migrations::from_slice(&MIGRATION_ARRAY[..MIGRATION_ARRAY.len() - 1])
-            .to_latest(&mut conn).unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..7]).to_latest(&mut conn).unwrap();
         conn.execute(
             "INSERT INTO mls_epoch_ahead (group_id,epoch,dispatch_id,msg_blob,received_at_ms,accepted_at_ms) VALUES (?1,2,?2,?3,456,123)",
             (vec![1; 32], vec![2; 16], vec![3; 128]),
@@ -285,9 +338,8 @@ mod tests {
         // Re-run migrations.
         apply_mls_migrations(&mut conn);
 
-        let count: i64 = conn
-            .query_row("SELECT count(*) FROM mls_storage", [], |r| r.get(0))
-            .expect("count");
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM mls_storage", [], |r| r.get(0)).expect("count");
         assert_eq!(count, 1, "row should survive a re-run of migrations");
     }
 }

@@ -4,9 +4,8 @@
 //! # Scope
 //!
 //! - **Lifecycle**: create / add / remove / self-update / leave.
-//! - **Application messaging**: encrypt-out, decrypt-in (inner MLS
-//!   message wrapping; outer envelope is in `welcome.rs` and the
-//!   `messaging.rs` wiring).
+//! - **Application messaging**: encrypt-out, decrypt-in (inner MLS message wrapping; outer envelope
+//!   is in `welcome.rs` and the `messaging.rs` wiring).
 //! - **Export secret** for SFrame integration.
 //!
 //! # Cipher suite pin
@@ -42,13 +41,18 @@
 // dead. Module-wide allow-lint matches the pattern in `provider.rs`.
 #![allow(dead_code)]
 
+use common::proto::mls_wire::GroupChange;
+use common::proto::mls_wire::SignedChange;
+use common::proto::mls_wire::group_change_signing_input;
 use openmls::prelude::tls_codec::Serialize as _;
 use openmls::prelude::*;
-use openmls_traits::signatures::Signer;
 use openmls_traits::OpenMlsProvider;
+use openmls_traits::signatures::Signer;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::policy;
+use super::policy::GroupState;
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
 
@@ -99,20 +103,104 @@ pub const GROUP_META_EXTENSION: ExtensionType = ExtensionType::Unknown(PROMTUZ_G
 /// group into a DM) nor forge one; it reaches the joiner inside the Welcome, so
 /// there is no message that can arrive before it; and the relay parses none of
 /// it, so this needed no wire version bump and no relay deploy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMeta {
-    /// The group's name when it was founded. Later renames travel as
-    /// `SystemEvent::Titled`; this is only the starting point.
+    /// The group's name as its committer last knew it. Renames travel as
+    /// `SystemEvent::Titled`; this is what a new member starts from.
     pub title:   String,
-    /// Who founded it, and so who administers it.
+    /// Who founded it.
     ///
     /// Carried here rather than inferred from whoever sent us the Welcome: a
     /// group whose state landed without a conversation is homed by the next
     /// message to arrive in it, and the sender of that message is whoever
-    /// happened to speak first. Reading the owner from the context means every
+    /// happened to speak first. Reading it from the context means every
     /// member agrees on it however they came to learn about the group.
-    #[serde(with = "serde_bytes")]
     pub founder: [u8; 32],
+    /// Who runs the group and by what rules. `None` for a group founded before
+    /// rules were signed, which its founder alone runs until it converts.
+    pub state:   Option<GroupState>,
+}
+
+/// The part of [`GroupMeta`] every client reads. The state follows it in the
+/// same extension, where clients from before it stop reading.
+#[derive(Serialize, Deserialize)]
+struct MetaHead {
+    title:   String,
+    #[serde(with = "serde_bytes")]
+    founder: [u8; 32],
+}
+
+impl GroupMeta {
+    pub fn founded(title: String, founder: [u8; 32]) -> Self {
+        Self { title, founder, state: Some(GroupState::founded(founder)) }
+    }
+
+    /// The rules this group runs by. A group from before they were signed runs
+    /// as it always did: its founder alone manages it.
+    pub fn effective(&self) -> GroupState {
+        self.state.clone().unwrap_or_else(|| {
+            let mut state = GroupState::founded(self.founder);
+            state.rules.members_add = false;
+            state
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        let head = MetaHead { title: self.title.clone(), founder: self.founder };
+        let mut bytes =
+            postcard::to_allocvec(&head).map_err(|e| MlsGroupError::Codec(e.to_string()))?;
+        if let Some(state) = &self.state {
+            bytes.extend(
+                postcard::to_allocvec(state).map_err(|e| MlsGroupError::Codec(e.to_string()))?,
+            );
+        }
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let (head, rest) = postcard::take_from_bytes::<MetaHead>(bytes).ok()?;
+        let state = if rest.is_empty() { None } else { Some(postcard::from_bytes(rest).ok()?) };
+        Some(Self { title: head.title, founder: head.founder, state })
+    }
+
+    /// The group context that carries this meta. Every GroupContextExtensions
+    /// proposal has to name its extensions as required, so the group is
+    /// founded with them required too.
+    fn extensions(&self) -> Result<Extensions<GroupContext>> {
+        Extensions::from_vec(vec![
+            Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(self.encode()?)),
+            Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+                &[GROUP_META_EXTENSION],
+                &[],
+                &[],
+            )),
+        ])
+        .map_err(|e| MlsGroupError::Codec(format!("group meta extension: {e}")))
+    }
+
+    fn from_extensions(exts: &Extensions<GroupContext>) -> Option<Self> {
+        exts.iter().find_map(|e| match e {
+            Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes)) => {
+                Self::decode(bytes)
+            },
+            _ => None,
+        })
+    }
+}
+
+/// A change a merged commit made, and the rules it replaced.
+#[derive(Debug, Clone)]
+pub struct Changed {
+    pub signed: SignedChange,
+    pub before: GroupState,
+}
+
+/// What became of a peer's commit.
+pub enum CommitOutcome {
+    /// Refused on every honest device alike: nothing merged.
+    Refused,
+    /// Merged. For a group with signed rules, the change it made.
+    Merged(Option<Changed>),
 }
 
 /// A decrypted inbound message together with the member who wrote it.
@@ -154,11 +242,7 @@ impl MlsGroupHandle {
             .use_ratchet_tree_extension(true);
 
         if let Some(meta) = meta {
-            let bytes = postcard::to_allocvec(meta)
-                .map_err(|e| MlsGroupError::Codec(e.to_string()))?;
-            let ext = Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes));
-            let exts = Extensions::single(ext)
-                .map_err(|e| MlsGroupError::Codec(format!("group meta extension: {e}")))?;
+            let exts = meta.extensions()?;
             // The founder's own leaf has to declare the extension too, not just
             // the leaves it adds — RFC 9420 holds every member to the same bar,
             // including whoever put the extension there.
@@ -192,9 +276,23 @@ impl MlsGroupHandle {
     /// `group_id` is stored.
     pub fn load(provider: &PromtuzMlsProvider, group_id: &[u8; 32]) -> Result<Option<Self>> {
         let gid = GroupId::from_slice(group_id);
-        let loaded =
-            MlsGroup::load(provider.storage(), &gid).map_err(MlsGroupError::Storage)?;
-        Ok(loaded.map(|inner| Self { inner }))
+        let loaded = MlsGroup::load(provider.storage(), &gid).map_err(MlsGroupError::Storage)?;
+        let Some(mut inner) = loaded else { return Ok(None) };
+        // Older joiners stored a configuration that omitted trees from their
+        // own later Welcomes. Normalize our local transport configuration too,
+        // so an existing member can become committer and invite someone.
+        let config = MlsGroupJoinConfig::builder()
+            .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+            .padding_size(super::MLS_PADDING_SIZE)
+            .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(
+                inner.configuration().sender_ratchet_configuration().clone(),
+            )
+            .build();
+        if inner.configuration() != &config {
+            inner.set_configuration(provider.storage(), &config).map_err(MlsGroupError::Storage)?;
+        }
+        Ok(Some(Self { inner }))
     }
 
     /// Add members to the group via their KeyPackages.
@@ -285,10 +383,8 @@ impl MlsGroupHandle {
     /// Returns `ProcessedMessageContent` — application payloads,
     /// proposals, or staged commits. **Caller must** then:
     /// - Surface `ApplicationMessage` content to the UI.
-    /// - For `StagedCommitMessage`: call
-    ///   [`Self::merge_staged_commit`] to advance the local epoch.
-    /// - For `ProposalMessage`: queue via openmls's
-    ///   `store_pending_proposal`.
+    /// - For `StagedCommitMessage`: call [`Self::merge_staged_commit`] to advance the local epoch.
+    /// - For `ProposalMessage`: queue via openmls's `store_pending_proposal`.
     pub fn process_incoming(
         &mut self, provider: &PromtuzMlsProvider, message: ProtocolMessage,
     ) -> Result<ProcessedInbound> {
@@ -313,17 +409,26 @@ impl MlsGroupHandle {
         Ok(ProcessedInbound { sender, content: processed.into_content() })
     }
 
-    /// The membership rule, applied on receipt. MLS lets any member commit any
-    /// proposal; the founder-only policy the send path enforces in
-    /// [`crate::groups`] is only as good as the client that sends, so every
-    /// receiver re-checks it here: only the founder may add, or remove anyone
-    /// who did not propose their own removal; a self-proposed removal — a leave
-    /// — may be committed by anyone; and nothing else may touch the group, in
-    /// particular its context extensions, which is where the founder is named.
-    /// A pair group has no founder and its roster never changes.
+    /// The group's rules, applied on receipt. MLS lets any member commit any
+    /// proposal, and a rule only the sending client keeps is only as good as
+    /// that client, so every receiver checks every commit here and they all
+    /// reach the same answer.
+    ///
+    /// With signed rules, only the committer named in the group's state
+    /// commits, apart from an admin taking its place. Every change arrives
+    /// signed by whoever asked for it, is checked against their role by
+    /// [`policy::apply`], and must be exactly what the commit's proposals do.
+    /// A commit with no change may only refresh the committer's keys.
+    ///
+    /// A group from before signed rules keeps its old rule: only the founder
+    /// adds, or removes anyone who didn't propose their own removal. Its one
+    /// other allowed change is the founder converting it. A pair group has no
+    /// founder and its roster never changes.
+    ///
+    /// Returns the verified change, if the commit made one.
     pub fn commit_is_permitted(
         &self, staged: &StagedCommit, author: [u8; 32],
-    ) -> std::result::Result<(), &'static str> {
+    ) -> std::result::Result<Option<SignedChange>, &'static str> {
         use super::credential::leaf_node_ipk;
         let strict = self.is_group_chat();
         // A committer's fresh leaf must still be theirs: the update path is
@@ -333,59 +438,261 @@ impl MlsGroupHandle {
         {
             return Err("the committer's new leaf is not bound to them");
         }
-        let mut needs_founder = false;
+        let mut adds = Vec::new();
+        // Who each removal takes out, and whether they proposed it themselves.
+        let mut removes = Vec::new();
+        let mut next = None;
         for p in staged.queued_proposals() {
             match p.proposal() {
-                Proposal::Add(a) => {
-                    // Whoever is added must arrive as somebody, or the roster
-                    // holds a leaf every device reads as a different person.
-                    if leaf_node_ipk(a.key_package().leaf_node(), strict).is_none() {
-                        return Err("commit adds a leaf bound to no identity");
-                    }
-                    needs_founder = true;
+                // Whoever is added must arrive as somebody, or the roster
+                // holds a leaf every device reads as a different person.
+                Proposal::Add(a) => adds.push(
+                    leaf_node_ipk(a.key_package().leaf_node(), strict)
+                        .ok_or("commit adds a leaf bound to no identity")?,
+                ),
+                Proposal::Remove(r) => removes.push((
+                    self.member_ipk_at(r.removed())
+                        .ok_or("commit removes a leaf bound to no one")?,
+                    matches!(p.sender(), Sender::Member(i) if *i == r.removed()),
+                )),
+                Proposal::GroupContextExtensions(e) => {
+                    let only_ours = e.extensions().iter().all(|x| {
+                        matches!(
+                            x,
+                            Extension::Unknown(PROMTUZ_GROUP_META_EXT, _)
+                                | Extension::RequiredCapabilities(_)
+                        )
+                    });
+                    next = Some(
+                        GroupMeta::from_extensions(e.extensions())
+                            .filter(|_| only_ours)
+                            .ok_or("commit rewrites the group into something unreadable")?,
+                    );
                 },
-                Proposal::Remove(r) => {
-                    let leaving = matches!(p.sender(), Sender::Member(i) if *i == r.removed());
-                    needs_founder |= !leaving;
-                },
-                // Nothing in promtuz proposes an update — a member refreshes
-                // their own leaf by committing — so one is someone else's client.
+                // Members never propose key updates or anything else; only the
+                // committer refreshes its leaf, through its commit's path.
                 _ => return Err("commit carries a proposal kind no member may make"),
             }
         }
-        if !needs_founder {
-            return Ok(());
+        let Some(meta) = self.group_meta() else {
+            if self.is_group_chat() {
+                return Err("group rules are not supported");
+            }
+            return if adds.is_empty() && removes.is_empty() && next.is_none() {
+                Ok(None)
+            } else {
+                Err("a pair group's membership never changes")
+            };
+        };
+        let Some(next) = next else {
+            let Some(state) = &meta.state else {
+                let leaves_only = adds.is_empty() && removes.iter().all(|(_, leaving)| *leaving);
+                return if leaves_only || author == meta.founder {
+                    Ok(None)
+                } else {
+                    Err("only the founder may change the membership")
+                };
+            };
+            return if !adds.is_empty() || !removes.is_empty() {
+                Err("a membership change must say who asked for it")
+            } else if author != state.committer {
+                Err("only the committer changes the group")
+            } else {
+                Ok(None)
+            };
+        };
+        if next.founder != meta.founder {
+            return Err("commit renames the group's founder");
         }
-        match self.group_meta() {
-            Some(meta) if meta.founder == author => Ok(()),
-            Some(_) => Err("only the founder may change the membership"),
-            None => Err("a pair group's membership never changes"),
+        let state_after = next.state.as_ref().ok_or("commit drops the group's rules")?;
+        let signed = state_after.last.clone().ok_or("commit carries no change")?;
+        let expected = self.state_after_change(&author, &signed)?;
+        if *state_after != expected {
+            return Err("the group's new rules aren't what the change makes them");
         }
+        let proposals_match = match &signed.change {
+            GroupChange::Add { who } => {
+                let mut asked: Vec<_> = who.iter().map(|w| w.0).collect();
+                asked.sort();
+                asked.dedup();
+                adds.sort();
+                removes.is_empty() && asked.len() == who.len() && asked == adds
+            },
+            GroupChange::Remove { who } => {
+                adds.is_empty() && removes.len() == 1 && removes[0].0 == who.0
+            },
+            GroupChange::Leave { .. } => {
+                adds.is_empty() && removes.len() == 1 && removes[0].0 == signed.by.0
+            },
+            GroupChange::MemberRequest(request) => {
+                (if request.action == common::proto::mls_wire::GroupMemberAction::Refresh {
+                    adds == [request.who.0]
+                } else {
+                    adds.is_empty()
+                }) && removes.len() == 1
+                    && removes[0].0 == request.who.0
+            },
+            _ => adds.is_empty() && removes.is_empty(),
+        };
+        if !proposals_match {
+            return Err("the commit doesn't do what its change says");
+        }
+        Ok(Some(signed))
+    }
+
+    /// The same signature and permission checks guard both commit creation and
+    /// receipt. In particular, an authenticated transport is not a signature on
+    /// the request the committer will carry for another member.
+    pub fn state_after_change(
+        &self, author: &[u8; 32], signed: &SignedChange,
+    ) -> std::result::Result<GroupState, &'static str> {
+        self.verify_change(signed)?;
+        if let GroupChange::MemberRequest(request) = &signed.change {
+            super::branch_proof::verify_member_request(&self.group_id(), request)
+                .map_err(|_| "invalid member resync authorization")?;
+        }
+        let meta = self.group_meta().ok_or("not a group chat")?;
+        match &meta.state {
+            Some(state) => policy::apply(state, &self.roster(), author, signed),
+            None if signed.change == GroupChange::Upgrade
+                && signed.by.0 == meta.founder
+                && *author == meta.founder =>
+            {
+                Ok(GroupState { last: Some(signed.clone()), ..GroupState::founded(meta.founder) })
+            },
+            None => Err("only the founder converts the group"),
+        }
+    }
+
+    /// Authorize application intent against the epoch that decrypted it. A
+    /// catch-up drain can cross several role/rule changes before persistence.
+    pub(crate) fn application_is_permitted(&self, author: &[u8; 32], plaintext: &[u8]) -> bool {
+        use common::proto::mls_wire::AppPayload;
+        use common::proto::mls_wire::SystemEvent;
+        use common::proto::pack::Unpacker;
+        let Ok(payload) = AppPayload::deser(plaintext) else { return true };
+        let Some(meta) = self.group_meta() else {
+            if self.is_group_chat() {
+                return false;
+            }
+            return !matches!(
+                payload,
+                AppPayload::System(_)
+                    | AppPayload::GroupPicture { .. }
+                    | AppPayload::GroupRequest(_)
+                    | AppPayload::GroupWelcome { .. }
+                    | AppPayload::GroupInvitation { .. }
+                    | AppPayload::GroupAdmins { .. }
+            );
+        };
+        if !self.roster().contains(author) {
+            return false;
+        }
+        let state = meta.effective();
+        match payload {
+            AppPayload::Post { .. }
+            | AppPayload::Text(_)
+            | AppPayload::Reply { .. }
+            | AppPayload::Image { .. }
+            | AppPayload::Attachment { .. }
+            | AppPayload::Edit { .. }
+            | AppPayload::Revise { .. } => state.may_send(author),
+            AppPayload::GroupPicture { .. } | AppPayload::System(SystemEvent::Titled { .. }) => {
+                state.may_edit(author)
+            },
+            AppPayload::System(SystemEvent::Added { .. } | SystemEvent::Removed { .. }) => {
+                meta.state.is_none() && *author == meta.founder
+            },
+            AppPayload::System(SystemEvent::Left { who }) => {
+                meta.state.is_none() && who.0 == *author
+            },
+            AppPayload::GroupWelcome { .. } | AppPayload::GroupInvitation { .. } => {
+                state.role(author) >= policy::ROLE_ADMIN
+            },
+            AppPayload::System(_) | AppPayload::GroupAdmins { .. } => false,
+            _ => true,
+        }
+    }
+
+    /// Signed by who it says, for this group at this epoch.
+    pub(crate) fn verify_change(
+        &self, signed: &SignedChange,
+    ) -> std::result::Result<(), &'static str> {
+        if signed.epoch != self.epoch() {
+            return Err("the change was signed for another epoch");
+        }
+        if signed.branch.0 != self.branch_id() {
+            return Err("the change was signed for another branch");
+        }
+        let input = group_change_signing_input(
+            &self.group_id(),
+            signed.epoch,
+            &signed.branch.0,
+            &signed.by.0,
+            &signed.change,
+        );
+        ed25519_dalek::VerifyingKey::from_bytes(&signed.by.0)
+            .and_then(|k| {
+                k.verify_strict(&input, &ed25519_dalek::Signature::from_bytes(&signed.sig.0))
+            })
+            .map_err(|_| "the change's signature doesn't hold")
     }
 
     /// Merge a peer's commit if the group's rules allow it: the roster stays
     /// within [`super::MAX_GROUP_MEMBERS`] and [`Self::commit_is_permitted`]
-    /// holds for `author`. `Ok(false)` is a refusal — nothing merged, the
-    /// epoch unmoved — and is the same answer on every honest device.
+    /// holds for `author`. A refusal merges nothing and leaves the epoch where
+    /// it was, and is the same answer on every honest device.
     pub fn merge_staged_commit_if_permitted(
         &mut self, provider: &PromtuzMlsProvider, staged: StagedCommit, author: [u8; 32],
-    ) -> Result<bool> {
+    ) -> Result<CommitOutcome> {
         let roster = self.member_count() + staged.add_proposals().count();
-        let why = if roster > super::MAX_GROUP_MEMBERS {
-            Some("commit would take the group past its member limit")
+        let verdict = if roster > super::MAX_GROUP_MEMBERS {
+            Err("commit would take the group past its member limit")
         } else {
-            self.commit_is_permitted(&staged, author).err()
+            self.commit_is_permitted(&staged, author)
         };
-        if let Some(why) = why {
-            log::warn!(
-                "GROUP: refusing commit from {} in {}: {why}",
-                hex::encode(&author[..4]),
-                hex::encode(&self.group_id()[..4])
-            );
-            return Ok(false);
+        match verdict {
+            Ok(change) => {
+                let before = self.group_meta().map(|m| m.effective());
+                self.merge_staged_commit(provider, staged)?;
+                Ok(CommitOutcome::Merged(
+                    change.zip(before).map(|(signed, before)| Changed { signed, before }),
+                ))
+            },
+            Err(why) => {
+                log::warn!(
+                    "GROUP: refusing commit from {} in {}: {why}",
+                    hex::encode(&author[..4]),
+                    hex::encode(&self.group_id()[..4])
+                );
+                Ok(CommitOutcome::Refused)
+            },
         }
-        self.merge_staged_commit(provider, staged)?;
-        Ok(true)
+    }
+
+    /// Commit `meta` as the group's new context, with the adds and removals
+    /// its change makes, as one commit. Returns the commit and, for adds, the
+    /// Welcome. **The caller merges the pending commit afterwards.**
+    pub fn commit_meta<S: Signer>(
+        &mut self, provider: &PromtuzMlsProvider, signer: &S, meta: &GroupMeta,
+        adds: Vec<KeyPackage>, removes: Vec<LeafNodeIndex>,
+    ) -> Result<(MlsMessageOut, Option<MlsMessageOut>)> {
+        let bundle = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_adds(adds)
+            .propose_removals(removes)
+            .propose_group_context_extensions(meta.extensions()?)
+            .map_err(MlsGroupError::from_openmls)?
+            .load_psks(provider.storage())
+            .map_err(MlsGroupError::from_openmls)?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(MlsGroupError::from_openmls)?
+            .stage_commit(provider)
+            .map_err(MlsGroupError::from_openmls)?;
+        let (commit, welcome, _group_info) = bundle.into_messages();
+        Ok((commit, welcome))
     }
 
     /// Merge a *staged commit* (the result of processing a peer's
@@ -419,6 +726,13 @@ impl MlsGroupHandle {
         Ok(commit)
     }
 
+    /// Drop a commit we built but won't send, so the group takes the next one.
+    pub fn clear_pending_commit(&mut self, provider: &PromtuzMlsProvider) {
+        if let Err(e) = self.inner.clear_pending_commit(provider.storage()) {
+            log::warn!("GROUP: could not drop an unsent commit: {e:?}");
+        }
+    }
+
     /// Merge a *pending commit* (one we built via
     /// [`Self::add_members`] / [`Self::remove_members`] /
     /// [`Self::self_update`]) into our local state. Advances the
@@ -432,6 +746,33 @@ impl MlsGroupHandle {
     /// Current group epoch as a plain `u64`.
     pub fn epoch(&self) -> u64 {
         self.inner.epoch().as_u64()
+    }
+
+    /// Public, domain-separated identity of an MLS epoch. Epoch numbers alone
+    /// cannot distinguish two valid commits made from the same parent.
+    pub fn branch_id(&self) -> [u8; 32] {
+        use sha2::Digest;
+        use sha2::Sha256;
+        let mut hash = Sha256::new();
+        hash.update(b"promtuz group branch v1");
+        hash.update(self.group_id());
+        hash.update(self.epoch().to_be_bytes());
+        // OpenMLS exits before updating the transcript/confirmation tag when
+        // our leaf is removed. The new public tree and extensions are already
+        // installed on every recipient, including that removed member.
+        hash.update(
+            self.inner
+                .export_ratchet_tree()
+                .tls_serialize_detached()
+                .expect("serializable ratchet tree"),
+        );
+        hash.update(
+            self.inner
+                .extensions()
+                .tls_serialize_detached()
+                .expect("serializable group extensions"),
+        );
+        hash.finalize().into()
     }
 
     /// Current group ID as a 32-byte array.
@@ -463,12 +804,7 @@ impl MlsGroupHandle {
         // `extensions()`, not `export_group_context()` — the latter is gated
         // behind openmls's `test-utils`, so it compiles under `cargo test` and
         // vanishes in the build that ships.
-        self.inner.extensions().iter().find_map(|e| match e {
-            Extension::Unknown(PROMTUZ_GROUP_META_EXT, UnknownExtension(bytes)) => {
-                postcard::from_bytes::<GroupMeta>(bytes.as_slice()).ok()
-            },
-            _ => None,
-        })
+        GroupMeta::from_extensions(self.inner.extensions())
     }
 
     /// Iterate members. Returned items expose `index: LeafNodeIndex`,
@@ -481,7 +817,10 @@ impl MlsGroupHandle {
     /// Whether this is a group chat (founded with a [`GroupMeta`]) rather
     /// than a pair — the line along which the credential rule tightens.
     pub fn is_group_chat(&self) -> bool {
-        self.group_meta().is_some()
+        self.inner
+            .extensions()
+            .iter()
+            .any(|e| matches!(e, Extension::Unknown(PROMTUZ_GROUP_META_EXT, _)))
     }
 
     /// The identity a member's leaf is bound to, under this group's rule;
@@ -571,13 +910,16 @@ pub fn mls_message_from_bytes(bytes: &[u8]) -> Result<MlsMessageIn> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::MLS_PADDING_SIZE;
+    include!("recovery_tests.rs");
+    use std::sync::Arc;
+
     use openmls::prelude::tls_codec::Deserialize as _;
     use parking_lot::Mutex;
     use rusqlite::Connection;
-    use std::sync::Arc;
+
+    use super::*;
+    use crate::db::mls::apply_mls_migrations;
+    use crate::mls::MLS_PADDING_SIZE;
 
     /// Build a fresh in-memory provider for tests.
     fn build_provider() -> PromtuzMlsProvider {
@@ -613,7 +955,11 @@ mod tests {
         /// The leaf key under a credential its identity signed for.
         fn cwk(&self) -> CredentialWithKey {
             CredentialWithKey {
-                credential:    crate::mls::credential::bound_credential(&self.ipk_signer, self.sig_kp.public()).into(),
+                credential:    crate::mls::credential::bound_credential(
+                    &self.ipk_signer,
+                    self.sig_kp.public(),
+                )
+                .into(),
                 signature_key: self.sig_kp.public().into(),
             }
         }
@@ -640,11 +986,11 @@ mod tests {
     }
 
     /// Helper: Alice creates a 1-member group.
-    fn create_group(provider: &PromtuzMlsProvider, party: &Party, gid: &[u8; 32]) -> MlsGroupHandle {
-        MlsGroupHandle::create(provider, &party.sig_kp, party.cwk(), gid,
-            None,
-        )
-        .expect("create group")
+    fn create_group(
+        provider: &PromtuzMlsProvider, party: &Party, gid: &[u8; 32],
+    ) -> MlsGroupHandle {
+        MlsGroupHandle::create(provider, &party.sig_kp, party.cwk(), gid, None)
+            .expect("create group")
     }
 
     // -------------------------------------------------------------
@@ -702,10 +1048,8 @@ mod tests {
         // Bob processes Welcome.
         let welcome_msg = extract_welcome_via_tls(welcome);
         let join_config = MlsGroupJoinConfig::default();
-        let staged = StagedWelcome::new_from_welcome(
-            &provider_b, &join_config, welcome_msg, None,
-        )
-        .expect("staged");
+        let staged = StagedWelcome::new_from_welcome(&provider_b, &join_config, welcome_msg, None)
+            .expect("staged");
         let mut bob_group = MlsGroupHandle::wrap(staged.into_group(&provider_b).expect("into"));
 
         assert_eq!(bob_group.epoch(), alice_group.epoch());
@@ -726,7 +1070,7 @@ mod tests {
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext);
-            }
+            },
             other => panic!("expected app msg, got {other:?}"),
         }
 
@@ -738,16 +1082,13 @@ mod tests {
         let bytes = mls_message_to_bytes(&bob_msg).expect("ser");
         let on_alice = mls_message_from_bytes(&bytes).expect("deser");
         let content = alice_group
-            .process_incoming(
-                &provider_a,
-                on_alice.try_into_protocol_message().expect("proto"),
-            )
+            .process_incoming(&provider_a, on_alice.try_into_protocol_message().expect("proto"))
             .expect("alice process")
             .content;
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext_b);
-            }
+            },
             other => panic!("expected app msg, got {other:?}"),
         }
     }
@@ -771,10 +1112,8 @@ mod tests {
 
         let welcome_msg = extract_welcome_via_tls(welcome);
         let join_config = MlsGroupJoinConfig::default();
-        let staged = StagedWelcome::new_from_welcome(
-            &provider_b, &join_config, welcome_msg, None,
-        )
-        .expect("staged");
+        let staged = StagedWelcome::new_from_welcome(&provider_b, &join_config, welcome_msg, None)
+            .expect("staged");
         let mut bob_group = MlsGroupHandle::wrap(staged.into_group(&provider_b).expect("into"));
         let pre = alice_group.epoch();
 
@@ -802,42 +1141,86 @@ mod tests {
         assert!(result.is_err(), "removed Bob can't decrypt new-epoch");
     }
 
-    /// Three members, one founder. A commit that evicts someone is the
-    /// founder's alone to make; a removal the leaver proposed themselves is a
-    /// leave, which anyone may commit.
+    use common::proto::mls_wire::GroupRules;
+
+    fn joined(provider: &PromtuzMlsProvider, welcome: &MlsMessageOut) -> MlsGroupHandle {
+        let w = extract_welcome_via_tls(welcome.clone());
+        let staged =
+            StagedWelcome::new_from_welcome(provider, &MlsGroupJoinConfig::default(), w, None)
+                .expect("staged");
+        MlsGroupHandle::wrap(staged.into_group(provider).expect("into"))
+    }
+
+    fn inbound(
+        g: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, msg: &MlsMessageOut,
+    ) -> ProcessedMessageContent {
+        let in_msg = mls_message_from_bytes(&mls_message_to_bytes(msg).unwrap()).unwrap();
+        g.process_incoming(provider, in_msg.try_into_protocol_message().unwrap())
+            .expect("process")
+            .content
+    }
+
+    fn commit_of(c: ProcessedMessageContent) -> StagedCommit {
+        match c {
+            ProcessedMessageContent::StagedCommitMessage(s) => *s,
+            other => panic!("expected a commit, got {other:?}"),
+        }
+    }
+
+    /// What `g` makes of `commit` from `author`.
+    fn judge(
+        g: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, commit: &MlsMessageOut,
+        author: [u8; 32],
+    ) -> std::result::Result<Option<SignedChange>, &'static str> {
+        let staged = commit_of(inbound(g, provider, commit));
+        g.commit_is_permitted(&staged, author)
+    }
+
+    fn signed_by(g: &MlsGroupHandle, p: &Party, change: GroupChange) -> SignedChange {
+        use ed25519_dalek::Signer as _;
+        let sig = p.ipk_signer.sign(&group_change_signing_input(
+            &g.group_id(),
+            g.epoch(),
+            &g.branch_id(),
+            &p.ipk,
+            &change,
+        ));
+        SignedChange {
+            by: p.ipk.into(),
+            epoch: g.epoch(),
+            branch: g.branch_id().into(),
+            change,
+            sig: common::types::bytes::Bytes(sig.to_bytes()),
+        }
+    }
+
+    /// `g`'s meta with `state` after `signed`, as its commit would carry it.
+    fn meta_after(g: &MlsGroupHandle, state: GroupState, signed: SignedChange) -> GroupMeta {
+        GroupMeta {
+            state: Some(GroupState { last: Some(signed), ..state }),
+            ..g.group_meta().unwrap()
+        }
+    }
+
+    /// A group from before signed rules: a commit that evicts someone is the
+    /// founder's alone to make, a removal the leaver proposed themselves is a
+    /// leave, which anyone may commit, and only the founder converts it.
     #[test]
-    fn receivers_refuse_membership_commits_from_anyone_but_the_founder() {
+    fn a_group_from_before_signed_rules_keeps_its_founder_rule() {
         let (pa, pb, pc) = (build_provider(), build_provider(), build_provider());
         let alice = Party::new(&pa, 1);
         let bob = Party::new(&pb, 2);
         let carol = Party::new(&pc, 3);
-        let meta = GroupMeta { title: "room".into(), founder: alice.ipk };
-        let mut ga = MlsGroupHandle::create(&pa, &alice.sig_kp, alice.cwk(), &[0xAB; 32], Some(&meta),
-        )
-        .expect("create");
+        let meta = GroupMeta { title: "room".into(), founder: alice.ipk, state: None };
+        let mut ga =
+            MlsGroupHandle::create(&pa, &alice.sig_kp, alice.cwk(), &[0xAB; 32], Some(&meta))
+                .expect("create");
         let (_c, welcome) = ga
             .add_members(&pa, &alice.sig_kp, &[make_kp(&pb, &bob), make_kp(&pc, &carol)])
             .expect("add");
         ga.merge_pending_commit(&pa).expect("merge");
-        let join = |provider: &PromtuzMlsProvider| {
-            let w = extract_welcome_via_tls(welcome.clone());
-            let staged =
-                StagedWelcome::new_from_welcome(provider, &MlsGroupJoinConfig::default(), w, None)
-                    .expect("staged");
-            MlsGroupHandle::wrap(staged.into_group(provider).expect("into"))
-        };
-        let mut gb = join(&pb);
-        let mut gc = join(&pc);
-        let inbound = |g: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, msg: &MlsMessageOut| {
-            let in_msg = mls_message_from_bytes(&mls_message_to_bytes(msg).unwrap()).unwrap();
-            g.process_incoming(provider, in_msg.try_into_protocol_message().unwrap())
-                .expect("process")
-                .content
-        };
-        let commit_of = |c: ProcessedMessageContent| match c {
-            ProcessedMessageContent::StagedCommitMessage(s) => *s,
-            other => panic!("expected a commit, got {other:?}"),
-        };
+        let mut gb = joined(&pb, &welcome);
+        let mut gc = joined(&pc, &welcome);
         let proposal_of = |c: ProcessedMessageContent| match c {
             ProcessedMessageContent::ProposalMessage(p) => *p,
             other => panic!("expected a proposal, got {other:?}"),
@@ -861,8 +1244,354 @@ mod tests {
         // who did not ask to go.
         let alice_idx = gc.member_index_by_ipk(&alice.ipk).expect("alice");
         let evict = gc.remove_members(&pc, &carol.sig_kp, &[alice_idx]).expect("commit");
-        let s = commit_of(inbound(&mut ga, &pa, &evict));
-        assert!(ga.commit_is_permitted(&s, carol.ipk).is_err(), "carol may not evict the founder");
+        assert!(judge(&mut ga, &pa, &evict, carol.ipk).is_err(), "carol may not evict the founder");
+        gc.clear_pending_commit(&pc);
+
+        // Only the founder converts the group to signed rules.
+        let upgrade = |g: &MlsGroupHandle, p: &Party| {
+            let signed = signed_by(g, p, GroupChange::Upgrade);
+            meta_after(g, GroupState::founded(alice.ipk), signed)
+        };
+        let (forged, _) = gc
+            .commit_meta(&pc, &carol.sig_kp, &upgrade(&gc, &carol), vec![], vec![])
+            .expect("commit");
+        gc.clear_pending_commit(&pc);
+        assert!(
+            judge(&mut ga, &pa, &forged, carol.ipk).is_err(),
+            "carol may not convert alice's group"
+        );
+        let (converted, _) = ga
+            .commit_meta(&pa, &alice.sig_kp, &upgrade(&ga, &alice), vec![], vec![])
+            .expect("commit");
+        let change = judge(&mut gc, &pc, &converted, alice.ipk).expect("the founder converts it");
+        assert_eq!(change.map(|c| c.change), Some(GroupChange::Upgrade));
+    }
+
+    /// With signed rules, only the committer commits, apart from an admin
+    /// taking its place; every change is signed by whoever asked for it and
+    /// held to their role; and the commit must do exactly what the change says.
+    #[test]
+    fn receivers_hold_every_commit_to_the_signed_rules() {
+        let (pa, pb, pc, pd) =
+            (build_provider(), build_provider(), build_provider(), build_provider());
+        let alice = Party::new(&pa, 1);
+        let bob = Party::new(&pb, 2);
+        let carol = Party::new(&pc, 3);
+        let dave = Party::new(&pd, 4);
+        let meta = GroupMeta::founded("room".into(), alice.ipk);
+        let mut ga =
+            MlsGroupHandle::create(&pa, &alice.sig_kp, alice.cwk(), &[0xAC; 32], Some(&meta))
+                .expect("create");
+        let (_c, welcome) = ga
+            .add_members(&pa, &alice.sig_kp, &[make_kp(&pb, &bob), make_kp(&pc, &carol)])
+            .expect("add");
+        ga.merge_pending_commit(&pa).expect("merge");
+        let mut gb = joined(&pb, &welcome);
+        let mut gc = joined(&pc, &welcome);
+        let state = ga.group_meta().unwrap().state.unwrap();
+
+        // Alice commits what `signed` asks and `state` says, then drops it.
+        let mut probe = |ga: &mut MlsGroupHandle,
+                         signed: SignedChange,
+                         state: GroupState,
+                         adds: Vec<KeyPackage>| {
+            let (commit, _) = ga
+                .commit_meta(&pa, &alice.sig_kp, &meta_after(ga, state, signed), adds, vec![])
+                .unwrap();
+            ga.clear_pending_commit(&pa);
+            judge(&mut gc, &pc, &commit, alice.ipk)
+        };
+        let add_dave = GroupChange::Add { who: vec![dave.ipk.into()] };
+        let asked = signed_by(&ga, &bob, add_dave.clone());
+        assert!(
+            probe(&mut ga, asked.clone(), state.clone(), vec![make_kp(&pd, &dave)]).is_ok(),
+            "members may add"
+        );
+        assert!(
+            probe(&mut ga, asked, state.clone(), vec![]).is_err(),
+            "the commit must add whoever was asked for"
+        );
+        let mut forged = signed_by(&ga, &carol, add_dave.clone());
+        forged.by = bob.ipk.into();
+        assert!(
+            probe(&mut ga, forged, state.clone(), vec![make_kp(&pd, &dave)]).is_err(),
+            "bob never signed it"
+        );
+        let quiet = GroupRules { members_send: false, ..state.rules };
+        let asked = signed_by(&ga, &bob, GroupChange::Rules(quiet));
+        assert!(
+            probe(&mut ga, asked, GroupState { rules: quiet, ..state.clone() }, vec![]).is_err(),
+            "members set no rules"
+        );
+        let asked = signed_by(&ga, &alice, GroupChange::Rules(quiet));
+        assert!(
+            probe(&mut ga, asked.clone(), state.clone(), vec![]).is_err(),
+            "the state must be what the change makes"
+        );
+
+        // Carol isn't the committer: not for rules, not for her own keys.
+        let signed = signed_by(&gc, &carol, GroupChange::Rules(quiet));
+        let (commit, _) = gc
+            .commit_meta(
+                &pc,
+                &carol.sig_kp,
+                &meta_after(&gc, GroupState { rules: quiet, ..state.clone() }, signed),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        gc.clear_pending_commit(&pc);
+        assert!(judge(&mut gb, &pb, &commit, carol.ipk).is_err(), "only the committer commits");
+        let update = gc.self_update(&pc, &carol.sig_kp).unwrap();
+        gc.clear_pending_commit(&pc);
+        assert!(judge(&mut gb, &pb, &update, carol.ipk).is_err(), "not even a key update");
+
+        // Alice makes Bob an admin, and Bob can then take over.
+        let promote = signed_by(
+            &ga,
+            &alice,
+            GroupChange::Role { who: bob.ipk.into(), role: policy::ROLE_ADMIN },
+        );
+        let promoted = GroupState { admins: vec![bob.ipk], ..state.clone() };
+        let (commit, _) = ga
+            .commit_meta(
+                &pa,
+                &alice.sig_kp,
+                &meta_after(&ga, promoted.clone(), promote),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        for (g, p) in [(&mut gb, &pb), (&mut gc, &pc)] {
+            let staged = commit_of(inbound(g, p, &commit));
+            assert!(matches!(
+                g.merge_staged_commit_if_permitted(p, staged, alice.ipk).unwrap(),
+                CommitOutcome::Merged(Some(_))
+            ));
+        }
+        ga.merge_pending_commit(&pa).unwrap();
+        let takeover = signed_by(&gb, &bob, GroupChange::Takeover);
+        let taken = GroupState { committer: bob.ipk, ..promoted };
+        let (commit, _) = gb
+            .commit_meta(&pb, &bob.sig_kp, &meta_after(&gb, taken, takeover), vec![], vec![])
+            .unwrap();
+        assert!(judge(&mut gc, &pc, &commit, bob.ipk).is_ok(), "an admin may take over");
+    }
+
+    fn recovery_commit(
+        provider: &PromtuzMlsProvider, gid: [u8; 32], author: &Party, change: GroupChange,
+    ) -> ([u8; 32], Vec<u8>) {
+        use crate::mls::recovery::Candidate;
+        use crate::mls::recovery::Transaction;
+        let mut tx = Transaction::open(provider, gid, None).unwrap().unwrap();
+        let parent = tx.parent;
+        let signed = signed_by(&tx.group, author, change);
+        let before = tx.group.group_meta().unwrap().effective();
+        let after = tx.group.state_after_change(&author.ipk, &signed).unwrap();
+        let mut meta = tx.group.group_meta().unwrap();
+        meta.state = Some(after);
+        let (commit, _) =
+            tx.group.commit_meta(&tx.provider, &author.sig_kp, &meta, vec![], vec![]).unwrap();
+        let bytes = mls_message_to_bytes(&commit).unwrap();
+        tx.group.merge_pending_commit(&tx.provider).unwrap();
+        tx.publish(
+            Some(Candidate {
+                rank:    before.role(&author.ipk),
+                message: bytes.clone(),
+                change:  Some(signed),
+                proof:   None,
+            }),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        (parent, bytes)
+    }
+
+    fn recover_commit(
+        provider: &PromtuzMlsProvider, gid: [u8; 32], parent: [u8; 32], bytes: &[u8],
+    ) {
+        use crate::mls::recovery::Candidate;
+        use crate::mls::recovery::Transaction;
+        let mut tx = Transaction::open(provider, gid, Some(parent)).unwrap().unwrap();
+        let processed = tx
+            .group
+            .process_incoming(
+                &tx.provider,
+                mls_message_from_bytes(bytes).unwrap().try_into_protocol_message().unwrap(),
+            )
+            .unwrap();
+        let author = processed.sender;
+        let rank = tx.group.group_meta().unwrap().effective().role(&author);
+        let CommitOutcome::Merged(changed) = tx
+            .group
+            .merge_staged_commit_if_permitted(&tx.provider, commit_of(processed.content), author)
+            .unwrap()
+        else {
+            panic!("valid commit refused")
+        };
+        tx.publish(
+            Some(Candidate {
+                rank,
+                message: bytes.to_vec(),
+                change: changed.map(|c| c.signed),
+                proof: None,
+            }),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn simultaneous_takeovers_converge_after_descendants_and_restart_and_replay_once() {
+        use sha2::Digest;
+        use sha2::Sha256;
+
+        use crate::mls::recovery::Replay;
+        use crate::mls::recovery::Transaction;
+        use crate::mls::recovery::replay_needed;
+        let pa = build_provider();
+        let pb = build_provider();
+        let pc = build_provider();
+        let alice = Party::new(&pa, 71);
+        let bob = Party::new(&pb, 72);
+        let carol = Party::new(&pc, 73);
+        let gid = [91; 32];
+        let mut meta = GroupMeta::founded("recovery".into(), alice.ipk);
+        meta.state.as_mut().unwrap().admins = vec![bob.ipk, carol.ipk];
+        let mut ga =
+            MlsGroupHandle::create(&pa, &alice.sig_kp, alice.cwk(), &gid, Some(&meta)).unwrap();
+        let (_, welcome) = ga
+            .add_members(&pa, &alice.sig_kp, &[make_kp(&pb, &bob), make_kp(&pc, &carol)])
+            .unwrap();
+        ga.merge_pending_commit(&pa).unwrap();
+        joined(&pb, &welcome);
+        joined(&pc, &welcome);
+        let b = recovery_commit(&pb, gid, &bob, GroupChange::Takeover);
+        let c = recovery_commit(&pc, gid, &carol, GroupChange::Takeover);
+        let (winner, winner_provider, winning, loser, losing_provider, losing) =
+            if Sha256::digest(&b.1)[..] < Sha256::digest(&c.1)[..] {
+                (&bob, &pb, &b, &carol, &pc, &c)
+            } else {
+                (&carol, &pc, &c, &bob, &pb, &b)
+            };
+        let losing_child = recovery_commit(
+            losing_provider,
+            gid,
+            loser,
+            GroupChange::Rules(GroupRules { members_edit: true, ..GroupRules::default() }),
+        );
+        let replay = Replay {
+            id:         [44; 16],
+            payload:    b"a post sent before learning of the collision".to_vec(),
+            recipients: vec![alice.ipk, winner.ipk],
+            wake:       1,
+            kind:       0,
+        };
+        let mut send = Transaction::open(losing_provider, gid, None).unwrap().unwrap();
+        send.group
+            .create_application_message(&send.provider, &loser.sig_kp, &replay.payload)
+            .unwrap();
+        send.publish(None, &[], Some(&replay), None).unwrap();
+
+        // Alice sees the losing branch and its descendant before the winner;
+        // the winner receives those same commits in the opposite order.
+        recover_commit(&pa, gid, losing.0, &losing.1);
+        recover_commit(&pa, gid, losing_child.0, &losing_child.1);
+        recover_commit(&pa, gid, winning.0, &winning.1);
+        recover_commit(winner_provider, gid, losing.0, &losing.1);
+        recover_commit(winner_provider, gid, losing_child.0, &losing_child.1);
+        recover_commit(losing_provider, gid, winning.0, &winning.1);
+        let expected = MlsGroupHandle::load(winner_provider, &gid).unwrap().unwrap();
+        for provider in [&pa, &pb, &pc] {
+            // Rebuild both handle and provider from persisted storage.
+            let restarted = PromtuzMlsProvider::new(provider.storage().connection());
+            let group = MlsGroupHandle::load(&restarted, &gid).unwrap().unwrap();
+            assert_eq!(group.branch_id(), expected.branch_id());
+            assert_eq!(group.group_meta().unwrap().effective().committer, winner.ipk);
+            assert!(!group.group_meta().unwrap().effective().rules.members_edit);
+        }
+        let pending = replay_needed(losing_provider, &gid).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, replay.id);
+        let mut resend = Transaction::open(losing_provider, gid, None).unwrap().unwrap();
+        let message = resend
+            .group
+            .create_application_message(&resend.provider, &loser.sig_kp, &replay.payload)
+            .unwrap();
+        resend.publish(None, &[], Some(&replay), None).unwrap();
+        assert!(replay_needed(losing_provider, &gid).unwrap().is_empty());
+        let mut alice_after = Transaction::open(&pa, gid, None).unwrap().unwrap();
+        let processed = inbound(&mut alice_after.group, &alice_after.provider, &message);
+        let ProcessedMessageContent::ApplicationMessage(body) = processed else {
+            panic!("expected post")
+        };
+        assert_eq!(body.into_bytes(), replay.payload);
+        alice_after.publish(None, &[], None, None).unwrap();
+        let mut again = Transaction::open(&pa, gid, None).unwrap().unwrap();
+        assert!(
+            again
+                .group
+                .process_incoming(
+                    &again.provider,
+                    mls_message_from_bytes(&mls_message_to_bytes(&message).unwrap())
+                        .unwrap()
+                        .try_into_protocol_message()
+                        .unwrap()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_operations_and_failed_publication_never_advance_live_ratchets() {
+        use crate::mls::recovery::Candidate;
+        use crate::mls::recovery::Transaction;
+        let provider = build_provider();
+        let alice = Party::new(&provider, 81);
+        let gid = [92; 32];
+        let meta = GroupMeta::founded("transaction".into(), alice.ipk);
+        MlsGroupHandle::create(&provider, &alice.sig_kp, alice.cwk(), &gid, Some(&meta)).unwrap();
+        let mut first = Transaction::open(&provider, gid, None).unwrap().unwrap();
+        let mut stale = Transaction::open(&provider, gid, None).unwrap().unwrap();
+        first.group.create_application_message(&first.provider, &alice.sig_kp, b"first").unwrap();
+        stale
+            .group
+            .create_application_message(&stale.provider, &alice.sig_kp, b"concurrent")
+            .unwrap();
+        first.publish(None, &[], None, None).unwrap();
+        assert!(stale.publish(None, &[], None, None).is_err());
+        let mut tx = Transaction::open(&provider, gid, None).unwrap().unwrap();
+        let before = tx.group.branch_id();
+        let signed = signed_by(
+            &tx.group,
+            &alice,
+            GroupChange::Rules(GroupRules { members_send: false, ..GroupRules::default() }),
+        );
+        let mut meta = tx.group.group_meta().unwrap();
+        meta.state = Some(tx.group.state_after_change(&alice.ipk, &signed).unwrap());
+        let (commit, _) =
+            tx.group.commit_meta(&tx.provider, &alice.sig_kp, &meta, vec![], vec![]).unwrap();
+        tx.group.merge_pending_commit(&tx.provider).unwrap();
+        provider.storage().connection().lock().execute_batch("CREATE TRIGGER refuse_branch BEFORE INSERT ON mls_branches BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
+        assert!(
+            tx.publish(
+                Some(Candidate {
+                    rank:    2,
+                    message: mls_message_to_bytes(&commit).unwrap(),
+                    change:  Some(signed),
+                    proof:   None,
+                }),
+                &[],
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(MlsGroupHandle::load(&provider, &gid).unwrap().unwrap().branch_id(), before);
     }
 
     // -------------------------------------------------------------

@@ -4,7 +4,6 @@ import com.promtuz.chat.utils.extensions.fromHex
 import kotlinx.coroutines.launch
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,7 +36,9 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     val displayName by viewModel.displayName.collectAsStateWithLifecycle()
     val canManage by viewModel.canManage.collectAsStateWithLifecycle()
     val canAdd by viewModel.canAdd.collectAsStateWithLifecycle()
-    val amOwner by viewModel.amOwner.collectAsStateWithLifecycle()
+    val canEdit by viewModel.canEdit.collectAsStateWithLifecycle()
+    val role by viewModel.role.collectAsStateWithLifecycle()
+    val rules by viewModel.rules.collectAsStateWithLifecycle()
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val work by viewModel.work.collectAsStateWithLifecycle()
     val canLeave by viewModel.canLeave.collectAsStateWithLifecycle()
@@ -47,7 +48,8 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
     LaunchedEffect(conversationHex) { viewModel.load(conversationHex) }
     GroupInfoContent(
         GroupInfoState(members, title, displayName, canManage, candidates, work, canLeave,
-            ownerIsStuck, muted, notice, loading, loadError, contactsLoading, contactsError, canAdd, amOwner),
+            ownerIsStuck, muted, notice, loading, loadError, contactsLoading, contactsError, canAdd,
+            canEdit, role, rules?.adminsAppoint == true, rules != null),
         GroupInfoActions(
             clearNotice = viewModel::clearNotice,
             clearError = viewModel::clearError,
@@ -57,7 +59,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
             setMuted = viewModel::setMuted,
             addMembers = viewModel::addMembers,
             removeMember = viewModel::removeMember,
-            setAdmin = viewModel::setAdmin,
+            setRole = viewModel::setRole,
             leave = { viewModel.leave() },
             deleteAnyway = { viewModel.deleteAnyway() },
         ), conversation = conversationHex,
@@ -80,7 +82,12 @@ internal data class GroupInfoState(
     val contactsLoading: Boolean = false,
     val contactsError: Boolean = false,
     val canAdd: Boolean = false,
-    val amOwner: Boolean = false,
+    val canEdit: Boolean = false,
+    /** Ours: 0 member, 1 admin, 2 owner. */
+    val role: Int = 0,
+    val adminsAppoint: Boolean = false,
+    /** The group's rules are signed into it, so it has settings to open. */
+    val hasRules: Boolean = false,
 )
 
 internal data class GroupInfoActions(
@@ -90,9 +97,9 @@ internal data class GroupInfoActions(
     val loadContacts: () -> Unit,
     val rename: (String, () -> Unit) -> Unit,
     val setMuted: (Boolean) -> Unit,
-    val addMembers: (List<UiMember>, (String) -> Unit, () -> Unit) -> Unit,
+    val addMembers: (List<UiMember>, () -> Unit) -> Unit,
     val removeMember: (UiMember, () -> Unit) -> Unit,
-    val setAdmin: (UiMember, Boolean) -> Unit,
+    val setRole: (UiMember, Int) -> Unit,
     val leave: () -> Unit,
     val deleteAnyway: () -> Unit,
 )
@@ -120,7 +127,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     var query by rememberSaveable { mutableStateOf("") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var showPast by rememberSaveable { mutableStateOf(false) }
-    var person by remember { mutableStateOf<UiMember?>(null) }
     var removing by remember { mutableStateOf<UiMember?>(null) }
     var leaving by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
@@ -130,6 +136,20 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     val past = members.filterNot { it.active }
     val addable = candidates.filter { c -> active.none { it.ipkHex == c.ipkHex } }
     val dialogOpen = editing || adding || removing != null || leaving || deleting
+    // What we may do to each member, by the group's roles and rules.
+    fun actionsFor(member: UiMember): List<MenuAction> = buildList {
+        if (member.me || !member.active) return@buildList
+        // A group from before signed rules has no roles to hand out.
+        val owner = role == 2 && hasRules
+        val appoints = owner || (role == 1 && adminsAppoint && !member.owner)
+        if (appoints && !member.admin) add(MenuAction("Make admin", iconPlaceholder = "admin") { actions.setRole(member, 1) })
+        if (owner && !member.owner) add(MenuAction("Make owner", iconPlaceholder = "owner") { actions.setRole(member, 2) })
+        if (appoints && member.admin) add(MenuAction(if (member.owner) "Dismiss as owner" else "Dismiss as admin",
+            iconPlaceholder = "dismiss") { actions.setRole(member, 0) })
+        if (canManage && (role == 2 || !member.owner)) add(MenuAction("Remove", iconPlaceholder = "remove", destructive = true) {
+            removing = member; actions.clearError()
+        })
+    }
     val direction = LocalLayoutDirection.current
     val colors = MaterialTheme.colorScheme
 
@@ -137,7 +157,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
         GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = size, conversation = conversation,
             onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
     }, actions = {
-        if (canManage && conversation != null) AppDropMenu(
+        if (canEdit && conversation != null) AppDropMenu(
             anchor = { DrawableIcon(com.promtuz.chat.R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Group options") },
             groups = listOf(buildList {
                 add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
@@ -167,7 +187,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(memberTally(active.size), color = colors.onSurfaceVariant)
-                        if (canManage) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
+                        if (canEdit) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
                             Text("Edit group name")
                         }
                     }
@@ -178,6 +198,11 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         headlineContent = { Text("Notifications") },
                         supportingContent = { Text(if (muted) "Muted" else "On") },
                         trailingContent = { Switch(checked = !muted, onCheckedChange = { actions.setMuted(!it) }, enabled = !busy) },
+                    )
+                    if (canManage && hasRules && conversation != null) ListItem(
+                        headlineContent = { Text("Group settings") },
+                        supportingContent = { Text("Who can send messages, edit group info and add members") },
+                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.GroupSettings(conversation)) },
                     )
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -192,10 +217,9 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
                 }
                 items(active, key = { it.ipkHex }) { member ->
-                    GroupMemberRow(member, !busy,
+                    GroupMemberRow(member, !busy, actionsFor(member),
                         onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
                             else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
-                        onLongClick = { person = member },
                     )
                 }
                 if (past.isNotEmpty()) {
@@ -203,10 +227,9 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         Text(if (showPast) "Hide past members" else "Past members (${past.size})")
                     } }
                     if (showPast) items(past, key = { "past:${it.ipkHex}" }) { member ->
-                        GroupMemberRow(member, !busy,
+                        GroupMemberRow(member, !busy, emptyList(),
                             onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
                                 else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
-                            onLongClick = { person = member },
                         )
                     }
                 }
@@ -274,36 +297,10 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 GroupWorkFeedback(work)
                 val picks = addable.filter { it.ipkHex in selected }
                 GroupActionButton(if (picks.size == 1) "Add 1 member" else "Add ${picks.size} members",
-                    onClick = { actions.addMembers(picks, { selected = selected - it }, { dismissRequested = true }) },
+                    onClick = { actions.addMembers(picks) { dismissRequested = true } },
                     enabled = !busy && picks.isNotEmpty(), modifier = Modifier.fillMaxWidth().padding(16.dp))
             }
         }
-    }
-    person?.let { member ->
-        val canRemove = canManage && member.active && !member.me && !member.owner
-        val canPromote = amOwner && member.active && !member.me
-        AppAlertDialog(
-            onDismissRequest = { person = null }, title = { Text(member.name) },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(when {
-                    !member.active -> "Past member"
-                    member.owner -> "Group owner"
-                    member.admin -> "Group admin"
-                    else -> "Group member"
-                })
-                if (member.claimed) Text("This name was set by the member.", color = colors.onSurfaceVariant)
-            } },
-            confirmButton = {
-                if (canRemove) TextButton(onClick = { removing = member; person = null; actions.clearError() }) {
-                    Text("Remove", color = colors.error)
-                }
-                if (canPromote) TextButton(onClick = { person = null; actions.setAdmin(member, !member.admin) }) {
-                    Text(if (member.admin) "Dismiss as admin" else "Make admin")
-                }
-                if (!canRemove && !canPromote) TextButton(onClick = { person = null }) { Text("Done") }
-            },
-            dismissButton = if (canRemove || canPromote) {{ TextButton(onClick = { person = null }) { Text("Cancel") } }} else null,
-        )
     }
     removing?.let { member -> GroupConfirmation(
         "Remove ${member.name}?", "They won’t receive new messages from this group.", "Remove", work,
@@ -317,23 +314,28 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
         "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
 }
 
+/** Tapped, a member opens their profile; held, the actions we may take on them. */
 @Composable
-private fun GroupMemberRow(member: UiMember, enabled: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
-    ListItem(
-        headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = {
-            val avatar = rememberAvatar(member.ipkHex)
-            Avatar(
-                member.name, size = 44.dp, image = avatar, identityKey = member.ipkHex, originKey = "avatar-${member.ipkHex}",
-                onClick = onClick.takeIf { enabled },
-            )
-        },
-        supportingContent = if (!member.active) {{ Text("Past member") }} else null,
-        trailingContent = if (member.admin && member.active) {{
-            Text(if (member.owner) "Owner" else "Admin", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }} else null,
-        modifier = Modifier.combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onLongClick),
-    )
+private fun GroupMemberRow(member: UiMember, enabled: Boolean, actions: List<MenuAction>, onClick: () -> Unit) {
+    val row = @Composable {
+        ListItem(
+            headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            leadingContent = {
+                val avatar = rememberAvatar(member.ipkHex)
+                Avatar(
+                    member.name, size = 44.dp, image = avatar, identityKey = member.ipkHex, originKey = "avatar-${member.ipkHex}",
+                    onClick = onClick.takeIf { enabled },
+                )
+            },
+            supportingContent = if (!member.active) {{ Text("Past member") }} else null,
+            trailingContent = if (member.admin && member.active) {{
+                Text(if (member.owner) "Owner" else "Admin", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }} else null,
+        )
+    }
+    if (actions.isEmpty() || !enabled) Box(Modifier.clickable(enabled = enabled, onClick = onClick)) { row() }
+    else AppDropMenu(anchor = row, groups = listOf(actions), onClick = onClick, onClickLabel = "Open profile",
+        onLongClickLabel = "Member options")
 }
 
 @Composable

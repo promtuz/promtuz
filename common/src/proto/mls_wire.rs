@@ -144,7 +144,9 @@ pub enum AppPayload {
     },
     /// Reverse-wake: receiver asks an offline sender to come online and serve
     /// `file_id`. A control message — routed, never stored. wake = true.
-    FileWant { file_id: [u8; 32] },
+    FileWant {
+        file_id: [u8; 32],
+    },
     /// A message, quoting `reply_to` when set. Supersedes Text/Reply/Image/
     /// Attachment, which fused content with intent and so could only express
     /// the diagonal — a reply carried a String and nothing else. Appended after
@@ -202,7 +204,9 @@ pub enum AppPayload {
     },
     /// Confirms a successfully stored owner-issued picture revision. This is
     /// application-level persistence, not a relay delivery acknowledgement.
-    AvatarAck { revision: u64 },
+    AvatarAck {
+        revision: u64,
+    },
     /// Peer-to-peer connection offer: the sender's candidate addresses for a
     /// direct QUIC hole-punch, its home relay's address for the TURN fallback
     /// when the punch can't land, and two random session secrets, a TURN
@@ -230,11 +234,24 @@ pub enum AppPayload {
     /// never shown as a message. Appended last so postcard ordinals hold.
     Call(CallMsg),
     /// Versioned profile metadata, authenticated by the MLS author.
-    ProfileDetails { revision: u64, name: String, bio: String, card: Vec<u8> },
-    ProfileDetailsSync { known_revision: Option<u64>, reply: bool },
-    ProfileDetailsAck { revision: u64 },
+    ProfileDetails {
+        revision: u64,
+        name:     String,
+        bio:      String,
+        card:     Vec<u8>,
+    },
+    ProfileDetailsSync {
+        known_revision: Option<u64>,
+        reply:          bool,
+    },
+    ProfileDetailsAck {
+        revision: u64,
+    },
     /// Only the group's active admins may change its picture.
-    GroupPicture { revision: u64, avif: Option<Vec<u8>> },
+    GroupPicture {
+        revision: u64,
+        avif:     Option<Vec<u8>>,
+    },
     /// Optional permission for original group recipients to help deliver a
     /// post's attachment. Authenticated by the MLS author and group; receiving
     /// this control alone never grants access without the matching live post.
@@ -245,28 +262,161 @@ pub enum AppPayload {
     /// The sender deleted this direct chat and its pair group. The receiver drops
     /// its copy too, so its next message starts a fresh pair. Old clients ignore it.
     Unpaired,
-    /// A member asks the group's founder to change its membership. Only the
-    /// founder's device commits, so every member sees one order of changes.
-    /// Sent to the founder alone; old clients ignore it.
+    /// A member asks the group's committer, the one device that changes it, to
+    /// carry a change or to catch them up. Sent to the committer alone; old
+    /// clients ignore it.
     GroupRequest(GroupRequest),
-    /// The founder's list of the other admins, whole. Sent to every member when
-    /// it changes and to each new member. Old clients ignore it.
-    GroupAdmins { admins: Vec<Bytes<32>> },
-    /// The founder's encoded Welcome for `who`, sent to the member who asked to
-    /// add them. That member seals and delivers it, because `who` refuses a
+    /// Retired unsigned admin list. Reserve its postcard ordinal; signed group
+    /// context is now the only authority for roles.
+    GroupAdmins {
+        admins: Vec<Bytes<32>>,
+    },
+    /// The committer's encoded Welcome for `who`, sent to the member who asked
+    /// to add them. That member seals and delivers it, because `who` refuses a
     /// group Welcome from anyone who isn't their contact. Old clients ignore it.
-    GroupWelcome { who: Bytes<32>, kp_ref: Bytes<32>, welcome: Vec<u8> },
+    GroupWelcome {
+        who:     Bytes<32>,
+        kp_ref:  Bytes<32>,
+        welcome: Vec<u8>,
+    },
+    GroupInvitation {
+        who:     Bytes<32>,
+        kp_ref:  Bytes<32>,
+        welcome: Vec<u8>,
+        history: Vec<u8>,
+    },
 }
 
-/// What a member asks of the founder's device. Anyone may ask to add; only an
-/// admin may ask to remove.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupRequest {
-    Add { who: Bytes<32> },
-    Remove { who: Bytes<32> },
+    /// Retired unsigned requests. Keep their ordinals for older peers.
+    Add {
+        who: Bytes<32>,
+    },
+    Remove {
+        who: Bytes<32>,
+    },
     /// A new member asks for what reached them before their Welcome did, and
-    /// so was dropped: the group's name, its admins and the founder's profile.
+    /// so was dropped: the group's name and the committer's profile.
     Sync,
+    /// A change its author signed, for the committer to carry.
+    Change(SignedChange),
+    /// A member of a group founded before its rules were signed can follow
+    /// them. The founder converts the group once every member has said so.
+    Ready,
+    /// Supports authenticated branch recovery, including fresh-key rejoining.
+    RecoveryReady,
+}
+
+/// One change to a group. The committer puts it in the group's signed state
+/// with the commit that makes it, and every member checks it against the rules
+/// before applying it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupChange {
+    Add {
+        who: Vec<Bytes<32>>,
+    },
+    Remove {
+        who: Bytes<32>,
+    },
+    /// The signer leaves. `successor` becomes an owner when the signer is the
+    /// last one.
+    Leave {
+        successor: Option<Bytes<32>>,
+    },
+    /// `role` is 0 for a member, 1 for an admin and 2 for an owner.
+    Role {
+        who:  Bytes<32>,
+        role: u8,
+    },
+    Rules(GroupRules),
+    /// The committer passes its role to `to`.
+    Handover {
+        to: Bytes<32>,
+    },
+    /// An admin takes the committer's role, when the committer's phone has
+    /// been gone too long.
+    Takeover,
+    /// The founder converts a group founded before its rules were signed.
+    Upgrade,
+    /// Replace a member's lost/stale MLS leaf with a fresh identity-bound KP.
+    /// The member's separate signature authorizes this across epoch changes.
+    MemberRequest(GroupMemberRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupMemberAction {
+    Refresh,
+    Leave,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMemberRequest {
+    pub who:       Bytes<32>,
+    pub nonce:     Bytes<16>,
+    pub action:    GroupMemberAction,
+    pub signature: Bytes<64>,
+}
+
+pub fn group_member_request_signing_input(
+    group: &[u8; 32], who: &[u8; 32], nonce: &[u8; 16], action: &GroupMemberAction,
+) -> Vec<u8> {
+    let mut input = b"promtuz group member request v1".to_vec();
+    input.extend_from_slice(group);
+    input.extend_from_slice(who);
+    input.extend_from_slice(nonce);
+    input.extend(postcard::to_allocvec(action).expect("member action"));
+    input
+}
+
+/// What members who aren't admins may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRules {
+    pub members_add:    bool,
+    pub members_edit:   bool,
+    pub members_send:   bool,
+    /// Admins may make others admins. Only owners change this.
+    pub admins_appoint: bool,
+}
+
+impl Default for GroupRules {
+    fn default() -> Self {
+        Self {
+            members_add:    true,
+            members_edit:   false,
+            members_send:   true,
+            admins_appoint: false,
+        }
+    }
+}
+
+/// A [`GroupChange`] signed by the member who asked for it, at the epoch it
+/// applies to, so the committer can neither forge a request nor replay one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedChange {
+    pub by:     Bytes<32>,
+    pub epoch:  u64,
+    pub branch: Bytes<32>,
+    pub change: GroupChange,
+    /// Ed25519 by `by`'s identity key over [`group_change_signing_input`].
+    pub sig:    Bytes<64>,
+}
+
+pub const GROUP_CHANGE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 group-change";
+
+/// Layout: `GROUP_CHANGE_SIG_DOMAIN || group_id || epoch_be || by || postcard(change)`
+pub fn group_change_signing_input(
+    group_id: &[u8; 32], epoch: u64, branch: &[u8; 32], by: &[u8; 32], change: &GroupChange,
+) -> Vec<u8> {
+    let change = postcard::to_allocvec(change).unwrap_or_default();
+    let mut buf = Vec::with_capacity(GROUP_CHANGE_SIG_DOMAIN.len() + 32 + 8 + 32 + change.len());
+    buf.extend_from_slice(GROUP_CHANGE_SIG_DOMAIN);
+    buf.extend_from_slice(group_id);
+    buf.extend_from_slice(&epoch.to_be_bytes());
+    buf.extend_from_slice(branch);
+    buf.extend_from_slice(by);
+    buf.extend_from_slice(&change);
+    buf
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,7 +439,9 @@ fn receipt_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Receipt
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("1 to 128 receipt entries")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self, mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
             use serde::de::Error;
             if seq.size_hint().is_some_and(|n| n > 128) { return Err(A::Error::custom("too many receipts")); }
             let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(128));
@@ -323,7 +475,9 @@ fn sharing_recipients<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[u8;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("at most 255 original recipients")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self, mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
             use serde::de::Error;
             if seq.size_hint().is_some_and(|n| n > 255) { return Err(A::Error::custom("sharing audience too large")); }
             let mut peers = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(255));
@@ -385,7 +539,13 @@ pub enum CallMsg {
     /// within the call: a side that sees a higher one than its own restarts
     /// too and answers with its own credentials, so two phones that lost the
     /// path at once settle on one restart instead of trading them forever.
-    Restart { call: [u8; 16], generation: u32, ufrag: String, pwd: String, candidates: Vec<CallCandidate> },
+    Restart {
+        call:       [u8; 16],
+        generation: u32,
+        ufrag:      String,
+        pwd:        String,
+        candidates: Vec<CallCandidate>,
+    },
     /// The call is over, or never started.
     End { call: [u8; 16], reason: CallEnd },
 }
@@ -416,22 +576,35 @@ pub enum CallEnd {
 
 /// What happened to a group. The *actor* is the MLS sender of the payload, so
 /// these need only name the target, exactly as [`AppPayload::React`] leaves the
-/// reactor implicit. The `By` variants are the exception: the founder made a
-/// change someone else asked for, and names them.
+/// reactor implicit. A group with signed rules narrates its membership from
+/// the commits instead, and sends only `Titled`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SystemEvent {
     /// The sender added `who` to the group.
-    Added { who: Bytes<32> },
+    Added {
+        who: Bytes<32>,
+    },
     /// `who` left of their own accord. Sent by the leaver.
-    Left { who: Bytes<32> },
+    Left {
+        who: Bytes<32>,
+    },
     /// The sender removed `who`.
-    Removed { who: Bytes<32> },
+    Removed {
+        who: Bytes<32>,
+    },
     /// The sender renamed the group.
-    Titled { title: String },
-    /// The founder added `who` because `by` asked. Old clients ignore it.
-    AddedBy { who: Bytes<32>, by: Bytes<32> },
-    /// The founder removed `who` because `by`, an admin, asked. Old clients ignore it.
-    RemovedBy { who: Bytes<32>, by: Bytes<32> },
+    Titled {
+        title: String,
+    },
+    /// Retired membership narration; membership now comes from MLS commits.
+    AddedBy {
+        who: Bytes<32>,
+        by:  Bytes<32>,
+    },
+    RemovedBy {
+        who: Bytes<32>,
+        by:  Bytes<32>,
+    },
 }
 
 /// What a message IS, split from what it's doing so `reply_to` and a revision
@@ -713,6 +886,59 @@ pub enum MlsEnvelopeP {
         sender: Bytes<32>, recipient: Bytes<32>, id: Bytes<16>, expires_ms: u64,
         encapsulated: ByteVec, ciphertext: ByteVec, signature: Bytes<64>,
     },
+    /// Group traffic bound to one particular MLS epoch state. A numeric epoch
+    /// can have competing commits, so recovery also needs this branch identity.
+    GroupApplication {
+        branch:  Bytes<32>,
+        message: MlsApplicationEnvelopeP,
+        proof:   Option<ByteVec>,
+    },
+    /// A group invitation with its public branch ancestry. This lets a member
+    /// invited onto a losing branch compare a replacement invitation without
+    /// ever receiving the pre-join MLS secrets.
+    GroupWelcome {
+        welcome:   WelcomeEnvelopeP,
+        history:   ByteVec,
+        signature: Bytes<64>,
+    },
+    GroupMemberRequest {
+        group:   Bytes<32>,
+        request: GroupMemberRequest,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupBranch {
+    pub branch:      Bytes<32>,
+    pub rank:        u8,
+    pub commit_hash: Bytes<32>,
+    pub author:      Bytes<32>,
+    pub context:     ByteVec,
+    pub signature:   Bytes<64>,
+}
+
+pub fn group_welcome_signing_input(welcome: &WelcomeEnvelopeP, history: &[u8]) -> Vec<u8> {
+    let mut input = b"promtuz group welcome v1".to_vec();
+    input
+        .extend(postcard::to_allocvec(&(welcome, history)).expect("serializable group invitation"));
+    input
+}
+
+pub fn group_envelope_signing_input(
+    version: u16, to: &[u8; 32], group: &[u8; 32], epoch: u64, branch: &[u8; 32], ciphertext: &[u8],
+) -> Vec<u8> {
+    let mut input = b"promtuz group envelope v1".to_vec();
+    input.extend_from_slice(branch);
+    input.extend(envelope_signing_input(version, to, group, epoch, ciphertext));
+    input
+}
+
+/// The stable application identity survives resealing after a fork. The MLS
+/// signature authenticates it, independently of the carrier's transport id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessage {
+    pub id:      Bytes<16>,
+    pub payload: ByteVec,
 }
 
 /// Application-tier envelope: encrypted MLS message addressed to a
@@ -1679,13 +1905,35 @@ pub fn welcome_publish_wrap_signing_input(
 #[cfg(all(test, feature = "crypto"))]
 mod tests {
     #[test]
+    fn group_upgrade_preserves_retired_wire_discriminants() {
+        use crate::proto::pack::Unpacker;
+        // Bytes emitted by the previous group protocol, before signed rules
+        // and recovery. Retired messages must decode as retired messages.
+        assert_eq!(AppPayload::deser(&[27, 2]).unwrap(), AppPayload::GroupRequest(GroupRequest::Sync));
+        assert_eq!(AppPayload::deser(&[28, 0]).unwrap(), AppPayload::GroupAdmins { admins: vec![] });
+        let mut welcome = vec![29, 32];
+        welcome.extend([1; 32]);
+        welcome.push(32);
+        welcome.extend([2; 32]);
+        welcome.push(0);
+        assert!(matches!(AppPayload::deser(&welcome).unwrap(), AppPayload::GroupWelcome { .. }));
+    }
+
+    #[test]
     fn exact_receipts_are_bounded_and_append_without_rewriting_legacy_receipts() {
-        use crate::proto::pack::{Packer,Unpacker};
-        let entry=ReceiptEntry {message_id:[7;16],delivered_at:Some(100),read_at:Some(110)};
-        let payload=AppPayload::ReceiptDetails(ReceiptDetails {entries:vec![entry.clone();128]});
-        assert_eq!(AppPayload::deser(&payload.ser().unwrap()).unwrap(),payload);
-        for count in [0,129] {
-            let oversized=AppPayload::ReceiptDetails(ReceiptDetails {entries:vec![entry.clone();count]});
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+        let entry = ReceiptEntry {
+            message_id:   [7; 16],
+            delivered_at: Some(100),
+            read_at:      Some(110),
+        };
+        let payload =
+            AppPayload::ReceiptDetails(ReceiptDetails { entries: vec![entry.clone(); 128] });
+        assert_eq!(AppPayload::deser(&payload.ser().unwrap()).unwrap(), payload);
+        for count in [0, 129] {
+            let oversized =
+                AppPayload::ReceiptDetails(ReceiptDetails { entries: vec![entry.clone(); count] });
             assert!(AppPayload::deser(&oversized.ser().unwrap()).is_err());
         }
         let old=AppPayload::Receipt {kind:ReceiptKind::Delivered,upto:[9;16]}.ser().unwrap();
@@ -1695,9 +1943,15 @@ mod tests {
 
     #[test]
     fn sharing_grants_append_without_changing_post_ordinals_and_bound_audience_decode() {
-        use crate::proto::pack::{Packer, Unpacker};
-        let offer = AttachmentSharing { message_id: [1; 16], file_id: [2; 32], size: 123,
-            expires_at: 456, recipients: vec![[3; 32], [4; 32]] };
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+        let offer = AttachmentSharing {
+            message_id: [1; 16],
+            file_id:    [2; 32],
+            size:       123,
+            expires_at: 456,
+            recipients: vec![[3; 32], [4; 32]],
+        };
         let bytes = AppPayload::AttachmentSharing(offer.clone()).ser().unwrap();
         assert_eq!(AppPayload::deser(&bytes).unwrap(), AppPayload::AttachmentSharing(offer.clone()));
         let previous = AppPayload::GroupPicture { revision: 0, avif: None }.ser().unwrap();
@@ -2268,12 +2522,24 @@ mod tests {
         // ordinal stability: Text must still encode as discriminant 0
         assert_eq!(AppPayload::Text("x".into()).ser().unwrap()[0], 0);
         // new variants round-trip
-        let img = AppPayload::Image { caption: "hi".into(), group_id: Some([1u8;16]),
-            mime: "image/avif".into(), width: 4, height: 3, data: vec![9,9,9] };
+        let img = AppPayload::Image {
+            caption:  "hi".into(),
+            group_id: Some([1u8; 16]),
+            mime:     "image/avif".into(),
+            width:    4,
+            height:   3,
+            data:     vec![9, 9, 9],
+        };
         assert_eq!(AppPayload::deser(&img.ser().unwrap()).unwrap(), img);
-        let att = AppPayload::Attachment { caption: "".into(), group_id: None,
-            mime: "application/pdf".into(), name: "a.pdf".into(), size: 12345,
-            thumb: vec![1,2], file_id: [7u8;32] };
+        let att = AppPayload::Attachment {
+            caption:  "".into(),
+            group_id: None,
+            mime:     "application/pdf".into(),
+            name:     "a.pdf".into(),
+            size:     12345,
+            thumb:    vec![1, 2],
+            file_id:  [7u8; 32],
+        };
         assert_eq!(AppPayload::deser(&att.ser().unwrap()).unwrap(), att);
         let want = AppPayload::FileWant { file_id: [7u8;32] };
         assert_eq!(AppPayload::deser(&want.ser().unwrap()).unwrap(), want);

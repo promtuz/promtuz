@@ -123,6 +123,10 @@ class ChatVM(
     private val _muted = MutableStateFlow(initialSummary?.muted == true)
     val muted: StateFlow<Boolean> = _muted.asStateFlow()
 
+    /** Why we can't post here, when we can't: the composer gives way to it. */
+    private val _closed = MutableStateFlow<String?>(null)
+    val closed: StateFlow<String?> = _closed.asStateFlow()
+
     /** An unaccepted message request: the composer gives way to accept, delete and block. */
     private val _request = MutableStateFlow(initialSummary?.request == true)
     val request: StateFlow<Boolean> = _request.asStateFlow()
@@ -448,6 +452,12 @@ class ChatVM(
             _rawTitle.value = record.title
             _muted.value = record.muted
             _request.value = record.request
+            _closed.value = when {
+                record.kind.toInt() != 1 -> null
+                !record.amMember -> "You’re no longer in this group"
+                !record.canSend -> "Only admins can send messages"
+                else -> null
+            }
             peer = record.peer
             others = record.others
             _memberNames.value = names

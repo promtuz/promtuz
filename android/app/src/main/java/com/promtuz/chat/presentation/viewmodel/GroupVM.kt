@@ -16,19 +16,22 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import timber.log.Timber
+import uniffi.core.GroupRulesRecord
 
 /** A person as the group screens show them: name, key, and their standing. */
 data class UiMember(
     val ipkHex: String,
     val name: String,
-    val admin: Boolean = false,
-    /** Founded the group: appoints the admins and can't be removed. */
-    val owner: Boolean = false,
+    /** 0 member, 1 admin, 2 owner. */
+    val role: Int = 0,
     val active: Boolean = true,
     val me: Boolean = false,
     /** They told us this name; we didn't choose it. Worth marking as such. */
     val claimed: Boolean = false,
-)
+) {
+    val admin get() = role >= 1
+    val owner get() = role == 2
+}
 
 /** What a membership call is doing right now, so the UI can hold still. */
 sealed interface GroupWork {
@@ -73,12 +76,7 @@ class GroupVM(app: AppVM) : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, label)
-                _work.value = GroupWork.Failed(
-                    if (e is MemberAddFailure) {
-                        val prefix = if (e.added > 0) "${e.added} added. " else ""
-                        prefix + "Couldn’t add ${e.names.joinToString()}. Try again."
-                    } else failure
-                )
+                _work.value = GroupWork.Failed(failure)
             }
         }
     }
@@ -161,17 +159,28 @@ class GroupVM(app: AppVM) : ViewModel() {
     private val _displayName = MutableStateFlow("")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
 
-    /** We are an admin: we may remove members, rename the group and change its photo. */
+    /** We are an admin or an owner: we may remove members and change the group's rules. */
     private val _canManage = MutableStateFlow(false)
     val canManage: StateFlow<Boolean> = _canManage.asStateFlow()
 
-    /** Any member may add people. */
+    /** The group's rules let us add people. */
     private val _canAdd = MutableStateFlow(false)
     val canAdd: StateFlow<Boolean> = _canAdd.asStateFlow()
 
-    /** We founded the group, so we choose its admins. */
-    private val _amOwner = MutableStateFlow(false)
-    val amOwner: StateFlow<Boolean> = _amOwner.asStateFlow()
+    /** The group's rules let us rename it and change its photo. */
+    private val _canEdit = MutableStateFlow(false)
+    val canEdit: StateFlow<Boolean> = _canEdit.asStateFlow()
+
+    /** Our role: 0 member, 1 admin, 2 owner. */
+    private val _role = MutableStateFlow(0)
+    val role: StateFlow<Int> = _role.asStateFlow()
+
+    /** What members who aren't admins may do. Null for a group from before rules were signed. */
+    private val _rules = MutableStateFlow<GroupRulesRecord?>(null)
+    val rules: StateFlow<GroupRulesRecord?> = _rules.asStateFlow()
+
+    /** Whose phone makes the group's changes; what anyone else asks for waits for it. */
+    private var committerHex: String? = null
 
     /** Leaving is offered: we are in the group and wouldn't strand it. */
     private val _canLeave = MutableStateFlow(false)
@@ -217,8 +226,7 @@ class GroupVM(app: AppVM) : ViewModel() {
                         ipkHex = m.ipk.toHex(),
                         name = if (m.me) "You" else m.name,
                         claimed = !m.me && m.nameIsClaimed,
-                        admin = m.role.toInt() == 1,
-                        owner = m.owner,
+                        role = if (m.active) m.role.toInt() else 0,
                         active = m.active,
                         me = m.me,
                     )
@@ -229,74 +237,70 @@ class GroupVM(app: AppVM) : ViewModel() {
                         .thenBy { it.name.lowercase() },
                 )
                 _canManage.value = record.canManage
-                _canAdd.value = record.amMember && record.hasGroup
-                _amOwner.value = roster.any { it.me && it.owner && it.active }
+                _canAdd.value = record.canAdd
+                _canEdit.value = record.canEdit
+                _role.value = record.role.toInt()
+                _rules.value = record.rules
+                committerHex = record.committer?.toHex()
                 _canLeave.value = record.canLeave
                 _ownerIsStuck.value = record.ownerIsStuck
             }
         }
     }
 
-    fun addMembers(people: List<UiMember>, onAdded: (String) -> Unit, onComplete: () -> Unit) {
+    /** Everyone picked, in one change. It either adds them all or none. */
+    fun addMembers(people: List<UiMember>, onComplete: () -> Unit) {
         if (people.isEmpty()) return
-        perform("Adding members…", "Couldn’t finish adding members. Try again.") {
-            val failed = mutableListOf<String>()
-            val asked = mutableListOf<UiMember>()
-            for (person in people) {
-                _work.value = GroupWork.Busy("Adding ${person.name}…")
-                try {
-                    if (!CoreBridge.addGroupMember(conversation, person.ipkHex.fromHex())) asked += person
-                    onAdded(person.ipkHex)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Timber.tag(TAG).e(e, "add member failed")
-                    failed += person.name
-                }
+        val names = people.joinToString { it.name }
+        perform(if (people.size == 1) "Adding ${people[0].name}…" else "Adding ${people.size} members…",
+            "Couldn’t add $names. Try again.") {
+            val done = CoreBridge.addGroupMembers(conversation, people.map { it.ipkHex.fromHex() }) ||
+                awaitRoster { roster -> people.all { p -> roster.any { it.ipkHex == p.ipkHex } } }
+            _notice.value = when {
+                !done -> "$names will join when ${committerName()} is next online"
+                people.size == 1 -> "Member added"
+                else -> "${people.size} members added"
             }
-            val joined = { person: UiMember, roster: List<UiMember> -> roster.any { it.ipkHex == person.ipkHex } }
-            if (asked.isNotEmpty()) awaitRoster { roster -> asked.all { joined(it, roster) } }
-            val waiting = asked.filterNot { joined(it, _members.value.filter { m -> m.active }) }
-            val added = people.size - failed.size - waiting.size
-            if (failed.isEmpty()) {
-                _notice.value = when {
-                    waiting.isNotEmpty() -> "${waiting.joinToString { it.name }} will join when ${ownerName()} is next online"
-                    added == 1 -> "Member added"
-                    else -> "$added members added"
-                }
-                onComplete()
-            } else {
-                // Keep only unsuccessful selections so retry cannot add someone twice.
-                throw MemberAddFailure(added, failed)
-            }
+            onComplete()
         }
     }
-
-    private class MemberAddFailure(val added: Int, val names: List<String>) : Exception()
 
     fun removeMember(person: UiMember, onComplete: () -> Unit) =
         perform("Removing ${person.name}…", "Couldn’t remove ${person.name}. Try again.") {
             val done = CoreBridge.removeGroupMember(conversation, person.ipkHex.fromHex()) ||
                 awaitRoster { roster -> roster.none { it.ipkHex == person.ipkHex } }
             _notice.value = if (done) "${person.name} removed"
-                            else "${person.name} will be removed when ${ownerName()} is next online"
+                            else "${person.name} will be removed when ${committerName()} is next online"
             onComplete()
         }
 
-    fun setAdmin(person: UiMember, admin: Boolean) =
+    fun setRole(person: UiMember, role: Int) =
         perform("Updating ${person.name}…", "Couldn’t update ${person.name}. Try again.") {
-            CoreBridge.setGroupAdmin(conversation, person.ipkHex.fromHex(), admin)
-            _notice.value = if (admin) "${person.name} is now an admin" else "${person.name} is no longer an admin"
+            val done = CoreBridge.setGroupRole(conversation, person.ipkHex.fromHex(), role) ||
+                awaitRoster { roster -> roster.any { it.ipkHex == person.ipkHex && it.role == role } }
+            _notice.value = when {
+                !done -> "This will apply when ${committerName()} is next online"
+                role == 2 -> "${person.name} is now an owner"
+                role == 1 -> "${person.name} is now an admin"
+                else -> "${person.name} is no longer an admin"
+            }
+        }
+
+    fun setRules(rules: GroupRulesRecord) =
+        perform("Saving…", "Couldn’t change the group’s settings. Try again.") {
+            val done = CoreBridge.setGroupRules(conversation, rules) ||
+                withTimeoutOrNull(12_000) { _rules.first { it == rules } } != null
+            if (!done) _notice.value = "This will apply when ${committerName()} is next online"
         }
 
     /**
-     * Only the owner's device changes the membership, so a change we asked it for
+     * Only one member's phone changes the group, so a change we asked it for
      * lands when it has run. Usually that's moments; give it those before saying so.
      */
     private suspend fun awaitRoster(done: (List<UiMember>) -> Boolean): Boolean =
         withTimeoutOrNull(12_000) { members.first { roster -> done(roster.filter { it.active }) } } != null
 
-    private fun ownerName() = _members.value.firstOrNull { it.owner }?.name ?: "the owner"
+    private fun committerName() = _members.value.firstOrNull { it.ipkHex == committerHex }?.name ?: "an admin"
 
     fun rename(value: String, onComplete: () -> Unit) {
         val name = value.trim()

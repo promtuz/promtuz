@@ -39,7 +39,7 @@ sealed interface MessageContent {
      * between. Not a bubble — a centred line with no author, no reactions and
      * nothing to reply to.
      */
-    data class System(val event: SystemEventKind, val actor: String, val target: String) :
+    data class System(val event: SystemEventKind, val actor: String, val target: String, val detail: String = "") :
         MessageContent
 
     /** P2P attachment pulled by [fileIdHex]; [transferState] 0 none/1 active/2 done/3 failed/4 held/5 connecting. */
@@ -101,23 +101,30 @@ fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
 }
 
 /** What a [MessageContent.System] row is narrating. */
-enum class SystemEventKind { Added, Left, Removed, Titled }
+enum class SystemEventKind { Added, Left, Removed, Titled, Role, Rules }
 
 /**
  * A system row as core stores it. [target] is a member's hex for the membership
- * events and the new name for a rename; [names] maps member hex to what to call them.
+ * events, the new name for a rename, `<member hex>:<role>` for a role change and
+ * `<rule>:<0|1>` for a rule change; [names] maps member hex to what to call them.
  */
-fun systemContent(code: Int, actorHex: String?, target: String, names: Map<String, String>) =
-    MessageContent.System(
+fun systemContent(code: Int, actorHex: String?, target: String, names: Map<String, String>): MessageContent.System {
+    val (subject, detail) = if (code == 6 || code == 7) target.substringBefore(':') to target.substringAfter(':', "")
+        else target to ""
+    return MessageContent.System(
         event = when (code) {
             1 -> SystemEventKind.Added
             2 -> SystemEventKind.Left
             3 -> SystemEventKind.Removed
+            6 -> SystemEventKind.Role
+            7 -> SystemEventKind.Rules
             else -> SystemEventKind.Titled
         },
         actor = actorHex?.let { names[it] } ?: "Someone",
-        target = if (code == 4) target else names[target] ?: "someone",
+        target = if (code == 4 || code == 7) subject else names[subject] ?: "someone",
+        detail = detail,
     )
+}
 
 /** One member of an [MessageContent.Album], still addressable by its own id. */
 @Immutable

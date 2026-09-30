@@ -23,6 +23,8 @@ use crate::data::identity::Identity;
 use crate::db::messages::ConversationRow;
 use crate::db::messages::MESSAGES_DB;
 use crate::db::messages::MemberRow;
+use crate::mls::GroupMeta;
+use crate::mls::GroupState;
 use crate::utils::systime;
 
 /// Two-party chat, titled by the peer's contact name.
@@ -30,11 +32,9 @@ pub const KIND_DIRECT: u8 = 0;
 /// Multi-member chat, carrying its own title and roster.
 pub const KIND_GROUP: u8 = 1;
 
-/// Ordinary member: may speak and may leave.
-pub const ROLE_MEMBER: u8 = 0;
-/// Admin: may also remove members, rename the group and change its picture.
-/// The founder is always one, and appoints the others.
-pub const ROLE_ADMIN: u8 = 1;
+pub use crate::mls::policy::ROLE_ADMIN;
+pub use crate::mls::policy::ROLE_MEMBER;
+pub use crate::mls::policy::ROLE_OWNER;
 
 /// Time-sortable, so an unordered conversation list still reads oldest-first.
 fn mint_conversation_id() -> [u8; 16] {
@@ -52,8 +52,12 @@ impl Conversation {
     }
 
     pub fn get_tx(conn: &Connection, id: &[u8; 16]) -> Option<ConversationRow> {
-        conn.query_row("SELECT * FROM conversations WHERE id = ?1", [id.as_slice()], ConversationRow::from_row)
-            .ok()
+        conn.query_row(
+            "SELECT * FROM conversations WHERE id = ?1",
+            [id.as_slice()],
+            ConversationRow::from_row,
+        )
+        .ok()
     }
 
     /// The direct conversation with `peer`, created if this is the first time
@@ -109,7 +113,7 @@ impl Conversation {
         Ok(found)
     }
 
-    /// Create a group conversation with us as admin and `members` as the
+    /// Create a group conversation with us as its owner and `members` as the
     /// initial roster. The MLS group is bound separately once it exists.
     pub fn create_group(title: &str, members: &[[u8; 32]]) -> Result<[u8; 16]> {
         let me = Identity::get().map(|i| i.ipk());
@@ -122,7 +126,7 @@ impl Conversation {
             (id.as_slice(), KIND_GROUP, title, now, me.as_ref().map(|m| m.as_slice())),
         )?;
         if let Some(me) = me {
-            Self::put_member(&conn, &id, &me, ROLE_ADMIN)?;
+            Self::put_member(&conn, &id, &me, ROLE_OWNER)?;
         }
         for m in members {
             Self::put_member(&conn, &id, m, ROLE_MEMBER)?;
@@ -133,9 +137,8 @@ impl Conversation {
     /// Create a group conversation we were Welcomed into, rather than founded.
     ///
     /// The roster comes from the MLS group itself — it is the authority on who
-    /// is in it, and it already includes us. `creator` is the member who sent
-    /// the Welcome and is recorded as the admin; the title arrives separately,
-    /// so a group can exist unnamed for a moment.
+    /// is in it, and it already includes us. `creator` founded it and starts as
+    /// its owner, until [`Self::sync_group`] reads the roles off the group.
     pub fn join_group(creator: &[u8; 32], members: &[[u8; 32]]) -> Result<[u8; 16]> {
         let conn = MESSAGES_DB.lock();
         Self::join_group_tx(&conn, creator, members)
@@ -151,7 +154,7 @@ impl Conversation {
              VALUES (?1, ?2, '', NULL, ?3, ?4)",
             (id.as_slice(), KIND_GROUP, now, creator.as_slice()),
         )?;
-        Self::put_member(&conn, &id, creator, ROLE_ADMIN)?;
+        Self::put_member(&conn, &id, creator, ROLE_OWNER)?;
         for m in members.iter().filter(|m| *m != creator) {
             Self::put_member(&conn, &id, m, ROLE_MEMBER)?;
         }
@@ -216,7 +219,10 @@ impl Conversation {
     }
 
     pub fn unbind_group(id: &[u8; 16]) -> Result<()> {
-        MESSAGES_DB.lock().execute("UPDATE conversations SET mls_group_id = NULL WHERE id = ?1", [id.as_slice()])?;
+        MESSAGES_DB.lock().execute(
+            "UPDATE conversations SET mls_group_id = NULL WHERE id = ?1",
+            [id.as_slice()],
+        )?;
         Ok(())
     }
 
@@ -234,9 +240,7 @@ impl Conversation {
         Self::peer_of_tx(&conn, id, me)
     }
 
-    pub fn peer_of_tx(
-        conn: &Connection, id: &[u8; 16], me: Option<[u8; 32]>,
-    ) -> Option<[u8; 32]> {
+    pub fn peer_of_tx(conn: &Connection, id: &[u8; 16], me: Option<[u8; 32]>) -> Option<[u8; 32]> {
         let me = me.unwrap_or([0u8; 32]);
         conn.query_row(
             "SELECT member_ipk FROM conversation_members \
@@ -259,7 +263,9 @@ impl Conversation {
     fn for_peer_transport_tx(
         conn: &Connection, me: &[u8; 32], peer: &[u8; 32], paired: bool,
     ) -> Option<[u8; 16]> {
-        if me == peer { return None; }
+        if me == peer {
+            return None;
+        }
         // Migrated direct chats may have only the peer's roster row. Pairing
         // authorizes those; group transport always requires both active rows.
         conn.query_row(
@@ -273,7 +279,9 @@ impl Conversation {
              ORDER BY c.kind, c.id LIMIT 1",
             rusqlite::params![me.as_slice(), peer.as_slice(), KIND_GROUP, KIND_DIRECT, paired],
             |r| r.get::<_, Vec<u8>>(0),
-        ).ok().and_then(|v| v.try_into().ok())
+        )
+        .ok()
+        .and_then(|v| v.try_into().ok())
     }
 
     /// Everyone we should address for this conversation — the active roster
@@ -285,9 +293,7 @@ impl Conversation {
         Self::recipients_tx(&conn, id, me)
     }
 
-    pub fn recipients_tx(
-        conn: &Connection, id: &[u8; 16], me: Option<[u8; 32]>,
-    ) -> Vec<[u8; 32]> {
+    pub fn recipients_tx(conn: &Connection, id: &[u8; 16], me: Option<[u8; 32]>) -> Vec<[u8; 32]> {
         let me = me.unwrap_or([0u8; 32]);
         let Ok(mut stmt) = conn.prepare(
             "SELECT member_ipk FROM conversation_members \
@@ -316,9 +322,7 @@ impl Conversation {
 
     /// Add a member, or re-activate one who had left. Never demotes an
     /// existing role — a re-add must not strip an admin.
-    pub fn put_member(
-        conn: &Connection, id: &[u8; 16], member: &[u8; 32], role: u8,
-    ) -> Result<()> {
+    pub fn put_member(conn: &Connection, id: &[u8; 16], member: &[u8; 32], role: u8) -> Result<()> {
         conn.execute(
             "INSERT INTO conversation_members (conversation_id, member_ipk, role, joined_at, active) \
              VALUES (?1, ?2, ?3, ?4, 1) \
@@ -340,9 +344,7 @@ impl Conversation {
         Self::deactivate_member_tx(&conn, id, member)
     }
 
-    pub fn deactivate_member_tx(
-        conn: &Connection, id: &[u8; 16], member: &[u8; 32],
-    ) -> Result<()> {
+    pub fn deactivate_member_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> Result<()> {
         conn.execute(
             "UPDATE conversation_members SET active = 0 \
              WHERE conversation_id = ?1 AND member_ipk = ?2",
@@ -351,11 +353,12 @@ impl Conversation {
         Ok(())
     }
 
-    /// Replace the roster with `members`, marking anyone absent as departed.
-    /// The shape an applied MLS Commit hands us: the new membership, whole.
-    /// A departed admin loses the role, so being added back makes them an
+    /// Replace the roster with `members`, marking anyone absent as departed,
+    /// and take the roles and rules from the group's `meta`. The shape an
+    /// applied MLS Commit hands us: the new membership, whole. A departed
+    /// member keeps their row but no role, so being added back makes them an
     /// ordinary member again.
-    pub fn sync_roster(id: &[u8; 16], members: &[[u8; 32]]) -> Result<()> {
+    pub fn sync_group(id: &[u8; 16], members: &[[u8; 32]], meta: Option<&GroupMeta>) -> Result<()> {
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
         tx.execute(
@@ -365,22 +368,103 @@ impl Conversation {
         for m in members {
             Self::put_member(&tx, id, m, ROLE_MEMBER)?;
         }
-        tx.execute(
-            "UPDATE conversation_members SET role = ?2 WHERE conversation_id = ?1 AND active = 0 \
-             AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
-            (id.as_slice(), ROLE_MEMBER),
-        )?;
+        if let Some(meta) = meta {
+            let state = meta.effective();
+            tx.execute(
+                "UPDATE conversation_members SET role = ?2 WHERE conversation_id = ?1",
+                (id.as_slice(), ROLE_MEMBER),
+            )?;
+            for m in members {
+                tx.execute(
+                    "UPDATE conversation_members SET role = ?3 WHERE conversation_id = ?1 AND member_ipk = ?2",
+                    (id.as_slice(), m.as_slice(), state.role(m)),
+                )?;
+            }
+            let blob = meta.state.as_ref().map(postcard::to_allocvec).transpose()?;
+            tx.execute(
+                "UPDATE conversations SET group_state = ?2 WHERE id = ?1",
+                (id.as_slice(), blob),
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
 
-    /// Whether `member` runs this conversation *now*.
+    /// The rules a group runs by, as its signed state last said: read here, so
+    /// a received message is checked without loading the MLS group. A group
+    /// from before signed rules runs by its founder alone. `None` for a direct
+    /// chat.
+    pub fn state(id: &[u8; 16]) -> Option<GroupState> {
+        let conn = MESSAGES_DB.lock();
+        Self::state_tx(&conn, id)
+    }
+
+    pub fn state_tx(conn: &Connection, id: &[u8; 16]) -> Option<GroupState> {
+        let (kind, blob, founder): (u8, Option<Vec<u8>>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT kind, group_state, created_by FROM conversations WHERE id = ?1",
+                [id.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()?;
+        if kind != KIND_GROUP {
+            return None;
+        }
+        match blob {
+            Some(blob) => postcard::from_bytes(&blob).ok(),
+            None => {
+                let meta = GroupMeta {
+                    title:   String::new(),
+                    founder: founder?.try_into().ok()?,
+                    state:   None,
+                };
+                Some(meta.effective())
+            },
+        }
+    }
+
+    /// The group's rules are signed into it, rather than it running by its
+    /// founder alone as groups from before them do.
+    pub fn has_signed_rules(id: &[u8; 16]) -> bool {
+        MESSAGES_DB
+            .lock()
+            .query_row(
+                "SELECT group_state IS NOT NULL FROM conversations WHERE id = ?1",
+                [id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+    }
+
+    /// Who is in it now, us included.
+    pub fn active_members(id: &[u8; 16]) -> Vec<[u8; 32]> {
+        Self::members(id).into_iter().filter(|m| m.active).map(|m| m.member_ipk).collect()
+    }
+
+    /// Whether `member` may rename the group and change its photo: an admin, or
+    /// anyone while its rules let members edit.
+    pub fn may_edit(id: &[u8; 16], member: &[u8; 32]) -> bool {
+        let conn = MESSAGES_DB.lock();
+        Self::may_edit_tx(&conn, id, member)
+    }
+
+    pub fn may_edit_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> bool {
+        let active = conn
+            .query_row(
+                "SELECT 1 FROM conversation_members WHERE conversation_id = ?1 AND member_ipk = ?2 AND active = 1",
+                (id.as_slice(), member.as_slice()),
+                |_| Ok(()),
+            )
+            .is_ok();
+        active && Self::state_tx(conn, id).is_some_and(|s| s.may_edit(member))
+    }
+
+    /// Whether `member` runs this conversation *now*: an admin or an owner.
     ///
     /// Scoped to the active roster. A role row outlives its owner's membership
     /// so their old messages still attribute to a name, and reading that row as
     /// standing leaves someone who is out of the group still gating what the
-    /// people in it may do — and still held to a founder's duty not to strand a
-    /// group whose fate stopped being theirs.
+    /// people in it may do.
     pub fn is_admin(id: &[u8; 16], member: &[u8; 32]) -> bool {
         let conn = MESSAGES_DB.lock();
         Self::is_admin_tx(&conn, id, member)
@@ -393,12 +477,11 @@ impl Conversation {
             (id.as_slice(), member.as_slice()),
             |r| r.get::<_, i64>(0),
         )
-        .map(|r| r as u8 == ROLE_ADMIN)
+        .map(|r| r as u8 >= ROLE_ADMIN)
         .unwrap_or(false)
     }
 
-    /// Whether `member` founded this group and is still in it. The founder's
-    /// device makes every membership commit and appoints the other admins.
+    /// Whether `member` is an owner of this group and still in it.
     pub fn is_owner(id: &[u8; 16], member: &[u8; 32]) -> bool {
         let conn = MESSAGES_DB.lock();
         Self::is_owner_tx(&conn, id, member)
@@ -406,52 +489,12 @@ impl Conversation {
 
     pub fn is_owner_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> bool {
         conn.query_row(
-            "SELECT 1 FROM conversations c JOIN conversation_members m ON m.conversation_id = c.id \
-             WHERE c.id = ?1 AND c.kind = ?3 AND c.created_by = ?2 AND m.member_ipk = ?2 AND m.active = 1",
-            (id.as_slice(), member.as_slice(), KIND_GROUP),
+            "SELECT 1 FROM conversation_members \
+             WHERE conversation_id = ?1 AND member_ipk = ?2 AND role = ?3 AND active = 1",
+            (id.as_slice(), member.as_slice(), ROLE_OWNER),
             |_| Ok(()),
         )
         .is_ok()
-    }
-
-    /// The group's founder, while they are still in it.
-    pub fn owner(id: &[u8; 16]) -> Option<[u8; 32]> {
-        let founder: [u8; 32] = Self::get(id)?.created_by?.try_into().ok()?;
-        Self::is_owner(id, &founder).then_some(founder)
-    }
-
-    /// The admins the founder appointed who are still in the group.
-    pub fn admins(id: &[u8; 16]) -> Vec<[u8; 32]> {
-        let conn = MESSAGES_DB.lock();
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT member_ipk FROM conversation_members WHERE conversation_id = ?1 AND role = ?2 \
-             AND active = 1 AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
-        ) else {
-            return Vec::new();
-        };
-        stmt.query_map((id.as_slice(), ROLE_ADMIN), |r| r.get::<_, Vec<u8>>(0))
-            .map(|rows| rows.flatten().filter_map(|v| v.try_into().ok()).collect())
-            .unwrap_or_default()
-    }
-
-    /// Make exactly `admins`, and the founder, this group's admins.
-    pub fn set_admins(id: &[u8; 16], admins: &[[u8; 32]]) -> Result<()> {
-        let mut conn = MESSAGES_DB.lock();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "UPDATE conversation_members SET role = ?2 WHERE conversation_id = ?1 \
-             AND member_ipk IS NOT (SELECT created_by FROM conversations WHERE id = ?1)",
-            (id.as_slice(), ROLE_MEMBER),
-        )?;
-        for admin in admins {
-            tx.execute(
-                "UPDATE conversation_members SET role = ?3 \
-                 WHERE conversation_id = ?1 AND member_ipk = ?2 AND active = 1",
-                (id.as_slice(), admin.as_slice(), ROLE_ADMIN),
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     /// Capped like a peer's name: the title arrives from the wire, and a
@@ -481,12 +524,22 @@ impl Conversation {
 
     /// Empty a conversation of its history, keeping the chat and its roster.
     pub fn clear_history(id: &[u8; 16]) -> Result<()> {
+        let gid = Self::group_of(id);
+        let _operation = gid.as_ref().map(|g| crate::mls::recovery::operation_lock(g).lock());
+        let clear = crate::groups::recovery::clear_marker(id)?;
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
+        if let Some((key, through)) = clear {
+            tx.execute(
+                "INSERT OR REPLACE INTO app_prefs(key,value) VALUES(?1,?2)",
+                (key, through.to_string()),
+            )?;
+        }
         let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.commit()?;
         crate::data::media::unlink_orphaned(&conn, &orphaned);
-        Ok(())
+        drop(conn);
+        crate::groups::recovery::finish_clears()
     }
 
     /// Every table scoped to a conversation, emptied — the shared half of
@@ -512,9 +565,15 @@ impl Conversation {
             stmt.query_map([id.as_slice()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         drop(stmt);
 
-        for table in
-            ["messages", "reactions", "read_state", "member_read_state", "message_media", "attachment_sharing", "receipt_peers"]
-        {
+        for table in [
+            "messages",
+            "reactions",
+            "read_state",
+            "member_read_state",
+            "message_media",
+            "attachment_sharing",
+            "receipt_peers",
+        ] {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
                 [id.as_slice()],
@@ -525,16 +584,29 @@ impl Conversation {
 
     /// Drop a conversation and everything scoped to it.
     pub fn delete(id: &[u8; 16]) -> Result<()> {
+        let gid = Self::group_of(id);
+        let _operation = gid.as_ref().map(|g| crate::mls::recovery::operation_lock(g).lock());
+        let clear = crate::groups::recovery::clear_marker(id)?;
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
+        if let Some((key, through)) = clear {
+            tx.execute(
+                "INSERT OR REPLACE INTO app_prefs(key,value) VALUES(?1,?2)",
+                (key, through.to_string()),
+            )?;
+        }
         let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.execute("DELETE FROM message_deletions WHERE conversation_id = ?1", [id.as_slice()])?;
-        tx.execute("DELETE FROM attachment_sharing_revocations WHERE conversation_id = ?1", [id.as_slice()])?;
+        tx.execute(
+            "DELETE FROM attachment_sharing_revocations WHERE conversation_id = ?1",
+            [id.as_slice()],
+        )?;
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
         crate::data::media::unlink_orphaned(&conn, &orphaned);
-        Ok(())
+        drop(conn);
+        crate::groups::recovery::finish_clears()
     }
 
     /// Flip a per-conversation flag. `column` is a fixed identifier, never
@@ -548,9 +620,13 @@ impl Conversation {
         Ok(())
     }
 
-    pub fn set_pinned(id: &[u8; 16], on: bool) -> Result<()> { Self::set_flag(id, "pinned", on) }
+    pub fn set_pinned(id: &[u8; 16], on: bool) -> Result<()> {
+        Self::set_flag(id, "pinned", on)
+    }
 
-    pub fn set_muted(id: &[u8; 16], on: bool) -> Result<()> { Self::set_flag(id, "muted", on) }
+    pub fn set_muted(id: &[u8; 16], on: bool) -> Result<()> {
+        Self::set_flag(id, "muted", on)
+    }
 
     /// Remember the newest message this chat has already alerted for.
     pub fn set_alerted_at(id: &[u8; 16], ts_secs: u64) -> Result<()> {
@@ -651,7 +727,9 @@ impl Conversation {
 
     /// Parse a hex conversation id from the FFI boundary.
     pub fn id_from_bytes(bytes: &[u8]) -> Result<[u8; 16]> {
-        bytes.try_into().map_err(|_| anyhow!("conversation id must be 16 bytes, got {}", bytes.len()))
+        bytes
+            .try_into()
+            .map_err(|_| anyhow!("conversation id must be 16 bytes, got {}", bytes.len()))
     }
 }
 
@@ -725,7 +803,8 @@ mod tests {
         conn.execute(
             "DELETE FROM conversation_members WHERE conversation_id = ?1 AND member_ipk = ?2",
             (dm.as_slice(), me.as_slice()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(resolve(true), Some(dm), "legacy direct chats may omit our roster row");
         Conversation::deactivate_member_tx(&conn, &group, &peer).unwrap();
         assert_eq!(resolve(false), None, "removed peer loses transport permission");
@@ -750,9 +829,8 @@ mod tests {
         let other = direct(&conn, &[3u8; 32], me);
         assert_ne!(a, other, "a different peer gets its own conversation");
 
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
-            .expect("count");
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0)).expect("count");
         assert_eq!(n, 2, "exactly two conversations minted");
     }
 
@@ -795,9 +873,11 @@ mod tests {
         assert_eq!(Conversation::for_group_tx(&conn, &[0xAA; 32]), None, "old pointer released");
 
         let kept: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [id.as_slice()], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                [id.as_slice()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(kept, 1, "history survives the group rotation");
     }
@@ -816,12 +896,16 @@ mod tests {
         let dm = direct(&conn, &inviter, me);
         Conversation::bind_group_tx(&conn, &dm, &[0xAA; 32]).expect("bind the pair");
 
-        let group = Conversation::join_group_tx(&conn, &inviter, &[me, inviter, third])
-            .expect("join");
+        let group =
+            Conversation::join_group_tx(&conn, &inviter, &[me, inviter, third]).expect("join");
         Conversation::bind_group_tx(&conn, &group, &[0xBB; 32]).expect("bind the group");
 
         assert_ne!(group, dm, "a group is not the inviter's direct chat");
-        assert_eq!(Conversation::for_group_tx(&conn, &[0xAA; 32]), Some(dm), "the DM keeps its group");
+        assert_eq!(
+            Conversation::for_group_tx(&conn, &[0xAA; 32]),
+            Some(dm),
+            "the DM keeps its group"
+        );
         assert_eq!(Conversation::for_group_tx(&conn, &[0xBB; 32]), Some(group));
 
         // The inviter is the admin; we are an ordinary member and are in the
@@ -905,7 +989,11 @@ mod tests {
         Conversation::clear_history_tx(&conn, &group).expect("clear");
 
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [group.as_slice()], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                [group.as_slice()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "the history is gone");
         assert!(Conversation::get_tx(&conn, &group).is_some(), "the chat itself survives");

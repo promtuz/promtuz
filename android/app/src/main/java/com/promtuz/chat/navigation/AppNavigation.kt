@@ -83,6 +83,7 @@ fun AppNavigation(
             entry<Routes.PersonInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(null, key.peer, key.name) }
             entry<Routes.SharedMedia> { key -> com.promtuz.chat.ui.screens.SharedMediaScreen(key.conversation, key.name) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
+            entry<Routes.GroupSettings> { key -> com.promtuz.chat.ui.screens.GroupSettingsScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
                 ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
             }

@@ -4,10 +4,8 @@
 //!
 //! Called by an inviter after `MlsGroupHandle::add_members` returns
 //! its `(commit, welcome)` pair. We:
-//! 1. TLS-serialise the openmls `Welcome` (carried inside the
-//!    returned `MlsMessageOut`).
-//! 2. Compute the outer signing transcript via
-//!    `welcome_envelope_signing_input`.
+//! 1. TLS-serialise the openmls `Welcome` (carried inside the returned `MlsMessageOut`).
+//! 2. Compute the outer signing transcript via `welcome_envelope_signing_input`.
 //! 3. Sign with the inviter's IPK long-term key.
 //! 4. Pack into [`WelcomeEnvelopeP`].
 //!
@@ -19,12 +17,10 @@
 //! # Inbound (`process_welcome`)
 //!
 //! 1. Verify outer sig under `sender_ipk`. Reject on failure.
-//! 2. TLS-deserialise the inner `MlsMessageIn`, ensure it carries a
-//!    `Welcome` body.
-//! 3. Hand to `StagedWelcome::new_from_welcome` — openmls looks up
-//!    the matching KeyPackageBundle via its storage provider
-//!    (`mls_storage.key_tag = KEY_PACKAGE`); on success, decrypts
-//!    and gives us a `StagedWelcome`.
+//! 2. TLS-deserialise the inner `MlsMessageIn`, ensure it carries a `Welcome` body.
+//! 3. Hand to `StagedWelcome::new_from_welcome` — openmls looks up the matching KeyPackageBundle
+//!    via its storage provider (`mls_storage.key_tag = KEY_PACKAGE`); on success, decrypts and
+//!    gives us a `StagedWelcome`.
 //! 4. Promote into a real group via `into_group`.
 //! 5. Wrap in [`MlsGroupHandle`].
 //!
@@ -43,28 +39,28 @@
 // pattern.
 #![allow(dead_code)]
 
-use common::proto::mls_wire::welcome_envelope_signing_input;
-use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
+use common::proto::mls_wire::WelcomeEnvelopeP;
+use common::proto::mls_wire::welcome_envelope_signing_input;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer as DalekSigner;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
-use openmls::prelude::tls_codec::Deserialize as _;
-use openmls::prelude::tls_codec::Serialize as _;
 use openmls::prelude::MlsGroupJoinConfig;
 use openmls::prelude::MlsMessageBodyIn;
 use openmls::prelude::MlsMessageIn;
 use openmls::prelude::MlsMessageOut;
-use openmls::prelude::StagedWelcome;
 use openmls::prelude::PURE_CIPHERTEXT_WIRE_FORMAT_POLICY;
+use openmls::prelude::StagedWelcome;
+use openmls::prelude::tls_codec::Deserialize as _;
+use openmls::prelude::tls_codec::Serialize as _;
 
+use super::MAX_GROUP_MEMBERS;
 use super::group::MlsGroupHandle;
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
-use super::MAX_GROUP_MEMBERS;
 
 type Result<T> = std::result::Result<T, MlsGroupError>;
 
@@ -101,7 +97,14 @@ pub fn make_welcome_envelope(
     // equivalent to "TLS-encoded Welcome"; the only difference is the
     // outer 1-byte `version` field that prefixes the message body.
     // Documented in the [`process_welcome`] doc comment.
-    seal_welcome_blob(encode_welcome(&welcome_msg)?, group_id, sender_ipk, recipient_ipk, kp_ref_used, signer)
+    seal_welcome_blob(
+        encode_welcome(&welcome_msg)?,
+        group_id,
+        sender_ipk,
+        recipient_ipk,
+        kp_ref_used,
+        signer,
+    )
 }
 
 /// The bytes a Welcome envelope carries.
@@ -154,14 +157,11 @@ pub fn seal_welcome_blob(
 /// Returns a fully-loaded [`MlsGroupHandle`] for the new group on
 /// success, or an [`MlsGroupError`] on:
 ///
-/// - `MlsGroupError::BadSignature` — outer envelope sig failed
-///   verification under `sender_ipk`.
-/// - `MlsGroupError::BadCipherSuite` — the embedded `Welcome`'s
-///   cipher suite is not `0x0003`.
-/// - `MlsGroupError::Codec` — the `welcome_blob` bytes don't
-///   parse as a TLS-encoded `Welcome`.
-/// - `MlsGroupError::OpenMls(...)` — openmls rejected the welcome
-///   (no matching KP, joiner secret invalid, …).
+/// - `MlsGroupError::BadSignature` — outer envelope sig failed verification under `sender_ipk`.
+/// - `MlsGroupError::BadCipherSuite` — the embedded `Welcome`'s cipher suite is not `0x0003`.
+/// - `MlsGroupError::Codec` — the `welcome_blob` bytes don't parse as a TLS-encoded `Welcome`.
+/// - `MlsGroupError::OpenMls(...)` — openmls rejected the welcome (no matching KP, joiner secret
+///   invalid, …).
 ///
 /// **Out-of-band gating** (the "is sender_ipk a contact?" check)
 /// is *not* in this function — it's the caller's responsibility to
@@ -193,8 +193,8 @@ pub fn process_welcome(
         .map_err(|_| MlsGroupError::BadSignature)?;
 
     // ---------------------------------------------------------
-    // 2. Deserialise as `MlsMessageIn` (the openmls 0.8 outer
-    //    framing) and extract the inner `Welcome` body.
+    // 2. Deserialise as `MlsMessageIn` (the openmls 0.8 outer framing) and extract the inner
+    //    `Welcome` body.
     //
     //    The bytes here are the full `MlsMessage` framing
     //    (`MlsMessageOut`/`MlsMessageIn`), which prefixes a version byte
@@ -212,14 +212,15 @@ pub fn process_welcome(
             return Err(MlsGroupError::Internal(format!(
                 "welcome_blob does not carry a Welcome body (got {other:?})"
             )));
-        }
+        },
     };
 
     // ---------------------------------------------------------
-    // 3. Hand to openmls — it'll look up the matching KP bundle
-    //    by its hash_ref and decrypt the joiner secret.
+    // 3. Hand to openmls — it'll look up the matching KP bundle by its hash_ref and decrypt the
+    //    joiner secret.
     // ---------------------------------------------------------
     let join_config = MlsGroupJoinConfig::builder()
+        .use_ratchet_tree_extension(true)
         .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
         .padding_size(super::MLS_PADDING_SIZE)
         .build();
@@ -251,6 +252,9 @@ pub fn process_welcome(
 
     let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
     let handle = MlsGroupHandle::wrap(mls_group);
+    if handle.is_group_chat() && handle.group_meta().is_none() {
+        return Err(MlsGroupError::Internal("Welcome carries unsupported group rules".into()));
+    }
 
     // Cross-check the inner credential identities against the wire
     // envelope.
@@ -307,16 +311,8 @@ mod tests {
     // ed25519_dalek's `Signature` type at module scope — openmls's
     // prelude also exports a `Signature` (an MLS sig) and the two
     // would conflict.
-    use super::make_welcome_envelope;
-    use super::process_welcome;
-    use super::WelcomeEnvelopeP;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::group::mls_message_from_bytes;
-    use crate::mls::group::mls_message_to_bytes;
-    use crate::mls::group::MlsGroupHandle;
-    use crate::mls::group::PROMTUZ_CIPHERSUITE;
-    use crate::mls::provider::PromtuzMlsProvider;
-    use crate::mls::types::MlsGroupError;
+    use std::sync::Arc;
+
     use ed25519_dalek::SigningKey;
     use openmls::prelude::Capabilities;
     use openmls::prelude::CredentialWithKey;
@@ -325,7 +321,17 @@ mod tests {
     use openmls::prelude::SignatureScheme;
     use parking_lot::Mutex;
     use rusqlite::Connection;
-    use std::sync::Arc;
+
+    use super::WelcomeEnvelopeP;
+    use super::make_welcome_envelope;
+    use super::process_welcome;
+    use crate::db::mls::apply_mls_migrations;
+    use crate::mls::group::MlsGroupHandle;
+    use crate::mls::group::PROMTUZ_CIPHERSUITE;
+    use crate::mls::group::mls_message_from_bytes;
+    use crate::mls::group::mls_message_to_bytes;
+    use crate::mls::provider::PromtuzMlsProvider;
+    use crate::mls::types::MlsGroupError;
 
     fn build_provider() -> PromtuzMlsProvider {
         let mut conn = Connection::open_in_memory().expect("in-memory db");
@@ -356,7 +362,11 @@ mod tests {
         /// The leaf key under a credential its identity signed for.
         fn cwk(&self) -> CredentialWithKey {
             CredentialWithKey {
-                credential:    crate::mls::credential::bound_credential(&self.ipk_sk, self.sig_kp.public()).into(),
+                credential:    crate::mls::credential::bound_credential(
+                    &self.ipk_sk,
+                    self.sig_kp.public(),
+                )
+                .into(),
                 signature_key: self.sig_kp.public().into(),
             }
         }
@@ -391,10 +401,9 @@ mod tests {
         provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
         bob: &Party, gid: [u8; 32], meta: Option<&crate::mls::GroupMeta>,
     ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
-        let mut alice_group = MlsGroupHandle::create(provider_a, &alice.sig_kp, alice.cwk(), &gid,
-            meta,
-        )
-        .expect("create");
+        let mut alice_group =
+            MlsGroupHandle::create(provider_a, &alice.sig_kp, alice.cwk(), &gid, meta)
+                .expect("create");
         let bob_kp = make_kp(provider_b, bob);
         // Save the kp_ref before consuming the kp into add_members.
         // The provider's `crypto()` is reached via the
@@ -415,15 +424,9 @@ mod tests {
         let copy = kp_ref.len().min(32);
         kp_ref_arr[..copy].copy_from_slice(&kp_ref[..copy]);
 
-        let env = make_welcome_envelope(
-            welcome,
-            gid,
-            alice.ipk,
-            bob.ipk,
-            kp_ref_arr,
-            &alice.ipk_sk,
-        )
-        .expect("make welcome");
+        let env =
+            make_welcome_envelope(welcome, gid, alice.ipk, bob.ipk, kp_ref_arr, &alice.ipk_sk)
+                .expect("make welcome");
         (env, alice_group)
     }
 
@@ -438,7 +441,7 @@ mod tests {
         let alice = Party::new(&provider_a, 1);
         let bob = Party::new(&provider_b, 2);
 
-        let meta = crate::mls::GroupMeta { title: "book club".into(), founder: alice.ipk };
+        let meta = crate::mls::GroupMeta::founded("book club".into(), alice.ipk);
         let (env, alice_group) =
             alice_invites_bob_with(&provider_a, &alice, &provider_b, &bob, [7u8; 32], Some(&meta));
         let bob_group = process_welcome(&provider_b, &env).expect("process");
@@ -478,7 +481,7 @@ mod tests {
             .key_package()
             .clone();
 
-        let meta = crate::mls::GroupMeta { title: "trap".into(), founder: mallory.ipk };
+        let meta = crate::mls::GroupMeta::founded("trap".into(), mallory.ipk);
         let gid = [9u8; 32];
         let mut group =
             MlsGroupHandle::create(&provider_a, &mallory.sig_kp, mallory.cwk(), &gid, Some(&meta))
@@ -590,7 +593,7 @@ mod tests {
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext);
-            }
+            },
             other => panic!("expected app msg, got {other:?}"),
         }
 
@@ -609,7 +612,7 @@ mod tests {
         match content {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 assert_eq!(app.into_bytes(), plaintext_b);
-            }
+            },
             other => panic!("expected app msg, got {other:?}"),
         }
     }

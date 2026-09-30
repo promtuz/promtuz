@@ -62,6 +62,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.Manifest
@@ -240,20 +241,28 @@ fun ChatBottomBar(
                 .hazeEffect(haze, chatBarHaze())
                 .padding(BarPad),
         ) {
-            // A request has nothing to reply with until it is accepted.
+            // A request has nothing to reply with until it is accepted, and a group we
+            // left, or where only admins send, nothing to reply with at all.
             val request by viewModel.request.collectAsState()
+            val closed by viewModel.closed.collectAsState()
             // Bottom-aligned, so the composer appears where it settles while the pill's top
             // edge glides down; the request fades out before it fades in, never across it.
             AnimatedContent(
-                targetState = request,
+                targetState = when {
+                    request -> BarMode.Request
+                    closed != null -> BarMode.Closed(closed!!)
+                    else -> BarMode.Compose
+                },
                 transitionSpec = {
                     (fadeIn(tween(150, delayMillis = 70, easing = ChatMotion.Easing)) togetherWith fadeOut(tween(70)))
                         .using(SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> ChatMotion.spec() }))
                 },
                 contentAlignment = Alignment.BottomStart,
                 label = "requestOrComposer",
-            ) { isRequest ->
-                if (isRequest) RequestRow(viewModel, onRequestGone) else ComposerSlots(metrics) {
+            ) { mode ->
+                if (mode is BarMode.Request) RequestRow(viewModel, onRequestGone)
+                else if (mode is BarMode.Closed) ClosedRow(mode.reason)
+                else ComposerSlots(metrics) {
                     Reveal(actionProgress) {
                         lastAction?.let {
                             ComposerActionBlock(
@@ -354,6 +363,20 @@ fun ChatBottomBar(
             region.placeRelative(0, pill.height)
         }
     }
+}
+
+/** What the bar holds: the composer, a request's decision, or why we can't post. */
+private sealed interface BarMode {
+    data object Compose : BarMode
+    data object Request : BarMode
+    data class Closed(val reason: String) : BarMode
+}
+
+/** Stands in for the composer where we can't post, and says why. */
+@Composable
+private fun ClosedRow(reason: String) {
+    Text(reason, Modifier.fillMaxWidth().padding(vertical = 12.dp), textAlign = TextAlign.Center,
+        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 /** Stands in for the composer while a message request waits for a decision. */

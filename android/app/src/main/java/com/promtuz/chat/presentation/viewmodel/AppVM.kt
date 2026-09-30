@@ -335,7 +335,7 @@ class AppVM(
                 rejectReason = contact?.rejectReason?.toInt(),
                 unreadCount = unread[key] ?: 0,
                 // A membership line already names who did it.
-                lastOutgoing = last?.outgoing == true && last.system.toInt() !in 1..4,
+                lastOutgoing = last?.outgoing == true && last.system.toInt() !in setOf(1, 2, 3, 4, 6, 7),
                 lastDeleted = last?.deleted == true,
                 lastStatus = last?.status?.toInt() ?: 1,
                 pinned = c.pinned,
@@ -344,6 +344,7 @@ class AppVM(
                 amMember = c.amMember,
                 canLeave = c.canLeave,
                 ownerIsStuck = c.ownerIsStuck,
+                commits = c.commits,
                 rawTitle = c.title,
                 request = c.request,
             )

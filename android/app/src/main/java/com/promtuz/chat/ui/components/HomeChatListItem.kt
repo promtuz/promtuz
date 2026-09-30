@@ -363,6 +363,21 @@ fun DeleteChatDialog(
         )
         return
     }
+    if (chat.isGroup && chat.commits) {
+        AppAlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Delete this group chat?") },
+            text = {
+                Text(
+                    "You’ll leave the group first, so someone else can manage it. " +
+                        "This deletes the group’s messages from this device and can’t be undone.",
+                )
+            },
+            confirmButton = { TextButton(onClick = onLeaveAndDelete) { Text("Leave and delete", color = error) } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+        return
+    }
     AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (chat.isGroup) "Delete this group chat?" else "Delete chat") },

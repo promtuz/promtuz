@@ -82,9 +82,14 @@ impl Message {
 
         // Snapshot failure must roll the message back, not freeze an empty
         // audience. Resolve identity before locking this DB at the call site.
-        let recipients = conn.prepare("SELECT member_ipk FROM conversation_members
-            WHERE conversation_id=?1 AND member_ipk<>?2 AND active=1")?
-            .query_map((conversation_id.as_slice(), me.unwrap_or([0;32]).as_slice()), |r| r.get::<_,[u8;32]>(0))?
+        let recipients = conn
+            .prepare(
+                "SELECT member_ipk FROM conversation_members
+            WHERE conversation_id=?1 AND member_ipk<>?2 AND active=1",
+            )?
+            .query_map((conversation_id.as_slice(), me.unwrap_or([0; 32]).as_slice()), |r| {
+                r.get::<_, [u8; 32]>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         super::receipts::snapshot_tx(conn, &id.to_string(), &recipients, true)?;
         Ok(Self {
@@ -116,7 +121,15 @@ impl Message {
     ) -> Result<Option<Self>> {
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
-        let row = Self::save_incoming_tx(&tx, conversation_id, sender, dispatch_id, content, timestamp, reply_to)?;
+        let row = Self::save_incoming_tx(
+            &tx,
+            conversation_id,
+            sender,
+            dispatch_id,
+            content,
+            timestamp,
+            reply_to,
+        )?;
         tx.commit()?;
         Ok(row)
     }
@@ -205,7 +218,13 @@ impl Message {
                 "UPDATE messages SET content = ?1, edited = 1 \
                  WHERE conversation_id = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0 \
                    AND (?5 IS NULL OR sender_ipk = ?5)",
-                (content, conversation_id.as_slice(), dispatch_id, own, author.map(|a| a.as_slice())),
+                (
+                    content,
+                    conversation_id.as_slice(),
+                    dispatch_id,
+                    own,
+                    author.map(|a| a.as_slice()),
+                ),
             )
             .ok()?;
         if n == 0 {
@@ -230,7 +249,8 @@ impl Message {
     ) -> Option<MessageRow> {
         if !own && let Some(author) = author {
             return Self::receive_delete(conversation_id, &dispatch_id.try_into().ok()?, author)
-                .ok().flatten();
+                .ok()
+                .flatten();
         }
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction().ok()?;
@@ -292,7 +312,8 @@ impl Message {
         let orphan = crate::data::media::drop_row_tx(tx, conversation_id, dispatch_id)?;
         let row = tx.query_row(
             "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
-            (conversation_id.as_slice(), dispatch_id.as_slice()), MessageRow::from_row,
+            (conversation_id.as_slice(), dispatch_id.as_slice()),
+            MessageRow::from_row,
         )?;
         Ok((Some(row), orphan))
     }
@@ -326,6 +347,69 @@ impl Message {
         super::receipts::seen_count(conversation_id, dispatch_id)
     }
 
+    /// Record every notice for one signed transition atomically. The marker
+    /// survives clearing history, so recovery cannot recreate cleared notices.
+    pub(crate) fn record_group_change(
+        conversation: [u8; 16], change: [u8; 32], actor: [u8; 32], rows: &[(u8, String)], ts: u64,
+    ) -> Result<Option<Vec<Self>>> {
+        use sha2::Digest;
+        use sha2::Sha256;
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        if tx.execute(
+            "INSERT OR IGNORE INTO group_events(conversation_id,change_id) VALUES(?1,?2)",
+            rusqlite::params![conversation, change],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        let ours = super::identity::Identity::get().is_some_and(|i| i.ipk() == actor);
+        let mut saved = Vec::new();
+        for (code, target) in rows {
+            let hash =
+                Sha256::digest(postcard::to_allocvec(&(conversation, change, code, target))?);
+            let did: [u8; 16] = hash[..16].try_into()?;
+            if let Some(row) = Self::save_system_tx(
+                &tx,
+                conversation,
+                actor,
+                &did,
+                *code,
+                target,
+                ts,
+                ours,
+                Some(&change),
+            )? {
+                saved.push(row);
+            }
+        }
+        tx.commit()?;
+        Ok(Some(saved))
+    }
+
+    pub(crate) fn reconcile_group_events(
+        conversation: &[u8; 16], accepted: &[[u8; 32]],
+    ) -> Result<()> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let stored = {
+            let mut query = tx.prepare("SELECT DISTINCT group_change FROM messages WHERE conversation_id=?1 AND group_change IS NOT NULL")?;
+            query
+                .query_map([conversation], |r| r.get::<_, [u8; 32]>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for change in stored {
+            if !accepted.contains(&change) {
+                tx.execute(
+                    "DELETE FROM messages WHERE conversation_id=?1 AND group_change=?2",
+                    rusqlite::params![conversation, change],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Narrate a membership or title change inline with the conversation.
     /// `actor` is who did it; `target` names the affected member (hex IPK) or
     /// the new title. Deduped on `(conversation, dispatch_id)` like any other
@@ -335,10 +419,28 @@ impl Message {
         target: &str, timestamp: u64, outgoing: bool,
     ) -> Result<Option<Self>> {
         let conn = MESSAGES_DB.lock();
+        Self::save_system_tx(
+            &conn,
+            conversation_id,
+            actor,
+            dispatch_id,
+            system,
+            target,
+            timestamp,
+            outgoing,
+            None,
+        )
+    }
+
+    fn save_system_tx(
+        conn: &rusqlite::Connection, conversation_id: [u8; 16], actor: [u8; 32],
+        dispatch_id: &[u8; 16], system: u8, target: &str, timestamp: u64, outgoing: bool,
+        group_change: Option<&[u8; 32]>,
+    ) -> Result<Option<Self>> {
         let id = Ulid::new();
         let changed = conn.execute(
-            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, system) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, system, group_change) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(conversation_id, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
             (
                 &id.to_string(),
@@ -350,6 +452,7 @@ impl Message {
                 STATUS_SENT,
                 dispatch_id.as_slice(),
                 system,
+                group_change.map(|c| c.as_slice()),
             ),
         )?;
         if changed == 0 {
@@ -426,8 +529,11 @@ impl Message {
     /// Delete every message in a conversation (forget-contact / leave cascade).
     pub fn delete_in(conversation_id: &[u8; 16]) {
         let conn = MESSAGES_DB.lock();
-        conn.execute("DELETE FROM messages WHERE conversation_id = ?1", [conversation_id.as_slice()])
-            .ok();
+        conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1",
+            [conversation_id.as_slice()],
+        )
+        .ok();
     }
 
     /// Fail every not-yet-read outgoing message in a conversation (PAIRING.md):
@@ -514,10 +620,8 @@ impl Message {
         if needle.is_empty() {
             return Vec::new();
         }
-        let pattern = format!(
-            "%{}%",
-            needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-        );
+        let pattern =
+            format!("%{}%", needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let conn = MESSAGES_DB.lock();
         let mut stmt = match conn.prepare(
             "SELECT m.dispatch_id, \
@@ -547,7 +651,9 @@ impl Message {
     /// If the date is after all history, use the latest timestamp. Timestamp and
     /// insertion order may differ after an offline drain, so count by id only
     /// after choosing the target by timestamp.
-    pub fn position_at_time(conversation_id: &[u8; 16], timestamp: u64) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+    pub fn position_at_time(
+        conversation_id: &[u8; 16], timestamp: u64,
+    ) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
         position_at_time(&MESSAGES_DB.lock(), conversation_id, timestamp)
     }
 
@@ -627,7 +733,9 @@ impl Message {
     }
 }
 
-fn position_at_time(conn: &rusqlite::Connection, conversation: &[u8; 16], timestamp: u64) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+fn position_at_time(
+    conn: &rusqlite::Connection, conversation: &[u8; 16], timestamp: u64,
+) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
     use rusqlite::OptionalExtension;
     Ok(conn.query_row(
         "SELECT m.id, m.dispatch_id, (SELECT COUNT(*) FROM messages n WHERE n.conversation_id = m.conversation_id AND n.deleted = 0 AND n.id > m.id) \
@@ -656,20 +764,34 @@ mod tests {
             tx.commit().unwrap();
         }
         // Reopen the persisted database, not an in-memory dedup set.
-        let path = std::env::temp_dir().join(format!("promtuz-deletions-{}.sqlite", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("promtuz-deletions-{}.sqlite", uuid::Uuid::now_v7()));
         conn.execute("VACUUM INTO ?1", [path.to_str().unwrap()]).unwrap();
         drop(conn);
         let mut conn = rusqlite::Connection::open(&path).unwrap();
-        assert!(Message::save_incoming_tx(&conn, conv, author, &target, "late post", 1, None).unwrap().is_none());
-        assert!(Message::save_incoming_tx(&conn, conv, other, &target, "another member", 1, None).unwrap().is_some());
+        assert!(
+            Message::save_incoming_tx(&conn, conv, author, &target, "late post", 1, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            Message::save_incoming_tx(&conn, conv, other, &target, "another member", 1, None)
+                .unwrap()
+                .is_some()
+        );
         {
             let tx = conn.transaction().unwrap();
             // A repeated deletion cannot affect another author's same ID.
             assert!(Message::receive_delete_tx(&tx, &conv, &target, &author).unwrap().0.is_none());
             tx.commit().unwrap();
         }
-        let gone: bool = conn.query_row("SELECT deleted FROM messages WHERE conversation_id=?1 AND dispatch_id=?2",
-            (conv.as_slice(), target.as_slice()), |r| r.get(0)).unwrap();
+        let gone: bool = conn
+            .query_row(
+                "SELECT deleted FROM messages WHERE conversation_id=?1 AND dispatch_id=?2",
+                (conv.as_slice(), target.as_slice()),
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(!gone);
         // A failed transaction must neither consume the future post nor leave
         // a half-applied tombstone. A trigger simulates a storage-write error.
@@ -680,12 +802,21 @@ mod tests {
             let tx = conn.transaction().unwrap();
             assert!(Message::receive_delete_tx(&tx, &conv, &failed, &author).is_err());
         }
-        let count: u32 = conn.query_row("SELECT COUNT(*) FROM message_deletions WHERE dispatch_id=?1",
-            [failed.as_slice()], |r| r.get(0)).unwrap();
+        let count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_deletions WHERE dispatch_id=?1",
+                [failed.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
         conn.execute_batch("DROP TRIGGER reject_delete").unwrap();
         crate::data::conversation::Conversation::clear_history_tx(&conn, &conv).unwrap();
-        assert!(Message::save_incoming_tx(&conn, conv, author, &target, "after clear", 1, None).unwrap().is_none());
+        assert!(
+            Message::save_incoming_tx(&conn, conv, author, &target, "after clear", 1, None)
+                .unwrap()
+                .is_none()
+        );
         drop(conn);
         std::fs::remove_file(path).unwrap();
     }
@@ -698,8 +829,11 @@ mod tests {
         // Arrival order deliberately differs from message dates; calendar
         // targeting uses dates, but pagination still uses insertion IDs.
         for (id, timestamp, conversation) in [
-            ("01", 100, conv), ("02", 300, conv), ("03", 200, conv),
-            ("04", 201, other), ("05", 300, conv),
+            ("01", 100, conv),
+            ("02", 300, conv),
+            ("03", 200, conv),
+            ("04", 201, other),
+            ("05", 300, conv),
         ] {
             conn.execute(
                 "INSERT INTO messages (id, conversation_id, content, outgoing, timestamp, status) VALUES (?1, ?2, '', 1, ?3, 1)",
@@ -727,7 +861,8 @@ mod tests {
         let conversation = [8; 16];
         let sender = [7; 32];
         let insert = |did: [u8; 16], time| {
-            Message::save_incoming_tx(&db, conversation, sender, &did, "message", time, None).unwrap();
+            Message::save_incoming_tx(&db, conversation, sender, &did, "message", time, None)
+                .unwrap();
         };
         insert([1; 16], 100);
         let first = pending_notification_ids(&db, &conversation).unwrap();
@@ -764,13 +899,27 @@ mod tests {
         let first = conn
             .execute(
                 sql,
-                (Ulid::new().to_string(), conv.as_slice(), "hi", 100u64, STATUS_SENT, did.as_slice()),
+                (
+                    Ulid::new().to_string(),
+                    conv.as_slice(),
+                    "hi",
+                    100u64,
+                    STATUS_SENT,
+                    did.as_slice(),
+                ),
             )
             .unwrap();
         let dup = conn
             .execute(
                 sql,
-                (Ulid::new().to_string(), conv.as_slice(), "hi", 100u64, STATUS_SENT, did.as_slice()),
+                (
+                    Ulid::new().to_string(),
+                    conv.as_slice(),
+                    "hi",
+                    100u64,
+                    STATUS_SENT,
+                    did.as_slice(),
+                ),
             )
             .unwrap();
 
@@ -831,8 +980,6 @@ mod tests {
         assert_eq!(row.sender_ipk, None, "no sender stored → resolves to the local user");
         assert_eq!(row.sender(&[5u8; 32]), [5u8; 32]);
     }
-
-
 }
 
 /// Both read-watermark tables, for the backup snapshot.
@@ -936,7 +1083,9 @@ impl Message {
     }
 }
 
-fn pending_notification_ids(conn: &rusqlite::Connection, conversation_id: &[u8; 16]) -> Result<Vec<String>> {
+fn pending_notification_ids(
+    conn: &rusqlite::Connection, conversation_id: &[u8; 16],
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT m.id FROM messages m
          LEFT JOIN incoming_receipts r ON r.message_id=m.id
@@ -946,7 +1095,9 @@ fn pending_notification_ids(conn: &rusqlite::Connection, conversation_id: &[u8; 
            AND CASE WHEN r.message_id IS NOT NULL THEN r.is_read=0
                ELSE legacy.upto_dispatch_id IS NULL OR m.dispatch_id>legacy.upto_dispatch_id END",
     )?;
-    Ok(stmt.query_map([conversation_id.as_slice()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    Ok(stmt
+        .query_map([conversation_id.as_slice()], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn mark_notified(conn: &rusqlite::Connection, ids: &[String]) -> Result<()> {

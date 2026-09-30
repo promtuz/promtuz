@@ -94,7 +94,9 @@ const PRESENCE_RENEW_INTERVAL: Duration = Duration::from_secs(4 * 60);
 pub use crate::state::RELAY;
 
 /// EOF between frames ends a drain; truncation and transport errors do not.
-async fn read_relay_packet<R: AsyncRead + Unpin + Send>(rx: &mut R) -> Result<Option<SRelayPacket>> {
+async fn read_relay_packet<R: AsyncRead + Unpin + Send>(
+    rx: &mut R,
+) -> Result<Option<SRelayPacket>> {
     let mut first = [0u8; 1];
     if rx.read(&mut first).await? == 0 { return Ok(None); }
     let mut framed = first.as_slice().chain(rx);
@@ -344,9 +346,11 @@ impl Relay {
         tx.finish()?;
         let reply = tokio::time::timeout(Duration::from_secs(10), read_relay_packet(&mut rx)).await??;
         let Some(reply) = reply else { return Ok(()) };
-        let SRelayPacket::AckAuthRequest {
-            requester_relay_id, delivered_ids, suggested_timestamp,
-        } = reply else { bail!("unexpected drain acknowledgement"); };
+        let SRelayPacket::AckAuthRequest { requester_relay_id, delivered_ids, suggested_timestamp } =
+            reply
+        else {
+            bail!("unexpected drain acknowledgement");
+        };
         let (mut ack_tx, _ack_rx) = conn.open_bi().await?;
         handle_ack_auth_request(
             &mut ack_tx, ipk, requester_relay_id, delivered_ids, suggested_timestamp, drained,
@@ -505,6 +509,10 @@ impl Relay {
                 }
             });
 
+            // After the drain, so a commit waiting in the queue is applied
+            // before we ask a committer again or take its place.
+            crate::groups::on_reconnect();
+
             // Receive-side mirror: re-drive incomplete attachment pulls — HELD
             // (sender may now be reachable) and ACTIVE (a transfer interrupted by
             // a restart). Spawns per file_id; the DOWNLOADING guard dedups a
@@ -649,12 +657,8 @@ fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::Activi
     let Some(conversation) = Conversation::for_activity(&eph.group_id.0, &eph.from.0) else {
         return;
     };
-    crate::events::messaging::ActivityEv {
-        conversation,
-        peer: eph.from.0,
-        activity: eph.activity,
-    }
-    .emit();
+    crate::events::messaging::ActivityEv { conversation, peer: eph.from.0, activity: eph.activity }
+        .emit();
 }
 
 /// Surface a relay-asserted presence push (snapshot or delta). Relay-trusted
@@ -692,7 +696,8 @@ fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
 fn is_welcome_envelope(payload: &[u8]) -> bool {
     matches!(
         common::proto::mls_wire::MlsEnvelopeP::deser(payload),
-        Ok(common::proto::mls_wire::MlsEnvelopeP::Welcome(_))
+        Ok(common::proto::mls_wire::MlsEnvelopeP::Welcome(_)
+            | common::proto::mls_wire::MlsEnvelopeP::GroupWelcome { .. })
     )
 }
 
@@ -729,6 +734,278 @@ fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
     let transcript = dispatch_sig_message(our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload);
     from.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&msg.sig.0))
         .map_err(|e| anyhow!("dispatch signature: {e}"))
+}
+
+/// The single application handler for live delivery, catch-up, and recovery.
+/// Call only after MLS has authenticated and authorized the plaintext at its epoch.
+pub(crate) fn receive_application_content(
+    conv: [u8; 16], author: [u8; 32], dispatch_id: [u8; 16], accepted_at_ms: u64, plaintext: &[u8],
+) -> Result<()> {
+    let payload = AppPayload::deser(plaintext);
+    if crate::groups::delete_pending(&conv)
+        && !matches!(
+            &payload,
+            Ok(AppPayload::GroupRequest(_)
+                | AppPayload::GroupWelcome { .. }
+                | AppPayload::GroupInvitation { .. })
+        )
+    {
+        return Ok(());
+    }
+    match payload {
+        Ok(AppPayload::GroupAdmins { .. }) => {},
+        // Content of any wire vintage: Post carries the quote target beside
+        // the body, pre-v12 payloads convert to the same pair. One persist
+        // and one receipt regardless of body kind.
+        Ok(
+            p @ (AppPayload::Post { .. }
+            | AppPayload::Text(..)
+            | AppPayload::Reply { .. }
+            | AppPayload::Image { .. }
+            | AppPayload::Attachment { .. }),
+        ) => {
+            let pair = match p {
+                AppPayload::Post { reply_to, body } => Some((reply_to, body)),
+                other => crate::messaging::legacy_body(other),
+            };
+            let Some((reply_to, body)) = pair else {
+                warn!("MESSAGE: content payload with no body from {}", hex::encode(&author[..4]));
+                bail!("bad content payload");
+            };
+            let did = dispatch_id;
+            let timestamp = accepted_at_secs(accepted_at_ms);
+            // Read off before the body moves into the persist.
+            let auto = match &body {
+                Body::Attachment { size, file_id, .. } => Some((*size, *file_id)),
+                _ => None,
+            };
+            let sticker = match &body {
+                Body::Sticker { pack, id, token, store, .. } => {
+                    Some(common::proto::sticker::StickerRef {
+                        pack:  *pack,
+                        id:    *id,
+                        token: *token,
+                        store: *store,
+                    })
+                },
+                _ => None,
+            };
+            match crate::messaging::save_inbound_body(
+                &conv, &author, &did, timestamp, reply_to, body,
+            ) {
+                Ok(Some((saved, content))) => {
+                    MessageEv::Received {
+                        id: saved.inner.id,
+                        conversation: conv,
+                        sender: author,
+                        content,
+                        timestamp,
+                    }
+                    .emit();
+                    info!("MESSAGE: received from {}", hex::encode(&author[..4]));
+                    // Event time was persisted with the incoming message.
+                    crate::data::receipts::schedule();
+                    let from = author;
+                    // Fetch the bytes without a tap only from a paired contact
+                    // over a trusted network; otherwise the UI drives the pull.
+                    // ponytail: on_wifi is hardcoded false until the platform
+                    // feeds real network state — no-op today, correct and ready.
+                    if let Some((size, file_id)) = auto {
+                        if crate::transfer::should_auto_download(&from, size, false) {
+                            crate::RUNTIME.spawn(async move {
+                                let _ = crate::transfer::download(file_id).await;
+                            });
+                        }
+                    }
+                    // A sticker is small and named by hash: fetch it now so
+                    // the chat opens on the picture, not on a fetch.
+                    if let Some(r) = sticker {
+                        crate::RUNTIME.spawn(async move {
+                            if let Err(e) = crate::stickers::fetch(&r).await {
+                                debug!("STICKERS: prefetch failed: {e:#}");
+                            }
+                        });
+                    }
+                },
+                // Relay redelivered a dispatch_id we already stored: no
+                // re-emit, but still Ok so the caller acks and the relay GCs.
+                Ok(None) => {
+                    debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&author[..4]));
+                },
+                Err(e) => {
+                    warn!("MESSAGE: failed to save incoming: {e}");
+                    bail!("save failed: {e}");
+                },
+            }
+        },
+        Ok(AppPayload::AttachmentSharing(offer)) => {
+            if let Err(e) = crate::transfer::sharing::receive(conv, author, offer) {
+                warn!("TRANSFER: sharing grant rejected: {e}");
+            }
+        },
+        Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
+            crate::data::receipts::receive(&conv, &author, payload)?;
+        },
+        Ok(
+            payload @ (AppPayload::Edit { .. }
+            | AppPayload::Revise { .. }
+            | AppPayload::Delete { .. }),
+        ) => {
+            crate::messaging::receive_message_mutation(&conv, &author, payload)?;
+        },
+        Ok(AppPayload::React { target, emoji, add }) => {
+            // Reactor is the MLS sender (`msg.from`) — attributed to its
+            // own IPK, so this is already group-correct.
+            let ts = accepted_at_secs(accepted_at_ms);
+            if crate::data::reaction::Reaction::apply(&conv, &target, &author, &emoji, add, ts) {
+                crate::events::messaging::ReactionEv {
+                    conversation: conv,
+                    dispatch_id: target,
+                    reactor: author,
+                    emoji,
+                    add,
+                }
+                .emit();
+            }
+        },
+        Ok(AppPayload::System(event)) => {
+            use common::proto::mls_wire::SystemEvent;
+
+            let ts = accepted_at_secs(accepted_at_ms);
+            let (code, actor, target) = crate::messaging::system_row(&event, author);
+            // A rename has no Commit behind it, so the event itself is
+            // the change. Membership events only narrate — the Commit
+            // is what actually moved the roster, and syncing from the
+            // MLS group after merging it is the authoritative path.
+            if let SystemEvent::Titled { title } = &event {
+                // Only a group has a shared name. Renaming a direct
+                // chat from the wire would let a peer relabel a DM,
+                // and did whenever a group was mis-homed into one.
+                let is_group = Conversation::get(&conv)
+                    .is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
+                if !is_group {
+                    warn!("GROUP: ignored a rename aimed at a direct chat");
+                } else {
+                    Conversation::set_title(&conv, title)?;
+                }
+            }
+            // Someone joined after us, so they never heard the
+            // introduction we made on our own way in. Say it again,
+            // to them alone.
+            if let SystemEvent::Added { who } = &event {
+                if who.0
+                    != crate::data::identity::Identity::get().map(|i| i.ipk()).unwrap_or_default()
+                {
+                    crate::messaging::introduce_ourselves_to(conv, who.0);
+                }
+            }
+            match Message::save_system(conv, actor, &dispatch_id, code, &target, ts, false) {
+                Ok(Some(row)) => MessageEv::Received {
+                    id:           row.inner.id,
+                    conversation: conv,
+                    sender:       actor,
+                    content:      target,
+                    timestamp:    ts,
+                }
+                .emit(),
+                Ok(None) => debug!("GROUP: duplicate system event, already stored"),
+                Err(e) => return Err(e),
+            }
+        },
+        Ok(AppPayload::Profile { name }) => {
+            // Their claim about themselves, kept apart from the address
+            // book so it can never overwrite a name we chose. Stored,
+            // never shown as a message — nobody said anything.
+            crate::data::peer_name::put(&author, &name)?;
+        },
+        Ok(
+            payload @ (AppPayload::ProfileDetails { .. }
+            | AppPayload::ProfileDetailsSync { .. }
+            | AppPayload::ProfileDetailsAck { .. }),
+        ) => {
+            crate::profile_details_sync::receive(conv, author, payload);
+        },
+        Ok(AppPayload::GroupPicture { revision, avif }) => {
+            if let Err(e) = crate::data::group_picture::receive_authorized(conv, revision, avif) {
+                log::warn!("GROUP: picture rejected: {e}");
+            }
+        },
+        Ok(
+            payload @ (AppPayload::Avatar { .. }
+            | AppPayload::AvatarSync { .. }
+            | AppPayload::AvatarAck { .. }),
+        ) => {
+            crate::profile_sync::receive(conv, author, payload);
+        },
+        Ok(AppPayload::Unpaired) => crate::messaging::unpaired(conv, author),
+        Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
+        Ok(AppPayload::GroupInvitation { who, kp_ref, welcome, history }) => {
+            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, Some(history))?;
+        },
+        Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
+            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, None)?;
+        },
+        Ok(AppPayload::PairAck) => {
+            // Proof-of-pair — its whole job was the mark_paired above.
+            info!("PAIR: confirmed by {}", hex::encode(&author[..4]));
+            // The pair now works both ways, and they hold our name from
+            // the invite: our picture is the one thing left to show them.
+            crate::messaging::introduce_avatar(conv);
+        },
+        Ok(AppPayload::P2pOffer {
+            session,
+            in_reply_to,
+            expires_at_ms,
+            candidates,
+            relay,
+            token,
+            disco_key,
+        }) => {
+            // Candidate offer for a direct connection — hand to the
+            // P2P layer (routed to the waiting session), never stored.
+            info!(
+                "P2P[{}]: received offer — {} cands",
+                hex::encode(&author[..4]),
+                candidates.len()
+            );
+            crate::p2p::deliver_offer(
+                author,
+                crate::p2p::Offer {
+                    session,
+                    in_reply_to,
+                    expires_at_ms,
+                    candidates,
+                    relay,
+                    token,
+                    disco_key,
+                },
+            );
+        },
+        Ok(AppPayload::P2p { .. }) => {
+            // A sender this old cannot read our answer, so there is
+            // nothing to do with its offer but let it go.
+            debug!("P2P[{}]: legacy offer ignored", hex::encode(&author[..4]));
+        },
+        Ok(AppPayload::FileWant { file_id }) => {
+            // Reverse-wake control message — routed, never stored. The push
+            // wake already revived us; bring the P2P listener up so the
+            // receiver's retry-dial can land (they drive the connect).
+            info!("P2P: FileWant received from {}", hex::encode(&author[..4]));
+            crate::transfer::on_file_want(author, file_id);
+        },
+        Ok(AppPayload::Call(signal)) => {
+            // Call signaling — routed to the call engine, never stored.
+            // Only the person in the direct chat can be on the call.
+            crate::call::on_signal(author, conv, signal);
+        },
+        Err(e) => {
+            warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&author[..4]));
+            // The authenticated ciphertext is already consumed. A newer
+            // app may add a control variant we do not understand yet;
+            // discard it without tearing down the relay connection.
+        },
+    }
+    Ok(())
 }
 
 async fn process_deliver(
@@ -793,7 +1070,14 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      client.as_ref(),
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms, msg.id.0).await
+            crate::messaging::process_inbound_envelope(
+                &ctx,
+                *msg.from,
+                &msg.payload,
+                msg.accepted_at_ms,
+                msg.id.0,
+            )
+            .await
         },
         None => {
             let dht = crate::quic::dht_client::NotWiredDhtClient;
@@ -803,7 +1087,14 @@ async fn process_deliver(
                 buffer:   &buffer,
                 dht:      &dht,
             };
-            crate::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload, msg.accepted_at_ms, msg.id.0).await
+            crate::messaging::process_inbound_envelope(
+                &ctx,
+                *msg.from,
+                &msg.payload,
+                msg.accepted_at_ms,
+                msg.id.0,
+            )
+            .await
         },
     };
 
@@ -828,266 +1119,7 @@ async fn process_deliver(
             // the group works, so a PENDING contact is now confirmed. No-op if
             // already paired. Fires for PairAck and any real message alike.
             Contact::mark_paired(&msg.from);
-            match AppPayload::deser(&plaintext) {
-                // Content of any wire vintage: Post carries the quote target beside
-                // the body, pre-v12 payloads convert to the same pair. One persist
-                // and one receipt regardless of body kind.
-                Ok(p @ (AppPayload::Post { .. }
-                    | AppPayload::Text(..)
-                    | AppPayload::Reply { .. }
-                    | AppPayload::Image { .. }
-                    | AppPayload::Attachment { .. })) => {
-                    let pair = match p {
-                        AppPayload::Post { reply_to, body } => Some((reply_to, body)),
-                        other => crate::messaging::legacy_body(other),
-                    };
-                    let Some((reply_to, body)) = pair else {
-                        warn!(
-                            "MESSAGE: content payload with no body from {}",
-                            hex::encode(&msg.from[..4])
-                        );
-                        bail!("bad content payload");
-                    };
-                    let did = msg.id.0;
-                    let timestamp = accepted_at_secs(msg.accepted_at_ms);
-                    // Read off before the body moves into the persist.
-                    let auto = match &body {
-                        Body::Attachment { size, file_id, .. } => Some((*size, *file_id)),
-                        _ => None,
-                    };
-                    let sticker = match &body {
-                        Body::Sticker { pack, id, token, store, .. } => {
-                            Some(common::proto::sticker::StickerRef {
-                                pack: *pack, id: *id, token: *token, store: *store,
-                            })
-                        },
-                        _ => None,
-                    };
-                    match crate::messaging::save_inbound_body(
-                        &conv, &author, &did, timestamp, reply_to, body,
-                    ) {
-                        Ok(Some((saved, content))) => {
-                            MessageEv::Received {
-                                id: saved.inner.id,
-                                conversation: conv,
-                                sender: author,
-                                content,
-                                timestamp,
-                            }
-                            .emit();
-                            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
-                            // Event time was persisted with the incoming message.
-                            crate::data::receipts::schedule();
-                            let from = *msg.from;
-                            // Fetch the bytes without a tap only from a paired contact
-                            // over a trusted network; otherwise the UI drives the pull.
-                            // ponytail: on_wifi is hardcoded false until the platform
-                            // feeds real network state — no-op today, correct and ready.
-                            if let Some((size, file_id)) = auto {
-                                if crate::transfer::should_auto_download(&from, size, false) {
-                                    crate::RUNTIME.spawn(async move {
-                                        let _ = crate::transfer::download(file_id).await;
-                                    });
-                                }
-                            }
-                            // A sticker is small and named by hash: fetch it now so
-                            // the chat opens on the picture, not on a fetch.
-                            if let Some(r) = sticker {
-                                crate::RUNTIME.spawn(async move {
-                                    if let Err(e) = crate::stickers::fetch(&r).await {
-                                        debug!("STICKERS: prefetch failed: {e:#}");
-                                    }
-                                });
-                            }
-                        },
-                        // Relay redelivered a dispatch_id we already stored: no
-                        // re-emit, but still Ok so the caller acks and the relay GCs.
-                        Ok(None) => {
-                            debug!(
-                                "MESSAGE: duplicate from {}, already stored",
-                                hex::encode(&msg.from[..4])
-                            );
-                        },
-                        Err(e) => {
-                            warn!("MESSAGE: failed to save incoming: {e}");
-                            bail!("save failed: {e}");
-                        },
-                    }
-                },
-                Ok(AppPayload::AttachmentSharing(offer)) => {
-                    if let Err(e) = crate::transfer::sharing::receive(conv, author, offer) {
-                        warn!("TRANSFER: sharing grant rejected: {e}");
-                    }
-                },
-                Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
-                    crate::data::receipts::receive(&conv, &author, payload)?;
-                },
-                Ok(payload @ (AppPayload::Edit { .. } | AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
-                    crate::messaging::receive_message_mutation(&conv, &author, payload)?;
-                },
-                Ok(AppPayload::React { target, emoji, add }) => {
-                    // Reactor is the MLS sender (`msg.from`) — attributed to its
-                    // own IPK, so this is already group-correct.
-                    let ts = accepted_at_secs(msg.accepted_at_ms);
-                    if crate::data::reaction::Reaction::apply(
-                        &conv, &target, &author, &emoji, add, ts,
-                    ) {
-                        crate::events::messaging::ReactionEv {
-                            conversation: conv,
-                            dispatch_id: target,
-                            reactor: author,
-                            emoji,
-                            add,
-                        }
-                        .emit();
-                    }
-                },
-                Ok(AppPayload::System(event)) => {
-                    use common::proto::mls_wire::SystemEvent;
-
-                    let ts = accepted_at_secs(msg.accepted_at_ms);
-                    let (code, actor, target) = crate::messaging::system_row(&event, author);
-                    // Narration may only come from whoever could have done the
-                    // deed: an admin for an add or a removal, the founder for
-                    // one they made on someone's behalf, the leaver for a
-                    // leave. The roster itself moves only on a merged Commit,
-                    // so a forged line could not remove anyone — but it would
-                    // still read as if it had.
-                    let allowed = match &event {
-                        SystemEvent::Added { .. } | SystemEvent::Removed { .. } =>
-                            Conversation::is_admin(&conv, &author),
-                        SystemEvent::AddedBy { .. } | SystemEvent::RemovedBy { .. } =>
-                            Conversation::is_owner(&conv, &author),
-                        SystemEvent::Left { who } => who.0 == author,
-                        SystemEvent::Titled { .. } => true,
-                    };
-                    if !allowed {
-                        warn!(
-                            "GROUP: ignored a membership line from {} who could not have done it",
-                            hex::encode(&author[..4])
-                        );
-                        return Ok(());
-                    }
-                    // A rename has no Commit behind it, so the event itself is
-                    // the change. Membership events only narrate — the Commit
-                    // is what actually moved the roster, and syncing from the
-                    // MLS group after merging it is the authoritative path.
-                    if let SystemEvent::Titled { title } = &event {
-                        // Only a group has a shared name. Renaming a direct
-                        // chat from the wire would let a peer relabel a DM,
-                        // and did whenever a group was mis-homed into one.
-                        let is_group = Conversation::get(&conv).is_some_and(|c| {
-                            c.kind == crate::data::conversation::KIND_GROUP
-                        });
-                        if !is_group {
-                            warn!("GROUP: ignored a rename aimed at a direct chat");
-                        } else if let Err(e) = Conversation::set_title(&conv, title) {
-                            warn!("GROUP: could not apply a title change: {e}");
-                        }
-                    }
-                    // Someone joined after us, so they never heard the
-                    // introduction we made on our own way in. Say it again,
-                    // to them alone.
-                    if let SystemEvent::Added { who } | SystemEvent::AddedBy { who, .. } = &event {
-                        if who.0 != our_ipk.to_bytes() {
-                            crate::messaging::introduce_ourselves_to(conv, who.0);
-                        }
-                    }
-                    match Message::save_system(conv, actor, &msg.id.0, code, &target, ts, false) {
-                        Ok(Some(row)) => MessageEv::Received {
-                            id: row.inner.id,
-                            conversation: conv,
-                            sender: actor,
-                            content: target,
-                            timestamp: ts,
-                        }
-                        .emit(),
-                        Ok(None) => debug!("GROUP: duplicate system event, already stored"),
-                        Err(e) => warn!("GROUP: could not store a system event: {e}"),
-                    }
-                },
-                Ok(AppPayload::Profile { name }) => {
-                    // Their claim about themselves, kept apart from the address
-                    // book so it can never overwrite a name we chose. Stored,
-                    // never shown as a message — nobody said anything.
-                    if let Err(e) = crate::data::peer_name::put(&author, &name) {
-                        warn!("PROFILE: could not record a self-asserted name: {e}");
-                    }
-                },
-                Ok(payload @ (AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. })) => {
-                crate::profile_details_sync::receive(conv, author, payload);
-            },
-            Ok(AppPayload::GroupPicture { revision, avif }) => {
-                if let Err(e) = crate::data::group_picture::receive(conv, author, revision, avif) {
-                    log::warn!("GROUP: picture rejected: {e}");
-                }
-            },
-            Ok(payload @ (AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. })) => {
-                    crate::profile_sync::receive(conv, author, payload);
-                },
-                Ok(AppPayload::Unpaired) => crate::messaging::unpaired(conv, author),
-                Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
-                Ok(AppPayload::GroupAdmins { admins }) => crate::groups::receive_admins(conv, author, admins),
-                Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
-                    crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome)
-                },
-                Ok(AppPayload::PairAck) => {
-                    // Proof-of-pair — its whole job was the mark_paired above.
-                    info!("PAIR: confirmed by {}", hex::encode(&msg.from[..4]));
-                    // The pair now works both ways, and they hold our name from
-                    // the invite: our picture is the one thing left to show them.
-                    crate::messaging::introduce_avatar(conv);
-                },
-                Ok(AppPayload::P2pOffer {
-                    session, in_reply_to, expires_at_ms, candidates, relay, token, disco_key,
-                }) => {
-                    // Candidate offer for a direct connection — hand to the
-                    // P2P layer (routed to the waiting session), never stored.
-                    info!(
-                        "P2P[{}]: received offer — {} cands",
-                        hex::encode(&msg.from[..4]),
-                        candidates.len()
-                    );
-                    crate::p2p::deliver_offer(
-                        *msg.from,
-                        crate::p2p::Offer {
-                            session,
-                            in_reply_to,
-                            expires_at_ms,
-                            candidates,
-                            relay,
-                            token,
-                            disco_key,
-                        },
-                    );
-                },
-                Ok(AppPayload::P2p { .. }) => {
-                    // A sender this old cannot read our answer, so there is
-                    // nothing to do with its offer but let it go.
-                    debug!("P2P[{}]: legacy offer ignored", hex::encode(&msg.from[..4]));
-                },
-                Ok(AppPayload::FileWant { file_id }) => {
-                    // Reverse-wake control message — routed, never stored. The push
-                    // wake already revived us; bring the P2P listener up so the
-                    // receiver's retry-dial can land (they drive the connect).
-                    info!("P2P: FileWant received from {}", hex::encode(&msg.from[..4]));
-                    crate::transfer::on_file_want(*msg.from, file_id);
-                },
-                Ok(AppPayload::Call(signal)) => {
-                    // Call signaling — routed to the call engine, never stored.
-                    // Only the person in the direct chat can be on the call.
-                    crate::call::on_signal(author, conv, signal);
-                },
-                Err(e) => {
-                    warn!(
-                        "MESSAGE: undecodable AppPayload from {}: {e}",
-                        hex::encode(&msg.from[..4])
-                    );
-                    // The authenticated ciphertext is already consumed. A newer
-                    // app may add a control variant we do not understand yet;
-                    // discard it without tearing down the relay connection.
-                },
-            }
+            receive_application_content(conv, author, msg.id.0, msg.accepted_at_ms, &plaintext)?;
         },
         Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
             crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
@@ -1391,7 +1423,8 @@ mod tests {
 
     #[tokio::test]
     async fn drain_only_completes_at_a_frame_boundary() {
-        use common::proto::client_rel::{DeliverP, SRelayPacket};
+        use common::proto::client_rel::DeliverP;
+        use common::proto::client_rel::SRelayPacket;
         use common::proto::pack::Packer;
         let packet = SRelayPacket::Deliver(DeliverP {
             id: [1; 16].into(), from: [2; 32].into(), payload: vec![3; 16].into(),

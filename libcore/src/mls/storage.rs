@@ -89,6 +89,9 @@ impl std::fmt::Debug for PromtuzStorageProvider {
 }
 
 impl PromtuzStorageProvider {
+    pub(crate) fn connection(&self) -> Arc<Mutex<Connection>> {
+        self.conn.clone()
+    }
     /// Build a provider over a caller-supplied SQLite connection.
     ///
     /// The caller is responsible for having applied the MLS schema
@@ -445,6 +448,10 @@ impl PromtuzStorageProvider {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM mls_storage WHERE group_id = ?1", params![&key])?;
         tx.execute("DELETE FROM mls_group_size WHERE group_id = ?1", params![&key])?;
+        for table in ["mls_branches", "mls_recovery_roots", "mls_replay", "mls_dispatch_jobs",
+            "mls_dispatch_ids", "mls_branch_inbox", "mls_group_received", "mls_join_history", "mls_recovery_retries"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE group_id=?1"), [group_id])?;
+        }
         tx.commit()?;
         Ok(())
     }

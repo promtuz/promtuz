@@ -5,27 +5,25 @@
 //!
 //! # Module layout
 //!
-//! - `provider.rs`, `storage.rs`, `types.rs`: `PromtuzMlsProvider`
-//!   (the openmls `OpenMlsProvider`), the rusqlite-backed
-//!   `PromtuzStorageProvider`, and the storage error enum.
-//! - `common/src/proto/mls_wire.rs`: wire types
-//!   (`MlsApplicationEnvelopeP`, `WelcomeEnvelopeP`,
+//! - `provider.rs`, `storage.rs`, `types.rs`: `PromtuzMlsProvider` (the openmls `OpenMlsProvider`),
+//!   the rusqlite-backed `PromtuzStorageProvider`, and the storage error enum.
+//! - `common/src/proto/mls_wire.rs`: wire types (`MlsApplicationEnvelopeP`, `WelcomeEnvelopeP`,
 //!   `KeyPackagePublishReq` etc.) and signing-input helpers.
-//! - `signer.rs`, `keypackage.rs`, `relay/src/dht/mls_kp.rs`,
-//!   `relay/src/dht/mls_welcome.rs`: leaf-signer adapter, KeyPackage
-//!   stash + Welcome queue handlers.
-//! - `group.rs`, `welcome.rs`, `epoch_catchup.rs`: the high-level
-//!   group runtime (`MlsGroupHandle`), Welcome envelope handling
-//!   (`process_welcome`, `make_welcome_envelope`), and the
-//!   out-of-order epoch buffer (`EpochCatchupBuffer`).
-//! - `libcore/src/api/messaging.rs`: wires MLS into the messaging
-//!   path.
+//! - `signer.rs`, `keypackage.rs`, `relay/src/dht/mls_kp.rs`, `relay/src/dht/mls_welcome.rs`:
+//!   leaf-signer adapter, KeyPackage stash + Welcome queue handlers.
+//! - `group.rs`, `welcome.rs`, `epoch_catchup.rs`: the high-level group runtime (`MlsGroupHandle`),
+//!   Welcome envelope handling (`process_welcome`, `make_welcome_envelope`), and the out-of-order
+//!   epoch buffer (`EpochCatchupBuffer`).
+//! - `libcore/src/api/messaging.rs`: wires MLS into the messaging path.
 
+pub(crate) mod branch_proof;
 pub mod credential;
 pub mod epoch_catchup;
 pub mod group;
 pub mod keypackage;
+pub mod policy;
 pub mod provider;
+pub(crate) mod recovery;
 pub mod scheduler;
 pub mod signer;
 pub mod storage;
@@ -36,11 +34,27 @@ pub mod welcome;
 // allows are required because the cdylib compiler can't see external
 // use across the JNI boundary.
 #[allow(unused_imports)]
-pub use epoch_catchup::{EpochCatchupBuffer, PushOutcome};
+pub use epoch_catchup::EpochCatchupBuffer;
 #[allow(unused_imports)]
-pub use group::{GROUP_META_EXTENSION, GroupMeta, MlsGroupHandle, PROMTUZ_CIPHERSUITE};
+pub use epoch_catchup::PushOutcome;
 #[allow(unused_imports)]
-pub use keypackage::{KeyPackageStash, KeyPackageStashError};
+pub use group::Changed;
+#[allow(unused_imports)]
+pub use group::CommitOutcome;
+#[allow(unused_imports)]
+pub use group::GROUP_META_EXTENSION;
+#[allow(unused_imports)]
+pub use group::GroupMeta;
+#[allow(unused_imports)]
+pub use group::MlsGroupHandle;
+#[allow(unused_imports)]
+pub use group::PROMTUZ_CIPHERSUITE;
+#[allow(unused_imports)]
+pub use keypackage::KeyPackageStash;
+#[allow(unused_imports)]
+pub use keypackage::KeyPackageStashError;
+#[allow(unused_imports)]
+pub use policy::GroupState;
 #[allow(unused_imports)]
 pub use provider::PromtuzMlsProvider;
 #[allow(unused_imports)]
@@ -48,9 +62,17 @@ pub use signer::Ed25519Signer;
 #[allow(unused_imports)]
 pub use storage::PromtuzStorageProvider;
 #[allow(unused_imports)]
-pub use types::{MlsGroupError, PromtuzMlsStorageError};
+pub use types::MlsGroupError;
 #[allow(unused_imports)]
-pub use welcome::{encode_welcome, make_welcome_envelope, process_welcome, seal_welcome_blob};
+pub use types::PromtuzMlsStorageError;
+#[allow(unused_imports)]
+pub use welcome::encode_welcome;
+#[allow(unused_imports)]
+pub use welcome::make_welcome_envelope;
+#[allow(unused_imports)]
+pub use welcome::process_welcome;
+#[allow(unused_imports)]
+pub use welcome::seal_welcome_blob;
 
 /// Per-`group_id` ceiling on cumulative `mls_storage.value` bytes,
 /// before a write is rejected with

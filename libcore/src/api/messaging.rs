@@ -86,10 +86,27 @@ pub struct ConversationRecord {
     /// The active roster minus ourselves — exactly who a send fans out to.
     /// Same list the client needs for presence and typing, which are
     /// per-person and so can never key off the conversation.
-    pub others: Vec<Vec<u8>>,
-    /// We are an admin: we may remove members, rename the group and change its
-    /// picture. Resolved here because only core knows our own IPK.
-    pub can_manage: bool,
+    pub others:         Vec<Vec<u8>>,
+    /// We are an admin or an owner: we may remove members and change the
+    /// group's rules. Resolved here because only core knows our own IPK.
+    pub can_manage:     bool,
+    /// Our role in a group: 0 member, 1 admin, 2 owner.
+    pub role:           u8,
+    /// What members who aren't admins may do. `None` for a direct chat, and for
+    /// a group from before rules were signed, which its founder alone runs.
+    pub rules:          Option<GroupRulesRecord>,
+    /// We may add people.
+    pub can_add:        bool,
+    /// We may rename the group and change its photo.
+    pub can_edit:       bool,
+    /// We may post. False in a group where only admins send, and once we left.
+    pub can_send:       bool,
+    /// Whose phone makes the group's changes. What anyone else asks for waits
+    /// until it's online.
+    pub committer:      Option<Vec<u8>>,
+    /// Ours does, and others are in the group: deleting the chat has to leave
+    /// it first, which hands that on.
+    pub commits:        bool,
     /// True once an MLS group backs this conversation — i.e. it can send.
     pub has_group: bool,
     /// We are still an active member. False for a group we left or were
@@ -97,11 +114,11 @@ pub struct ConversationRecord {
     pub am_member: bool,
     /// Leaving is offered. False for a direct chat, which has no membership,
     /// and for a group we already left — and see [`Self::owner_is_stuck`].
-    pub can_leave: bool,
-    /// We founded this group and other people are still in it, so both leaving
-    /// and deleting are refused: the group would be left with nobody able to
-    /// manage it. Lifted by removing everyone first — or, later, by handing
-    /// the group to someone else. Carried so the UI can say *why*.
+    pub can_leave:      bool,
+    /// We founded a group from before rules were signed and other people are
+    /// still in it, so both leaving and deleting are refused: the group would
+    /// be left with nobody able to manage it. Lifted by removing everyone
+    /// first, or once the group converts. Carried so the UI can say *why*.
     pub owner_is_stuck: bool,
     /// Kept at the top of the home list. Core sorts by it, so the client
     /// doesn't re-sort.
@@ -112,19 +129,26 @@ pub struct ConversationRecord {
     pub alerted_at: u64,
     pub created_at: u64,
     /// A message request we have not accepted: its own list, and no composer.
-    pub request: bool,
+    pub request:        bool,
+}
+
+/// What members who aren't admins may do in a group.
+#[derive(uniffi::Record)]
+pub struct GroupRulesRecord {
+    pub members_add:    bool,
+    pub members_edit:   bool,
+    pub members_send:   bool,
+    /// Admins may make others admins. Only owners change this.
+    pub admins_appoint: bool,
 }
 
 /// One member's standing in a conversation.
 #[derive(uniffi::Record)]
 pub struct MemberRecord {
-    pub ipk: Vec<u8>,
-    /// 0 = member, 1 = admin.
-    pub role: u8,
-    /// Founded the group: always an admin, appoints the others and can't be
-    /// removed.
-    pub owner: bool,
-    pub joined_at: u64,
+    pub ipk:             Vec<u8>,
+    /// 0 = member, 1 = admin, 2 = owner.
+    pub role:            u8,
+    pub joined_at:       u64,
     /// False once they left or were removed; their old messages still attribute.
     pub active: bool,
     /// This row is us. Resolved here for the same reason as `ReactionRecord.mine`:
@@ -184,8 +208,12 @@ pub fn edit_message(
     use crate::events::Emittable;
     crate::events::messaging::MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::send_control(conv,
-            common::proto::mls_wire::AppPayload::Revise { target, body }).await {
+        if let Err(e) = crate::messaging::send_control(
+            conv,
+            common::proto::mls_wire::AppPayload::Revise { target, body },
+        )
+        .await
+        {
             log::error!("MESSAGE: edit failed: {e}");
         }
     });
@@ -261,8 +289,10 @@ pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError>
 }
 
 #[uniffi::export]
-pub fn message_receipt_info(conversation_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>) -> Result<crate::data::receipts::MessageReceiptInfo, CoreError> {
-    let ids = dispatch_ids.iter().map(|id| to_did16(id)).collect::<Result<Vec<_>,_>>()?;
+pub fn message_receipt_info(
+    conversation_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>,
+) -> Result<crate::data::receipts::MessageReceiptInfo, CoreError> {
+    let ids = dispatch_ids.iter().map(|id| to_did16(id)).collect::<Result<Vec<_>, _>>()?;
     Ok(crate::data::receipts::info_many(&to_conv16(&conversation_id)?, &ids)?)
 }
 
@@ -310,19 +340,24 @@ pub async fn sync_messages() -> Result<(), CoreError> {
     // Replacing an Android wake job must not cancel a message halfway through
     // decryption/storage. Core owns this bounded sync; the next job joins the
     // same serialized drain path.
-    crate::RUNTIME.spawn(async move {
-        tokio::time::timeout(std::time::Duration::from_secs(45), async {
-            loop {
-                let relay = crate::state::RELAY.read().clone();
-                if let Some(relay) = relay.filter(|r| {
-                    r.connection.as_ref().is_some_and(|c| c.close_reason().is_none())
-                }) {
-                    return relay.sync_incoming(ipk).await;
+    crate::RUNTIME
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(45), async {
+                loop {
+                    let relay = crate::state::RELAY.read().clone();
+                    if let Some(relay) = relay.filter(|r| {
+                        r.connection.as_ref().is_some_and(|c| c.close_reason().is_none())
+                    }) {
+                        return relay.sync_incoming(ipk).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }).await.map_err(anyhow::Error::from)?
-    }).await.map_err(anyhow::Error::from)??;
+            })
+            .await
+            .map_err(anyhow::Error::from)?
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
     Ok(())
 }
 
@@ -401,7 +436,9 @@ pub struct MessagePosition {
 }
 
 #[uniffi::export]
-pub fn message_at_time(conversation_id: Vec<u8>, timestamp: u64) -> Result<Option<MessagePosition>, CoreError> {
+pub fn message_at_time(
+    conversation_id: Vec<u8>, timestamp: u64,
+) -> Result<Option<MessagePosition>, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     Ok(Message::position_at_time(&conv, timestamp)?.map(|(id, dispatch_id, newer)| MessagePosition { id, dispatch_id, newer }))
 }
@@ -463,6 +500,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
 pub fn list_conversations() -> Vec<ConversationRecord> {
     Conversation::list()
         .into_iter()
+        .filter(|c| !crate::groups::delete_pending(&c.id))
         .map(conversation_record)
         .collect()
 }
@@ -473,19 +511,34 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
     let roster = Conversation::members(&c.id);
     let is_group = c.kind == crate::data::conversation::KIND_GROUP;
-    let am_member = me.is_some_and(|k| roster.iter().any(|m| m.active && m.member_ipk == k));
-    let can_manage = me.is_some_and(|k| Conversation::is_admin(&c.id, &k));
-    let owner_is_stuck = me.is_some_and(|k| Conversation::is_owner(&c.id, &k)) && !others.is_empty();
+    let am_member = me.is_some_and(|k| roster.iter().any(|m| m.active && m.member_ipk == k))
+        && !crate::groups::is_leaving(&c.id);
+    let state = Conversation::state(&c.id).filter(|_| am_member);
+    let signed = Conversation::has_signed_rules(&c.id);
+    let role = me.zip(state.as_ref()).map_or(0, |(k, s)| s.role(&k));
+    let owner_is_stuck =
+        !signed && role == crate::data::conversation::ROLE_OWNER && !others.is_empty();
 
     ConversationRecord {
-        members: roster
-            .iter()
-            .filter(|m| m.active)
-            .map(|m| m.member_ipk.to_vec())
-            .collect(),
-        peer:           Conversation::peer_of(&c.id).map(|p| p.to_vec()),
-        can_manage,
-        has_group:      c.mls_group_id.is_some(),
+        members: roster.iter().filter(|m| m.active).map(|m| m.member_ipk.to_vec()).collect(),
+        peer: Conversation::peer_of(&c.id).map(|p| p.to_vec()),
+        can_manage: role >= crate::data::conversation::ROLE_ADMIN,
+        role,
+        rules: state.as_ref().filter(|_| signed).map(|s| GroupRulesRecord {
+            members_add:    s.rules.members_add,
+            members_edit:   s.rules.members_edit,
+            members_send:   s.rules.members_send,
+            admins_appoint: s.rules.admins_appoint,
+        }),
+        can_add: me.zip(state.as_ref()).is_some_and(|(k, s)| s.may_add(&k))
+            && c.mls_group_id.is_some(),
+        can_edit: me.zip(state.as_ref()).is_some_and(|(k, s)| s.may_edit(&k)),
+        can_send: am_member && me.zip(state.as_ref()).is_none_or(|(k, s)| s.may_send(&k)),
+        committer: state.as_ref().map(|s| s.committer.to_vec()),
+        commits: signed
+            && !others.is_empty()
+            && me.zip(state.as_ref()).is_some_and(|(k, s)| s.committer == k),
+        has_group: c.mls_group_id.is_some(),
         am_member,
         can_leave:      is_group && am_member && !owner_is_stuck,
         owner_is_stuck,
@@ -546,6 +599,10 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
 pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let Some(row) = Conversation::get(&conv) else { return Ok(()) };
+    if crate::groups::is_leaving(&conv) {
+        crate::groups::delete_after_leave(&conv)?;
+        return Ok(());
+    }
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
 
     if let Some(me) = me
@@ -556,6 +613,7 @@ pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), 
     if let Some(gid) = Conversation::group_of(&conv) {
         purge_mls_group(&gid);
     }
+    crate::groups::forget_requests(&conv);
     Conversation::delete(&conv)?;
     log::info!(
         "DELETE: dropped conversation {} ({})",
@@ -581,10 +639,11 @@ pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), 
 pub(crate) fn purge_mls_group(gid: &[u8; 32]) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     match crate::mls::MlsGroupHandle::load(&provider, gid) {
-        Ok(Some(mut g)) =>
+        Ok(Some(mut g)) => {
             if let Err(e) = g.delete(&provider) {
                 log::warn!("MLS: dropping group state failed: {e}");
-            },
+            }
+        },
         // No loadable group, which is the ordinary case for state so damaged
         // it can't be opened. `forget_group` below is what clears that.
         Ok(None) => {},
@@ -672,13 +731,9 @@ pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationR
 pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord>, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
-    let founder = Conversation::get(&conv)
-        .filter(|c| c.kind == crate::data::conversation::KIND_GROUP)
-        .and_then(|c| c.created_by);
     Ok(Conversation::members(&conv)
         .into_iter()
         .map(|m| MemberRecord {
-            owner:           founder.as_deref() == Some(m.member_ipk.as_slice()),
             me:              me.is_some_and(|k| k == m.member_ipk),
             name:            crate::data::peer_name::resolve(&m.member_ipk),
             name_is_claimed: crate::data::peer_name::is_self_asserted(&m.member_ipk),
@@ -702,13 +757,15 @@ pub fn seen_by_count(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<u
 /// the network; a group's new name is then narrated to its members, who apply
 /// it on receipt. A direct chat's title is ours alone, so it stays local.
 #[uniffi::export]
-pub fn set_conversation_title(
-    conversation_id: Vec<u8>, title: String,
-) -> Result<(), CoreError> {
+pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result<(), CoreError> {
     let conv = to_conv16(&conversation_id)?;
+    let is_group =
+        Conversation::get(&conv).is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
+    let me = crate::data::identity::Identity::get().map(|i| i.ipk()).unwrap_or_default();
+    if is_group && !Conversation::may_edit(&conv, &me) {
+        return Err(anyhow::anyhow!("only admins can rename this group").into());
+    }
     Conversation::set_title(&conv, &title)?;
-    let is_group = Conversation::get(&conv)
-        .is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
     if is_group {
         crate::RUNTIME.spawn(async move {
             crate::messaging::announce(
@@ -917,21 +974,22 @@ pub async fn create_group(title: String, members: Vec<Vec<u8>>) -> Result<Vec<u8
     Ok(id.to_vec())
 }
 
-/// Add someone to a group; they get no pre-join history. Any member may. Only
-/// the owner's device commits the change, so `false` means we asked it to and
-/// they join once it has.
+// Every change below returns whether it's done. Only one member's phone, the
+// committer's, changes a group; `false` means we asked it to, and the change
+// lands once it has.
+
+/// Add people to a group, in one change; they get no pre-join history.
 #[uniffi::export]
-pub async fn add_group_member(
-    conversation_id: Vec<u8>, member_ipk: Vec<u8>,
+pub async fn add_group_members(
+    conversation_id: Vec<u8>, members: Vec<Vec<u8>>,
 ) -> Result<bool, CoreError> {
     let conv = to_conv16(&conversation_id)?;
-    let who = to_ipk32(&member_ipk)?;
-    on_runtime(crate::groups::add_member(conv, who)).await
+    let who = members.iter().map(|m| to_ipk32(m)).collect::<Result<Vec<_>, _>>()?;
+    on_runtime(crate::groups::add_members(conv, who)).await
 }
 
-/// Remove someone from a group, rotating keys afterwards so their device can't
-/// read what follows. Admins only; `false` means the owner's device was asked,
-/// as with an add.
+/// Remove someone from a group. The commit that removes them refreshes the
+/// group's keys, so their device can't read what follows.
 #[uniffi::export]
 pub async fn remove_group_member(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>,
@@ -941,14 +999,28 @@ pub async fn remove_group_member(
     on_runtime(crate::groups::remove_member(conv, who)).await
 }
 
-/// Make a member an admin, or stop them being one. Owner only.
+/// Make a member a member (0), an admin (1) or an owner (2).
 #[uniffi::export]
-pub async fn set_group_admin(
-    conversation_id: Vec<u8>, member_ipk: Vec<u8>, admin: bool,
-) -> Result<(), CoreError> {
+pub async fn set_group_role(
+    conversation_id: Vec<u8>, member_ipk: Vec<u8>, role: u8,
+) -> Result<bool, CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let who = to_ipk32(&member_ipk)?;
-    on_runtime(crate::groups::set_admin(conv, who, admin)).await
+    on_runtime(crate::groups::set_role(conv, who, role)).await
+}
+
+#[uniffi::export]
+pub async fn set_group_rules(
+    conversation_id: Vec<u8>, rules: GroupRulesRecord,
+) -> Result<bool, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    let rules = common::proto::mls_wire::GroupRules {
+        members_add:    rules.members_add,
+        members_edit:   rules.members_edit,
+        members_send:   rules.members_send,
+        admins_appoint: rules.admins_appoint,
+    };
+    on_runtime(crate::groups::set_rules(conv, rules)).await
 }
 
 /// Leave a group. The conversation and its history stay; it just can't send.

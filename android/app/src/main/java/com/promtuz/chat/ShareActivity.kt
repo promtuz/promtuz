@@ -88,7 +88,7 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
     val recipients = observeQuery(setOf("contacts", "conversations", "conversation_members")) {
         val contacts = CoreBridge.contacts().associateBy { it.ipk.toHex() }
         CoreBridge.listConversations().filter { c ->
-            if (c.kind.toInt() == 1) c.amMember else contacts[c.peer?.toHex()]?.status?.toInt() == 1
+            if (c.kind.toInt() == 1) c.canSend else contacts[c.peer?.toHex()]?.status?.toInt() == 1
         }.map { c -> ShareRecipient(c.id.toHex(), if (c.kind.toInt() == 1) c.displayName else contacts[c.peer?.toHex()]?.name.orEmpty(), c.kind.toInt() == 1, c.peer?.toHex()) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 

@@ -18,6 +18,10 @@ object Routes : NavKey {
     @Serializable
     data class GroupInfo(val conversation: String) : NavKey
 
+    /** What a group's members may do, for its admins to change. */
+    @Serializable
+    data class GroupSettings(val conversation: String) : NavKey
+
     @Serializable
     data object ShareIdentity : NavKey
 
