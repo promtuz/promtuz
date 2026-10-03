@@ -125,6 +125,7 @@ private const val FLIGHT_HOLD_MS = 200L
 private val flightEase = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
 private val DISMISS_THRESHOLD = 96.dp
 private const val BACK_SCALE = 0.90f
+private const val BACK_CHROME_START = 0.05f
 private val BACK_CORNER = 24.dp
 
 private enum class Phase { Opening, Open, Closing }
@@ -142,6 +143,9 @@ private class Flight(
     val fromClip: Rect? = null,
     val toClip: Rect? = null,
     val fromAlpha: Float = 1f,
+    val backgroundAlpha: Float = 1f,
+    val chromeAlpha: Float = 1f,
+    val chromeBackProgress: Float = 0f,
 )
 
 /** Mount once above navigation. */
@@ -176,12 +180,17 @@ private fun Viewer(session: MediaSession) {
     val hostCoords = remember { arrayOfNulls<LayoutCoordinates>(1) }
 
     val current = session.items.getOrNull(pager.currentPage)
-    var backActive by remember { mutableStateOf(false) }
     var backEdgeRight by remember { mutableStateOf(false) }
     var backTouchY by remember { mutableStateOf(0f) }
     val deviceRadius = deviceCornerRadius()
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(Unit) { keyboard?.hide() }
+
+    val chromeShown = chrome && phase != Phase.Closing && dismissY.value == 0f
+    val chromeAlpha by animateFloatAsState(if (chromeShown) 1f else 0f, tween(240, easing = ChatMotion.Easing), label = "viewer chrome")
+
+    fun chromeBackProgress(): Float =
+        ((backScale.value - BACK_CHROME_START) / (1f - BACK_CHROME_START)).coerceIn(0f, 1f)
 
     // The overlay is black under any theme, so the status bar icons must go light for the duration.
     val insets = remember(activity, view) { activity?.window?.let { WindowCompat.getInsetsController(it, view) } }
@@ -214,6 +223,13 @@ private fun Viewer(session: MediaSession) {
         return r
     }
 
+    fun gestureBackgroundAlpha(): Float {
+        val distance = (abs(dismissY.value) / (viewport.height * 0.5f).coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val drag = 1f - 0.85f * distance
+        val back = 1f - backScale.value.coerceIn(0f, 1f)
+        return minOf(drag, back)
+    }
+
     fun close(afterClose: () -> Unit = {}) {
         val item = session.items.getOrNull(pager.currentPage) ?: run { MediaViewer.close(); afterClose(); return }
         if (phase == Phase.Closing) return
@@ -244,6 +260,10 @@ private fun Viewer(session: MediaSession) {
             } else null,
             toClip = if (target != null) MediaViewer.originClipIn(item.key, hostCoords[0]) else null,
             fromAlpha = if (interruptedOpening && priorFlight?.fade == true) openingProgress else 1f,
+            // Preserve the drawn opacity before the back handler resets its gesture progress.
+            backgroundAlpha = (if (interruptedOpening) openingProgress else 1f) * gestureBackgroundAlpha(),
+            chromeAlpha = chromeAlpha * (if (interruptedOpening) openingProgress else 1f),
+            chromeBackProgress = chromeBackProgress(),
         )
         // A fresh progress object starts the return at this exact rect, even mid-opening.
         progress = Animatable(0f)
@@ -291,7 +311,6 @@ private fun Viewer(session: MediaSession) {
     ImageWindowColorMode(flight?.image, active = flight != null)
 
     PredictiveBackHandler { events: Flow<BackEventCompat> ->
-        backActive = true
         try {
             events.collect {
                 backEdgeRight = it.swipeEdge == BackEventCompat.EDGE_RIGHT
@@ -300,17 +319,13 @@ private fun Viewer(session: MediaSession) {
             }
             close()
             backScale.snapTo(0f)
-            backActive = false
         } catch (c: Throwable) {
-            backActive = false
             scope.launch { backScale.animateTo(0f, spring()) }
             throw c
         }
     }
 
     val dismissThresholdPx = with(density) { DISMISS_THRESHOLD.toPx() }
-    val chromeShown = chrome && phase != Phase.Closing && dismissY.value == 0f && !backActive
-    val chromeAlpha by animateFloatAsState(if (chromeShown) 1f else 0f, tween(240, easing = ChatMotion.Easing), label = "viewer chrome")
     var bottomChromePx by remember { mutableIntStateOf(0) }
     LaunchedEffect(chrome, phase) {
         val c = insets ?: return@LaunchedEffect
@@ -346,10 +361,11 @@ private fun Viewer(session: MediaSession) {
                     val base = when (phase) {
                         Phase.Opening -> p
                         Phase.Open -> 1f
-                        Phase.Closing -> 1f - p
+                        Phase.Closing -> (flight?.backgroundAlpha ?: 1f) * (1f - p)
                     }
-                    val drag = 1f - 0.85f * (abs(dismissY.value) / (size.height * 0.5f)).coerceIn(0f, 1f)
-                    drawRect(Color.Black, alpha = base * drag)
+                    // Closing already includes the captured gesture opacity; do not apply it twice.
+                    val alpha = if (phase == Phase.Closing) base else base * gestureBackgroundAlpha()
+                    drawRect(Color.Black, alpha = alpha.coerceIn(0f, 1f))
                 },
         ) {
         if (phase == Phase.Open) {
@@ -409,7 +425,14 @@ private fun Viewer(session: MediaSession) {
             items = session.items,
             index = pager.currentPage,
             onSelect = { i -> scope.launch { pager.animateScrollToPage(i) } },
-            alpha = if (phase == Phase.Opening) chromeAlpha * progress.value else chromeAlpha,
+            alpha = when (phase) {
+                Phase.Opening -> chromeAlpha * progress.value
+                Phase.Open -> chromeAlpha
+                Phase.Closing -> (flight?.chromeAlpha ?: 0f) * (1f - progress.value)
+            },
+            backProgress = {
+                if (phase == Phase.Closing) flight?.chromeBackProgress ?: 0f else chromeBackProgress()
+            },
             onBottomHeight = { bottomChromePx = it },
             onBack = { close() },
             onShowInChat = { item -> item.message?.let { message -> close { app.showMessage(message) } } },
@@ -602,6 +625,7 @@ private fun Chrome(
     index: Int,
     onSelect: (Int) -> Unit,
     alpha: Float,
+    backProgress: () -> Float,
     onBottomHeight: (Int) -> Unit,
     onBack: () -> Unit,
     onSave: (MediaItem) -> Unit,
@@ -617,7 +641,12 @@ private fun Chrome(
         Row(
             Modifier
                 .fillMaxWidth()
-                .graphicsLayer { this.alpha = alpha; translationY = -(1f - alpha) * slide }
+                .graphicsLayer {
+                    // Read live gesture state in the layer, without animating toward a target.
+                    val back = backProgress()
+                    this.alpha = alpha * (1f - back)
+                    translationY = -lerp((1f - alpha) * slide, size.height, back)
+                }
                 .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
                 .statusBarsPadding()
                 .padding(bottom = 36.dp)
@@ -658,7 +687,11 @@ private fun Chrome(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .graphicsLayer { this.alpha = alpha; translationY = (1f - alpha) * slide }
+                .graphicsLayer {
+                    val back = backProgress()
+                    this.alpha = alpha * (1f - back)
+                    translationY = lerp((1f - alpha) * slide, size.height, back)
+                }
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))))
                 .padding(top = 56.dp)
                 .navigationBarsPadding(),
