@@ -2,7 +2,9 @@
 #![warn(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
-mod cli;
+mod cli {
+    common::daemon_cli!("resolver", "Promtuz resolver");
+}
 mod quic;
 mod resolver;
 mod util;
@@ -21,7 +23,8 @@ use crate::util::config::AppConfig;
 
 /// Sized for a carrier NAT: phones open a fresh connection per lookup, and the per-connection RPC
 /// budget bounds what each connection costs.
-const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 4096 };
+const ACCEPT: accept::Policy =
+    accept::Policy { per_minute: 600, burst: 300, max_live: 4096, max_live_per_source: 256 };
 
 #[tokio::main]
 async fn main() -> Result<()> {

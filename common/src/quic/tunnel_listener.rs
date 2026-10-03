@@ -17,7 +17,8 @@ use super::tunnel::{self, AcceptedMode, Channel};
 use crate::node::config::NetworkConfig;
 use crate::server::accept::{Gate, Policy, SWEEP_INTERVAL, drain};
 
-const ACCEPT: Policy = Policy { per_minute: 120, burst: 60, max_live: 1024 };
+const ACCEPT: Policy =
+    Policy { per_minute: 120, burst: 60, max_live: 1024, max_live_per_source: 256 };
 const INNER_HANDSHAKE: Duration = Duration::from_secs(8);
 
 /// Construct before starting the daemon so an occupied TCP port is a startup
@@ -70,7 +71,7 @@ impl NodeTunnel {
         A: Fn(Arc<Channel>, AcceptedMode) -> AF + Send + Sync + 'static,
         AF: Future<Output = ()> + Send + 'static,
     {
-        let gate = Gate::new(&ACCEPT);
+        let mut gate = Gate::new(&ACCEPT);
         let mut tasks = JoinSet::new();
         let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
         loop {

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use common::contracts::Support;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchAckP;
@@ -9,6 +10,7 @@ use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::QueryP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::Wake;
+use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -16,6 +18,7 @@ use common::utils::now_ms;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 
+use crate::dht::rpc::rpc;
 use crate::quic::handler::client::events::forward::dispatch_to_deliver;
 use crate::storage::MessageKey;
 use crate::test_support::Client;
@@ -166,6 +169,25 @@ async fn a_drain_at_the_third_home_delivers_what_only_the_other_two_hold() {
             "homes keep custody until the user acks"
         );
     }
+}
+
+/// A peer's services are probed once per connection, and a reconnect probes them again.
+#[tokio::test]
+async fn a_reconnect_probes_a_peers_services_again() {
+    let (a, b) = (Node::start(71, true).await, Node::start(72, true).await);
+    a.learn(&b);
+    let peer = a.dht().routing.read().get(&b.dht().node_id).unwrap().descriptor();
+    let inventory = DhtRequest::KeyPackageInventory { request: Vec::new().into() };
+    let ask = || rpc(a.dht(), &peer, &inventory, 3_000);
+    assert!(ask().await.is_some());
+
+    let conn = a.dht().peer_conns.read()[&peer.id].0.clone();
+    a.dht().peer_services.write().insert(conn.stable_id(), Support::default());
+    assert!(ask().await.is_none(), "the next request trusts this connection's probe");
+
+    conn.close(0u32.into(), b"reconnect");
+    eventually(|| !a.dht().peer_services.read().contains_key(&conn.stable_id())).await;
+    assert!(ask().await.is_some(), "a new connection is probed again");
 }
 
 /// Rows older relays queued still drain: the delivered form `messages` held, with and without

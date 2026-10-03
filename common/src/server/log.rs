@@ -16,7 +16,9 @@ pub enum Level {
     Error = 4,
 }
 
-static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
+/// Errors only until a daemon calls [`init`]: the writer thread's output escapes the test
+/// harness's capture.
+static LEVEL: AtomicU8 = AtomicU8::new(Level::Error as u8);
 
 #[derive(serde::Deserialize, Debug, Default)]
 pub struct LogConfig {

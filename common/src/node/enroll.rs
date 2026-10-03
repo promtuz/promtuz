@@ -210,6 +210,7 @@ pub use orchestrate::spawn_config_reload;
 
 #[cfg(all(feature = "server", feature = "tokio"))]
 mod orchestrate {
+    use std::ffi::OsStr;
     use std::io::Read as _;
     use std::path::Path;
     use std::path::PathBuf;
@@ -221,6 +222,7 @@ mod orchestrate {
     use ed25519_dalek::SigningKey;
     use notify::RecursiveMode;
     use notify::Watcher as _;
+    use serde::de::DeserializeOwned;
 
     use super::cert_is_valid;
     use super::csr_pem;
@@ -328,18 +330,39 @@ mod orchestrate {
         Ok(())
     }
 
+    /// Only a write to the config file itself: the daemon opens other files in its directory.
+    fn is_config_write(event: &notify::Event, name: Option<&OsStr>) -> bool {
+        matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
+            && event.paths.iter().any(|path| path.file_name() == name)
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Reload {
+        Unchanged,
+        Restart,
+        Invalid,
+    }
+
+    /// A config that does not parse as `T` would stop the restarted daemon, so it is not applied.
+    fn reload<T: DeserializeOwned>(current: &[u8], new: &[u8]) -> Reload {
+        if new == current {
+            return Reload::Unchanged;
+        }
+        match std::str::from_utf8(new).ok().and_then(|s| toml::from_str::<T>(s).ok()) {
+            Some(_) => Reload::Restart,
+            None => Reload::Invalid,
+        }
+    }
+
     /// Re-execs in place (same PID, no reliance on systemd `Restart=`) when the config file's
     /// bytes change and still parse as `T`. A parse failure keeps the current config.
-    pub fn spawn_config_reload<T: serde::de::DeserializeOwned>(config_path: PathBuf) {
+    pub fn spawn_config_reload<T: DeserializeOwned>(config_path: PathBuf) {
         tokio::spawn(async move {
             let name = config_path.file_name().map(|n| n.to_os_string());
             let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
             let Ok(mut watcher) =
                 notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-                    let Ok(e) = e else { return };
-                    if matches!(e.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
-                        && e.paths.iter().any(|p| p.file_name() == name.as_deref())
-                    {
+                    if e.is_ok_and(|e| is_config_write(&e, name.as_deref())) {
                         let _ = tx.blocking_send(());
                     }
                 })
@@ -358,12 +381,11 @@ mod orchestrate {
                 while rx.try_recv().is_ok() {}
 
                 let Ok(bytes) = std::fs::read(&config_path) else { continue };
-                if bytes == current {
-                    continue;
-                }
+                let decision = reload::<T>(&current, &bytes);
                 current = bytes;
-                match std::str::from_utf8(&current).ok().and_then(|s| toml::from_str::<T>(s).ok()) {
-                    Some(_) => {
+                match decision {
+                    Reload::Unchanged => {},
+                    Reload::Restart => {
                         crate::info!("config changed and parses; restarting in place");
                         use std::os::unix::process::CommandExt as _;
                         let err =
@@ -372,11 +394,56 @@ mod orchestrate {
                                 .exec();
                         crate::warn!("re-exec failed: {err}; staying on the old config");
                     },
-                    None => {
+                    Reload::Invalid => {
                         crate::warn!("config changed but failed to parse; keeping current config")
                     },
                 }
             }
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::collections::HashMap;
+
+        use notify::Event;
+        use notify::EventKind;
+        use notify::event::AccessKind;
+        use notify::event::AccessMode;
+        use notify::event::CreateKind;
+        use notify::event::DataChange;
+        use notify::event::ModifyKind;
+
+        use super::*;
+
+        /// Restarting on every open of a file next to the config loops the daemon, and restarting
+        /// into a config it cannot parse stops it.
+        #[test]
+        fn only_a_parsable_change_to_the_config_file_restarts() {
+            let event = |kind, file: &str| Event::new(kind).add_path(file.into());
+            let open = EventKind::Access(AccessKind::Open(AccessMode::Read));
+            let write = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+            let create = EventKind::Create(CreateKind::File);
+            let name = Some(OsStr::new("relay.toml"));
+            for (label, sent, expected) in [
+                ("an open of the config", event(open, "relay.toml"), false),
+                ("a write to the CA beside it", event(write, "ca.pem"), false),
+                ("a write to the config", event(write, "relay.toml"), true),
+                ("a new config renamed into place", event(create, "relay.toml"), true),
+            ] {
+                assert_eq!(is_config_write(&sent, name), expected, "{label}");
+            }
+
+            type Config = HashMap<String, u16>;
+            for (label, new, expected) in [
+                ("the same bytes", &b"port = 1"[..], Reload::Unchanged),
+                ("a new port", b"port = 2", Reload::Restart),
+                ("valid TOML of the wrong type", b"port = \"two\"", Reload::Invalid),
+                ("broken TOML", b"port =", Reload::Invalid),
+                ("not UTF-8", b"\xff", Reload::Invalid),
+            ] {
+                assert_eq!(reload::<Config>(b"port = 1", new), expected, "{label}");
+            }
+        }
     }
 }

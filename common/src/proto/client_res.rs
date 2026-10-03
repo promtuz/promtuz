@@ -32,8 +32,8 @@ pub enum ClientRequest {
         count_rtt_near: u8,
     },
 
-    /// Unauthenticated directory; dialers check `PUSH_GATEWAY` on the gateway's cert. Appended
-    /// last (postcard variant order).
+    /// Gateways registered with a CA-issued `PUSH_GATEWAY` cert, which dialers check again.
+    /// Appended last (postcard variant order).
     GetGateways(),
 
     /// Public, from operator configuration. Appended last (postcard variant order).

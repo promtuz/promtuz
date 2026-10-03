@@ -8,8 +8,8 @@ use std::time::Instant;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use common::node::capability::CAPABILITY_OID;
 use common::node::capability::NodeCapabilities;
+use common::node::enroll::cert_capabilities;
 use common::proto::RelayId;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_res::ClientRequest;
@@ -22,6 +22,7 @@ use common::proto::push::GatewayRequest;
 use common::proto::push::PushProvider;
 use common::proto::push::RegisterResponse;
 use common::proto::push::RegisterToken;
+use common::proto::push::wake_targets;
 use common::types::bytes::Bytes;
 use common::utils::now_ms;
 use ed25519_dalek::SigningKey;
@@ -33,9 +34,6 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use x509_parser::der_parser::Oid;
-use x509_parser::prelude::FromDer;
-use x509_parser::prelude::X509Certificate;
 
 use crate::data::identity::IdentitySigner;
 use crate::db::all;
@@ -165,19 +163,18 @@ pub async fn register_token_at_gateway() -> Result<()> {
         return Err(anyhow!("endpoint not initialized"));
     }
     let Some(token) = PUSH_TOKEN.read().clone() else { return Ok(()) };
-    let mut gateways = match timeout(REGISTRATION_TIMEOUT, fetch_gateways()).await {
+    let directory = match timeout(REGISTRATION_TIMEOUT, fetch_gateways()).await {
         Ok(Ok(gateways)) => gateways,
         _ => cached_gateways(),
     };
-    // The directory is unverified and ordered by id, like the relay's fanout:
-    // walk it until one gateway proves itself, skipping recent refusals.
-    gateways.sort_by_key(|gateway| gateway.id);
+    // Relays wake only their wake targets, so registration walks the same set, skipping recent
+    // refusals the way a relay skips gateways that failed its dial.
+    let gateways = wake_targets(directory, |gateway| {
+        let refused_at = REFUSED_GATEWAYS.lock().get(&gateway.id).copied();
+        refused_at.is_none_or(|at| at.elapsed() >= GATEWAY_RETRY_AFTER)
+    });
     let mut error = anyhow!("no push gateways available");
     for gateway in gateways {
-        let refused_at = REFUSED_GATEWAYS.lock().get(&gateway.id).copied();
-        if refused_at.is_some_and(|at| at.elapsed() < GATEWAY_RETRY_AFTER) {
-            continue;
-        }
         match timeout(REGISTRATION_TIMEOUT, send_registration(&gateway, token.clone())).await {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(e)) => error = e,
@@ -193,18 +190,15 @@ pub async fn register_token_at_gateway() -> Result<()> {
 pub(crate) fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
     let identity = conn.peer_identity()?;
     let chain = identity.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()?;
-    let (_, cert) = X509Certificate::from_der(chain.first()?.as_ref()).ok()?;
-    let oid = Oid::from(CAPABILITY_OID).ok()?;
-    let ext = cert.extensions().iter().find(|e| e.oid == oid)?;
-    NodeCapabilities::decode(ext.value)
+    cert_capabilities(chain.first()?)
 }
 
 async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Result<()> {
     let reg = RegisterToken::signed(&push_key()?, PushProvider::Fcm, token);
     let conn = crate::quic::dialer::connect(gateway.addr, &gateway.id.to_string()).await?;
 
-    // The resolver's gateway directory is unauthenticated, so the token only goes to a node whose
-    // CA-issued cert carries PUSH_GATEWAY.
+    // The resolver checked this gateway's cert when it registered. The token still goes only to a
+    // node that answers here with a CA-issued cert carrying PUSH_GATEWAY.
     let caps = capabilities_from_conn(&conn)
         .ok_or_else(|| anyhow!("gateway cert carries no capability extension"))?;
     if !caps.contains(NodeCapabilities::PUSH_GATEWAY) {

@@ -193,21 +193,6 @@ pub(crate) async fn handle_welcome_publish(
         }
     }
 
-    let id = welcome_id(&req.envelope);
-    let key = storage_key(&req.envelope.recipient_ipk.0, &id);
-    if welcome_queue_full(
-        dht,
-        &req.envelope.recipient_ipk.0,
-        &req.envelope.sender_ipk.0,
-        &key,
-    ) {
-        common::warn!(
-            "MLS welcome_publish: queue full for recipient={}",
-            recipient_short
-        );
-        return WelcomePublishOutcome::QueueFull;
-    }
-
     let envelope_bytes = match req.envelope.ser() {
         Ok(b) => b,
         Err(e) => {
@@ -221,12 +206,21 @@ pub(crate) async fn handle_welcome_publish(
     value.extend_from_slice(&expires_at_ms.to_be_bytes());
     value.extend_from_slice(&envelope_bytes);
 
-    if let Err(e) = dht.store.put_sync(&dht.store.welcome, key, &value) {
-        common::warn!(
-            "MLS welcome_publish: fjall put failed for recipient={}: {e}",
-            recipient_short
-        );
-        return WelcomePublishOutcome::BadSig;
+    let id = welcome_id(&req.envelope);
+    let recipient = &req.envelope.recipient_ipk.0;
+    let key = storage_key(recipient, &id);
+    {
+        let _admission = dht.store.admission(recipient);
+        if welcome_queue_full(dht, recipient, &req.envelope.sender_ipk.0, &key) {
+            common::warn!("MLS welcome_publish: queue full for recipient={recipient_short}");
+            return WelcomePublishOutcome::QueueFull;
+        }
+        if let Err(e) = dht.store.put_sync(&dht.store.welcome, key, &value) {
+            common::warn!(
+                "MLS welcome_publish: fjall put failed for recipient={recipient_short}: {e}"
+            );
+            return WelcomePublishOutcome::BadSig;
+        }
     }
     if dht.store.persist_barrier().wait().await.is_err() {
         return WelcomePublishOutcome::BadSig;
@@ -348,6 +342,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::dht;
+    use crate::test_support::ipk;
     use crate::test_support::key;
     use crate::test_support::welcome;
 
@@ -429,5 +424,26 @@ mod tests {
         // The limiter clock stands still in tests, so the hourly budget cannot refill mid-burst.
         let refused = (0..=MAX_WELCOME_RPC_PER_HOUR).map(|_| fetch(relay)).find(Result::is_err);
         assert_eq!(refused, Some(Err(WelcomeFetchOutcome::RateLimited)));
+    }
+
+    /// Racing publishes from one inviter still fill only that inviter's share of the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn racing_publishes_stay_within_the_senders_share() {
+        let (_dir, dht) = dht(NodeId::from_bytes([0; 32]));
+        let (sender, relay, now) = (key(1), NodeId::from_bytes([0xA1; 32]), now_ms());
+        for round in 0..20 {
+            let recipient = ipk(round);
+            let publishes: Vec<_> = (0..8)
+                .map(|tag| {
+                    let (dht, envelope) = (dht.clone(), welcome(&sender, recipient, tag));
+                    let req = WelcomePublishReq { envelope, timestamp: now };
+                    tokio::spawn(async move { handle_welcome_publish(&dht, req, relay, now).await })
+                })
+                .collect();
+            for publish in publishes {
+                publish.await.unwrap();
+            }
+            assert_eq!(iterate_welcomes(&dht, &recipient).len(), MAX_WELCOMES_PER_SENDER);
+        }
     }
 }

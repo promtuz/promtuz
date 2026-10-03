@@ -15,9 +15,9 @@ use common::proto::client_rel::Wake;
 use common::proto::client_res::GatewayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::push::GatewayRequest;
-use common::proto::push::MAX_PUSH_GATEWAYS;
 use common::proto::RelayId;
 use common::proto::push::WakeRequest;
+use common::proto::push::wake_targets;
 use common::types::bytes::Bytes;
 use governor::Quota;
 use quinn::Connection;
@@ -61,13 +61,11 @@ impl Dht {
             debug!("wake({who}) skipped: per-recipient wake quota exhausted");
             return;
         }
-        let mut gateways = self.push_gateways.read().clone();
+        let gateways = self.push_gateways.read().clone();
         if gateways.is_empty() {
             debug!("wake({who}) skipped: gateway directory empty (is a gateway registered with the resolver?)");
             return;
         }
-        gateways.sort_by_key(|g| g.id);
-        gateways.truncate(MAX_PUSH_GATEWAYS);
         debug!(
             "wake({who} P={}): dialing {} gateway(s)",
             hex::encode(&pseudonym[..8]),
@@ -87,8 +85,8 @@ impl Dht {
     }
 }
 
-/// The resolver admits any self-made key, so only gateways whose certificate carries the capability
-/// are kept, and the cap on wake targets applies to those.
+/// The resolver lists a gateway only after checking its certificate. A dial checks the certificate
+/// of whoever answers at the listed address, and the wake targets come from those that pass.
 pub(crate) async fn refresh_gateways(dht: Arc<Dht>, resolver: ResolverLinkHandle) {
     const REFRESH: Duration = Duration::from_secs(60);
     const RECHECK_VERIFIED: Duration = Duration::from_secs(3600);
@@ -114,11 +112,8 @@ pub(crate) async fn refresh_gateways(dht: Arc<Dht>, resolver: ResolverLinkHandle
                 while let Some(Ok((id, ok))) = checks.join_next().await {
                     verdicts.insert(id, (ok, Instant::now()));
                 }
-                let verified: Vec<GatewayDescriptor> = directory
-                    .into_iter()
-                    .filter(|g| verdicts.get(&g.id).is_some_and(|(ok, _)| *ok))
-                    .collect();
-                *dht.push_gateways.write() = verified;
+                *dht.push_gateways.write() =
+                    wake_targets(directory, |g| verdicts.get(&g.id).is_some_and(|(ok, _)| *ok));
             },
             (Ok(_), None) => debug!("gateway refresh skipped: no DHT endpoint attached"),
             (Err(e), _) => debug!("gateway refresh failed: {e}"),
@@ -127,8 +122,7 @@ pub(crate) async fn refresh_gateways(dht: Arc<Dht>, resolver: ResolverLinkHandle
     }
 }
 
-/// Dial a gateway and prove it is one: the directory is untrusted, the CA
-/// stamp on its leaf certificate is not.
+/// Dial a gateway and prove it is one by the CA stamp on its leaf certificate.
 async fn dial_gateway(endpoint: &Endpoint, gateway: &GatewayDescriptor) -> Result<Connection> {
     let conn = endpoint.connect(gateway.addr, &gateway.id.to_string())?.await?;
     let caps = super::tls_extract::capabilities_from_conn(&conn)

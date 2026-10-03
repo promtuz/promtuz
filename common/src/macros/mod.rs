@@ -24,3 +24,31 @@ macro_rules! ret {
         }
     };
 }
+
+/// The resolver's and gateway's `cli` module: `--config`, and `enroll` in place of the daemon. It
+/// expands in the daemon's crate, so `VERSION` is that crate's.
+#[macro_export]
+macro_rules! daemon_cli {
+    ($name:literal, $about:literal) => {
+        pub const VERSION: &str =
+            concat!(env!("CARGO_PKG_VERSION"), " (", env!("PZ_GIT_SHA"), ")");
+
+        /// With no subcommand, runs the daemon.
+        #[derive(clap::Parser, Debug)]
+        #[command(name = concat!("pz", $name), version = VERSION, about = $about)]
+        pub struct Cli {
+            /// Path to the config file.
+            #[arg(short, long, default_value = concat!("/etc/promtuz/", $name, ".toml"))]
+            pub config: std::path::PathBuf,
+
+            #[command(subcommand)]
+            pub command: Option<Command>,
+        }
+
+        #[derive(clap::Subcommand, Debug)]
+        pub enum Command {
+            /// Print the CSR, then install a signed cert pasted on stdin.
+            Enroll,
+        }
+    };
+}

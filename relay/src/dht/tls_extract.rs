@@ -1,8 +1,8 @@
 //! Ed25519 keys and capabilities from peer certificates. Inbound `peer/5` peers present no client
 //! certificate, so their key comes from the verified `DhtHello` instead.
 
-use common::node::capability::CAPABILITY_OID;
 use common::node::capability::NodeCapabilities;
+use common::node::enroll::cert_capabilities;
 use thiserror::Error;
 use x509_parser::der_parser::Oid;
 use x509_parser::oid_registry::asn1_rs::oid;
@@ -17,14 +17,7 @@ const ED25519_OID: Oid<'static> = oid!(1.3.101 .112);
 pub(crate) fn capabilities_from_conn(conn: &quinn::Connection) -> Option<NodeCapabilities> {
     let identity = conn.peer_identity()?;
     let chain = identity.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()?;
-    capabilities_from_leaf_der(chain.first()?.as_ref())
-}
-
-fn capabilities_from_leaf_der(der: &[u8]) -> Option<NodeCapabilities> {
-    let (_, cert) = X509Certificate::from_der(der).ok()?;
-    let oid = Oid::from(CAPABILITY_OID).ok()?;
-    let ext = cert.extensions().iter().find(|e| e.oid == oid)?;
-    NodeCapabilities::decode(ext.value)
+    cert_capabilities(chain.first()?)
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

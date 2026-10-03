@@ -1,5 +1,6 @@
 //! Connection admission for the daemons' QUIC endpoints and the TLS fallback listener.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::future::IntoFuture;
 use std::net::IpAddr;
@@ -18,11 +19,13 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-/// Accepts per minute and burst per [`source_group`], and the cap on live connections.
+/// Accepts per minute and burst per [`source_group`], and the caps on live connections in all and
+/// per source group, so one source cannot hold every slot.
 pub struct Policy {
-    pub per_minute: u32,
-    pub burst:      u32,
-    pub max_live:   usize,
+    pub per_minute:          u32,
+    pub burst:               u32,
+    pub max_live:            usize,
+    pub max_live_per_source: usize,
 }
 
 /// Bounds how long a peer that never finishes the TLS handshake holds a slot.
@@ -52,27 +55,41 @@ pub fn quota(per_minute: u32, burst: u32) -> Quota {
 }
 
 pub(crate) struct Gate {
-    limiter: RateLimiter<[u8; 16], DefaultKeyedStateStore<[u8; 16]>, DefaultClock>,
-    slots:   Arc<Semaphore>,
+    limiter:    RateLimiter<[u8; 16], DefaultKeyedStateStore<[u8; 16]>, DefaultClock>,
+    slots:      Arc<Semaphore>,
+    sources:    HashMap<[u8; 16], Arc<Semaphore>>,
+    per_source: usize,
 }
 
 impl Gate {
     pub(crate) fn new(policy: &Policy) -> Self {
         Self {
-            limiter: RateLimiter::keyed(quota(policy.per_minute, policy.burst)),
-            slots:   Arc::new(Semaphore::new(policy.max_live)),
+            limiter:    RateLimiter::keyed(quota(policy.per_minute, policy.burst)),
+            slots:      Arc::new(Semaphore::new(policy.max_live)),
+            sources:    HashMap::new(),
+            per_source: policy.max_live_per_source,
         }
     }
 
-    pub(crate) fn admit(&self, ip: IpAddr) -> Result<OwnedSemaphorePermit, &'static str> {
-        self.limiter.check_key(&source_group(ip)).map_err(|_| "rate limited")?;
-        self.slots.clone().try_acquire_owned().map_err(|_| "at the live-connection cap")
+    /// The connection holds both permits until it ends.
+    pub(crate) fn admit(&mut self, ip: IpAddr) -> Result<[OwnedSemaphorePermit; 2], &'static str> {
+        let group = source_group(ip);
+        self.limiter.check_key(&group).map_err(|_| "rate limited")?;
+        let per_source = self.per_source;
+        let source =
+            self.sources.entry(group).or_insert_with(|| Arc::new(Semaphore::new(per_source)));
+        let source = source.clone().try_acquire_owned().map_err(|_| "at the per-source cap")?;
+        let slot =
+            self.slots.clone().try_acquire_owned().map_err(|_| "at the live-connection cap")?;
+        Ok([source, slot])
     }
 
-    /// governor never evicts on its own; unswept, the map keeps every source it has seen.
-    pub(crate) fn sweep(&self) {
+    /// Neither map forgets a source on its own; unswept, both keep every source they have seen.
+    pub(crate) fn sweep(&mut self) {
         self.limiter.retain_recent();
         self.limiter.shrink_to_fit();
+        let per_source = self.per_source;
+        self.sources.retain(|_, source| source.available_permits() < per_source);
     }
 }
 
@@ -83,7 +100,7 @@ where
     F: Fn(Connection) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let gate = Gate::new(&policy);
+    let mut gate = Gate::new(&policy);
     let handle = Arc::new(handle);
     let mut tasks = JoinSet::new();
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
@@ -126,5 +143,31 @@ pub(crate) async fn drain(mut tasks: JoinSet<()>) {
         let left = tasks.len();
         crate::warn!("{left} connection task(s) still running after {SHUTDOWN_GRACE:?}; aborting");
         tasks.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    /// One source group fills only its share of the live slots, another still gets in, and a
+    /// closed connection frees its slot.
+    #[test]
+    fn one_source_cannot_hold_every_live_slot() {
+        let policy =
+            Policy { per_minute: 600, burst: 300, max_live: 300, max_live_per_source: 256 };
+        let mut gate = Gate::new(&policy);
+        let ip = |last| IpAddr::V4(Ipv4Addr::new(10, 0, 0, last));
+        let mut held: Vec<_> = (0..256).map(|_| gate.admit(ip(1)).unwrap()).collect();
+        assert_eq!(gate.admit(ip(1)).err(), Some("at the per-source cap"));
+        let other: Vec<_> = (0..44).map(|_| gate.admit(ip(2)).unwrap()).collect();
+        assert_eq!(gate.admit(ip(3)).err(), Some("at the live-connection cap"));
+        drop(other);
+        held.pop();
+        assert!(gate.admit(ip(1)).is_ok());
+        gate.sweep();
+        assert_eq!(gate.sources.len(), 1, "only a source with live connections is kept");
     }
 }

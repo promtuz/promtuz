@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::proto::client_rel::Wake;
+use crate::proto::client_res::GatewayDescriptor;
 use crate::proto::pack::bounded_vec;
 use crate::types::bytes::Bytes;
 
@@ -18,6 +19,18 @@ pub const MAX_WAKE_PAYLOAD_BYTES: usize = 4096;
 
 /// Registration candidates must match the relay's bounded wake fanout.
 pub const MAX_PUSH_GATEWAYS: usize = 8;
+
+/// The gateways a relay wakes and a device registers with: the [`MAX_PUSH_GATEWAYS`] lowest ids
+/// among the verified ones. Both sides pick the same set, so a registration lands where wakes go.
+/// Capping before verifying would let unverified low ids crowd out every real gateway.
+pub fn wake_targets(
+    mut directory: Vec<GatewayDescriptor>, verified: impl FnMut(&GatewayDescriptor) -> bool,
+) -> Vec<GatewayDescriptor> {
+    directory.retain(verified);
+    directory.sort_by_key(|gateway| gateway.id);
+    directory.truncate(MAX_PUSH_GATEWAYS);
+    directory
+}
 
 /// Sent only after the gateway commits a device's registration.
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +123,24 @@ impl RegisterToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::RelayId;
+
+    #[test]
+    fn wake_targets_cap_only_verified_gateways() {
+        let directory: Vec<GatewayDescriptor> = (0..20u8)
+            .rev()
+            .map(|n| GatewayDescriptor {
+                id:     RelayId::from_bytes([n; 32]),
+                addr:   "127.0.0.1:1".parse().unwrap(),
+                pubkey: Bytes([n; 32]),
+            })
+            .collect();
+        let first = |gateway: &GatewayDescriptor| gateway.id.as_bytes()[0];
+        for (verified, expected) in [(0..20, 0..8), (10..20, 10..18)] {
+            let targets = wake_targets(directory.clone(), |g| verified.contains(&first(g)));
+            assert_eq!(targets.iter().map(first).collect::<Vec<_>>(), expected.collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn transcripts() {

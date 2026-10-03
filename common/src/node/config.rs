@@ -8,7 +8,7 @@ use std::str::FromStr;
 use serde::Deserialize;
 use serde_with::serde_as;
 
-use crate::quic::id::NodeKey;
+use crate::types::id::NodeKey;
 
 #[derive(Deserialize, Debug)]
 pub struct NetworkConfig {

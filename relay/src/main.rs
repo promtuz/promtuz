@@ -32,8 +32,9 @@ mod turn;
 mod util;
 
 /// Per source, and loose on purpose: a whole carrier NAT shares one address and reconnects at
-/// once after an outage. `max_live` is what bounds concurrency.
-const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 8192 };
+/// once after an outage. The live caps are what bound concurrency.
+const ACCEPT: accept::Policy =
+    accept::Policy { per_minute: 600, burst: 300, max_live: 8192, max_live_per_source: 1024 };
 
 #[tokio::main]
 async fn main() -> Result<()> {

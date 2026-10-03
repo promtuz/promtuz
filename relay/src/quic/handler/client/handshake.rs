@@ -49,7 +49,11 @@ pub(super) async fn handle_handshake(
             .send(&mut tx)
             .await
             .err();
-        bail!("client({}) failed auth for ipk({ipk:?})", conn.remote_address());
+        bail!(
+            "client({}) failed auth for ipk({})",
+            conn.remote_address(),
+            hex::encode(&ipk_bytes[..4])
+        );
     }
 
     // The client binds its welcome fetch/ack signatures to this NodeId.

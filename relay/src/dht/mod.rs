@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 
+use common::contracts::Support;
 use common::proto::RelayId;
 use common::proto::client_res::GatewayDescriptor;
 use common::quic::id::NodeId;
@@ -52,6 +53,10 @@ pub struct Dht {
     /// `BLAKE3(SPKI) == NodeId` pin after the handshake is the dial's only identity check.
     /// Inbound: the verified `DhtHello` pubkey.
     pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
+
+    /// Each live `peer/5` connection's service guarantees, keyed by `stable_id` and dropped when
+    /// its serve loop ends.
+    pub(crate) peer_services: RwLock<HashMap<usize, Support>>,
 
     pub(crate) resolver: parking_lot::RwLock<Option<ResolverLinkHandle>>,
 
@@ -88,7 +93,8 @@ pub struct Dht {
     /// handler so a lease relay can reject stale cross-relay routes.
     pub(crate) presence_leases: Option<PresenceLeases>,
 
-    /// Gateways from the resolver whose certificate carries `PUSH_GATEWAY`. Empty means no wakes.
+    /// The wake targets among the gateways whose certificate carries `PUSH_GATEWAY`. Empty means
+    /// no wakes.
     pub(crate) push_gateways: PushGateways,
 
     /// One live connection per gateway, redialed once it has closed.
@@ -109,6 +115,7 @@ impl Dht {
             routing: RwLock::new(RoutingTable::empty(node_id)),
             store,
             peer_conns: RwLock::new(HashMap::new()),
+            peer_services: RwLock::new(HashMap::new()),
             resolver: parking_lot::RwLock::new(None),
             node_id,
             signing_key,

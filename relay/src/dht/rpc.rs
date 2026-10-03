@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::contracts::Support;
 use common::contracts::services;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
@@ -18,27 +19,41 @@ use super::Dht;
 use super::config::FORWARD_TIMEOUT_MS;
 
 /// `None` on any failure or a missed budget. A KeyPackage request first checks the peer's service
-/// guarantee on the same connection, so a reconnect cannot inherit old capabilities.
+/// guarantee, probed once per connection, so a reconnect cannot inherit old capabilities.
 pub(crate) async fn rpc(
     dht: &Arc<Dht>, peer: &NodeDescriptor, req: &DhtRequest, budget_ms: u64,
 ) -> Option<DhtResponse> {
     timeout(Duration::from_millis(budget_ms), async {
         let conn = super::lookup::connect_to_peer(dht, peer).await.ok()?;
-        if let Some((id, version)) = required_service(req) {
-            let DhtResponse::ServiceCapabilities { supported } =
-                exchange(&conn, DhtRequest::ServiceCapabilities).await?
-            else {
-                return None;
-            };
-            if !common::contracts::Support::decode(&supported.0).ok()?.supports(id, version) {
-                return None;
-            }
+        if let Some((id, version)) = required_service(req)
+            && !peer_services(dht, &conn).await?.supports(id, version)
+        {
+            return None;
         }
         exchange(&conn, req.clone()).await
     })
     .await
     .ok()
     .flatten()
+}
+
+async fn peer_services(dht: &Dht, conn: &Connection) -> Option<Support> {
+    if let Some(support) = dht.peer_services.read().get(&conn.stable_id()) {
+        return Some(support.clone());
+    }
+    let DhtResponse::ServiceCapabilities { supported } =
+        exchange(conn, DhtRequest::ServiceCapabilities).await?
+    else {
+        return None;
+    };
+    let support = Support::decode(&supported.0).ok()?;
+    // Checked under the lock: once the connection closes, its serve loop drops the entry and
+    // another connection may reuse the id.
+    let mut cache = dht.peer_services.write();
+    if conn.close_reason().is_none() {
+        cache.insert(conn.stable_id(), support.clone());
+    }
+    Some(support)
 }
 
 /// Every peer at once. A peer that fails or misses the budget is left out.

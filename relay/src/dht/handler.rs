@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use common::proto::dht_p2p::DhtHello;
 use common::proto::dht_p2p::DhtHelloVerifyError;
@@ -21,6 +22,7 @@ use common::proto::pack::Unpacker;
 use common::quic::CloseReason;
 use common::quic::id::NodeId;
 use common::utils::now_ms;
+use parking_lot::Mutex;
 use quinn::Connection;
 use quinn::SendStream;
 use tokio::sync::Semaphore;
@@ -35,6 +37,10 @@ use super::routing::RoutingTable;
 const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 
 const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A connection's RPCs refresh its peer's routing entry at most this often. The LRU order only
+/// picks which entry a full bucket probes, and a busy peer answers that probe.
+const LIVENESS_REFRESH: Duration = Duration::from_secs(30);
 
 pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // A failed hello has already closed the connection with the matching reason.
@@ -64,6 +70,8 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
 pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: AuthenticatedPeer) {
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
     let conn_id = conn.stable_id();
+    // When this connection last refreshed the peer's routing entry. Setting it up inserted it.
+    let refreshed = Arc::new(Mutex::new(Instant::now()));
 
     loop {
         let stream = match conn.accept_bi().await {
@@ -79,13 +87,15 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
 
         let dht_clone = dht.clone();
         let conn_for_task = conn.clone();
+        let refreshed = refreshed.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let mut recv = recv;
-            handle_one_stream(dht_clone, conn_for_task, send, &mut recv, auth).await;
+            handle_one_stream(dht_clone, conn_for_task, send, &mut recv, auth, &refreshed).await;
         });
     }
 
+    dht.peer_services.write().remove(&conn_id);
     // Evict only if the cache still holds this connection; a reconnect may have replaced it.
     let peer_id_to_remove: Option<NodeId> = {
         let map = dht.peer_conns.read();
@@ -191,7 +201,7 @@ fn verify_hello_with_close_reason(
 
 async fn handle_one_stream(
     dht: Arc<Dht>, conn: Connection, mut send: SendStream, recv: &mut quinn::RecvStream,
-    auth: AuthenticatedPeer,
+    auth: AuthenticatedPeer, refreshed: &Mutex<Instant>,
 ) {
     let pkt = match DhtPacket::unpack(recv).await {
         Ok(p) => p,
@@ -221,8 +231,16 @@ async fn handle_one_stream(
 
     let resp = handle_dht_request(&dht, req, auth.node_id).await;
 
-    // Usually a refresh: setting up the connection already inserted the peer.
-    {
+    // Every RPC would otherwise queue on the routing write lock.
+    let due = {
+        let mut at = refreshed.lock();
+        let due = at.elapsed() >= LIVENESS_REFRESH;
+        if due {
+            *at = Instant::now();
+        }
+        due
+    };
+    if due {
         let desc = NodeDescriptor {
             id: auth.node_id,
             addr: conn.remote_address(),

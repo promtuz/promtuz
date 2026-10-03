@@ -20,8 +20,8 @@ use parking_lot::RwLock;
 use quinn::Connection;
 use tokio::task::JoinHandle;
 
-/// Counted per [`source_group`]. Registration proves only possession of a fresh keypair, so
-/// the source address is the one scarce resource an unauthenticated peer has to spend.
+/// Counted per [`source_group`]. A relay's registration proves only possession of a fresh keypair,
+/// so the source address is the one scarce resource an unauthenticated peer has to spend.
 pub const MAX_REGISTRATIONS_PER_SOURCE: usize = 8;
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-mod cli;
+mod cli {
+    common::daemon_cli!("gateway", "Promtuz push gateway");
+}
 mod config;
 mod fcm;
 mod gateway;
@@ -24,7 +26,8 @@ use crate::gateway::Gateway;
 
 /// Sized for a carrier NAT and for a relay that dials once per wake; the per-connection request
 /// budget bounds what each connection costs.
-const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 4096 };
+const ACCEPT: accept::Policy =
+    accept::Policy { per_minute: 600, burst: 300, max_live: 4096, max_live_per_source: 256 };
 
 #[tokio::main]
 async fn main() -> Result<()> {

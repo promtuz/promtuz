@@ -71,7 +71,7 @@ pub struct Store {
     pub presence_lease:   Keyspace,
     pub push_pseudonym:   Keyspace,
     pub push_pending:     Keyspace,
-    /// Striped by recipient, so a queue's cap and id checks see every earlier insert.
+    /// Striped by the row's owner, so a cap or version check sees every earlier write.
     admission:            [parking_lot::Mutex<()>; 64],
     maintenance:          Arc<Maintenance>,
     worker:               Option<JoinHandle<()>>,
@@ -148,9 +148,9 @@ impl Store {
         })
     }
 
-    /// Held from a queue's admission scan through its insert.
-    pub fn admission(&self, recipient: &[u8; 32]) -> parking_lot::MutexGuard<'_, ()> {
-        self.admission[usize::from(recipient[0]) % self.admission.len()].lock()
+    /// Held from a cap or version check through the write it admits.
+    pub fn admission(&self, owner: &[u8; 32]) -> parking_lot::MutexGuard<'_, ()> {
+        self.admission[usize::from(owner[0]) % self.admission.len()].lock()
     }
 
     /// Not fsynced: a stamp lost in a crash only degrades last-seen.
@@ -170,6 +170,7 @@ impl Store {
         let mut key = [0u8; 64];
         key[..32].copy_from_slice(&consent.owner.0);
         key[32..].copy_from_slice(&consent.recipient.0);
+        let _admission = self.admission(&consent.owner.0);
         let stored = self.presence_consent.get(key)?;
         if stored.as_ref().is_some_and(|v| be_u64(v, 0).is_some_and(|old| old >= consent.version)) {
             return Ok(false);
@@ -206,6 +207,7 @@ impl Store {
         let mut key = [0u8; 64];
         key[..32].copy_from_slice(recipient);
         key[32..].copy_from_slice(contact);
+        let _admission = self.admission(recipient);
         if self.presence_state.get(key)?.is_some_and(|v| {
             !presence_state_expired(b"", &v, observed_at_ms)
                 && (be_u64(&v, 0).is_some_and(|old| old >= version)
@@ -256,6 +258,7 @@ impl Store {
         use common::proto::pack::Packer;
         use common::proto::pack::Unpacker;
 
+        let _admission = self.admission(&lease.user.0);
         if self.presence_lease.get(&lease.user.0)?.is_some_and(|v| {
             common::proto::dht_p2p::PresenceLease::deser(&v)
                 .ok()
@@ -707,5 +710,32 @@ mod tests {
             "a live row still wins on version"
         );
         assert!(put(1, t0 + PRESENCE_STATE_TTL_MS + 1), "a stale row counts as absent");
+    }
+
+    /// Racing writes of one consent row keep the newest version, so an older grant written late
+    /// cannot undo a revocation.
+    #[test]
+    fn racing_presence_writes_keep_the_newest_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_empty(dir.path());
+        for round in 0..20u8 {
+            std::thread::scope(|scope| {
+                for version in 1..=8 {
+                    let consent = PresenceConsent {
+                        owner: [round; 32].into(),
+                        recipient: [2; 32].into(),
+                        version,
+                        issued_at_ms: 1,
+                        granted: version < 8,
+                        user_sig: [0; 64].into(),
+                    };
+                    let store = &store;
+                    scope.spawn(move || store.put_presence_consent(&consent).unwrap());
+                }
+            });
+            let row = store.presence_consent.get([[round; 32], [2; 32]].concat()).unwrap();
+            assert_eq!(row.and_then(|v| be_u64(&v, 0)), Some(8), "round {round}");
+            assert!(!store.has_presence_consent(&[round; 32], &[2; 32]), "round {round}");
+        }
     }
 }
