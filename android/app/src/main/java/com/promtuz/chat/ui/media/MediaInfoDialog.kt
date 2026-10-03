@@ -1,58 +1,68 @@
 package com.promtuz.chat.ui.media
 
 import com.promtuz.chat.ui.components.AppAlertDialog
-import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
-import android.text.format.Formatter
+import android.content.ClipData
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.ui.text.clock
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 @Composable
 fun MediaInfoDialog(item: MediaItem, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val details by produceState<List<Pair<String, String>>>(emptyList(), item.key) {
-        value = withContext(Dispatchers.IO) {
-            buildList {
-                if (item.title.isNotBlank()) add("From" to item.title)
-                if (item.subtitle.isNotBlank()) add("Date" to item.subtitle)
-                if (item.filePath != null) add("Name" to item.shareName)
-                add("Type" to item.mime)
-                (item.byteSize ?: item.filePath?.let { File(it).takeIf(File::isFile)?.length() })
-                    ?.let { add("Size" to Formatter.formatShortFileSize(context, it)) }
-                var width = if (item.filePath == null) item.width else 0
-                var height = if (item.filePath == null) item.height else 0
-                if (item.videoPath != null) runCatching {
-                    val r = MediaMetadataRetriever()
-                    try {
-                        r.setDataSource(item.videoPath)
-                        width = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                        height = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                        r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-                            ?.let { add("Duration" to clock(it)) }
-                    } finally { r.release() }
-                } else if (item.filePath != null) runCatching {
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(item.filePath, bounds)
-                    width = bounds.outWidth; height = bounds.outHeight
-                }
-                if (width > 0 && height > 0) add("Dimensions" to "$width × $height")
-            }
-        }
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val summary = remember(context, item) { listOf(MediaInfoSection(null, mediaSummary(context, item))) }
+    var loading by remember(item) { mutableStateOf(true) }
+    var failed by remember(item) { mutableStateOf(false) }
+    val details by produceState(summary, item) {
+        loading = true
+        failed = false
+        value = summary
+        try { value = readMediaDetails(context, item) }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { failed = true }
+        finally { loading = false }
     }
     AppAlertDialog(onDismissRequest = onDismiss, title = { Text("Media info") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            details.forEach { (label, value) -> Column {
-                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(value, style = MaterialTheme.typography.bodyLarge)
-            } }
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            SelectionContainer {
+                Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                    details.forEach { section ->
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            section.title?.let { title ->
+                                HorizontalDivider()
+                                Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                            section.rows.forEach { (label, value) -> Column {
+                                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(value, style = MaterialTheme.typography.bodyLarge)
+                            } }
+                        }
+                    }
+                }
+            }
+            if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            if (failed) Text("Couldn’t read more details", style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }, dismissButton = {
+        TextButton(onClick = {
+            val text = details.joinToString("\n\n") { section ->
+                listOfNotNull(section.title, section.rows.joinToString("\n") { (label, value) -> "$label: $value" }).joinToString("\n")
+            }
+            scope.launch {
+                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Media info", text)))
+                Toast.makeText(context, "Media info copied", Toast.LENGTH_SHORT).show()
+            }
+        }) { Text("Copy") }
+    })
 }
