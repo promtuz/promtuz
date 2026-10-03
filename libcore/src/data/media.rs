@@ -349,7 +349,11 @@ pub fn dump_all_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MediaBac
     Ok(rows)
 }
 
+/// Oldest dispatch first, whatever order the blob lists them in, so rowids rise with age as the
+/// export's inline budget expects.
 pub fn import_rows_tx(conn: &rusqlite::Connection, rows: &[MediaBackupRow]) -> Result<usize> {
+    let mut rows: Vec<_> = rows.iter().collect();
+    rows.sort_by_key(|r| r.dispatch_id);
     let mut n = 0usize;
     for r in rows {
         n += conn.execute(

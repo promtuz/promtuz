@@ -131,9 +131,13 @@ pub fn send_attachment(
         .and_then(|d| d.try_into().ok())
         .expect("save_outgoing mints a dispatch_id");
     core().spawn(async move {
+        // Held from before the copy is retained until the row names it, so a cleanup of the same
+        // content meanwhile keeps the fresh copy.
+        let mut hold = None;
+        let held = |f| hold = Some(crate::staging::Hold::new(f));
         // Only a prepare failure discards the placeholder, since the offer never existed. A later
         // send failure leaves the row pending for retry.
-        let file_id = match crate::transfer::prepare_send(&source_path, 7 * 24 * 3600, |_| {}) {
+        let file_id = match crate::transfer::prepare_send(&source_path, 7 * 24 * 3600, held) {
             Ok((file_id, _size)) => file_id,
             Err(e) => {
                 log::warn!("MEDIA: send_attachment prepare failed: {e}");
@@ -144,6 +148,7 @@ pub fn send_attachment(
         if let Err(e) = crate::messaging::finish_attachment(to, did, file_id).await {
             log::warn!("MEDIA: send_attachment send deferred to retry: {e}");
         }
+        drop(hold);
     });
     Ok(())
 }

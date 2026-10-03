@@ -157,6 +157,15 @@ const MIGRATION_ARRAY: &[M] = &[
             conversation BLOB NOT NULL
         );
     "#),
+    // Groups stored before `mls_group_size` existed were never counted in full.
+    M::up(
+        r#"--sql
+        DELETE FROM mls_group_size;
+        INSERT INTO mls_group_size(group_id, total_bytes)
+            SELECT group_id, SUM(length(value)) FROM mls_storage
+            WHERE group_id <> X'' GROUP BY group_id;
+    "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -193,5 +202,25 @@ mod tests {
         let legacy: (Vec<u8>, Vec<u8>, u64, Option<Vec<u8>>, Option<Vec<u8>>) =
             (vec![2; 16], vec![3; 128], 123, None, None);
         assert_eq!(row, legacy);
+    }
+
+    /// A group stored before sizes were tracked, whose total holds only the writes made since,
+    /// is counted in full; unscoped rows count toward no group.
+    #[test]
+    fn group_sizes_are_recounted_from_storage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..5]).to_latest(&mut conn).unwrap();
+        let rows = [(vec![1u8], 5, 10), (vec![1], 9, 20), (vec![2], 5, 7), (vec![], 32, 100)];
+        for (group, tag, len) in rows {
+            let sql = "INSERT INTO mls_storage VALUES (?1, ?2, X'', ?3)";
+            conn.execute(sql, (group, tag, vec![0u8; len])).unwrap();
+        }
+        conn.execute("INSERT INTO mls_group_size VALUES (X'01', 20)", []).unwrap();
+        migrate(&mut conn);
+        let sql = "SELECT group_id, total_bytes FROM mls_group_size ORDER BY 1";
+        let mut q = conn.prepare(sql).unwrap();
+        let sizes: Vec<(Vec<u8>, i64)> =
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(sizes, [(vec![1], 30), (vec![2], 7)]);
     }
 }

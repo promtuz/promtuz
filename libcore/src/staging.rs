@@ -62,6 +62,28 @@ impl Staged {
 
 static ITEMS: LazyLock<Mutex<HashMap<u64, Staged>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// Files a direct send retained and has not yet named on its message row, once per send.
+static SENDING: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::new());
+
+/// Keeps a direct send's file from cleanup until dropped, without naming it on the row a reconnect
+/// retry would send.
+pub(crate) struct Hold([u8; 32]);
+
+impl Hold {
+    pub(crate) fn new(file_id: [u8; 32]) -> Self {
+        SENDING.lock().push(file_id);
+        Self(file_id)
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut sending = SENDING.lock();
+        if let Some(i) = sending.iter().position(|f| *f == self.0) {
+            sending.swap_remove(i);
+        }
+    }
+}
 
 fn ring() {
     if let Some(events) = core().events.get() {
@@ -96,9 +118,10 @@ pub fn clear() {
     release(&orphans);
 }
 
-/// Consulted by the message-side unlink: a chip can hold the same file as a deleted message.
+/// Consulted by the message-side unlink: a chip or a send in flight can hold the same file as a
+/// deleted message.
 pub(crate) fn holds(file_id: &[u8; 32]) -> bool {
-    ITEMS.lock().values().any(|s| s.file_id == Some(*file_id))
+    SENDING.lock().contains(file_id) || ITEMS.lock().values().any(|s| s.file_id == Some(*file_id))
 }
 
 /// Files `gone` held that no remaining item holds. Retention is one row per content hash, so the

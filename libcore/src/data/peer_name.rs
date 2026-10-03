@@ -27,20 +27,26 @@ pub fn get(who: &[u8; 32]) -> Option<String> {
         .ok()
 }
 
-/// The name to show, and whether it is only their own claim. Precedence: local nickname, their
-/// profile name, the address book, a group-asserted name, then the key's head.
+/// The name to show, and whether it is only their own claim. Precedence: local nickname, then
+/// [`named`], then the key's head.
 pub fn resolve_claimed(who: &[u8; 32]) -> (String, bool) {
     let nickname = crate::data::app_prefs::get(&format!("nickname:{}", hex::encode(who)));
     if let Some(nickname) = nickname.filter(|s| !s.is_empty()) {
         return (nickname, false);
     }
+    named(who).unwrap_or_else(|| (hex::encode(&who[..4]), false))
+}
+
+/// Their profile name, the address book, then a group-asserted name, and whether it is only their
+/// own claim.
+pub fn named(who: &[u8; 32]) -> Option<(String, bool)> {
     if let Some(profile) = crate::data::peer_profile::get(who) {
-        return (profile.name, true);
+        return Some((profile.name, true));
     }
     if let Some(c) = crate::data::contact::Contact::get(who).filter(|c| !c.inner.name.is_empty()) {
-        return (c.inner.name.clone(), false);
+        return Some((c.inner.name.clone(), false));
     }
-    get(who).map_or_else(|| (hex::encode(&who[..4]), false), |name| (name, true))
+    get(who).map(|name| (name, true))
 }
 
 pub fn resolve(who: &[u8; 32]) -> String {

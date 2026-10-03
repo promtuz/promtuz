@@ -1,6 +1,5 @@
 use anyhow::Result;
 use common::utils::now_secs;
-use parking_lot::Mutex;
 use ulid::Ulid;
 
 use crate::data::backup::MemberReadRow;
@@ -17,17 +16,10 @@ pub const STATUS_FAILED: u8 = 2;
 pub const STATUS_DELIVERED: u8 = 3;
 pub const STATUS_READ: u8 = 4;
 
-/// Strictly monotonic, so a "delivered up to X" watermark never covers a later same-ms send.
-static LAST_DISPATCH_ID: Mutex<u128> = Mutex::new(0);
-
+/// Strictly monotonic within the process, as `now_v7` guarantees, so a "delivered up to X"
+/// watermark never covers a later same-ms send.
 pub fn next_dispatch_id() -> [u8; 16] {
-    let mut last = LAST_DISPATCH_ID.lock();
-    let mut v = u128::from_be_bytes(uuid::Uuid::now_v7().into_bytes());
-    if v <= *last {
-        v = *last + 1;
-    }
-    *last = v;
-    v.to_be_bytes()
+    uuid::Uuid::now_v7().into_bytes()
 }
 
 #[derive(Debug, Clone)]
@@ -617,19 +609,23 @@ pub fn dump_read_state_tx(
     ))
 }
 
+/// Watermarks only move forward, so a blob older than the live state changes nothing.
 pub fn import_read_state_tx(
     conn: &rusqlite::Connection, mine: &[ReadRow], theirs: &[MemberReadRow],
 ) -> Result<()> {
     for r in mine {
         conn.execute(
-            "INSERT OR IGNORE INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2)",
+            "INSERT INTO read_state (conversation_id, upto_dispatch_id) VALUES (?1, ?2) \
+             ON CONFLICT(conversation_id) \
+             DO UPDATE SET upto_dispatch_id = MAX(upto_dispatch_id, excluded.upto_dispatch_id)",
             (r.conversation_id.as_slice(), &r.upto_dispatch_id),
         )?;
     }
     for r in theirs {
         conn.execute(
-            "INSERT OR IGNORE INTO member_read_state \
-             (conversation_id, member_ipk, upto_dispatch_id) VALUES (?1, ?2, ?3)",
+            "INSERT INTO member_read_state (conversation_id, member_ipk, upto_dispatch_id) \
+             VALUES (?1, ?2, ?3) ON CONFLICT(conversation_id, member_ipk) \
+             DO UPDATE SET upto_dispatch_id = MAX(upto_dispatch_id, excluded.upto_dispatch_id)",
             (r.conversation_id.as_slice(), r.member_ipk.as_slice(), &r.upto_dispatch_id),
         )?;
     }

@@ -72,8 +72,11 @@ pub fn person_profile(ipk: Vec<u8>) -> Result<PersonProfile, CoreError> {
     let profile = Identity::get().filter(|i| i.ipk() == who).map(|i| i.details())
         .or_else(|| crate::data::peer_profile::get(&who));
     Ok(PersonProfile {
-        name: profile.as_ref().map(|p| p.name.clone()).or_else(|| crate::data::peer_name::get(&who))
-            .or_else(|| crate::data::contact::Contact::get(&who).map(|c| c.inner.name.clone())).unwrap_or_default(),
+        name: profile
+            .as_ref()
+            .map(|p| p.name.clone())
+            .or_else(|| crate::data::peer_name::named(&who).map(|(name, _)| name))
+            .unwrap_or_default(),
         can_share: profile.as_ref().is_some_and(|p| !p.card.is_empty()),
         bio: profile.map(|p| p.bio).unwrap_or_default(),
         nickname: crate::data::app_prefs::get(&format!("nickname:{}", hex::encode(who))).unwrap_or_default(),

@@ -259,9 +259,7 @@ fn import_into(
     let media = crate::data::media::import_rows_tx(&tx, &payload.media)?;
     crate::data::media::import_sticker_refs_tx(&tx, &suffixes.stickers.0)?;
     crate::data::stickers::import_rows_tx(&tx, &suffixes.stickers.1)?;
-    if replace {
-        crate::data::message::import_read_state_tx(&tx, &payload.read_state, &payload.member_read)?;
-    }
+    crate::data::message::import_read_state_tx(&tx, &payload.read_state, &payload.member_read)?;
     crate::data::receipts::backfill_tx(&tx)?;
     crate::data::receipts::restore_tx(&tx, &suffixes.receipts)?;
     crate::data::app_prefs::import_rows_tx(&tx, &payload.prefs)?;

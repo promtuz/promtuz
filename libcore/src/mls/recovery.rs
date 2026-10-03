@@ -677,6 +677,7 @@ impl PromtuzStorageProvider {
                 "mls_recovery_retries", "mls_migration_consents", "mls_epoch_ahead"] {
                 tx.execute(&format!("DELETE FROM {table} WHERE group_id=?1"), [gid])?;
             }
+            tx.execute("DELETE FROM mls_group_migrations WHERE group_id=?1 OR target=?1", [gid])?;
             Ok(())
         })
     }
