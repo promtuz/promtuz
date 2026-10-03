@@ -21,9 +21,9 @@ pub fn client_auth_message(nonce: &[u8; 32], binding: &[u8; 32]) -> Vec<u8> {
 }
 
 pub fn dispatch_sig_message(
-    to: &[u8; 32], from: &[u8; 32], id: &[u8; 16], payload: &[u8],
+    version: u16, to: &[u8; 32], from: &[u8; 32], id: &[u8; 16], payload: &[u8],
 ) -> Vec<u8> {
-    [DISPATCH_SIG_DOMAIN, &PROTOCOL_VERSION.to_be_bytes(), to, from, id, payload].concat()
+    [DISPATCH_SIG_DOMAIN, &version.to_be_bytes(), to, from, id, payload].concat()
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -396,12 +396,27 @@ mod tests {
         crate::proto::golden(
             &[
                 client_auth_message(&[1; 32], &[2; 32]),
-                dispatch_sig_message(&[1; 32], &[2; 32], &[3; 16], b"payload"),
+                dispatch_sig_message(PROTOCOL_VERSION, &[1; 32], &[2; 32], &[3; 16], b"payload"),
                 activity_sig_message(&[1; 32], &[2; 32], &[3; 32], 0x0102, 0x0304),
             ],
-            "1b9a992eafdc6e9e7c6a31cf3c8cc7bc93f1990d21bcdf45abea25fdf6a91469
-             fbd2606c5c83fd5c6ddf544fab3a1b442c3ed582fee254833e0c8c4207266ce6
-             28e6d33826ac34a648c6b541de63850fdd8596f8670e75140b79c3da747f05ed",
+            "b784a6c7ee42b34603c07eddccd6eda1f0830755ccad8b9fe8dad5f1453862f8
+             3db888a1b396d726a8ab4186fc1fc441ffa66ab6b6524a635aa479b8aa76418e
+             363343bbafd645880d89d826eb2eea80ecdcbca5de46c4a1202efed33c066bd7",
         );
+    }
+
+    #[test]
+    fn dispatches_signed_under_an_accepted_version_verify() {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let from = key.verifying_key().to_bytes();
+        let transcript = |v| dispatch_sig_message(v, &[2; 32], &from, &[3; 16], b"payload");
+        let verifies = |signed_at: u16| {
+            let sig = key.sign(&transcript(signed_at)).to_bytes();
+            crate::crypto::verify_versioned(&from, &sig, transcript).is_ok()
+        };
+        for (version, accepted) in [(PROTOCOL_VERSION, true), (10, true), (9, false), (12, false)] {
+            assert_eq!(verifies(version), accepted, "signed under version {version}");
+        }
     }
 }

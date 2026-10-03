@@ -24,3 +24,12 @@ pub fn get_nonce<const N: usize>() -> [u8; N] {
 pub fn verify_ed25519(pubkey: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SignatureError> {
     PublicKey::from_bytes(pubkey)?.verify_strict(msg, &Signature::from_bytes(sig))
 }
+
+/// [`verify_ed25519`] over the transcript of any version in [`crate::SIGNATURE_VERSIONS`].
+pub fn verify_versioned(
+    pubkey: &[u8; 32], sig: &[u8; 64], transcript: impl Fn(u16) -> Vec<u8>,
+) -> Result<(), SignatureError> {
+    let [current, previous] = crate::SIGNATURE_VERSIONS;
+    verify_ed25519(pubkey, &transcript(current), sig)
+        .or_else(|e| verify_ed25519(pubkey, &transcript(previous), sig).map_err(|_| e))
+}

@@ -114,9 +114,9 @@ mod tests {
                 relay_heartbeat_signing_input(&id, &[2; 32], 0x0102),
                 gateway_hello_signing_input(&id, &[2; 32], 0x0102, &[3; 32]),
             ],
-            "b161f2df1ff0ddb5d2550c17bdb3a901387c660c098ae94da92c9349d3ddf5b2
-             2363b0d911f375b80ee040166a9b4dca5a6c587303a5d85de7cffa8f751fa904
-             1e42714d7d2845563f2a86d608facd2f5e78939a0aa0fabe975f96e29fac234c",
+            "326597cd67382077debbf13b1bfcef28f046bd4a04220eb3485f71dc47f04d18
+             09b026cd7e4f69576b939599d17396bb44f2ae0b3670946668331f437f7d1062
+             dea4f88c36b5d01a82a4a802c7befe0e0a80701d1720fd42047a3635b477eaa2",
         );
     }
 }

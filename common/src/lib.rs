@@ -1,6 +1,9 @@
 /// Version in the `role/N` ALPNs and in the handshake and signing transcripts nodes verify. A bump
 /// is a flag day for every node and client at once.
-pub static PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
+
+/// Messages queued under the previous version still verify.
+pub const SIGNATURE_VERSIONS: [u16; 2] = [PROTOCOL_VERSION, 10];
 
 #[cfg(feature = "contracts")]
 pub mod contracts;

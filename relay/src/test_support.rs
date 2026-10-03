@@ -79,7 +79,7 @@ pub(crate) fn unreachable_peer(seed: u8) -> NodeDescriptor {
 
 pub(crate) fn dispatch(from: &SigningKey, to: [u8; 32], id: [u8; 16], payload: &[u8]) -> DispatchP {
     let from_ipk = from.verifying_key().to_bytes();
-    let sig = from.sign(&dispatch_sig_message(&to, &from_ipk, &id, payload)).to_bytes();
+    let sig = from.sign(&dispatch_sig_message(common::PROTOCOL_VERSION, &to, &from_ipk, &id, payload)).to_bytes();
     DispatchP {
         to:             to.into(),
         from:           from_ipk.into(),

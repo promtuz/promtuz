@@ -315,7 +315,7 @@ pub(crate) async fn dispatch_envelope(
     env_bytes: Vec<u8>, wake: Wake, outbox: Option<OpType>,
 ) -> Result<()> {
     let id = crate::data::message::next_dispatch_id();
-    let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
+    let sig_message = dispatch_sig_message(common::PROTOCOL_VERSION, &to, &our_ipk, &id, &env_bytes);
     let sig = {
         use ed25519_dalek::Signer;
         ipk_signer.sign(&sig_message).to_bytes()
@@ -392,7 +392,7 @@ pub(crate) fn prepare_dispatch(
     to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
     wake: Wake, ttl_ms: u64,
 ) -> Result<Vec<u8>> {
-    let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
+    let sig_message = dispatch_sig_message(common::PROTOCOL_VERSION, to, our_ipk, id, &payload);
     let sig = {
         use ed25519_dalek::Signer;
         ipk_signer.sign(&sig_message).to_bytes()

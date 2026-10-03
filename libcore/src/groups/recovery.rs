@@ -4,7 +4,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
 use log::warn;
-use common::crypto::verify_ed25519;
+use common::crypto::verify_versioned;
 use common::proto::client_rel::Wake;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::GroupMessage;
@@ -246,15 +246,9 @@ pub fn receive(
         envelope.mls_message.0.len() <= common::proto::mls_wire::MAX_FRAMED_MLS_BYTES,
         "group message too large"
     );
-    let transcript = group_envelope_signing_input(
-        common::PROTOCOL_VERSION,
-        ours,
-        &gid,
-        envelope.epoch,
-        &branch,
-        &envelope.mls_message.0,
-    );
-    verify_ed25519(&sender, &transcript, &envelope.sender_sig.0)?;
+    verify_versioned(&sender, &envelope.sender_sig.0, |v| {
+        group_envelope_signing_input(v, ours, &gid, envelope.epoch, &branch, &envelope.mls_message.0)
+    })?;
     let Some(mut operation) = Transaction::open(provider, gid, Some(branch))? else {
         let Some(group) = MlsGroupHandle::load(provider, &gid)? else {
             if let Some(conversation) = Conversation::for_group(&gid)

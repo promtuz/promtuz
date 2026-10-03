@@ -136,7 +136,7 @@ impl DhtClient for RelayDhtClient {
 
         let to = envelope.recipient_ipk.0;
         let id = random_dispatch_id();
-        let sig_message = dispatch_sig_message(&to, &self.user_ipk, &id, &payload);
+        let sig_message = dispatch_sig_message(common::PROTOCOL_VERSION, &to, &self.user_ipk, &id, &payload);
         let sig = self.sign(&sig_message)?;
         let fwd = DispatchP {
             to:      Bytes(to),

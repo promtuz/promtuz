@@ -2,8 +2,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::ensure;
-use common::PROTOCOL_VERSION;
 use common::crypto::verify_ed25519;
+use common::crypto::verify_versioned;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::AppPayload;
@@ -59,8 +59,9 @@ pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
 /// The signature covers `to`, `from`, `id` and the payload, so a relay can neither re-address a
 /// captured dispatch at us nor mint one under a contact's IPK.
 fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
-    let transcript = dispatch_sig_message(our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload);
-    verify_ed25519(&msg.from, &transcript, &msg.sig.0)
+    verify_versioned(&msg.from, &msg.sig.0, |v| {
+        dispatch_sig_message(v, our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload)
+    })
         .map_err(|e| anyhow!("dispatch signature: {e}"))
 }
 
@@ -351,14 +352,9 @@ pub fn process_application_inbound_for<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32], env: MlsApplicationEnvelopeP,
     accepted_at_ms: u64, dispatch_id: [u8; 16],
 ) -> Result<InboundDecoded> {
-    let transcript = envelope_signing_input(
-        PROTOCOL_VERSION,
-        our_ipk,
-        &env.group_id.0,
-        env.epoch,
-        &env.mls_message.0,
-    );
-    verify_ed25519(&sender_ipk, &transcript, &env.sender_sig.0)
+    verify_versioned(&sender_ipk, &env.sender_sig.0, |v| {
+        envelope_signing_input(v, our_ipk, &env.group_id.0, env.epoch, &env.mls_message.0)
+    })
         .map_err(|_| anyhow!("application envelope sig invalid"))?;
 
     // A recovery-enabled group must publish every ratchet and commit through
@@ -873,6 +869,7 @@ pub(crate) fn receive_message_mutation(
 
 #[cfg(test)]
 mod tests {
+    use common::PROTOCOL_VERSION;
     use common::proto::mls_wire::AttachmentSharing;
     use common::proto::mls_wire::MAX_EPOCH_AHEAD;
     use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
@@ -943,7 +940,7 @@ mod tests {
         let deliver = |to: &VerifyingKey| {
             let from = sender.verifying_key().to_bytes();
             let sig =
-                sender.sign(&dispatch_sig_message(to.as_bytes(), &from, &[7; 16], b"envelope"));
+                sender.sign(&dispatch_sig_message(PROTOCOL_VERSION, to.as_bytes(), &from, &[7; 16], b"envelope"));
             DeliverP {
                 id:             [7; 16].into(),
                 from:           from.into(),
