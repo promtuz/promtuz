@@ -40,13 +40,15 @@ pub enum LifetimeP {
         uptime_seconds: u64,
     },
 
-    /// Same transcript as `RelayHello` under `GATEWAY_HELLO_SIG_DOMAIN`. `PUSH_GATEWAY` is checked
-    /// by dialers, not here. Appended last (postcard variant order).
+    /// Same transcript as `RelayHello` under `GATEWAY_HELLO_SIG_DOMAIN`. Appended last (postcard
+    /// variant order).
     GatewayHello {
         gateway_id: RelayId,
         pubkey:     Bytes<32>,
         timestamp:  u128,
         sig:        Bytes<64>,
+        /// The CA-issued leaf (DER) for `pubkey`, which must carry `PUSH_GATEWAY`.
+        cert:       Vec<u8>,
     },
 }
 

@@ -2,22 +2,15 @@ package com.promtuz.chat.presentation.state
 
 import androidx.annotation.StringRes
 import com.promtuz.chat.R
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 
-// @formatter:off
-
-@Serializable
+/** [Idle] until core reports a state. */
 enum class ConnectionState(@param:StringRes val text: Int) {
-    @SerialName("Disconnected") Disconnected(R.string.state_disconnected),
-    @SerialName("Idle") Idle(R.string.state_idle),
-    @SerialName("Resolving") Resolving(R.string.state_resolving),
-    @SerialName("Connecting") Connecting(R.string.state_connecting),
-    @SerialName("Handshaking") Handshaking(R.string.state_handshaking),
-    @SerialName("Connected") Connected(R.string.state_connected),
-    @SerialName("Reconnecting") Reconnecting(R.string.state_reconnecting),
-    @SerialName("Failed") Failed(R.string.state_failed),
-    @SerialName("NoInternet") NoInternet(R.string.state_nointernet),
-    // Ordinals must match the libcore enum, since the client maps by ordinal.
-    @SerialName("Syncing") Syncing(R.string.state_syncing)
+    Disconnected(R.string.state_disconnected),
+    Idle(R.string.state_idle),
+    Resolving(R.string.state_resolving),
+    Connecting(R.string.state_connecting),
+    Handshaking(R.string.state_handshaking),
+    Connected(R.string.state_connected),
+    Failed(R.string.state_failed),
+    Syncing(R.string.state_syncing),
 }

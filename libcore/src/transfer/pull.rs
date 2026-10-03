@@ -8,7 +8,6 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use super::CHUNK_DEADLINE;
-use super::CHUNK_TIMEOUT;
 use super::CONTROL_TIMEOUT;
 use super::Failure;
 use super::FailureKind;
@@ -31,32 +30,6 @@ const WAKE_BACKOFF_SECS: u64 = 60;
 pub(super) const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 const RETRY_COOLDOWN_SECS: u64 = 60;
 static PULLING: Semaphore = Semaphore::const_new(4);
-
-/// The idle timeout applies per read, so a slow but healthy path advances; `CHUNK_DEADLINE` caps
-/// a drip-fed chunk.
-async fn read_chunk(
-    r: &mut quinn::RecvStream, buf: &mut [u8], idle: Duration,
-) -> Result<(), Failure> {
-    let deadline = tokio::time::Instant::now() + CHUNK_DEADLINE;
-    let mut filled = 0;
-    while filled < buf.len() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(Failure::new(
-                FailureKind::Transport,
-                anyhow::anyhow!("chunk progress deadline exceeded"),
-            ));
-        }
-        let n = bounded(idle.min(remaining), async {
-            r.read(&mut buf[filled..])
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("attachment stream ended before chunk completed"))
-        })
-        .await?;
-        filled += n;
-    }
-    Ok(())
-}
 
 fn protocol_failure(message: &'static str) -> Failure {
     Failure::new(FailureKind::InvalidData, wire::InvalidFrame(message.into()))
@@ -222,7 +195,7 @@ where
             _ = lease.cancel.cancelled() => return Ok(false),
             result = async {
                 let link = connect().await?;
-                let result = pull_live(c, &link, file_id, offered_size, &local, &lease, CHUNK_TIMEOUT).await;
+                let result = pull_live(c, &link, file_id, offered_size, &local, &lease).await;
                 if result.as_ref().is_err_and(|e|
                     matches!(e.kind, FailureKind::Transport | FailureKind::Authentication)
                         && e.source.downcast_ref::<v2::ErrorCode>() != Some(&v2::ErrorCode::Busy)
@@ -286,9 +259,6 @@ where
             _ = lease.cancel.cancelled() => return Ok(true),
             result = async {
                 let link = connect(peer).await?;
-                if link.protocol().map_err(Failure::wire)? != crate::p2p::protocol::AttachmentProtocol::V2 {
-                    return Err(remote_failure(v2::ErrorCode::Unsupported));
-                }
                 let result = pull_v2_from(c, &link, file, size, local, lease, Some(grant)).await;
                 if result.as_ref().is_err_and(|e| matches!(e.kind, FailureKind::Authentication | FailureKind::InvalidData)
                     && e.source.downcast_ref::<v2::ErrorCode>() != Some(&v2::ErrorCode::Unsupported)) {
@@ -335,96 +305,13 @@ pub(super) fn set_state(
 
 pub(super) async fn pull_live(
     c: &'static Core, link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64,
-    local: &wire::Auth, lease: &store::ReceiverLease, chunk_timeout: Duration,
+    local: &wire::Auth, lease: &store::ReceiverLease,
 ) -> Result<(), Failure> {
     tokio::select! {
         biased;
         _ = lease.cancel.cancelled() => Err(Failure::new(FailureKind::Cancelled, store::Cancelled)),
-        result = async {
-            match link.protocol().map_err(|e| Failure::new(FailureKind::InvalidData, e))? {
-                crate::p2p::protocol::AttachmentProtocol::Legacy => {
-                    pull_legacy(c, link, file_id, offered_size, local, lease, chunk_timeout).await
-                },
-                crate::p2p::protocol::AttachmentProtocol::V2 => {
-                    pull_v2_from(c, link, file_id, offered_size, local, lease, None).await
-                },
-            }
-        } => result,
+        result = pull_v2_from(c, link, file_id, offered_size, local, lease, None) => result,
     }
-}
-
-/// The legacy wire's `have` is a contiguous prefix; sparse progress is never advertised as one.
-async fn pull_legacy(
-    c: &'static Core, link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64,
-    local: &wire::Auth, lease: &store::ReceiverLease, chunk_timeout: Duration,
-) -> Result<(), Failure> {
-    let cached_manifest = store::partial_get_tx(&c.db.transfers().lock(), &file_id)
-        .and_then(|p| p.manifest)
-        .filter(|bytes| bytes.len() <= 8 * 1024 * 1024)
-        .and_then(|bytes| postcard::from_bytes::<wire::Manifest>(&bytes).ok())
-        .filter(|m| m.file_id() == file_id && m.total_size == offered_size);
-    let mut cached = match cached_manifest {
-        Some(ref manifest) => Some(
-            ranges::Receiver::open_async(c, file_id, link.ipk, manifest.clone(), offered_size,
-                lease)
-                .await
-                .map_err(coordinator_failure)?,
-        ),
-        None => None,
-    };
-    let have0 = cached.as_ref().map_or(0, |receiver| receiver.prefix());
-    let (s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
-    let mut s = TransferSend::new(s);
-    bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
-    bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }))
-        .await?;
-    s.finish().map_err(|e| Failure::wire(e.into()))?;
-    let manifest =
-        match bounded(CONTROL_TIMEOUT, wire::read_frame::<wire::ServeResp>(&mut r)).await? {
-            wire::ServeResp::Manifest(m) => m,
-            wire::ServeResp::Gone => {
-                return Err(Failure::new(
-                    FailureKind::Unavailable,
-                    anyhow::anyhow!("sender no longer retains the file"),
-                ));
-            },
-        };
-    if manifest.file_id() != file_id
-        || manifest.chunk_size == 0
-        || manifest.chunk_size as usize > wire::CHUNK_SIZE
-        || manifest.chunks.len() as u64 != manifest.total_size.div_ceil(manifest.chunk_size as u64)
-        || have0 as usize > manifest.chunks.len()
-        || manifest.total_size != offered_size
-    {
-        return Err(protocol_failure("manifest does not match the attachment offer"));
-    }
-    let mut receiver = match cached.take() {
-        Some(receiver) => receiver,
-        None => {
-            ranges::Receiver::open_async(c, file_id, link.ipk, manifest.clone(), offered_size,
-                lease)
-                .await
-                .map_err(coordinator_failure)?
-        },
-    };
-    let mut buf = vec![0; manifest.chunk_size as usize];
-    for index in have0 as usize..manifest.chunks.len() {
-        let expected = (manifest.total_size - index as u64 * manifest.chunk_size as u64)
-            .min(manifest.chunk_size as u64) as usize;
-        tokio::select! {
-            biased;
-            _ = lease.cancel.cancelled() => return Err(Failure::new(FailureKind::Cancelled, store::Cancelled)),
-            result = read_chunk(&mut r, &mut buf[..expected], chunk_timeout) => result?,
-        }
-        let already_verified = receiver.contains(index as u32);
-        receiver.commit(index as u32, &buf[..expected], lease).map_err(coordinator_failure)?;
-        if !already_verified {
-            diagnostics::received_verified(expected as u64);
-        }
-    }
-    receiver.finish(lease).map_err(coordinator_failure)?;
-    store::defer_retry_tx(&c.db.transfers().lock(), &file_id, 0).map_err(Failure::storage)?;
-    Ok(())
 }
 
 fn coordinator_failure(error: anyhow::Error) -> Failure {

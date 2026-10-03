@@ -37,10 +37,10 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Relays also send signed heartbeats; a gateway's open connection is its liveness.
-#[derive(Clone, Copy)]
 pub enum Hello {
     Relay,
-    Gateway,
+    /// The gateway's CA-issued leaf, DER.
+    Gateway(Vec<u8>),
 }
 
 /// The registered session; `None` while the link reconnects.
@@ -59,7 +59,7 @@ pub fn spawn(
         let registered = Registered(registered);
         let mut delay = BACKOFF_MIN;
         loop {
-            let Err(e) = register(&endpoint, &seeds, &key, hello, &registered.0, &mut delay).await;
+            let Err(e) = register(&endpoint, &seeds, &key, &hello, &registered.0, &mut delay).await;
             registered.0.send_replace(None);
             crate::warn!("resolver session ended: {e:#}; retrying in {delay:?}");
             tokio::time::sleep(delay).await;
@@ -83,7 +83,7 @@ impl Drop for Registered {
 /// The backoff resets only once the resolver accepts the hello, so a rejected hello cannot
 /// reconnect every second.
 async fn register(
-    endpoint: &Endpoint, seeds: &[NodeSeed], key: &SigningKey, hello: Hello,
+    endpoint: &Endpoint, seeds: &[NodeSeed], key: &SigningKey, hello: &Hello,
     registered: &watch::Sender<Option<Connection>>, delay: &mut Duration,
 ) -> Result<Infallible> {
     let conn = dial_any(endpoint, seeds).await?;
@@ -113,7 +113,7 @@ async fn register(
 }
 
 impl Hello {
-    fn packet(self, key: &SigningKey, binding: &[u8; 32]) -> ResolverPacket {
+    fn packet(&self, key: &SigningKey, binding: &[u8; 32]) -> ResolverPacket {
         let pubkey = key.verifying_key().to_bytes();
         let id = NodeId::new(pubkey);
         let timestamp = u128::from(now_ms());
@@ -125,11 +125,12 @@ impl Hello {
                 timestamp,
                 sig: sign(relay_hello_signing_input(&id, &pubkey, timestamp, binding)),
             },
-            Hello::Gateway => LifetimeP::GatewayHello {
+            Hello::Gateway(cert) => LifetimeP::GatewayHello {
                 gateway_id: id,
                 pubkey: Bytes(pubkey),
                 timestamp,
                 sig: sign(gateway_hello_signing_input(&id, &pubkey, timestamp, binding)),
+                cert: cert.clone(),
             },
         })
     }

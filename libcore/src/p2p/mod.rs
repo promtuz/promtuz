@@ -295,10 +295,6 @@ pub struct PeerLink {
 }
 
 impl PeerLink {
-    pub(crate) fn protocol(&self) -> Result<protocol::AttachmentProtocol> {
-        protocol::AttachmentProtocol::from_conn(&self.conn)
-    }
-
     fn still_permitted(&self) -> bool {
         match consent::may_connect(&self.ipk) {
             consent::Decision::Direct => true,

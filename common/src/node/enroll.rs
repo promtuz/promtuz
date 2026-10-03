@@ -16,6 +16,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
 use rustls::pki_types::UnixTime;
 
+use crate::node::capability::NodeCapabilities;
 use crate::quic::config::load_root_ca;
 use crate::quic::id::NodeId;
 
@@ -36,9 +37,9 @@ fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, value, rest))
 }
 
-/// Walks the TBSCertificate to the SPKI instead of searching for a byte pattern, so a decoy
-/// elsewhere in the cert cannot be mistaken for the key.
-pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
+/// The TBSCertificate from its SPKI on. Walking the fields instead of searching for a byte pattern
+/// means a decoy elsewhere in the cert cannot be mistaken for a field.
+fn tbs_from_spki(cert_der: &[u8]) -> Option<&[u8]> {
     let (0x30, cert, _) = read_tlv(cert_der)? else { return None };
     let (0x30, tbs, _) = read_tlv(cert)? else { return None };
 
@@ -48,8 +49,11 @@ pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
     for _ in 0..5 {
         rest = read_tlv(rest)?.2;
     }
+    Some(rest)
+}
 
-    let (0x30, spki, _) = read_tlv(rest)? else { return None };
+pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
+    let (0x30, spki, _) = read_tlv(tbs_from_spki(cert_der)?)? else { return None };
     let (0x30, algorithm, key) = read_tlv(spki)? else { return None };
     if algorithm != ED25519_AID {
         return None;
@@ -59,7 +63,36 @@ pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
     pubkey.try_into().ok()
 }
 
-fn first_cert_der(cert_path: &Path) -> anyhow::Result<CertificateDer<'static>> {
+/// The DER value octets of [`crate::node::capability::CAPABILITY_OID`].
+const CAPABILITY_OID_DER: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xcc, 0x08, 0x01];
+
+/// The CA-stamped capabilities extension. Trust it only from a cert whose chain verified.
+pub fn cert_capabilities(cert_der: &[u8]) -> Option<NodeCapabilities> {
+    // The unique ids [1] and [2] may sit between the SPKI and the extensions [3].
+    let mut rest = read_tlv(tbs_from_spki(cert_der)?)?.2;
+    let extensions = loop {
+        let (tag, value, next) = read_tlv(rest)?;
+        if tag == 0xa3 {
+            break value;
+        }
+        rest = next;
+    };
+    let (0x30, mut extensions, _) = read_tlv(extensions)? else { return None };
+    while !extensions.is_empty() {
+        let (0x30, extension, next) = read_tlv(extensions)? else { return None };
+        extensions = next;
+        let (0x06, CAPABILITY_OID_DER, mut fields) = read_tlv(extension)? else { continue };
+        // A `critical` BOOLEAN may precede the OCTET STRING.
+        if fields.first() == Some(&0x01) {
+            fields = read_tlv(fields)?.2;
+        }
+        let (0x04, value, _) = read_tlv(fields)? else { return None };
+        return NodeCapabilities::decode(value);
+    }
+    None
+}
+
+pub fn first_cert_der(cert_path: &Path) -> anyhow::Result<CertificateDer<'static>> {
     let pem =
         std::fs::read(cert_path).with_context(|| format!("failed to read file '{cert_path:?}'"))?;
     let mut rd = std::io::BufReader::new(&pem[..]);
@@ -91,10 +124,11 @@ pub fn validate_cert_pem(
     verify_leaf(&leaf, ca_path, node_id, key_pub)
 }
 
-fn verify_leaf(
-    leaf: &CertificateDer, ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
+/// The chain to the root CA, the validity window, `node_id` as the name and `key_pub` as the key.
+pub fn verify_leaf(
+    leaf: &[u8], ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
 ) -> anyhow::Result<()> {
-    if spki_ed25519(leaf.as_ref()).as_ref() != Some(key_pub) {
+    if spki_ed25519(leaf).as_ref() != Some(key_pub) {
         bail!("provided certificate does not certify own key");
     }
     let roots = load_root_ca(&ca_path.to_path_buf()).context("failed to load root ca")?;
@@ -104,7 +138,7 @@ fn verify_leaf(
     let server_name = ServerName::try_from(node_id.to_string())
         .with_context(|| "failed to forge server name from node id")?;
     verifier
-        .verify_server_cert(leaf, &[], &server_name, &[], UnixTime::now())
+        .verify_server_cert(&CertificateDer::from(leaf), &[], &server_name, &[], UnixTime::now())
         .map(|_| ())
         .map_err(|e| anyhow!(e).context("webpki server verifier failed"))
 }

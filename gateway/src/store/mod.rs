@@ -137,13 +137,13 @@ impl StickerStore {
                 self.backend.put(&blob_path(&pack, &key), bytes, true).await?;
                 ledger.add_blob(&pack, &creator, &key, now_secs())?;
             },
-            StoreRequest::PutManifest { env, keys } => {
+            StoreRequest::PutManifest { env, keys, .. } => {
                 let keys: Vec<[u8; 32]> = keys.iter().map(|k| k.0).collect();
                 if env.version < version {
                     return Ok(StoreResponse::Rejected(StoreReject::StaleVersion));
                 }
                 let serialized = env.ser()?;
-                // `keys` is unsigned, so a replay of the public manifest must change nothing.
+                // A retry of the stored version changes nothing.
                 if env.version == version {
                     let stored = self.backend.get(&manifest_path(&pack)).await?;
                     return Ok(if stored.as_deref() == Some(serialized.as_slice()) {
@@ -232,10 +232,8 @@ mod tests {
     }
 
     fn manifest(key: &SigningKey, pack: [u8; 16], version: u32, keys: &[[u8; 32]]) -> StoreRequest {
-        StoreRequest::PutManifest {
-            env: ManifestEnvelope::signed(key, pack, 1, version, vec![version as u8; 8]),
-            keys: keys.iter().map(|k| Bytes(*k)).collect(),
-        }
+        let env = ManifestEnvelope::signed(key, pack, 1, version, vec![version as u8; 8]);
+        StoreRequest::signed_manifest(key, env, keys.iter().map(|k| Bytes(*k)).collect())
     }
 
     fn blob(key: &SigningKey, pack: [u8; 16], k: [u8; 32]) -> StoreRequest {
@@ -258,11 +256,14 @@ mod tests {
         assert_eq!(s.handle(manifest(&alice, pack, 2, &[[9; 32]])).await, StoreResponse::Ok);
         let older = manifest(&alice, pack, 1, &[[9; 32]]);
         assert_eq!(s.handle(older).await, StoreResponse::Rejected(StaleVersion));
-        let rewritten = StoreRequest::PutManifest {
-            env: ManifestEnvelope::signed(&alice, pack, 1, 2, b"rewritten".to_vec()),
-            keys: vec![Bytes([9; 32])],
-        };
+        let env = ManifestEnvelope::signed(&alice, pack, 1, 2, b"rewritten".to_vec());
+        let rewritten = StoreRequest::signed_manifest(&alice, env, vec![Bytes([9; 32])]);
         assert_eq!(s.handle(rewritten).await, StoreResponse::Rejected(StaleVersion));
+        let mut forged = manifest(&alice, pack, 3, &[[9; 32]]);
+        if let StoreRequest::PutManifest { keys, .. } = &mut forged {
+            keys.clear();
+        }
+        assert_eq!(s.handle(forged).await, StoreResponse::Rejected(BadSignature));
     }
 
     #[tokio::test]

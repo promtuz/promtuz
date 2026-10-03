@@ -129,7 +129,7 @@ class AppVM(
                     _dynamicTitle.value = when (state) {
                         CS.Idle -> context.resources.getString(R.string.app_name)
                         // Held until the next state replaces it (Syncing → Connected).
-                        CS.Disconnected, CS.Connecting, CS.Failed, CS.Handshaking, CS.Reconnecting, CS.Resolving, CS.NoInternet, CS.Syncing -> context.resources.getString(
+                        CS.Disconnected, CS.Connecting, CS.Failed, CS.Handshaking, CS.Resolving, CS.Syncing -> context.resources.getString(
                             state.text
                         )
 

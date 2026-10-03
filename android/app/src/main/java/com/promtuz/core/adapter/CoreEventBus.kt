@@ -45,7 +45,15 @@ object CoreEventBus : CoreEvents {
     }
 
     override fun onConnection(state: FfiConnectionState) {
-        _connection.value = ConnectionState.entries.getOrElse(state.ordinal) { ConnectionState.Idle }
+        _connection.value = when (state) {
+            FfiConnectionState.DISCONNECTED -> ConnectionState.Disconnected
+            FfiConnectionState.RESOLVING -> ConnectionState.Resolving
+            FfiConnectionState.CONNECTING -> ConnectionState.Connecting
+            FfiConnectionState.HANDSHAKING -> ConnectionState.Handshaking
+            FfiConnectionState.CONNECTED -> ConnectionState.Connected
+            FfiConnectionState.FAILED -> ConnectionState.Failed
+            FfiConnectionState.SYNCING -> ConnectionState.Syncing
+        }
     }
 
     override fun onDbChanged(tables: List<String>) {

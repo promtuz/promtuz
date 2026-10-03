@@ -19,7 +19,6 @@ use super::v2::ReadPhase;
 use super::*;
 use crate::data::conversation::Conversation;
 use crate::p2p::PeerLink;
-use crate::p2p::protocol::AttachmentProtocol;
 use crate::p2p::protocol::offered_alpns;
 use crate::state::Core;
 use crate::test_support::transfer::content;
@@ -33,7 +32,7 @@ async fn pull(
     c: &'static Core, link: &PeerLink, file: &wire::Manifest, local: &wire::Auth,
 ) -> Result<(), Failure> {
     let lease = store::receiver_lease(&c.db, file.file_id());
-    pull_live(c, link, file.file_id(), file.total_size, local, &lease, CHUNK_TIMEOUT).await
+    pull_live(c, link, file.file_id(), file.total_size, local, &lease).await
 }
 
 /// The serving side of one v2 request, scripted by the test.
@@ -164,9 +163,8 @@ async fn serving_and_pulling_refuse_before_any_state_or_bytes() {
         let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
         let fid = pulled.file_id();
         let lease = store::receiver_lease(&r.core.db, fid);
-        let error = pull_live(r.core, &link.client, fid, claimed, &local, &lease, CHUNK_TIMEOUT)
-            .await
-            .unwrap_err();
+        let error =
+            pull_live(r.core, &link.client, fid, claimed, &local, &lease).await.unwrap_err();
         assert!(kind.is_none_or(|kind| error.kind == kind), "{why}: {error:?}");
         assert!(r.partial(&fid).is_none(), "{why}: no row");
         let part = store::partial_path(&r.core.db, &fid);
@@ -175,36 +173,6 @@ async fn serving_and_pulling_refuse_before_any_state_or_bytes() {
     }
     let kept = store::retention_get_tx(&s.core.db.transfers().lock(), &elsewhere.file_id());
     assert!(kept.is_some(), "still kept for its recipient");
-}
-
-#[tokio::test]
-async fn old_and_new_peers_fall_back_to_legacy_and_resume_sparse_progress() {
-    let (sender, receiver) = (identity(98), identity(99));
-    let (s, r) = (device(), device());
-    let group = s.group(&[sender.ipk, receiver.ipk]);
-    let legacy = || vec![crate::p2p::protocol::LEGACY_ALPN.to_vec()];
-    for (seed, server, client) in [(6, legacy(), offered_alpns()), (7, offered_alpns(), legacy())] {
-        let bytes = content(seed, 4);
-        let file = s.retain(&bytes, 1024);
-        s.offer(sender.ipk, group, &file);
-        let fid = file.file_id();
-        let lease = store::receiver_lease(&r.core.db, fid);
-        let size = file.total_size;
-        let mut partial = ranges::Receiver::open_async(r.core, fid, sender.ipk, file.clone(), size, &lease)
-            .await
-            .unwrap();
-        partial.commit(0, &bytes[..1024], &lease).unwrap();
-        partial.commit(2, &bytes[2048..3072], &lease).unwrap();
-        drop((partial, lease));
-        let link = linked(&sender, &receiver, server, client).await;
-        assert_eq!(link.client.protocol().unwrap(), AttachmentProtocol::Legacy);
-        let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
-        pull(r.core, &link.client, &file, &receiver).await.unwrap();
-        let done = r.partial(&fid).unwrap();
-        assert_eq!((done.state, done.have), (store::DONE, 4));
-        assert_eq!(std::fs::read(&done.path).unwrap(), bytes);
-        serving.abort();
-    }
 }
 
 #[tokio::test]
@@ -347,14 +315,13 @@ async fn malformed_range_responses_are_terminal_without_claiming_bad_progress() 
 }
 
 #[tokio::test]
-async fn negotiated_v2_never_retries_legacy_after_bad_auth_or_capabilities() {
+async fn bad_auth_or_capabilities_fail_once_before_any_metadata() {
     let (sender, receiver) = (identity(90), identity(91));
     let r = device();
     r.pair(sender.ipk);
     for (case, bad_auth) in [true, false].into_iter().enumerate() {
         let file = manifest(&content(130 + case as u8, 2), 1024);
         let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
-        assert_eq!(link.client.protocol().unwrap(), AttachmentProtocol::V2);
         let (server, local) = (link.server.clone(), sender.clone());
         let serve = tokio::spawn(async move {
             let (mut s, mut r) = server.accept_stream().await.unwrap();
@@ -387,7 +354,7 @@ async fn negotiated_v2_never_retries_legacy_after_bad_auth_or_capabilities() {
             false,
             || {
                 attempts += 1;
-                std::future::ready(Ok(next.take().expect("a selected v2 link never downgrades")))
+                std::future::ready(Ok(next.take().expect("a rejected link is not retried")))
             },
         )
         .await

@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser as _;
+use common::node::enroll::first_cert_der;
 use common::server::accept;
 use common::server::daemon;
 use common::server::resolver_link;
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
         &cfg.network, common::quic::tunnel::FEATURE_CONTROL,
     ).await?;
     let seeds = cfg.resolver.as_ref().map(|r| r.seed.clone()).unwrap_or_default();
+    let cert = common::graceful!(first_cert_der(&cfg.network.cert_path), "reading the node cert");
     let gateway = Arc::new(Gateway::new(cfg));
     let tunnel = tunnel_listener.map(|listener| {
         let gateway = gateway.clone();
@@ -90,7 +92,7 @@ async fn main() -> Result<()> {
         gateway.endpoint.clone(),
         seeds,
         key,
-        resolver_link::Hello::Gateway,
+        resolver_link::Hello::Gateway(cert.to_vec()),
     );
     let mut acceptor = tokio::spawn(accept::serve(gateway.endpoint.clone(), ACCEPT, {
         let gateway = gateway.clone();

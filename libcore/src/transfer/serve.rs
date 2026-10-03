@@ -2,7 +2,6 @@ use common::utils::now_secs;
 use tokio::sync::Semaphore;
 
 use super::CHUNK_DEADLINE;
-use super::CHUNK_TIMEOUT;
 use super::CONTROL_TIMEOUT;
 use super::Failure;
 use super::FailureKind;
@@ -22,24 +21,6 @@ use crate::state::Core;
 const SERVES_PER_LINK: usize = 4;
 static SERVING: Semaphore = Semaphore::const_new(16);
 static HELPING: Semaphore = Semaphore::const_new(2);
-
-async fn write_chunk(s: &mut quinn::SendStream, buf: &[u8]) -> Result<(), Failure> {
-    let deadline = tokio::time::Instant::now() + CHUNK_DEADLINE;
-    let mut written = 0;
-    while written < buf.len() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(Failure::new(
-                FailureKind::Transport,
-                anyhow::anyhow!("chunk progress deadline exceeded"),
-            ));
-        }
-        written +=
-            bounded(CHUNK_TIMEOUT.min(remaining), async { Ok(s.write(&buf[written..]).await?) })
-                .await?;
-    }
-    Ok(())
-}
 
 /// Retention is keyed by content hash alone, so the outgoing message row scopes a pull to whom
 /// the file was sent: in a group, every active member of that conversation.
@@ -107,71 +88,7 @@ async fn serve_stream(
 ) -> Result<(), Failure> {
     let mut s = TransferSend::new(s);
     bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
-    if link.protocol().map_err(|e| Failure::new(FailureKind::InvalidData, e))?
-        == crate::p2p::protocol::AttachmentProtocol::V2
-    {
-        return serve_v2(c, link, local, &mut s, &mut r).await;
-    }
-    let pull: wire::Pull =
-        bounded(CONTROL_TIMEOUT, wire::read_frame_limited(&mut r, wire::PULL_FRAME_LIMIT)).await?;
-    let now = now_secs();
-    let retained = store::retention_get_tx(&c.db.transfers().lock(), &pull.file_id)
-        .filter(|r| r.expires_at > now);
-    let retained = retained.filter(|_| offered_to(c, &pull.file_id, &link.ipk, &local.ipk));
-    let Some(ret) = retained else {
-        bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::ServeResp::Gone)).await?;
-        let _ = s.finish();
-        return Ok(());
-    };
-    let manifest: wire::Manifest = postcard::from_bytes(&ret.manifest).map_err(Failure::storage)?;
-    if manifest.chunk_size == 0
-        || manifest.chunk_size as usize > wire::CHUNK_SIZE
-        || manifest.file_id() != pull.file_id
-        || pull.have as usize > manifest.chunks.len()
-        || manifest.chunks.len() as u64 != manifest.total_size.div_ceil(manifest.chunk_size as u64)
-    {
-        return Err(Failure::new(
-            FailureKind::InvalidData,
-            anyhow::anyhow!("invalid retained manifest or prefix"),
-        ));
-    }
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = match std::fs::File::open(&ret.path) {
-        Ok(f) => f,
-        Err(_) => {
-            bounded(CONTROL_TIMEOUT, wire::write_frame(&mut s, &wire::ServeResp::Gone)).await?;
-            let _ = s.finish();
-            return Ok(());
-        },
-    };
-    f.seek(SeekFrom::Start(pull.have as u64 * manifest.chunk_size as u64))
-        .map_err(Failure::storage)?;
-    bounded(
-        CONTROL_TIMEOUT,
-        wire::write_frame(&mut s, &wire::ServeResp::Manifest(manifest.clone())),
-    )
-    .await?;
-    let mut buf = vec![0u8; manifest.chunk_size as usize];
-    for idx in pull.have as usize..manifest.chunks.len() {
-        // Revocation/deletion is rechecked between chunks. Bytes already sent
-        // cannot be recalled, but an open fd is not unlimited serving consent.
-        if !offered_to(c, &pull.file_id, &link.ipk, &local.ipk)
-            || store::retention_get_tx(&c.db.transfers().lock(), &pull.file_id)
-                .is_none_or(|r| r.expires_at <= now_secs())
-        {
-            return Err(Failure::new(
-                FailureKind::Unavailable,
-                anyhow::anyhow!("attachment no longer available"),
-            ));
-        }
-        let count = (manifest.total_size - idx as u64 * manifest.chunk_size as u64)
-            .min(manifest.chunk_size as u64) as usize;
-        f.read_exact(&mut buf[..count]).map_err(Failure::storage)?;
-        write_chunk(&mut s, &buf[..count]).await?;
-        diagnostics::sent_content(count as u64);
-    }
-    s.finish().map_err(|e| Failure::wire(e.into()))?;
-    Ok(())
+    serve_v2(c, link, local, &mut s, &mut r).await
 }
 
 async fn v2_error(s: &mut TransferSend, code: v2::ErrorCode) -> Result<(), Failure> {

@@ -5,10 +5,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 256 * 1024;
-// Auth encodes to 129 bytes and Pull to at most 37. These small limits stop parallel
-// unauthenticated streams from allocating a manifest-sized buffer before validation.
+// Auth encodes to 129 bytes. The small limit stops parallel unauthenticated streams from
+// allocating a large buffer before validation.
 pub(crate) const AUTH_FRAME_LIMIT: usize = 256;
-pub(crate) const PULL_FRAME_LIMIT: usize = 64;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Manifest {
@@ -58,18 +57,6 @@ impl Manifest {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub struct Pull {
-    pub file_id: [u8; 32],
-    pub have: u32,
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub enum ServeResp {
-    Manifest(Manifest),
-    Gone,
-}
-
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Auth {
     pub ipk: [u8; 32],
@@ -78,24 +65,15 @@ pub struct Auth {
     pub sig: [u8; 64],
 }
 
-/// Bounds the reader's allocation and keeps a write from truncating under the `u32` length
-/// prefix; a manifest this large already describes a multi-TB file.
-const MAX_FRAME: usize = 8 * 1024 * 1024;
-
 #[derive(Debug, thiserror::Error)]
 #[error("invalid transfer frame: {0}")]
 pub(crate) struct InvalidFrame(pub(crate) String);
 
 pub async fn write_frame<T: Serialize>(w: &mut quinn::SendStream, v: &T) -> Result<()> {
     let bytes = postcard::to_allocvec(v)?;
-    anyhow::ensure!(bytes.len() <= MAX_FRAME, "frame too large");
     w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     w.write_all(&bytes).await?;
     Ok(())
-}
-
-pub async fn read_frame<T: DeserializeOwned>(r: &mut quinn::RecvStream) -> Result<T> {
-    read_frame_limited(r, MAX_FRAME).await
 }
 
 pub(crate) async fn read_frame_limited<T: DeserializeOwned>(
@@ -104,7 +82,7 @@ pub(crate) async fn read_frame_limited<T: DeserializeOwned>(
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let n = u32::from_le_bytes(len) as usize;
-    if n > limit.min(MAX_FRAME) {
+    if n > limit {
         return Err(InvalidFrame("frame too large".into()).into());
     }
     let mut buf = vec![0u8; n];

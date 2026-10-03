@@ -2,6 +2,7 @@
 //! with its recipients; the gateway verifies signatures without it.
 
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
 use crate::proto::pack::bounded_vec;
@@ -18,6 +19,7 @@ pub const PACK_NAME_MAX: usize = 64;
 pub const MANIFEST_MAX_BYTES: usize = 16 * 1024;
 
 const MANIFEST_SIG_DOMAIN: &[u8] = b"promtuz-sticker-manifest-v1";
+const MANIFEST_KEYS_SIG_DOMAIN: &[u8] = b"promtuz-sticker-manifest-keys-v1";
 const BLOB_PUT_SIG_DOMAIN: &[u8] = b"promtuz-sticker-blob-v1";
 const BLOB_KEY_DOMAIN: &[u8] = b"promtuz-sticker-key-v1";
 
@@ -85,7 +87,16 @@ pub enum StoreRequest {
         env: ManifestEnvelope,
         #[serde(deserialize_with = "bounded_vec::<_, _, PACK_MAX_STICKERS>")]
         keys: Vec<Bytes<32>>,
+        /// By `env.creator` over [`manifest_keys_signing_input`].
+        #[serde(deserialize_with = "zero_if_absent")]
+        sig: Bytes<64>,
     },
+}
+
+/// A saved upload may end before `sig`. It then reads as zeros, which never verify, and the app
+/// signs it again before sending.
+fn zero_if_absent<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes<64>, D::Error> {
+    Ok(Bytes::deserialize(d).unwrap_or(Bytes([0; 64])))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +156,21 @@ pub fn manifest_signing_input(
         blake3::hash(manifest_blob).as_bytes(),
     ]
     .concat()
+}
+
+/// Binds the blob keys to the envelope that publishes them, so a replayed envelope cannot name
+/// other objects.
+pub fn manifest_keys_signing_input(env: &ManifestEnvelope, keys: &[Bytes<32>]) -> Vec<u8> {
+    let mut input = [
+        MANIFEST_KEYS_SIG_DOMAIN,
+        &env.pack_id,
+        &env.store.to_be_bytes(),
+        &env.version.to_be_bytes(),
+        blake3::hash(&env.manifest_blob).as_bytes(),
+    ]
+    .concat();
+    input.extend(keys.iter().flat_map(|k| k.0));
+    input
 }
 
 /// Binds the blob's pack, store, object key and contents. Exact replays are safe.
@@ -207,6 +233,14 @@ impl StoreRequest {
         }
     }
 
+    pub fn signed_manifest(
+        key: &ed25519_dalek::SigningKey, env: ManifestEnvelope, keys: Vec<Bytes<32>>,
+    ) -> Self {
+        use ed25519_dalek::Signer;
+        let sig = Bytes(key.sign(&manifest_keys_signing_input(&env, &keys)).to_bytes());
+        Self::PutManifest { env, keys, sig }
+    }
+
     /// Checks signatures only; size caps are the caller's.
     pub fn verify(&self) -> bool {
         match self {
@@ -214,7 +248,10 @@ impl StoreRequest {
                 let msg = blob_put_signing_input(pack, *store, key, bytes);
                 crate::crypto::verify_ed25519(&creator.0, &msg, &sig.0).is_ok()
             },
-            Self::PutManifest { env, .. } => env.verify(),
+            Self::PutManifest { env, keys, sig } => {
+                let msg = manifest_keys_signing_input(env, keys);
+                env.verify() && crate::crypto::verify_ed25519(&env.creator.0, &msg, &sig.0).is_ok()
+            },
         }
     }
 
@@ -246,13 +283,37 @@ mod tests {
 
     #[test]
     fn transcripts() {
+        let env = ManifestEnvelope {
+            pack_id: [1; 16],
+            store: 0x0102,
+            creator: Bytes([0; 32]),
+            version: 0x03040506,
+            manifest_blob: b"manifest".to_vec(),
+            sig: Bytes([0; 64]),
+        };
         crate::proto::golden(
             &[
                 manifest_signing_input(&[1; 16], 0x0102, 0x03040506, b"manifest"),
                 blob_put_signing_input(&[1; 16], 0x0102, &[2; 32], b"blob"),
+                manifest_keys_signing_input(&env, &[Bytes([2; 32]), Bytes([3; 32])]),
             ],
             "b177b1e283cb1ec80cfacc9ae8e1383de16e2e8490cf282b806a4df84852066b
-             23e34835d078a6c294cf0afbd0232e647d2298253b7f4cf03592ca81eb8934fe",
+             23e34835d078a6c294cf0afbd0232e647d2298253b7f4cf03592ca81eb8934fe
+             3b8cebc46b4072a12b7dc9117d3408e191e5023cbac1a0be7303425618a0f8cc",
         );
+    }
+
+    #[test]
+    fn a_manifest_request_saved_before_keys_were_signed_still_decodes() {
+        use crate::proto::pack::Packer;
+        use crate::proto::pack::Unpacker;
+        let key = crate::crypto::SigningKey::from_bytes(&[1; 32]);
+        let env = ManifestEnvelope::signed(&key, [1; 16], 2, 3, vec![4; 8]);
+        let bytes = StoreRequest::signed_manifest(&key, env, vec![Bytes([5; 32])]).ser().unwrap();
+        // The signature's length byte and its 64 bytes end the encoding.
+        let saved = StoreRequest::deser(&bytes[..bytes.len() - 65]).unwrap();
+        assert!(matches!(saved, StoreRequest::PutManifest { sig, .. } if sig.0 == [0; 64]));
+        assert!(!saved.verify());
+        assert!(StoreRequest::deser(&bytes[..bytes.len() - 1]).is_err(), "a cut signature");
     }
 }

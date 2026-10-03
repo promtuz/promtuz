@@ -1,7 +1,11 @@
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 use common::crypto::verify_ed25519;
+use common::node::capability::NodeCapabilities;
+use common::node::enroll::cert_capabilities;
+use common::node::enroll::verify_leaf;
 use common::proto::RelayId;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::NODE_HELLO_EXPORTER_LABEL;
@@ -50,9 +54,8 @@ impl Resolver {
         }
     }
 
-    /// Verifies the id-key binding, the session-bound signature and freshness, then admits the
-    /// sender to the directory its hello names. The `PUSH_GATEWAY` capability is not checked here:
-    /// the resolver never sees the gateway's cert, so a relay verifies it at dial.
+    /// Verifies the id-key binding, the session-bound signature, freshness and a gateway's cert,
+    /// then admits the sender to the directory its hello names.
     pub fn register(
         &self, conn: &Arc<Connection>, hello: &LifetimeP,
     ) -> Result<&Arc<Directory>, CloseReason> {
@@ -66,7 +69,7 @@ impl Resolver {
                 let msg = relay_hello_signing_input(relay_id, &pubkey.0, *timestamp, &binding);
                 (&self.relays, relay_id, pubkey, *timestamp, sig, msg)
             },
-            LifetimeP::GatewayHello { gateway_id, pubkey, timestamp, sig } => {
+            LifetimeP::GatewayHello { gateway_id, pubkey, timestamp, sig, .. } => {
                 let msg = gateway_hello_signing_input(gateway_id, &pubkey.0, *timestamp, &binding);
                 (&self.gateways, gateway_id, pubkey, *timestamp, sig, msg)
             },
@@ -75,6 +78,9 @@ impl Resolver {
 
         let label = format_args!("{} hello from {addr}", dir.kind);
         verify_signed_packet(label, id, &pubkey.0, &sig.0, &msg, timestamp, now_ms().into())?;
+        if let LifetimeP::GatewayHello { cert, .. } = hello {
+            verify_gateway_cert(label, &self.cfg.network.root_ca_path, cert, id, &pubkey.0)?;
+        }
         dir.admit(*id, *pubkey, conn.clone())?;
         Ok(dir)
     }
@@ -105,6 +111,22 @@ impl Resolver {
         self.relays.close_all();
         self.gateways.close_all();
     }
+}
+
+/// What a relay checks when it dials a gateway: a CA-issued cert for this id and key that carries
+/// `PUSH_GATEWAY`.
+fn verify_gateway_cert(
+    label: fmt::Arguments, ca_path: &Path, cert: &[u8], id: &RelayId, pubkey: &[u8; 32],
+) -> Result<(), CloseReason> {
+    if let Err(e) = verify_leaf(cert, ca_path, id, pubkey) {
+        warn!("{label} rejected: {e:#}");
+        return Err(CloseReason::BadSignature);
+    }
+    if !cert_capabilities(cert).is_some_and(|c| c.contains(NodeCapabilities::PUSH_GATEWAY)) {
+        warn!("{label} rejected: the cert lacks PUSH_GATEWAY");
+        return Err(CloseReason::UnsupportedRole);
+    }
+    Ok(())
 }
 
 fn verify_signed_packet(
@@ -165,6 +187,52 @@ mod tests {
         ];
         for (id, timestamp, forged, want) in cases {
             assert_eq!(check(id, timestamp, forged), want, "{id} at {timestamp}, forged: {forged}");
+        }
+    }
+
+    #[test]
+    fn a_gateway_registers_only_with_a_ca_issued_push_gateway_cert() {
+        use common::node::capability::CAPABILITY_OID;
+        use rcgen::CertificateParams;
+        use rcgen::CustomExtension;
+        use rcgen::KeyPair;
+        let _ = common::quic::config::setup_crypto_provider();
+        let new_key = || KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let (ca_key, gateway, other) = (new_key(), new_key(), new_key());
+        let mut ca = CertificateParams::default();
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.self_signed(&ca_key).unwrap().pem()).unwrap();
+        let issuer = rcgen::Issuer::new(ca, &ca_key);
+
+        let public = |key: &KeyPair| -> [u8; 32] { key.public_key_raw().try_into().unwrap() };
+        let id = |key: &KeyPair| NodeId::new(public(key));
+        let leaf = |key: &KeyPair, name: NodeId, caps: Option<NodeCapabilities>, by_ca: bool| {
+            let mut params = CertificateParams::new(vec![name.to_string()]).unwrap();
+            let stamp =
+                caps.map(|caps| CustomExtension::from_oid_content(CAPABILITY_OID, caps.encode()));
+            params.custom_extensions.extend(stamp);
+            let cert = if by_ca { params.signed_by(key, &issuer) } else { params.self_signed(key) };
+            cert.unwrap().der().to_vec()
+        };
+        let (push, relay) = (Some(NodeCapabilities::PUSH_GATEWAY), Some(NodeCapabilities::RELAY));
+        let bad = Some(CloseReason::BadSignature.code());
+        let not_a_gateway = Some(CloseReason::UnsupportedRole.code());
+        let cases = [
+            ("a CA-issued gateway cert", leaf(&gateway, id(&gateway), push, true), None),
+            ("a relay cert", leaf(&gateway, id(&gateway), relay, true), not_a_gateway),
+            ("no capabilities", leaf(&gateway, id(&gateway), None, true), not_a_gateway),
+            ("another key's cert", leaf(&other, id(&other), push, true), bad),
+            ("another id's cert", leaf(&gateway, id(&other), push, true), bad),
+            ("a self-signed cert", leaf(&gateway, id(&gateway), push, false), bad),
+            ("not a cert", vec![0x30, 0x03, 0x02, 0x01, 0x01], bad),
+        ];
+        let (gateway_id, gateway_key) = (id(&gateway), public(&gateway));
+        for (why, cert, want) in cases {
+            let label = format_args!("{why}");
+            let got = verify_gateway_cert(label, &ca_path, &cert, &gateway_id, &gateway_key);
+            assert_eq!(got.err().map(|reason| reason.code()), want, "{why}");
         }
     }
 }

@@ -20,6 +20,8 @@ governor = "0.10.4"
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+rcgen = "0.14.8"
+tempfile = "3"
 
 # ---------------------------------------------------------------------------
 # Debian packaging (`cargo deb`) → `pzresolver_<version>_<arch>.deb`.

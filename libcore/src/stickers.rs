@@ -39,6 +39,7 @@ use common::proto::sticker::StoreResponse;
 use common::proto::sticker::blob_key;
 use common::proto::sticker::blob_path;
 use common::proto::sticker::blob_put_signing_input;
+use common::proto::sticker::manifest_keys_signing_input;
 use common::proto::sticker::manifest_path;
 use common::proto::sticker::manifest_signing_input;
 use common::types::bytes::Bytes;
@@ -371,6 +372,14 @@ async fn resume_upload(pending: &db::PendingUpload) -> Result<()> {
         "upload belongs to another identity"
     );
     let mut pending = pending.clone();
+    // A manifest request saved without its keys signature reads as zeros.
+    for req in &mut pending.requests {
+        if let StoreRequest::PutManifest { env, keys, sig } = req
+            && sig.0 == [0; 64]
+        {
+            *sig = keys_sig(env, keys)?;
+        }
+    }
     for _ in 0..3 {
         match upload(&pending.requests).await {
             Ok(()) => {
@@ -430,17 +439,22 @@ fn manifest_request(pack: &PackRow, stickers: &[StickerRow]) -> Result<StoreRequ
         &manifest_blob,
     ))?;
     anyhow::ensure!(creator == pack.creator, "identity changed during publishing");
-    Ok(StoreRequest::PutManifest {
-        env: ManifestEnvelope {
-            pack_id: pack.pack_id,
-            store: pack.store_id,
-            creator: Bytes(creator),
-            version: pack.version,
-            manifest_blob,
-            sig: Bytes(sig.to_bytes()),
-        },
-        keys: stickers.iter().map(|s| Bytes(blob_key(&pack.token, &s.sticker_id))).collect(),
-    })
+    let env = ManifestEnvelope {
+        pack_id: pack.pack_id,
+        store: pack.store_id,
+        creator: Bytes(creator),
+        version: pack.version,
+        manifest_blob,
+        sig: Bytes(sig.to_bytes()),
+    };
+    let keys: Vec<_> =
+        stickers.iter().map(|s| Bytes(blob_key(&pack.token, &s.sticker_id))).collect();
+    let sig = keys_sig(&env, &keys)?;
+    Ok(StoreRequest::PutManifest { env, keys, sig })
+}
+
+fn keys_sig(env: &ManifestEnvelope, keys: &[Bytes<32>]) -> Result<Bytes<64>> {
+    Ok(Bytes(IdentitySigner::sign(&manifest_keys_signing_input(env, keys))?.to_bytes()))
 }
 
 async fn publish(

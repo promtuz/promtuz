@@ -179,7 +179,7 @@ fn bounded_fields_accept_their_cap_and_refuse_one_more() {
         ("ManifestEnvelope.manifest_blob", MANIFEST_MAX_BYTES, &|n| decodes(envelope(n))),
         ("PutBlob.bytes", BLOB_MAX_BYTES, &|n| decodes(blob(n))),
         ("PutManifest.keys", PACK_MAX_STICKERS, &|n| {
-            decodes(StoreRequest::PutManifest { env: envelope(1), keys: vec![Bytes([7; 32]); n] })
+            decodes(StoreRequest::signed_manifest(&key(1), envelope(1), vec![Bytes([7; 32]); n]))
         }),
         ("ReceiptDetails.entries", 128, &|n| {
             decodes(ReceiptDetails { entries: vec![receipt.clone(); n] })

@@ -273,8 +273,8 @@ pub(crate) fn partial_progress_verified_live_tx(
     Ok(())
 }
 
-/// UI progress counts verified chunks; `Partial::have` stays the contiguous prefix old peers need.
-/// An invalid bitmap counts as nothing.
+/// UI progress counts verified chunks, not the contiguous prefix in `Partial::have`. An invalid
+/// bitmap counts as nothing.
 pub(crate) fn verified_count(p: &Partial) -> u32 {
     verified_count_tx(&core().db.transfers().lock(), p)
 }
