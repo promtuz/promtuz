@@ -139,11 +139,11 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
         // A group from before signed rules has no roles to hand out.
         val owner = role == 2 && hasRules
         val appoints = owner || (role == 1 && adminsAppoint && !member.owner)
-        if (appoints && !member.admin) add(MenuAction("Make admin", iconPlaceholder = "admin") { actions.setRole(member, 1) })
-        if (owner && !member.owner) add(MenuAction("Make owner", iconPlaceholder = "owner") { actions.setRole(member, 2) })
+        if (appoints && !member.admin) add(MenuAction("Make admin", icon = com.promtuz.chat.R.drawable.oi_user_shield) { actions.setRole(member, 1) })
+        if (owner && !member.owner) add(MenuAction("Make owner", icon = com.promtuz.chat.R.drawable.oi_user_crown) { actions.setRole(member, 2) })
         if (appoints && member.admin) add(MenuAction(if (member.owner) "Dismiss as owner" else "Dismiss as admin",
-            iconPlaceholder = "dismiss") { actions.setRole(member, 0) })
-        if (canManage && (role == 2 || !member.owner)) add(MenuAction("Remove", iconPlaceholder = "remove", destructive = true) {
+            icon = com.promtuz.chat.R.drawable.oi_user_arrow_down) { actions.setRole(member, 0) })
+        if (canManage && (role == 2 || !member.owner)) add(MenuAction("Remove", icon = com.promtuz.chat.R.drawable.oi_user_minus, destructive = true) {
             removing = member; actions.clearError()
         })
     }

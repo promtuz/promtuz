@@ -87,7 +87,7 @@ fun HomeChatListItem(
     val rowCoord = remember { object { var c: LayoutCoordinates? = null } }
 
     val groups = if (chat.request) listOf(listOf(
-        MenuAction("Block", iconPlaceholder = "block", destructive = true) { confirmRequest = RequestDecision.Block },
+        MenuAction("Block", icon = R.drawable.oi_user_slash, destructive = true) { confirmRequest = RequestDecision.Block },
         MenuAction("Delete", R.drawable.oi_trash, destructive = true) { confirmRequest = RequestDecision.Delete },
     )) else listOf(
         buildList {
