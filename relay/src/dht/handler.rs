@@ -1,4 +1,4 @@
-//! Inbound `peer/5` connections. A signed `DhtHello` on the first uni-stream authenticates the
+//! Inbound `peer/N` connections. A signed `DhtHello` on the first uni-stream authenticates the
 //! dialer, then each bi-stream carries one RPC.
 
 use std::sync::Arc;

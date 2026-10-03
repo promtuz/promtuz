@@ -1,4 +1,4 @@
-//! Ed25519 keys and capabilities from peer certificates. Inbound `peer/5` peers present no client
+//! Ed25519 keys and capabilities from peer certificates. Inbound `peer/N` peers present no client
 //! certificate, so their key comes from the verified `DhtHello` instead.
 
 use common::node::capability::NodeCapabilities;
@@ -44,7 +44,7 @@ pub(crate) enum ExtractError {
     NodeIdMismatch,
 }
 
-/// The `BLAKE3(SPKI) == NodeId` pin. The `peer/5` dialer accepts any well-formed Ed25519 cert with
+/// The `BLAKE3(SPKI) == NodeId` pin. The `peer/N` dialer accepts any well-formed Ed25519 cert with
 /// no CA chain check, so this is the only identity check on an outbound dial.
 pub(crate) fn extract_and_verify_pubkey(
     conn: &quinn::Connection, claimed: &NodeId,
@@ -80,7 +80,7 @@ fn extract_pubkey_from_leaf_der(der: &[u8]) -> Result<[u8; 32], ExtractError> {
 mod tests {
     use super::*;
 
-    /// The `peer/5` dial pins `BLAKE3(SPKI)` to the NodeId and checks nothing else, so only a
+    /// The `peer/N` dial pins `BLAKE3(SPKI)` to the NodeId and checks nothing else, so only a
     /// well-formed Ed25519 leaf may yield a key.
     #[test]
     fn only_a_well_formed_ed25519_leaf_yields_a_key() {

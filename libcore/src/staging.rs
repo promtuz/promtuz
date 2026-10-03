@@ -111,16 +111,6 @@ pub fn discard(id: u64) {
     release(&orphans);
 }
 
-pub fn clear() {
-    let orphans = {
-        let mut items = core().staging.items.lock();
-        let gone = std::mem::take(&mut *items);
-        orphans_of(&items, gone.into_values())
-    };
-    ring();
-    release(&orphans);
-}
-
 /// Consulted by the message-side unlink: a chip or a send in flight can hold the same file as a
 /// deleted message.
 pub(crate) fn holds(c: &Core, file_id: &[u8; 32]) -> bool {

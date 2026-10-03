@@ -18,7 +18,7 @@ impl Handler {
             },
             None => {
                 warn!(
-                    "received peer/5 connection from {remote_addr} but DHT is disabled; closing"
+                    "received a peer connection from {remote_addr} but DHT is disabled; closing"
                 );
                 CloseReason::UnsupportedRole.close(&conn);
             },

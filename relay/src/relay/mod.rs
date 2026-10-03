@@ -122,7 +122,7 @@ impl Relay {
         // The peer ALPN trusts self-signed NodeKey certs pinned to the dialed NodeId, not the CA.
         let peer_client_cfg = Arc::new(graceful!(
             crate::dht::peer_dial::build_peer_client_cfg(),
-            "building the peer/5 client config"
+            "building the peer client config"
         ));
 
         endpoint.set_default_client_config(client_cfg);

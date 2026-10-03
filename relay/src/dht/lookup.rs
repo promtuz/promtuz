@@ -56,7 +56,7 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
     xor32(target, peer.as_bytes())
 }
 
-/// Peer-supplied addresses (`peer/5` dials, TURN targets) aim this relay's packets at a host of
+/// Peer-supplied addresses (`peer/N` dials, TURN targets) aim this relay's packets at a host of
 /// the peer's choosing: special ranges are refused, loopback and private ones unless `allow_local`.
 pub(crate) fn is_dialable_peer_addr(addr: &SocketAddr, allow_local: bool) -> bool {
     if addr.port() == 0 {
@@ -205,7 +205,7 @@ pub(crate) fn record_liveness(dht: &Dht, peer: &NodeId, alive: bool) {
     }
 }
 
-/// `peer/5` has no PING, so a `FindNode` for the peer's own id is the liveness probe.
+/// `peer/N` has no PING, so a `FindNode` for the peer's own id is the liveness probe.
 pub(crate) async fn probe_peer(dht: &Arc<Dht>, peer: &NodeDescriptor) -> bool {
     let req = DhtRequest::FindNode(FindNode {
         target:    (*peer.id.as_bytes()).into(),

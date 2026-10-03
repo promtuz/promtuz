@@ -1,4 +1,4 @@
-//! `peer/5` dial config. On `peer/5` a relay presents a self-signed cert for its NodeKey
+//! `peer/N` dial config. On `peer/N` a relay presents a self-signed cert for its NodeKey
 //! (`NodeId == BLAKE3(NodeKey)`), which a CA verifier cannot validate.
 
 use std::sync::Arc;

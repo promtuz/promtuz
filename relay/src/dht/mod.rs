@@ -1,4 +1,4 @@
-//! Relay-to-relay mesh: Kademlia routing over `peer/5`, the sticky-home offline queue and the MLS
+//! Relay-to-relay mesh: Kademlia routing over `peer/N`, the sticky-home offline queue and the MLS
 //! stash relay.
 
 
@@ -49,12 +49,12 @@ pub struct Dht {
 
     pub(crate) store: Arc<Store>,
 
-    /// Live `peer/5` connections with each peer's verified key. Outbound: the cert SPKI, whose
+    /// Live `peer/N` connections with each peer's verified key. Outbound: the cert SPKI, whose
     /// `BLAKE3(SPKI) == NodeId` pin after the handshake is the dial's only identity check.
     /// Inbound: the verified `DhtHello` pubkey.
     pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
 
-    /// Each live `peer/5` connection's service guarantees, keyed by `stable_id` and dropped when
+    /// Each live `peer/N` connection's service guarantees, keyed by `stable_id` and dropped when
     /// its serve loop ends.
     pub(crate) peer_services: RwLock<HashMap<usize, Support>>,
 
