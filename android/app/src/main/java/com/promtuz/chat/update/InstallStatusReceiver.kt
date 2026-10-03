@@ -8,7 +8,7 @@ import androidx.core.content.IntentCompat
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
-/** Where an update install reports back. Not exported: only the installer, holding our own PendingIntent, sends to it. */
+/** Not exported: only the installer, holding our own PendingIntent, sends to it. */
 class InstallStatusReceiver : BroadcastReceiver(), KoinComponent {
     private val updates: UpdateRepository by inject()
 

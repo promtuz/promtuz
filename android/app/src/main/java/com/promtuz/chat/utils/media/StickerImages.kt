@@ -19,7 +19,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-/** Decoded images shared by chat bubbles, pack covers and picker cells. */
 object StickerImages {
     private val cache = object : LruCache<String, ImageBitmap>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4

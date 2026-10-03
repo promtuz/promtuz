@@ -18,11 +18,6 @@ fun appTopBarColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
     scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
 )
 
-/**
- * Standard screen chrome. Search/selection headers can own their title content.
- * Home keeps its gradient scrim and Chat keeps its wallpaper blur; neither uses
- * the opaque scrolling surface provided here. Camera overlays supply their own colors.
- */
 @Composable
 fun AppTopBar(
     title: @Composable () -> Unit,

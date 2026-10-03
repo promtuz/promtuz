@@ -8,12 +8,7 @@ import android.view.Surface
 import timber.log.Timber
 import java.util.ArrayDeque
 
-/**
- * Decodes the peer's H.264 (Annex-B) and renders it to [surface]. Frames from
- * core arrive on a core thread and are queued; the decoder drains them on its
- * own thread. SPS/PPS ride inline with each keyframe, so the decoder needs no
- * out-of-band configuration.
- */
+/** Frames arrive on a core thread; the queues and the codec are touched only on the decoder thread. */
 class CallVideoDecoder(private val surface: Surface) {
     private val thread = HandlerThread("call-decoder").apply { start() }
     private val handler = Handler(thread.looper)
@@ -21,16 +16,14 @@ class CallVideoDecoder(private val surface: Surface) {
     private val free = ArrayDeque<Int>()
     private var codec: MediaCodec? = null
     @Volatile private var started = false
-    /// Wait for a keyframe before feeding the decoder, so it starts on an IDR
-    /// with its SPS/PPS rather than mid-GOP garbage.
+    // The decoder starts on a keyframe, which carries the SPS/PPS, rather than mid-GOP.
     private var sawKeyframe = false
 
     fun start() {
         if (started) return
         started = true
         handler.post {
-            // A nominal size; the decoder reads the real dimensions from the
-            // stream's SPS and reconfigures its output.
+            // A nominal size; the real one comes from the stream's SPS.
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 640, 480)
             val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             decoder.setCallback(object : MediaCodec.Callback() {
@@ -43,7 +36,6 @@ class CallVideoDecoder(private val surface: Surface) {
                     }
                 }
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    // Render to the surface (render = true) and drop the buffer.
                     runCatching { codec.releaseOutputBuffer(index, info.size != 0) }
                 }
                 override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {

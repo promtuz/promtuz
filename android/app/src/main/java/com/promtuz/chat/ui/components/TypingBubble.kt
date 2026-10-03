@@ -28,11 +28,6 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
 import kotlin.math.PI
 import kotlin.math.sin
 
-/**
- * The peer-is-typing row: an incoming-shaped bubble with three dots pulsing on a
- * staggered sine. Lives at the bottom of the list while the signal is live; its
- * exit as the real message enters reads as the typing→message hand-off.
- */
 @Composable
 fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
     val motion = LocalStageBubbleMotion.current
@@ -45,8 +40,7 @@ fun TypingBubble(modifier: Modifier = Modifier, mergedTop: Boolean = false) {
         style = appearance.bubble,
     )
 
-    // Enter/exit (fold at the tail corner) belong to the stage; this row only
-    // owns the dots' pulse.
+    // Enter and exit belong to the stage; this row owns only the dots' pulse.
     val phase by rememberInfiniteTransition(label = "typing")
         .animateFloat(0f, 1f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "phase")
 

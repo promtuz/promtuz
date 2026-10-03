@@ -32,12 +32,6 @@ fun HomeTopBar(
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .width(32.dp)
-                    .combinedClickable(
-                        indication = null,
-                        interactionSource = null,
-                        onClick = {},
-                        onDoubleClick = {}
-                    )
             )
         },
         title = {

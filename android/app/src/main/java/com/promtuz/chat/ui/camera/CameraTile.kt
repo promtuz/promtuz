@@ -24,12 +24,6 @@ import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.media.mediaOrigin
 
-/**
- * First cell of the attach grid: the live camera. It warms the shared
- * [CameraSession] and shows its view; opening the full camera takes that same view over,
- * so there is no second start and no black frame. The session is let go once neither the
- * tile nor the full camera shows it.
- */
 @Composable
 fun CameraTile(onOpen: () -> Unit) {
     val context = LocalContext.current
@@ -40,7 +34,10 @@ fun CameraTile(onOpen: () -> Unit) {
 
     if (granted) {
         LaunchedEffect(Unit) { CameraSession.bind(context, owner) }
-        DisposableEffect(Unit) { onDispose { if (CameraLauncher.request == null) CameraSession.release() } }
+        DisposableEffect(Unit) {
+            CameraSession.retain()
+            onDispose { CameraSession.release() }
+        }
     }
 
     Box(

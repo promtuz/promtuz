@@ -64,11 +64,7 @@ import com.promtuz.chat.ui.views.QrScannerOverlayView
 import org.koin.androidx.compose.koinViewModel
 
 
-/**
- * Full-screen QR scanner shown as a modal with a result callback — not a nav destination or an
- * Activity. Summon it behind a `showScanner` flag; it validates the QR as a promtuz invite, hands
- * the bytes back via [onResult], and closes itself.
- */
+/** A modal, not a route: it hands a valid invite's bytes to [onResult] and closes itself. */
 @Composable
 fun QrScannerSheet(
     onResult: (ByteArray) -> Unit,
@@ -91,7 +87,7 @@ fun QrScannerSheet(
             ActivityResultContracts.RequestPermission()
         ) { viewModel.handleCameraPermissionRequest(it) }
 
-        // VM outlives this modal (shared store) — reset it so the next open is a clean session.
+        // The VM outlives this modal, so reset it for a clean next session.
         DisposableEffect(Unit) { onDispose { viewModel.reset() } }
 
         Box(

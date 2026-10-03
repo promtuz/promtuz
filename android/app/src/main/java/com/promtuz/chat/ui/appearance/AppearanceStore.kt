@@ -7,11 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.Json
 
-/**
- * The persisted [ChatAppearance] — one JSON blob in prefs, surfaced as a StateFlow
- * that PromtuzTheme collects, so an edit anywhere restyles the app live. Unknown
- * keys are ignored on decode: presets survive fields coming and going.
- */
+/** One JSON blob in prefs; unknown keys are ignored so a stored preset survives field changes. */
 object AppearanceStore {
     private const val KEY = "chat_appearance"
     private lateinit var prefs: SharedPreferences

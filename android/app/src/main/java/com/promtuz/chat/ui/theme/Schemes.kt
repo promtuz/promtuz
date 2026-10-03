@@ -4,12 +4,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
-/*
- * The app's designed identity — hue 214 blue over cool neutrals, hand-authored for
- * both modes (no wallpaper seeding; dynamic color is an explicit opt-in in Theme.kt).
- * Chat-specific roles the scheme has no slot for live in ui/appearance/ChatColorScheme.
- */
-
 val DarkColors = darkColorScheme(
     primary = Color(0xFF5A91D8),
     onPrimary = Color(0xFF000714),

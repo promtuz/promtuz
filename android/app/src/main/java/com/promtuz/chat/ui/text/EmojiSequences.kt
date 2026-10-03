@@ -1,22 +1,11 @@
 package com.promtuz.chat.ui.text
 
-/** A run of text: plain, or one emoji cluster with the pack key that draws it. */
 sealed interface EmojiRun {
     data class Text(val text: String) : EmojiRun
     data class Emoji(val cluster: String, val key: String) : EmojiRun
 }
 
-/**
- * Splits text into plain runs and the emoji clusters a bundled pack can draw.
- *
- * Sequences are scanned by the emoji grammar itself (a ZWJ family, a
- * skin-toned hand, a keycap or a flag pair is one unit), then judged: a bare
- * `©` is text, `©️` is not. A matched sequence is named by the pack's key
- * scheme: codepoints in four-digit hex joined by underscores, variation
- * selectors dropped, which is what build-emoji-pack.py writes.
- * Anything the pack lacks stays text and falls back to the system font, so a newer emoji than the
- * pack degrades to what the device draws today rather than to a box.
- */
+/** Splits text into plain runs and the emoji clusters the bundled pack can draw. */
 object EmojiSequences {
     private const val VS15 = 0xFE0E
     private const val VS16 = 0xFE0F
@@ -24,10 +13,9 @@ object EmojiSequences {
     private const val KEYCAP = 0x20E3
 
     /**
-     * Unicode 17.0 Emoji_Presentation=Yes, including supplementary-plane defaults.
+     * Unicode 17.0 Emoji_Presentation=Yes, pinned so classification doesn't depend on the device.
      * Source: https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-data.txt
      * © 2025 Unicode, Inc. License: tools/licenses/notices/unicode.txt.
-     * Keep this pinned so classification does not depend on the device's Unicode version.
      */
     private val emojiPresentation: Set<Int> = buildSet {
         addAll(0x231A..0x231B); addAll(0x23E9..0x23EC); add(0x23F0)
@@ -86,15 +74,7 @@ object EmojiSequences {
         return runs
     }
 
-    /**
-     * Where the emoji sequence starting at [start] ends, per the emoji grammar
-     * rather than the platform's grapheme segmenter: a base, then any run of
-     * variation selectors, skin tones, a keycap or tag characters, then as many
-     * `ZWJ + element` links as follow; two regional indicators pair into a flag.
-     * Text that is not emoji yields one codepoint at a time, which is all the
-     * caller needs from it. Scanning it ourselves keeps the JVM tests and the
-     * device (whose segmenters disagree on the edges) on one behaviour.
-     */
+    /** Follows the emoji grammar rather than the platform segmenter, whose edges vary between runtimes. */
     private fun clusterEnd(text: String, start: Int): Int {
         var i = start
         val base = text.codePointAt(i)
@@ -126,10 +106,9 @@ object EmojiSequences {
 
     private fun isRegionalIndicator(cp: Int) = cp in 0x1F1E6..0x1F1FF
 
-    /** True when [runs] holds nothing the pack draws, so the caller can skip the inline machinery. */
     fun isPlain(runs: List<EmojiRun>): Boolean = runs.none { it is EmojiRun.Emoji }
 
-    /** The pack key for a cluster: hex codepoints padded to four digits, variation selectors dropped, `_`-joined. */
+    /** Four-digit hex codepoints joined by `_`, selectors dropped, as build-emoji-pack.py names assets. */
     fun keyOf(cluster: String): String {
         val sb = StringBuilder()
         var i = 0

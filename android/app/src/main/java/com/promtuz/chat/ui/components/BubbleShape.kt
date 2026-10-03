@@ -16,12 +16,6 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.BubbleStyle
 
-/**
- * Chat-bubble outline — a rounded rect with four independent corner radii, plus
- * an optional tail curling off the sender's bottom corner (right = outgoing).
- * Merged edges collapse the sender-side corner so a run of same-author messages
- * nests; the tail draws only on the last bubble in a group. GPU-drawn per frame.
- */
 class BubbleShape(
     private val topLeft: Dp,
     private val topRight: Dp,

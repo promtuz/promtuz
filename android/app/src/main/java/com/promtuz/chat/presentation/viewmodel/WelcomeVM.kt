@@ -1,6 +1,5 @@
 package com.promtuz.chat.presentation.viewmodel
 
-//import com.promtuz.chat.data.remote.ConnectionError
 import android.app.Application
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
@@ -43,7 +42,7 @@ class WelcomeVM(
         viewModelScope.launch {
             try {
                 CoreBridge.enroll(name)
-                // Channel A escrow — best-effort; Channel B (phrase) always exists.
+                // Best-effort; the recovery phrase always exists.
                 RecoveryStore.escrow(application)
                 onSuccess()
             } catch (e: CoreException) {

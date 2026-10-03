@@ -9,15 +9,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-/**
- * "Mark read" action on a message notification: clears unread. The resulting DB write
- * rings [CoreEventBus.dbChanged], and PushNotifier's reconcile dismisses the notif.
- */
-// ponytail: read-on-another-device dismiss lives in libcore (a read receipt → local mark) — out of scope here.
 class MarkReadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val conversation = intent.getByteArrayExtra("conversation") ?: return
-        PushNotifier.cancelChat(context, conversation.toHex()) // dismiss immediately, before the async mark
+        PushNotifier.cancelChat(context, conversation.toHex())
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {

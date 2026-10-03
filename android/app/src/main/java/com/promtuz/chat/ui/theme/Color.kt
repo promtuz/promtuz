@@ -23,12 +23,7 @@ fun gradientScrim(base: Color = MaterialTheme.colorScheme.background) = Brush.ve
     )
 )
 
-/**
- * Content settles into the background on its way down to the composer, so a
- * floating bar sits over a faded edge instead of a hard cut. One straight ramp,
- * not [gradientScrim]'s stepped curve — stops only bend the falloff, and here
- * the whole point is that it reads as a single even fade.
- */
+/** One straight ramp, not [gradientScrim]'s stepped curve, so it reads as a single even fade. */
 @Composable
 fun bottomScrim(base: Color = MaterialTheme.colorScheme.background) =
     Brush.verticalGradient(listOf(Color.Transparent, base))

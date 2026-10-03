@@ -30,7 +30,6 @@ import com.promtuz.chat.presentation.viewmodel.GroupWork
 import com.promtuz.chat.presentation.viewmodel.UiMember
 import com.promtuz.chat.utils.media.rememberAvatar
 
-/** Shared contact rows for starting chats, creating groups and adding members. */
 @Composable
 fun ContactPicker(
     modifier: Modifier = Modifier,

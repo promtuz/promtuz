@@ -59,19 +59,13 @@ class AppVM(
         _messageToShow.compareAndSet(message, null)
     }
 
-    /** Invite that arrived before onboarding finished; raised once enroll completes. */
     var pendingInvite: ByteArray? = null
     var pendingContactCard: String? = null
 
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
 
-    /**
-     * Every chat, message requests included, kept live. Core orders it (pinned
-     * first, then most recent activity), so a pin toggle arrives as a row change
-     * like anything else and the list has no ordering rule of its own to keep in
-     * sync. Home shows the rest; requests have their own screen.
-     */
+    /** Requests included. Core orders it, pinned first, so the list keeps no ordering rule of its own. */
     val chats: StateFlow<List<ChatSummary>> =
         observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
             loadSummaries()
@@ -95,35 +89,22 @@ class AppVM(
         }
     }
 
-    /** Live presence per contact (hex IPK) for the whole app — home dots + chat header. */
     val presenceByPeer: StateFlow<Map<String, Presence>> get() = bridge.presenceByPeer
 
-    /**
-     * Live activity bits per *conversation* (hex id), timed out client-side;
-     * 0/absent = quiet. Keyed on the chat rather than the person: the same
-     * contact can be typing in a group without typing in your DM.
-     */
+    /** Keyed by conversation, since a contact can type in a group without typing in your DM. */
     internal val conversationActivity = ConversationActivity(viewModelScope, ACTIVITY_TTL_MS)
     val activityByChat: StateFlow<Map<String, Int>> = conversationActivity.byChat
 
-    /** Invite-link confirmation sheet; null when hidden. Driven by deeplinks. */
     private val _invite = MutableStateFlow<InviteSheet?>(null)
     val invite: StateFlow<InviteSheet?> = _invite.asStateFlow()
 
     init {
-        // Channel A silent restore (IDENTITY_RECOVERY.md §5.1): fresh install
-        // with a Block Store hit re-adopts the identity + imports the
-        // Auto-Backup blob, then skips onboarding entirely.
         if (!CoreBridge.shouldLaunchApp()) viewModelScope.launch {
             if (RecoveryStore.tryAutoRestore(context)) completeOnboarding()
         }
 
-        // Presence is app-wide, not per-chat: subscribe to the WHOLE contact set so
-        // the home list and every open chat see live status. The relay scopes a
-        // subscription to the connection and treats each SubscribePresence as a
-        // full-set replace, so re-express the entire set on each (re)connect and
-        // whenever a contact is added. ChatVM must NOT also subscribe — one owner
-        // keeps the replace-semantics from narrowing us back to a single peer.
+        // Each subscribe replaces the connection's whole set, so this is the only subscriber
+        // and it resends every contact on each connect and contact change.
         viewModelScope.launch {
             combine(
                 bridge.connection.filter { it == CS.Connected },
@@ -132,10 +113,7 @@ class AppVM(
                 .collect { ipks -> runCatching { bridge.subscribePresence(ipks) } }
         }
 
-        // Typing/recording already reaches us for any contact (relay-routed,
-        // surfaced view-agnostically) — it just wasn't collected outside a chat.
-        // Track it app-wide for home and chat; time each member out (an offline
-        // peer never sends "stopped").
+        // Each member times out, since an offline peer never sends a stop.
         viewModelScope.launch {
             bridge.activity.collect { sig ->
                 conversationActivity.update(sig.conversation.toHex(), sig.peer.toHex(), sig.bits)
@@ -172,9 +150,7 @@ class AppVM(
 
     companion object {
         private const val TAG = "AppVM"
-        private val log = { Timber.tag(TAG) }
 
-        /** Shared receive timeout for typing and recording activity. */
         private const val ACTIVITY_TTL_MS = 6_000L
     }
 
@@ -182,29 +158,17 @@ class AppVM(
         navigator.push(Routes.Chat(conversationHex, name))
     }
 
-    /** Open a chat with a contact, minting the conversation on first open. */
     fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {
         val conv = runCatching { bridge.conversationWith(peerHex.fromHex()) }.getOrNull() ?: return@launch
         navigator.push(Routes.Chat(conv.toHex(), name))
     }
 
-    /** Home-list "Mark read": clear the unread backlog for this conversation. */
     fun markConversationRead(conversationHex: String) = viewModelScope.launch {
         runCatching { bridge.markConversationRead(conversationHex.fromHex()) }
     }
 
-    /**
-     * Drop a chat from this device, keys included. Local and silent, but final
-     * for a group: its messages stop arriving and nobody in it is told.
-     * Leaving is [leaveGroup], deliberately a separate act, and the one that
-     * tells them.
-     *
-     * A direct chat still forgets the contact: there is no membership to keep,
-     * and half-forgetting one is what leaves a phantom row behind.
-     *
-     * [onDone] runs once the chat is really gone, so a caller that navigates
-     * away on it can't strand the user somewhere the chat still exists.
-     */
+    /** A direct chat forgets the contact too, since half-forgetting one leaves a phantom row.
+     *  [onDone] runs only once the chat is really gone. */
     fun deleteChat(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
         val result = if (summary.isGroup) {
             runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
@@ -216,48 +180,30 @@ class AppVM(
             .onFailure { complain(it, "Couldn't delete this chat") }
     }
 
-    /** Empty a chat of its messages, keeping the chat and, for a group, our place in it. */
     fun clearHistory(conversationHex: String) = viewModelScope.launch {
         runCatching { bridge.clearConversationHistory(conversationHex.fromHex()) }
             .onFailure { complain(it, "Couldn't clear this chat") }
     }
 
-    /**
-     * Say a refusal out loud. The home list is a plain list with no error state
-     * of its own, and these acts are one-shot and deliberate: a tap that quietly
-     * does nothing reads as a broken app, and core's own message is usually the
-     * whole explanation.
-     *
-     * ponytail: a Toast, not a snackbar the scaffold hosts — no anchor and no
-     * retry action. Enough for a refusal there is nothing to retry about; wire
-     * a host when one of these grows a next step.
-     */
+    /** The home list has no error state, and a tap that silently does nothing reads as a broken app. */
     private fun complain(e: Throwable, fallback: String) {
         val why = e.reason(fallback)
         Timber.tag(TAG).e(e, "$fallback: $why")
         Toast.makeText(context, why, Toast.LENGTH_LONG).show()
     }
 
-    /**
-     * Leave a group, then drop it — the "leave and delete" path off the modal.
-     * Leaving needs the network, so this one really can fail; [onDone] runs only
-     * when it didn't, and the chat stays put when it did.
-     */
+    /** Leaving needs the network and can fail; [onDone] runs only when both steps succeed. */
     fun leaveAndDelete(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
         val conv = summary.conversationHex.fromHex()
         runCatching { bridge.leaveGroup(conv) }
             .onFailure { complain(it, "Couldn't leave this group") }
             .onSuccess {
-                // A delete that fails here leaves the chat on the home list in a
-                // left-but-present state, which is not "gone" — so [onDone] waits
-                // on it too.
                 runCatching { bridge.deleteConversation(conv) }
                     .onSuccess { onDone() }
                     .onFailure { complain(it, "Left the group, but the chat wouldn't delete") }
             }
     }
 
-    /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
     fun showInvite(bytes: ByteArray) {
         _invite.value = InviteSheet.Decoding
         viewModelScope.launch {
@@ -271,17 +217,15 @@ class AppVM(
         }
     }
 
-    /** User tapped Add: queue the pairing, then WATCH for the contact to appear.
-     *  pair() saves it PENDING only after the welcome publishes, so its arrival
-     *  is our success signal; nothing within the window means unreachable
-     *  (their KeyPackage isn't published — the common "new user" case). */
+    /** Core saves the contact only after the welcome publishes, so its arrival is the success
+     *  signal; nothing within the window means the peer is unreachable. */
     fun acceptInvite(bytes: ByteArray, ipk: ByteArray, name: String) {
         _invite.value = InviteSheet.Pairing(name)
         viewModelScope.launch {
             try {
                 bridge.pairFromQr(bytes)
             } catch (e: Exception) {
-                // Synchronous refusal (self-pair) — surface the reason directly.
+                // A synchronous refusal, such as pairing with ourselves.
                 Timber.tag(TAG).w(e, "pairFromQr failed")
                 _invite.value = InviteSheet.Invalid(e.message ?: "Couldn't start pairing.")
                 return@launch
@@ -299,7 +243,6 @@ class AppVM(
         _invite.value = null
     }
 
-    /** Enroll finished: drop Welcome from the stack (no going back) and raise any deferred invite. */
     fun completeOnboarding() {
         navigator.reset(Routes.App)
         pendingInvite?.let { showInvite(it); pendingInvite = null }
@@ -314,8 +257,6 @@ class AppVM(
         bridge.listConversations().mapNotNull { c ->
             val key = c.id.toList()
             val last = lastByConv[key]
-            // A direct chat titles itself from the address book. Core resolves
-            // which member is the peer, so the app never needs its own IPK.
             val contact = c.peer?.let { contactByIpk[it.toList()] }
             // Opened to message someone, then left without writing anything.
             if (c.kind.toInt() == 0 && contact == null && !c.request && last == null) return@mapNotNull null
@@ -340,7 +281,6 @@ class AppVM(
                 lastStatus = last?.status?.toInt() ?: 1,
                 pinned = c.pinned,
                 muted = c.muted,
-                alertedAt = c.alertedAt.toLong(),
                 amMember = c.amMember,
                 canLeave = c.canLeave,
                 ownerIsStuck = c.ownerIsStuck,
@@ -354,7 +294,6 @@ class AppVM(
         emptyList()
     }
 
-    /** A membership or title line reads as it does in the chat, with names rather than keys. */
     private suspend fun preview(conversation: ByteArray, last: MessageRecord): String =
         when (val code = last.system.toInt()) {
             0 -> last.content

@@ -19,16 +19,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.promtuz.chat.presentation.viewmodel.GroupVM
 import com.promtuz.chat.presentation.viewmodel.GroupWork
+import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.listPadding
 import org.koin.androidx.compose.koinViewModel
 import uniffi.core.GroupRulesRecord
 
-/** What a group's members may do. Admins change it; whether admins appoint admins is for owners. */
+/** Admins change these rules; only owners decide whether admins appoint admins. */
 @Composable
 fun GroupSettingsScreen(conversationHex: String, viewModel: GroupVM = koinViewModel()) {
     val rules by viewModel.rules.collectAsStateWithLifecycle()
@@ -37,7 +39,6 @@ fun GroupSettingsScreen(conversationHex: String, viewModel: GroupVM = koinViewMo
     val notice by viewModel.notice.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val loadError by viewModel.loadError.collectAsStateWithLifecycle()
-    val direction = LocalLayoutDirection.current
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(conversationHex) { viewModel.load(conversationHex) }
     LaunchedEffect(notice) { notice?.let { snackbar.showSnackbar(it); viewModel.clearNotice() } }
@@ -63,44 +64,43 @@ fun GroupSettingsScreen(conversationHex: String, viewModel: GroupVM = koinViewMo
         Column(
             Modifier.fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(
-                    start = padding.calculateLeftPadding(direction) + 18.dp,
-                    end = padding.calculateRightPadding(direction) + 18.dp,
-                    top = padding.calculateTopPadding() + 12.dp,
-                    bottom = padding.calculateBottomPadding() + 24.dp,
-                ),
+                .padding(padding.listPadding()),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             SettingsSection("Members can")
-            SettingsRow(
+            GroupedActionRow(
                 title = "Send messages",
-                detail = if (current.membersSend) "Everyone can send messages" else "Only admins can send messages",
-                index = 0, count = 3, checked = current.membersSend,
+                supportingText = if (current.membersSend) "Everyone can send messages" else "Only admins can send messages",
+                index = 0, groupSize = 3, checked = current.membersSend,
                 onClick = { set(current.copy(membersSend = !current.membersSend)) },
-            ) { Switch(checked = current.membersSend, onCheckedChange = null, enabled = !busy) }
-            SettingsRow(
+                control = { Switch(checked = current.membersSend, onCheckedChange = null, enabled = !busy) },
+            )
+            GroupedActionRow(
                 title = "Edit group info",
-                detail = if (current.membersEdit) "Everyone can change the name and photo"
+                supportingText = if (current.membersEdit) "Everyone can change the name and photo"
                     else "Only admins can change the name and photo",
-                index = 1, count = 3, checked = current.membersEdit,
+                index = 1, groupSize = 3, checked = current.membersEdit,
                 onClick = { set(current.copy(membersEdit = !current.membersEdit)) },
-            ) { Switch(checked = current.membersEdit, onCheckedChange = null, enabled = !busy) }
-            SettingsRow(
+                control = { Switch(checked = current.membersEdit, onCheckedChange = null, enabled = !busy) },
+            )
+            GroupedActionRow(
                 title = "Add members",
-                detail = if (current.membersAdd) "Everyone can add people" else "Only admins can add people",
-                index = 2, count = 3, checked = current.membersAdd,
+                supportingText = if (current.membersAdd) "Everyone can add people" else "Only admins can add people",
+                index = 2, groupSize = 3, checked = current.membersAdd,
                 onClick = { set(current.copy(membersAdd = !current.membersAdd)) },
-            ) { Switch(checked = current.membersAdd, onCheckedChange = null, enabled = !busy) }
+                control = { Switch(checked = current.membersAdd, onCheckedChange = null, enabled = !busy) },
+            )
 
             if (role == 2) {
                 SettingsSection("Admins")
-                SettingsRow(
+                GroupedActionRow(
                     title = "Make admins",
-                    detail = if (current.adminsAppoint) "Admins can make other members admins"
+                    supportingText = if (current.adminsAppoint) "Admins can make other members admins"
                         else "Only owners can make admins",
-                    checked = current.adminsAppoint,
+                    index = 0, groupSize = 1, checked = current.adminsAppoint,
                     onClick = { set(current.copy(adminsAppoint = !current.adminsAppoint)) },
-                ) { Switch(checked = current.adminsAppoint, onCheckedChange = null, enabled = !busy) }
+                    control = { Switch(checked = current.adminsAppoint, onCheckedChange = null, enabled = !busy) },
+                )
             }
         }
     }

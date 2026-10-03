@@ -45,11 +45,6 @@ import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 
-/**
- * The appearance editor: every knob writes the [AppearanceStore] preset directly,
- * so the preview (real bubbles over the real wallpaper) and the whole app restyle
- * live. `null` color tokens mean "auto" — follow the theme.
- */
 @Composable
 fun ChatAppearanceScreen() {
     val appearance by AppearanceStore.appearance.collectAsState()
@@ -152,13 +147,11 @@ private fun set(transform: ChatAppearance.() -> ChatAppearance) =
 
 private fun percent(v: Float) = "${(v * 100).toInt()}%"
 
-/** Muted fills that read well as bubbles/tints in both modes (text auto-derives). */
 private val BubblePalette = listOf(
     0xFF3A6EA8, 0xFF4F5AA8, 0xFF7A4FA8, 0xFFA84F8C, 0xFFA84F4F,
     0xFFA8763A, 0xFF3D8F62, 0xFF3A8FA8, 0xFF3C4048,
 )
 
-/** Vivid actives for send/cursor/typing. */
 private val AccentPalette = listOf(
     0xFF5A91D8, 0xFF7C6CF0, 0xFFB06CF0, 0xFFF06CB4, 0xFFF0756C,
     0xFFF0A93C, 0xFF3CC98A, 0xFF3CB8C9,
@@ -237,7 +230,7 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     }
 }
 
-/** "Auto" (null = follow theme) + fixed swatches; the picked token is ARGB. */
+/** A null pick means auto, following the theme. */
 @Composable
 private fun SwatchRow(label: String, selected: Long?, palette: List<Long>, onPick: (Long?) -> Unit) {
     val colors = MaterialTheme.colorScheme

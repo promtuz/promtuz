@@ -8,7 +8,6 @@ interface ContentProgression<T> {
     fun next(from: T, target: T): T
     fun remainingSteps(from: T, target: T): Long
 
-    /** Counts in either direction without allocating a list of intermediate numbers. */
     object Integers : ContentProgression<Int> {
         override fun next(from: Int, target: Int) = when {
             from < target -> from + 1
@@ -20,7 +19,6 @@ interface ContentProgression<T> {
     }
 }
 
-/** One active hop and one latest destination, including null; no frame clock or timers. */
 internal class ContentQueue<T>(initial: T) {
     internal data class Hop<T>(val target: T, val durationMillis: Int)
 
@@ -51,8 +49,7 @@ internal class ContentQueue<T>(initial: T) {
         val target = if (progression != null) progression.next(settled, destination) else destination
         require(target != settled) { "ContentProgression.next must advance toward the target" }
         val duration = if (progression != null) {
-            // Recalculate only between hops: a larger backlog runs faster, then
-            // settles gently as it catches up. Long arithmetic covers Int extremes.
+            // A larger backlog runs faster. Long arithmetic covers Int extremes.
             (durationMillis.toLong() / progression.remainingSteps(settled, destination).coerceAtLeast(1))
                 .coerceIn(minDurationMillis.toLong(), durationMillis.toLong()).toInt()
         } else if (updatedWhileRunning) minDurationMillis else durationMillis

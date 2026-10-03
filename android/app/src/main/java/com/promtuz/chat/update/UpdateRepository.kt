@@ -47,7 +47,6 @@ sealed interface UpdateState {
     data class Error(val message: String) : UpdateState
 }
 
-/** The build an update state is about, if it is about one. */
 val UpdateState.offered: UpdateManifest?
     get() = when (this) {
         is UpdateState.Available -> manifest
@@ -58,7 +57,7 @@ val UpdateState.offered: UpdateManifest?
         else -> null
     }
 
-/** One release's notes, published beside its APK; [body] is a small Markdown subset. */
+/** [body] is a small Markdown subset. */
 class ReleaseNote(val code: Long, val version: String, val date: String, val body: String) {
     companion object {
         private val HEADER = Regex("""^# (\S+) - (\d{4}-\d{2}-\d{2})\n?""")
@@ -87,7 +86,6 @@ data class UpdateManifest(
     val size: Long,
     val publishedAt: String,
 ) {
-    /** The subset core validates. `publishedAt` is display-only, so it stays here. */
     fun toCore() = uniffi.core.UpdateManifest(
         versionCode = versionCode.toUInt(),
         versionName = versionName,
@@ -107,10 +105,9 @@ class UpdateRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Unchecked)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
-    /** Every release after the installed one up to the offered build, newest first. */
     private val _notes = MutableStateFlow<List<ReleaseNote>>(emptyList())
     val notes: StateFlow<List<ReleaseNote>> = _notes.asStateFlow()
-    /** The offered build when the installed one can no longer be used; the app is gated on it. */
+    /** Set when the installed build can no longer be used; the app is gated on it. */
     private val _required = MutableStateFlow<UpdateManifest?>(null)
     val required: StateFlow<UpdateManifest?> = _required.asStateFlow()
 
@@ -137,7 +134,6 @@ class UpdateRepository(private val context: Context) {
         notifier.clearIfInstalled(installedVersionCode(), nativeChannel)
     }
 
-    /** Cross-channel switch: drop any in-flight/staged update from the old channel, then re-check. */
     fun switchChannel(newChannel: String) {
         require(newChannel in CHANNELS)
         if (newChannel == channel) return
@@ -209,11 +205,7 @@ class UpdateRepository(private val context: Context) {
         return Offer(manifest, releaseNotes(selectedChannel, abi, manifest))
     }
 
-    /**
-     * Walks the version codes from the offered build back to the installed one; a code
-     * without notes is a 404. Signed like the manifest, but only decoration: an update
-     * without notes is still an update.
-     */
+    /** A code without notes is a 404, and an update without notes is still an update. */
     private fun releaseNotes(selectedChannel: String, abi: String, offered: UpdateManifest): List<ReleaseNote> {
         val installed = installedVersionCode()
         val notes = ArrayList<ReleaseNote>()
@@ -237,8 +229,7 @@ class UpdateRepository(private val context: Context) {
     }
 
     fun check() {
-        // A foreground auto-check must not stomp an update the user is already
-        // downloading or about to install — the verified APK is on disk; don't send them back to "Download".
+        // A foreground auto-check must not stomp an update being downloaded or installed.
         when (_state.value) {
             is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.Installing,
             is UpdateState.PermissionNeeded -> return
@@ -359,12 +350,8 @@ class UpdateRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Android 12+ installs our own update without asking. Older versions, and any
-     * install Android decides needs the user, report STATUS_PENDING_USER_ACTION to
-     * [InstallStatusReceiver], which shows Android's install screen instead. Either
-     * way Android closes the app to replace it.
-     */
+    /** Android 12+ installs without asking; otherwise [InstallStatusReceiver] gets
+     *  STATUS_PENDING_USER_ACTION and shows Android's install screen. */
     private fun commitInstall(apk: File) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
@@ -477,11 +464,7 @@ class UpdateRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Check the manifest against the contract before anything is downloaded.
-     * The contract is the server's, not Android's, so core states it — every
-     * field here arrives over the network and the filename names what we fetch.
-     */
+    /** Runs before any download: every field arrives over the network, and the filename names what we fetch. */
     private fun validateManifest(manifest: UpdateManifest, abi: String, selectedChannel: String) {
         CoreBridge.validateUpdateManifest(manifest.toCore())
         require(URL(apkUrl(abi, manifest.apk, selectedChannel)).path.endsWith("/${manifest.apk}")) { "Update path is invalid." }

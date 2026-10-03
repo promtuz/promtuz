@@ -205,7 +205,6 @@ android {
         compose = true
         buildConfig = true
     }
-    ndkVersion = "29.0.14206865"
 }
 
 // Register the generated uniffi bindings as a Kotlin source dir per variant
@@ -368,7 +367,6 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.constraintlayout.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
@@ -376,8 +374,6 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.google.material)
     implementation(libs.haze.materials)
-//    implementation(libs.room.runtime)
-//    implementation(libs.room.ktx)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -406,9 +402,6 @@ dependencies {
     implementation(libs.koin.core)
 
     implementation(libs.koin.androidx.compose)
-    implementation(libs.koin.androidx.compose.navigation)
-
-    implementation(kotlin("reflect"))
 
     implementation(libs.coil.compose)
     implementation(libs.coil.video)

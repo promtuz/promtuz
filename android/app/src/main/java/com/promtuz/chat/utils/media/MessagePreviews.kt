@@ -45,7 +45,7 @@ object MessagePreviews {
             } ?: return@withContext null
             val key = "$conversation:$dispatch:${bytes.contentHashCode()}"
             cache.get(key) ?: decoders.withPermit {
-                cache.get(key) ?: decodeAvif(bytes, maxEdge = 4096)?.asAndroidBitmap()?.tile()
+                cache.get(key) ?: decodeAvifThumb(bytes, 192)?.asAndroidBitmap()
                     ?.also { cache.put(key, it) }
             }
         } catch (e: CancellationException) { throw e }

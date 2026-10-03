@@ -17,18 +17,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.promtuz.chat.data.ChatPrefs
 
-// Suppresses the primer for the rest of this process after "Not now" — resets on next launch so the
-// ask returns at a later high-intent moment, without persisting a permanent opt-out.
+// Per process, so "Not now" asks again after the next launch.
 private var dismissedThisSession = false
 
-/**
- * Contextual, one-shot priming for POST_NOTIFICATIONS. The system prompt is a
- * one-shot on 13+ (denials can't be re-summoned), so we don't burn it head-on at
- * cold launch — this fires at a high-intent moment (entering a chat). A tiny
- * in-app step first; only tapping Enable fires the real system dialog, so a
- * hesitant "Not now" keeps it in reserve. Receiving/draining never needs this —
- * it only gates whether a banner shows, so denial degrades to silent sync.
- */
+/** A denied system prompt can't be shown again, so only Enable spends it. */
 @Composable
 fun NotificationPrimer() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
@@ -43,7 +35,6 @@ fun NotificationPrimer() {
     if (!show) return
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    // Enable spends the one-shot system prompt → done for good. "Not now" only suppresses this session.
     val enable = {
         ChatPrefs.notifPrimed = true
         show = false

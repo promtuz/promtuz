@@ -16,11 +16,7 @@ import androidx.core.graphics.drawable.toBitmap
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.appearance.Wallpaper
 
-/**
- * A Modifier that paints the chat [wallpaper] — a tiled pattern (built once, the
- * heavy bitmap remembered so it never rebuilds per frame) or a solid fill. Tint +
- * alpha ride outside the remembered brush so recolouring stays live.
- */
+/** Tint and alpha stay outside the remembered brush, so recoloring never rebuilds the bitmap. */
 @Composable
 fun rememberChatWallpaper(wallpaper: Wallpaper): Modifier {
     val colors = MaterialTheme.colorScheme

@@ -18,12 +18,6 @@ private const val MIN_HEIGHT = 120f * MAX_W / 360f
 /** The album's height as a fraction of the width it was laid out for. */
 const val ALBUM_HEIGHT_RATIO = MAX_H / MAX_W
 
-/**
- * Album grid. Two, three and four
- * pictures get the hand-picked layouts keyed on how wide, narrow or square each one is;
- * anything else, or any panorama, is fitted by trying every row split of up to three per
- * row and keeping the one closest to a 4:3 stack.
- */
 fun albumLayout(ratios: List<Float>): List<AlbumCell> {
     val count = ratios.size
     if (count == 0) return emptyList()

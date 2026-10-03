@@ -5,12 +5,12 @@ import android.content.Context
 import android.content.Intent
 import com.promtuz.core.CoreBridge
 
-/** Answer / hang-up buttons on the call notification. */
 class CallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             ACTION_ANSWER -> {
-                CoreBridge.callAccept()
+                // A second tap finds nothing ringing; the call it answered goes on.
+                runCatching { CoreBridge.callAccept() }
                 CallActivity.launch(context.applicationContext)
             }
             ACTION_HANGUP -> CoreBridge.callHangup()

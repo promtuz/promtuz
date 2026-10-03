@@ -75,7 +75,6 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
     val direction = LocalLayoutDirection.current
     val presenceNow = rememberPresenceTime()
     val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    // TODO: Reintroduce Contacts search with a dedicated UI and interaction design.
     var selecting by rememberSaveable { mutableStateOf(false) }
     var naming by rememberSaveable { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }

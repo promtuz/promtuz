@@ -55,7 +55,6 @@ import org.koin.androidx.compose.koinViewModel
 private const val PackMax = 100
 private const val NameMax = 64
 
-/** Create a pack or append images to a pack owned by this identity. */
 @Composable
 fun NewStickerPackScreen(
     packHex: String?,

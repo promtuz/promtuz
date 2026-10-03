@@ -3,8 +3,8 @@ package com.promtuz.chat.security
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
@@ -15,7 +15,6 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecoveryPhraseSessionTest {
-    // Synthetic fixture, not an exported identity or a usable recovery phrase.
     private val words = List(24) { "example" }
 
     @Test fun openingAndCancellingNeverExportsAndRepeatedTapsAreIgnored() = runTest {
@@ -107,23 +106,19 @@ class RecoveryPhraseSessionTest {
         assertTrue(session.state.value is RecoveryPhraseState.Locked)
     }
 
-    @Test fun malformedExportAndCoreErrorsStayHiddenWithoutExposingExceptionText() = runTest {
-        for (invalid in listOf(emptyList(), List(23) { "example" }, List(24) { " " }, List(24) { "two words" })) {
-            val session = RecoveryPhraseSession(backgroundScope) { invalid }
+    @Test fun malformedOrFailedExportsStayLockedAndNoStatePrintsSecrets() = runTest {
+        val exports: List<suspend () -> List<String>> = listOf(
+            { emptyList() }, { List(23) { "example" } }, { List(24) { " " } }, { List(24) { "two words" } },
+            { error("sensitive internal details") },
+        )
+        for (export in exports) {
+            val session = RecoveryPhraseSession(backgroundScope, export)
             session.setForeground(true)
             session.authenticated(session.beginAuthentication()!!)
             runCurrent()
             assertEquals(RecoveryPhraseState.Locked(RecoveryNotice.LoadFailed), session.state.value)
+            assertFalse(session.state.value.toString().contains("sensitive"))
         }
-        val session = RecoveryPhraseSession(backgroundScope) { error("sensitive internal details") }
-        session.setForeground(true)
-        session.authenticated(session.beginAuthentication()!!)
-        runCurrent()
-        assertEquals(RecoveryPhraseState.Locked(RecoveryNotice.LoadFailed), session.state.value)
-        assertFalse(session.state.value.toString().contains("sensitive"))
-    }
-
-    @Test fun revealedStateDoesNotIncludeWordsInToString() {
         assertFalse(RecoveryPhraseState.Revealed(words).toString().contains("example"))
     }
 

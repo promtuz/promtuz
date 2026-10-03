@@ -123,11 +123,7 @@ private val BACK_CORNER = 24.dp
 
 private enum class Phase { Opening, Open, Closing }
 
-/**
- * One leg of the transition: a copy of the picture drawn in this overlay travels from [from] to
- * [to] while the real thing stays put underneath. The entry point is never moved, only
- * hidden behind the overlay until the copy lands on it.
- */
+/** A copy of the picture flying between rects; the entry point itself never moves. */
 private class Flight(
     val image: ImageBitmap?,
     val from: Rect,
@@ -140,7 +136,7 @@ private class Flight(
     val toClip: Rect? = null,
 )
 
-/** Mount once above navigation. Shows whatever [MediaViewer.session] holds. */
+/** Mount once above navigation. */
 @Composable
 fun MediaViewerHost() {
     val session = MediaViewer.session ?: return
@@ -192,7 +188,6 @@ private fun Viewer(session: MediaSession) {
 
     fun originRect(item: MediaItem) = MediaViewer.originRectIn(item.key, hostCoords[0], density)
 
-    /** Where the current item is on screen right now, whatever state the viewer is in. */
     fun currentRect(): Rect {
         val f = flight
         if (phase != Phase.Open && f != null) return lerp(f.from, f.to, progress.value)
@@ -237,7 +232,6 @@ private fun Viewer(session: MediaSession) {
         }
     }
 
-    // Open: the copy flies from wherever the entry point is to the fitted rectangle.
     LaunchedEffect(Unit) {
         val vp = snapshotFlow { viewport }.first { it != Size.Zero }
         val item = session.items[session.startIndex]
@@ -279,12 +273,9 @@ private fun Viewer(session: MediaSession) {
     }
 
     val dismissThresholdPx = with(density) { DISMISS_THRESHOLD.toPx() }
-    // The chrome rides the flight in rather than waiting for it, and steps aside for a
-    // drag or a back gesture without forgetting it was on.
     val chromeShown = chrome && phase != Phase.Closing && dismissY.value == 0f && !backActive
     val chromeAlpha by animateFloatAsState(if (chromeShown) 1f else 0f, tween(240, easing = ChatMotion.Easing), label = "viewer chrome")
     var bottomChromePx by remember { mutableIntStateOf(0) }
-    // The system bars go with the chrome: a picture alone gets the whole screen.
     LaunchedEffect(chrome, phase) {
         val c = insets ?: return@LaunchedEffect
         if (phase != Phase.Open || chrome) c.show(WindowInsetsCompat.Type.systemBars())
@@ -296,11 +287,9 @@ private fun Viewer(session: MediaSession) {
             .fillMaxSize()
             .onSizeChanged { viewport = Size(it.width.toFloat(), it.height.toFloat()) }
             .onGloballyPositioned { hostCoords[0] = it }
-            // A dim over the chat revealed behind the back-swipe card, as the stage does.
             .drawBehind { drawRect(Color.Black, alpha = 0.2f * backScale.value) },
     ) {
-        // The card: the black ground and the pages together, so a back swipe scales one
-        // thing toward the finger with the same rounding the navigation stage uses.
+        // The black ground and the pages scale together as one card on a back swipe.
         Box(
             Modifier
                 .fillMaxSize()
@@ -555,7 +544,6 @@ private fun Chrome(
     val white = Color.White
     val slide = with(LocalDensity.current) { 40.dp.toPx() }
     Box(Modifier.fillMaxSize()) {
-        // The bars come in from their own edges and leave the same way, with the fade.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -595,7 +583,6 @@ private fun Chrome(
                 },
             )
         }
-        // The strip is an album's: the other pictures of the same message, nothing else.
         val album = item.group?.let { g -> items.withIndex().filter { it.value.group == g } }?.takeIf { it.size > 1 }
         Column(
             Modifier
@@ -620,10 +607,6 @@ private fun Chrome(
     }
 }
 
-/**
- * An album's pictures under the current one, each at its own proportions, the current one
- * a size up. The strip keeps the current one in view as the pages move; a tap jumps.
- */
 @Composable
 private fun Filmstrip(items: List<MediaItem>, index: Int, onSelect: (Int) -> Unit) {
     val state = rememberLazyListState()

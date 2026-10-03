@@ -121,7 +121,6 @@ class QrView(context: Context) : View(context) {
             }
         }
 
-        // ---- FINDERS (Telegram-style) ----
         val outer = 7 * m
         val innerPad = 1 * m
         val dotPad = 2 * m
@@ -136,17 +135,14 @@ class QrView(context: Context) : View(context) {
 
             canvas.saveLayer(l, t, rgt, btm, null)
 
-            // outer
             canvas.drawRoundRect(l, t, rgt, btm, rOuter, rOuter, paint)
 
-            // white ring
             paint.xfermode = xfermode
             canvas.drawRoundRect(
                 l + innerPad, t + innerPad, rgt - innerPad, btm - innerPad, rInner, rInner, paint
             )
             paint.xfermode = null
 
-            // center dot (3x3)
             canvas.drawRoundRect(
                 l + dotPad,
                 t + dotPad,

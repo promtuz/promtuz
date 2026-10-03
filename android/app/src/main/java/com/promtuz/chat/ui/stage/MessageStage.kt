@@ -47,10 +47,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
-/**
- * One clock for every chat motion. Placement, unfold, resize, crossfade — all
- * chat animation runs on this spec so simultaneous movements read as one event.
- */
+/** Every chat motion runs on this spec so simultaneous movements read as one event. */
 object ChatMotion {
     val Easing = CubicBezierEasing(0.19919f, 0.01064f, 0.27921f, 0.91025f)
     const val DURATION_MS = 220
@@ -68,12 +65,6 @@ internal class StageBubbleMotion(val progress: () -> Float) {
 internal data class BubbleSnapshot(val size: Size, val dotsPhase: Float, val opacity: Float)
 internal val LocalStageBubbleMotion = staticCompositionLocalOf<StageBubbleMotion?> { null }
 
-/**
- * Scroll + anchor state for [MessageStage]. [scroll] is px of history above the
- * newest edge (0 = pinned to the live bottom). While [pin]ned, scroll is derived
- * each frame to preserve the row's position within the available scroll range.
- * Composer growth can displace it; pinnedOffsetY lets the lifted copy follow.
- */
 @Stable
 class MessageStageState {
     /** px scrolled up into history; 0 = at the newest message. */
@@ -90,8 +81,6 @@ class MessageStageState {
     var pinnedOffsetY by mutableFloatStateOf(0f)
         internal set
     internal var stackOf: ((Any) -> Float?)? = null
-
-    val isAtBottom: Boolean get() = pinnedKey == null && scroll < 2f
 
     /** Hold [key] at [bottomPx] (stage-root px), subject to viewport limits, until [unpin]. */
     fun pin(key: Any, bottomPx: Float) {
@@ -110,7 +99,6 @@ class MessageStageState {
         animate(scroll, 0f, animationSpec = ChatMotion.spec()) { v, _ -> scroll = v }
     }
 
-    /** Glide until [key]'s row sits in the upper half of the viewport. */
     suspend fun scrollToKey(key: Any) {
         // A history jump can add rows in the caller's composition before Scaffold's
         // subcomposed stage has measured them. Wait for that layout's scroll extent.
@@ -143,32 +131,21 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
     var exiting = false
     var stickyHeader = false
 
-    /**
-     * Enter decision deferred to the first measure pass that places this row:
-     * in-band additions unfold (visible = worth animating), off-band ones snap
-     * (history backfill above the viewport).
-     */
+    /** Resolved by the first measure pass: in-band rows unfold, off-band history backfill snaps. */
     var pendingEnter = false
     var motion: Job? = null
 
     /** Row data behind state so an update recomposes exactly this slot. */
     val rowState = mutableStateOf<Any?>(null)
 
-    /**
-     * The one content lambda this slot ever gets: subcompose() with a stable
-     * lambda skips recomposition entirely on unchanged passes.
-     */
+    /** The slot's only content lambda, so subcompose() skips unchanged passes. */
     val content: @Composable () -> Unit = {
         CompositionLocalProvider(LocalStageBubbleMotion provides bubbleMotion) {
             rowState.value?.let { holder.render.value(it) }
         }
     }
 
-    /**
-     * Morph hand-off: px of room already open when this row entered (the vanished
-     * row it replaces). Effective height lerps enterFromPx → measuredH over the
-     * enter, so the swap is one continuous bubble instead of a collapse + unfold.
-     */
+    /** Room inherited from a morph source; the enter lerps it to measuredH. */
     var enterFromPx = 0
     var exitBaseH = 0f
     var exitTravel = 0f
@@ -194,22 +171,7 @@ private class Entity(val key: Any, initialFactor: Float, holder: StageHolder) {
     var beforeKey: Any? = null
 }
 
-/**
- * The chat's placement engine — a bottom-anchored, windowed, animated column that
- * owns every motion the framework list kept to itself (NavStage/AppDropMenu
- * precedent). Newest row is index 0 and sits at the bottom edge.
- *
- * - **One clock**: room for entering/exiting rows opens/closes via a factor on
- *   [ChatMotion]; a row resizing mid-list (its content animates its own size)
- *   moves every neighbor in the same measure pass — sync is structural.
- * - **Exits are first-class**: removed rows stay composed, spliced where they
- *   were, and scale toward their bottom corner before release.
- * - **Anchor policy**: at the bottom, content growth is absorbed by the walk;
- *   near-bottom (< [followThreshold]) the view glides home; scrolled-up it
- *   holds; a [MessageStageState.pin]ned row never moves on screen.
- *
- * Narrow contract by design: single column, newest-first rows, stable [key]s.
- */
+/** Bottom-anchored, windowed chat column. Rows are newest first; removed rows exit in place. */
 @Composable
 fun <T : Any> MessageStage(
     rows: List<T>,
@@ -218,25 +180,14 @@ fun <T : Any> MessageStage(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     /**
-     * The share of [contentPadding]'s bottom that DISPLACES content instead of
-     * covering it — the composer's reply/edit block. Growth here rides every row
-     * up with the composer at any scroll position; growth in the rest of the
-     * bottom inset (IME, attach panel, a text field wrapping a line) only holds
-     * a scrolled-up view still and opens the freed space below it.
-     *
-     * A lambda so the read lands in the measure pass: the composer's reveal is an
-     * animation, and sampling it in composition would invalidate every row slot
-     * on every frame of it.
+     * Share of the bottom padding that lifts rows instead of covering them (the reply/edit block).
+     * A lambda so its animation is read in measure, not composition.
      */
     pushBottom: () -> Dp = { 0.dp },
     followThreshold: Dp = 240.dp,
     /** False while the initial query is pending; true also for successfully loaded empty history. */
     historyLoaded: Boolean = true,
-    /**
-     * The key of a row removed in the same emission that this new row visually
-     * REPLACES (typing bubble → the message that ended it). The source vanishes
-     * without an exit and this row enters from its height — a morph.
-     */
+    /** Key of a row removed in the same emission that this row replaces, as a message replaces typing dots. */
     morphFrom: (T) -> Any? = { null },
     /** Transient rows can enter before or alongside the first history snapshot. */
     animateOnInitialFill: (T) -> Boolean = { false },
@@ -245,15 +196,10 @@ fun <T : Any> MessageStage(
     /** Distance below the composer at birth, captured once for each new row. */
     enterFromBelow: (T) -> Float = { 0f },
     horizontalPivotInset: Dp = 0.dp,
-    /** Fold pivot per row (a bubble's tail corner); bottom-center default. */
     transformOrigin: (T) -> TransformOrigin = { TransformOrigin(0.5f, 1f) },
     /** Section headers pin below the top inset until the next newer header pushes them away. */
     stickyHeader: (T) -> Boolean = { false },
-    /**
-     * Fired from the measure walk while the view sits within ~1.5 viewports of
-     * the top of loaded history — the pagination doorbell. Fires every pass in
-     * the zone, so the callback must carry its own re-entrancy/exhausted guard.
-     */
+    /** Fires on every measure pass near the top of loaded history, so it must guard itself. */
     onNearTop: () -> Unit = {},
     row: @Composable (T) -> Unit,
 ) {
@@ -267,12 +213,8 @@ fun <T : Any> MessageStage(
     }
     state.stackOf = holder::stackEstimate
     holder.scope = scope
-    // Slots read the renderer through state, and each entity owns ONE content
-    // lambda for its lifetime: a measure pass with unchanged rows recomposes
-    // nothing (a fresh lambda per subcompose() call would invalidate every
-    // visible row on every scroll/animation frame). Wrapped, not cast: composable
-    // function types can't be runtime-cast (ComposableLambdaImpl is not a
-    // FunctionN), only the erased row value can.
+    // Slots read the renderer through state so each entity keeps one content lambda.
+    // Wrapped, not cast: composable function types can't be cast at runtime.
     holder.render.value = { any ->
         @Suppress("UNCHECKED_CAST")
         row(any as T)
@@ -298,15 +240,9 @@ fun <T : Any> MessageStage(
         }
     }
 
-    // Rows crossing the band edge recycle retired compositions instead of
-    // composing from scratch (fresh-compose + dispose per scroll frame is
-    // what a lazy walk costs without a pool).
     val subcomposeState = remember { SubcomposeLayoutState(SubcomposeSlotReusePolicy(12)) }
 
-    // Warm-up prefetch: cold rows compose + text-layout mid-fling otherwise (the
-    // first fast scroll's 80ms frames). A couple of off-band rows precompose per
-    // frame in the idle gaps until the whole history is warm; the walk later
-    // adopts them as ordinary (cheap) slots.
+    // Precompose two cold rows per frame so a first fling doesn't compose them mid-scroll.
     LaunchedEffect(rows) {
         while (holder.lastWidthPx == 0) withFrameNanos { }
         val cold = holder.coldKeys()
@@ -336,13 +272,8 @@ fun <T : Any> MessageStage(
         val anchorY = height - bottomPad
         val buffer = 400
 
-        // Rows sit at anchorY + scroll - stack, so a growing bottom inset drops
-        // anchorY and rides every row up with it. That's what the push share wants;
-        // the rest of the inset instead holds a scrolled-up view where it is, and
-        // scroll += delta is exactly the cancellation (maxScroll grows by the same
-        // delta as innerViewport shrinks, so the room is always there). At the
-        // bottom nothing holds — content tracks the composer. Clamping is left to
-        // the resolve below, which is where maxScroll is finally known.
+        // Rows sit at anchorY + scroll - stack, so inset growth lifts them. A scrolled-up view
+        // cancels the hold share with scroll += delta; the resolve below clamps it.
         val pushPad = pushBottom().roundToPx()
         val holdPad = bottomPad - pushPad
         if (holder.lastHoldPad >= 0) {
@@ -363,9 +294,8 @@ fun <T : Any> MessageStage(
         val display = holder.displayList
         val entities = holder.entities
 
-        // Content-space walk: stack(i) = summed effective heights of rows newer
-        // than i. Screen positions need scroll, which (pinned) needs the pinned
-        // row's stack — so band with last frame's value and resolve after.
+        // stack(i) sums the heights of rows newer than i. A pinned scroll needs the pinned
+        // row's stack, so band with last frame's scroll and resolve after the walk.
         val provisionalScroll =
             if (state.pinnedKey != null) holder.lastScroll else state.scroll
 
@@ -381,9 +311,7 @@ fun <T : Any> MessageStage(
             val k = holder.keyOf(item)
             val e = entities.getOrPut(k) { Entity(k, 1f, holder).also { it.rowState.value = item } }
 
-            // Lazy for real: off-band rows are never subcomposed — unknown heights
-            // walk as estimates and correct when the band reaches them (corrections
-            // land above the viewport, which only moves the clamp, not the view).
+            // Off-band heights walk as estimates; corrections land above the viewport and move only the clamp.
             val bottom = anchorY + provisionalScroll - stack
             val estH = if (e.measuredH > 0) e.measuredH else ESTIMATED_ROW_PX
             val inBand = bottom > -buffer && bottom - estH < height + buffer
@@ -424,15 +352,13 @@ fun <T : Any> MessageStage(
         state.innerViewport = (height - topPad - bottomPad).coerceAtLeast(1).toFloat()
         state.maxScroll = max(0f, stack - state.innerViewport)
 
-        // Resolve scroll: derived while pinned (row's bottom edge invariant),
-        // clamped otherwise. Pinned derivation must not read state.scroll or it
-        // would self-invalidate every pass.
+        // Derived while pinned, clamped otherwise. The pinned branch must not read
+        // state.scroll or it invalidates itself every pass.
         val scroll = if (state.pinnedKey != null && pinnedStack >= 0f) {
             val derived =
                 state.pinnedBottom - (pushPad - state.pinnedPushAtStart) - anchorY + pinnedStack
-            // A frozen position outside the scroll range cannot survive unpinning.
-            // Apply that limit now so composer/IME growth moves the lifted copy
-            // continuously, rather than jumping when the menu releases the row.
+            // A frozen position outside the scroll range can't survive unpinning. Clamping
+            // now keeps the lifted copy from jumping when the menu releases the row.
             val clamped = derived.coerceIn(0f, state.maxScroll)
             state.pinnedOffsetY = anchorY + clamped - pinnedStack - state.pinnedBottom
             state.scroll = clamped
@@ -489,9 +415,8 @@ fun <T : Any> MessageStage(
                         (f / (e.exitMorphPhase ?: 1f).coerceAtLeast(0.0001f)).coerceIn(0f, 1f) else 1f
                     val scale = if (morph) morphExitScale else
                         (e.effectiveHeight() / e.measuredH.coerceAtLeast(1)).coerceIn(0f, 1f)
-                    // Position the transformed bounds explicitly. A full-width row's
-                    // right edge is not the bubble's right edge, and moving composer
-                    // insets must not turn a bottom pivot into a top-pivot illusion.
+                    // A full-width row's edge is not the bubble's, and a moving inset must
+                    // not make a bottom pivot read as a top pivot, so place the bounds by hand.
                     val pivotX = pivotInset + (width - 2f * pivotInset) * e.origin.pivotFractionX
                     translationX = pivotX * (1f - scale)
                     translationY = e.measuredH * (1f - scale) + e.travel()
@@ -508,9 +433,6 @@ fun <T : Any> MessageStage(
         }
     }
 
-    // Near-bottom follow: a new bottom row glides the view home; farther up it
-    // holds (reading history). Own-send force-follow is the caller's call via
-    // scrollToBottom().
     val followPx = with(LocalDensity.current) { followThreshold.toPx() }
     val bottomKey = rows.firstOrNull()?.let(key)
     remember(bottomKey) {
@@ -527,7 +449,6 @@ private data class StickyHeaderClip(val top: Float) : Shape {
         Outline.Rectangle(Rect(0f, top.coerceAtMost(size.height), size.width, size.height))
 }
 
-/** Composition-side bookkeeping: entity map, exit splicing, display list. */
 private class StageHolder {
     val entities = HashMap<Any, Entity>()
     val exiting = mutableStateListOf<Entity>()
@@ -555,9 +476,8 @@ private class StageHolder {
     private var lastKeys: List<Any>? = null
     var hasPresentedHistory = false
 
-    // Snapshot-backed: the measure pass depends on it, and a plain var would leave
-    // the layout with no reason to re-run when rows change (first symptom: a chat
-    // renders blank until an unrelated invalidation — e.g. the IME — forces a pass).
+    // Snapshot state: the measure pass reads it, and a plain var leaves the layout
+    // no reason to rerun when rows change.
     private var rows by mutableStateOf<List<Any>>(emptyList())
     private var rawKey: ((Any) -> Any)? = null
 
@@ -574,7 +494,6 @@ private class StageHolder {
 
     fun keyOf(item: Any): Any = if (item is Entity) item.key else rawKey!!(item)
 
-    /** Keys not yet measured, walk order — the prefetch worklist. */
     fun coldKeys(): List<Any> = displayList.mapNotNull { item ->
         val k = keyOf(item)
         k.takeIf { (entities[k]?.measuredH ?: 0) == 0 && k !in warm }
@@ -600,7 +519,6 @@ private class StageHolder {
         warm.remove(k)?.let { runCatching { it.dispose() } }
     }
 
-    /** Content-space stack of [key] from cached heights (estimates for unmeasured). */
     fun stackEstimate(key: Any): Float? {
         var stack = 0f
         for (item in displayList) {
@@ -688,8 +606,6 @@ private class StageHolder {
             }
         }
 
-        // History paints in place even if transient rows (such as typing) arrived
-        // first. Conversely, a live message can enter a loaded but still empty chat.
         for (r in newRows) {
             val k = key(r)
             var e = entities[k]
@@ -723,9 +639,8 @@ private class StageHolder {
             if (e.rowState.value != r) e.rowState.value = r
         }
 
-        // Re-anchor every active exit: another burst may remove its neighbor
-        // before the animation finishes. Preserve the old display order, with
-        // evicted history staying above the live rows instead of at the bottom.
+        // Another burst may remove an exit's neighbor mid-animation, so re-anchor every exit.
+        // Evicted history keeps its old order above the live rows.
         var olderKey: Any? = null
         val orderedExits = ArrayList<Entity>(exiting.size)
         for (k in previousDisplayKeys.asReversed()) {
@@ -738,7 +653,6 @@ private class StageHolder {
         exiting.clear()
         exiting.addAll(orderedExits.asReversed())
 
-        // A pinned key that vanished entirely releases the pin.
         val pinned = state.pinnedKey
         if (pinned != null && pinned !in keySet && exiting.none { it.key == pinned }) {
             state.unpin()

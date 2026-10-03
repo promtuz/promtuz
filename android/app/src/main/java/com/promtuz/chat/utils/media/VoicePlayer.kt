@@ -14,15 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
 
-/**
- * One voice note plays at a time, app-wide — tapping another stops this one,
- * the way every messenger does it. MediaPlayer wants a file, so the bytes are
- * spilled to one scratch file for the duration of the play and unlinked on
- * stop: the database is the only place a note lives, and deleting the chat
- * leaves nothing behind to find.
- */
+/** MediaPlayer wants a file, so the note spills to one scratch file that [stop] unlinks; the database keeps the only copy. */
 object VoicePlayer {
-    /** What's playing (or paused), for the bubble to draw progress. */
     data class Playback(val dispatchIdHex: String, val positionMs: Int, val playing: Boolean)
 
     private val _state = MutableStateFlow<Playback?>(null)
@@ -32,7 +25,6 @@ object VoicePlayer {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var ticker: Job? = null
 
-    /** Play, pause, or resume [dispatchIdHex]. */
     fun toggle(context: Context, dispatchIdHex: String, bytes: ByteArray, mime: String) {
         val current = _state.value
         val p = player

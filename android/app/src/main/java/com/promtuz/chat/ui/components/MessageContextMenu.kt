@@ -1,15 +1,11 @@
 package com.promtuz.chat.ui.components
 
-import android.view.animation.OvershootInterpolator
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.EaseOutQuint
-import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -24,13 +20,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,9 +36,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -55,11 +47,9 @@ import androidx.compose.ui.unit.sp
 import com.promtuz.chat.domain.model.UiMessage
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
 import com.promtuz.chat.ui.text.EmojiText
 
-/** What was long-pressed: the message, its row bounds in root space, its merge shape. */
 data class MenuAnchor(
     val msg: UiMessage,
     val bounds: Rect,
@@ -67,116 +57,31 @@ data class MenuAnchor(
     val mergedBottom: Boolean,
 )
 
-/** What the finger was over at release. */
-sealed interface MenuHit {
-    data class Reaction(val emoji: String) : MenuHit
-    data class Action(val action: MenuAction) : MenuHit
-}
-
-/**
- * Shared state between the pressed bubble — which owns the continuous pointer
- * stream, because the long-press that opens the menu is the same finger that
- * drags to an item — and the overlay, which owns the visuals. Items register
- * live [LayoutCoordinates]; hit-testing queries them at event time, so bounds
- * stay correct even mid-pop-animation.
- */
-class MessageMenuState {
-    var anchor by mutableStateOf<MenuAnchor?>(null)
-        private set
-    internal var closing by mutableStateOf(false)
-
-    /** Flat hover index: 0..reactions-1 = strip chips, then action rows. -1 = none. */
-    internal var hovered by mutableIntStateOf(-1)
-
+/** Strip reactions and dragged-to reactions both toggle through [onReact] on the anchored message. */
+class MessageMenuState(private val onReact: (UiMessage, String) -> Unit) : DragMenuState<MenuAnchor>(32) {
     internal var reactions: List<String> = emptyList()
     internal var actions: List<MenuAction> = emptyList()
-    internal val chipCoords = arrayOfNulls<LayoutCoordinates>(MAX_ITEMS)
-    internal val rowCoords = arrayOfNulls<LayoutCoordinates>(MAX_ITEMS)
-
-    /** Drag-release on a strip emoji lands here (actions carry their own onClick). */
-    var onReact: ((String) -> Unit)? = null
 
     /** How lifted the copy is, 0..1. The list row fades by the same amount, so the two cross-fade. */
-    var lift by mutableFloatStateOf(0f)
-        internal set
+    val lift get() = pop.value.coerceIn(0f, 1f)
 
-    val isOpen get() = anchor != null
-
-    fun open(anchor: MenuAnchor) {
-        if (isOpen) return
-        chipCoords.fill(null)
-        rowCoords.fill(null)
-        hovered = -1
-        closing = false
-        this.anchor = anchor
+    fun react(emoji: String) {
+        anchor?.let { onReact(it.msg, emoji) }
+        close()
     }
 
-    /** Play the exit; the anchor releases when it finishes. */
-    fun close() {
-        if (isOpen) closing = true
-    }
-
-    internal fun closed() {
-        lift = 0f
-        anchor = null
-        closing = false
-        hovered = -1
-    }
-
-    /** Track the dragging finger (root coords). Returns true when the hover target changed to an item. */
-    fun drag(at: Offset): Boolean {
-        if (closing) return false
-        val h = hitIndex(at)
-        if (h == hovered) return false
-        hovered = h
-        return h != -1
-    }
-
-    /** Finger up: what it landed on (null = nothing). Clears hover. */
-    fun release(at: Offset): MenuHit? {
-        val h = hitIndex(at)
-        hovered = -1
-        if (closing) return null
-        return when {
-            h < 0 -> null
-            h < reactions.size -> MenuHit.Reaction(reactions[h])
-            else -> actions.getOrNull(h - reactions.size)?.let { MenuHit.Action(it) }
+    /** Targets are the strip's chips, then the action rows; actions close the menu themselves. */
+    internal fun pick(index: Int) {
+        val action = actions.getOrNull(index - reactions.size)
+        when {
+            index in reactions.indices -> react(reactions[index])
+            action != null -> action.onClick()
+            else -> close()
         }
-    }
-
-    private fun hitIndex(at: Offset): Int {
-        for (i in reactions.indices) {
-            val c = chipCoords[i] ?: continue
-            if (c.isAttached && c.boundsInRootLive().contains(at)) return i
-        }
-        for (i in actions.indices) {
-            val c = rowCoords[i] ?: continue
-            if (c.isAttached && c.boundsInRootLive().contains(at)) return reactions.size + i
-        }
-        return -1
-    }
-
-    private companion object {
-        const val MAX_ITEMS = 16
     }
 }
 
-/** Query-time bounds (not cached rects) so animated transforms are accounted for. */
-private fun LayoutCoordinates.boundsInRootLive(): Rect {
-    val tl = positionInRoot()
-    return Rect(tl.x, tl.y, tl.x + size.width, tl.y + size.height)
-}
-
-private val Overshoot = Easing { OvershootInterpolator(1.1f).getInterpolation(it) }
-
-/**
- * The long-press overlay: the list hides the pressed row and this re-composes the
- * same bubble at its captured bounds, gently lifted (scale → ~1.03) over a 20%
- * scrim — zero reparenting. Reaction strip + action card ([MenuCard], the same
- * surface AppDropMenu uses) pop in anchored to the bubble's side; when cramped the
- * bubble slides to make room. Everything animates both ways: [MessageMenuState.close] plays the
- * exit and only then releases the anchor. Drag-select rides [MessageMenuState].
- */
+/** Redraws the pressed bubble at its captured bounds while the list hides the original. */
 @Composable
 fun MessageContextMenu(
     state: MessageMenuState,
@@ -184,26 +89,10 @@ fun MessageContextMenu(
     actionGroups: List<List<MenuAction>>,
     iconSize: Dp = MenuIconSize,
     anchorOffsetY: () -> Float = { 0f },
-    onReact: (String) -> Unit,
 ) {
     val anchor = state.anchor ?: return
     state.reactions = quickReactions
     state.actions = remember(actionGroups) { actionGroups.flatten() }
-
-    val scrim = remember { Animatable(0f) }
-    val pop = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        launch { scrim.animateTo(0.2f, tween(320, easing = EaseOutQuint)) }
-        launch { pop.animateTo(1f, tween(250, easing = Overshoot)) { state.lift = value.coerceIn(0f, 1f) } }
-    }
-    LaunchedEffect(state.closing) {
-        if (state.closing) {
-            launch { scrim.animateTo(0f, tween(160)) }
-            pop.animateTo(0f, tween(160)) { state.lift = value.coerceIn(0f, 1f) }
-            state.lift = 0f
-            state.closed()
-        }
-    }
 
     // Root offset makes bounds (captured in window-root space) local to this overlay.
     var origin by remember { mutableStateOf(Offset.Zero) }
@@ -212,16 +101,9 @@ fun MessageContextMenu(
     val density = LocalDensity.current
 
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = scrim.value }
-                .background(Color.Black)
-                .pointerInput(Unit) { detectTapGestures { state.close() } },
-        )
+        MenuBackdrop(state, dim = 0.2f, scrimMs = 320, popMs = 250, exitMs = 160)
 
-        // The lifted bubble: re-laid-out at the captured row width so it wraps exactly
-        // as it did in the list, lifting from its tail corner and sliding with the pop.
+        // Laid out at the captured row width so it wraps exactly as it did in the list.
         Box(
             Modifier
                 .offset {
@@ -232,20 +114,20 @@ fun MessageContextMenu(
                 }
                 .width(with(density) { anchor.bounds.width.toDp() })
                 .graphicsLayer {
-                    alpha = pop.value.coerceIn(0f, 1f)
-                    val s = 1f + 0.03f * pop.value
+                    val p = state.pop.value
+                    alpha = p.coerceIn(0f, 1f)
+                    val s = 1f + 0.03f * p
                     scaleX = s
                     scaleY = s
-                    translationY = shift.floatValue * pop.value + anchorOffsetY()
+                    translationY = shift.floatValue * p + anchorOffsetY()
                     transformOrigin = TransformOrigin(if (anchor.msg.outgoing) 1f else 0f, 1f)
                 },
         ) {
             MessageBubble(msg = anchor.msg, mergedTop = anchor.mergedTop, mergedBottom = anchor.mergedBottom)
         }
 
-        // The strip/card ensemble fits inside the visible safe area (IME + bars),
-        // with its own origin so the anchor math stays exact in the padded space —
-        // the card must never sink behind the keyboard; the bubble shifts instead.
+        // The strip and card stay inside the bars and IME, with their own origin for the
+        // anchor math; the bubble shifts rather than the card sinking behind the keyboard.
         var stackOrigin by remember { mutableStateOf(Offset.Zero) }
         Box(
             Modifier
@@ -253,18 +135,11 @@ fun MessageContextMenu(
                 .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
                 .onGloballyPositioned { stackOrigin = it.positionInRoot() },
         ) {
-            // Pop is handed down as a getter and read only inside graphicsLayer, so
-            // animation frames never recompose the stack.
-            MenuStack(state, anchor, quickReactions, actionGroups, iconSize,{ pop.value }, stackOrigin, shift, onReact)
+            MenuStack(state, anchor, quickReactions, actionGroups, iconSize, stackOrigin, shift)
         }
     }
 }
 
-/**
- * Measures strip + card, places them around the bubble (strip above, card below).
- * When that stack can't fit, it writes the bubble's required translation into
- * [shift] instead of flipping, so the whole ensemble slides into view together.
- */
 @Composable
 private fun MenuStack(
     state: MessageMenuState,
@@ -272,24 +147,23 @@ private fun MenuStack(
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
     iconSize: Dp = MenuIconSize,
-    pop: () -> Float,
     origin: Offset,
     shift: MutableFloatState,
-    onReact: (String) -> Unit,
 ) {
     val outgoing = anchor.msg.outgoing
     val pivot = TransformOrigin(if (outgoing) 1f else 0f, 0.1f)
     // Set by the layout below: a card placed above the bubble grows from its bottom corner.
     val flipped = remember { mutableStateOf(false) }
+    // Pop is read only inside graphicsLayer, so frames never recompose the stack.
     val entrance = Modifier.graphicsLayer {
-        val p = pop()
+        val p = state.pop.value
         alpha = p.coerceIn(0f, 1f)
         scaleX = 0.75f + 0.25f * p
         scaleY = 0.75f + 0.25f * p
         transformOrigin = pivot
     }
     val cardEntrance = Modifier.graphicsLayer {
-        val p = pop()
+        val p = state.pop.value
         alpha = p.coerceIn(0f, 1f)
         scaleX = 0.75f + 0.25f * p
         scaleY = 0.75f + 0.25f * p
@@ -298,14 +172,14 @@ private fun MenuStack(
 
     Layout(
         content = {
-            ReactionStrip(state, anchor.msg, quickReactions, entrance, onReact)
+            ReactionStrip(state, anchor.msg, quickReactions, entrance)
             MenuCard(
                 groups = actionGroups,
                 hovered = state.hovered - quickReactions.size,
                 modifier = cardEntrance,
                 itemHeight = 42.dp,
                 iconSize = iconSize,
-                onRowPositioned = { i, coords -> state.rowCoords[i] = coords },
+                onRowPositioned = { i, coords -> state.targets[quickReactions.size + i] = coords },
                 onPick = { it.onClick() },
             )
         },
@@ -322,9 +196,8 @@ private fun MenuStack(
             val bottom = (anchor.bounds.bottom - origin.y).roundToInt()
             fun xFor(w: Int) = if (outgoing) constraints.maxWidth - margin - w else margin
 
-            // A bubble low on the screen keeps its place: the card goes above it and the
-            // thinner strip below, which always has the bottom bar's height to sit in.
-            // Only a bubble that cannot fit either way shifts, and then the card wins.
+            // A low bubble keeps its place with the card above and the strip below. Only a
+            // bubble that fits neither way shifts into [shift], and then the card wins.
             val maxBottom = constraints.maxHeight - margin - gap - card.height
             val flip = bottom > maxBottom
             flipped.value = flip
@@ -354,7 +227,6 @@ private fun ReactionStrip(
     msg: UiMessage,
     emojis: List<String>,
     modifier: Modifier,
-    onReact: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     Row(
@@ -375,7 +247,7 @@ private fun ReactionStrip(
             val hover by animateFloatAsState(if (hoveredHere) 1.25f else 1f, spring())
             Box(
                 Modifier
-                    .onGloballyPositioned { state.chipCoords[i] = it }
+                    .onGloballyPositioned { state.targets[i] = it }
                     .graphicsLayer {
                         val s = chipPop.value * hover
                         alpha = chipPop.value.coerceIn(0f, 1f)
@@ -390,7 +262,7 @@ private fun ReactionStrip(
                             else -> Color.Transparent
                         }
                     )
-                    .clickable { onReact(emoji) }
+                    .clickable { state.react(emoji) }
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             ) {
                 EmojiText(emoji, fontSize = 19.sp)

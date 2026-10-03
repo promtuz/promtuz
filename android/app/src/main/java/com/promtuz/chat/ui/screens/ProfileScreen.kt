@@ -24,6 +24,7 @@ import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ProfileWork
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
@@ -33,7 +34,6 @@ import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
     val app = koinInject<AppVM>()
@@ -111,10 +111,7 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
                         onClick = { app.navigator.push(Routes.ShareIdentity) }) { DrawableIcon(R.drawable.oi_qr_code, size = 26.dp) }
                 }
             }
-            item {
-                Text("ACCOUNT", Modifier.fillMaxWidth().padding(top = 18.dp),
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            item { SettingsSection("Account") }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     GroupedActionRow("Identity & keys", 0, 2,

@@ -10,22 +10,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-/**
- * Inline "Reply" action on a message notification. Cancels the notification UP FRONT so the
- * RemoteInput spinner resolves immediately — the send may force a slow reconnect but is durable
- * via the outbox — then marks read + sends in the background.
- */
 class ReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val conversation = intent.getByteArrayExtra("conversation") ?: return
         val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(PushNotifier.KEY_REPLY)?.toString()
             ?: return
-        // Resolve the spinner NOW, before the (possibly slow) send. Mark read before send so a
-        // post-send reconcile doesn't briefly re-post the now-read chat.
         PushNotifier.cancelChat(context, conversation.toHex())
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                // Read before the send, so the reconcile after it does not re-post the chat.
                 CoreBridge.markConversationRead(conversation)
                 CoreBridge.sendMessage(conversation, text)
             } finally {

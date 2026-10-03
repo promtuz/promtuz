@@ -5,15 +5,9 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-/**
- * The active chat look, read by every chat renderer. Mounted by PromtuzTheme from
- * [AppearanceStore]. Non-static local: editor sliders mutate this per drag-frame,
- * so only actual readers recompose.
- */
+/** Non-static: editor sliders change it every drag frame, so only its readers should recompose. */
 val LocalChatAppearance: ProvidableCompositionLocal<ChatAppearance> =
     compositionLocalOf { ChatAppearance.Default }
-
-// ── token → Compose conversions (the primitive-to-Compose boundary) ────────────
 
 val BubbleStyle.corner: Dp get() = cornerRadius.dp
 val BubbleStyle.nearCorner: Dp get() = nearCornerRadius.dp

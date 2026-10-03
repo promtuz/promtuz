@@ -5,9 +5,6 @@ import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.*
 
 
-/**
- * first style is chosen and second's size
- */
 fun avgSizeInStyle(
     first: TextStyle,
     second: TextStyle,

@@ -25,18 +25,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-/**
- * Decoded profile pictures, keyed by hex IPK.
- *
- * One decode per person rather than one per row: the home list, the chat header
- * and a member list all ask for the same face. A miss is remembered too, so a
- * person with no picture costs one core call, not one per recomposition. When a
- * picture changes, ours or theirs, the cache empties and [generation] moves,
- * which every [rememberAvatar] keys on, so the change redraws wherever it is
- * shown.
- */
+/** Decoded pictures by hex IPK, misses included. A picture change empties the cache and moves
+ *  [generation], which every [rememberAvatar] keys on. */
 object AvatarImages {
-    /** Hex IPK → decoded picture, or [NONE] for someone known to have none. */
     private val cache = LruCache<String, Any>(128)
     private val NONE = Any()
     private val cacheLock = Any()
@@ -49,9 +40,7 @@ object AvatarImages {
 
     init {
         scope.launch {
-            // The doorbell rings for every commit in the messages DB, which is
-            // every message. Core's generation says whether a picture was among
-            // it, at the cost of one call rather than a decode per face.
+            // The doorbell rings for every message; core's generation says whether a picture changed.
             var seen = -1L
             CoreEventBus.dbChanged.collect {
                 val now = runCatching { CoreBridge.avatarGeneration().toLong() }.getOrNull()
@@ -64,12 +53,10 @@ object AvatarImages {
         }
     }
 
-    /** What is already decoded for [ipkHex], for a first frame without a flash. */
     fun peek(ipkHex: String): ImageBitmap? = synchronized(cacheLock) {
         cache.get(ipkHex) as? ImageBitmap
     }
 
-    /** Reads and decoding stay off main. Concurrent callers share the cached result. */
     suspend fun load(ipkHex: String): ImageBitmap? = withContext(Dispatchers.IO) {
         loads.withLock {
             while (true) {
@@ -93,8 +80,7 @@ object AvatarImages {
                 val image = bytes?.let { decodeAvatar(it) }
                 currentCoroutineContext().ensureActive()
                 synchronized(cacheLock) {
-                    // Invalidation can arrive during the read or decode. Retry
-                    // instead of repopulating the cache with the older result.
+                    // Invalidation can land mid-decode; retry rather than cache the older result.
                     if (startedAt == _generation.value) {
                         cache.put(ipkHex, image ?: NONE)
                         return@withLock image
@@ -106,25 +92,18 @@ object AvatarImages {
         }
     }
 
-    /** Forget decoded images and advance their generation as one operation. */
     fun invalidateAll() = synchronized(cacheLock) {
         cache.evictAll()
         _generation.value++
     }
 }
 
-/**
- * The picture for [ipkHex], for an [com.promtuz.chat.ui.components.Avatar] to
- * draw. Null while unknown or absent, which draws initials; re-resolved when
- * the cache generation moves.
- */
 @Composable
 fun rememberAvatar(ipkHex: String?): ImageBitmap? {
     if (ipkHex == null) return null
     val generation by AvatarImages.generation.collectAsState()
     return key(ipkHex) {
-        // Keep the current picture during refresh, but never carry it to a
-        // different person when a list row's identity changes.
+        // Keeps the picture during a refresh, but never carries it to another person in a reused row.
         produceState(AvatarImages.peek(ipkHex), generation) {
             value = AvatarImages.load(ipkHex)
         }.value

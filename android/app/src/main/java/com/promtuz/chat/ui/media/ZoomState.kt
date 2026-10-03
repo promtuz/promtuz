@@ -16,10 +16,7 @@ import kotlinx.coroutines.launch
 const val MAX_ZOOM = 5f
 const val DOUBLE_TAP_ZOOM = 2.5f
 
-/**
- * Scale and pan of one page. [offset] is where the picture's centre sits relative to the
- * viewport's centre, so a zoom about a finger keeps the pixel under it still.
- */
+/** [offset] is the picture's centre relative to the viewport's centre. */
 class ZoomState {
     var scale by mutableStateOf(1f)
         private set
@@ -51,17 +48,6 @@ class ZoomState {
     fun panBy(delta: Offset) {
         offset += delta
         clamp(soft = false)
-    }
-
-    /** How far a pan at the current edge would overshoot, so the caller can hand it to the pager. */
-    fun overshootX(dx: Float): Float {
-        val max = ((fitted.width * scale - viewport.width) / 2f).coerceAtLeast(0f)
-        val next = offset.x + dx
-        return when {
-            next > max -> next - max
-            next < -max -> next + max
-            else -> 0f
-        }
     }
 
     suspend fun animateTo(targetScale: Float, targetOffset: Offset, spec: AnimationSpec<Float>, offsetSpec: AnimationSpec<Offset>) =

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.utils.extensions.fromHex
 import kotlinx.coroutines.launch
 import androidx.activity.compose.BackHandler
@@ -11,7 +12,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -24,7 +24,6 @@ import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel()) {
     val loading by viewModel.loading.collectAsStateWithLifecycle()
@@ -104,7 +103,6 @@ internal data class GroupInfoActions(
     val deleteAnyway: () -> Unit,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, conversation: String? = null) = with(state) {
     val app = org.koin.compose.koinInject<AppVM>()
@@ -136,7 +134,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     val past = members.filterNot { it.active }
     val addable = candidates.filter { c -> active.none { it.ipkHex == c.ipkHex } }
     val dialogOpen = editing || adding || removing != null || leaving || deleting
-    // What we may do to each member, by the group's roles and rules.
     fun actionsFor(member: UiMember): List<MenuAction> = buildList {
         if (member.me || !member.active) return@buildList
         // A group from before signed rules has no roles to hand out.
@@ -150,7 +147,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
             removing = member; actions.clearError()
         })
     }
-    val direction = LocalLayoutDirection.current
     val colors = MaterialTheme.colorScheme
 
     ProfileScaffold(name = displayName.ifBlank { "Group" }, photo = { size ->
@@ -181,8 +177,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         TextButton(onClick = { actions.reload() }) { Text("Retry") }
                     }
                 }
-            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = padding.calculateStartPadding(direction), end = padding.calculateEndPadding(direction),
-                top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 80.dp)) {
+            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(0.dp, 0.dp, 80.dp)) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -314,7 +309,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
         "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
 }
 
-/** Tapped, a member opens their profile; held, the actions we may take on them. */
 @Composable
 private fun GroupMemberRow(member: UiMember, enabled: Boolean, actions: List<MenuAction>, onClick: () -> Unit) {
     val row = @Composable {

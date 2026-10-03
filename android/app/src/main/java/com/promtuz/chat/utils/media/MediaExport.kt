@@ -16,7 +16,6 @@ import java.io.File
 
 private const val ALBUM = "Promtuz"
 
-/** Copies a picture into the device gallery under a Promtuz album; the app keeps its own file. */
 suspend fun saveToGallery(context: Context, image: ImageBitmap, name: String): Boolean = withContext(Dispatchers.IO) {
     runCatching {
         val values = ContentValues().apply {
@@ -40,7 +39,6 @@ suspend fun saveToGallery(context: Context, image: ImageBitmap, name: String): B
     }.getOrDefault(false)
 }
 
-/** Copies a downloaded file into the gallery, keeping its type, so a video lands as a video. */
 suspend fun saveFileToGallery(context: Context, path: String, mime: String, name: String): Boolean =
     withContext(Dispatchers.IO) {
         runCatching {
@@ -68,7 +66,6 @@ suspend fun saveFileToGallery(context: Context, path: String, mime: String, name
         }.getOrDefault(false)
     }
 
-/** Hands a picture to the system share sheet through the app's FileProvider. */
 suspend fun sharePicture(context: Context, image: ImageBitmap, name: String) {
     val file = withContext(Dispatchers.IO) {
         File(File(context.cacheDir, "images").apply { mkdirs() }, "$name.jpg").also { f ->

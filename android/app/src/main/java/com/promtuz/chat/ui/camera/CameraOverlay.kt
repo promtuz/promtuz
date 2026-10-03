@@ -51,6 +51,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -92,7 +93,7 @@ import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.media.MediaViewer
-import com.promtuz.chat.ui.media.clock
+import com.promtuz.chat.ui.text.clock
 import com.promtuz.chat.ui.components.LottieFrame
 import com.promtuz.chat.ui.components.LottieLoop
 import com.promtuz.chat.ui.components.rememberLottie
@@ -226,8 +227,17 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     val shutterFlash = remember { Animatable(0f) }
 
-    // Usually already bound by the attach tile, in which case this returns at once.
     LaunchedEffect(Unit) { CameraSession.bind(context, owner) }
+    // Leaving mid-recording discards the clip rather than letting it run on.
+    var discard by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        CameraSession.retain()
+        onDispose {
+            discard = true
+            recording?.stop()
+            CameraSession.release()
+        }
+    }
     fun flip() = scope.launch { CameraSession.flip(context, owner) }
     LaunchedEffect(flash) {
         imageCapture.flashMode = when (flash) {
@@ -284,13 +294,13 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
             if (event is VideoRecordEvent.Finalize) {
                 recording = null
                 camera?.cameraControl?.enableTorch(false)
-                if (!event.hasError() && file.length() > 0) {
+                if (!discard && !event.hasError() && file.length() > 0) {
                     request.onCaptured(file, true)
                     onClose()
                 } else {
                     file.delete()
                     busy = false
-                    if (event.hasError()) Toast.makeText(context, "Couldn’t record", Toast.LENGTH_SHORT).show()
+                    if (event.hasError() && !discard) Toast.makeText(context, "Couldn’t record", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -333,15 +343,13 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
                 .pointerInput(Unit) { detectTapGestures(onDoubleTap = { flip() }) },
         )
 
-        // Photo flash.
         Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.White, alpha = shutterFlash.value) })
 
-        // Top row: close, timer, flash.
         Row(
             Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CloseButton(onClose, Modifier.graphicsLayer { alpha = if (recording == null) 1f else 0f })
+            CloseButton({ if (recording == null) onClose() }, Modifier.graphicsLayer { alpha = if (recording == null) 1f else 0f })
             Spacer(Modifier.weight(1f))
             if (recording != null) Row(
                 Modifier.clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.45f))
@@ -368,7 +376,6 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
             }
         }
 
-        // Bottom: zoom chip, lock target, shutter, flip.
         Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -381,7 +388,6 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
             }
             Spacer(Modifier.height(18.dp))
             Box(Modifier.fillMaxWidth().height(96.dp)) {
-                // Slide-to-lock target, left of the shutter, visible while holding.
                 val lockAlpha by animateFloatAsState(if (recording != null) 1f else 0f, tween(160), label = "lock target")
                 Box(
                     Modifier.align(Alignment.Center).graphicsLayer {
@@ -469,9 +475,8 @@ private fun CloseButton(onClose: () -> Unit, modifier: Modifier) {
 }
 
 /**
- * The shutter, from the `camera_shutter` Lottie: idle 0, press 6, record 18, locked 30, and a
- * release run at 42–54 that only a locked recording uses. Every other change reverses along the
- * frames it came by, so letting go mid-way never jumps. The clip progress arc rides the ring.
+ * `camera_shutter` frames: idle 0, press 6, record 18, locked 30, and a release run at 42..54
+ * that only a locked recording uses. Other changes reverse along their frames, so nothing jumps.
  */
 @Composable
 private fun Shutter(recording: Boolean, locked: Boolean, pressed: Boolean, progress: () -> Float, modifier: Modifier) {

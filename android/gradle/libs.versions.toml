@@ -2,7 +2,6 @@
 agp = "9.2.1"
 barcodeScanning = "17.3.0"
 capturable = "3.0.1"
-constraintlayoutCompose = "1.1.1"
 core = "3.5.4"
 coreSplashscreen = "1.2.0"
 firebaseBom = "34.16.0"
@@ -63,7 +62,6 @@ androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", versi
 androidx-media3-ui-compose = { module = "androidx.media3:media3-ui-compose", version.ref = "media3" }
 lottie-compose = { module = "com.airbnb.android:lottie-compose", version.ref = "lottie" }
 androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics", version.ref = "uiGraphics" }
-androidx-constraintlayout-compose = { module = "androidx.constraintlayout:constraintlayout-compose", version.ref = "constraintlayoutCompose" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "coreSplashscreen" }
 barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref = "barcodeScanning" }
@@ -110,7 +108,6 @@ androidx-material3-adaptive-navigation3 = { group = "androidx.compose.material3.
 koin-bom = { module = "io.insert-koin:koin-bom", version.ref = "koin-bom" }
 koin-core = { module = "io.insert-koin:koin-core" }
 koin-androidx-compose = { module = "io.insert-koin:koin-androidx-compose" }
-koin-androidx-compose-navigation = { module = "io.insert-koin:koin-androidx-compose-navigation" }
 
 
 [plugins]

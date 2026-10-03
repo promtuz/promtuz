@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -96,7 +97,7 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
                     Text("Update required", style = MaterialTheme.typography.headlineLarge)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Promtuz ${manifest.versionName} · ${formatSize(manifest.size)}",
+                        "Promtuz ${manifest.versionName} · ${Formatter.formatShortFileSize(context, manifest.size)}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
                     )
@@ -132,7 +133,7 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
                     UpdateState.Checking -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
                     is UpdateState.Downloading -> {
                         LinearProgressIndicator({ shown.progress }, Modifier.fillMaxWidth())
-                        Detail("Downloading · ${(shown.progress * 100).toInt()}% of ${formatSize(shown.manifest.size)}")
+                        Detail("Downloading · ${(shown.progress * 100).toInt()}% of ${Formatter.formatShortFileSize(context, shown.manifest.size)}")
                     }
                     is UpdateState.Ready -> {
                         Detail("Promtuz closes while the update installs.")

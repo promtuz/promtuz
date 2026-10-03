@@ -4,7 +4,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 
-/** Notification channels + the message group key, created once. minSdk 26, so channels always exist. */
 object Notifications {
     const val MESSAGES_CHANNEL = "messages"
     const val REQUESTS_CHANNEL = "message_requests"
@@ -17,12 +16,10 @@ object Notifications {
         nm.createNotificationChannel(
             NotificationChannel(MESSAGES_CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH)
         )
-        // Strangers don't get to buzz by default; the user can raise it in Android's settings.
+        // No heads-up for strangers by default; the user can raise it in Android's settings.
         nm.createNotificationChannel(
             NotificationChannel(REQUESTS_CHANNEL, "Message requests", NotificationManager.IMPORTANCE_DEFAULT)
         )
-        // Low-key channel for the brief foreground notice the drain worker shows on API < 31,
-        // where expedited work runs as a foreground service.
         nm.createNotificationChannel(
             NotificationChannel(SYNC_CHANNEL, "Syncing", NotificationManager.IMPORTANCE_MIN)
         )

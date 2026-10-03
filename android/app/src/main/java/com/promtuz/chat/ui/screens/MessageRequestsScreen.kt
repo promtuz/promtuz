@@ -31,7 +31,6 @@ import com.promtuz.core.push.PushNotifier
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
-/** Chats from people who aren't contacts. Each one opens with accept, delete and block. */
 @Composable
 fun MessageRequestsScreen() {
     if (LocalNavForeground.current) LifecycleResumeEffect(Unit) {

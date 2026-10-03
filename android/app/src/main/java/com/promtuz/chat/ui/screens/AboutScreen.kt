@@ -6,7 +6,6 @@ import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,11 +19,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
@@ -38,7 +37,6 @@ import org.koin.androidx.compose.koinViewModel
 @Composable
 fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel()) {
     val context = LocalContext.current
-    val direction = LocalLayoutDirection.current
     val channel by updates.channel.collectAsState()
     // Share the phone build even from an emulator. Updating this device still uses its own ABI.
     val downloadLink = "https://apt.promtuz.dev/apk/$channel/arm64-v8a/latest.apk"
@@ -53,11 +51,8 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
 
     SimpleScreen({ Text("About Promtuz") }) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(
-                start = padding.calculateLeftPadding(direction),
-                end = padding.calculateRightPadding(direction),
-            ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 24.dp, 18.dp, padding.calculateBottomPadding() + 32.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(top = 24.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item("app") {

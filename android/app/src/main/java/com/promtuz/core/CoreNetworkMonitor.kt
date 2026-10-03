@@ -87,8 +87,8 @@ internal object CoreNetworkMonitor {
             .onFailure { Timber.tag("CoreNetwork").w(it, "network watch failed") }
     }
 
-    // Deliberately omit capability flags, DNS and lease lifetimes: their frequent
-    // updates do not invalidate an established UDP path. Never log IP addresses.
+    // No capability flags, DNS or lease lifetimes: their frequent updates do not
+    // invalidate an established UDP path. Never log IP addresses.
     private data class Route(
         val networkHandle: Long,
         val interfaceName: String?,

@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.promtuz.chat.ui.text.EmojiTextField
 import com.promtuz.chat.ui.text.EmojiFieldController
 import com.promtuz.chat.ui.text.EmojiText
+import com.promtuz.chat.ui.text.clock
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -79,6 +80,7 @@ import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.STAGED_ATTACHMENT
 import com.promtuz.chat.domain.model.STAGED_IMAGE
 import com.promtuz.chat.domain.model.acceptsStaged
+import com.promtuz.chat.domain.model.previewLine
 import com.promtuz.chat.navigation.LocalNavForeground
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ComposerAction
@@ -92,22 +94,15 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import org.koin.androidx.compose.koinViewModel
 
-/** The bar's own geometry; [ComposerMetrics.composerPx] is built from these. */
 private val BarMarginH = 10.dp
 private val BarMarginV = 8.dp
 private val BarPad = 6.dp
 private val BarRadius = 26.dp
 
-/** Gap between composer slots. Lives inside each animated node so a slot that
- *  folds away takes its spacing with it instead of dropping it a frame later. */
 private val SlotGap = 8.dp
 
 enum class ComposerPanelKind { Attach, Stickers }
 
-/**
- * One blurred surface for the reply/edit preview, multiline input and send button.
- * Accessory content expands within the same clipped surface.
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatBottomBar(
@@ -135,9 +130,8 @@ fun ChatBottomBar(
     val inputActive = LocalNavForeground.current && MediaViewer.session == null
     DisposableEffect(field, inputActive) {
         onDispose {
-            // Navigation retains the outgoing chat for its animation; the viewer retains it
-            // underneath the overlay. End native input as soon as the chat loses the foreground.
-            // Compose's keyboard controller cannot hide an AndroidView editor's IME.
+            // The chat stays composed behind nav animations and the media viewer. Compose's
+            // keyboard controller can't hide an AndroidView editor's IME, so clear focus here.
             if (inputActive) field.clearFocus()
         }
     }
@@ -167,7 +161,6 @@ fun ChatBottomBar(
         if (action is ComposerAction.Edit && stickersOpen) closeFlat()
     }
 
-    // Permissionless system pickers (photo-picker / SAF), so no storage permission needed.
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         if (uris.isNotEmpty()) { viewModel.attachPhotos(uris); closeFlat() }
     }
@@ -175,11 +168,8 @@ fun ChatBottomBar(
         if (uris.isNotEmpty()) { viewModel.attachFiles(uris); closeFlat() }
     }
 
-    // Back closes the panel before the nav stack.
     BackHandler(openPanel != null) { closeRestoring() }
 
-    // Voice notes. The mic is asked for on the first tap rather than up front:
-    // a chat that never records never sees the prompt.
     val context = LocalContext.current
     val recording by viewModel.recording.collectAsState()
     val beginRecording = {
@@ -198,14 +188,10 @@ fun ChatBottomBar(
     }
     BackHandler(action != null && openPanel == null && recording == null) { viewModel.cancelComposerAction() }
     BackHandler(recording != null) { viewModel.cancelRecording() }
-    // Leaving the screen ends the note rather than letting it run on: the
-    // platform mutes a backgrounded mic, so what would be recorded is silence,
-    // and the cap would then send that silence with nobody having tapped send.
+    // Android mutes a backgrounded mic, so a note left running records silence and the cap sends it.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.cancelRecording() }
 
-    // No .imePadding()/.navigationBarsPadding(): ComposerPanel owns the bottom region
-    // and reserves the keyboard/nav space itself (see its region formula).
-    // The pill's own chrome, which the input row's measured height knows nothing about.
+    // No imePadding or navigationBarsPadding: ComposerPanel reserves the keyboard and nav space itself.
     val minimumPill = with(LocalDensity.current) { (38.dp + (BarPad + BarMarginV) * 2).roundToPx() }
     val actionProgress = remember { Animatable(0f) }
     val stripProgress = remember { Animatable(0f) }
@@ -220,8 +206,6 @@ fun ChatBottomBar(
             actionProgress.animateTo(if (action != null) 1f else 0f, ChatMotion.spec())
         }
 
-        // Same capture-for-exit as the action block: the strip needs tiles to draw
-        // while it closes, after the buffer has already emptied.
         val staged by viewModel.staged.collectAsState()
         var lastStaged by remember { mutableStateOf(staged) }
         if (staged.isNotEmpty()) lastStaged = staged
@@ -241,12 +225,9 @@ fun ChatBottomBar(
                 .hazeEffect(haze, chatBarHaze())
                 .padding(BarPad),
         ) {
-            // A request has nothing to reply with until it is accepted, and a group we
-            // left, or where only admins send, nothing to reply with at all.
             val request by viewModel.request.collectAsState()
             val closed by viewModel.closed.collectAsState()
-            // Bottom-aligned, so the composer appears where it settles while the pill's top
-            // edge glides down; the request fades out before it fades in, never across it.
+            // Bottom-aligned so the composer appears where it settles as the pill's top edge glides.
             AnimatedContent(
                 targetState = when {
                     request -> BarMode.Request
@@ -268,9 +249,6 @@ fun ChatBottomBar(
                             ComposerActionBlock(
                                 it,
                                 onCancel = { if (!busy && action != null) viewModel.cancelComposerAction() },
-                                // Editing can't reach the body's media from the field, so
-                                // the block's line opens the picker, narrowed to whatever
-                                // the target may legally become.
                                 onAddMedia = { if (!busy && action != null) open(ComposerPanelKind.Attach) },
                                 onJumpTo = { if (action != null) onJumpTo(it) },
                             )
@@ -279,8 +257,7 @@ fun ChatBottomBar(
                     Reveal(stripProgress) {
                         StagedStrip(lastStaged, viewModel::unstage)
                     }
-                    // The recorder takes the input row's place, not a row of its own:
-                    // the pill keeps one height and the stage under it never moves.
+                    // The recorder replaces the input row so the pill keeps one height.
                     AnimatedContent(
                         targetState = recording != null,
                         transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
@@ -307,9 +284,7 @@ fun ChatBottomBar(
                 }
             }
         }
-        // Editing narrows what may be picked to what the target's body can legally
-        // become: the client half of libcore's revision matrix, so a swap the core
-        // would refuse is never on offer.
+        // Editing narrows the picker to what the target's body may become under libcore's revision rules.
         val editing = (action as? ComposerAction.Edit)?.msg?.content
         ComposerPanel(
             open = openPanel != null,
@@ -365,21 +340,18 @@ fun ChatBottomBar(
     }
 }
 
-/** What the bar holds: the composer, a request's decision, or why we can't post. */
 private sealed interface BarMode {
     data object Compose : BarMode
     data object Request : BarMode
     data class Closed(val reason: String) : BarMode
 }
 
-/** Stands in for the composer where we can't post, and says why. */
 @Composable
 private fun ClosedRow(reason: String) {
     Text(reason, Modifier.fillMaxWidth().padding(vertical = 12.dp), textAlign = TextAlign.Center,
         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-/** Stands in for the composer while a message request waits for a decision. */
 @Composable
 private fun RequestRow(viewModel: ChatVM, onGone: () -> Unit) {
     val name by viewModel.title.collectAsState()
@@ -420,15 +392,7 @@ private fun ComposerSlots(metrics: ComposerMetrics, content: @Composable () -> U
     }
 }
 
-/**
- * A reveal slot: reports [progress] of its content's height and places the
- * content at its own top edge. The content rides the bar's rising edge and is
- * uncovered top-down, a reply's label before its snippet, with the fade
- * tracking the same value so the clip line never reads as a cut.
- *
- * The parent measures the revealed allocation and publishes that actual height
- * for the message stage, including any constraints on this slot.
- */
+/** Shows [progress] of its content's height from the top, fading with the same value. */
 @Composable
 private fun Reveal(
     progress: Animatable<Float, *>, content: @Composable () -> Unit,
@@ -448,12 +412,7 @@ private fun Reveal(
     }
 }
 
-/**
- * The staged reply/edit line (label, one-line snippet, cancel) drawn straight
- * onto the bar's surface. One line always, so a swap never resizes the bar and the
- * snippet can roll in place ([AppBarDynamicTitle]'s treatment); the label, being
- * one of two fixed strings, just cuts.
- */
+/** Always one line, so a swap never resizes the bar and the snippet rolls in place. */
 @Composable
 private fun ComposerActionBlock(
     action: ComposerAction, onCancel: () -> Unit, onAddMedia: () -> Unit,
@@ -463,9 +422,7 @@ private fun ComposerActionBlock(
     val chat = LocalChatColors.current
     val content = action.msg.content
     val editing = action is ComposerAction.Edit
-    // Only an edit whose target can legally take a staged pick offers the media
-    // line; an album can't (a revision targets one message, it is several), so
-    // there it stays a plain label rather than a control that opens an empty picker.
+    // An album is several messages and a revision targets one, so it gets no media line.
     val offersMedia = editing && !action.msg.deleted && content !is MessageContent.Album
     val label = if (editing) "Editing" else "Replying to"
 
@@ -484,28 +441,15 @@ private fun ComposerActionBlock(
         else -> null
     }
 
-    // A reply names what it's answering. An edit doesn't: the text is already in
-    // the field and editable, so repeating it is noise. The line offers the one
-    // part of the body the composer can't otherwise reach.
     val snippet = when {
         action.msg.deleted -> "Deleted message"
         editing -> when (content) {
             is MessageContent.Image -> "Tap to replace photo"
             is MessageContent.Attachment -> "Tap to replace file"
-            // An album is several messages; a revision targets one, so there's
-            // nothing here to offer.
-            is MessageContent.Album -> content.caption.ifEmpty { "${content.items.size} photos" }
+            is MessageContent.Album -> content.previewLine()
             else -> "Tap to add media"
         }
-        content is MessageContent.Image -> content.caption.ifEmpty { "Photo" }
-        content is MessageContent.Attachment ->
-            content.caption.ifEmpty { content.name.ifEmpty { "File" } }
-        content is MessageContent.Album ->
-            content.caption.ifEmpty { "${content.items.size} photos" }
-        content is MessageContent.Voice -> "Voice message"
-        content is MessageContent.Sticker -> "Sticker"
-        content is MessageContent.Text -> content.text
-        else -> ""
+        else -> content.previewLine()
     }
 
     Row(
@@ -527,8 +471,6 @@ private fun ComposerActionBlock(
                     thumb, null, Modifier.fillMaxSize(),
                     contentScale = if (content is MessageContent.Sticker) ContentScale.Fit else ContentScale.Crop,
                 )
-                // A file with no preview still needs a mark, or the tile reads as a
-                // failed image rather than a document.
                 else DrawableIcon(
                     when (content) {
                         is MessageContent.Voice -> R.drawable.i_mic
@@ -540,8 +482,6 @@ private fun ComposerActionBlock(
                 )
             }
         }
-        // Editing offers the media the field can't reach; replying names another
-        // message, so the block is the way back to it.
         val onLineTap: (() -> Unit)? = when {
             offersMedia -> onAddMedia
             !editing -> action.msg.dispatchIdHex?.let { did -> { onJumpTo(did) } }
@@ -566,16 +506,13 @@ private fun ComposerActionBlock(
                 EmojiText(
                     s,
                     style = MaterialTheme.typography.bodyMedium,
-                    // The edit line is an affordance, not a quote, tinted so it
-                    // reads as something to press rather than something to read.
                     color = if (offersMedia) chat.accent else colors.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
-        // Same circle as the row below, not an IconButton: its 48dp minimum exceeds
-        // the label+snippet stack and would set the block's height instead of them.
+        // Not an IconButton: its 48dp minimum would set the block's height.
         Box(
             Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onCancel)
                 .semantics { contentDescription = "Cancel action" },
@@ -586,7 +523,6 @@ private fun ComposerActionBlock(
     }
 }
 
-/** The input row itself, unstyled. The pill above it owns shape, blur and inset. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ComposerRow(
@@ -606,9 +542,7 @@ private fun ComposerRow(
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
 
-    // Buffered media is a draft on its own. Text is optional once something's
-    // staged. Held while anything is still encoding: libcore refuses a
-    // half-prepared item, so an enabled button there would fail silently.
+    // Send is held while anything is encoding: libcore refuses a half-prepared item.
     val staged by viewModel.staged.collectAsState()
     val sending by viewModel.composerBusy.collectAsState()
     val sentRevision by viewModel.sentRevision.collectAsState()
@@ -625,10 +559,8 @@ private fun ComposerRow(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom,
     ) {
-        // Swap the leading affordance without changing the input's width: the
-        // paperclip while drafting (the trailing one has gone), stickers otherwise.
-        // An edit has a body to replace and a sticker is not one, so the sticker
-        // slot sits out of an edit rather than open a panel whose taps do nothing.
+        // Paperclip while drafting, stickers otherwise. A sticker can't replace an
+        // edit's body, so the slot sits out of an edit.
         Box(
             Modifier.padding(end = SlotGap).size(38.dp).clip(CircleShape)
                 .clickable(enabled = !busy && (hasContent || action !is ComposerAction.Edit)) {
@@ -662,20 +594,15 @@ private fun ComposerRow(
             onFieldFocused = onFieldFocused,
             onReceiveImages = viewModel::attachPhotos,
             maxLines = 6,
-            // Tapping the field to type raises the keyboard, so close the panel it replaces.
             modifier = Modifier.weight(1f)
                 .then(textExit.modifier)
                 .animateContentSize(if (textExit.fading) snap() else ChatMotion.spec(), alignment = Alignment.BottomStart),
-            // Floored at the button size and centred within it, so a single line sits
-            // level with the icons rather than riding the row's Bottom alignment. Past
-            // one line the box grows and Bottom keeps the buttons at the last line.
+            // Floored at the button size and centred, so a single line sits level with the icons.
             decorationBox = { inner ->
                 Box(
                     Modifier.heightIn(min = 38.dp).padding(vertical = 7.dp),
                     contentAlignment = Alignment.CenterStart,
                 ) {
-                    // Staged media makes the field a caption for it, not a message
-                    // of its own. The send commits one thing either way.
                     if (input.isEmpty()) Text(
                         if (staged.isEmpty()) "Message" else "Caption",
                         style = MaterialTheme.typography.bodyLarge,
@@ -697,19 +624,14 @@ private fun ComposerRow(
                 tint = if (attachOpen) chat.accent else colors.onSurfaceVariant)
         }
 
-        // The trailing slot is ALWAYS occupied at a fixed size so the pill's
-        // height never jumps: mic by default, send when there's a draft,
-        // crossfading in place. Solid accent, no haze, since a blurred layer under
-        // the circle rendered as a square. Held while media is still encoding:
-        // the tap then does nothing rather than start a recording under a draft.
+        // Always occupied at a fixed size so the pill's height never jumps. Solid accent,
+        // no haze: a blurred layer under the circle renders as a square.
         Box(
             Modifier
                 .padding(start = SlotGap)
                 .size(38.dp)
                 .clip(CircleShape)
                 .background(if (hasDraft) chat.accent else Color.Transparent)
-                // An edit has a body to replace and a voice note is not one,
-                // so the mic sits out while one is staged; a reply rides along.
                 .semantics { contentDescription = if (hasContent || action is ComposerAction.Edit) "Send message" else "Record voice message" }
                 .clickable(enabled = !busy && (hasDraft || (!hasContent && action !is ComposerAction.Edit))) {
                     if (hasDraft) {
@@ -719,9 +641,7 @@ private fun ComposerRow(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // Anything drafted shows send, even while it's still encoding and
-            // the tap is held: a mic there would promise a recording the slot
-            // can't start.
+            // hasContent, not hasDraft: a mic would promise a recording the held slot can't start.
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = chat.accent)
             else AnimatedContent(
                 targetState = when {
@@ -745,19 +665,12 @@ private fun ComposerRow(
     }
 }
 
-/**
- * The input row while a voice note records: a level-driven red dot, the
- * elapsed time, cancel, and the same accent send circle the draft uses. Tap
- * to start and tap to send rather than hold, one gesture fewer to get wrong,
- * and the note survives a glance away from the screen.
- */
 @Composable
 private fun RecordingRow(viewModel: ChatVM, onCancel: () -> Unit, onSend: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
     val recording by viewModel.recording.collectAsState()
     val level by animateFloatAsState(recording?.level ?: 0f, tween(100), label = "micLevel")
-    val elapsed = (recording?.elapsedMs ?: 0L) / 1000
     Row(
         Modifier.fillMaxWidth().heightIn(min = 38.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -771,7 +684,7 @@ private fun RecordingRow(viewModel: ChatVM, onCancel: () -> Unit, onSend: () -> 
             )
         }
         Text(
-            "%d:%02d".format(elapsed / 60, elapsed % 60),
+            clock(recording?.elapsedMs ?: 0L),
             style = MaterialTheme.typography.bodyLarge,
             color = colors.onSurface,
             modifier = Modifier.padding(start = 4.dp),

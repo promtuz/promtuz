@@ -22,7 +22,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -35,8 +34,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.data.storage.*
+import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.stage.ChatMotion
 import java.text.DateFormat
@@ -63,7 +64,6 @@ internal fun StorageManager(
     chatName: String? = null,
 ) {
     val context = LocalContext.current
-    val direction = LocalLayoutDirection.current
     val listState = rememberLazyListState()
     val previews = remember(source) { StoragePreviews() }
     val model = androidx.lifecycle.viewmodel.compose.viewModel { StorageVM(source) }
@@ -135,8 +135,7 @@ internal fun StorageManager(
         },
     ) { padding ->
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = padding.calculateStartPadding(direction) + 18.dp, end = padding.calculateEndPadding(direction) + 18.dp, top = padding.calculateTopPadding(),
-                bottom = padding.calculateBottomPadding() + if (chosen.isNotEmpty()) 88.dp else 24.dp),
+            contentPadding = padding.listPadding(top = 0.dp, bottom = if (chosen.isNotEmpty()) 88.dp else 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (busy && usage == null) item("progress") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             if (chat == null) {
@@ -201,7 +200,7 @@ internal fun StorageManager(
                 }
             } else {
                 items(visible, key = { it.key }) { item ->
-                    val title = item.name.ifBlank { item.caption.ifBlank { when (item.kind) { 1 -> "Photo"; 3 -> "Voice message"; else -> "File" } } }
+                    val title = item.name.ifBlank { item.caption.ifBlank { mediaLabel(item.kind) } }
                     val date = remember(item.timestamp) { DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(item.timestamp * 1000)) }
                     StorageRow(title, "${item.chat} · $date", size(item.bytes), enabled = !busy,
                         checked = item.key in selected, onClick = {

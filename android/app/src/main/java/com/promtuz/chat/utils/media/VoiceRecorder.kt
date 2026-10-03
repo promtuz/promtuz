@@ -6,16 +6,8 @@ import android.os.Build
 import android.os.SystemClock
 import java.io.File
 
-/**
- * One recording at a time, into a private cache file that leaves with the
- * recorder: [finish] reads it back as bytes for the wire and unlinks it,
- * [cancel] just unlinks it.
- *
- * Opus in Ogg from API 29, AAC in MP4 below — the mime rides the message, so
- * the receiver plays whatever it was given. Bitrates are chosen so the
- * recorder's own file-size cap lands under libcore's inline frame budget:
- * a note that hits the cap stops itself rather than failing to send.
- */
+/** Opus in Ogg from API 29, AAC in MP4 below, and the mime rides the message. The file-size cap keeps a
+ *  note under core's inline budget, so a long note stops itself rather than failing to send. */
 class VoiceRecorder(private val context: Context) {
     private var recorder: MediaRecorder? = null
     private var file: File? = null
@@ -26,7 +18,6 @@ class VoiceRecorder(private val context: Context) {
 
     val isRecording: Boolean get() = recorder != null
 
-    /** Start, or return false if the device refused (mic busy, no permission). */
     fun start(onLimit: () -> Unit): Boolean {
         if (recorder != null) return true
         val dir = File(context.cacheDir, "voice").apply { mkdirs() }
@@ -67,14 +58,9 @@ class VoiceRecorder(private val context: Context) {
         }.isSuccess
     }
 
-    /** Elapsed so far. */
     val elapsedMs: Long get() = if (recorder == null) 0 else SystemClock.elapsedRealtime() - startedAt
 
-    /**
-     * Read the current loudness, 0f..1f, and keep it for the waveform. Called
-     * on a ticker while recording; maxAmplitude resets on every read, so one
-     * reader owns it.
-     */
+    /** Loudness in 0f..1f. maxAmplitude resets on every read, so only the recording ticker calls this. */
     fun sample(): Float {
         val amp = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
         samples += amp
@@ -83,7 +69,6 @@ class VoiceRecorder(private val context: Context) {
 
     class Recording(val bytes: ByteArray, val mime: String, val durationMs: Int, val waveform: ByteArray)
 
-    /** Stop and hand back what was recorded; null if nothing usable landed. */
     fun finish(): Recording? {
         val r = recorder ?: return null
         val f = file
@@ -111,10 +96,6 @@ class VoiceRecorder(private val context: Context) {
         file = null
     }
 
-    /**
-     * Fold the amplitude samples into [WAVE_BARS] bytes, scaled so the loudest
-     * moment is full height — a quiet speaker still gets a readable shape.
-     */
     private fun waveformOf(raw: List<Int>): ByteArray {
         if (raw.isEmpty()) return ByteArray(0)
         val peak = raw.max().coerceAtLeast(1)

@@ -5,18 +5,13 @@ import android.graphics.ImageDecoder
 import android.os.Build
 import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import org.aomedia.avif.android.AvifDecoder
 import timber.log.Timber
 import java.nio.ByteBuffer
 
-/**
- * Decode an inline/preview AVIF blob. Bundled libavif (dav1d) decodes first —
- * the platform ImageDecoder is device-specific: absent on API 26–30, and some
- * 31+ builds reject our encoder's output → null bitmap → grey bubble. The
- * platform path stays as a fallback. Every failure branch logs so a grey
- * bubble is diagnosable.
- */
+/** Bundled libavif goes first: the platform decoder is missing below API 31 and some builds reject our output. */
 fun decodeAvif(bytes: ByteArray, maxEdge: Int = Int.MAX_VALUE): ImageBitmap? {
     if (bytes.isEmpty()) {
         Timber.tag("Avif").w("decode skipped: empty blob")
@@ -34,7 +29,7 @@ fun decodeAvif(bytes: ByteArray, maxEdge: Int = Int.MAX_VALUE): ImageBitmap? {
 }
 
 private fun decodeWithLibavif(bytes: ByteArray, maxEdge: Int): ImageBitmap? = runCatching {
-    // libavif's JNI reads via GetDirectBufferAddress — a wrapped array won't do.
+    // libavif's JNI reads via GetDirectBufferAddress, so a wrapped array won't do.
     val buf = ByteBuffer.allocateDirect(bytes.size).put(bytes).apply { rewind() }
     val info = AvifDecoder.Info()
     if (!AvifDecoder.getInfo(buf, bytes.size, info)) {
@@ -49,14 +44,27 @@ private fun decodeWithLibavif(bytes: ByteArray, maxEdge: Int): ImageBitmap? = ru
     }
     bitmap.asImageBitmap()
 }.onFailure {
-    // UnsatisfiedLinkError and friends — fall through to the platform decoder.
+    // UnsatisfiedLinkError and the like fall through to the platform decoder.
     Timber.tag("Avif").w(it, "libavif threw")
 }.getOrNull()
 
-// Keyed by dispatch-id-hex so re-reads on every DB doorbell hand back the SAME
-// ImageBitmap instance, keeping the @Immutable content's value-equality stable
-// (a fresh decode each tick would churn MessageStage).
-private val cache = LruCache<String, ImageBitmap>(64)
+// Re-reads get the same instance, so @Immutable content stays equal. The bytes are in the key
+// because a revision replaces the picture under the same dispatch id.
+private val cache = object : LruCache<String, ImageBitmap>(64 shl 20) {
+    override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
+}
 
-fun decodeAvifCached(dispatchIdHex: String, bytes: ByteArray): ImageBitmap? =
-    cache.get(dispatchIdHex) ?: decodeAvif(bytes)?.also { cache.put(dispatchIdHex, it) }
+fun decodeAvifCached(dispatchIdHex: String, bytes: ByteArray): ImageBitmap? {
+    val key = "$dispatchIdHex:${bytes.contentHashCode()}"
+    return cache.get(key) ?: decodeAvif(bytes)?.also { cache.put(key, it) }
+}
+
+fun decodeAvifThumb(bytes: ByteArray, edge: Int): ImageBitmap? {
+    val full = decodeAvif(bytes)?.asAndroidBitmap() ?: return null
+    val scale = minOf(1f, edge.toFloat() / maxOf(full.width, full.height))
+    if (scale == 1f) return full.asImageBitmap()
+    val small = Bitmap.createScaledBitmap(full, (full.width * scale).toInt().coerceAtLeast(1),
+        (full.height * scale).toInt().coerceAtLeast(1), true)
+    full.recycle()
+    return small.asImageBitmap()
+}

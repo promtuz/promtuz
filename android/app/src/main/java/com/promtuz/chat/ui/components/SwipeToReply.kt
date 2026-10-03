@@ -33,11 +33,6 @@ import com.promtuz.chat.ui.text.MessageLinkGestures
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
-/**
- * Drag a message left to stage a reply: hard linear clamp at 80dp (no banding),
- * commit at 50dp on release, exactly one haptic at the threshold (guard resets when
- * dragged back under). The cue arrow behind the row fades/scales with progress.
- */
 @Composable
 fun SwipeToReply(
     enabled: Boolean,
@@ -46,10 +41,7 @@ fun SwipeToReply(
     content: @Composable () -> Unit,
 ) {
     val offsetX = remember { Animatable(0f) }
-    // pointerInput keys on `enabled`, which almost never changes, so the gesture
-    // coroutine outlives the composition that started it and would keep calling
-    // whichever `onReply` it closed over first — replying to a message as it was
-    // several edits ago.
+    // pointerInput keys only on `enabled`, so its coroutine would keep the first onReply.
     val reply by rememberUpdatedState(onReply)
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -79,9 +71,7 @@ fun SwipeToReply(
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
-                    // Two-phase: observe (never consume) until the direction is
-                    // DECISIVELY a left swipe — 3:1 horizontal dominance past slop.
-                    // Anything vertical-ish or rightward bails silently, so the
+                    // Observe without consuming until it is clearly a left swipe, so the
                     // list's scroll never loses a frame to this gesture.
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -103,24 +93,15 @@ fun SwipeToReply(
                             if (dx < -slop && kotlin.math.abs(dx) > 3 * kotlin.math.abs(dy)) break
                         }
 
-                        // Claimed: drive the clamp, one haptic at the threshold.
-                        //
-                        // The offset is tracked here rather than read back off the
-                        // Animatable: snapTo is dispatched through `scope.launch`, so
-                        // its value trails the finger by however long that takes to
-                        // run — and a quick flick ends the gesture with the Animatable
-                        // still near zero, which is a commit that never fires. The
-                        // Animatable stays the render source; this is the truth.
+                        // Track the offset here: snapTo is dispatched through scope.launch, so the
+                        // Animatable trails the finger and a quick flick would end before it commits.
                         var vibrated = false
                         var offset = dx.coerceIn(-clampPx, 0f)
                         scope.launch { offsetX.snapTo(offset) }
                         while (true) {
                             val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                             if (!ch.pressed) break
-                            // Read the delta BEFORE consuming: positionChange()
-                            // reports zero for a change already marked consumed, so
-                            // consuming first silently pins the drag at its claim
-                            // distance and the commit threshold is never reached.
+                            // Read the delta before consuming: positionChange() reports zero once consumed.
                             val step = ch.positionChange().x
                             ch.consume()
                             offset = (offset + step).coerceIn(-clampPx, 0f)

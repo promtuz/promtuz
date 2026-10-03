@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.BottomSheetDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetState
@@ -43,7 +42,6 @@ private val BackDropMax = 96.dp
 private const val BackDropFraction = 0.15f
 private const val BackSettleMs = 260
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppBottomSheet(
     onDismissRequest: () -> Unit,

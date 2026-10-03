@@ -36,8 +36,7 @@ class DrainWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
         return if (synced && notified) Result.success() else Result.retry()
     }
 
-    // API < 31 runs expedited work as a foreground service and requires this. A minimal, low-key
-    // notice on the sync channel; on 31+ it is never shown.
+    // Below API 31 expedited work runs as a foreground service and needs this notice; 31+ never shows it.
     override suspend fun getForegroundInfo(): ForegroundInfo {
         Notifications.ensureChannels(applicationContext)
         val notif = NotificationCompat.Builder(applicationContext, Notifications.SYNC_CHANNEL)

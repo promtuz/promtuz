@@ -10,32 +10,19 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.extensions.toHex
+import timber.log.Timber
 import uniffi.core.CoreEvents
 import uniffi.core.MessageEvent
 import uniffi.core.ConnectionState as FfiConnectionState
 import uniffi.core.Presence as FfiPresence
 
-/**
- * Ephemeral member activity — `bits` is an OR of ACTIVITY_* (0 = present-idle).
- * Carries the conversation as well as the person, so a group header can show
- * several members typing at once.
- */
+/** [bits] is an OR of Activity bits; 0 is idle. */
 class ActivitySignal(val conversation: ByteArray, val peer: ByteArray, val bits: Int)
 
-/** Ephemeral presence delta for a contact. */
 class PresenceSignal(val peer: ByteArray, val presence: Presence)
 
-/**
- * The client's [CoreEvents] port. core calls these off-main (tokio threads);
- * bodies MUST NOT throw or block — a throw across the FFI callback aborts core,
- * and on_db_changed fires while the writing DB connection is locked. So every
- * path is a non-blocking tryEmit into a bounded, drop-oldest flow.
- *
- * Persistent state is *observed*, not pushed: [dbChanged] is the doorbell — fed
- * by the SQLite commit hook AND by the message/reaction events (belt-and-suspenders;
- * each maps to a DB write) — and the truth comes from re-reading the DB. Only the
- * genuinely ephemeral signals, [activity] and [presence], flow as typed events.
- */
+/** Core calls these on its own threads. They must not block, and on_db_changed runs with the writer
+ *  connection locked, so each body is a tryEmit into a bounded flow or a guarded call. */
 object CoreEventBus : CoreEvents {
     private val _connection = MutableStateFlow(ConnectionState.Idle)
     val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
@@ -49,15 +36,10 @@ object CoreEventBus : CoreEvents {
     private val _presence = bounded<PresenceSignal>()
     val presence: SharedFlow<PresenceSignal> = _presence.asSharedFlow()
 
-    /**
-     * Last-known presence per peer (hex IPK). The event stream has no memory, so a
-     * delta arriving while no screen collects was simply lost until the next
-     * subscribe — this cache is what late collectors read first.
-     */
+    /** Keyed by hex IPK. The event stream has no memory, so late collectors start here. */
     private val _presenceByPeer = MutableStateFlow<Map<String, Presence>>(emptyMap())
     val presenceByPeer: StateFlow<Map<String, Presence>> = _presenceByPeer.asStateFlow()
 
-    /** Seed the presence cache from disk on cold start ([PresenceStore]). */
     fun hydratePresence(seed: Map<String, Presence>) {
         if (seed.isNotEmpty()) _presenceByPeer.value = seed
     }
@@ -81,22 +63,21 @@ object CoreEventBus : CoreEvents {
         _dbChanged.tryEmit(REACTIONS)
     }
 
-    override fun onCall(event: uniffi.core.CallEvent) {
-        // The call machine turns this into service, notification and screen.
-        // A call also writes a row when it ends, so nudge the message tables.
+    override fun onCall(event: uniffi.core.CallEvent) = guard {
+        // A call writes a message row when it ends.
         com.promtuz.core.call.CallController.onEvent(event)
         if (event is uniffi.core.CallEvent.Ended) _dbChanged.tryEmit(MESSAGES)
     }
 
-    override fun onCallVideo(frame: ByteArray, keyframe: Boolean) {
+    override fun onCallVideo(frame: ByteArray, keyframe: Boolean) = guard {
         com.promtuz.core.call.CallVideoManager.onFrame(frame, keyframe)
     }
 
-    override fun onCallVideoKeyframe() {
+    override fun onCallVideoKeyframe() = guard {
         com.promtuz.core.call.CallVideoManager.onKeyframeNeeded()
     }
 
-    override fun onCallVideoBitrate(kbps: UInt) {
+    override fun onCallVideoBitrate(kbps: UInt) = guard {
         com.promtuz.core.call.CallVideoManager.onBitrate(kbps.toInt())
     }
 
@@ -113,6 +94,14 @@ object CoreEventBus : CoreEvents {
         }
         _presence.tryEmit(PresenceSignal(peer, p))
         _presenceByPeer.value = _presenceByPeer.value + (peer.toHex() to p)
+    }
+
+    private inline fun guard(block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            Timber.tag("Core").e(t, "event handler failed")
+        }
     }
 
     private fun <T> bounded(): MutableSharedFlow<T> = MutableSharedFlow(

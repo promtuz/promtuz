@@ -29,7 +29,6 @@ fun IdentityQrCode(
 ) {
     val context = LocalContext.current
 
-    // TODO: make these customizable as well
     val containerColor = Color.White
     val modulesColor = Color.Black
 

@@ -21,14 +21,7 @@ import com.promtuz.core.CoreBridge
 import timber.log.Timber
 import java.nio.ByteBuffer
 
-/**
- * The camera and the H.264 encoder for a video call. One Camera2 capture
- * request feeds two surfaces at once, the encoder's input and the local
- * self-view, so there is no GL copy. Encoded Annex-B access units go to core;
- * core drives the target bitrate and asks for keyframes.
- *
- * libcore owns the RTP and the network; this owns only pixels to bytes.
- */
+/** One capture request feeds both the encoder surface and the self-view, so there is no GL copy. */
 class CallVideo(private val context: Context) {
     private companion object {
         const val WIDTH = 640
@@ -48,11 +41,9 @@ class CallVideo(private val context: Context) {
     private var previewSurface: Surface? = null
     private var frontFacing = true
     @Volatile private var running = false
-    /// SPS/PPS from the encoder, prepended to every keyframe so a peer that
-    /// missed the first ones can still start decoding after a loss.
+    // SPS/PPS, prepended to every keyframe so a peer that missed them can start decoding after a loss.
     private var codecConfig: ByteArray? = null
 
-    /** Start capture, rendering the local preview into [preview]. */
     fun start(preview: Surface?) {
         if (running) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
@@ -80,7 +71,6 @@ class CallVideo(private val context: Context) {
         }
     }
 
-    /** Flip between the front and back camera. */
     fun switchCamera() {
         if (!running) return
         handler.post {
@@ -91,13 +81,11 @@ class CallVideo(private val context: Context) {
         }
     }
 
-    /** The peer (via core) asked for a fresh IDR. */
     fun requestKeyframe() {
         val bundle = Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }
         runCatching { encoder?.setParameters(bundle) }
     }
 
-    /** Retune the encoder to the bandwidth estimate. */
     fun setBitrate(kbps: Int) {
         val bundle = Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, kbps * 1000) }
         runCatching { encoder?.setParameters(bundle) }
@@ -109,7 +97,7 @@ class CallVideo(private val context: Context) {
             setInteger(MediaFormat.KEY_BIT_RATE, START_BITRATE)
             setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_SECONDS)
-            // Constrained baseline: the floor the spec picks so every phone decodes it.
+            // Constrained baseline, so every phone can decode it.
             setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline)
             setInteger("bitrate-mode", MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
         }
@@ -137,7 +125,6 @@ class CallVideo(private val context: Context) {
         buffer.position(info.offset)
         buffer.get(bytes)
         if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-            // SPS/PPS: keep it, don't send it alone.
             codecConfig = bytes
             return
         }

@@ -15,7 +15,6 @@ import uniffi.core.RelayStat
 
 enum class RelayStatus { LIVE, IDLE, PROBING, DOWN }
 
-/** Screen model: uniffi's unsigned types flattened to plain Kotlin. */
 data class UiRelay(
     val id: String,
     val host: String,
@@ -25,21 +24,16 @@ data class UiRelay(
     val windowAttempts: Int,
     val windowSuccesses: Int,
     val consecutiveFailures: Int,
-    /** Last time we successfully connected to this relay (ms epoch), or null. */
     val lastConnectMs: Long?,
     val backoffUntilMs: Long?,
     val isConnected: Boolean,
-    /** RTT history (ms), oldest→newest, for the latency graph. */
+    /** RTT in ms, oldest first. */
     val latencySamples: List<Float>,
 ) {
     val canReset get() = status == RelayStatus.PROBING || status == RelayStatus.DOWN
 }
 
-/**
- * Polls the relay set every [POLL_MS] for a live view — there is no relay
- * event stream in core, so a poll is the simplest correct approach. The VM
- * is screen-scoped, so polling stops when the page is popped.
- */
+/** Polls, since core has no relay event stream; the VM is screen-scoped, so polling stops with the page. */
 class RelaysVM : ViewModel() {
     private val _relays = MutableStateFlow<List<UiRelay>>(emptyList())
     val relays: StateFlow<List<UiRelay>> = _relays.asStateFlow()
@@ -57,7 +51,6 @@ class RelaysVM : ViewModel() {
         try {
             _relays.value = CoreBridge.relays()
                 .map { it.toUi() }
-                // Live relay pinned first, then most-recently-connected.
                 .sortedWith(compareByDescending<UiRelay> { it.isConnected }.thenByDescending { it.lastConnectMs ?: 0L })
         } catch (e: Exception) {
             Timber.tag("RelaysVM").e(e, "Failed to load relays")

@@ -1,46 +1,29 @@
 package com.promtuz.chat.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import com.promtuz.chat.ui.appearance.ChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.ThemeMode
 import com.promtuz.chat.ui.appearance.resolve
 
-/**
- * Designed identity by default ([DarkColors]/[LightColors]); [dynamicTheme] opts into
- * wallpaper-seeded Material You. Also mounts the chat appearance + its resolved
- * [LocalChatColors]. [appearance]'s themeMode overrides [darkTheme] unless System.
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+/** [appearance]'s themeMode overrides [darkTheme] unless it is System. */
 @Composable
 fun PromtuzTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicTheme: Boolean = false,
     appearance: ChatAppearance = ChatAppearance.Default,
     content: @Composable () -> Unit
 ) {
-    val context = LocalContext.current
-
     val dark = when (appearance.themeMode) {
         ThemeMode.System -> darkTheme
         ThemeMode.Light -> false
         ThemeMode.Dark -> true
     }
-    val colorScheme = when {
-        dynamicTheme && dark -> dynamicDarkColorScheme(context)
-        dynamicTheme -> dynamicLightColorScheme(context)
-        dark -> DarkColors
-        else -> LightColors
-    }
+    val colorScheme = if (dark) DarkColors else LightColors
 
     CompositionLocalProvider(
         LocalChatAppearance provides appearance,

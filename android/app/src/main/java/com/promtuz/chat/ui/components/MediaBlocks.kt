@@ -1,6 +1,8 @@
 package com.promtuz.chat.ui.components
 
+import android.text.format.Formatter
 import com.promtuz.chat.ui.text.EmojiText
+import com.promtuz.chat.ui.text.clock
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -64,19 +66,10 @@ import androidx.compose.runtime.snapshotFlow
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import androidx.compose.ui.res.painterResource
 import com.promtuz.chat.utils.media.rememberStickerBitmap
-import java.util.Locale
 
-private val MediaRadius = RoundedCornerShape(14.dp)
-
-/** Hairline between album cells — enough to read as separate photos, not as a grid. */
 private val AlbumGap = 2.dp
 
-/**
- * Inline image. The box reserves the image's aspect-ratio footprint from
- * [width]/[height] so the windowed stage keeps a stable row height whether or
- * not [MessageContent.Image.bitmap] decoded (null on API levels without AVIF) —
- * a null bitmap shows a muted stand-in of the same size, never a collapse.
- */
+/** Sized from the stored dimensions, so an undecoded bitmap keeps the row's height. */
 @Composable
 fun ImageBlock(
     image: MessageContent.Image, textColor: Color, fontScale: Float, metaLabel: String,
@@ -87,8 +80,7 @@ fun ImageBlock(
     val ratio = if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f
     val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
     Column {
-        // No clip of its own: the picture runs to the bubble's edge and the
-        // bubble's shape does the rounding, so there's one outline, not two.
+        // No clip of its own: the bubble's shape does the rounding.
         Box(
             Modifier
                 .mediaSize(ratio)
@@ -106,10 +98,6 @@ fun ImageBlock(
     }
 }
 
-/**
- * An album: the cells come from [albumLayout], sized by each picture's proportions, and the whole thing
- * fills the bubble's width. Every cell is its own message and its own tap.
- */
 @Composable
 fun AlbumBlock(
     album: MessageContent.Album, textColor: Color, fontScale: Float, metaLabel: String,
@@ -142,8 +130,7 @@ fun AlbumBlock(
             // Normalise: a layout that leaves a strip unused spans out to the full width.
             val spanW = cells.maxOf { it.x + it.w }.coerceAtLeast(0.01f)
             val spanH = cells.maxOf { it.y + it.h }
-            // Gaps sit only between cells; the outer edges run to the bubble's own edge so
-            // its rounding is the only outline the album has.
+            // Gaps sit only between cells; outer edges run to the bubble's edge.
             val half = (AlbumGap / 2).roundToPx()
             val placed = measurables.mapIndexed { i, m ->
                 val c = cells[i]
@@ -162,12 +149,6 @@ fun AlbumBlock(
     }
 }
 
-/**
- * How big a picture is in a bubble. It takes the bubble's full width until that
- * would make it taller than [MediaMaxHeight]; past that the width gives way, so a
- * tall photo becomes a narrower bubble rather than a cropped one. A sliver still
- * keeps a minimum width, where cropping is the lesser evil.
- */
 private fun Modifier.mediaSize(ratio: Float) = layout { measurable, constraints ->
     val maxW = constraints.maxWidth
     val maxH = MediaMaxHeight.roundToPx()
@@ -188,12 +169,6 @@ private fun albumBitmap(content: MessageContent) = when (content) {
     else -> null
 }
 
-/**
- * A P2P file card: thumb (or a mime glyph), name + size, and a transfer
- * affordance driven by [MessageContent.Attachment.transferState] — tap to
- * download when idle/failed/held, a determinate ring while pulling, open when
- * done. Progress arrives by reactive re-read; this stays a pure renderer.
- */
 @Composable
 fun AttachmentBlock(
     att: MessageContent.Attachment,
@@ -205,16 +180,14 @@ fun AttachmentBlock(
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
-    // Plain-language transfer line — no P2P/relay jargon. "Waiting" = the sender's
-    // offline. Outgoing shows plain size: retry/waiting states are receiver-side.
-    val subtitle = if (outgoing) formatBytes(att.size) else when (att.transferState) {
-        1 -> if (att.transferTotal > 0)
-            "${formatBytes(att.size)} · ${att.transferHave * 100 / att.transferTotal}%"
-        else formatBytes(att.size)
+    val size = Formatter.formatShortFileSize(LocalContext.current, att.size)
+    // Outgoing shows plain size: retry and waiting states are receiver-side.
+    val subtitle = if (outgoing) size else when (att.transferState) {
+        1 -> if (att.transferTotal > 0) "$size · ${att.transferHave * 100 / att.transferTotal}%" else size
         3 -> "Tap to retry"
         4 -> if (peerName.isNotBlank()) "Waiting for $peerName…" else "Waiting…"
         5 -> "Connecting…"
-        else -> formatBytes(att.size)
+        else -> size
     }
     Column {
         Row(
@@ -249,16 +222,9 @@ fun AttachmentBlock(
     }
 }
 
-/** A picture or video sent as a file is drawn as a tile once it carries a poster. */
 val MessageContent.Attachment.isMediaTile: Boolean
     get() = thumb != null && (mime.startsWith("image/") || mime.startsWith("video/"))
 
-/**
- * A picture or video attachment as a media tile: poster at its own aspect, the
- * transfer ring over it until the bytes land, a play badge and size pill for a
- * video. Tapping a finished one opens the viewer; tapping anything else drives
- * the download, the same as the file card's ring.
- */
 @Composable
 fun MediaTileBlock(
     att: MessageContent.Attachment, textColor: Color, fontScale: Float, metaLabel: String,
@@ -269,8 +235,7 @@ fun MediaTileBlock(
     val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
     val video = att.mime.startsWith("video/")
     val ready = att.transferState == 2 && att.localPath != null
-    // The tile opens once the bytes are here; before that only the ring is a control,
-    // and it is its own control, so a tap on it never lights the whole picture.
+    // Until the bytes land only the ring is a control, so a tap never lights the whole picture.
     val download: (() -> Unit)? = when {
         ready || outgoing -> null
         att.transferState == 1 || att.transferState == 4 -> null
@@ -316,7 +281,7 @@ fun MediaTileBlock(
                     .size(48.dp),
             )
             Text(
-                if (att.transferState == 4) "Waiting…" else formatBytes(att.size),
+                if (att.transferState == 4) "Waiting…" else Formatter.formatShortFileSize(LocalContext.current, att.size),
                 style = MaterialTheme.typography.labelSmall, color = Color.White,
                 modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
                     .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
@@ -327,14 +292,7 @@ fun MediaTileBlock(
     }
 }
 
-/**
- * A voice note: play/pause, the sender's waveform with the played part lit,
- * and the clock — remaining while it plays, total otherwise.
- *
- * With a [surface] the player is its own pill on the wallpaper, in the
- * bubble's colour; without one it sits inside a bubble (a reply) as a
- * quieter inset card.
- */
+/** With a [surface] the player is its own pill on the wallpaper; without one it sits inside a bubble. */
 @Composable
 fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = null) {
     val context = LocalContext.current
@@ -344,7 +302,6 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = 
     val position = mine?.positionMs ?: 0
     val fraction = if (voice.durationMs > 0) (position.toFloat() / voice.durationMs).coerceIn(0f, 1f) else 0f
     val shown = if (mine != null) (voice.durationMs - position).coerceAtLeast(0) else voice.durationMs
-    val secs = (shown + 500) / 1000
     Row(
         Modifier
             .width(VoiceWidth)
@@ -371,14 +328,13 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = 
         }
         Waveform(voice.waveform, fraction, textColor, Modifier.weight(1f).height(28.dp))
         Text(
-            "%d:%02d".format(Locale.US, secs / 60, secs % 60),
+            clock(shown + 500L),
             style = MaterialTheme.typography.labelMedium,
             color = textColor.copy(alpha = 0.8f),
         )
     }
 }
 
-/** A player is a control, not prose: one width, whatever the note's length. */
 private val VoiceWidth = 232.dp
 
 /** Reserve the sticker's dimensions while downloading to keep chat layout stable. */
@@ -401,10 +357,9 @@ fun StickerBlock(sticker: MessageContent.Sticker, textColor: Color) {
     }
 }
 
-/** The longest edge a sticker draws at; the other edge follows its aspect. */
 private val StickerBox = 160.dp
 
-/** Bars from 0–255 loudness samples; a missing waveform draws as a flat line. */
+/** Bars from 0..255 loudness samples; a missing waveform draws as a flat line. */
 @Composable
 private fun Waveform(samples: ByteArray, lit: Float, color: Color, modifier: Modifier) {
     Canvas(modifier) {
@@ -435,16 +390,13 @@ private fun TransferAffordance(
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
-    // Outgoing pre-done = still sending (hash/offer in flight) — you never
-    // download your own send, so no glyph and nothing tappable.
+    // An outgoing file is still sending until state 2; there is nothing to download.
     if (outgoing && att.transferState != 2) {
         CircularProgressIndicator(Modifier.size(20.dp), color = textColor, strokeWidth = 2.dp)
         return
     }
     when (att.transferState) {
-        // Connecting or downloading — tapping the ring re-drives download():
-        // the in-flight guard no-ops a genuinely-live pull, so a tap only
-        // force-resumes a stalled one (e.g. one auto-resume hasn't picked up yet).
+        // A tap re-drives download(), which no-ops a live pull and resumes a stalled one.
         1, 5 -> {
             val ring = Modifier.size(26.dp).clickable { onDownload?.invoke(att.fileIdHex) }
             if (att.transferState == 1 && att.transferTotal > 0)
@@ -466,11 +418,7 @@ private fun TransferAffordance(
     }
 }
 
-/**
- * A caption line that also reserves the trailing corner meta slot (same trick as
- * the text bubble), so the pinned timestamp never lands on media or the caption's
- * last glyph. Renders as a bare reservation strip when the caption is empty.
- */
+/** Reserves the corner meta slot inline so the timestamp never lands on the last glyph. */
 @Composable
 private fun Caption(
     text: String, textColor: Color, fontScale: Float, metaLabel: String,
@@ -503,8 +451,6 @@ private fun Caption(
     )
     com.promtuz.chat.ui.text.MessageText(
         annotated,
-        // A bleeding media block waives the bubble's inset, so the caption puts it
-        // back for itself — and the meta lands in the gap the placeholder reserves.
         if (inset) Modifier.padding(start = BubblePadH, end = BubblePadH, top = 4.dp, bottom = BubblePadV)
         else Modifier.padding(top = 4.dp),
         style = style,
@@ -513,11 +459,6 @@ private fun Caption(
     )
 }
 
-/**
- * The file-type mark: a page outline in the text colour, a badge in the bubble
- * accent, and a white label. Three tinted layers so it keeps its two tones in
- * either bubble.
- */
 @Composable
 fun FileGlyph(mime: String, textColor: Color, accent: Color, modifier: Modifier = Modifier) {
     val label = when {
@@ -534,11 +475,4 @@ fun FileGlyph(mime: String, textColor: Color, accent: Color, modifier: Modifier 
         DrawableIcon(R.drawable.ic_file_badge, Modifier.fillMaxSize(), tint = accent)
         DrawableIcon(label, Modifier.fillMaxSize(), tint = Color.White)
     }
-}
-
-fun formatBytes(bytes: Long): String = when {
-    bytes < 1024 -> "$bytes B"
-    bytes < 1024 * 1024 -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
-    bytes < 1024 * 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024))
-    else -> String.format(Locale.US, "%.1f GB", bytes / (1024.0 * 1024 * 1024))
 }

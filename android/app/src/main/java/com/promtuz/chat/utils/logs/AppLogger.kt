@@ -14,16 +14,12 @@ data class AppLog(
     val message: String,
     val t: Throwable?,
 ) {
-    // Stable, unique per entry — content+time can repeat within a millisecond, so hashCode is not a
-    // safe LazyColumn key (duplicate-key crash). Body val, so it stays out of equals/hashCode.
+    // A unique LazyColumn key, since content and time can repeat; as a body val it stays out of equals.
     val id: Long = nextId.getAndIncrement()
 
     companion object {
         private val nextId = AtomicLong(0)
 
-        /**
-         * Returns logcat priority based on given character
-         */
         fun charPriority(char: Char) = when (char) {
             'V' -> 2
             'D' -> 3

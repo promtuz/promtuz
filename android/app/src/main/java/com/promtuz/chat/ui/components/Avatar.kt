@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
@@ -31,13 +30,6 @@ import com.promtuz.chat.ui.media.mediaOrigin
 
 const val AVATAR_RADIUS_RATIO = 2.875f;
 
-/**
- * A person's tile: their picture when we hold one ([image], see
- * [com.promtuz.chat.utils.media.rememberAvatar]), their initials otherwise.
- * Tappable only when given an [onClick]; a tile with nothing to do lets the
- * tap fall through to the row it sits in.
- */
-@ExperimentalMaterial3Api
 @Composable
 fun Avatar(
     name: String,
@@ -82,8 +74,7 @@ fun Avatar(
             )
         }
 
-        // Corner status dot; the surface-colored ring reads as a cutout over the
-        // list/header behind the avatar's rounded corner.
+        // The surface-colored ring reads as a cutout over whatever is behind the avatar.
         if (statusColor != null) {
             val dot = size * 0.28f
             Box(
@@ -99,15 +90,7 @@ fun Avatar(
         }
     }
 }
-/**
- * A group's avatar.
- *
- * [Avatar] derives initials from one name, which a group doesn't have — so a
- * titled group uses its title's initials, and an untitled one falls back to a
- * split of its first two members. That fallback matters: a group created
- * without a name should still look like *those people*, not like a blank tile.
- */
-@ExperimentalMaterial3Api
+
 @Composable
 fun GroupAvatar(
     title: String,
@@ -146,8 +129,6 @@ fun GroupAvatar(
                 color = Color.White,
             )
         } else {
-            // Two initials on a diagonal — legible at list size, where a 2x2
-            // grid of four would just be four smudges.
             pair.forEachIndexed { i, name ->
                 Text(
                     name.trim().take(1).uppercase(),
@@ -163,7 +144,7 @@ fun GroupAvatar(
     }
 }
 
-/** Stable across renames and restores; the key never leaves this device. */
+/** Keyed on identity, so the color survives renames and restores. */
 fun avatarColor(identityKey: String): Color {
     val palette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
         0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)

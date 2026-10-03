@@ -82,11 +82,7 @@ private class LinkGeometry {
     })
 }
 
-/**
- * Natural font spacing, inline emoji, and individually actionable links. The text and
- * link targets share one measure pass, so hit areas follow wrapping and font scaling.
- * This emits one measurable, as required by the bubble's timestamp layout.
- */
+/** Emits exactly one measurable, which the bubble's Layout requires. */
 @Composable
 fun MessageText(
     text: AnnotatedString,

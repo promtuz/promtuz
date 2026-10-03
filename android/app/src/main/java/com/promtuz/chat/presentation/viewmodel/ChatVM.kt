@@ -52,28 +52,16 @@ import uniffi.core.MediaRecord
 import uniffi.core.MessageRecord
 import uniffi.core.ReactionRecord
 
-/**
- * Reactive chat. [messages] observes the DB — re-read on every commit touching
- * messages/reactions — so send / receive / edit / delete / reaction / receipt all
- * surface as row updates with no hand-patching. [input] is the draft, cleared the
- * point the core accepts [send]. Rejected edits retain the draft. Newest message sits at
- * index 0 and the list draws reversed, so new messages land at the bottom. Typing
- * is an ephemeral signal, timed out client-side.
- */
+/** [messages] is re-read on every change; the newest sits at index 0 and the list draws reversed. */
 class ChatVM(
     private val application: Application,
     private val app: AppVM,
     val conversationHex: String,
 ) : ViewModel() {
-    /** The chat's scope — a 16-byte conversation id, group or 1:1 alike. */
     private val conversation = conversationHex.fromHex()
     // Seed before composition, without waiting for the initial database query.
     private val initialSummary = app.chats.value.firstOrNull { it.conversationHex == conversationHex }
-    /**
-     * Everyone in the chat except us. Presence and typing are per-person, so
-     * they key off this rather than off the conversation: comparing a
-     * conversation id against a peer IPK would simply never match.
-     */
+    /** Everyone but us; presence and typing key off people, not the conversation. */
     private var others: List<ByteArray> = emptyList()
     private var started = false
     private var chatForeground = false
@@ -99,35 +87,24 @@ class ChatVM(
         }
     }
 
-    /** True once the roster is bigger than a pair — drives per-sender bubbles. */
     private val _isGroup = MutableStateFlow(initialSummary?.isGroup == true)
     val isGroup: StateFlow<Boolean> = _isGroup.asStateFlow()
 
-    /**
-     * The group's own name, live. Empty for a 1:1, whose header name is the
-     * contact's. The route carries a name too, but that one is a snapshot from
-     * when the chat was opened — a rename has to land on an open header.
-     */
+    /** Live, unlike the route's name, so a rename lands on an open header. */
     private val _title = MutableStateFlow(initialSummary?.name.orEmpty())
     val title: StateFlow<String> = _title.asStateFlow()
 
-    /**
-     * The name actually set on the group, blank until someone sets one. The
-     * avatar wants this rather than [title]: an unnamed group draws its
-     * members' initials, and a derived name would hide that it has none.
-     */
+    /** Blank until someone names the group, so the avatar draws the members' initials instead. */
     private val _rawTitle = MutableStateFlow(initialSummary?.rawTitle.orEmpty())
     val rawTitle: StateFlow<String> = _rawTitle.asStateFlow()
 
-    /** Notifications silenced for this chat. A conversation flag, so it rides the row. */
     private val _muted = MutableStateFlow(initialSummary?.muted == true)
     val muted: StateFlow<Boolean> = _muted.asStateFlow()
 
-    /** Why we can't post here, when we can't: the composer gives way to it. */
+    /** Why we can't post here, or null; the composer gives way to it. */
     private val _closed = MutableStateFlow<String?>(null)
     val closed: StateFlow<String?> = _closed.asStateFlow()
 
-    /** An unaccepted message request: the composer gives way to accept, delete and block. */
     private val _request = MutableStateFlow(initialSummary?.request == true)
     val request: StateFlow<Boolean> = _request.asStateFlow()
     private var peer: ByteArray? = null
@@ -139,7 +116,6 @@ class ChatVM(
             .onFailure { composerError.value = "Couldn't accept the request" }
     }
 
-    /** Delete or block the request; [onGone] runs once its chat no longer exists. */
     fun dismissRequest(block: Boolean, onGone: () -> Unit) = viewModelScope.launch {
         val who = peer ?: return@launch
         runCatching { if (block) CoreBridge.blockMessageRequest(who) else CoreBridge.deleteMessageRequest(who) }
@@ -147,18 +123,14 @@ class ChatVM(
             .onFailure { composerError.value = if (block) "Couldn't block" else "Couldn't delete the request" }
     }
 
-    /**
-     * Member IPK hex → display name, for attributing bubbles in a group.
-     * Departed members stay in here — their old messages still need a name.
-     */
+    /** Keyed by member hex, departed members included so old messages still have a name. */
     private val _memberNames = MutableStateFlow<Map<String, String>>(emptyMap())
     val memberNames: StateFlow<Map<String, String>> = _memberNames.asStateFlow()
 
-    /** How many are in the group *now* — the header's count, so it excludes the departed. */
+    /** Excludes departed members, unlike [memberNames]. */
     private val _memberCount = MutableStateFlow(initialSummary?.memberCount ?: 0)
     val memberCount: StateFlow<Int> = _memberCount.asStateFlow()
 
-    /** Who is currently typing, by member hex — a group can have several. */
     private val _typingMembers = MutableStateFlow(
         app.conversationActivity.members.value[conversationHex].orEmpty()
             .filterValues { Activity.Typing in Activity.fromBits(it) }.keys.toSet()
@@ -179,10 +151,8 @@ class ChatVM(
     private val _messages = MutableStateFlow<List<UiMessage>?>(null)
     val messages: StateFlow<List<UiMessage>?> = _messages.asStateFlow()
 
-    /** Composer draft; two-way bound to the input field, cleared on [send]. */
     val input = MutableStateFlow("")
 
-    /** Reply/edit staging shown as a chip above the composer; consumed by [send]. */
     val composerAction = MutableStateFlow<ComposerAction?>(null)
 
     private data class SavedDraft(val text: String, val reply: ComposerAction?)
@@ -202,24 +172,16 @@ class ChatVM(
         composerAction.value = draft?.reply
     }
 
-    /**
-     * The composer's media buffer, mirrored from libcore's staging registry.
-     * Picking fills it and starts the encode; [send] commits it. While anything
-     * here is still preparing the send is held — libcore refuses a half-encoded
-     * item rather than dispatch a husk.
-     */
+    /** Mirrors core's staging. Send waits while an item still prepares, since core refuses a half-encoded one. */
     private val _staged = MutableStateFlow<List<StagedMedia>>(emptyList())
     val staged: StateFlow<List<StagedMedia>> = _staged.asStateFlow()
 
-    /** Decoded tile per staged id — the client-side preview the core doesn't return. */
+    /** The buffer is shared with the share sheet and other chats; only these ids are ours. */
+    private val owned = mutableSetOf<ULong>()
+
     private val previews = mutableMapOf<ULong, ImageBitmap>()
 
-    /**
-     * In-chat search. [searchQuery] is null while the bar is closed; hits are
-     * newest first, and [hitIndex] walks them. A hit below the loaded window
-     * widens the window first, then [jump] names the message for the screen
-     * to glide to once its row exists.
-     */
+    /** Null while the bar is closed. A hit below the loaded window widens it before [jump] names the row. */
     val searchQuery = MutableStateFlow<String?>(null)
     private val _hits = MutableStateFlow<List<String>>(emptyList())
     val hits: StateFlow<List<String>> = _hits.asStateFlow()
@@ -234,7 +196,6 @@ class ChatVM(
     fun nextHit() = stepHit(1)
     fun prevHit() = stepHit(-1)
 
-    /** Locate a media message outside the loaded window, including a child of a folded album. */
     suspend fun revealMessage(dispatchId: String, timestampMs: Long): String? {
         fun target(rows: List<UiMessage>) = rows.firstOrNull { message ->
             !message.deleted && (message.dispatchIdHex == dispatchId ||
@@ -252,7 +213,6 @@ class ChatVM(
         return target(loaded)?.key
     }
 
-    /** Resolve against all stored history, then widen the same window used by search. */
     suspend fun jumpToDate(date: java.time.LocalDate, zone: java.time.ZoneId): Boolean {
         val start = date.atStartOfDay(zone).toEpochSecond()
         val position = CoreBridge.messageAtTime(conversation, start) ?: return false
@@ -285,9 +245,7 @@ class ChatVM(
 
     private fun goToHit(i: Int) {
         val did = _hits.value.getOrNull(i) ?: return
-        // The depth was measured when the search ran; every message since
-        // has pushed the hit one row deeper, so it is a floor, not the truth.
-        // What decides is whether the row is actually loaded.
+        // The depth was measured at search time and newer messages push the hit deeper, so it is a floor.
         val depth = hitDepth.getOrNull(i) ?: 0
         viewModelScope.launch {
             if (_messages.value.orEmpty().none { it.dispatchIdHex == did }) {
@@ -298,7 +256,6 @@ class ChatVM(
         }
     }
 
-    /** A voice note being recorded: how long so far and how loud right now. */
     data class Recording(val elapsedMs: Long, val level: Float)
 
     private val recorder = VoiceRecorder(application)
@@ -308,7 +265,7 @@ class ChatVM(
 
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
 
-    /** Key of the incoming message that ended a live typing signal — the morph target. */
+    /** The incoming message that ended a typing signal, which the typing bubble morphs into. */
     val typingHandoff = MutableStateFlow<String?>(null)
 
     private val _presence = MutableStateFlow(initialSummary?.peerHex?.let { CoreBridge.presenceByPeer.value[it] })
@@ -327,10 +284,8 @@ class ChatVM(
         var newestIncoming: String? = null
         var previousIncomingKeys = emptySet<String>()
         viewModelScope.launch {
-            // Roster and messages ride one doorbell. Attribution reads the
-            // roster, so resolving them in separate flows would let a message
-            // render before the names it needs — and nothing re-attributes it
-            // afterwards, so "Unknown" would stick until the next write.
+            // One query for roster and messages: attribution reads the roster, and nothing
+            // re-attributes a message that rendered before its names.
             observeQuery(
                 setOf(
                     "messages", "reactions", "message_media", "partials",
@@ -340,9 +295,8 @@ class ChatVM(
                 resolveRoster()
                 load()
             }.collect { list ->
-                // Their message just landed — if they were typing, it inherits the
-                // typing bubble (morph). Handoff is set BEFORE the list so one
-                // recomposition sees both.
+                // Their message inherits the typing bubble. The handoff is set before the list so
+                // one recomposition sees both.
                 val newest = list.firstOrNull { !it.outgoing }
                 if (incomingLoaded && newest != null && newest.key != newestIncoming && newest.key !in previousIncomingKeys) {
                     (newest.senderHex ?: others.singleOrNull()?.toHex())?.let {
@@ -350,9 +304,8 @@ class ChatVM(
                         typingPresentation.consume(it)
                     }
                     syncTyping()
-                    // An idle signal can beat the message. The stage may still
-                    // have an exiting typing row to hand over; it decides whether
-                    // that source is present rather than relying on this Boolean.
+                    // An idle signal can beat the message; the stage decides whether an exiting
+                    // typing row is still there to hand over.
                     if (typingBubbleMembers.value.isEmpty()) typingHandoff.value = newest.key
                 }
                 newestIncoming = newest?.key
@@ -363,10 +316,6 @@ class ChatVM(
             }
         }
 
-        // The buffer is process-wide in libcore, so a chat opening inherits
-        // whatever the last one left. Clear it rather than surface someone
-        // else's pick as this conversation's draft.
-        fire { CoreBridge.clearStaged() }
         @OptIn(FlowPreview::class)
         viewModelScope.launch {
             searchQuery.debounce(250).collect { q ->
@@ -391,8 +340,7 @@ class ChatVM(
             app.conversationActivity.members.collect { syncTyping() }
         }
 
-        // Initial presence is resolved with the roster; subsequent signals stay live.
-        // AppVM owns the process-wide subscription, including its cached snapshot.
+        // Initial presence comes with the roster; AppVM owns the process-wide subscription.
         viewModelScope.launch {
             CoreBridge.presence
                 .filter { sig -> others.any { it.contentEquals(sig.peer) } }
@@ -427,20 +375,16 @@ class ChatVM(
     private var limit = INITIAL_LIMIT
 
 
-    /** A load returned fewer rows than asked → all history is loaded. */
     @Volatile
     private var exhausted = false
     private var loadingOlder = false
 
     fun toggleMute() = com.promtuz.chat.data.ChatPrefs.toggleMute(conversationHex, !_muted.value)
 
-    /** Who is in this chat and what to call them — read before every message pass. */
     private suspend fun resolveRoster() {
         val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull() ?: return
         val roster = runCatching { CoreBridge.members(conversation) }.getOrNull() ?: return
-        // Core resolves a member's name — address book, then what they call
-        // themselves, then their key's head — so every screen agrees on the
-        // order. Only "You" is ours to say: we are never in our own contacts.
+        // Core resolves every name but ours: we are never in our own contacts.
         val names = roster.associate { m ->
             m.ipk.toHex() to if (m.me) "You" else m.name
         }
@@ -473,42 +417,22 @@ class ChatVM(
         val rows = CoreBridge.messages(conversation, want)                   // oldest-first
         exhausted = rows.size < want
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
-        val media = CoreBridge.getMedia(conversation).associateBy { it.dispatchId.toHex() }
-        // Quote resolution: replies name a dispatch_id; snippet comes from the
-        // loaded window (null text → "unavailable" shell, e.g. outside window).
+        val media = CoreBridge.getMedia(conversation, want).associateBy { it.dispatchId.toHex() }
+        // Quotes resolve within the loaded window; one outside it shows as unavailable.
         val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
-        // reversed → newest at index 0 → drawn at the bottom under reverseLayout;
-        // AVIF decode happens in toUi, so map off the main thread.
+        // toUi decodes AVIF, so this maps off the main thread.
         val loaded = withContext(Dispatchers.Default) {
-            // "Seen by N" is only meaningful for our own messages in a group;
-            // a 1:1 already says it with the delivery tick, so the per-message
-            // count query is skipped entirely there.
-            val seen: Map<String, Int> = if (!_isGroup.value) emptyMap() else
-                rows.filter { it.outgoing && it.dispatchId != null }
-                    .associate { r ->
-                        val did = r.dispatchId!!
-                        did.toHex() to runCatching {
-                            CoreBridge.seenBy(conversation, did)
-                        }.getOrDefault(0)
-                    }
-            // Core already folded runs of pictures sent together into albums;
-            // the head row carries the run and the rest are marked to skip.
+            // Core folds pictures sent together onto the album's head row and marks the rest.
             rows.asReversed()
                 .filterNot { it.inAlbum }
-                .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value, seen) }
+                .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value) }
         }
         // A date/search jump can widen the window while this read is decoding.
         // Never publish that older, narrower snapshot over the requested window.
         return if (want < limit) load() else loaded
     }
 
-    /**
-     * Near-top pagination: grow the window and re-read. An accumulating beforeId
-     * cursor would fight the reactive re-read (observeQuery reloads the whole
-     * window on every commit); a bigger limit composes with it.
-     * ponytail: grow-limit re-reads the full window per page — beforeId keyset
-     * paging if that re-read ever gets too heavy.
-     */
+    /** Grows the window instead of paging by cursor, since every commit re-reads the whole window. */
     fun loadOlder() {
         if (loadingOlder || exhausted) return
         loadingOlder = true
@@ -522,12 +446,6 @@ class ChatVM(
         }
     }
 
-    /**
-     * Commit the composer: buffered media (with the draft as its caption) if
-     * there is any, plain text otherwise. Held while anything is still encoding
-     * — libcore refuses a half-prepared item, so the UI keeps send disabled
-     * until the buffer settles rather than letting it fail silently.
-     */
     fun send() {
         if (composerBusy.value || pickingMedia) return
         val text = input.value.trim()
@@ -562,8 +480,7 @@ class ChatVM(
                         runCatching { CoreBridge.discardStaged(items.single().id) }
                     }
                     editing != null -> CoreBridge.editMessage(conversation, did!!.fromHex(), text)
-                    // An album holds at most ten; a bigger pick goes out as
-                    // several albums, the caption and reply riding the first.
+                    // A bigger pick goes out as several albums, the caption and reply riding the first.
                     items.isNotEmpty() -> items.chunked(ALBUM_MAX).forEachIndexed { i, chunk ->
                         CoreBridge.sendStaged(conversation, chunk.map { it.id }, if (i == 0) text else "",
                             if (i == 0) (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex() else null)
@@ -631,7 +548,6 @@ class ChatVM(
         } else composerAction.value = null
     }
 
-    /** Tap on a quick-reaction or an existing chip: mine → remove, else add. */
     fun toggleReaction(msg: UiMessage, emoji: String) {
         if (_request.value) { composerError.value = "Accept the request to react"; return }
         val id = msg.dispatchIdHex ?: return
@@ -648,45 +564,37 @@ class ChatVM(
     fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
         fire { CoreBridge.react(conversation, dispatchIdHex.fromHex(), emoji, add) }
 
-    /**
-     * Picked media → the composer buffer. The AVIF pass starts now and runs
-     * while the caption is typed; [send] commits what's ready. Videos ride the
-     * P2P attachment path. The album id is minted at commit time, so a pick
-     * added later still joins the same group.
-     */
+    /** The album id is minted at send time, so a later pick still joins the same album. */
     fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
         val cr = application.contentResolver
         selected.forEach { uri ->
-            // ponytail: video staged raw over P2P — transcode + poster frame land later.
             if (cr.getType(uri)?.startsWith("video/") == true) stagePickedFile(uri)
             else {
                 val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@forEach
                 val tile = bmp.tile()
-                rememberPreview(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height), tile)
+                rememberPreview(own(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height)), tile)
             }
         }
     }
 
-    /** A photo or clip the camera just wrote, as the picker would have staged it. */
     fun attachCaptured(file: java.io.File, video: Boolean) {
         val uri = Uri.fromFile(file)
         if (video) prepareMedia(listOf(uri), photos = false) { stageCaptured(file, "video/mp4", uri) }
         else prepareMedia(listOf(uri), photos = true) {
             val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@prepareMedia
-            rememberPreview(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height), bmp.tile())
+            rememberPreview(own(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height)), bmp.tile())
         }
     }
 
     private suspend fun stageCaptured(file: java.io.File, mime: String, uri: Uri) {
         val poster = videoPoster(application, uri, POSTER_MAX_EDGE)?.first
-        val id = CoreBridge.stageAttachment(
+        val id = own(CoreBridge.stageAttachment(
             file.absolutePath, file.name, mime,
             poster?.toRgba(), poster?.width ?: 0, poster?.height ?: 0,
-        )
+        ))
         poster?.let { rememberPreview(id, it.tile()) }
     }
 
-    /** Picked documents → the buffer as P2P attachments. */
     fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected -> selected.forEach { stagePickedFile(it) } }
 
     private fun prepareMedia(uris: List<Uri>, photos: Boolean, prepare: suspend (List<Uri>) -> Unit) {
@@ -711,8 +619,13 @@ class ChatVM(
         }
     }
 
+    private fun own(id: ULong): ULong {
+        owned += id
+        return id
+    }
+
     private fun updateStaged(records: List<uniffi.core.StagedRecord>) {
-        _staged.value = records.map { r ->
+        _staged.value = records.filter { it.id in owned }.map { r ->
             StagedMedia(
                 id = r.id,
                 kind = r.kind.toInt(),
@@ -722,27 +635,25 @@ class ChatVM(
                 size = r.size.toLong(),
                 width = r.width.toInt(),
                 height = r.height.toInt(),
-                // An image's tile is decoded from the pick at stage time; an
-                // attachment's is libcore's blurred thumb, keyed per staged id.
+                // An image's tile comes from the pick; an attachment's is core's blurred thumb.
                 preview = previews[r.id]
                     ?: r.thumb?.let { decodeAvifCached("staged-${r.id}", it) },
                 error = r.error,
             )
         }
-        previews.keys.retainAll(records.map { it.id }.toSet())
+        val live = records.map { it.id }.toSet()
+        previews.keys.retainAll(live)
+        owned.retainAll(live)
     }
 
-    /** Drop one buffered item; safe mid-encode. */
     fun unstage(id: ULong) = fire {
         if (composerBusy.value) return@fire
         previews.remove(id)
+        owned -= id
         CoreBridge.discardStaged(id)
     }
 
-    /**
-     * Start a voice note. The caller has the mic permission in hand; a false
-     * return is the device refusing (another app holds the mic).
-     */
+    /** The caller already holds the mic permission. */
     fun startRecording(): Boolean {
         if (composerBusy.value || pickingMedia || composerAction.value is ComposerAction.Edit || input.value.isNotBlank() || _staged.value.isNotEmpty()) return false
         if (recorder.isRecording) return true
@@ -764,10 +675,6 @@ class ChatVM(
         _recording.value = null
     }
 
-    /**
-     * Stop and send. A recording too short to be a note is dropped, not sent.
-     * A staged reply rides along and is consumed, as it would be by [send].
-     */
     fun finishRecording() {
         recordingTicker?.cancel()
         val rec = recorder.finish()
@@ -779,7 +686,6 @@ class ChatVM(
         fire { CoreBridge.sendVoice(to, r.bytes, r.mime, r.durationMs, r.waveform, replyTo) }
     }
 
-    /** Send immediately with the current reply, preserving the text draft. */
     fun sendSticker(ref: StickerRef) {
         if (composerAction.value is ComposerAction.Edit) return
         val to = conversation
@@ -792,9 +698,15 @@ class ChatVM(
 
     override fun onCleared() {
         cancelRecording()
+        // The scope is gone by now; what this chat staged and never sent goes with it.
+        val mine = owned.toList()
+        if (mine.isNotEmpty()) {
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                mine.forEach { runCatching { CoreBridge.discardStaged(it) } }
+            }
+        }
     }
 
-    /** Copy a picked uri into cache and buffer it as a P2P attachment; image mimes get a preview thumb. */
     private suspend fun stagePickedFile(uri: Uri) {
         val picked = resolvePickedFile(application, uri) ?: return
         val thumb = when {
@@ -802,25 +714,19 @@ class ChatVM(
             picked.mime.startsWith("video/") -> videoPoster(application, uri, POSTER_MAX_EDGE)?.first
             else -> null
         }
-        val id = CoreBridge.stageAttachment(
+        val id = own(CoreBridge.stageAttachment(
             picked.path, picked.name, picked.mime,
             thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0,
-        )
+        ))
         thumb?.let { rememberPreview(id, it.tile()) }
     }
 
-    /**
-     * Bind the decoded tile to its staged id. Staging rings the doorbell before
-     * this runs, so the first re-read can land without one — patch the emitted
-     * list too rather than leave a blank tile until the encode finishes.
-     */
+    /** Staging rings the doorbell before this runs, so the emitted list is patched too. */
     private fun rememberPreview(id: ULong, tile: ImageBitmap) {
         previews[id] = tile
         _staged.value = _staged.value.map { if (it.id == id) it.copy(preview = tile) else it }
     }
 
-    /** Downscale a decoded pick to a strip tile — the full-size bitmap is far
-     *  more than a 60dp square needs, and a multi-pick would hold several. */
     private fun Bitmap.tile(): ImageBitmap {
         val longest = maxOf(width, height).coerceAtLeast(1)
         if (longest <= TILE_MAX_EDGE) return asImageBitmap()
@@ -835,28 +741,21 @@ class ChatVM(
     private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
 
     private companion object {
-        /** Cap the inline photo's longest edge so the AVIF pass lands under libcore's
-         *  256KB budget. Over-budget picks fail in the buffer, where the strip can
-         *  show it, rather than at send time. */
+        /** Keeps the AVIF pass under core's 256KB inline budget; an over-budget pick fails in the strip. */
         const val INLINE_MAX_EDGE = 1600
 
-        /** Attachment preview thumb; libcore blurs it, so tiny is plenty. */
-        const val THUMB_MAX_EDGE = 256
         const val POSTER_MAX_EDGE = 640
         const val ALBUM_MAX = 10
 
         /** Composer strip tile; a 60dp square needs nothing like the full pick. */
         const val TILE_MAX_EDGE = 192
 
-        /** First load window: a screenful + buffer. loadOlder() pages the rest on scroll. */
         const val INITIAL_LIMIT = 40
 
-        /** Near-top page-in growth per [loadOlder]. */
         const val PAGE = 100
     }
 }
 
-/** What the next [ChatVM.send] means: a staged reply or an in-place edit. */
 sealed interface ComposerAction {
     val msg: UiMessage
 
@@ -865,18 +764,12 @@ sealed interface ComposerAction {
 }
 
 
-/**
- * What the composer edits for this message: its text, or a media body's caption.
- * Reading only [MessageContent.Text] here leaves the field empty for a picture,
- * and committing that empty field wipes the caption it should have loaded.
- */
+/** A media body's caption counts too, or committing the empty field would wipe it. */
 fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.Text -> c.text
     is MessageContent.Image -> c.caption
     is MessageContent.Attachment -> c.caption
     is MessageContent.Album -> c.caption
-    // Not editable — a system or call row narrates something that already
-    // happened, and a voice note or sticker carries no text at all.
     is MessageContent.System, is MessageContent.Call, is MessageContent.Voice,
     is MessageContent.Sticker -> ""
 }
@@ -888,7 +781,6 @@ private fun MessageRecord.toUi(
     mediaByDid: Map<String, MediaRecord>,
     memberNames: Map<String, String> = emptyMap(),
     isGroup: Boolean = false,
-    seenBy: Map<String, Int> = emptyMap(),
 ): UiMessage {
     val didHex = dispatchId?.toHex()
     val reactions = didHex?.let { reactionsByMsg[it] }
@@ -899,17 +791,14 @@ private fun MessageRecord.toUi(
         val quoted = byDid[rtHex]
         Quote(
             dispatchIdHex = rtHex,
-            // A captionless picture quotes as "Photo", not as nothing.
             text = quoted?.takeIf { !it.deleted }?.content?.ifEmpty {
                 mediaByDid[rtHex]?.let { mediaLabel(it.kind.toInt(), it.name) }.orEmpty()
             },
-            outgoing = quoted?.outgoing ?: false,
         )
     }
     val senderHex = senderIpk?.toHex()
     val payload = when {
-        // A call row: `content` is the outcome the engine wrote —
-        // "answered:<seconds>" for a connected call, else a word.
+        // A call row's content is "answered:<seconds>" for a connected call, else a word such as "missed".
         system.toInt() == 5 -> MessageContent.Call(
             outgoing = outgoing,
             durationSecs = content.removePrefix("answered:").toIntOrNull()
@@ -933,7 +822,6 @@ private fun MessageRecord.toUi(
         dispatchIdHex = didHex,
         content = payload,
         outgoing = outgoing,
-        // Only a group needs to say who spoke; a 1:1 has one possible author.
         senderHex = senderHex.takeIf { isGroup && !outgoing },
         senderName = senderHex?.takeIf { isGroup && !outgoing }?.let { memberNames[it] },
         status = SendStatus.from(status.toInt()),
@@ -942,7 +830,6 @@ private fun MessageRecord.toUi(
         timestampMs = timestamp.toLong() * 1000,
         reactions = reactions,
         quote = quote,
-        seenBy = didHex?.let { seenBy[it] } ?: 0,
     )
 }
 

@@ -13,12 +13,7 @@ private data class PresenceEntry(val kind: Int, val ts: Long)
 @Serializable
 private data class PresenceSnapshot(val savedAt: Long, val peers: Map<String, PresenceEntry>)
 
-/**
- * Persists the last-known presence per contact (hex IPK) so a cold app start
- * shows relay-reported last-seens immediately. Live states cannot be trusted
- * across restart, so [seed] drops them until a fresh relay snapshot confirms
- * their current state. One JSON blob in prefs; written off the hot path.
- */
+/** Last-known presence per hex IPK, so a cold start shows last-seens at once. */
 object PresenceStore {
     private const val KEY = "presence"
     private lateinit var prefs: SharedPreferences
@@ -28,7 +23,6 @@ object PresenceStore {
         prefs = context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     }
 
-    /** Cold-start seed: only persisted relay-reported offline states are valid. */
     fun seed(): Map<String, Presence> {
         val snap = prefs.getString(KEY, null)
             ?.let { runCatching { json.decodeFromString<PresenceSnapshot>(it) }.getOrNull() }

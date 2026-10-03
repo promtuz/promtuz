@@ -21,6 +21,7 @@ import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.media.*
+import com.promtuz.chat.ui.text.dateAndTime
 import com.promtuz.chat.utils.extensions.*
 import com.promtuz.chat.utils.media.*
 import com.promtuz.core.CoreBridge
@@ -60,12 +61,12 @@ fun SharedMediaScreen(conversation: String, name: String) {
             LazyColumn(contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 24.dp)) {
                 items(rows.orEmpty().filter { category(it) == tab }, key = { it.dispatchId.toHex() }) { row ->
                     val did = row.dispatchId.toHex()
-                    val record by produceState<uniffi.core.MediaRecord?>(null, did, rows) {
+                    val record by produceState<uniffi.core.MediaRecord?>(null, did) {
                         value = runCatching { CoreBridge.getMessageMedia(conversation.fromHex(), row.dispatchId) }.getOrNull()
                     }
                     val thumb by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, did, record) {
                         val bytes = record?.let { if (it.kind.toInt() == 1) it.blob else it.thumb }
-                        value = bytes?.let { withContext(Dispatchers.Default) { decodeAvif(it, 160) } }
+                        value = bytes?.let { withContext(Dispatchers.Default) { decodeAvifThumb(it, 160) } }
                     }
                     if (row.kind.toInt() == 3 && record?.blob != null) {
                         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
@@ -83,7 +84,7 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                     if (media.kind.toInt() == 1) {
                                         val image = media.blob?.let { withContext(Dispatchers.Default) { decodeAvif(it) } } ?: error("Image unavailable")
                                         MediaViewer.open(listOf(pictureItem(did, image, row.senderName.ifBlank { name }).copy(mime = media.mime,
-                                            subtitle = DateFormat.getDateTimeInstance().format(Date(row.timestamp.toLong() * 1000)), byteSize = media.blob?.size?.toLong(), message = location)))
+                                            subtitle = dateAndTime(context, row.timestamp.toLong() * 1000), byteSize = media.blob?.size?.toLong(), message = location)))
                                     } else if (media.kind.toInt() == 4 && media.sticker != null) {
                                         val image = withContext(Dispatchers.Default) { decodeAvif(CoreBridge.stickerImage(media.sticker!!)) } ?: error("Sticker unavailable")
                                         MediaViewer.open(listOf(pictureItem(did, image, row.senderName.ifBlank { name }).copy(message = location)))
@@ -91,7 +92,7 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                         val file = File(media.localPath!!)
                                         if (media.mime.startsWith("video/") || media.mime.startsWith("image/")) {
                                             MediaViewer.open(listOf(MediaItem(did, thumb, media.width.toInt().coerceAtLeast(1), media.height.toInt().coerceAtLeast(1),
-                                                title = row.senderName.ifBlank { name }, subtitle = DateFormat.getDateTimeInstance().format(Date(row.timestamp.toLong() * 1000)), mime = media.mime, filePath = file.absolutePath,
+                                                title = row.senderName.ifBlank { name }, subtitle = dateAndTime(context, row.timestamp.toLong() * 1000), mime = media.mime, filePath = file.absolutePath,
                                                 shareName = media.name, byteSize = media.size.toLong(), message = location,
                                                 videoPath = file.absolutePath.takeIf { media.mime.startsWith("video/") },
                                                 load = { decodeDownscaled(context, Uri.fromFile(file), 4096)?.let { it.asImageBitmap() } })))

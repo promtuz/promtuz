@@ -20,9 +20,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.LifecycleOwner
 
 /**
- * One camera for the whole app. The attach tile and the full camera share the same
- * [PreviewView] and the same bound use cases, so opening the camera from the tile is
- * a reparent of a view that is already streaming, not a second warm-up and a black frame.
+ * The attach tile and the full camera share one [PreviewView] and binding, so opening the
+ * camera reparents a view that is already streaming instead of warming up again.
  */
 object CameraSession {
     var camera by mutableStateOf<Camera?>(null)
@@ -88,8 +87,16 @@ object CameraSession {
         c.cameraControl.setZoomRatio(zoomRatio)
     }
 
-    /** Lets the camera go when nothing shows it any more. */
+    private var users = 0
+
+    /** The tile and the full camera each hold the session; the last one out unbinds it. */
+    fun retain() {
+        users++
+    }
+
     fun release() {
+        users = (users - 1).coerceAtLeast(0)
+        if (users > 0) return
         provider?.unbindAll()
         camera = null
         boundTo = null

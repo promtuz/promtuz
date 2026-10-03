@@ -46,7 +46,6 @@ class QrScannerVM(
     private val _scanError = MutableStateFlow<String?>(null)
     val scanError = _scanError.asStateFlow()
 
-    /** Validated invite bytes to hand back to the opener; set once. */
     private val _scanned = MutableStateFlow<ByteArray?>(null)
     val scanned = _scanned.asStateFlow()
 
@@ -57,7 +56,6 @@ class QrScannerVM(
     private fun newAnalysis() =
         ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
 
-    /** Spin up the camera provider + QR analyzer. Idempotent while a session is live. */
     fun initScanner(context: Context) {
         if (_cameraProviderState.value != null) return
         barcodeScanner = BarcodeScanning.getClient(
@@ -77,7 +75,6 @@ class QrScannerVM(
             imageProxy.close()
             return
         }
-        // rotationDegrees keeps decoding correct across orientations (the old activity hardcoded 90).
         val input = InputImage.fromMediaImage(media, imageProxy.imageInfo.rotationDegrees)
         scanner.process(input)
             .addOnSuccessListener { handleScannedBarcodes(it) }
@@ -85,7 +82,7 @@ class QrScannerVM(
             .addOnCompleteListener { imageProxy.close() }
     }
 
-    /** Tear down camera + state so the next open starts a clean session (VM outlives the sheet). */
+    /** The VM outlives the sheet, so the next open needs a clean session. */
     fun reset() {
         _cameraProviderState.value?.unbindAll()
         imageAnalysis.clearAnalyzer()
@@ -113,8 +110,7 @@ class QrScannerVM(
     }
 
     fun handleScannedBarcodes(barcodes: List<Barcode>) {
-        // One capture per session: validate as a promtuz invite here; the confirm-and-pair happens
-        // in the shared invite sheet. A non-invite QR re-arms via processing/_scanned guards.
+        // One capture per session; a QR that is not an invite re-arms the scanner.
         if (processing || _scanned.value != null) return
         val bytes = barcodes.firstNotNullOfOrNull { it.rawBytes } ?: return
         processing = true

@@ -1,9 +1,13 @@
 package com.promtuz.chat.ui.components
 
 import android.content.Context
+import android.view.animation.OvershootInterpolator
 import android.view.accessibility.AccessibilityManager
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseOutQuint
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -18,6 +22,7 @@ import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +30,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
@@ -37,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,15 +52,22 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -62,8 +76,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.launch
 
 data class MenuAction(
     val label: String,
@@ -74,22 +90,12 @@ data class MenuAction(
     val onClick: () -> Unit,
 )
 
-/**
- * Menu row icon size. Explicit because Material's [androidx.compose.material3.Icon]
- * only falls back to its own 24dp default when the painter has no intrinsic size —
- * a vector drawable always reports one, so without this every row would silently
- * render at whatever its XML happened to declare.
- */
+/** Explicit, since a vector drawable otherwise draws at whatever size its XML declares. */
 val MenuIconSize = 24.dp
 
 /**
- * Our dropdown, so height/shape/spacing are ours instead of M3's forced 48dp / 8dp internals.
- * Owns the anchor because press-drag-select needs one continuous pointer stream: the down that
- * opens the menu is the same one that drags to an item.
- *
- * Tap the anchor -> menu opens and stays for normal tapping.
- * Press-and-drag -> hover items, release over one to pick it, release anywhere else to cancel.
- * With [onClick], a short tap performs that action; hold to open the same menu and drag-select.
+ * Owns the anchor so the press that opens the menu can drag to an item and release to pick it.
+ * With [onClick], a short tap performs that action and a hold opens the menu.
  */
 @Composable
 fun AppDropMenu(
@@ -98,7 +104,6 @@ fun AppDropMenu(
     modifier: Modifier = Modifier,
     itemHeight: Dp = 48.dp,
     verticalPadding: Dp = 0.dp,
-    dragSelect: Boolean = true,
     offset: DpOffset = DpOffset(0.dp, 0.dp),
     shape: Shape = RoundedCornerShape(20.dp),
     iconSize: Dp = MenuIconSize,
@@ -119,37 +124,32 @@ fun AppDropMenu(
     val pressSource = remember { MutableInteractionSource() }
 
     var expanded by remember { mutableStateOf(false) }
-    var dragging by remember { mutableStateOf(false) }
     var tapHeld by remember { mutableStateOf(false) } // opened by a tap -> allow outside-tap dismiss
     var hovered by remember { mutableIntStateOf(-1) }
     var menuWidthPx by remember { mutableIntStateOf(0) }
     val vis = remember { MutableTransitionState(false) }
     vis.targetState = expanded
 
-    fun close() { expanded = false; tapHeld = false; dragging = false; hovered = -1 }
+    fun close() { expanded = false; tapHeld = false; hovered = -1 }
 
     Box(modifier) {
         Box(
             Modifier
-                .pointerInput(onClick != null, dragSelect, touchExploration, itemHeight, verticalPadding, offset) {
+                .pointerInput(onClick != null, touchExploration, itemHeight, verticalPadding, offset) {
                     val itemPx = itemHeight.toPx()
                     val vpadPx = verticalPadding.toPx()
                     val offX = offset.x.toPx()
                     val offY = offset.y.toPx()
 
-                    // The menu is a separate Popup window, so its items live in another coordinate
-                    // space we can't hit-test against. Instead the menu sits at a known spot
-                    // (covering the anchor, right-aligned) and we map the finger by math.
-                    // ponytail: press starts over item 0 since the menu covers the icon; the
-                    // touch-slop drag gate guards accidental commits. Ignores divider thickness
-                    // (~1dp each); fine at 48dp rows.
-                    fun indexAt(px: Float, py: Float): Int {
+                    // The Popup is a separate window, so items can't be hit-tested directly. The menu
+                    // covers the anchor, right-aligned, so the finger maps to an item by math.
+                    fun indexAt(p: Offset): Int {
                         if (menuWidthPx == 0) return -1
                         val top = offY
                         val right = size.width + offX
-                        if (py < top + vpadPx) return -1
-                        if (px < right - menuWidthPx || px > right) return -1
-                        val i = ((py - top - vpadPx) / itemPx).toInt()
+                        if (p.y < top + vpadPx) return -1
+                        if (p.x < right - menuWidthPx || p.x > right) return -1
+                        val i = ((p.y - top - vpadPx) / itemPx).toInt()
                         return if (i in flat.indices) i else -1
                     }
 
@@ -162,9 +162,8 @@ fun AppDropMenu(
                         if (!vis.isIdle) { down.consume(); return@awaitEachGesture } // ignore spam mid-animation
                         if (expanded) { close(); down.consume(); return@awaitEachGesture }
                         if (longPressOnly) {
-                            // Own the touch stream before the clickable below or a parent
-                            // bubble sees it. Clickable still supplies keyboard/accessibility
-                            // actions and draws feedback from this shared interaction source.
+                            // Own the touch stream before the clickable below or a parent bubble sees it.
+                            // The clickable still supplies keyboard and accessibility actions.
                             down.consume()
                             val press = PressInteraction.Press(down.position)
                             pressSource.tryEmit(press)
@@ -192,34 +191,13 @@ fun AppDropMenu(
                                 if (!released) pressSource.tryEmit(PressInteraction.Cancel(press))
                             }
                         }
-                        expanded = true; dragging = false; hovered = -1
-                        if (!dragSelect || touchExploration) { tapHeld = true; return@awaitEachGesture }
-
-                        while (true) {
-                            val change = awaitPointerEvent().changes.firstOrNull() ?: break
-                            if (!change.pressed) {
-                                if (dragging) {
-                                    if (hovered in flat.indices) {
-                                        haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                                        flat[hovered].onClick()
-                                    }
-                                    close()
-                                } else tapHeld = true
-                                hovered = -1
-                                break
-                            }
-                            if (!dragging &&
-                                (change.position - down.position).getDistance() > viewConfiguration.touchSlop
-                            ) dragging = true
-                            if (dragging) {
-                                val i = indexAt(change.position.x, change.position.y)
-                                if (i != hovered) {
-                                    hovered = i
-                                    if (i >= 0) haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                }
-                                change.consume()
-                            }
+                        expanded = true; hovered = -1
+                        if (touchExploration) { tapHeld = true; return@awaitEachGesture }
+                        val dragged = dragSelect(down, haptic, ::indexAt, { hovered = it }) {
+                            flat.getOrNull(it)?.onClick()
+                            close()
                         }
+                        if (!dragged) tapHeld = true
                     }
                 }
                 .then(if (onClick == null) Modifier else Modifier.combinedClickable(
@@ -240,10 +218,9 @@ fun AppDropMenu(
                 alignment = Alignment.TopEnd,
                 offset = IntOffset(offXpx, offYpx),
                 onDismissRequest = { close() },
-                // Non-focusable while dragging: a focusable window opening mid-gesture can cancel the
-                // in-flight drag. Once the menu is just held open by a tap, focusable enables
-                // outside-tap dismiss.
-                properties = PopupProperties(focusable = tapHeld && !dragging),
+                // A focusable window opening mid-gesture cancels the drag. Once a tap holds
+                // the menu open, focusable enables outside-tap dismiss.
+                properties = PopupProperties(focusable = tapHeld),
             ) {
                 AnimatedVisibility(
                     visibleState = vis,
@@ -267,11 +244,111 @@ fun AppDropMenu(
 }
 
 /**
- * The menu surface itself — grouped rows with dividers, hover highlight — shared
- * by [AppDropMenu] and the message context menu so every menu in the app reads
- * the same. [hovered] is a flat index across all groups (-1 = none);
- * [onRowPositioned] hands each row's live coordinates to drag-select hit-testing.
+ * The finger that opened a menu drives it: dragging hovers [hitAt] targets, and a lift after a drag hands
+ * [onRelease] the one under it, or -1. Returns false for a lift without a drag, which leaves the menu open.
  */
+internal suspend fun AwaitPointerEventScope.dragSelect(
+    down: PointerInputChange,
+    haptic: HapticFeedback,
+    hitAt: (Offset) -> Int,
+    onHover: (Int) -> Unit,
+    onRelease: (Int) -> Unit,
+): Boolean {
+    var dragged = false
+    var hovered = -1
+    while (true) {
+        val ch = awaitPointerEvent().changes.let { all -> all.firstOrNull { it.id == down.id } ?: all.first() }
+        if (!ch.pressed) {
+            if (dragged) {
+                val hit = hitAt(ch.position)
+                onHover(-1)
+                if (hit >= 0) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                onRelease(hit)
+            }
+            return dragged
+        }
+        if (!dragged && (ch.position - down.position).getDistance() > viewConfiguration.touchSlop) dragged = true
+        if (dragged) {
+            val hit = hitAt(ch.position)
+            if (hit != hovered) {
+                hovered = hit
+                onHover(hit)
+                if (hit >= 0) haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            }
+        }
+        ch.consume()
+    }
+}
+
+/** Shared by the pressed item, which owns the pointer stream, and the overlay, which owns the visuals. */
+open class DragMenuState<A : Any>(maxTargets: Int) {
+    var anchor by mutableStateOf<A?>(null)
+        private set
+    internal var closing by mutableStateOf(false)
+
+    /** Index into [targets], -1 for none. */
+    internal var hovered by mutableIntStateOf(-1)
+    internal val targets = arrayOfNulls<LayoutCoordinates>(maxTargets)
+    internal val scrim = Animatable(0f)
+    internal val pop = Animatable(0f)
+
+    val isOpen get() = anchor != null
+
+    fun open(anchor: A) {
+        if (isOpen) return
+        targets.fill(null)
+        hovered = -1
+        closing = false
+        this.anchor = anchor
+    }
+
+    /** Plays the exit; the anchor releases when it finishes. */
+    fun close() {
+        if (isOpen) closing = true
+    }
+
+    internal fun closed() {
+        anchor = null
+        closing = false
+        hovered = -1
+    }
+
+    /** The target under [local], a position in [from]. Bounds are read live so animated transforms count. */
+    internal fun hitIndex(from: LayoutCoordinates?, local: Offset): Int {
+        if (closing) return -1
+        val at = from?.takeIf { it.isAttached }?.localToRoot(local) ?: return -1
+        return targets.indexOfFirst { c ->
+            c != null && c.isAttached && Rect(c.positionInRoot(), c.size.toSize()).contains(at)
+        }
+    }
+}
+
+internal val Overshoot = Easing { OvershootInterpolator(1.1f).getInterpolation(it) }
+
+/** Dims and guards the screen behind a [DragMenuState] menu, and plays the menu's pop in and out. */
+@Composable
+internal fun MenuBackdrop(state: DragMenuState<*>, dim: Float, scrimMs: Int, popMs: Int, exitMs: Int) {
+    LaunchedEffect(Unit) {
+        launch { state.scrim.animateTo(dim, tween(scrimMs, easing = EaseOutQuint)) }
+        state.pop.animateTo(1f, tween(popMs, easing = Overshoot))
+    }
+    LaunchedEffect(state.closing) {
+        if (state.closing) {
+            launch { state.scrim.animateTo(0f, tween(exitMs)) }
+            state.pop.animateTo(0f, tween(exitMs))
+            state.closed()
+        }
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .graphicsLayer { alpha = state.scrim.value }
+            .background(Color.Black)
+            .pointerInput(Unit) { detectTapGestures { state.close() } },
+    )
+}
+
+/** [hovered] is a flat index across all groups, -1 for none. */
 @Composable
 fun MenuCard(
     groups: List<List<MenuAction>>,

@@ -22,7 +22,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Opaque modal surface, independent of the screen behind it. */
 @Composable
 fun Modifier.modalSurface(shape: Shape): Modifier =
     clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
@@ -36,7 +35,6 @@ internal fun ModalWindowMotion() {
     }
 }
 
-/** Native dialog focus, outside touch and Back behavior, with fade/scale window motion. */
 @Composable
 internal fun AppModal(
     onDismissRequest: () -> Unit,

@@ -174,7 +174,6 @@ private fun shareLogFile(context: Context, text: String) {
     context.startActivity(Intent.createChooser(send, "Export logs"))
 }
 
-/** Header (build/device) + chronological body, one tight line per entry, stacktraces indented. */
 private fun formatLogs(logs: List<AppLog>): String {
     val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.ENGLISH)
     val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH)

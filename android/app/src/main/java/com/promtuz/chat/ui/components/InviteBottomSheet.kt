@@ -24,14 +24,11 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.ui.text.clock
 import com.promtuz.chat.utils.extensions.toHex
 import kotlinx.coroutines.delay
 
-/**
- * Material 3 confirmation sheet for a remote invite link. Drives the pairing
- * state machine (PAIRING.md): confirm, pairing, then added (PENDING) or unreachable.
- * Never a false "Added": the contact must actually reach PENDING first.
- */
+/** Never shows a false "Added": the contact must actually reach PENDING first. */
 @Composable
 fun InviteBottomSheet(vm: AppVM) {
     val state by vm.invite.collectAsState()
@@ -132,7 +129,6 @@ private fun Subtitle(text: String) = Text(
     textAlign = TextAlign.Center,
 )
 
-/** Ticks the remaining invite window each second. */
 @Composable
 private fun ExpiryCountdown(expiryMs: Long) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -142,6 +138,5 @@ private fun ExpiryCountdown(expiryMs: Long) {
             now = System.currentTimeMillis()
         }
     }
-    val secs = ((expiryMs - now) / 1000).coerceAtLeast(0)
-    Subtitle("Expires in ${secs / 60}:${(secs % 60).toString().padStart(2, '0')}")
+    Subtitle("Expires in ${clock((expiryMs - now).coerceAtLeast(0))}")
 }

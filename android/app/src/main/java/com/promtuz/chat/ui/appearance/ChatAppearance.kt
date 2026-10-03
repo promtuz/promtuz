@@ -2,16 +2,6 @@ package com.promtuz.chat.ui.appearance
 
 import kotlinx.serialization.Serializable
 
-/**
- * The chat's user-tweakable look — one serializable bundle (a "preset"). Nested
- * sub-styles so each settings section maps to one group and each renderer takes
- * only its slice. Values are platform-neutral primitives (Float dp, Long ARGB;
- * `null` color = derive from the M3 role) — converted to Compose types at the
- * `LocalChatAppearance` boundary, and shareable as a preset across clients.
- *
- * [Default] is our shipping baseline (Telegram-like), the seed the user tweaks.
- * Only one preset ships today; the bundle shape is the gate for more.
- */
 @Serializable
 data class ChatAppearance(
     val bubble: BubbleStyle = BubbleStyle(),
@@ -23,7 +13,6 @@ data class ChatAppearance(
     val themeMode: ThemeMode = ThemeMode.System,
 ) {
     companion object {
-        /** Shipping default preset (Telegram-baseline). */
         val Default = ChatAppearance()
     }
 }
@@ -37,7 +26,6 @@ data class BubbleStyle(
     val tailSize: Float = 8f,
 )
 
-/** List layout + grouping. */
 @Serializable
 data class LayoutStyle(
     /** Same-author messages within this window merge into one group. */
@@ -49,10 +37,7 @@ data class LayoutStyle(
     val maxWidthFraction: Float = 0.75f,
 )
 
-/**
- * User color tokens (ARGB). `null` = the designed default from the scheme role — see
- * [resolve], which turns these into the full [ChatColorScheme] vocabulary.
- */
+/** ARGB; null uses the scheme's designed default (see [resolve]). */
 @Serializable
 data class ChatColors(
     val outgoing: Long? = null,
@@ -62,13 +47,11 @@ data class ChatColors(
     val accent: Long? = null,
 )
 
-/** Typography scaling. */
 @Serializable
 data class TypeStyle(
     val fontScale: Float = 1f,
 )
 
-/** Gesture behavior. */
 @Serializable
 data class InteractionStyle(
     val doubleTapAction: DoubleTapAction = DoubleTapAction.React,
@@ -78,7 +61,7 @@ data class InteractionStyle(
 @Serializable
 enum class DoubleTapAction { None, React, Reply, Edit }
 
-/** Chat background. Platform-neutral: [Pattern] = "the app's built-in chat pattern". */
+/** [Pattern] is the app's built-in chat pattern. */
 @Serializable
 sealed interface Wallpaper {
     @Serializable
@@ -92,6 +75,5 @@ sealed interface Wallpaper {
     }
 }
 
-/** App/chat theme mode. */
 @Serializable
 enum class ThemeMode { System, Light, Dark }

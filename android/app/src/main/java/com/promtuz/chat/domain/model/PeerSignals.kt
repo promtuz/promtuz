@@ -1,9 +1,8 @@
 package com.promtuz.chat.domain.model
 
 /**
- * Live peer activity bits, matching `common::proto::client_rel::ACTIVITY_*`.
- * Ephemeral — relay-routed, online-only, never stored — so the UI times each
- * signal out after a few seconds (an offline peer sends no "stopped").
+ * Bits match `common::proto::client_rel::ACTIVITY_*`. Signals are never stored and an
+ * offline peer sends no stop, so the UI times each one out after a few seconds.
  */
 enum class Activity(val bit: Int) {
     Typing(1 shl 0),

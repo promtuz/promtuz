@@ -59,7 +59,6 @@ class EmojiFieldController {
     }
 }
 
-/** Native editing and span measurement, with the same pack used by [EmojiText]. */
 @Composable
 fun EmojiTextField(
     value: String,

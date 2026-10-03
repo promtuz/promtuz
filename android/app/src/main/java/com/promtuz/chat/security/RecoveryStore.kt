@@ -9,46 +9,26 @@ import kotlinx.coroutines.tasks.await
 import timber.log.Timber
 import java.io.File
 
-/**
- * What became of the backup blob during an identity restore. The identity and
- * the history restore through separate mechanisms, so "identity is back" says
- * nothing about the history — callers must be able to tell the difference and
- * say so, or a total history loss looks exactly like a clean restore.
- */
+/** The identity and the history restore separately, so callers must report a history that did not come back. */
 sealed interface BlobOutcome {
     data class Imported(val bytes: Long) : BlobOutcome
 
-    /** No blob on disk: Auto Backup never ran, or the OS didn't restore it. */
     data object Absent : BlobOutcome
 
     data class Failed(val reason: String) : BlobOutcome
 }
 
-/**
- * Identity recovery, platform side (IDENTITY_RECOVERY.md §7).
- *
- * Channel A = Block Store: the raw isk, escrowed to the platform (E2E to
- * Google, lock-screen keyed, survives reinstall + device-to-device restore).
- * Channel B = the BIP39 phrase (RestorePhraseScreen).
- *
- * The backup blob rides Android Auto Backup: [BackupWorker] writes it to
- * `files/recovery/backup.pzbk`, the OS ships that one file to the user's
- * Drive app data (see data_extraction_rules.xml) and restores it BEFORE
- * first launch on reinstall — so by the time either channel restores the
- * identity, the blob is already on disk.
- *
- * Everything here is best-effort: a de-Googled phone fails Block Store and
- * Auto Backup silently — Channel B still works, per the spec's channel split.
- */
+/** Auto Backup restores the blob before first launch, so it is on disk when Block Store or the phrase
+ *  brings the identity back. Without Google services both fail silently and only the phrase works. */
 object RecoveryStore {
     private const val BS_KEY = "promtuz.isk"
 
-    /** Overwritten by backup_import when a blob exists; user-facing only until then. */
+    /** backupImport replaces it when a blob exists. */
     private const val PLACEHOLDER_NAME = "Restored"
 
     fun blobFile(context: Context) = File(context.filesDir, "recovery/backup.pzbk")
 
-    /** Escrow the isk into Block Store. Call after enroll and after any restore. */
+    /** Call after enroll and after any restore. */
     suspend fun escrow(context: Context) {
         try {
             val isk = CoreBridge.escrowSecret()
@@ -60,16 +40,11 @@ object RecoveryStore {
             Blockstore.getClient(context).storeBytes(data).await()
             Timber.tag("Recovery").i("isk escrowed to Block Store")
         } catch (e: Exception) {
-            // No GMS / no lock screen / transient — Channel B still covers the user.
+            // No GMS, no lock screen or a transient failure; the phrase still covers the user.
             Timber.tag("Recovery").w(e, "Block Store escrow failed")
         }
     }
 
-    /**
-     * Channel A silent restore on fresh launch: Block Store hit → adopt the
-     * isk → import the Auto-Backup-restored blob if present. Returns true if
-     * the identity was restored (caller navigates into the app).
-     */
     suspend fun tryAutoRestore(context: Context): Boolean {
         val isk = try {
             val req = RetrieveBytesRequest.Builder().setKeys(listOf(BS_KEY)).build()
@@ -82,8 +57,7 @@ object RecoveryStore {
 
         return try {
             CoreBridge.adoptEscrowedSecret(isk, PLACEHOLDER_NAME)
-            // No UI is attached to this path (it runs silently in AppVM.init),
-            // so the log is the only channel — make a lost history shout.
+            // Nothing on screen reports this path, so the log has to make a lost history obvious.
             when (val outcome = importBlobIfPresent(context)) {
                 is BlobOutcome.Imported -> Timber.tag("Recovery")
                     .i("identity restored via Block Store; history imported (${outcome.bytes} bytes)")
@@ -101,12 +75,7 @@ object RecoveryStore {
         }
     }
 
-    /**
-     * Channel B restore: typed phrase + prompted name → identity → blob →
-     * re-escrow. Returns what happened to the blob so the caller can report a
-     * history that did not come back; the identity itself is restored either
-     * way (this function throws only if that part fails).
-     */
+    /** Throws only when the identity itself fails to restore. */
     suspend fun restoreFromPhrase(
         context: Context, words: List<String>, name: String,
     ): BlobOutcome {
@@ -116,7 +85,6 @@ object RecoveryStore {
         return outcome
     }
 
-    /** Feed the Auto-Backup-restored blob to core, if one landed. */
     private suspend fun importBlobIfPresent(context: Context): BlobOutcome {
         val file = blobFile(context)
         if (!file.exists()) {

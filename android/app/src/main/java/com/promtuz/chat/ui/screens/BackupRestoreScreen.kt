@@ -40,15 +40,7 @@ import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.SimpleScreen
 import org.koin.androidx.compose.koinViewModel
 
-/**
- * Developer utility: take a backup snapshot, export it off-device, and merge a
- * `.pzbk` back in — every step narrated in the console below, because the
- * production recovery path is silent by design and a silent failure there is
- * indistinguishable from success.
- *
- * Restore is additive: it can only add rows it doesn't already have. See
- * [BackupRestoreVM].
- */
+/** Developer utility. Restore is additive: it only adds rows it doesn't already have. */
 @Composable
 fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
     val console by viewModel.console.collectAsState()
@@ -109,7 +101,6 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
     }
 }
 
-/** States the two rules that make this screen safe to hand to a tester. */
 @Composable
 private fun Notice() {
     val colors = MaterialTheme.colorScheme
@@ -148,7 +139,6 @@ private fun Notice() {
 private fun Console(lines: List<BackupLogLine>, modifier: Modifier = Modifier) {
     val state = rememberLazyListState()
 
-    // Follow the tail: every appended line scrolls into view.
     LaunchedEffect(lines.size) {
         if (lines.isNotEmpty()) state.animateScrollToItem(lines.lastIndex)
     }

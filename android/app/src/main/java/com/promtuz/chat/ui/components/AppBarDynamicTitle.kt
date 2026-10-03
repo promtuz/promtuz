@@ -29,7 +29,6 @@ internal fun connectionLabel(): String? {
     }
 }
 
-/** Shared queued transition for home, screen titles and chat subtitles. */
 @Composable
 internal fun AnimatedBarLabel(
     text: String,

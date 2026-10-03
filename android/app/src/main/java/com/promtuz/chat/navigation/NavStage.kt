@@ -49,21 +49,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * True for a card that is being animated off (mid back-swipe or sliding off after commit). Read by
- * [com.promtuz.chat.ui.util.freezeOnExit] to freeze live blur before the scale hits it.
- */
 /** Only the current entry owns read/notification visibility, never a revealed back-preview. */
 val LocalNavForeground = compositionLocalOf { true }
 
+/** True while a card animates off; freezeOnExit freezes live blur before the scale hits it. */
 val LocalNavCardExiting = compositionLocalOf { false }
-
-/**
- * False while this card is still sliding in from a push. Screens defer heavy
- * content fills (a chat's message list) until it flips true, so the expensive
- * first layout lands on a still frame instead of mid-animation.
- */
-val LocalNavEnterSettled = compositionLocalOf { true }
 
 private const val FWD_DUR = 260
 private const val COMMIT_DUR = 340
@@ -71,13 +61,12 @@ private const val CANCEL_DUR = 260
 private const val SCALE_TO = 0.90f
 private val PBG_CORNER = 24.dp // back-swipe rounds a card up to at least this (flat screens included)
 private const val SCRIM_MAX = 0.2f // dim over the revealed screen while back-swiping; lifts on commit
-// Cap a single frame's contribution to the push so a janky frame can't jump the slide ahead
-// (~2 frames @ 60fps); normal frames fall well under it, only real hitches get clamped.
+// Caps one frame's share of the push (about 2 frames at 60 fps) so a hitch can't jump the slide.
 private const val FRAME_CAP_NANOS = 33_000_000L
 private val fwdEase = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
 private val commitEase = CubicBezierEasing(0.3f, 0f, 0.1f, 1f) // EASE_OUT_QUINT-ish fling
 
-/** A card that's been popped and is now a detached ghost sliding off — no longer on the stack. */
+/** A popped card sliding off as a detached ghost, no longer on the stack. */
 private class ExitingCard(
     val entry: NavEntry<NavKey>,
     val scale: Float,
@@ -88,16 +77,8 @@ private class ExitingCard(
 )
 
 /**
- * A single-stack navigation display, ours end-to-end so we own every pixel of motion — built on
- * nav3's entry primitives ([rememberDecoratedNavEntries] keeps per-entry ViewModelStore + saved
- * state, so a revealed screen keeps its scroll and half-typed text). Replaces nav3's `NavDisplay`.
- *
- * Forward push slides the new screen in from the right over a still previous. Back is the scale-card
- * gesture: the current screen scales toward the finger (drag), and on release the pop is decided
- * *immediately* — the card leaves the stack and becomes a detached [ExitingCard] that slides off on
- * its own, so a follow-up back-swipe already targets the screen beneath instead of fighting the
- * outgoing one. Cancel just springs the scale back. Every card (live + exiting) renders from one
- * keyed loop so a screen changing role is moved by Compose, never disposed (which would wipe state).
+ * Single-stack navigation on nav3's entry primitives. A released back-swipe pops at once, and the
+ * card slides off as a detached [ExitingCard] so the next swipe targets the screen beneath.
  */
 @Composable
 fun NavStage(
@@ -117,16 +98,15 @@ fun NavStage(
     val top = entries.last()
     val below = entries.getOrNull(entries.lastIndex - 1)
 
-    val deviceRadius = deviceCornerRadius()         // device's own corner radius; 0 on flat-corner screens
-    val pbgCorner = maxOf(deviceRadius, PBG_CORNER) // during back-swipe, round up to at least this
+    val deviceRadius = deviceCornerRadius()
+    val pbgCorner = maxOf(deviceRadius, PBG_CORNER)
     val restShape = RoundedCornerShape(deviceRadius)
     val size = LocalWindowInfo.current.containerSize
     val widthPx = size.width.toFloat().coerceAtLeast(1f)
     val heightPx = size.height.toFloat().coerceAtLeast(1f)
     val scope = rememberCoroutineScope()
 
-    // Forward (push): new top slides in from the right over a still previous. `forward` is derived in
-    // composition (not an effect) so the new screen is already offscreen on the first frame — no flash.
+    // `forward` is derived in composition, not an effect, so the new screen starts offscreen.
     val topKey = top.contentKey
     var shownKey by remember { mutableStateOf(topKey) }
     var shownSize by remember { mutableIntStateOf(backStack.size) }
@@ -136,10 +116,7 @@ fun NavStage(
     val replacing = forward && backStack.size == shownSize
     val enter = remember { Animatable(1f) } // 0 = new fully offscreen right, 1 = settled
     var pushing by remember { mutableStateOf(false) }
-    // Detached pop ghosts sliding off — declared here (not with the back gesture below) so the
-    // forward-push effect can read it for reopen-continuity.
     val exiting = remember { mutableStateListOf<ExitingCard>() }
-    // Fresh per destination (remember(topKey) auto-resets); the incoming card flips it in onPlaced.
     val placed = remember(topKey) { mutableStateOf(false) }
     LaunchedEffect(topKey) {
         val isForward = topKey != shownKey && backStack.size >= shownSize && backStack.size > 1
@@ -150,16 +127,12 @@ fun NavStage(
         if (isForward) {
             pushing = true
             try {
-                // Continuity: reopening a chat whose pop-ghost is still sliding off starts the slide-in
-                // from where the ghost is now (not full offscreen-right), so the card reads as returning.
+                // Reopening a chat whose ghost is still sliding off starts from the ghost's position.
                 val startEnter = exiting.firstOrNull { it.entry.contentKey == topKey }
                     ?.let { 1f - it.commit.value } ?: 0f
                 enter.snapTo(startEnter)
-                // Hold offscreen until the incoming screen has laid out, so its first-frame cost is
-                // spent while parked, not eating the slide (timeout is a safety net).
+                // Park offscreen until the incoming screen lays out, so its first frame doesn't eat the slide.
                 withTimeoutOrNull(250) { snapshotFlow { placed.value }.first { it } }
-                // Drive the slide with a clamped per-frame delta: no single blocked frame can advance
-                // it more than FRAME_CAP, so it can't truncate or complete instantly — it plays through.
                 val durNanos = FWD_DUR * 1_000_000L
                 var last = withFrameNanos { it }
                 var elapsed = 0L
@@ -177,11 +150,9 @@ fun NavStage(
             }
         }
     }
-    // enter.value is read ONLY inside the graphicsLayer lambdas below, never in composition — so the
-    // push animates by redraw, with no per-frame recomposition of the stage or the screens.
+    // Read enter.value only inside graphicsLayer lambdas, so the push animates without recomposing.
     val showPush = forward || pushing
 
-    // Back gesture on the live top: scale follows the finger; release detaches a ghost, cancel springs.
     var backActive by remember(topKey) { mutableStateOf(false) }
     var touchY by remember { mutableFloatStateOf(heightPx / 2f) }
     var fromRight by remember { mutableStateOf(false) }
@@ -202,8 +173,7 @@ fun NavStage(
                 fromRight = e.swipeEdge == BackEventCompat.EDGE_RIGHT
                 progress.snapTo(lerp(startProgress, 1f, e.progress))
             }
-            // Released past threshold → the pop is decided NOW. Detach the card as a ghost, pop it off
-            // the stack immediately, and slide it off in `scope` (survives the next gesture's coroutine).
+            // Released: pop now and slide the ghost off in `scope`, which outlives this gesture's coroutine.
             val leaving = ExitingCard(
                 entry = top,
                 scale = lerp(1f, SCALE_TO, progress.value),
@@ -224,9 +194,8 @@ fun NavStage(
             backActive = false
         } finally {
             if (backActive && generation == backGeneration) {
-                // Android cancels the gesture coroutine itself. Returning from
-                // the preview must survive that cancellation, or the chat stays
-                // frozen and never resumes its read/notification lifecycle.
+                // Android cancels the gesture coroutine itself, so the return runs in `scope`;
+                // otherwise the chat stays frozen and never resumes its read lifecycle.
                 backRecovery = scope.launch {
                     try {
                         progress.animateTo(0f, tween(CANCEL_DUR, easing = fwdEase))
@@ -238,13 +207,11 @@ fun NavStage(
         }
     }
 
-    // Reopening a chat whose pop-ghost is mid-slide: the incoming card's first frame starts at the
-    // ghost's current offset (not full-right) so there's no gap before the continuity slide-in.
+    // A reopened card's first frame starts at its ghost's offset, before the push effect runs.
     val firstFrameEnter = if (forward) {
         exiting.firstOrNull { it.entry.contentKey == topKey }?.let { 1f - it.commit.value } ?: 0f
     } else 0f
 
-    // Live top transform. graphicsLayer lambdas read the animatables (draw-only, no recomposition).
     val frontMod = when {
         backActive -> Modifier.graphicsLayer {
             val s = lerp(1f, SCALE_TO, progress.value)
@@ -254,7 +221,6 @@ fun NavStage(
                 if (fromRight) 0.12f else 0.88f,
                 (touchY / heightPx).coerceIn(0f, 1f),
             )
-            // Round the card up as the swipe progresses, so a flat-corner screen still forms a card.
             clip = true
             shape = RoundedCornerShape(lerp(deviceRadius.toPx(), pbgCorner.toPx(), progress.value))
         }
@@ -265,9 +231,8 @@ fun NavStage(
     }
 
     Box(modifier.fillMaxSize()) {
-        // Bottom-to-top: revealed background, then the live top, then any detached exiting ghosts.
-        // One keyed loop → a screen changing role (top ⇄ revealed) is matched by contentKey and MOVED
-        // by Compose, not disposed+recreated (which would reset its scroll/state, and pop a ghost early).
+        // One keyed loop, bottom to top, so a screen changing role is moved by Compose rather
+        // than disposed, which would reset its state.
         val layers = buildList {
             val seen = HashSet<Any?>()
             val background = if (showPush) {
@@ -277,10 +242,8 @@ fun NavStage(
                 add(Triple(background, Modifier.clip(restShape), false)); seen += background.contentKey
             }
             add(Triple(top, frontMod, backActive)); seen += top.contentKey
-            // Drop any exiting ghost whose key is already live — every entry shares one
-            // SaveableStateHolder, so two with the same contentKey crash ("used multiple times").
-            // This is the reopen-while-sliding-off case; the live reopened card takes over (and picks
-            // up the ghost's position via firstFrameEnter).
+            // Skip a ghost whose key is live again: entries share one SaveableStateHolder,
+            // and a duplicate contentKey crashes it.
             exiting.forEach { ex ->
                 if (!seen.add(ex.entry.contentKey)) return@forEach
                 add(Triple(ex.entry, Modifier.graphicsLayer {
@@ -297,10 +260,8 @@ fun NavStage(
         layers.forEachIndexed { i, (entry, mod, exit) ->
             key(entry.contentKey) {
                 val isTop = entry.contentKey == topKey
-                // Every card paints its own ground. Two cards are on screen at once during
-                // a push or a back-swipe, so a screen that leaves its background to a
-                // Scaffold — or forgets one — reads as see-through onto the card behind it.
-                // After `mod` so the fill lands inside the card's clip, not around it.
+                // Every card paints its own ground, since two are on screen during a push or swipe.
+                // After `mod` so the fill lands inside the card's clip.
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -311,14 +272,12 @@ fun NavStage(
                     CompositionLocalProvider(
                         LocalNavCardExiting provides exit,
                         LocalNavForeground provides (isTop && !exit && !showPush),
-                        LocalNavEnterSettled provides (!isTop || !showPush),
                     ) {
                         entry.Content()
                     }
                 }
             }
-            // Scrim over the revealed screen (index 0), under everything moving. Full while dragging,
-            // fading to nothing as the topmost ghost slides off on commit.
+            // Scrim over the revealed screen, under everything moving.
             if (backInteraction && i == 0 && layers.size > 1) {
                 Box(Modifier.fillMaxSize().drawBehind {
                     val a = if (backActive) SCRIM_MAX else SCRIM_MAX * (1f - (exiting.lastOrNull()?.commit?.value ?: 1f))

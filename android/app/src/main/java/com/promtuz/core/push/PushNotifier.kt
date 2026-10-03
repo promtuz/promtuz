@@ -66,22 +66,17 @@ object PushNotifier {
 
     fun viewingRequests(visible: Boolean) { requestsVisible = visible; scope.launch { reconcileSafely() } }
 
-    /** RemoteInput result key; shared with [ReplyReceiver]. */
     const val KEY_REPLY = "reply_text"
 
-    /** Notification-tap extras: which chat to open (hex IPK + display name). */
     const val EXTRA_CONVERSATION = "chat_conversation_hex"
     const val EXTRA_CONV_NAME = "chat_conversation_name"
 
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    /** Conversation hex → the title to show for it. */
     private var names: Map<String, String> = emptyMap()
 
-    /** Contact hex → their name, for attributing individual lines in a group. */
     private var senderNames: Map<String, String> = emptyMap()
 
-    /** Conversation hexes that are groups — they attribute lines per sender. */
     private var groupConvs: Set<String> = emptySet()
     private var mutedConvs: Set<String> = emptySet()
     private val reconcileLock = Mutex()
@@ -105,7 +100,6 @@ object PushNotifier {
         val image: Uri?,
     )
 
-    /** Activity state and the resumed conversation are separate: other chats still alert. */
     @Volatile
     private var foreground = false
 
@@ -169,8 +163,6 @@ object PushNotifier {
 
         val nm = app.getSystemService(NotificationManager::class.java)
 
-        // Master off: nuke our whole group (children + summary) and post nothing — flipping the switch
-        // off should silence AND clear the shade, not just stop future buzzes.
         val enabled = ChatPrefs.notifEnabled
         if (!enabled) {
             nm.activeNotifications
@@ -204,14 +196,10 @@ object PushNotifier {
 
         if (!enabled) return
 
-        // Muted chats drop out entirely: they neither post nor stay in `live`, so muting a chat also
-        // clears any notif it already had. Requests share one notification of their own.
         val requestConvs = requests.map { it.id.toHex() }.toSet()
         val visible = counts.filterKeys { it !in mutedConvs && !viewing(it) && it !in requestConvs }
 
-        // Dismiss per-chat notifs whose chat is no longer unread (read from any surface) or now muted.
-        // Unconditional (runs foregrounded too), so an in-app read or a mute clears the shade. GROUP_KEY
-        // filter spares the drain worker's foreground-service notice (SYNC id 42, no group).
+        // The GROUP_KEY filter spares the drain worker's foreground-service notice, which has no group.
         val live = visible.keys.map(::notifId).toSet()
         nm.activeNotifications
             .filter { it.notification.group == Notifications.GROUP_KEY && it.id != SUMMARY_ID && it.id !in live }
@@ -227,10 +215,7 @@ object PushNotifier {
         for ((convHex, n) in visible) postChat(convHex, n)
     }
 
-    /**
-     * One quiet notification for every unread message request, on its own channel so it
-     * can be silenced apart from chats. No per-chat reply action: replying is accepting.
-     */
+    /** One notification for all requests, with no Reply action: replying would accept the request. */
     private suspend fun reconcileRequests(enabled: Boolean, requests: List<ConversationRecord>) {
         val fresh = requests.flatMap { CoreBridge.pendingNotificationIds(it.id) }
         if (!enabled || requests.isEmpty() || requestsVisible) {
@@ -259,14 +244,11 @@ object PushNotifier {
         val conv = convHex.fromHex()
         val displayName = names[convHex] ?: "New message"
 
-        // The newest n incoming ≈ the unread ones (read is a high-water-mark). Core
-        // picks and orders them — it is a question about messages, and iOS would
-        // otherwise write the same filter-and-sort over a full page of rows.
+        // The newest n incoming are the unread ones, since read is a high-water mark.
         val pending = CoreBridge.pendingNotificationIds(conv)
         val recent = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
         if (viewing(convHex)) return
-        // All newest-window rows deleted-for-everyone while count>0: nothing to paint, so clear this
-        // chat's own notif (a bare return would strand a stale one reconcile can't repaint or cancel).
+        // Everything unread was deleted for everyone. A bare return would strand a stale notification.
         if (recent.isEmpty()) { nm().cancel(notifId(convHex)); return }
 
         val readPI = PendingIntent.getBroadcast(
@@ -319,15 +301,14 @@ object PushNotifier {
         val chat = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
             .setSmallIcon(R.drawable.i_logo_mono)
             .setColor(BRAND_COLOR)
-            .setNumber(n) // unread count → OEM launcher/shade badge (the "2/3" pill)
-            // The sender's send time, not now: a drain after hours offline would
-            // otherwise stamp every queued message with the moment it arrived.
+            .setNumber(n)
+            // The send time, so a drain after hours offline does not stamp everything with its arrival.
             .setWhen(newest * 1000)
             .setShowWhen(true)
             .setGroup(Notifications.GROUP_KEY)
             .setAutoCancel(true)
             .setSilent(silent)
-            .setContentIntent(openChat(convHex, displayName)) // peer rides in the extras even when hidden
+            .setContentIntent(openChat(convHex, displayName))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
             val identity = CoreBridge.conversation(conv)?.peer?.toHex() ?: convHex
@@ -337,8 +318,7 @@ object PushNotifier {
             chat.setLargeIcon(avatar)
             val them = Person.Builder().setName(displayName).setKey(convHex).setIcon(avatarIcon).build()
 
-            // Promote into the system's Conversations section (prominent avatar, heads-up priority):
-            // a long-lived dynamic shortcut carrying the Person, tied to the notif by id + LocusId.
+            // A long-lived shortcut carrying the Person puts this in the system's Conversations section.
             val shortcut = ShortcutInfoCompat.Builder(app, convHex)
                 .setLongLived(true)
                 .setShortLabel(displayName)
@@ -382,11 +362,10 @@ object PushNotifier {
                 .build()
             chat.setStyle(style).addAction(replyAction)
         } else {
-            // Preview off: no sender, no text, no Reply (nothing to reply to blind) — just a generic title.
             chat.setContentTitle("New message")
         }
         chat.addAction(readAction)
-        if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true) // only the first msg per live notif buzzes
+        if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true)
         nm().notify(notifId(convHex), chat.build())
         rendered[convHex] = snapshot
         // Only disposable, generated previews; never the authoritative media files.
@@ -404,7 +383,7 @@ object PushNotifier {
                 .setGroup(Notifications.GROUP_KEY)
                 .setGroupSummary(true)
                 .setAutoCancel(true)
-                .setSilent(true) // the child is the only buzzer; a sounding summary would double-alert
+                .setSilent(true) // a sounding summary would double-alert
                 .build(),
         )
     }
@@ -448,31 +427,23 @@ object PushNotifier {
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             .putExtra(EXTRA_CONVERSATION, convHex)
             .putExtra(EXTRA_CONV_NAME, name)
-        // Per-peer request code: extras aren't part of PendingIntent equality, so a shared code (0)
-        // would alias every tap onto whichever chat's notification updated last.
+        // Extras are not part of PendingIntent equality, so each chat needs its own request code.
         return PendingIntent.getActivity(
             app, notifId(convHex), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
-    // ponytail: "You: …" reply-preview re-notify skipped — the reconcile after the send DB write
-    // repaints the thread anyway; add a synchronous preview only if the ~150ms feels laggy.
-
-    /** Deterministic per-peer id (so a cold FCM wake updates the same chat's notification instead of
-     *  duplicating), kept clear of the reserved summary (1) / drain-FGS (42) ids. */
+    /** Stable per chat, and clear of the summary (1), requests (2) and drain-FGS (42) ids. */
     private fun notifId(convHex: String): Int {
         val h = convHex.hashCode() and 0x7FFF_FFFF
         return if (h < RESERVED_MAX) h + RESERVED_MAX else h
     }
 
-    /** Cancel this chat's notification straight away (reply/read receivers) so the RemoteInput
-     *  spinner resolves without waiting on the debounced reconcile. Takes the receiver's context —
-     *  the process may be cold, before [start] set [app]. */
+    /** Cancels at once, so the RemoteInput spinner resolves without waiting for the debounced reconcile. */
     internal fun cancelChat(context: Context, convHex: String) =
         NotificationManagerCompat.from(context).cancel(notifId(convHex))
 
-    /** Share the app's contact/group photo cache, rounded for Android's conversation icon. */
     private suspend fun notificationAvatar(key: String, px: Int = 128): Bitmap? {
         val src = com.promtuz.chat.utils.media.AvatarImages.load(key)?.asAndroidBitmap() ?: return null
         val scaled = Bitmap.createScaledBitmap(src, px, px, true)
@@ -507,5 +478,5 @@ object PushNotifier {
     private const val MAX_LINES = 8
     private const val RESERVED_MAX = 100
     private const val BUZZ_THROTTLE_MS = 2000L
-    private val BRAND_COLOR = 0xFF00B2FF.toInt() // notification accent — tints the mono logo (the foreground)
+    private val BRAND_COLOR = 0xFF00B2FF.toInt()
 }

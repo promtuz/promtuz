@@ -7,21 +7,14 @@ import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import timber.log.Timber
 import uniffi.core.CallEndReason
 import uniffi.core.CallEvent
 
-/**
- * The one place the app tracks a call. It turns core's `on_call` events into a
- * single observable state for the UI, runs the foreground service that holds
- * the microphone and the ringing notification, and remembers the last call so
- * a missed-call notice can be shown after it ends.
- *
- * One call at a time, mirroring the engine. Everything the UI does to a call it
- * does through [CoreBridge]; everything it reads it reads from [state].
- */
+/** One call at a time, as in core: its events become [state], and the service and notifications follow. */
 object CallController {
-    /** A call shaped for the screen. */
     data class Ui(
         val callId: ByteArray,
         val peer: ByteArray,
@@ -34,7 +27,7 @@ object CallController {
         val peerMuted: Boolean,
         val peerCamera: Boolean,
         val speaker: Boolean,
-        /** When the call connected, elapsed-real-time millis, for the timer. */
+        /** SystemClock.elapsedRealtime at the first connect; 0 until then. */
         val connectedAt: Long,
     )
 
@@ -49,16 +42,20 @@ object CallController {
         app = context.applicationContext
     }
 
-    /** Called from [com.promtuz.core.adapter.CoreEventBus.onCall] on a core thread. */
+    /** Runs on a core thread, from [com.promtuz.core.adapter.CoreEventBus.onCall]. */
     fun onEvent(event: CallEvent) {
         when (event) {
             is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, video = videoNow(event.call), Phase.Outgoing)
             is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, video = event.video, Phase.Incoming)
             is CallEvent.Ringing -> update(event.call) { it.copy(phase = Phase.Ringing) }
             is CallEvent.Connecting -> update(event.call) { it.copy(phase = Phase.Connecting) }
-            is CallEvent.Connected -> update(event.call) {
-                if (it.video) CallVideoManager.start()
-                it.copy(phase = Phase.Connected, connectedAt = android.os.SystemClock.elapsedRealtime())
+            is CallEvent.Connected -> {
+                // A reconnect connects again; the timer keeps its first start.
+                val now = android.os.SystemClock.elapsedRealtime()
+                update(event.call) {
+                    it.copy(phase = Phase.Connected, connectedAt = it.connectedAt.takeIf { t -> t != 0L } ?: now)
+                }
+                if (_state.value?.video == true) CallVideoManager.start()
             }
             is CallEvent.Reconnecting -> update(event.call) { it.copy(phase = Phase.Reconnecting) }
             is CallEvent.PeerMuted -> update(event.call) { it.copy(peerMuted = event.muted) }
@@ -67,7 +64,6 @@ object CallController {
         }
     }
 
-    /** An outgoing call's video flag, read from core's current-call snapshot. */
     private fun videoNow(call: ByteArray): Boolean =
         runCatching { CoreBridge.callCurrent()?.takeIf { it.call.contentEquals(call) }?.video }
             .getOrNull() ?: false
@@ -83,58 +79,57 @@ object CallController {
         CallActivity.launch(app)
     }
 
+    /** Events land from several threads, so the state moves in one CAS step. */
     private fun update(call: ByteArray, f: (Ui) -> Ui) {
-        val current = _state.value ?: return
-        if (!current.callId.contentEquals(call)) return
-        val next = f(current)
-        _state.value = next
-        // Once connected the ringing notification becomes the ongoing one.
-        if (next.phase == Phase.Connected || next.phase == Phase.Reconnecting) {
-            CallNotifications.ongoing(app, next)
+        var next: Ui? = null
+        _state.update { s -> if (s != null && s.callId.contentEquals(call)) f(s).also { next = it } else s }
+        val ui = next ?: return
+        // Once answered the ringing notification becomes the ongoing one, so a
+        // second Answer tap has nothing to press.
+        if (ui.phase == Phase.Connecting || ui.phase == Phase.Connected || ui.phase == Phase.Reconnecting) {
+            CallNotifications.ongoing(app, ui)
         }
     }
 
     private fun ended(event: CallEvent.Ended) {
+        // An expired offer that never became the current call is still missed.
+        if (event.reason == CallEndReason.MISSED) {
+            val name = runCatching { CoreBridge.contactName(event.peer) }.getOrNull().orEmpty()
+            CallNotifications.missed(app, event.conversation, name)
+        }
         val current = _state.value
         if (current != null && !current.callId.contentEquals(event.call)) return
         _state.value = null
         CallVideoManager.stop()
         stopService()
         CallNotifications.clearOngoing(app)
-        if (event.reason == CallEndReason.MISSED) {
-            val name = runCatching { CoreBridge.contactName(event.peer) }.getOrNull().orEmpty()
-            CallNotifications.missed(app, event.call, event.conversation, name)
-        }
     }
 
-    // — UI actions (each just delegates; state moves on the next core event) —
-
     fun toggleMute() {
-        val s = _state.value ?: return
-        CoreBridge.callSetMuted(!s.muted)
-        _state.value = s.copy(muted = !s.muted)
+        val s = _state.updateAndGet { it?.copy(muted = !it.muted) } ?: return
+        CoreBridge.callSetMuted(s.muted)
     }
 
     fun toggleSpeaker() {
-        val s = _state.value ?: return
-        val on = !s.speaker
-        CallService.instance?.setSpeaker(on)
-        _state.value = s.copy(speaker = on)
+        val s = _state.updateAndGet { it?.copy(speaker = !it.speaker) } ?: return
+        CallService.instance?.setSpeaker(s.speaker)
     }
 
     fun toggleCamera() = CallVideoManager.toggleCamera()
 
     fun switchCamera() = CallVideoManager.switchCamera()
 
-    /** The default network moved; tell the engine to restart ICE now. */
     fun networkChanged() {
         if (_state.value != null) CoreBridge.callNetworkChanged()
     }
 
+    /** A refused start (background on API 31+) leaves the ringing notification to carry the call. */
     private fun startService() {
         val intent = Intent(app, CallService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent)
-        else app.startService(intent)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent)
+            else app.startService(intent)
+        }.onFailure { Timber.tag("Call").w(it, "call service refused; ringing by notification only") }
     }
 
     private fun stopService() {

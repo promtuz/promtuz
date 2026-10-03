@@ -13,13 +13,7 @@ import android.os.Process
 import com.promtuz.core.CoreBridge
 import timber.log.Timber
 
-/**
- * The microphone and speaker for a call. Capture reads 20 ms of 48 kHz mono
- * PCM per tick and hands it to core; playback pulls the same from core. Both
- * run in communication mode so the platform's own echo canceller and noise
- * suppressor are in the path — the same default Telegram relies on rather than
- * a canceller in the engine.
- */
+/** Runs in communication mode, so the platform's echo canceller and noise suppressor are in the path. */
 class CallAudio(private val audioManager: AudioManager) {
     private companion object {
         const val SAMPLE_RATE = 48_000
@@ -34,7 +28,6 @@ class CallAudio(private val audioManager: AudioManager) {
     private var track: AudioTrack? = null
     private var previousMode = AudioManager.MODE_NORMAL
 
-    /** Route to the loudspeaker rather than the earpiece. */
     @Volatile var speaker = false
         set(value) {
             field = value
@@ -143,7 +136,6 @@ class CallAudio(private val audioManager: AudioManager) {
         }
     }
 
-    /** Point the audio at the loudspeaker or the earpiece for the current mode. */
     private fun applyRoute() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val type = if (speaker) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER

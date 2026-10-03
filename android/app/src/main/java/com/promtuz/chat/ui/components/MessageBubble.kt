@@ -54,6 +54,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontStyle
@@ -75,53 +76,17 @@ import com.promtuz.chat.ui.theme.PromtuzTheme
 import android.content.res.Configuration
 import android.os.Build
 
-/**
- * The bubble's inner inset. The vertical half doubles as the meta's drop budget.
- * Media bubbles waive it — the picture goes to the bubble's own edge and the
- * blocks below it re-apply the inset themselves.
- */
 internal val BubblePadH = 11.dp
 internal val BubblePadV = 6.dp
 
-/**
- * How far the meta sits below the text's last line when it rides beside it, so the
- * timestamp settles under the baseline rather than reading level with the text.
- *
- * This is spent out of [BubblePadV], not added to the bubble's height — the meta
- * hangs into the existing padding, so the bubble never grows for it. Values past
- * that budget are clamped: the [clip] to the bubble shape would crop the glyphs.
- */
+/** Lowers a meta on the last line below the baseline, within [BubblePadV] so the bubble never grows. */
 private val MetaBaselineDrop = 3.dp
 
-/** How hard the patch under an on-picture meta is blurred. Large next to the
- *  glyphs it backs — the softness IS the effect, not an edge to hide. */
 private val MetaHaloBlur = 22.dp
 
-/**
- * How far the patch runs past the text. Grown mostly down and toward the end —
- * the corner the meta occupies — so it spills past the bubble and the bubble's
- * own clip trims it to the corner radius. That's what keeps it reading as the
- * picture darkening into its corner rather than a blob floating on top of it.
- */
 private const val MetaHaloSpreadX = 2.6f
 private const val MetaHaloSpreadY = 3.4f
 
-/**
- * A message bubble as an ordered stack of content blocks (text today; media /
- * reply become sibling blocks with the polymorphic content). Shape/colors/width
- * come from [LocalChatAppearance]. The trailing timestamp and outgoing status
- * are pinned to the bubble's bottom-end corner; the
- * bubble widens to seat it beside the text's last line, or gives it a compact row
- * of its own when that line has no room.
- * Every outgoing state keeps the same footprint beside the timestamp.
- *
- * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
- * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
- * and [onDoubleTap] are optional so the bubble stays a pure renderer elsewhere.
- * With [menuState] set, the long-press gesture keeps streaming into the open
- * menu — drag over an item, release to pick it (one continuous pointer stream,
- * same interaction grammar as AppDropMenu).
- */
 @Composable
 fun MessageBubble(
     modifier: Modifier = Modifier,
@@ -143,21 +108,16 @@ fun MessageBubble(
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
     val outgoing = msg.outgoing
-    // Name the author only in a group, only on an incoming message, and only
-    // at the head of a run — the rest of the run is visibly the same person.
     val showSender = msg.senderName != null && !outgoing && !mergedTop
     val groupIncoming = msg.senderName != null && !outgoing
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
+    val metaLabel = BubbleTextLayouts.metaLabelOf(LocalContext.current, msg)
     val haptic = LocalHapticFeedback.current
-    // Plain refs, not snapshot state: positions change every frame during placement
-    // animations and are only ever read inside gesture handlers (and, for the text
-    // layout, inside the measure pass that just wrote it).
+    // Plain refs, not snapshot state: positions change every frame and are read
+    // only in gesture handlers and the measure pass that wrote them.
     val coords = remember { CoordsHolder() }
-    // pointerInput keys on `menuState`, which is a stable holder, so the gesture
-    // coroutine is started once and closes over whatever `onLongPress` existed
-    // then. A message that later changes shape — a text edited into a picture —
-    // would still open the menu on the body it had at first composition.
+    // pointerInput keys only on menuState, so its coroutine would keep the first onLongPress.
     val longPress by rememberUpdatedState(onLongPress)
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
@@ -167,10 +127,8 @@ fun MessageBubble(
     val bare = jumboEmoji || (!msg.deleted && msg.quote == null &&
         (msg.content is MessageContent.Voice || msg.content is MessageContent.Sticker))
 
-    // A picture runs to the bubble's own edge — one outline instead of a frame
-    // around a frame — so the bubble waives its inset and the padded blocks
-    // (quote, caption, reactions) each put it back for themselves. An attachment
-    // card is not a picture: it keeps the inset like text.
+    // A picture runs to the bubble's edge, so the bubble waives its inset and the padded
+    // blocks put it back themselves. An attachment card keeps the inset like text.
     val tile = (msg.content as? MessageContent.Attachment)?.isMediaTile == true
     val bleeds = !msg.deleted &&
         (msg.content is MessageContent.Image || msg.content is MessageContent.Album || tile)
@@ -189,9 +147,7 @@ fun MessageBubble(
         if (metaOnMedia) appearance.bubble.copy(tail = false) else appearance.bubble,
     )
 
-    // Plain Box, not BoxWithConstraints — that's a nested SubcomposeLayout per
-    // bubble, real weight on every bubble birth. The width cap is applied inside
-    // the bubble Layout's own measure from its incoming constraints.
+    // Not BoxWithConstraints: that's a SubcomposeLayout per bubble. The Layout below applies the width cap.
     val widthFraction = appearance.layout.maxWidthFraction
     val linkGestures = LocalMessageLinkGestures.current ?: remember { MessageLinkGestures() }
     Box(
@@ -213,8 +169,6 @@ fun MessageBubble(
         }
         Layout(
             content = {
-                // Only the first bubble of a run is labelled — repeating the
-                // name down a run of five messages is noise, not information.
                 if (showSender) {
                     SenderLabel(
                         msg.senderName ?: "Unknown",
@@ -234,9 +188,7 @@ fun MessageBubble(
                     )
                 }
 
-                // One content child in a fixed slot: the bubble Layout hardcodes child
-                // indices, so a deleted-or-text bubble and a media bubble must emit exactly
-                // one measurable here. The meta corner is reserved inside each variant.
+                // The Layout reads children by index, so every variant emits exactly one measurable.
                 CompositionLocalProvider(LocalMessageLinkGestures provides linkGestures) {
                     val content = msg.content
                     when {
@@ -248,27 +200,27 @@ fun MessageBubble(
                         content is MessageContent.Image ->
                             ImageBlock(
                                 content, textColor, appearance.type.fontScale,
-                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                metaLabel, outgoing,
                                 originKey = msg.dispatchIdHex,
                                 onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
                             )
                         content is MessageContent.Album ->
                             AlbumBlock(
                                 content, textColor, appearance.type.fontScale,
-                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                metaLabel, outgoing,
                                 onOpen = onMediaTap,
                             )
                         content is MessageContent.Attachment && tile ->
                             MediaTileBlock(
                                 content, textColor, appearance.type.fontScale,
-                                BubbleTextLayouts.metaLabelOf(msg), outgoing,
+                                metaLabel, outgoing,
                                 originKey = msg.dispatchIdHex, onDownload = onDownload,
                                 onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
                             )
                         content is MessageContent.Attachment ->
                             AttachmentBlock(
                                 content, textColor, appearance.type.fontScale,
-                                BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
+                                metaLabel, peerName, outgoing, onDownload, onOpen,
                             )
                         content is MessageContent.Voice ->
                             VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
@@ -290,19 +242,15 @@ fun MessageBubble(
                     }
                 }
 
-                MetaRow(msg, textColor, metaOnMedia, pill = if (bare && !metaOnMedia) bubbleColor else null)
+                MetaRow(msg, metaLabel, textColor, metaOnMedia, pill = if (bare && !metaOnMedia) bubbleColor else null)
             },
             modifier = Modifier
                 .then(if (groupIncoming) Modifier.padding(start = 40.dp) else Modifier)
                 .typingMorphSurface(shape, bubbleColor, textColor, enabled = !bare)
-                // Fill FIRST, before animateContentSize (which opens with clipToBounds) and
-                // the .clip below. Both clip to the node's rectangular bounds, which would
-                // shear off the tail flicking past the body edge. As a plain draw modifier
-                // here, background paints the whole outline (tail included) into the parent
-                // Box (which never clips); .clip still bounds the child content below.
+                // The surface fills before animateContentSize and .clip, which clip to the
+                // node's rectangle and would shear off the tail.
 
-                // edit/delete/reactions change the bubble's size in place — glide from the
-                // tail corner on the shared clock so neighbors (stage) track frame-locked
+                // Resizes run on the shared clock so the stage moves neighbors in lockstep.
                 .animateContentSize(
                     ChatMotion.spec(),
                     alignment = if (outgoing) Alignment.BottomEnd else Alignment.BottomStart,
@@ -317,8 +265,7 @@ fun MessageBubble(
                             coords.longPressed = false
                             if (linkGestures.owns(down)) return@awaitEachGesture
                             if (menuState?.isOpen == true) return@awaitEachGesture
-                            val press =
-                                awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                             // The tap detector below sees this same release later and
                             // must not treat it as a tap on top of the menu.
                             coords.longPressed = true
@@ -326,43 +273,10 @@ fun MessageBubble(
                             longPress?.invoke(
                                 coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero
                             )
-                            if (menuState == null) return@awaitEachGesture
-
-                            // Same finger now drives the open menu: drag hovers, release picks.
-                            var dragged = false
-                            while (true) {
-                                val ev = awaitPointerEvent()
-                                val ch = ev.changes.firstOrNull { it.id == press.id }
-                                    ?: ev.changes.first()
-                                val root = coords.bubble?.takeIf { it.isAttached }
-                                    ?.localToRoot(ch.position)
-                                if (!ch.pressed) {
-                                    // Commits require an actual drag: a stationary hold-and-lift
-                                    // only leaves the menu open, even if an item spawned under
-                                    // the finger. Drag to nowhere cancels.
-                                    if (dragged) when (val hit = root?.let(menuState::release)) {
-                                        is MenuHit.Action -> {
-                                            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                                            hit.action.onClick()
-                                        }
-
-                                        is MenuHit.Reaction -> {
-                                            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                                            menuState.onReact?.invoke(hit.emoji)
-                                        }
-
-                                        null -> menuState.close()
-                                    }
-                                    break
-                                }
-                                if (!dragged &&
-                                    (ch.position - down.position).getDistance() > viewConfiguration.touchSlop
-                                ) dragged = true
-                                if (dragged && root != null && menuState.drag(root)) {
-                                    haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                }
-                                ch.consume()
-                            }
+                            if (menuState != null) dragSelect(
+                                down, haptic, { menuState.hitIndex(coords.bubble, it) },
+                                { menuState.hovered = it }, menuState::pick,
+                            )
                         }
                     }
                 )
@@ -382,10 +296,7 @@ fun MessageBubble(
                     vertical = if (bleeds || bare) 0.dp else BubblePadV,
                 ),
         ) { measurables, constraints ->
-            // Children: [quote?] text [reactions?] meta. The quote must span the widest
-            // sibling (measured last with that width as its minimum — measurables measure
-            // once); the meta is pinned to the bubble's absolute bottom-end corner, and the
-            // bubble grows to keep it off the content — see the contentWidth branches below.
+            // Children: [sender?] [quote?] content [reactions?] meta.
             val hasSender = showSender
             val hasQuote = msg.quote != null
             val hasReactions = msg.reactions.isNotEmpty()
@@ -397,23 +308,14 @@ fun MessageBubble(
             val reactions = if (hasReactions) measurables[++idx].measure(loose) else null
             val meta = measurables[idx + 1].measure(loose)
 
-            // Where the text's own last line ends — populated by BubbleText's onTextLayout
-            // during the measure above. Null for media blocks, which reserve their corner
-            // internally and own their full footprint.
             val lastLine = coords.text
                 ?.takeIf { it.lineCount > 0 }
                 ?.let { ceil(it.getLineRight(it.lineCount - 1)).toInt() }
 
             val metaGap = 8.dp.roundToPx()
-            // The meta rides the text's last line when that line leaves room for it; when it
-            // doesn't, it drops to a row of its own — meta-height, not a full text line, so a
-            // wrapped timestamp doesn't leave a tall empty gutter. Reactions, when present,
-            // share their line with the meta instead and take priority.
+            // The meta rides the last line when it fits, else takes a meta-height row of its own.
+            // Reactions share their line with the meta instead.
             var metaRow = 0
-            // Riding the last line, the meta would otherwise bottom-align with the text's
-            // line box and read as level with it. This settles it just under the baseline,
-            // spent out of the bubble's own padding so the bubble doesn't grow — see the
-            // height below, which deliberately leaves metaDrop out.
             var metaDrop = 0
             val contentWidth = when {
                 // Nothing to ride: the pill sits under the content, at its end.
@@ -421,8 +323,7 @@ fun MessageBubble(
                 hasReactions -> maxOf(text.width, reactions!!.width + metaGap + meta.width)
                 // Media owns its whole footprint and keeps the corner clear itself.
                 !isTextBlock -> text.width
-                // No layout to consult (shouldn't happen — onTextLayout runs in the measure
-                // above): give the meta its own row rather than risk it landing on a glyph.
+                // No layout to consult: give the meta its own row rather than risk a glyph.
                 lastLine == null -> { metaRow = meta.height; text.width }
                 lastLine + metaGap + meta.width <= cap -> {
                     metaDrop = MetaBaselineDrop.coerceAtMost(BubblePadV).roundToPx()
@@ -438,9 +339,7 @@ fun MessageBubble(
             } else null
 
             val width = maxOf(contentWidth, maxOf(quote?.width ?: 0, sender?.width ?: 0))
-            // metaDrop is absent by design: it's spent out of the padding, so it moves the
-            // meta without moving the Layout. metaRow can't be — a row of its own needs
-            // real space, and the padding alone can't cover a full meta height.
+            // metaDrop is left out: it hangs into the padding, while metaRow needs real space.
             val height = (sender?.height ?: 0) + (quote?.height ?: 0) + text.height + metaRow +
                 (reactions?.height ?: 0)
             // Bare: reactions go under the content and the pill under them.
@@ -453,9 +352,7 @@ fun MessageBubble(
                 val tx = if (bare && outgoing) width - text.width else 0
                 text.placeRelative(tx, y)
                 reactions?.placeRelative(if (bare && outgoing) width - reactions.width else 0, reactionsY)
-                // A bleeding bubble has no outer padding to sit in, so the meta
-                // takes the inset itself — the same one text bubbles get from the
-                // padding, which is what lines the time up across every variant.
+                // A bleeding bubble has no padding, so the meta takes the same inset itself.
                 val metaInsetX = if (bleeds || metaOnMedia) BubblePadH.roundToPx() else 0
                 val metaInsetY = if (bleeds || metaOnMedia) BubblePadV.roundToPx() else 0
                 meta.placeRelative(
@@ -467,7 +364,6 @@ fun MessageBubble(
     }
 }
 
-/** The quoted-message block a reply carries: accent rail + short snippet. */
 @Composable
 private fun QuoteBlock(
     quote: Quote, textColor: Color, accent: Color, onClick: (() -> Unit)?,
@@ -516,12 +412,7 @@ private fun ReactionChip(rg: ReactionGroup, textColor: Color, accent: Color, onT
     }
 }
 
-/**
- * The message text, wrapped purely on its own content. It reserves nothing for the
- * meta: [onLayout] hands the resolved [TextLayoutResult] up to the bubble's Layout
- * (it fires during this node's measure, so the parent reads it in the same pass),
- * which then decides whether the meta rides the last line or takes its own row.
- */
+/** Reserves nothing for the meta; [onLayout] fires during measure, so the bubble reads it in the same pass. */
 @Composable
 private fun BubbleText(
     msg: UiMessage,
@@ -543,7 +434,6 @@ private fun BubbleText(
     )
 }
 
-/** Fades the node in when [value] changes after first composition. Near-free at rest. */
 @Composable
 private fun Modifier.fadeOnChange(value: Any?): Modifier {
     val anim = remember { Animatable(1f) }
@@ -558,17 +448,9 @@ private fun Modifier.fadeOnChange(value: Any?): Modifier {
     return graphicsLayer { alpha = anim.value }
 }
 
-/**
- * A persistent timestamp with a fixed outgoing-status slot.
- *
- * [onMedia] is the uncaptioned-picture case: the meta lands on the photo, where
- * `textColor` at 55% would be unreadable over an arbitrary image, so it goes
- * white against the dark halo below. Status colours are lightened on that same
- * halo so a dark chat accent remains visible over the picture.
- */
 @Composable
 private fun MetaRow(
-    msg: UiMessage, textColor: Color, onMedia: Boolean = false, pill: Color? = null,
+    msg: UiMessage, label: String, textColor: Color, onMedia: Boolean = false, pill: Color? = null,
 ) {
     val metaStyle = MaterialTheme.typography.labelSmall
     val metaColor = if (onMedia) Color.White else textColor.copy(alpha = if (pill != null) 0.8f else 0.55f)
@@ -576,8 +458,6 @@ private fun MetaRow(
     val error = MaterialTheme.colorScheme.error
 
     Box(
-        // A standalone message carries its time in a pill of the bubble's
-        // colour, so it still reads as that side's message.
         if (pill != null) Modifier.clip(CircleShape).background(pill).padding(horizontal = 8.dp, vertical = 3.dp)
         else Modifier,
         contentAlignment = Alignment.Center,
@@ -585,7 +465,7 @@ private fun MetaRow(
         if (onMedia) MetaHalo(Modifier.matchParentSize())
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                BubbleTextLayouts.metaLabelOf(msg),
+                label,
                 style = metaStyle,
                 color = metaColor,
                 maxLines = 1,
@@ -604,22 +484,13 @@ private fun MetaRow(
     }
 }
 
-/**
- * The patch of dimmed picture an on-media meta sits on.
- *
- * A dark shape blurred well past its own bounds, not a drawn ramp: the falloff
- * comes from the blur, so it reads as the photo darkening under the time rather
- * than a band laid across it, and it stays local to the glyphs instead of
- * banding the full width. `Modifier.blur` is a no-op below API 31, so there a
- * radial ramp stands in — the same shape of falloff, and never a hard edge.
- */
+/** `Modifier.blur` is a no-op below API 31, so a radial ramp stands in there. */
 @Composable
 private fun MetaHalo(modifier: Modifier) {
     val shaped = modifier.graphicsLayer {
         scaleX = MetaHaloSpreadX
         scaleY = MetaHaloSpreadY
-        // Anchored up-and-start, so the growth runs the other way: into the
-        // bottom-end corner, where the clip is waiting for it.
+        // Grows into the bottom-end corner, where the bubble's clip trims it.
         transformOrigin = TransformOrigin(0.12f, 0.1f)
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -637,9 +508,7 @@ private fun MetaHalo(modifier: Modifier) {
     }
 }
 
-/** How much larger a lone emoji draws than body text. */
 private const val JumboEmojiScale = 2.8f
-/** Between bare content and the time pill under it. */
 private val BarePillGap = 4.dp
 private const val JumboEmojiMax = 3
 
@@ -647,7 +516,6 @@ private val EmojiOnly = Regex(
     "^(?:\\p{So}|\\p{Cn}|[\\uFE0F\\u200D\\u20E3]|[\\x{1F3FB}-\\x{1F3FF}]|[\\x{1F1E6}-\\x{1F1FF}])+$",
 )
 
-/** Up to [JumboEmojiMax] emoji and nothing else — the message that draws big and bare. */
 internal fun isJumboEmoji(text: String): Boolean {
     val t = text.trim()
     if (t.isEmpty() || !EmojiOnly.matches(t)) return false
@@ -669,16 +537,6 @@ private class CoordsHolder {
     var text: TextLayoutResult? = null
 }
 
-
-
-
-// === // === // === // === // === // === // === // === // === // === // === // === // === // === // === //
-
-/**
- * Sample [UiMessage] factory for previews — only the fields a preview usually
- * varies are parameters; the rest carry sensible constants. The bubble is a pure
- * renderer, so no callbacks/menuState are wired here.
- */
 private fun previewMsg(
     text: String,
     outgoing: Boolean,
@@ -703,10 +561,6 @@ private fun previewMsg(
     quote = quote,
 )
 
-/**
- * The meta's wrap boundary: messages stepping up in length until the last line
- * stops leaving room for the timestamp and it drops to a row of its own.
- */
 @Preview(name = "Meta wrap", showBackground = true)
 @Composable
 private fun MessageBubbleMetaWrapPreview() {
@@ -730,7 +584,6 @@ private fun MessageBubbleMetaWrapPreview() {
     }
 }
 
-/** A whole conversation's worth of bubble states, stacked. */
 @Composable
 private fun MessageBubbleGallery() {
     Column(
@@ -749,7 +602,7 @@ private fun MessageBubbleGallery() {
         MessageBubble(
             msg = previewMsg(
                 "Nice, this one is a reply.", outgoing = false, id = "3",
-                quote = Quote(dispatchIdHex = "2", text = "Just wiring them up now…", outgoing = true),
+                quote = Quote(dispatchIdHex = "2", text = "Just wiring them up now…"),
             ),
         )
         MessageBubble(
@@ -771,8 +624,6 @@ private fun MessageBubbleGallery() {
     }
 }
 
-// === // === // === // === // === // === // === // === // === // === // === // === // === // === // === //
-
 @Preview(name = "Light", showBackground = true)
 @Preview(name = "Dark", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
@@ -780,7 +631,6 @@ private fun MessageBubblePreview() {
     PromtuzTheme { MessageBubbleGallery() }
 }
 
-/** Merged run — top/middle/bottom of a same-sender group; checks the shape flags. */
 @Preview(name = "Merged run", showBackground = true)
 @Composable
 private fun MessageBubbleMergedPreview() {
@@ -797,11 +647,7 @@ private fun MessageBubbleMergedPreview() {
         }
     }
 }
-/**
- * The author's name atop the first incoming bubble of a run in a group.
- * Coloured from a hash of their key, so the same person keeps the same colour
- * across the conversation without anyone assigning one.
- */
+
 @Composable
 private fun SenderLabel(name: String, key: String?, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val palette = LocalChatColors.current.senderPalette

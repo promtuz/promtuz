@@ -20,13 +20,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * A quiet tap: no ripple, nothing consumed, and only a short press counts. A hold
- * that reaches the long-press timeout belongs to whoever is listening for it (the
- * bubble menu), a drag belongs to the list, and an up someone already consumed is
- * theirs. Media and other borderless surfaces use this so a tap opens and nothing
- * else lights up.
- */
+/** A tap with no ripple that consumes nothing: holds, drags and consumed ups belong to others. */
 fun Modifier.tapOnly(onTap: () -> Unit): Modifier = this
     .semantics { role = Role.Button; onClick { onTap(); true } }
     .pointerInput(onTap) {
@@ -41,10 +35,6 @@ fun Modifier.tapOnly(onTap: () -> Unit): Modifier = this
         }
     }
 
-/**
- * A small control that answers a press by shrinking a little, then acts on release.
- * Its own hit area, its own feedback; the surface it sits on stays still.
- */
 fun Modifier.pressScale(onClick: () -> Unit, scaleTo: Float = 0.88f): Modifier = composed {
     val currentOnClick by rememberUpdatedState(onClick)
     var pressed by remember { mutableStateOf(false) }

@@ -36,8 +36,7 @@ class Promtuz : Application() {
     private fun readJNILogs() {
         CoroutineScope(Dispatchers.IO).launch {
             val pid = android.os.Process.myPid()
-            // Collect only this process's native core tag. Release keeps info/warnings/errors;
-            // the full device log and other apps never enter the in-app diagnostic buffer.
+            // Only this process's core tag, so other apps and the device log never reach the diagnostic buffer.
             val pattern = Regex("^([VDIWEF])/core\\s*\\(\\s*\\d+\\):\\s?(.*)$")
             runCatching {
                 val proc = Runtime.getRuntime().exec(
@@ -64,9 +63,7 @@ class Promtuz : Application() {
         if (isDebuggable()) Timber.plant(Timber.DebugTree())
         readJNILogs()
 
-        // Seed the last-known presence before core starts firing deltas, so a
-        // cold start shows last-seens instead of a blank; then persist changes
-        // (debounced, off the hot path) for the next cold start.
+        // Seeds last-known presence before core starts firing deltas.
         PresenceStore.init(this)
         CoreEventBus.hydratePresence(PresenceStore.seed())
 
@@ -81,7 +78,7 @@ class Promtuz : Application() {
 
         CoroutineScope(Dispatchers.IO).launch {
             CoreEventBus.presenceByPeer.collectLatest { map ->
-                delay(1500) // collectLatest cancels+restarts on a new value → debounce
+                delay(1500)
                 PresenceStore.save(map, System.currentTimeMillis())
             }
         }
@@ -93,8 +90,6 @@ class Promtuz : Application() {
         }.koin.get()
         UpdateWorker.schedule(this)
 
-        // Foreground → nudge core for an instant reconnect and go Active.
-        // Background → assert Idle (the last packet before we freeze).
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 startService(Intent(this@Promtuz, AppCloseService::class.java))

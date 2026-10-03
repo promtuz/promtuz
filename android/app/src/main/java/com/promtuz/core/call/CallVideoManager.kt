@@ -7,13 +7,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/**
- * The video half of a call, one at a time. It owns the encoder and decoder and
- * ties them to the two surfaces the screen provides, the local self-view and
- * the remote view. Core drives it through [com.promtuz.core.adapter.CoreEventBus]:
- * frames in, keyframe requests, bitrate. The camera on/off state is mirrored to
- * the peer through core so their screen shows our video or our avatar.
- */
 object CallVideoManager {
     private lateinit var app: Context
 
@@ -30,7 +23,6 @@ object CallVideoManager {
         app = context.applicationContext
     }
 
-    /** The video call connected; begin encode and decode. */
     fun start() {
         if (active) return
         active = true
@@ -49,19 +41,16 @@ object CallVideoManager {
         remoteSurface = null
     }
 
-    /** The screen's self-view surface is ready, or gone (`null`). */
     fun setLocalSurface(surface: Surface?) {
         localSurface = surface
         if (active && _cameraOn.value) {
-            // Recreate the capture session so the self-view is one of its
-            // targets.
+            // Recreates the capture session so the self-view is one of its targets.
             video?.stop()
             video = null
             startEncoder()
         }
     }
 
-    /** The screen's remote-view surface is ready, or gone (`null`). */
     fun setRemoteSurface(surface: Surface?) {
         remoteSurface = surface
         decoder?.stop()
@@ -82,8 +71,6 @@ object CallVideoManager {
     fun switchCamera() {
         video?.switchCamera()
     }
-
-    // — Driven by core, via CoreEventBus —
 
     fun onFrame(frame: ByteArray, keyframe: Boolean) {
         decoder?.submit(frame, keyframe)

@@ -10,11 +10,6 @@ import kotlinx.coroutines.withContext
 
 data class GalleryItem(val uri: Uri, val isVideo: Boolean, val durationMs: Long)
 
-/**
- * Newest-first images+videos from the device MediaStore, for the Photos tab grid.
- * ponytail: flat 500-item cap instead of paged loading — plenty for a picker, revisit
- * if devices with huge libraries make the query itself slow.
- */
 suspend fun loadGallery(context: Context, limit: Int = 500): List<GalleryItem> = withContext(Dispatchers.IO) {
     val collection = MediaStore.Files.getContentUri("external")
     // DURATION on the Files collection exists only from API 29; older devices throw
@@ -30,8 +25,7 @@ suspend fun loadGallery(context: Context, limit: Int = 500): List<GalleryItem> =
         MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
         MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
     )
-    // No "LIMIT n" in the sort string — MediaStore rejects it as an invalid token on
-    // API 30+ (crash). Cap while reading the cursor instead.
+    // No "LIMIT n" in the sort string: MediaStore rejects it on API 30+ and crashes, so the cursor read caps.
     val sort = "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
 
     val items = mutableListOf<GalleryItem>()

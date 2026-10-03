@@ -163,7 +163,7 @@ fun WelcomeScreen(
                         textAlign = TextAlign.Center,
                         fontWeight = FontWeight.W500,
                         fontSize = 16.sp,
-                        modifier = Modifier.graphicsLayer { // Allow overflow
+                        modifier = Modifier.graphicsLayer {
                             clip = false
                         })
                 }

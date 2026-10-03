@@ -16,8 +16,7 @@ import com.promtuz.chat.ui.components.HomeTopBar
 fun HomeScreen(
     appViewModel: AppVM
 ) {
-    // Shared across all rows + the overlay: the long-pressed row owns the pointer
-    // stream, the overlay (above the Scaffold, so it dims bars + FAB too) draws.
+    // The overlay sits above the Scaffold so its scrim dims the bars and FAB too.
     val menuState = remember { HomeMenuState() }
     Box {
         Scaffold(

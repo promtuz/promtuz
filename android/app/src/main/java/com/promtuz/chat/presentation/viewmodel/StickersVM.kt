@@ -30,7 +30,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.core.StickerSource
 
-/** Preview of an installed or received pack. */
 @Immutable
 data class UiPackPreview(
     val packHex: String,
@@ -40,11 +39,9 @@ data class UiPackPreview(
     val stickers: List<StickerRef>,
 )
 
-/** Selected image and its thumbnail. */
 @Immutable
 data class PickedSticker(val uri: Uri, val preview: ImageBitmap?)
 
-/** Installed packs and publication state, scoped to the navigation entry. */
 class StickersVM(private val application: Application) : ViewModel() {
     val packs: StateFlow<List<UiStickerPack>> =
         observeQuery(setOf("sticker_packs", "stickers")) { CoreBridge.stickerPacks().map { it.toUi() } }
@@ -55,7 +52,6 @@ class StickersVM(private val application: Application) : ViewModel() {
             CoreBridge.recentStickers(RECENT_LIMIT).map { it.toRef() }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** Core rate-limits manifest refreshes per pack. */
     fun refresh() = viewModelScope.launch { runCatching { CoreBridge.refreshStickerPacks() } }
 
     /** Installed packs can be previewed offline. */

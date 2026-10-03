@@ -84,6 +84,7 @@ import com.promtuz.chat.ui.components.TypingBubble
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import com.promtuz.chat.ui.stage.MessageStage
 import com.promtuz.chat.ui.stage.rememberMessageStageState
+import com.promtuz.chat.ui.text.clock
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.ui.text.style.TextAlign
@@ -91,9 +92,6 @@ import com.promtuz.chat.ui.components.BubbleTextLayouts
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// Best-effort "open" for a finished download: hand the file to the system via the
-// app's FileProvider. Silently no-ops if the path isn't under a shared root or no
-// app can view the type — the ready state on the card is the real signal.
 private fun openAttachment(context: Context, path: String) {
     runCatching {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
@@ -123,9 +121,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val typingMembers by viewModel.typingBubbleMembers.collectAsState()
     val typing = typingMembers.isNotEmpty()
     val isGroup by viewModel.isGroup.collectAsState()
-    // A group can be renamed while it's open, and the route's name is a
-    // snapshot from when it was pushed. A 1:1 has no title of its own, so it
-    // keeps the contact name the route carried.
+    // The route's name is a snapshot; a group's live title replaces it, a 1:1 keeps it.
     val title by viewModel.title.collectAsState()
     val name = title.ifEmpty { routeName }
     val appearance = LocalChatAppearance.current
@@ -138,12 +134,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val calendar = rememberChatCalendar()
     var selectedDate by remember { mutableStateOf<java.time.LocalDate?>(null) }
 
-    // High-intent moment to ask for notifications: they're in a conversation. One-shot, self-gated.
     NotificationPrimer()
 
-    // Messages paint the moment they load — no nav-slide gate, no cascade. The stage
-    // is windowed (only the visible band is measured), so the full loaded window sits
-    // in the list free off-screen; older pages arrive via onNearTop on scroll.
     var groupingNow by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(messages.firstOrNull()?.key, typingMembers, mergeWindowMs, calendar) {
         groupingNow = System.currentTimeMillis()
@@ -159,8 +151,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val stage = rememberMessageStageState()
     val metrics = rememberComposerMetrics()
 
-    // Own sends always land us at the bottom; incoming near the bottom is the
-    // stage's built-in follow, and scrolled-up reading holds.
+    // Own sends scroll to the bottom; incoming rows use the stage's near-bottom follow.
     val newestOutKey = (rows.firstOrNull { it is ChatRow.Msg } as? ChatRow.Msg)
         ?.msg?.takeIf { it.outgoing }?.key
     var lastOutKey by remember { mutableStateOf(newestOutKey) }
@@ -170,8 +161,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         if (ownSend) stage.scrollToBottom()
     }
 
-    val menu = remember { MessageMenuState() }
-    var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
+    val menu = remember(viewModel) { MessageMenuState(viewModel::toggleReaction) }
+    var confirmDelete by remember { mutableStateOf<PendingDelete?>(null) }
     var pendingInfo by remember { mutableStateOf<UiMessage?>(null) }
     var infoMessage by remember { mutableStateOf<UiMessage?>(null) }
     // Finish lowering the selected bubble before presenting the sheet.
@@ -181,24 +172,17 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             pendingInfo = null
         }
     }
-    // A tapped sticker opens the pack it came from.
     var packSheet by remember { mutableStateOf<StickerRef?>(null) }
     val appVM = koinInject<AppVM>()
     val stickersVM = koinViewModel<StickersVM>()
-    menu.onReact = { emoji ->
-        menu.anchor?.let { viewModel.toggleReaction(it.msg, emoji) }
-        menu.close()
-    }
 
-    // Suspended row = the anchor: the stage derives scroll so it never moves while
-    // the menu is up; everything else grows away from it.
+    // Pin the menu's row so it holds still while everything else moves around it.
     LaunchedEffect(menu.anchor) {
         val anchor = menu.anchor
         if (anchor != null) stage.pin(anchor.msg.key, anchor.bounds.bottom)
         else stage.unpin()
     }
 
-    // Tap on a reply's quote → glide to the quoted message and flash it.
     var highlightKey by remember { mutableStateOf<String?>(null) }
     fun jumpToQuoted(didHex: String) {
         val target = (rows.firstOrNull { it is ChatRow.Msg && it.msg.dispatchIdHex == didHex } as? ChatRow.Msg)
@@ -210,8 +194,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             if (highlightKey == target.msg.key) highlightKey = null
         }
     }
-    // A search hit names a message that may still be loading in: hold the
-    // id until its row is on the stage, then make the same glide a quote does.
+    // A search hit may still be loading: hold its id until the row is on the stage.
     var pendingJump by remember { mutableStateOf<String?>(null) }
     val messageToShow by appVM.messageToShow.collectAsState()
     LaunchedEffect(messageToShow, foreground) {
@@ -268,14 +251,12 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         ) {
             val handoff by viewModel.typingHandoff.collectAsState()
             val density = LocalDensity.current
-            // Scaffold's inset lands a frame behind the composer's reveal, so the bar
-            // publishes its own footprint instead and the stage samples it during
-            // measure — one value, one pass, no drift between bar and messages.
+            // Scaffold's inset lands a frame behind the composer's reveal, so the stage
+            // samples the bar's own footprint during measure instead.
             val stagePadding = remember(padding, metrics, density) {
                 ComposerPadding(padding.calculateTopPadding(), metrics, density)
             }
-            // The media viewer flies pictures out of, and back into, only the strip
-            // between the bars, so nothing crisp is ever drawn over a bar's blur.
+            // The media viewer flies pictures only within the strip between the bars, never over their blur.
             val topPadPx = with(density) { stagePadding.calculateTopPadding().toPx() }
             val bottomPadPx = with(density) { stagePadding.calculateBottomPadding().toPx() }
             CompositionLocalProvider(LocalMediaClip provides {
@@ -348,7 +329,9 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                                     onDownload = viewModel::download,
                                     onOpen = { openAttachment(context, it) },
                                     onMediaTap = { did ->
-                                        val (items, index) = chatMediaItems(context, messages, viewModel.conversationHex, name, did) { confirmDelete = it }
+                                        val (items, index) = chatMediaItems(context, messages, viewModel.conversationHex, name, did) { target, outgoing ->
+                                            confirmDelete = PendingDelete(listOf(target), outgoing)
+                                        }
                                         MediaViewer.open(items, index)
                                     },
                                     onTap = (chatRow.msg.content as? MessageContent.Sticker)?.let { s ->
@@ -389,10 +372,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             }
 
             }
-            // Drawn after the stage so it fades the messages, not the wallpaper
-            // behind them, and spans exactly the bar's own live footprint — the
-            // composer's top edge to the bottom of the screen — so it tracks the
-            // composer growing rather than lagging it.
+            // Drawn after the stage so it fades the messages, not the wallpaper. Sized from
+            // the bar's live footprint so it tracks the composer.
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -404,15 +385,13 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         }
 
         menu.anchor?.let { anchor ->
-            // Follow the actual row, including viewport limits when editing a
-            // multiline message grows the field as well as the action area.
+            // Follows the pinned row, including viewport clamping as the composer grows.
             MessageContextMenu(
                 state = menu,
                 quickReactions = QuickReactions,
                 anchorOffsetY = { stage.pinnedOffsetY },
                 actionGroups = menuActionsFor(anchor.msg, viewModel,
-                    onDelete = { confirmDelete = it }, onInfo = { pendingInfo = it }) { menu.close() },
-                onReact = { viewModel.toggleReaction(anchor.msg, it); menu.close() },
+                    onDelete = { confirmDelete = it.deleteTargets() }, onInfo = { pendingInfo = it }) { menu.close() },
             )
         }
 
@@ -438,11 +417,12 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             )
         }
 
-        confirmDelete?.let { msg ->
+        confirmDelete?.let { pending ->
             DeleteConfirmDialog(
-                msg = msg,
+                count = pending.ids.size,
+                outgoing = pending.outgoing,
                 onConfirm = {
-                    msg.dispatchIdHex?.let { viewModel.delete(it, forEveryone = msg.outgoing); MediaViewer.remove(it) }
+                    pending.ids.forEach { viewModel.delete(it, forEveryone = pending.outgoing); MediaViewer.remove(it) }
                     confirmDelete = null
                 },
                 onDismiss = { confirmDelete = null },
@@ -451,9 +431,15 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     }
 }
 
+/** What a Delete confirms: one message, or every photo of an album. */
+private class PendingDelete(val ids: List<String>, val outgoing: Boolean)
+
+private fun UiMessage.deleteTargets(): PendingDelete? = dispatchIdHex?.let { did ->
+    PendingDelete((content as? MessageContent.Album)?.items?.map { it.dispatchIdHex } ?: listOf(did), outgoing)
+}
+
 private val QuickReactions = listOf("❤️", "👍", "👎", "😂", "🔥", "😢")
 
-/** Menu groups gated by ownership/state (destructive rides alone); every action closes via [close]. */
 @Composable
 private fun menuActionsFor(
     msg: UiMessage,
@@ -469,14 +455,13 @@ private fun menuActionsFor(
         if (actionable) add(MenuAction("Reply", R.drawable.oi_reply) {
             viewModel.beginReply(msg); close()
         })
-        if (actionable) add(MenuAction("Forward", R.drawable.oi_forward) { close() })
         if (actionable && msg.outgoing) add(MenuAction("Message info", R.drawable.oi_info) {
             onInfo(msg); close()
         })
-        // Only prose copies: a voice note or a sticker has no text to put on the clipboard.
-        if (!msg.deleted && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
+        // Copy offers whatever reads as text, a caption included.
+        val text = com.promtuz.chat.ui.components.BubbleTextLayouts.contentOf(msg)
+        if (!msg.deleted && text.isNotBlank())
             add(MenuAction("Copy", R.drawable.oi_copy) {
-                val text = (msg.content as? MessageContent.Text)?.text.orEmpty()
                 scope.launch {
                     clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
                 }
@@ -497,14 +482,18 @@ private fun menuActionsFor(
 }
 
 @Composable
-private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun DeleteConfirmDialog(count: Int, outgoing: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AppAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete message?") },
+        title = { Text(if (count > 1) "Delete $count photos?" else "Delete message?") },
         text = {
             Text(
-                if (msg.outgoing) "It will be deleted for everyone in this chat."
-                else "It will be removed from this device."
+                when {
+                    outgoing && count > 1 -> "They will be deleted for everyone in this chat."
+                    outgoing -> "It will be deleted for everyone in this chat."
+                    count > 1 -> "They will be removed from this device."
+                    else -> "It will be removed from this device."
+                }
             )
         },
         confirmButton = {
@@ -514,19 +503,12 @@ private fun DeleteConfirmDialog(msg: UiMessage, onConfirm: () -> Unit, onDismiss
     )
 }
 
-/**
- * A finished call, centred like a system line but with a phone icon and, when
- * it connected, its length.
- */
 @Composable
 private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier) {
     val marker = LocalChatColors.current.marker
     val label = when {
-        content.durationSecs != null -> {
-            val s = content.durationSecs
-            val length = if (s >= 60) "${s / 60} min ${s % 60} s" else "$s s"
-            "${if (content.outgoing) "Outgoing" else "Incoming"} call · $length"
-        }
+        content.durationSecs != null ->
+            "${if (content.outgoing) "Outgoing" else "Incoming"} call · ${clock(content.durationSecs * 1000L)}"
         content.missed -> "Missed call"
         content.outgoing -> "No answer"
         else -> "Call declined"
@@ -550,10 +532,6 @@ private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier)
     }
 }
 
-/**
- * A membership or title change: centred, quiet, and deliberately not a bubble —
- * nobody said it *to* anyone, so it carries no author, no tail and no actions.
- */
 @Composable
 private fun SystemRow(content: MessageContent.System, modifier: Modifier = Modifier) {
     val marker = LocalChatColors.current.marker
@@ -577,12 +555,7 @@ private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.Date -> row
 }
 
-/**
- * The stage's insets, with the bottom resolved on each call rather than captured.
- * [MessageStage] asks during its measure pass, so the composer's live footprint
- * reaches the walk as a layout read — the messages track the bar frame for frame
- * without a recomposition between them.
- */
+/** Resolves the bottom on each call, so the stage reads the composer's footprint during measure. */
 private class ComposerPadding(
     private val top: Dp,
     private val metrics: ComposerMetrics,

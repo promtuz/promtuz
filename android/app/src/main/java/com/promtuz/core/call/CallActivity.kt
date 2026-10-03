@@ -16,18 +16,13 @@ import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import kotlinx.coroutines.launch
 
-/**
- * The full-screen call, shown over the lock screen for an incoming ring and
- * for the length of a call. It hosts only [CallScreen] and closes itself the
- * moment the call ends, so there is no call UI to get stuck in the back stack.
- */
+/** Hosts only [CallScreen] and finishes when the call ends, so no call UI is left in the back stack. */
 class CallActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
         enableEdgeToEdge()
 
-        // Close as soon as there is no call — whichever way it ended.
         lifecycleScope.launch {
             CallController.state.collect { if (it == null) finish() }
         }
@@ -42,8 +37,6 @@ class CallActivity : ComponentActivity() {
     }
 
     override fun onUserLeaveHint() {
-        // Keep a connected video call visible as a floating window when the
-        // user leaves, the way a phone call does.
         val call = CallController.state.value
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             call?.video == true && call.phase == CallController.Phase.Connected

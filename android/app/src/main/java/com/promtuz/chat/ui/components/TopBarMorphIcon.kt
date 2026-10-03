@@ -7,7 +7,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-/** Shared visual weight for morph glyphs beside screen titles. */
 object TopBarIconDefaults {
     val Size = 22.dp
     val StrokeWidth = 2.25.dp

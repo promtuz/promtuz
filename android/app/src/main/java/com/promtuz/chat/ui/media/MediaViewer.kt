@@ -19,11 +19,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import com.promtuz.chat.ui.components.MenuAction
 
-/**
- * One thing the viewer can show. [thumb] is what the entry point already draws and is what
- * flies during the open and close transition; [load] produces the full picture once the
- * viewer is open. A video carries its file in [videoPath] and uses [thumb] as its poster.
- */
+/** [thumb] is what the entry point draws and what flies; [load] produces the full picture once open. */
 data class MediaItem(
     val key: String,
     val thumb: ImageBitmap?,
@@ -40,7 +36,7 @@ data class MediaItem(
     val load: suspend () -> ImageBitmap? = { thumb },
     val shareName: String = key,
     val byteSize: Long? = null,
-    /** Extra overflow entries after the built-in Save and Share. Each list is one group. */
+    /** Extra overflow menu groups after the built-in entries. */
     val actions: List<List<MenuAction>> = emptyList(),
     val message: com.promtuz.chat.domain.model.MessageLocation? = null,
 )
@@ -80,21 +76,12 @@ class MediaSession(items: List<MediaItem>, val startIndex: Int) {
     var items by mutableStateOf(items)
 }
 
-/** Where an entry point sits on screen, so the viewer can grow out of it and shrink back. */
 class MediaOrigin(val coordinates: LayoutCoordinates, val cornerRadius: Dp, val clip: (() -> Rect?)?)
 
-/**
- * The band a list shows its items in, in window coordinates. A chat provides the strip
- * between its bars, so a picture half under a bar flies out of, and back into, exactly the
- * part of it that is visible, never the part the bar covers.
- */
+/** The band a list shows its items in, in window coordinates. */
 val LocalMediaClip = compositionLocalOf<(() -> Rect?)?> { null }
 
-/**
- * The app-wide viewer. Screens hand it a list and an index; [MediaViewerHost], mounted once
- * above navigation, does the rest. Not a route: the screen underneath stays live and keeps
- * its scroll.
- */
+/** Not a route: the screen underneath stays live and keeps its scroll. */
 object MediaViewer {
     var session by mutableStateOf<MediaSession?>(null)
         private set
@@ -121,7 +108,6 @@ object MediaViewer {
 
     internal fun origin(key: String): MediaOrigin? = origins[key]?.takeIf { it.coordinates.isAttached }
 
-    /** [key]'s rectangle in [host]'s coordinates and its corner radius in px, if it is on screen. */
     /** [key]'s visible band in [host]'s coordinates, if its list declared one. */
     fun originClipIn(key: String, host: LayoutCoordinates?): Rect? {
         val h = host?.takeIf { it.isAttached } ?: return null
@@ -131,6 +117,7 @@ object MediaViewer {
         return Rect(tl, br)
     }
 
+    /** [key]'s rectangle in [host]'s coordinates and its corner radius in px, if it is on screen. */
     fun originRectIn(key: String, host: LayoutCoordinates?, density: Density): Pair<Rect, Float>? {
         val origin = origin(key) ?: return null
         val h = host?.takeIf { it.isAttached } ?: return null

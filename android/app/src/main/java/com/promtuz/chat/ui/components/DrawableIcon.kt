@@ -21,21 +21,8 @@ import com.promtuz.chat.R
 val IconGrid = 24.dp
 
 /**
- * [size] is the slot the icon *measures* as — always square — not a cap on what it
- * draws. Art that runs past the grid (a bell with ring lines, a pin with a slash)
- * keeps drawing at grid scale and bleeds past the slot's sides, centered, so its
- * subject matches every other icon and neighbours still lay out on a uniform grid.
- * Left null, the icon sizes itself the way it always has.
- *
- * What matters is scale, not fit: the drawable is drawn at its declared size times
- * [size]/[IconGrid], so one viewport unit is always the same number of dp whatever
- * the viewport measures. Normalising to the slot instead — fitting, or matching the
- * slot's height — silently shrinks any icon whose viewport is bigger than the grid
- * (a 27x28 pin-slash would land at 86% beside a 24x24 pin, subject and stroke both).
- * Material's [Icon] paints with ContentScale.Fit, so a plain square [Modifier.size]
- * does exactly that; [Modifier.requiredSize] is what escapes the slot's constraints.
- *
- * Nothing between here and the icon may clip, or the bleed is cut back off.
+ * [size] is the square slot the icon measures as. The art draws at grid scale and may
+ * bleed past the slot, so nothing between here and the icon may clip.
  */
 @Composable
 fun DrawableIcon(
@@ -51,8 +38,7 @@ fun DrawableIcon(
         return
     }
 
-    // A vector always reports an intrinsic size — its android:width/height, which the
-    // house style keeps equal to the viewport. Painters that don't just fill the slot.
+    // A vector's intrinsic size is its android:width/height, which matches its viewport.
     val intrinsic = painter.intrinsicSize
     val scale = size / IconGrid
     val drawn = with(LocalDensity.current) {
@@ -62,7 +48,7 @@ fun DrawableIcon(
     }
 
     Box(modifier.size(size), contentAlignment = Alignment.Center) {
-        // requiredSize ignores the slot's constraints — that's what lets it overflow.
+        // requiredSize ignores the slot's constraints, which lets the art overflow.
         Icon(painter, desc, Modifier.requiredSize(drawn), tint)
     }
 }

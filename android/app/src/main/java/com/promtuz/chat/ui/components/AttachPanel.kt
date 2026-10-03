@@ -45,9 +45,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 /*
- * The region is as tall as whatever is moving: the keyboard while it moves, the panel otherwise.
- * Under a keyboard that is leaving the panel snaps in first, and under one that is arriving it
- * stays until the keyboard has fully covered it, so the messages above never shift.
+ * The region is as tall as whatever is moving. The panel snaps in under a leaving keyboard and
+ * stays under an arriving one until it is covered, so the messages above never shift.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

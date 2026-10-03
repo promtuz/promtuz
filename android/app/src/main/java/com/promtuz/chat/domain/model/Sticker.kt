@@ -20,7 +20,6 @@ data class StickerRef(
     val key: String get() = "$packHex:$idHex"
 }
 
-/** A kept pack with its roster, in picker order. */
 @Immutable
 data class UiStickerPack(
     val packHex: String,

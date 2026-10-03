@@ -3,11 +3,7 @@ package com.promtuz.chat.domain.model
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.ImageBitmap
 
-/**
- * A message's payload; the bubble switches on the variant. Media variants hold
- * pre-decoded, process-cached [ImageBitmap]s (never raw ByteArray) so their
- * value-equality is stable across reactive re-reads.
- */
+/** Media variants hold process-cached [ImageBitmap]s so value equality is stable across re-reads. */
 @Immutable
 sealed interface MessageContent {
     data class Text(val text: String) : MessageContent
@@ -20,25 +16,12 @@ sealed interface MessageContent {
         val height: Int,
     ) : MessageContent
 
-    /**
-     * Several media messages sharing a `group_id`, drawn as one unit.
-     *
-     * Each item stays its own message on the wire and in storage — its own
-     * dispatch id, status and transfer — which is what lets a later pick join an
-     * existing album instead of landing at the bottom as a separate bubble. Only
-     * the rendering is collapsed. The caption rides the first item sent, so it's
-     * lifted here rather than left buried in one member.
-     */
+    /** Media messages sharing a `group_id`, drawn as one unit; each item stays its own message. */
     data class Album(
         val caption: String,
         val items: List<AlbumItem>,
     ) : MessageContent
 
-    /**
-     * A membership or title change, narrated between the messages it happened
-     * between. Not a bubble — a centred line with no author, no reactions and
-     * nothing to reply to.
-     */
     data class System(val event: SystemEventKind, val actor: String, val target: String, val detail: String = "") :
         MessageContent
 
@@ -56,14 +39,11 @@ sealed interface MessageContent {
         val localPath: String?,
     ) : MessageContent
 
-    /** The reference supplies dimensions before the image is downloaded. */
     data class Sticker(val sticker: StickerRef) : MessageContent
 
     /**
-     * A finished call, narrated where it happened like a system line but with
-     * its own icon. [outgoing] is our direction; [durationSecs] is set only
-     * when it connected, otherwise [missed] tells a missed call from a
-     * declined or unanswered one.
+     * [durationSecs] is set only when the call connected; otherwise [missed] tells
+     * a missed call from a declined or unanswered one.
      */
     data class Call(
         val outgoing: Boolean,
@@ -71,11 +51,7 @@ sealed interface MessageContent {
         val missed: Boolean,
     ) : MessageContent
 
-    /**
-     * Inline voice note. [waveform] is the sender's loudness samples (0–255),
-     * enough to draw the bubble before anything decodes; [bytes] is the encoded
-     * audio, handed to the player on the first tap.
-     */
+    /** [waveform] holds the sender's loudness samples (0..255); [bytes] is the encoded audio. */
     data class Voice(
         val dispatchIdHex: String,
         val mime: String,
@@ -83,15 +59,13 @@ sealed interface MessageContent {
         val waveform: ByteArray,
         val bytes: ByteArray,
     ) : MessageContent {
-        // Identity equality: the arrays are immutable and keyed by dispatch id,
-        // and a byte-wise compare of every recording on every recomposition is
-        // the wrong trade.
+        // Equal by dispatch id: the arrays never change for an id, and a byte-wise
+        // compare of every recording on recomposition is too costly.
         override fun equals(other: Any?) = other is Voice && other.dispatchIdHex == dispatchIdHex
         override fun hashCode() = dispatchIdHex.hashCode()
     }
 }
 
-/** One line standing in for a media message wherever its body can't be shown. */
 fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
     1 -> "Photo"
     2 -> name.ifEmpty { "File" }
@@ -100,13 +74,22 @@ fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
     else -> ""
 }
 
-/** What a [MessageContent.System] row is narrating. */
+/** One line for a reply bar or an info header. */
+fun MessageContent.previewLine(): String = when (this) {
+    is MessageContent.Text -> text
+    is MessageContent.Image -> caption.ifBlank { mediaLabel(1) }
+    is MessageContent.Album -> caption.ifBlank { "${items.size} photos" }
+    is MessageContent.Attachment -> caption.ifBlank { mediaLabel(2, name) }
+    is MessageContent.Voice -> mediaLabel(3)
+    is MessageContent.Sticker -> mediaLabel(4)
+    is MessageContent.System, is MessageContent.Call -> ""
+}
+
 enum class SystemEventKind { Added, Left, Removed, Titled, Role, Rules }
 
 /**
- * A system row as core stores it. [target] is a member's hex for the membership
- * events, the new name for a rename, `<member hex>:<role>` for a role change and
- * `<rule>:<0|1>` for a rule change; [names] maps member hex to what to call them.
+ * [target] is a member hex for membership events, the new name for a rename,
+ * `<member hex>:<role>` for a role change and `<rule>:<0|1>` for a rule change.
  */
 fun systemContent(code: Int, actorHex: String?, target: String, names: Map<String, String>): MessageContent.System {
     val (subject, detail) = if (code == 6 || code == 7) target.substringBefore(':') to target.substringAfter(':', "")
@@ -126,6 +109,5 @@ fun systemContent(code: Int, actorHex: String?, target: String, names: Map<Strin
     )
 }
 
-/** One member of an [MessageContent.Album], still addressable by its own id. */
 @Immutable
 data class AlbumItem(val dispatchIdHex: String, val content: MessageContent)

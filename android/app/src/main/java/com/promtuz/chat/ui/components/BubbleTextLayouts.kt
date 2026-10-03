@@ -1,18 +1,16 @@
 package com.promtuz.chat.ui.components
 
+import android.content.Context
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SystemEventKind
 import com.promtuz.chat.domain.model.UiMessage
+import com.promtuz.chat.ui.text.timeOfDay
 
 /** Stable across every outgoing status, including pending and failed. */
 internal val BubbleStatusSize = 16.dp
 internal val BubbleStatusGap = 3.dp
 
-/**
- * Static helpers for a message's display text and its meta label (send time,
- * "edited" prefix, "deleted" placeholder). Draw-time only; no layout cache.
- */
 object BubbleTextLayouts {
     fun contentOf(msg: UiMessage): String =
         if (msg.deleted) "This message was deleted"
@@ -26,7 +24,6 @@ object BubbleTextLayouts {
             is MessageContent.Call, is MessageContent.Voice, is MessageContent.Sticker -> ""
         }
 
-    /** The narration for a group change, in the past tense. */
     fun systemLine(c: MessageContent.System): String {
         // Mid-sentence, we are "you".
         val target = if (c.target == "You") "you" else c.target
@@ -53,11 +50,8 @@ object BubbleTextLayouts {
         }
     }
 
-    fun metaLabelOf(msg: UiMessage): String = buildString {
+    fun metaLabelOf(context: Context, msg: UiMessage): String = buildString {
         if (msg.edited && !msg.deleted) append("edited ")
-        append(clock(msg.timestampMs))
+        append(timeOfDay(context, msg.timestampMs))
     }
-
-    private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-    fun clock(ms: Long): String = clockFormat.format(java.util.Date(ms))
 }

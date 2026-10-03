@@ -7,9 +7,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
@@ -17,13 +17,10 @@ import com.promtuz.chat.ui.components.SimpleScreen
 
 @Composable
 fun IdentityKeysScreen(onShareIdentity: () -> Unit, onRecoveryPhrase: () -> Unit) {
-    val direction = LocalLayoutDirection.current
     SimpleScreen({ Text(stringResource(R.string.identity_keys_title)) }) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize()
-                .padding(start = padding.calculateLeftPadding(direction), end = padding.calculateRightPadding(direction)),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp,
-                18.dp, padding.calculateBottomPadding() + 32.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {

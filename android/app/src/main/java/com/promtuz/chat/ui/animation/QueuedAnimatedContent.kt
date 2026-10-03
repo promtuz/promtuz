@@ -18,20 +18,8 @@ import androidx.compose.ui.Modifier
 import com.promtuz.chat.ui.constants.Tweens
 
 /**
- * Finish the visible transition before advancing, even when [targetState] changes
- * several times in one animation. Keep only the latest destination, not stale requests.
- *
- * Labels use a full [durationMillis] hop, followed by a [minDurationMillis] catch-up
- * hop when another request arrived mid-animation (the original home-title behavior).
- * With [ContentProgression.Integers], every intermediate integer is shown. Each hop
- * takes duration / remaining steps, bounded by [minDurationMillis]; reversing or
- * extending the destination takes effect after the active hop completes.
- *
- * Render the value passed to [content], not the external target. [transitionSpec]
- * receives a duration fixed for that hop; use it for size changes as well as entry
- * and exit. Defaults to the app's vertical slide/fade, with matching size timing.
- * Values use equality, support null, and should be immutable. Use Compose `key`
- * around this component when switching to an unrelated stream of values.
+ * Finishes each visible transition before advancing to the latest target; a mid-animation
+ * change gets a [minDurationMillis] catch-up hop. Render the value passed to [content].
  */
 @Composable
 fun <T> QueuedAnimatedContent(
@@ -57,8 +45,7 @@ fun <T> QueuedAnimatedContent(
     var hopDuration by remember { mutableIntStateOf(durationMillis) }
     val transition = rememberTransition(state, label)
 
-    // One collector per mounted component. Read only target changes and the idle
-    // boundary, so animation frames do not drive queue work or recomposition.
+    // Read only target changes and the idle boundary, so animation frames don't drive queue work.
     LaunchedEffect(state) {
         // Include the settled value: with animations disabled, Compose can pass
         // through busy -> idle before the collector observes the busy snapshot.

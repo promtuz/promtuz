@@ -31,9 +31,8 @@ private fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
 private val hiddenStroke = line(12f, 12f, 12f, 12f)
 
 /**
- * Rounded centerlines on a 24-unit canvas; SVG sources: design/icons/outlined/morph.
- * Two compatible contours retain their identities during interrupted and reversed motion.
- * Directional bends use a smaller setback to preserve their tips at small sizes.
+ * Rounded centerlines on a 24-unit canvas, sourced from design/icons/outlined/morph. Two contours
+ * keep their identities through interrupted motion; bends use a small setback to keep tips sharp.
  */
 enum class MorphGlyph(internal val strokes: List<Float>, internal val angle: Float = 0f) {
     Back(bend(12f, 2.375f, 2.375f, 12f, 12f, 21.625f) + line(2.8f, 12f, 21.625f, 12f)),
@@ -72,17 +71,12 @@ fun rememberMorphIconState(glyph: MorphGlyph): MorphIconState {
     return remember { MorphIconState(coordinates, angle) }
 }
 
-/** [strokeWidth] is a fixed dp thickness, independent of the icon's layout size. */
 @Composable
 fun MorphIcon(glyph: MorphGlyph, description: String?, modifier: Modifier = Modifier,
     tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp) =
     MorphIcon(rememberMorphIconState(glyph), description, modifier, tint, strokeWidth)
 
-/**
- * [strokeWidth] stays fixed as the layout size changes. Zero draws nothing.
- * The centerlines fit inside the remaining space after the stroke and proportional
- * outer padding; a canvas too small for that thickness draws nothing.
- */
+/** [strokeWidth] stays fixed as the layout size changes; a canvas too small for it draws nothing. */
 @Composable
 fun MorphIcon(state: MorphIconState, description: String?, modifier: Modifier = Modifier,
     tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp) {

@@ -19,24 +19,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Severity of one console line; drives its colour in the screen. */
 enum class BackupLogLevel { STEP, INFO, OK, WARN, ERR }
 
 data class BackupLogLine(val id: Long, val level: BackupLogLevel, val text: String)
 
-/**
- * Developer utility behind Settings → Developer → Backup & Restore.
- *
- * Two operations, both narrated line-by-line into [console] because the whole
- * point of the screen is to see what the backup pipeline actually does — the
- * production path (RecoveryStore) is deliberately silent and that silence is
- * exactly what makes a failed restore look like a successful one.
- *
- * **Restore is additive.** It goes through `backup_import_merge`, which
- * inserts only rows we don't already hold: nothing existing is replaced,
- * deleted or renamed. The blob decrypts under a key its owner holds, so its
- * plaintext is editable by that owner and must never outrank a live row.
- */
+/** Restore only merges: the blob's owner holds its key and can edit its plaintext, so it never
+ *  outranks a live row. */
 class BackupRestoreVM(private val application: Application) : ViewModel() {
 
     private val _console = MutableStateFlow<List<BackupLogLine>>(emptyList())
@@ -45,10 +33,6 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
-    /** Size of the last snapshot taken this session; gates the "save a copy" action. */
-    private val _snapshotBytes = MutableStateFlow<Int?>(null)
-    val snapshotBytes: StateFlow<Int?> = _snapshotBytes.asStateFlow()
-
     private var nextId = 0L
 
     init {
@@ -56,7 +40,6 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         describeExistingBlob()
     }
 
-    /** Suggested filename for the save-a-copy picker. */
     fun suggestedFileName(): String =
         "promtuz-backup-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ENGLISH).format(Date())}.pzbk"
 
@@ -65,11 +48,7 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         line(BackupLogLevel.INFO, "Console cleared.")
     }
 
-    /**
-     * Take a fresh snapshot and write it to the canonical
-     * `files/recovery/backup.pzbk` — the same file BackupWorker maintains and
-     * Android Auto Backup ships, so this exercises the real pipeline.
-     */
+    /** Writes the same file BackupWorker maintains, so this exercises the real pipeline. */
     fun snapshot() = run("Snapshot") {
         val target = blobFile()
         line(BackupLogLevel.INFO, "Target: ${target.absolutePath}")
@@ -86,8 +65,7 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
 
         withContext(Dispatchers.IO) {
             target.parentFile?.mkdirs()
-            // Same atomic swap BackupWorker uses, so a crash mid-write can
-            // never leave a half-blob where a good one used to be.
+            // Atomic swap, so a crash mid-write never leaves a half-written blob.
             val tmp = File(target.parentFile, "${target.name}.tmp")
             tmp.writeBytes(blob)
             if (!tmp.renameTo(target)) {
@@ -95,12 +73,10 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
                 error("atomic rename failed — blob left untouched")
             }
         }
-        _snapshotBytes.value = blob.size
         line(BackupLogLevel.OK, "Wrote ${blob.size} bytes (tmp → atomic rename)")
         line(BackupLogLevel.INFO, "Use \"Save a copy\" to export this file off-device.")
     }
 
-    /** Copy the on-disk blob to a user-chosen location via the SAF picker. */
     fun saveCopyTo(uri: Uri) = run("Save a copy") {
         val source = blobFile()
         if (!source.exists()) {
@@ -116,11 +92,7 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         line(BackupLogLevel.OK, "Copied ${bytes.size} bytes to ${displayName(uri)}")
     }
 
-    /**
-     * Merge a user-picked `.pzbk` into the live DBs. Additive only — see the
-     * class doc. Decryption is keyed on the current identity, so a blob from a
-     * different identity fails authentication rather than importing garbage.
-     */
+    /** A blob from another identity fails authentication rather than importing garbage. */
     fun restoreFrom(uri: Uri) = run("Restore") {
         line(BackupLogLevel.INFO, "Source: ${displayName(uri)}")
         val blob = withContext(Dispatchers.IO) {
@@ -184,7 +156,6 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         )
     }
 
-    /** `n in blob, m added` → a note about the difference, when there is one. */
     private fun skipped(inBlob: UInt, added: UInt): String {
         val n = inBlob.toLong() - added.toLong()
         return if (n > 0) "  ($n already present, kept)" else ""
@@ -202,7 +173,6 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         line(BackupLogLevel.INFO, "On disk: ${f.length()} bytes, modified $stamp")
     }
 
-    /** Parse the `PZBK ‖ version` header locally so a wrong file fails clearly. */
     private fun describeHeader(blob: ByteArray) {
         if (blob.size < 5) {
             line(BackupLogLevel.ERR, "Too short to be a backup blob (${blob.size} bytes)")
@@ -223,7 +193,6 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
         }
     }.getOrNull() ?: uri.lastPathSegment ?: uri.toString()
 
-    /** One-at-a-time guard + uniform start/failure narration for every action. */
     private fun run(label: String, block: suspend () -> Unit) {
         if (_busy.value) {
             line(BackupLogLevel.WARN, "Busy — $label ignored.")

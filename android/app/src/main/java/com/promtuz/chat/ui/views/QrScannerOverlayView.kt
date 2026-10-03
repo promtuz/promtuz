@@ -56,14 +56,12 @@ class QrScannerOverlayView(
         val width = width.toFloat()
         val height = height.toFloat()
 
-        // Calculate center position
         val left = (width - guideSize) / 2f
         val top = (height - guideSize) / 2f
         val right = left + guideSize
         val bottom = top + guideSize
 
 
-        // Top-left corner bracket
         guideTopLeft.reset()
         guideTopLeft.moveTo(left + guideCornerLength, top)
         guideTopLeft.lineTo(left + guideCornerRadius, top)
@@ -75,7 +73,6 @@ class QrScannerOverlayView(
         canvas.drawPath(guideTopLeft, paint)
 
 
-        // Top-right corner bracket
         guideTopRight.reset()
         guideTopRight.moveTo(right - guideCornerLength, top)
         guideTopRight.lineTo(right - guideCornerRadius, top)
@@ -87,7 +84,6 @@ class QrScannerOverlayView(
         canvas.drawPath(guideTopRight, paint)
 
 
-        // Bottom-left corner bracket
         guideBottomLeft.reset()
         guideBottomLeft.moveTo(left, bottom - guideCornerLength)
         guideBottomLeft.lineTo(left, bottom - guideCornerRadius)
@@ -99,7 +95,6 @@ class QrScannerOverlayView(
         canvas.drawPath(guideBottomLeft, paint)
 
 
-        // Bottom-right corner bracket
         guideBottomRight.reset()
         guideBottomRight.moveTo(right, bottom - guideCornerLength)
         guideBottomRight.lineTo(right, bottom - guideCornerRadius)

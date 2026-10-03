@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -66,7 +65,6 @@ import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val appVM = koinInject<AppVM>()
@@ -86,12 +84,8 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val typingMembers by chatVM.typingMembers.collectAsState()
     val headerReady by chatVM.headerReady.collectAsState()
 
-    // Delete needs the same standing the home list uses to decide what to offer
-    // (can we leave, did we found it, are we still a member), and that already
-    // lives on the home summaries — one source, not a second read of our own.
-    // The lookup is derived so a message in some other chat doesn't recompose
-    // this bar, and keyed on the id because that is a plain getter rather than
-    // a State the derivation could re-read.
+    // Delete reads the home summary's standing. Derived so another chat's message doesn't
+    // recompose this bar, and keyed on the id because it is a plain getter, not State.
     val chats by appVM.chats.collectAsState()
     val summary by remember(chatVM.conversationHex) {
         derivedStateOf { chats.firstOrNull { it.conversationHex == chatVM.conversationHex } }
@@ -130,13 +124,10 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         }
     }
 
-    // The summaries come back empty on a transient FFI failure, which hides the
-    // delete dialog without answering it; a flag left standing would raise it
-    // again unasked once the list recovers.
+    // A transient FFI failure empties the summaries and hides the dialog unanswered.
+    // Reset the flag so it doesn't return unasked when the list recovers.
     LaunchedEffect(summary == null) { if (summary == null) confirmDelete = false }
 
-    // Who's typing, named — a group can have several at once, and "3 people
-    // typing…" reads better than three names past a couple.
     val typingLine = remember(typingMembers, memberNames) {
         val names = typingMembers.mapNotNull { memberNames[it] }
         when {
@@ -150,8 +141,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val presenceNow = rememberPresenceTime()
     val connection = connectionLabel()
 
-    // Subtitle cascade: live activity beats presence; silence renders nothing.
-    // A group has no single presence, so it falls back to its member count.
     val (subtitle, subtitleColor) = when {
         connection != null -> connection to colors.onSurfaceVariant
         typing && isGroup -> typingLine to chatTheme.accent
@@ -224,9 +213,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                                     confirmClear = true
                                 },
                             )
-                            // The dialog needs the summary to know what it is
-                            // deleting; while it hasn't arrived there is nothing
-                            // honest to offer, so offer nothing.
+                            // The dialog needs the summary, so Delete waits for it.
                             if (summary != null) add(
                                 MenuAction("Delete Chat", R.drawable.oi_trash, destructive = true) {
                                     confirmDelete = true
@@ -238,8 +225,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             )
             }
         },
-        // freezeOnExit: bake the blur to pixels while the nav card scales out (Haze
-        // samples screen-space and shatters under an ancestor scale).
+        // freezeOnExit bakes the blur while the card scales out; Haze shatters under an ancestor scale.
         modifier = Modifier
             .freezeOnExit()
             .hazeEffect(haze, chatBarHaze()),
@@ -251,14 +237,8 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         onConfirm = { confirmClear = false; appVM.clearHistory(chatVM.conversationHex) },
         onDismiss = { confirmClear = false },
     )
-    // Both paths take the chat we are reading out from under us, so the step
-    // back to the list waits on the work landing: a leave that fails keeps the
-    // chat, and the screen showing it is where the user should still be.
-    //
-    // That wait runs on AppVM, a Koin `single`, so it outlives this screen —
-    // leaving needs the network and deleting needs the DB, and the user can be
-    // in Settings by the time either lands. Step back only while this chat is
-    // still what's on top, or the pop lands on whatever they moved to.
+    // Pops after the work lands, so a failed leave keeps the chat. AppVM outlives this
+    // screen, so pop only while this chat is still on top.
     val popThisChat = {
         val top = navigator.backStack.lastOrNull()
         if ((top as? Routes.Chat)?.conversation == chatVM.conversationHex) navigator.back()
@@ -273,7 +253,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     }
 }
 
-/** Only the text block opens group info; the avatar and surrounding toolbar do not. */
+/** Only the text block opens the chat's info; the avatar and the rest of the toolbar do not. */
 @Composable
 internal fun ChatBarTitle(
     name: String,
@@ -300,11 +280,6 @@ internal fun ChatBarTitle(
     }
 }
 
-/**
- * The audio or video call button in a 1:1 chat. A call needs the microphone
- * (and, for video, the camera), so it asks for those first and starts the call
- * only once they are granted; a call with a dead device is worse than no call.
- */
 @Composable
 private fun CallButton(peerHex: String, video: Boolean) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -339,15 +314,8 @@ private fun CallButton(peerHex: String, video: Boolean) {
     }
 }
 
-/** "1 member" / "4 members" — a group of one is a real state after a removal. */
 fun memberTally(n: Int): String = if (n == 1) "1 member" else "$n members"
 
-/**
- * The top bar while searching: the field where the name was, and the walk
- * through the hits where the menu was. Hits are counted newest first, so
- * "up" goes further back — the direction the thumb expects in a chat that
- * grows downward.
- */
 @Composable
 private fun SearchField(chatVM: ChatVM, query: String) {
     val colors = MaterialTheme.colorScheme

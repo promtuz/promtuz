@@ -29,17 +29,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
 
-/** How much of the line an emoji glyph takes, relative to the font size; a touch over 1 matches how system emoji sit. */
+/** Emoji size relative to the font size; slightly over 1 matches how system emoji sit. */
 internal const val EmojiSizeEm = 1.2f
 private val EmojiEm = EmojiSizeEm.em
 
-/**
- * [Text] that draws emoji from the bundled pack, so a message or a reaction
- * looks the same on every device. Plain text, and text the pack cannot draw,
- * goes through the ordinary path untouched. The original string is what gets
- * laid out, copied and read aloud: each glyph is inline content whose
- * alternate text is the cluster it replaces.
- */
+/** Pack emoji are inline content over the original string, which stays what is copied and read aloud. */
 @Composable
 fun EmojiText(
     text: String,

@@ -18,10 +18,8 @@ import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 
 /**
- * Center the cap-to-baseline area, like vertical trim in a design tool. Keep the
- * full layout height so accents, descenders and title transitions aren't clipped.
- * Measure a stable capital rather than the title itself, so changing words or
- * selection counts doesn't move the baseline.
+ * Centers the cap-to-baseline area without clipping the layout. Measures a fixed capital,
+ * so changing words or counts don't move the baseline.
  */
 @Composable
 internal fun Modifier.centerBarTitle(style: TextStyle): Modifier {

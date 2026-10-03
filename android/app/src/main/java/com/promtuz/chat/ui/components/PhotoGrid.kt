@@ -49,6 +49,7 @@ import coil.decode.VideoFrameDecoder
 import coil.request.ImageRequest
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.text.clock
 import com.promtuz.chat.utils.media.GalleryItem
 import com.promtuz.chat.utils.media.loadGallery
 
@@ -77,16 +78,6 @@ private fun Context.galleryAccess(perms: Array<String>): Pair<Boolean, Boolean> 
     return any to partial
 }
 
-private fun formatDuration(ms: Long): String {
-    val totalSec = ms / 1000
-    return "%d:%02d".format(totalSec / 60, totalSec % 60)
-}
-
-/**
- * Inline MediaStore grid for the attach panel's Photos tab. Falls back to the
- * permissionless system picker ([onOpenSystemPicker]) when gallery permission
- * isn't granted, so picking media never hard-depends on this permission.
- */
 @Composable
 fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpenCamera: () -> Unit) {
     val context = LocalContext.current
@@ -94,8 +85,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
     var access by remember { mutableStateOf(context.galleryAccess(perms)) }
     val (hasAccess, partial) = access
 
-    // Bumped on every permission result so the grid reloads — notably after "Select
-    // more" in API 34 partial access, where hasAccess stays true so it alone won't re-key.
+    // Bumped on every permission result: after "Select more" hasAccess stays true and alone wouldn't reload.
     var reload by remember { mutableIntStateOf(0) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         access = context.galleryAccess(perms)
@@ -134,8 +124,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
             }
         }
 
-        // API 34 partial access already scopes the query to user-picked items —
-        // this just re-opens the system chooser to add more to that set.
+        // Partial access already scopes the query; this re-opens the system chooser to add more.
         if (partial) {
             TextButton(
                 onClick = { launcher.launch(perms) },
@@ -180,7 +169,7 @@ private fun PhotoCell(item: GalleryItem, order: Int, onToggle: () -> Unit) {
 
         if (item.isVideo) {
             Text(
-                formatDuration(item.durationMs),
+                clock(item.durationMs),
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White,
                 modifier = Modifier

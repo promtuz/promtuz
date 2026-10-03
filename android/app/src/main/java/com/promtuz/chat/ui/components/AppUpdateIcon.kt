@@ -23,7 +23,6 @@ fun AppUpdateIcon(onClick: () -> Unit, modifier: Modifier = Modifier, updates: U
 
     IconButton(onClick, modifier) {
         val s = state
-        // TODO: Temporarily allowing a separate progress indicator, will need xit included in the icon itself (lottie) later on
         if (s is UpdateState.Downloading) {
             CircularProgressIndicator({ s.progress }, Modifier.size(22.dp), strokeWidth = 2.dp)
         } else {

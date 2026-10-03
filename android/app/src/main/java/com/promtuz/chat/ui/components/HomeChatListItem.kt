@@ -41,6 +41,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,7 +51,7 @@ import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.SendStatus
-import com.promtuz.chat.utils.common.parseMessageDate
+import com.promtuz.chat.ui.text.parseMessageDate
 import kotlinx.coroutines.withTimeoutOrNull
 import com.promtuz.chat.utils.media.rememberAvatar
 
@@ -106,10 +107,8 @@ fun HomeChatListItem(
                 .fillMaxWidth()
                 .onGloballyPositioned { rowCoord.c = it }
                 .indication(interaction, ripple())
-                // One gesture arbitrates tap / scroll / long-press: a quick lift opens
-                // the chat, a pre-timeout drag lets the list scroll, and a stationary
-                // hold opens the menu — then the SAME finger drags to an item and
-                // releases to pick it (the iconic hold-and-swipe).
+                // A quick lift opens the chat, an early drag scrolls the list, and a hold
+                // opens the menu for the same finger to drag to an item.
                 .pointerInput(chat.conversationHex, pinned, muted, unread) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -135,31 +134,12 @@ fun HomeChatListItem(
                                     val at = rowCoord.c?.takeIf { it.isAttached }?.localToRoot(down.position)
                                         ?: Offset.Zero
                                     menuState.open(HomeMenuAnchor(at, groups))
-                                    var dragged = false
-                                    while (true) {
-                                        val ev = awaitPointerEvent()
-                                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
-                                        val root = rowCoord.c?.takeIf { it.isAttached }?.localToRoot(ch.position)
-                                        if (!ch.pressed) {
-                                            if (dragged) {
-                                                val a = root?.let(menuState::release)
-                                                if (a != null) {
-                                                    haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                                                    a.onClick()
-                                                }
-                                                menuState.close()
-                                            }
-                                            break
-                                        }
-                                        if (!dragged &&
-                                            (ch.position - down.position).getDistance() > viewConfiguration.touchSlop
-                                        ) dragged = true
-                                        if (dragged && root != null && menuState.drag(root))
-                                            haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                        ch.consume()
+                                    dragSelect(down, haptic, { menuState.hitIndex(rowCoord.c, it) }, { menuState.hovered = it }) {
+                                        groups.flatten().getOrNull(it)?.onClick()
+                                        menuState.close()
                                     }
                                 }
-                                else -> {} // SCROLL / GONE — leave it for the list to scroll
+                                else -> {} // SCROLL or GONE: the list scrolls
                             }
                         } finally {
                             interaction.tryEmit(PressInteraction.Release(press))
@@ -206,7 +186,7 @@ fun HomeChatListItem(
                             }
                         }
                         Text(
-                            parseMessageDate(chat.timestampMs),
+                            parseMessageDate(LocalContext.current, chat.timestampMs),
                             style = type.bodySmallEmphasized,
                             color = if (unread && !muted) colors.primary else colors.onSurfaceVariant.copy(0.7f),
                         )
@@ -265,7 +245,6 @@ fun HomeChatListItem(
     }
 }
 
-/** The preview/status line: live typing beats pairing state beats last message. */
 private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme): Pair<String, Color> = when {
     typing -> "typing…" to colors.primary
     chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to colors.primary.copy(0.8f)
@@ -282,7 +261,6 @@ private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme):
     }
 }
 
-/** "Couldn't connect" plus the decline reason (DECLINE_* code), when known. */
 private fun declineText(reason: Int?): String = when (reason) {
     0 -> "Couldn’t start the chat. Try again."
     1 -> "Couldn't connect — their invite was already used"
@@ -313,15 +291,8 @@ private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
     }
 }
 
-/**
- * Deleting a group and leaving one are different acts, and the dialog says so
- * rather than quietly picking. Delete is silent — the group carries on without
- * you and nobody there learns you have gone — so offering only that would be a
- * trapdoor for someone who meant to say goodbye.
- */
 enum class RequestDecision { Delete, Block }
 
-/** Deleting or blocking a request removes its chat. Neither tells the requester. */
 @Composable
 fun RequestConfirmDialog(decision: RequestDecision, name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     val block = decision == RequestDecision.Block
@@ -412,10 +383,6 @@ fun DeleteChatDialog(
     )
 }
 
-/**
- * Clearing is not leaving and not deleting — the chat stays, and so does
- * everyone else's copy. Confirmed all the same: the messages don't come back.
- */
 @Composable
 fun ClearHistoryDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AppAlertDialog(
@@ -439,7 +406,7 @@ fun ClearHistoryDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Uni
 private val OnlineDot = Color(0xFF34C759)
 private val IdleDot = Color(0xFFF5A623)
 
-/** Generic status colour for the avatar dot; null hides it (offline/unknown). */
+/** Null hides the avatar dot. */
 private fun presenceColor(p: Presence?): Color? = when (p) {
     Presence.Online -> OnlineDot
     is Presence.Idle -> IdleDot

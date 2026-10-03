@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.screens
 
+import android.content.Context
+import android.text.format.Formatter
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.ui.components.AppAlertDialog
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -10,7 +13,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -32,7 +34,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -51,7 +52,6 @@ import com.promtuz.chat.ui.constants.Tweens
 import com.promtuz.chat.update.UpdateManifest
 import com.promtuz.chat.update.UpdateState
 import org.koin.androidx.compose.koinViewModel
-import java.util.Locale
 
 @Composable
 fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
@@ -59,7 +59,6 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
     val channel by viewModel.channel.collectAsState()
     val notes by viewModel.notes.collectAsState()
     val context = LocalContext.current
-    val direction = LocalLayoutDirection.current
     var pendingChannel by remember { mutableStateOf<String?>(null) }
 
     LifecycleResumeEffect(viewModel) {
@@ -100,11 +99,8 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
         },
     ) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(
-                start = padding.calculateLeftPadding(direction),
-                end = padding.calculateRightPadding(direction),
-            ),
-            contentPadding = PaddingValues(24.dp, padding.calculateTopPadding() + 40.dp, 24.dp, padding.calculateBottomPadding() + 32.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(24.dp, 40.dp, 32.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -144,25 +140,25 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                             }
                             is UpdateState.Available -> {
                                 UpdateTitle("Update available")
-                                UpdateDetail(versionLine(shown.manifest))
+                                UpdateDetail(versionLine(context, shown.manifest))
                                 UpdateAction("Download update", active) { viewModel.download(shown.manifest) }
                             }
                             is UpdateState.Downloading -> {
                                 UpdateTitle("Downloading update")
                                 UpdateDetail("Promtuz ${shown.manifest.versionName}")
                                 LinearProgressIndicator({ shown.progress }, Modifier.fillMaxWidth())
-                                UpdateDetail("${(shown.progress * 100).toInt()}% · ${formatSize(shown.manifest.size)}")
+                                UpdateDetail("${(shown.progress * 100).toInt()}% · ${Formatter.formatShortFileSize(context, shown.manifest.size)}")
                                 TextButton(viewModel::cancelDownload, enabled = active) { Text("Cancel download") }
                             }
                             is UpdateState.Ready -> {
                                 UpdateTitle("Ready to install")
-                                UpdateDetail(versionLine(shown.manifest))
+                                UpdateDetail(versionLine(context, shown.manifest))
                                 UpdateDetail("Promtuz closes while the update installs.")
                                 UpdateAction("Install update", active) { viewModel.install(shown.manifest, shown.apk) }
                             }
                             is UpdateState.Installing -> {
                                 UpdateTitle("Installing update")
-                                UpdateDetail(versionLine(shown.manifest))
+                                UpdateDetail(versionLine(context, shown.manifest))
                                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
                             }
                             is UpdateState.PermissionNeeded -> {
@@ -226,10 +222,5 @@ private fun UpdateDetail(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
 }
 
-private fun versionLine(manifest: UpdateManifest) = "Promtuz ${manifest.versionName} · ${formatSize(manifest.size)}"
-
-internal fun formatSize(bytes: Long): String = when {
-    bytes >= 1_000_000 -> String.format(Locale.ROOT, "%.1f MB", bytes / 1_000_000.0)
-    bytes >= 1_000 -> String.format(Locale.ROOT, "%.0f KB", bytes / 1_000.0)
-    else -> "$bytes B"
-}
+private fun versionLine(context: Context, manifest: UpdateManifest) =
+    "Promtuz ${manifest.versionName} · ${Formatter.formatShortFileSize(context, manifest.size)}"

@@ -10,6 +10,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.text.clock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -34,10 +35,8 @@ fun MediaInfoDialog(item: MediaItem, onDismiss: () -> Unit) {
                         r.setDataSource(item.videoPath)
                         width = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
                         height = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                        r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let {
-                            val seconds = it / 1000
-                            add("Duration" to "%d:%02d".format(seconds / 60, seconds % 60))
-                        }
+                        r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                            ?.let { add("Duration" to clock(it)) }
                     } finally { r.release() }
                 } else if (item.filePath != null) runCatching {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

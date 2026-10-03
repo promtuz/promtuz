@@ -11,30 +11,19 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 
-/**
- * The chat's resolved color vocabulary — semantic roles the M3 [ColorScheme] has no
- * slot for. Chat renderers read this (via [LocalChatColors]) instead of reaching into
- * the scheme, so a preset can recolor the whole conversation without touching the app
- * shell. Resolved once at the theme root from the user's [ChatColors] tokens; `null`
- * tokens fall back to scheme roles, so the default preset tracks light/dark for free.
- */
+/** Chat renderers read colors from here, never the scheme, so a preset recolors only the conversation. */
 @Immutable
 data class ChatColorScheme(
     val outgoingBubble: Color,
     val onOutgoingBubble: Color,
     val incomingBubble: Color,
     val onIncomingBubble: Color,
-    /** Send button, cursor, typing indicator — the chat's active color. */
     val accent: Color,
-    /** Translucent top/bottom bar tint base (the haze). */
+    /** Tint base for the translucent bars' haze. */
     val bar: Color,
     /** System-event labels (alpha applied at use). */
     val marker: Color,
-    /**
-     * Name colours for group senders, picked by hashing the member's key. Not
-     * an identity — just enough separation that a run of messages reads as
-     * several people. Kept off the accent so a name never looks tappable.
-     */
+    /** Kept off the accent so a sender's name never looks tappable. */
     val senderPalette: List<Color>,
 )
 
@@ -53,11 +42,7 @@ fun ChatColors.resolve(scheme: ColorScheme) = ChatColorScheme(
     senderPalette = SENDER_PALETTE,
 )
 
-/**
- * Fixed hues rather than scheme roles: they must stay distinguishable from one
- * another, which a generated ramp off one seed colour cannot promise. Tuned to
- * read on both the light and dark incoming bubble.
- */
+/** Fixed hues: a ramp off one seed color can't keep them distinguishable. */
 private val SENDER_PALETTE = listOf(
     Color(0xFF4E8FD9), // blue
     Color(0xFFCF6E5B), // terracotta
@@ -70,11 +55,9 @@ private val SENDER_PALETTE = listOf(
 
 private fun Long?.orRole(role: Color): Color = this?.let { Color(it) } ?: role
 
-/** Readable text for a user-picked bubble fill the scheme knows nothing about. */
 private fun bestOn(argb: Long): Color =
     if (Color(argb).luminance() > 0.4f) Color(0xE6000000) else Color.White
 
-/** The one blur recipe both chat bars share. */
 @Composable
 fun chatBarHaze(): HazeStyle {
     val bar = LocalChatColors.current.bar

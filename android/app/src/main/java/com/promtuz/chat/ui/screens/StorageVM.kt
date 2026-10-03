@@ -26,14 +26,17 @@ internal class StorageVM(private val source: StorageSource) : ViewModel() {
         private set
     val snackbars = SnackbarHostState()
     private var refreshPending = false
+    /** Confirmed changes wait for the running refresh instead of being dropped. */
+    private val actions = ArrayDeque<suspend () -> String>()
 
     init {
         viewModelScope.launch { source.changes.collect { refresh() } }
     }
 
     fun refresh(action: (suspend () -> String)? = null) {
+        if (action != null) actions.addLast(action)
         if (busy) {
-            if (action == null) refreshPending = true
+            refreshPending = true
             return
         }
         busy = true
@@ -41,9 +44,11 @@ internal class StorageVM(private val source: StorageSource) : ViewModel() {
         viewModelScope.launch {
             var actionFinished = false
             try {
-                val feedback = action?.invoke()
-                actionFinished = action != null
-                feedback?.let { viewModelScope.launch { snackbars.showSnackbar(it) } }
+                while (actions.isNotEmpty()) {
+                    val feedback = actions.removeFirst().invoke()
+                    actionFinished = true
+                    viewModelScope.launch { snackbars.showSnackbar(feedback) }
+                }
                 usage = source.read()
                 try {
                     media = source.media()

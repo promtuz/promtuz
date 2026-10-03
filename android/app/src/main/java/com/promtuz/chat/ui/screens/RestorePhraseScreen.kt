@@ -38,12 +38,7 @@ import com.promtuz.chat.security.BlobOutcome
 import com.promtuz.chat.security.RecoveryStore
 import kotlinx.coroutines.launch
 
-/**
- * Channel B restore (IDENTITY_RECOVERY.md §5.2): type the 24 words + a
- * display name, become yourself again. The name is a fallback — if the
- * Auto-Backup blob is present its backed-up name wins. FLAG_SECURE while
- * a secret is on screen.
- */
+/** The typed name is a fallback: a name in the Auto-Backup blob wins. */
 @Composable
 fun RestorePhraseScreen(onRestored: () -> Unit) {
     val context = LocalContext.current
@@ -56,11 +51,10 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
-    /** Set when the identity came back but the history didn't; blocks the
-     *  silent hand-off into the app so the loss is acknowledged, not missed. */
+    // Set when the identity came back but the history didn't, so the loss is acknowledged.
     var historyWarning by remember { mutableStateOf<String?>(null) }
 
-    // The typed phrase IS the private key — keep it out of screenshots/recents.
+    // The typed phrase is the private key, so keep it out of screenshots and recents.
     val window = (context as? Activity)?.window
     DisposableEffect(Unit) {
         window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -119,9 +113,8 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
                             busy = true
                             scope.launch {
                                 try {
-                                    // The identity is back either way; the history
-                                    // is a separate mechanism that can fail on its
-                                    // own. Never let that failure read as success.
+                                    // The identity is back either way; a failed history
+                                    // restore must not read as success.
                                     when (val blob =
                                         RecoveryStore.restoreFromPhrase(context, words, name.trim())) {
                                         is BlobOutcome.Imported -> onRestored()

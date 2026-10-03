@@ -18,7 +18,6 @@ import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 import uniffi.core.GroupRulesRecord
 
-/** A person as the group screens show them: name, key, and their standing. */
 data class UiMember(
     val ipkHex: String,
     val name: String,
@@ -26,30 +25,20 @@ data class UiMember(
     val role: Int = 0,
     val active: Boolean = true,
     val me: Boolean = false,
-    /** They told us this name; we didn't choose it. Worth marking as such. */
+    /** A self-asserted name, which the UI marks. */
     val claimed: Boolean = false,
 ) {
     val admin get() = role >= 1
     val owner get() = role == 2
 }
 
-/** What a membership call is doing right now, so the UI can hold still. */
 sealed interface GroupWork {
     data object Idle : GroupWork
     data class Busy(val label: String) : GroupWork
     data class Failed(val reason: String) : GroupWork
 }
 
-/**
- * The create flow and the member list.
- *
- * Every membership call needs the network — a KeyPackage fetch and a Welcome —
- * so unlike sending a message these can genuinely fail, and the screen says so
- * rather than optimistically pretending. [work] is what the buttons watch.
- */
 class GroupVM(app: AppVM) : ViewModel() {
-    // The back stack lives on AppVM, which is the Koin singleton; AppNavigator
-    // itself is a property of it, not a definition of its own.
     private val navigator = app.navigator
 
     private val _work = MutableStateFlow<GroupWork>(GroupWork.Idle)
@@ -81,15 +70,12 @@ class GroupVM(app: AppVM) : ViewModel() {
         }
     }
 
-    // — Create flow —
-
     private val _title = MutableStateFlow("")
     val title: StateFlow<String> = _title.asStateFlow()
 
     private val _picked = MutableStateFlow<Set<String>>(emptySet())
     val picked: StateFlow<Set<String>> = _picked.asStateFlow()
 
-    /** Address book used by the shared contact picker. */
     private val _candidates = MutableStateFlow<List<UiMember>>(emptyList())
     val candidates: StateFlow<List<UiMember>> = _candidates.asStateFlow()
 
@@ -146,50 +132,39 @@ class GroupVM(app: AppVM) : ViewModel() {
 
     fun clearPicks() { _picked.value = emptySet() }
 
-    // — Member list —
-
     private val _members = MutableStateFlow<List<UiMember>>(emptyList())
     val members: StateFlow<List<UiMember>> = _members.asStateFlow()
 
-    /** The name actually set, blank until someone sets one — what rename edits. */
+    /** Blank until someone names the group. */
     private val _groupTitle = MutableStateFlow("")
     val groupTitle: StateFlow<String> = _groupTitle.asStateFlow()
 
-    /** What to head the screen with; falls back to the members for an unnamed group. */
     private val _displayName = MutableStateFlow("")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
 
-    /** We are an admin or an owner: we may remove members and change the group's rules. */
     private val _canManage = MutableStateFlow(false)
     val canManage: StateFlow<Boolean> = _canManage.asStateFlow()
 
-    /** The group's rules let us add people. */
     private val _canAdd = MutableStateFlow(false)
     val canAdd: StateFlow<Boolean> = _canAdd.asStateFlow()
 
-    /** The group's rules let us rename it and change its photo. */
     private val _canEdit = MutableStateFlow(false)
     val canEdit: StateFlow<Boolean> = _canEdit.asStateFlow()
 
-    /** Our role: 0 member, 1 admin, 2 owner. */
+    /** 0 member, 1 admin, 2 owner. */
     private val _role = MutableStateFlow(0)
     val role: StateFlow<Int> = _role.asStateFlow()
 
-    /** What members who aren't admins may do. Null for a group from before rules were signed. */
+    /** Null for a group without signed rules. */
     private val _rules = MutableStateFlow<GroupRulesRecord?>(null)
     val rules: StateFlow<GroupRulesRecord?> = _rules.asStateFlow()
 
-    /** Whose phone makes the group's changes; what anyone else asks for waits for it. */
     private var committerHex: String? = null
 
-    /** Leaving is offered: we are in the group and wouldn't strand it. */
     private val _canLeave = MutableStateFlow(false)
     val canLeave: StateFlow<Boolean> = _canLeave.asStateFlow()
 
-    /**
-     * We founded this group and others are still here, so leaving is refused —
-     * it would leave everyone in a group nobody can manage.
-     */
+    /** Leaving is refused, since it would strand the others in a group nobody can manage. */
     private val _ownerIsStuck = MutableStateFlow(false)
     val ownerIsStuck: StateFlow<Boolean> = _ownerIsStuck.asStateFlow()
 
@@ -219,8 +194,7 @@ class GroupVM(app: AppVM) : ViewModel() {
                 _muted.value = record.muted
                 _groupTitle.value = record.title
                 _displayName.value = record.displayName
-                // Core resolves the name and whether it is theirs to assert;
-                // only "You" is ours to say.
+                // Core resolves every name but ours.
                 _members.value = roster.map { m ->
                     UiMember(
                         ipkHex = m.ipk.toHex(),
@@ -231,7 +205,6 @@ class GroupVM(app: AppVM) : ViewModel() {
                         me = m.me,
                     )
                 }.sortedWith(
-                    // Us first, then everyone still here, then by name.
                     compareByDescending<UiMember> { it.me }
                         .thenByDescending { it.active }
                         .thenBy { it.name.lowercase() },
@@ -248,7 +221,7 @@ class GroupVM(app: AppVM) : ViewModel() {
         }
     }
 
-    /** Everyone picked, in one change. It either adds them all or none. */
+    /** One change: it adds everyone or no one. */
     fun addMembers(people: List<UiMember>, onComplete: () -> Unit) {
         if (people.isEmpty()) return
         val names = people.joinToString { it.name }
@@ -293,10 +266,7 @@ class GroupVM(app: AppVM) : ViewModel() {
             if (!done) _notice.value = "This will apply when ${committerName()} is next online"
         }
 
-    /**
-     * Only one member's phone changes the group, so a change we asked it for
-     * lands when it has run. Usually that's moments; give it those before saying so.
-     */
+    /** A change the committer carries usually lands within moments, so wait briefly before calling it pending. */
     private suspend fun awaitRoster(done: (List<UiMember>) -> Boolean): Boolean =
         withTimeoutOrNull(12_000) { members.first { roster -> done(roster.filter { it.active }) } } != null
 

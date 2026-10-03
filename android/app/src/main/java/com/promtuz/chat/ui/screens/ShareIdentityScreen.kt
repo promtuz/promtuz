@@ -51,9 +51,8 @@ fun ShareIdentityScreen(
     val colors = MaterialTheme.colorScheme
     var showScanner by remember { mutableStateOf(false) }
 
-    // Gate the QR + share link on discoverability: a link is useless until our
-    // KeyPackage is published, so a brand-new user waits (PAIRING.md). Scanning
-    // someone else's code doesn't need our KP, so that stays available.
+    // The QR and link are useless until our KeyPackage is published, so they wait for it.
+    // Scanning someone else's code doesn't need it.
     var discoverable by remember { mutableStateOf(CoreBridge.kpPublishReady()) }
     LaunchedEffect(Unit) {
         while (!discoverable) {

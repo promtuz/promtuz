@@ -58,10 +58,7 @@ enum class MessageStatusGlyph(val description: String) {
     }
 }
 
-/**
- * Keep this composition keyed to the message, not its status. Existing messages start at their
- * current silhouette; changes morph from the last drawn pose, including interrupted clock hands.
- */
+/** Key this to the message, not its status, so a change morphs from the last drawn pose. */
 @Composable
 fun MessageStatusIcon(
     status: SendStatus,
@@ -180,8 +177,7 @@ private class StatusIconMotion(initial: MessageStatusGlyph) {
         val target = if (glyph == MessageStatusGlyph.Sending) clockPose(clockTurn) else restingPose(glyph)
         if (source != target) {
             animate(0f, 1f, animationSpec = ChatMotion.spec()) { progress, _ ->
-                // A skipped Sent stage still reads as hands becoming a tick, then dividing,
-                // with overlapping motion and no artificial pause at the intermediate state.
+                // A skipped Sent stage still reads as hands becoming a tick, then dividing.
                 val division = if (source.ring > 0f && target.split > source.split)
                     ((progress - 0.25f) / 0.75f).coerceIn(0f, 1f) else progress
                 pose = StatusPose(
@@ -195,8 +191,7 @@ private class StatusIconMotion(initial: MessageStatusGlyph) {
             }
         }
         if (glyph == MessageStatusGlyph.Sending) {
-            // Compose's animation clock observes system animation scaling; no custom busy loop.
-            // Lifecycle cancellation preserves both the current geometry and the hand phase.
+            // Lifecycle cancellation keeps both the current geometry and the hand phase.
             val durationScale = coroutineContext[MotionDurationScale]
             while (true) {
                 // Infinite animate finishes when animations are disabled. Wait without drawing,

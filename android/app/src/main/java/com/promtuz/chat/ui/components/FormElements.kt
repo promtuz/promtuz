@@ -86,23 +86,6 @@ object OutlinedFormElements {
             keyboardOptions = keyboardOptions,
             keyboardActions = keyboardActions,
             interactionSource = interactionSource,
-//            colors = OutlinedTextFieldDefaults.colors(
-//                focusedLabelColor = colors.focused.label,
-//                focusedBorderColor = colors.focused.border,
-//                focusedPlaceholderColor = colors.focused.placeholder,
-//
-//                unfocusedLabelColor = colors.unfocused.label,
-//                unfocusedBorderColor = colors.unfocused.border,
-//                unfocusedPlaceholderColor = colors.unfocused.placeholder,
-//
-//                errorLabelColor = colors.error.label,
-//                errorBorderColor = colors.error.border,
-//                errorPlaceholderColor = colors.error.placeholder,
-//
-//                disabledLabelColor = colors.disabled.label,
-//                disabledBorderColor = colors.disabled.border,
-//                disabledPlaceholderColor = colors.disabled.placeholder
-//            ),
             shape = RoundedCornerShape(16.dp),
             singleLine = true
         )

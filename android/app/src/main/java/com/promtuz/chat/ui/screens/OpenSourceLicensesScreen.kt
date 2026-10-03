@@ -7,7 +7,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -33,11 +32,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
@@ -70,7 +69,6 @@ private data class LibraryLicense(
 @Composable
 fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
     val catalog by licenseAsset("licenses/index.json") { Json.decodeFromString<List<LicenseEntry>>(it) }
-    val direction = LocalLayoutDirection.current
     val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -100,11 +98,8 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
         )
     }) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(
-                start = padding.calculateLeftPadding(direction),
-                end = padding.calculateRightPadding(direction),
-            ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, padding.calculateBottomPadding() + 48.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             when {
@@ -131,7 +126,6 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
 @Composable
 fun LibraryLicenseScreen(id: String) {
     val library by licenseAsset("licenses/$id.json") { Json.decodeFromString<LibraryLicense>(it) }
-    val direction = LocalLayoutDirection.current
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
@@ -152,11 +146,8 @@ fun LibraryLicenseScreen(id: String) {
         },
     ) { padding ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(
-                start = padding.calculateLeftPadding(direction),
-                end = padding.calculateRightPadding(direction),
-            ),
-            contentPadding = PaddingValues(18.dp, padding.calculateTopPadding() + 12.dp, 18.dp, padding.calculateBottomPadding() + 48.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             when {

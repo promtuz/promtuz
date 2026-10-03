@@ -10,15 +10,13 @@ object Routes : NavKey {
     @Serializable
     data object Welcome : NavKey
 
-    /** `conversation` is a hex conversation id, not a peer — a group has no peer. */
+    /** `conversation` is a hex conversation id, not a peer: a group has no peer. */
     @Serializable
     data class Chat(val conversation: String, val name: String) : NavKey
 
-    /** A group's member list, with add / remove / leave. */
     @Serializable
     data class GroupInfo(val conversation: String) : NavKey
 
-    /** What a group's members may do, for its admins to change. */
     @Serializable
     data class GroupSettings(val conversation: String) : NavKey
 
@@ -39,7 +37,7 @@ object Routes : NavKey {
 
     @Serializable
     data class ContactCard(val peer: String = "", val name: String = "", val sharing: Boolean = false, val encoded: String? = null) : NavKey
-    /** Chats from people who aren't contacts, waiting to be accepted. */
+
     @Serializable
     data object MessageRequests : NavKey
 
@@ -61,15 +59,12 @@ object Routes : NavKey {
     @Serializable
     data class StorageChat(val conversation: String, val name: String) : NavKey
 
-    /** Onboarding: restore identity from a typed 24-word phrase. */
     @Serializable
     data object RestorePhrase : NavKey
 
-    /** Settings: public identity actions and private recovery options. */
     @Serializable
     data object IdentityKeys : NavKey
 
-    /** Identity & Keys: device-auth-gated reveal of the 24-word recovery phrase. */
     @Serializable
     data object RecoveryPhrase : NavKey
 
@@ -97,11 +92,9 @@ object Routes : NavKey {
     @Serializable
     data object Relays : NavKey
 
-    /** Developer: manual snapshot / merge-restore of the encrypted backup blob. */
     @Serializable
     data object BackupRestore : NavKey
 
-    /** Installed sticker packs, opened from the chat sticker picker. */
     @Serializable
     data object Stickers : NavKey
 

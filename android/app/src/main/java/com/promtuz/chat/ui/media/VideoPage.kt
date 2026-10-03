@@ -38,6 +38,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.text.clock
 import com.promtuz.chat.ui.components.LottieFrame
 import com.promtuz.chat.ui.components.LottieLoop
 import com.promtuz.chat.ui.components.rememberLottie
@@ -52,7 +53,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 
-/** One page's player and what the controls need to know about it. */
 class VideoPlayerState(val player: ExoPlayer, val path: String) {
     /** Set while another host is taking this player over, so the old host does not release it. */
     var handedOver = false
@@ -70,7 +70,6 @@ class VideoPlayerState(val player: ExoPlayer, val path: String) {
     }
 }
 
-/** Plays while [active], pauses otherwise, and is released with the page. */
 @Composable
 fun rememberVideoPlayer(path: String, active: Boolean, adopt: VideoPlayerState? = null): VideoPlayerState {
     val context = LocalContext.current
@@ -180,7 +179,6 @@ fun VideoControls(state: VideoPlayerState, chrome: Boolean, bottomInset: android
     }
 }
 
-/** A hairline track with a small knob: the played part is white, the rest a faint white. */
 @Composable
 private fun Scrubber(fraction: Float, scrubbing: Boolean, onScrub: (Float) -> Unit, onRelease: () -> Unit) {
     val knob by animateFloatAsState(if (scrubbing) 1.5f else 1f, tween(120), label = "knob")
@@ -210,10 +208,4 @@ private fun Scrubber(fraction: Float, scrubbing: Boolean, onScrub: (Float) -> Un
         drawLine(Color.White, Offset(0f, y), Offset(x, y), track, StrokeCap.Round)
         drawCircle(Color.White, 5.dp.toPx() * knob, Offset(x, y))
     }
-}
-
-fun clock(ms: Long): String {
-    val s = ms / 1000
-    val h = s / 3600
-    return if (h > 0) "%d:%02d:%02d".format(h, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 }

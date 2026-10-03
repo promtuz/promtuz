@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.DrawableIcon
+import com.promtuz.chat.ui.text.clock
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.call.CallController
@@ -42,11 +43,6 @@ import com.promtuz.core.call.CallController.Phase
 import com.promtuz.core.call.CallVideoManager
 import kotlinx.coroutines.delay
 
-/**
- * The whole call, one screen. The top half says who and how the call is doing;
- * the bottom half is the controls, which are answer/decline while it rings and
- * mute/speaker/end once it is up.
- */
 @Composable
 fun CallScreen(call: CallController.Ui?) {
     if (call == null) return
@@ -57,8 +53,6 @@ fun CallScreen(call: CallController.Ui?) {
             .fillMaxSize()
             .background(if (onVideo) Color.Black else colors.surface),
     ) {
-        // Remote video fills the screen when it is a connected video call and
-        // the peer's camera is on; otherwise the peer's avatar and name.
         if (onVideo && call.peerCamera) {
             CallSurface(Modifier.fillMaxSize()) { CallVideoManager.setRemoteSurface(it) }
         }
@@ -95,7 +89,6 @@ fun CallScreen(call: CallController.Ui?) {
             }
         }
 
-        // Local self-view, a small tile top-right, while our camera is on.
         val cameraOn by CallVideoManager.cameraOn.collectAsState()
         if (onVideo && cameraOn) {
             CallSurface(
@@ -133,8 +126,7 @@ private fun statusLine(call: CallController.Ui): String = when (call.phase) {
                 delay(500)
             }
         }
-        val secs = ((now - call.connectedAt) / 1000).coerceAtLeast(0)
-        "%d:%02d".format(secs / 60, secs % 60)
+        clock((now - call.connectedAt).coerceAtLeast(0))
     }
 }
 
@@ -148,7 +140,7 @@ private fun IncomingControls() {
             com.promtuz.core.CoreBridge.callReject()
         }
         RoundButton(R.drawable.i_phone, "Answer", Color(0xFF30A46C), Color.White) {
-            com.promtuz.core.CoreBridge.callAccept()
+            runCatching { com.promtuz.core.CoreBridge.callAccept() }
         }
     }
 }
@@ -188,10 +180,6 @@ private fun OngoingControls(call: CallController.Ui) {
     }
 }
 
-/**
- * A `SurfaceView` for call video, handing its `Surface` to the caller as it
- * comes and goes so the encoder or decoder can bind it.
- */
 @Composable
 private fun CallSurface(modifier: Modifier = Modifier, onSurface: (android.view.Surface?) -> Unit) {
     androidx.compose.ui.viewinterop.AndroidView(

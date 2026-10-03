@@ -4,9 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.calculateStartPadding
-import androidx.compose.foundation.layout.calculateEndPadding
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,7 +15,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,6 +33,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.RelayStatus
 import com.promtuz.chat.presentation.viewmodel.RelaysVM
@@ -51,13 +48,10 @@ import org.koin.androidx.compose.koinViewModel
 fun RelaysScreen(viewModel: RelaysVM = koinViewModel()) {
     val relays by viewModel.relays.collectAsState()
 
-    val direction = LocalLayoutDirection.current
     SimpleScreen({ Text("Relay Nodes") }) { padding ->
         LazyColumn(
-            Modifier
-                .fillMaxSize()
-                .padding(start = padding.calculateStartPadding(direction), end = padding.calculateEndPadding(direction)),
-            contentPadding = PaddingValues(16.dp, padding.calculateTopPadding() + 8.dp, 16.dp, padding.calculateBottomPadding() + 40.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(16.dp, 8.dp, 40.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item { RelaySummary(relays) }
@@ -213,11 +207,6 @@ private fun PingLabel(latencyMs: Long?) {
     )
 }
 
-/**
- * Smooth (cubic-bezier) latency line with the sample points drawn on it and a
- * soft gradient fill. x = sample index, y = latency normalized to this relay's
- * own min/max. Recomposes as the VM polls, so it animates live.
- */
 @Composable
 private fun LatencyGraph(samples: List<Float>, color: Color, modifier: Modifier) {
     Canvas(modifier) {
@@ -229,7 +218,6 @@ private fun LatencyGraph(samples: List<Float>, color: Color, modifier: Modifier)
         val minV = samples.min()
         val range = (maxV - minV).coerceAtLeast(1f)
 
-        // A single sample has no line to draw — mark it as a centered dot.
         if (samples.size == 1) {
             drawCircle(color, radius = 2.5.dp.toPx(), center = Offset(size.width / 2, size.height / 2))
             return@Canvas

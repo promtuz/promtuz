@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
+import com.promtuz.chat.domain.model.previewLine
+import com.promtuz.chat.ui.text.timeOfDay
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.rememberAvatar
@@ -25,7 +27,6 @@ import uniffi.core.MessageReceiptInfo
 import uniffi.core.RecipientReceipt
 import java.util.Date
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageInfoSheet(conversationHex: String, message: UiMessage, onDismiss: () -> Unit) {
     val dispatches = remember(message.key) {
@@ -57,7 +58,7 @@ fun MessageInfoSheet(conversationHex: String, message: UiMessage, onDismiss: () 
     ) {
         Text("Message info", Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             style = MaterialTheme.typography.titleLarge)
-        Text(messagePreview(message.content), Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
+        Text(message.content.previewLine(), Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
             style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight),
@@ -88,17 +89,6 @@ fun MessageInfoSheet(conversationHex: String, message: UiMessage, onDismiss: () 
     }
 }
 
-private fun messagePreview(content: MessageContent): String = when (content) {
-    is MessageContent.Text -> content.text
-    is MessageContent.Image -> content.caption.ifBlank { "Photo" }
-    is MessageContent.Album -> content.caption.ifBlank { "${content.items.size} photos" }
-    is MessageContent.Attachment -> content.name
-    is MessageContent.Voice -> "Voice message"
-    is MessageContent.Sticker -> "Sticker"
-    else -> "Message"
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReceiptPerson(receipt: RecipientReceipt) {
     val colors = MaterialTheme.colorScheme
@@ -133,8 +123,8 @@ private fun ReceiptPerson(receipt: RecipientReceipt) {
 private fun ReceiptTime(label: String, seconds: ULong?) {
     val context = LocalContext.current
     val text = if (seconds == null || seconds > (Long.MAX_VALUE / 1000).toULong()) "Time unavailable" else {
-        val date = Date(seconds.toLong() * 1000)
-        "${DateFormat.getMediumDateFormat(context).format(date)}, ${DateFormat.getTimeFormat(context).format(date)}"
+        val ms = seconds.toLong() * 1000
+        "${DateFormat.getMediumDateFormat(context).format(Date(ms))}, ${timeOfDay(context, ms)}"
     }
     Text("$label · $text", style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)

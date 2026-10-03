@@ -14,14 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-/**
- * The bundled emoji set under `assets/emoji/`: an index of the keys it holds
- * (see `tools/scripts/build-emoji-pack.py`) and a cache of decoded glyphs.
- *
- * The index loads once, off the main thread; until it has, [EmojiText] draws
- * system emoji, then redraws from the pack. Glyphs decode on demand and stay
- * in a bounded cache, so a long chat re-uses the same few dozen bitmaps.
- */
+/** Glyphs under `assets/emoji/`, indexed by `tools/scripts/build-emoji-pack.py`. */
 object EmojiPack {
     private const val DIR = "emoji"
 

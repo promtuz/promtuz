@@ -20,10 +20,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.components.AppAlertDialog
+import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.launch
@@ -31,7 +33,6 @@ import uniffi.core.BlockedPerson
 
 @Composable
 fun PrivacySettingsScreen() {
-    val direction = LocalLayoutDirection.current
     val scope = rememberCoroutineScope()
     var everyone by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) { everyone = runCatching { CoreBridge.messageRequestsEnabled() }.getOrDefault(true) }
@@ -42,41 +43,37 @@ fun PrivacySettingsScreen() {
         Column(
             Modifier.fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(
-                    start = padding.calculateLeftPadding(direction) + 18.dp,
-                    end = padding.calculateRightPadding(direction) + 18.dp,
-                    top = padding.calculateTopPadding() + 12.dp,
-                    bottom = padding.calculateBottomPadding() + 24.dp,
-                ),
+                .padding(padding.listPadding()),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             SettingsSection("Who can message me")
             Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 listOf(true, false).forEachIndexed { index, option ->
-                    SettingsRow(
+                    GroupedActionRow(
                         title = if (option) "Everyone" else "My contacts",
-                        detail = if (option) "People you haven’t added go to Message requests"
+                        supportingText = if (option) "People you haven’t added go to Message requests"
                                  else "Only people you’ve added can message you",
                         index = index,
-                        count = 2,
+                        groupSize = 2,
                         selected = everyone == option,
                         onClick = {
                             everyone = option
                             scope.launch { runCatching { CoreBridge.setMessageRequestsEnabled(option) } }
                         },
-                    ) { RadioButton(selected = everyone == option, onClick = null) }
+                        control = { RadioButton(selected = everyone == option, onClick = null) },
+                    )
                 }
             }
             if (blocked.isNotEmpty()) {
                 SettingsSection("Blocked")
                 blocked.forEachIndexed { index, person ->
-                    SettingsRow(
+                    GroupedActionRow(
                         title = person.name,
-                        detail = null,
                         index = index,
-                        count = blocked.size,
+                        groupSize = blocked.size,
                         onClick = { unblocking = person },
-                    ) { Text("Unblock", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge) }
+                        control = { Text("Unblock", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge) },
+                    )
                 }
             }
         }

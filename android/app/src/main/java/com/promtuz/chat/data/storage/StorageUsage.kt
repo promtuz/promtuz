@@ -3,7 +3,6 @@ package com.promtuz.chat.data.storage
 import android.content.Context
 import android.os.StatFs
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Dispatchers
@@ -28,9 +27,9 @@ internal data class StorageMediaItem(
 ) { val key get() = "$conversation:$dispatch" }
 
 internal interface StorageSource {
-    val changes: Flow<Unit> get() = emptyFlow()
+    val changes: Flow<Unit>
     suspend fun read(): StorageUsage
-    suspend fun preview(item: StorageMediaItem): ByteArray? = null
+    suspend fun preview(item: StorageMediaItem): ByteArray?
     suspend fun media(): List<StorageMediaItem>
     suspend fun remove(items: List<StorageMediaItem>): Int
     suspend fun clearStickerCache()

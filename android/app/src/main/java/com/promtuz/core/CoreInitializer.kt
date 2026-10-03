@@ -11,15 +11,7 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 import uniffi.core.init as ffiInit
 
-/**
- * One-shot libcore bootstrap. Installs the platform ports (KeyManager as the
- * SecureStore, CoreEventBus as CoreEvents) and starts core's relay loop.
- * `init()` is call-once (throws "init called twice"), so this guards and runs
- * it off-main. Call from [Application.onCreate].
- *
- * Resolver seeds come from BuildConfig (injected at build time from the
- * gitignored secrets.properties); empty seeds -> core stays disconnected.
- */
+/** Core's init throws when called twice, hence the guard. Empty resolver seeds leave core disconnected. */
 object CoreInitializer {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

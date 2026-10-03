@@ -9,7 +9,6 @@ import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -20,65 +19,59 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-/**
- * Daily encrypted-backup snapshot (IDENTITY_RECOVERY.md §4). Writes the blob
- * to `files/recovery/backup.pzbk`; Android Auto Backup ships that one file
- * to the user's Drive app data (E2E when the device has a lock screen — see
- * data_extraction_rules.xml) and restores it before first launch. No Drive
- * API, no OAuth — the OS is the transport.
- *
- * Debounce: `dbChanged` (the reactive doorbell) marks a dirty flag; a clean
- * day skips the export entirely.
- */
+/** Writes the encrypted blob that Auto Backup ships to Drive, but only after a DB change marked it dirty. */
 class BackupWorker(context: Context, params: WorkerParameters) :
     CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
         if (!CoreBridge.shouldLaunchApp()) return Result.success() // pre-enrollment
-        if (!prefs(applicationContext).getBoolean(KEY_DIRTY, false)) return Result.success()
+        val prefs = prefs(applicationContext)
+        if (!prefs.getBoolean(KEY_DIRTY, false)) return Result.success()
+        // Cleared before the export: a change that lands meanwhile marks it again.
+        prefs.edit().putBoolean(KEY_DIRTY, false).commit()
 
         return try {
-            val file = RecoveryStore.blobFile(applicationContext)
-
-            // Never trade a good blob for an empty one. A restore that brings
-            // the identity back but fails to import the history leaves a live
-            // app on an empty DB; the first trip to the background would then
-            // snapshot that emptiness over the very blob that could have
-            // repaired it — and ship it to Drive. An empty address book is
-            // indistinguishable from that state, so refuse the overwrite and
-            // let the existing blob stand. (Cost: a user who genuinely deletes
-            // every contact keeps a stale backup until they add one.)
-            if (file.exists() && file.length() > 0 && CoreBridge.contacts().isEmpty()) {
-                Timber.tag("Backup")
-                    .w("no contacts but a ${file.length()}-byte blob exists — refusing to overwrite it")
-                return Result.success()
-            }
-
-            val blob = CoreBridge.backupExport()
-            file.parentFile?.mkdirs()
-            // Atomic swap so Auto Backup never ships a half-written blob.
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeBytes(blob)
-            if (!tmp.renameTo(file)) {
-                tmp.delete()
-                return Result.retry()
-            }
-            prefs(applicationContext).edit().putBoolean(KEY_DIRTY, false).apply()
-            // Hint the OS that backup-worthy data changed (next backup window).
-            BackupManager(applicationContext).dataChanged()
-            if (blob.size > SIZE_WARN_BYTES) {
-                Timber.tag("Backup").w("blob is ${blob.size / 1_000_000}MB — nearing quota")
-            }
-            Timber.tag("Backup").i("snapshot written (${blob.size} bytes)")
-            Result.success()
+            writing.withLock { snapshot() }
         } catch (e: Exception) {
+            prefs.edit().putBoolean(KEY_DIRTY, true).apply()
             Timber.tag("Backup").w(e, "snapshot failed")
             Result.retry()
         }
+    }
+
+    private suspend fun snapshot(): Result {
+        val file = RecoveryStore.blobFile(applicationContext)
+
+        // Never replace a good blob with an empty one. A restore that lost the history leaves an empty DB
+        // that looks just like an empty address book, and this blob may be the only copy.
+        if (file.exists() && file.length() > 0 && CoreBridge.contacts().isEmpty()) {
+            Timber.tag("Backup")
+                .w("no contacts but a ${file.length()}-byte blob exists — refusing to overwrite it")
+            return Result.success()
+        }
+
+        val blob = CoreBridge.backupExport()
+        file.parentFile?.mkdirs()
+        // Atomic swap so Auto Backup never ships a half-written blob.
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.writeBytes(blob)
+        if (!tmp.renameTo(file)) {
+            tmp.delete()
+            prefs(applicationContext).edit().putBoolean(KEY_DIRTY, true).apply()
+            return Result.retry()
+        }
+        BackupManager(applicationContext).dataChanged()
+        if (blob.size > SIZE_WARN_BYTES) {
+            Timber.tag("Backup").w("blob is ${blob.size / 1_000_000}MB, nearing quota")
+        }
+        Timber.tag("Backup").i("snapshot written (${blob.size} bytes)")
+        return Result.success()
     }
 
     companion object {
@@ -93,14 +86,10 @@ class BackupWorker(context: Context, params: WorkerParameters) :
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        /** The periodic and the one-shot job share the blob file. */
+        private val writing = Mutex()
 
-        /**
-         * App-start hook: mark the dirty flag on every DB doorbell, snapshot
-         * whenever the app leaves the foreground (dirty-gated no-op
-         * otherwise — this is what keeps the LOCAL blob fresh; the daily
-         * periodic is just the safety net), and keep the daily schedule.
-         * Cloud shipping stays the OS's job on its own idle/WiFi window.
-         */
+        /** Every trip to the background keeps the local blob fresh; the daily job is the safety net. */
         fun start(context: Context) {
             val app = context.applicationContext
             scope.launch {
@@ -112,19 +101,13 @@ class BackupWorker(context: Context, params: WorkerParameters) :
                 override fun onStop(owner: LifecycleOwner) = snapshotNow(app)
             })
             val request = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS)
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.UNMETERED)
-                        .setRequiresCharging(true)
-                        .build()
-                )
+                .setConstraints(Constraints.Builder().setRequiresCharging(true).build())
                 .build()
             WorkManager.getInstance(app).enqueueUniquePeriodicWork(
                 WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request
             )
         }
 
-        /** One-shot local snapshot, no constraints (it's a disk write). */
         fun snapshotNow(context: Context) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 "$WORK_NAME-now",

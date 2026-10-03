@@ -14,14 +14,10 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
 
-/** A picked document resolved to a real filesystem path libcore can open, plus its metadata. */
 data class PickedFile(val path: String, val name: String, val mime: String)
 
-/**
- * libcore reads the pixel buffer as tightly-packed R,G,B,A bytes (4·w·h). getPixels hands back
- * 0xAARRGGBB ints; copyPixelsToBuffer's byte order is format/endianness-ambiguous, so unpack each
- * channel by hand in R,G,B,A order — this exact ordering is what makes decoded colours correct.
- */
+/** Core reads tightly packed R,G,B,A bytes. getPixels gives unpremultiplied 0xAARRGGBB ints with a fixed
+ *  layout, unlike copyPixelsToBuffer. */
 fun Bitmap.toRgba(): ByteArray {
     val src = if (config == Bitmap.Config.ARGB_8888) this else copy(Bitmap.Config.ARGB_8888, false)
     val px = IntArray(src.width * src.height)
@@ -29,15 +25,14 @@ fun Bitmap.toRgba(): ByteArray {
     val out = ByteArray(px.size * 4)
     var o = 0
     for (p in px) {
-        out[o++] = (p ushr 16).toByte() // R
-        out[o++] = (p ushr 8).toByte()  // G
-        out[o++] = p.toByte()           // B
-        out[o++] = (p ushr 24).toByte() // A
+        out[o++] = (p ushr 16).toByte()
+        out[o++] = (p ushr 8).toByte()
+        out[o++] = p.toByte()
+        out[o++] = (p ushr 24).toByte()
     }
     return out
 }
 
-/** Decode [uri] to a software bitmap whose longest edge is capped at [maxEdge], EXIF-oriented. */
 suspend fun decodeDownscaled(context: Context, uri: Uri, maxEdge: Int): Bitmap? =
     withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) runCatching {
@@ -51,7 +46,6 @@ suspend fun decodeDownscaled(context: Context, uri: Uri, maxEdge: Int): Bitmap? 
         }.getOrNull() else decodeLegacy(context, uri, maxEdge)
     }
 
-/** A frame near the start of the video, sized for a poster, plus its length. */
 suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, Long>? =
     withContext(Dispatchers.IO) {
         runCatching {
@@ -68,7 +62,6 @@ suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, 
         }.getOrNull()
     }
 
-/** Copy [uri]'s stream into cacheDir and read its display name + mime; null if unreadable. */
 suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
     withContext(Dispatchers.IO) {
         val cr = context.contentResolver
@@ -77,9 +70,8 @@ suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
             if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
         } ?: "file"
         val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
-        // Prefix keeps the on-disk path unique so a same-named later pick can't clobber a file
-        // still being streamed by an in-flight P2P transfer. The copy is core's from here: it
-        // unlinks it once no message (or staged item) names it.
+        // The prefix stops a later pick with the same name clobbering a file still in transfer.
+        // The copy is core's from here: it unlinks it once no message or staged item names it.
         val safeName = name.substringAfterLast('/').substringAfterLast('\\').filter { !it.isISOControl() }.take(180).ifBlank { "file" }
         val file = File(dir, "${java.util.UUID.randomUUID()}_$safeName")
         try {
