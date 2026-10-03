@@ -204,3 +204,14 @@ wrote them. Nothing gained a heading it did not need.
 `publish-apt.zsh` builds and publishes the relay, resolver, and gateway Debian
 packages. It accepts `--version`, `--channel`, `--no-publish`, and `--dry-run`.
 Its publication does not send Android update notifications.
+
+## GitHub release
+
+`draft-github-release.zsh` mirrors a published release into a draft GitHub
+release on its tag, the newest `v*` tag by default. It downloads the
+release-channel APKs and checks them against their signed manifests, attaches
+the daemon `.deb`s from `target/` only when they match what the apt repo serves,
+and signs `SHA256SUMS` with your git signing key. The notes are the app's signed
+release notes plus a downloads section; `--extra FILE` adds operator notes after
+them. Review the draft on GitHub, then publish it with
+`gh release edit <tag> --draft=false`.
