@@ -172,7 +172,7 @@ private fun IncomingControls(call: CallController.Ui) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         RoundButton(R.drawable.i_phone, "Decline", Color(0xFFE5484D), Color.White) {
-            com.promtuz.core.CoreBridge.callReject()
+            com.promtuz.core.CoreBridge.callReject(call.callId)
         }
         RoundButton(R.drawable.i_phone, "Answer", Color(0xFF30A46C), Color.White) {
             CallController.requestAnswer(call.callId)
@@ -214,7 +214,7 @@ private fun OngoingControls(call: CallController.Ui) {
         }
 
         RoundButton(R.drawable.i_phone, "End", Color(0xFFE5484D), Color.White) {
-            com.promtuz.core.CoreBridge.callHangup()
+            com.promtuz.core.CoreBridge.callHangup(call.callId)
         }
 
         val spkBg = if (call.speaker) colors.onSurface else colors.surfaceVariant

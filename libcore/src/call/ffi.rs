@@ -18,15 +18,20 @@ pub fn call_accept(call: Vec<u8>) -> Result<(), CoreError> {
     super::accept(call).map_err(anyhow_to_core)
 }
 
+/// Declines `call` if it is the one ringing; a stale id declines nothing.
 #[uniffi::export]
-pub fn call_reject() {
-    super::reject();
+pub fn call_reject(call: Vec<u8>) {
+    if let Ok(call) = fixed::<16>(&call, "call id") {
+        super::reject(call);
+    }
 }
 
-/// Hangs up, cancels or refuses, whatever the current call is doing.
+/// Hangs up, cancels or refuses `call`, whatever it is doing; a stale id ends nothing.
 #[uniffi::export]
-pub fn call_hangup() {
-    super::hangup();
+pub fn call_hangup(call: Vec<u8>) {
+    if let Ok(call) = fixed::<16>(&call, "call id") {
+        super::hangup(call);
+    }
 }
 
 #[uniffi::export]

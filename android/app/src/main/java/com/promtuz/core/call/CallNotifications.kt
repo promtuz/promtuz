@@ -82,7 +82,7 @@ object CallNotifications {
         if (incoming) {
             builder.setStyle(
                 NotificationCompat.CallStyle.forIncomingCall(
-                    person, hangup(context), answer(context, ui.callId),
+                    person, hangup(context, ui.callId), answer(context, ui.callId),
                 ),
             ).setFullScreenIntent(content, true)
                 // Outlives core's 45 s ring, so a ring the process can no longer end still stops.
@@ -90,7 +90,7 @@ object CallNotifications {
             // Ring until answered or ended, not once.
             return builder.build().also { it.flags = it.flags or Notification.FLAG_INSISTENT }
         }
-        builder.setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangup(context)))
+        builder.setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangup(context, ui.callId)))
             .setContentIntent(content)
         return builder.build()
     }
@@ -131,9 +131,11 @@ object CallNotifications {
         return PendingIntent.getActivity(context, call.contentHashCode(), intent, pendingFlags())
     }
 
-    private fun hangup(context: Context): PendingIntent {
-        val intent = Intent(context, CallActionReceiver::class.java).setAction(CallActionReceiver.ACTION_HANGUP)
-        return PendingIntent.getBroadcast(context, 0, intent, pendingFlags())
+    private fun hangup(context: Context, call: ByteArray): PendingIntent {
+        val intent = Intent(context, CallActionReceiver::class.java)
+            .setAction(CallActionReceiver.ACTION_HANGUP)
+            .putExtra(CallActivity.EXTRA_CALL, call)
+        return PendingIntent.getBroadcast(context, call.contentHashCode(), intent, pendingFlags())
     }
 
     private fun pendingFlags() = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

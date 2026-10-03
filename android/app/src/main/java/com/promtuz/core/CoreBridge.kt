@@ -446,9 +446,9 @@ object CoreBridge {
 
     fun callAccept(call: ByteArray) = uniffi.core.callAccept(call)
 
-    fun callReject() = uniffi.core.callReject()
+    fun callReject(call: ByteArray) = uniffi.core.callReject(call)
 
-    fun callHangup() = uniffi.core.callHangup()
+    fun callHangup(call: ByteArray) = uniffi.core.callHangup(call)
 
     fun callSetMuted(muted: Boolean) = uniffi.core.callSetMuted(muted)
 

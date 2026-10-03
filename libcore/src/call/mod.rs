@@ -5,6 +5,7 @@ pub(crate) mod audio;
 pub mod ffi;
 mod rtc;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -106,6 +107,9 @@ pub struct Snapshot {
 }
 
 static CURRENT: Mutex<Option<Call>> = parking_lot::const_mutex(None);
+/// Effects in the order their transitions held [`CURRENT`], and whether a caller is running them.
+static EFFECTS: Mutex<(VecDeque<Effect>, bool)> =
+    parking_lot::const_mutex((VecDeque::new(), false));
 
 /// A new call's DTLS certificate and audio path.
 type Media = (DtlsCert, Arc<AudioPath>);
@@ -116,8 +120,8 @@ enum Input {
     Start(Call),
     /// Refused unless this call is the one ringing.
     Accept([u8; 16]),
-    Reject,
-    Hangup,
+    Reject([u8; 16]),
+    Hangup([u8; 16]),
     Muted(bool),
     Camera(bool),
     NetworkChanged,
@@ -191,13 +195,32 @@ fn short(id: &[u8]) -> String {
     hex::encode(&id[..4])
 }
 
-/// Applies `input` to the current call, then runs what it asked for.
+/// Applies `input`, then runs what it asked for. Effects queue under the state lock and one caller
+/// at a time runs them outside it, so the platform sees events in the order the state changed.
 fn apply(input: Input) -> Result<()> {
-    let effects = step(&mut CURRENT.lock(), input)?;
-    for effect in effects {
-        run(effect);
+    {
+        let mut current = CURRENT.lock();
+        let effects = step(&mut current, input)?;
+        let mut queue = EFFECTS.lock();
+        queue.0.extend(effects);
+        if std::mem::replace(&mut queue.1, true) {
+            return Ok(());
+        }
     }
-    Ok(())
+    loop {
+        let effect = {
+            let mut queue = EFFECTS.lock();
+            let Some(effect) = queue.0.pop_front() else {
+                queue.1 = false;
+                return Ok(());
+            };
+            effect
+        };
+        // A panic must not leave the queue claimed with nobody running it.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(effect))).is_err() {
+            warn!("CALL: an effect panicked");
+        }
+    }
 }
 
 fn run(effect: Effect) {
@@ -265,8 +288,8 @@ fn step(state: &mut Option<Call>, input: Input) -> Result<Vec<Effect>> {
             fx.push(Effect::StartSession(id, rtc::Role::Callee, video));
             fx.push(Effect::Arm(CONNECT_TIMEOUT, id, Phase::Connecting, Expiry::Failed));
         },
-        Input::Reject => {
-            if let Some(call) = state.as_ref().filter(|c| c.phase == Phase::Ringing) {
+        Input::Reject(id) => {
+            if let Some(call) = state.as_ref().filter(|c| c.id == id && c.phase == Phase::Ringing) {
                 fx.push(Effect::Signal(call.conversation, CallMsg::End {
                     call: call.id,
                     reason: CallEnd::Declined,
@@ -274,8 +297,8 @@ fn step(state: &mut Option<Call>, input: Input) -> Result<Vec<Effect>> {
                 finish(state, CallEndReason::Declined, &mut fx);
             }
         },
-        Input::Hangup => {
-            if let Some(call) = state.as_ref() {
+        Input::Hangup(id) => {
+            if let Some(call) = state.as_ref().filter(|c| c.id == id) {
                 let (wire, reason) = match call.phase {
                     Phase::Offering => (CallEnd::Hangup, CallEndReason::Cancelled),
                     Phase::Ringing => (CallEnd::Declined, CallEndReason::Declined),
@@ -377,12 +400,12 @@ pub fn accept(id: [u8; 16]) -> Result<()> {
     apply(Input::Accept(id))
 }
 
-pub fn reject() {
-    let _ = apply(Input::Reject);
+pub fn reject(id: [u8; 16]) {
+    let _ = apply(Input::Reject(id));
 }
 
-pub fn hangup() {
-    let _ = apply(Input::Hangup);
+pub fn hangup(id: [u8; 16]) {
+    let _ = apply(Input::Hangup(id));
 }
 
 pub fn set_muted(muted: bool) {
@@ -1047,6 +1070,8 @@ mod tests {
             Input::Expired([1; 16], Phase::Offering, Expiry::Unanswered),
             Input::OfferLost([1; 16]),
             Input::Signal(CallMsg::End { call: [1; 16], reason: CallEnd::Hangup }),
+            Input::Hangup([1; 16]),
+            Input::Reject([1; 16]),
         ] {
             assert_eq!(check(&mut state, stale), "Connecting 2: ", "the abandoned id ends nothing");
         }
@@ -1055,6 +1080,23 @@ mod tests {
             check(&mut state, offer(HIGHER, 2, NOW + 30_000, true)),
             "Offering 1: ",
             "ours wins"
+        );
+    }
+
+    /// A hang-up taken while another caller is still running the switch's effects reaches the
+    /// platform after them.
+    #[tokio::test]
+    async fn effects_reach_the_platform_in_the_order_the_state_changed() {
+        let _core = crate::test_support::ScopedCore::new();
+        *CURRENT.lock() = Some(call(1, LOWER, Phase::Offering));
+        EFFECTS.lock().1 = true;
+        apply(offer(LOWER, 2, NOW + 30_000, true)).unwrap();
+        apply(Input::Hangup([2; 16])).unwrap();
+        let (queued, _) = std::mem::take(&mut *EFFECTS.lock());
+        assert_eq!(
+            queued.iter().map(describe).collect::<Vec<_>>().join(", "),
+            "emit Switched, emit Connecting, start callee, arm 20s Connecting Failed, \
+             send End Hangup, record cancelled, emit Ended Hangup"
         );
     }
 
@@ -1082,17 +1124,17 @@ mod tests {
             ),
             (
                 Phase::Offering,
-                Input::Hangup,
+                Input::Hangup([1; 16]),
                 "idle: send End Hangup, record cancelled, emit Ended Cancelled",
             ),
             (
                 Phase::Ringing,
-                Input::Hangup,
+                Input::Hangup([1; 16]),
                 "idle: send End Declined, record declined, emit Ended Declined",
             ),
             (
                 Phase::Connected,
-                Input::Hangup,
+                Input::Hangup([1; 16]),
                 "idle: send End Hangup, record answered:0, emit Ended Hangup",
             ),
             (Phase::Ringing, end(CallEnd::Hangup), "idle: record missed, emit Ended Missed"),
