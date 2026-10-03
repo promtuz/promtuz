@@ -9,7 +9,11 @@ import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
@@ -67,24 +71,48 @@ suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, 
         }.getOrNull()
     }
 
-suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
-    withContext(Dispatchers.IO) {
-        val cr = context.contentResolver
-        val mime = cr.getType(uri) ?: "application/octet-stream"
-        val name = cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
-        } ?: "file"
-        val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
-        // The prefix stops a later pick with the same name clobbering a file still in transfer.
-        // The copy is core's from here: it unlinks it once no message or staged item names it.
-        val safeName = name.substringAfterLast('/').substringAfterLast('\\').filter { !it.isISOControl() }.take(180).ifBlank { "file" }
-        val file = File(dir, "${java.util.UUID.randomUUID()}_$safeName")
-        try {
-            cr.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
-                ?: return@withContext null
-        } catch (e: Exception) { file.delete(); throw e }
-        PickedFile(file.absolutePath, name, mime)
+suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? {
+    var privateCopy: File? = null
+    try {
+        return withContext(Dispatchers.IO) {
+            val cr = context.contentResolver
+            val sourceFile = uri.path?.takeIf { uri.scheme == "file" }?.let(::File)
+            val name = sourceFile?.name ?: cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
+            } ?: "file"
+            val mime = cr.getType(uri)?.takeIf { it.isNotBlank() && it != "application/octet-stream" } ?: run {
+                val extension = name.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
+                when (extension) {
+                    "avif" -> "image/avif"
+                    "heic" -> "image/heic"
+                    "heif" -> "image/heif"
+                    else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                }
+            } ?: "application/octet-stream"
+            val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
+            // The caller owns this independent copy until staging accepts it. Register the path
+            // before copying so even cancellation on the IO return can clean up the partial file.
+            val safeName = name.substringAfterLast('/').substringAfterLast('\\').filter { !it.isISOControl() }.take(180).ifBlank { "file" }
+            val file = File(dir, "${java.util.UUID.randomUUID()}_$safeName")
+            privateCopy = file
+            cr.openInputStream(uri)?.use { input ->
+                file.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                    }
+                }
+            } ?: return@withContext null
+            PickedFile(file.absolutePath, name, mime)
+        }
+    } catch (error: Throwable) {
+        privateCopy?.let { withContext(NonCancellable + Dispatchers.IO) { it.delete() } }
+        throw error
     }
+}
 
 private fun fit(w: Int, h: Int, maxEdge: Int): Pair<Int, Int> {
     val longest = maxOf(w, h)

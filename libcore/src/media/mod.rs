@@ -8,6 +8,7 @@ mod avif;
 mod avatar;
 mod gif;
 mod sequence;
+pub(crate) mod video;
 
 pub use avif::{AvifInfo, inspect_avif};
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};

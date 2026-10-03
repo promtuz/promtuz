@@ -62,7 +62,6 @@ import uniffi.core.stageImage as ffiStageImage
 import uniffi.core.stageAttachment as ffiStageAttachment
 import uniffi.core.discardStaged as ffiDiscardStaged
 import uniffi.core.stagedItems as ffiStagedItems
-import uniffi.core.sendStaged as ffiSendStaged
 import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
@@ -340,10 +339,10 @@ object CoreBridge {
 
     suspend fun stagedItems(): List<StagedRecord> = withContext(Dispatchers.IO) { ffiStagedItems() }
 
-    /** One album: the caption rides the first item, [replyTo] rides all. */
+    /** Returns after durable local acceptance. Caption rides the first item, [replyTo] rides all. */
     suspend fun sendStaged(
         conversationId: ByteArray, ids: List<ULong>, caption: String, replyTo: ByteArray? = null,
-    ) = withContext(Dispatchers.IO) { ffiSendStaged(conversationId, ids, caption, replyTo) }
+    ) = uniffi.core.commitStaged(conversationId, ids, caption, replyTo)
 
     suspend fun reviseWithStaged(
         conversationId: ByteArray, dispatchId: ByteArray, stagedId: ULong, caption: String,

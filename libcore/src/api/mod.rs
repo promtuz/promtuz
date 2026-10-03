@@ -13,6 +13,7 @@ pub mod staging;
 pub mod stickers;
 pub mod storage;
 pub mod update;
+pub mod video;
 
 use crate::data::identity::Identity;
 

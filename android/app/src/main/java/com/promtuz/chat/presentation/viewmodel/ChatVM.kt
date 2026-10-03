@@ -1,11 +1,9 @@
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
-import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.acceptsStaged
@@ -28,15 +26,21 @@ import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.VoicePlayer
 import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
-import com.promtuz.chat.utils.media.videoPoster
-import com.promtuz.chat.utils.media.decodeDownscaled
-import com.promtuz.chat.utils.media.resolvePickedFile
-import com.promtuz.chat.utils.media.toRgba
+import com.promtuz.chat.utils.media.stageCapturedVideo
+import com.promtuz.chat.utils.media.stagePickedAttachment
+import com.promtuz.chat.utils.media.stagePickedImage
+import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.VideoPreparationException
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -163,6 +167,8 @@ class ChatVM(
     val composerBusy = MutableStateFlow(false)
     val composerError = MutableStateFlow<String?>(null)
     private var pickingMedia = false
+    private var prepareJob: Job? = null
+    private var sendJob: Job? = null
 
     private fun restoreDraft() {
         val draft = savedDraft
@@ -471,30 +477,57 @@ class ChatVM(
         }
         composerBusy.value = true
         composerError.value = null
-        viewModelScope.launch {
+        fun markSent() { _sentRevision.value++; input.value = ""; composerAction.value = null }
+        sendJob = viewModelScope.launch {
             try {
                 when {
                     editing != null && items.isNotEmpty() -> {
-                        CoreBridge.reviseWithStaged(conversation, did!!.fromHex(), items.single().id, text)
-                        // Remove only the committed replacement, never an unrelated buffer.
-                        runCatching { CoreBridge.discardStaged(items.single().id) }
+                        withContext(NonCancellable) {
+                            val id = items.single().id
+                            CoreBridge.reviseWithStaged(conversation, did!!.fromHex(), id, text)
+                            CoreBridge.discardStaged(id)
+                            releaseOwned(listOf(id))
+                            restoreDraft()
+                        }
                     }
-                    editing != null -> CoreBridge.editMessage(conversation, did!!.fromHex(), text)
+                    editing != null -> {
+                        CoreBridge.editMessage(conversation, did!!.fromHex(), text)
+                        restoreDraft()
+                    }
                     // A bigger pick goes out as several albums, the caption and reply riding the first.
                     items.isNotEmpty() -> items.chunked(ALBUM_MAX).forEachIndexed { i, chunk ->
-                        CoreBridge.sendStaged(conversation, chunk.map { it.id }, if (i == 0) text else "",
-                            if (i == 0) (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex() else null)
+                        currentCoroutineContext().ensureActive()
+                        withContext(NonCancellable) {
+                            val ids = chunk.map { it.id }
+                            try {
+                                CoreBridge.sendStaged(conversation, ids, if (i == 0) text else "",
+                                    if (i == 0) (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex() else null)
+                            } finally {
+                                // A batch can fail after creating some messages. A fresh read after
+                                // the awaited commit keeps only its unsent remainder available to retry.
+                                val records = CoreBridge.stagedItems()
+                                val remaining = records.map { it.id }.toSet()
+                                val committed = ids.filterNot { it in remaining }
+                                releaseOwned(committed)
+                                if (i == 0 && committed.isNotEmpty()) markSent()
+                                updateStaged(records)
+                            }
+                        }
                     }
-                    else -> CoreBridge.sendMessage(conversation, text,
-                        (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                    else -> {
+                        CoreBridge.sendMessage(conversation, text,
+                            (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                        markSent()
+                    }
                 }
-                _staged.value = _staged.value.filterNot { media -> items.any { it.id == media.id } }
-                if (editing != null) restoreDraft()
-                else { _sentRevision.value++; input.value = ""; composerAction.value = null }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                composerError.value = if (editing != null) "Couldn’t save changes. Try again." else "Couldn’t send. Try again."
+                composerError.value = when {
+                    editing != null -> "Couldn’t save changes. Try again."
+                    items.isNotEmpty() && items.none { it.id in owned } -> null // Every item reached a durable message.
+                    else -> "Couldn’t send. Try again."
+                }
             } finally { composerBusy.value = false }
         }
     }
@@ -537,7 +570,10 @@ class ChatVM(
                 composerBusy.value = true
                 viewModelScope.launch {
                     try {
-                        replacements.forEach { CoreBridge.discardStaged(it) }
+                        replacements.forEach { id ->
+                            CoreBridge.discardStaged(id)
+                            releaseOwned(listOf(id))
+                        }
                         updateStaged(CoreBridge.stagedItems())
                         restoreDraft()
                     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
@@ -568,53 +604,68 @@ class ChatVM(
     fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
         val cr = application.contentResolver
         selected.forEach { uri ->
-            if (cr.getType(uri)?.startsWith("video/") == true) stagePickedFile(uri)
-            else {
-                val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@forEach
-                val tile = bmp.tile()
-                rememberPreview(own(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height)), tile)
-            }
+            if (cr.getType(uri)?.startsWith("image/") == true) stagePhoto(uri)
+            else stagePickedFile(uri)
         }
     }
 
     fun attachCaptured(file: java.io.File, video: Boolean) {
         val uri = Uri.fromFile(file)
-        if (video) prepareMedia(listOf(uri), photos = false) { stageCaptured(file, "video/mp4", uri) }
-        else prepareMedia(listOf(uri), photos = true) {
-            val bmp = decodeDownscaled(application, uri, INLINE_MAX_EDGE) ?: return@prepareMedia
-            rememberPreview(own(CoreBridge.stageImage(bmp.toRgba(), bmp.width, bmp.height)), bmp.tile())
+        if (video) prepareMedia(listOf(uri), photos = false, onRejected = { file.delete() }) {
+            val staged = stageCapturedVideo(application, file)
+            own(staged.id)
+            staged.preview?.let { rememberPreview(staged.id, it) }
+        }
+        else prepareMedia(listOf(uri), photos = true, onRejected = { file.delete() }) {
+            // Camera callbacks transfer their completed output; image staging takes its own copy.
+            try { stagePhoto(uri) } finally { file.delete() }
         }
     }
 
-    private suspend fun stageCaptured(file: java.io.File, mime: String, uri: Uri) {
-        val poster = videoPoster(application, uri, POSTER_MAX_EDGE)?.first
-        val id = own(CoreBridge.stageAttachment(
-            file.absolutePath, file.name, mime,
-            poster?.toRgba(), poster?.width ?: 0, poster?.height ?: 0,
-        ))
-        poster?.let { rememberPreview(id, it.tile()) }
+    private suspend fun stagePhoto(uri: Uri) {
+        val editing = composerAction.value as? ComposerAction.Edit
+        val staged = stagePickedImage(application, uri,
+            allowAttachment = editing == null || editing.msg.content.acceptsStaged(com.promtuz.chat.domain.model.STAGED_ATTACHMENT))
+        own(staged.id)
+        staged.preview?.let { rememberPreview(staged.id, it) }
     }
 
     fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected -> selected.forEach { stagePickedFile(it) } }
 
-    private fun prepareMedia(uris: List<Uri>, photos: Boolean, prepare: suspend (List<Uri>) -> Unit) {
-        if (composerBusy.value || pickingMedia || uris.isEmpty()) return
+    private fun prepareMedia(
+        uris: List<Uri>, photos: Boolean, onRejected: () -> Unit = {}, prepare: suspend (List<Uri>) -> Unit,
+    ) {
+        if (!viewModelScope.isActive || composerBusy.value || pickingMedia || uris.isEmpty()) {
+            onRejected()
+            return
+        }
         val editing = composerAction.value as? ComposerAction.Edit
         if (editing != null) {
             val kind = if (photos) com.promtuz.chat.domain.model.STAGED_IMAGE else com.promtuz.chat.domain.model.STAGED_ATTACHMENT
             if (!editing.msg.content.acceptsStaged(kind) || uris.size != 1 || _staged.value.isNotEmpty() ||
                 (photos && uris.any { application.contentResolver.getType(it)?.startsWith("video/") == true })) {
                 composerError.value = "Choose one compatible replacement for this message."
+                onRejected()
                 return
             }
         }
         pickingMedia = true
         composerBusy.value = true
         composerError.value = null
-        viewModelScope.launch {
+        // Enter the helper immediately: a finalized capture must acquire a cleanup owner even
+        // if the screen closes before the first dispatched coroutine continuation runs.
+        prepareJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try { prepare(uris); updateStaged(CoreBridge.stagedItems()) }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) { composerError.value = "Couldn’t prepare the media. Try again." }
+            catch (e: Exception) {
+                composerError.value = when (e) {
+                    is ImagePreparationException -> e.message
+                    is VideoPreparationException -> e.message
+                    is uniffi.core.CoreException.Refused -> e.msg
+                    else -> "Couldn’t prepare the media. Try again."
+                }
+                updateStaged(CoreBridge.stagedItems())
+            }
             finally { pickingMedia = false; composerBusy.value = false }
         }
     }
@@ -622,6 +673,13 @@ class ChatVM(
     private fun own(id: ULong): ULong {
         owned += id
         return id
+    }
+
+    private fun releaseOwned(ids: Collection<ULong>) {
+        val released = ids.toSet()
+        owned.removeAll(released)
+        ids.forEach { previews.remove(it) }
+        _staged.value = _staged.value.filterNot { it.id in released }
     }
 
     private fun updateStaged(records: List<uniffi.core.StagedRecord>) {
@@ -641,16 +699,15 @@ class ChatVM(
                 error = r.error,
             )
         }
-        val live = records.map { it.id }.toSet()
-        previews.keys.retainAll(live)
-        owned.retainAll(live)
+        // An older async snapshot may omit an item just returned by a prepare job. Only a
+        // successful commit/discard releases ownership; snapshots describe its current UI state.
+        previews.keys.retainAll(owned)
     }
 
     fun unstage(id: ULong) = fire {
         if (composerBusy.value) return@fire
-        previews.remove(id)
-        owned -= id
         CoreBridge.discardStaged(id)
+        releaseOwned(listOf(id))
     }
 
     /** The caller already holds the mic permission. */
@@ -698,27 +755,30 @@ class ChatVM(
 
     override fun onCleared() {
         cancelRecording()
-        // The scope is gone by now; what this chat staged and never sent goes with it.
-        val mine = owned.toList()
-        if (mine.isNotEmpty()) {
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                mine.forEach { runCatching { CoreBridge.discardStaged(it) } }
-            }
+        val preparing = prepareJob
+        val sending = sendJob
+        preparing?.cancel()
+        sending?.cancel()
+        // A prepare helper may be finishing its brief ownership handoff despite cancellation.
+        // Join it before reading the Main-confined ledger, so the final returned ID is included.
+        kotlinx.coroutines.CoroutineScope(Dispatchers.Main.immediate).launch {
+            preparing?.join()
+            sending?.join()
+            owned.toList().forEach { runCatching { CoreBridge.discardStaged(it) } }
+            owned.clear()
+            previews.clear()
         }
+        super.onCleared()
     }
 
     private suspend fun stagePickedFile(uri: Uri) {
-        val picked = resolvePickedFile(application, uri) ?: return
-        val thumb = when {
-            picked.mime.startsWith("image/") -> decodeDownscaled(application, uri, POSTER_MAX_EDGE)
-            picked.mime.startsWith("video/") -> videoPoster(application, uri, POSTER_MAX_EDGE)?.first
-            else -> null
+        val editing = composerAction.value as? ComposerAction.Edit
+        if (editing != null && !editing.msg.content.acceptsStaged(com.promtuz.chat.domain.model.STAGED_ATTACHMENT)) {
+            throw ImagePreparationException("Choose one compatible replacement for this message.")
         }
-        val id = own(CoreBridge.stageAttachment(
-            picked.path, picked.name, picked.mime,
-            thumb?.toRgba(), thumb?.width ?: 0, thumb?.height ?: 0,
-        ))
-        thumb?.let { rememberPreview(id, it.tile()) }
+        val staged = stagePickedAttachment(application, uri)
+        own(staged.id)
+        staged.preview?.let { rememberPreview(staged.id, it) }
     }
 
     /** Staging rings the doorbell before this runs, so the emitted list is patched too. */
@@ -727,28 +787,12 @@ class ChatVM(
         _staged.value = _staged.value.map { if (it.id == id) it.copy(preview = tile) else it }
     }
 
-    private fun Bitmap.tile(): ImageBitmap {
-        val longest = maxOf(width, height).coerceAtLeast(1)
-        if (longest <= TILE_MAX_EDGE) return asImageBitmap()
-        val k = TILE_MAX_EDGE.toFloat() / longest
-        return Bitmap.createScaledBitmap(
-            this, (width * k).toInt().coerceAtLeast(1), (height * k).toInt().coerceAtLeast(1), true,
-        ).asImageBitmap()
-    }
-
     fun download(fileIdHex: String) = fire { CoreBridge.downloadAttachment(fileIdHex.fromHex()) }
 
     private fun fire(block: suspend () -> Unit) = viewModelScope.launch { runCatching { block() } }
 
     private companion object {
-        /** Keeps the AVIF pass under core's 256KB inline budget; an over-budget pick fails in the strip. */
-        const val INLINE_MAX_EDGE = 1600
-
-        const val POSTER_MAX_EDGE = 640
         const val ALBUM_MAX = 10
-
-        /** Composer strip tile; a 60dp square needs nothing like the full pick. */
-        const val TILE_MAX_EDGE = 192
 
         const val INITIAL_LIMIT = 40
 
@@ -840,6 +884,8 @@ private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): Messa
         bitmap = blob?.let { decodeAvifCached(dispatchIdHex, it) },
         width = width.toInt(),
         height = height.toInt(),
+        encoded = blob,
+        mime = mime,
     ) else if (kind.toInt() == 4) (
         // Older backup formats may omit the reference.
         sticker?.let { MessageContent.Sticker(it.toRef()) } ?: MessageContent.Text(mediaLabel(4))

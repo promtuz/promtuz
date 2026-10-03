@@ -91,6 +91,20 @@ pub fn send_staged(
     Ok(())
 }
 
+/// Waits for durable message creation before the caller releases its staged ids.
+/// Network delivery continues independently after each message is committed.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn commit_staged(
+    conversation_id: Vec<u8>, ids: Vec<u64>, caption: String, reply_to: Option<Vec<u8>>,
+) -> Result<(), CoreError> {
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let reply = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
+    crate::api::messaging::on_runtime(async move {
+        crate::staging::commit(to, ids, caption, reply).await
+    })
+    .await
+}
+
 /// Replaces a prior message's body with a staged item. An illegal swap is refused, and the item
 /// stays in the buffer either way.
 #[uniffi::export]

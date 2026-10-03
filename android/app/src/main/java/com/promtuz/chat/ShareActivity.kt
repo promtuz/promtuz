@@ -18,7 +18,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -36,7 +35,6 @@ import com.promtuz.core.observeQuery
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.Serializable
-import java.io.File
 
 @Serializable private data object ShareChoose : NavKey
 @Serializable private data class ShareReview(val conversation: String, val name: String) : NavKey
@@ -76,12 +74,15 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
     var query by mutableStateOf("")
     var busy by mutableStateOf(false)
         private set
+    var sending by mutableStateOf(false)
+        private set
     var error by mutableStateOf<String?>(null)
         private set
     private var received = false
     private var importJob: Job? = null
     private var sendJob: Job? = null
     private val owned = mutableStateListOf<SharedPick>()
+    private val removing = mutableStateListOf<ULong>()
     private val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val staged = observeQuery(setOf("staging")) { CoreBridge.stagedItems() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -111,40 +112,46 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             try {
                 for (uri in uris) {
                     ensureActive()
-                    // Finish transferring one file to core ownership before cancellation.
-                    // onCleared waits for this block, then discards precisely our IDs.
-                    withContext(NonCancellable) {
                     val context = getApplication<Application>()
                     val mime = context.contentResolver.getType(uri).orEmpty()
-                    if (mime.startsWith("image/") && mime != "image/gif") {
-                        val bitmap = decodeDownscaled(context, uri, 2048) ?: error("Image couldn't be read")
-                        try {
-                            val scale = 96f / maxOf(bitmap.width, bitmap.height)
-                            val scaled = android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1), (bitmap.height * scale).toInt().coerceAtLeast(1), true)
-                            val preview = (if (scaled === bitmap) scaled.copy(android.graphics.Bitmap.Config.ARGB_8888, false) else scaled).asImageBitmap()
-                            val id = CoreBridge.stageImage(bitmap.toRgba(), bitmap.width, bitmap.height)
-                            owned.add(SharedPick(id, "Photo", preview))
-                        } finally { bitmap.recycle() }
+                    // Preparation stays cancellable; each helper protects just the core handoff.
+                    // Record its returned ID without suspension before preparing the next item.
+                    if (mime.startsWith("image/")) {
+                        val image = stagePickedImage(context, uri)
+                        owned.add(SharedPick(image.id, "Photo", image.preview))
                     } else {
-                        val file = resolvePickedFile(context, uri) ?: error("File couldn't be read")
-                        try {
-                            val poster = if (mime.startsWith("video/")) videoPoster(context, uri, 320)?.first else null
-                            val id = CoreBridge.stageAttachment(file.path, file.name, file.mime, poster?.toRgba(), poster?.width ?: 0, poster?.height ?: 0)
-                            owned.add(SharedPick(id, file.name, poster?.asImageBitmap()))
-                        } catch (e: Exception) { File(file.path).delete(); throw e }
-                    }
+                        val attachment = stagePickedAttachment(context, uri)
+                        owned.add(SharedPick(attachment.id, attachment.name, attachment.preview))
                     }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { error = "Some attachments couldn't be added. Only the items shown will be sent." }
+            catch (e: Exception) {
+                val reason = when (e) {
+                    is ImagePreparationException -> e.message
+                    is VideoPreparationException -> e.message
+                    is uniffi.core.CoreException.Refused -> e.msg
+                    else -> null
+                }
+                error = reason?.let { if (owned.isEmpty()) it else "$it Only the items shown will be sent." }
+                    ?: "Some attachments couldn't be added. Only the items shown will be sent."
+            }
             finally { busy = false }
         }
     }
 
     private fun remove(id: ULong) {
-        if (busy) return
-        owned.removeAll { it.id == id }
-        cleanup.launch { CoreBridge.discardStaged(id) }
+        if (busy || id in removing) return
+        removing += id
+        cleanup.launch(Dispatchers.Main.immediate) {
+            try {
+                withContext(NonCancellable) {
+                    CoreBridge.discardStaged(id)
+                    owned.removeAll { it.id == id }
+                }
+            } catch (_: Exception) {
+                error = "Couldn’t remove the attachment. Try again."
+            } finally { removing -= id }
+        }
     }
 
     @Composable fun Picks() {
@@ -154,16 +161,16 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             ListItem(leadingContent = { pick.preview?.let { Image(it, null, Modifier.size(48.dp)) } },
                 headlineContent = { Text(pick.name, maxLines = 2) },
                 supportingContent = { if (state?.state?.toInt() != 1) Text(if (state?.state?.toInt() == 2) "Couldn't prepare attachment" else "Preparing…") },
-                trailingContent = { IconButton(enabled = !busy, onClick = { remove(pick.id) }) { DrawableIcon(R.drawable.oi_trash, desc = "Remove attachment") } })
+                trailingContent = { IconButton(enabled = !busy && pick.id !in removing, onClick = { remove(pick.id) }) { DrawableIcon(R.drawable.oi_trash, desc = "Remove attachment") } })
         }
     }
 
-    fun canSend(records: List<uniffi.core.StagedRecord>) = !busy && (text.isNotBlank() || owned.isNotEmpty()) &&
+    fun canSend(records: List<uniffi.core.StagedRecord>) = !busy && removing.isEmpty() && (text.isNotBlank() || owned.isNotEmpty()) &&
         owned.all { p -> records.any { it.id == p.id && it.state.toInt() == 1 } }
 
     fun send(conversation: String, done: () -> Unit) {
         if (!canSend(staged.value)) return
-        busy = true; error = null
+        busy = true; sending = true; error = null
         sendJob = viewModelScope.launch {
             try {
                 if (owned.isEmpty()) withContext(NonCancellable) { CoreBridge.commitShared(conversation.fromHex(), emptyList(), text.trim()) }
@@ -171,12 +178,13 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
                     for (chunk in owned.toList().chunked(10)) {
                         ensureActive()
                         withContext(NonCancellable) {
-                        try { CoreBridge.commitShared(conversation.fromHex(), chunk.map { it.id }, text.trim()) }
-                        finally {
-                            val remaining = CoreBridge.stagedItems().map { it.id }.toSet()
-                            if (chunk.any { it.id !in remaining }) text = ""
-                            owned.removeAll { it.id !in remaining }
-                        }
+                            try { CoreBridge.commitShared(conversation.fromHex(), chunk.map { it.id }, text.trim()) }
+                            finally {
+                                val remaining = CoreBridge.stagedItems().map { it.id }.toSet()
+                                val committed = chunk.map { it.id }.filterNot { it in remaining }.toSet()
+                                if (committed.isNotEmpty()) text = ""
+                                owned.removeAll { it.id in committed }
+                            }
                         }
                     }
                 }
@@ -185,17 +193,19 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             catch (_: Exception) {
                 if (owned.isEmpty() && text.isEmpty()) done()
                 else error = "Couldn't send everything. You can retry the remaining items."
-            } finally { busy = false }
+            } finally { busy = false; sending = false }
         }
     }
 
     override fun onCleared() {
         importJob?.cancel()
+        sendJob?.cancel()
         cleanup.launch(Dispatchers.Main.immediate) {
-            importJob?.join()
-            sendJob?.join()
-            owned.map { it.id }.forEach { CoreBridge.discardStaged(it) }
-            cleanup.cancel()
+            try {
+                importJob?.join()
+                sendJob?.join()
+                owned.map { it.id }.forEach { runCatching { CoreBridge.discardStaged(it) } }
+            } finally { cleanup.cancel() }
         }
         super.onCleared()
     }
@@ -221,7 +231,7 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
 
 @Composable private fun ReviewShare(model: IncomingShareVM, destination: ShareReview, done: () -> Unit) {
     val staged by model.staged.collectAsState()
-    androidx.activity.compose.BackHandler(model.busy) { }
+    androidx.activity.compose.BackHandler(model.sending) { }
     SimpleScreen(title = { Text(destination.name) }, connectionStatus = false, actions = {
         TextButton(enabled = model.canSend(staged), onClick = { model.send(destination.conversation, done) }) { Text("Send") }
     }) { padding ->
