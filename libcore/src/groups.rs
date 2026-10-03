@@ -8,6 +8,7 @@ use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::GroupChange;
 use common::proto::mls_wire::GroupRequest;
 use common::proto::mls_wire::GroupRules;
+use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::SignedChange;
 use common::proto::mls_wire::SystemEvent;
 use common::proto::mls_wire::group_change_signing_input;
@@ -44,7 +45,6 @@ use crate::mls::KeyPackageStash;
 use crate::mls::MlsGroupHandle;
 use crate::mls::PromtuzMlsProvider;
 use crate::mls::policy;
-use crate::quic::dht_client::DhtClient;
 use crate::quic::dht_client::DhtClientError;
 use crate::state::core;
 
@@ -343,7 +343,7 @@ async fn commit_change(conversation: [u8; 16], signed: SignedChange) -> Result<(
         }
         // Validate before fetching, then validate again against the snapshot
         // after the network await. An incoming commit may have advanced us.
-        load_group(ctx.provider, &group_id)?
+        load_settled(ctx.provider, &conversation, &group_id)?
             .state_after_change(&our_ipk, &signed)
             .map_err(|e| anyhow!("{e}"))?;
         let mut joiners = Vec::new();
@@ -994,7 +994,6 @@ pub(crate) fn forward_welcome(
     conversation: [u8; 16], _from: [u8; 32], who: [u8; 32], kp_ref: [u8; 32], welcome: Vec<u8>,
     history: Option<Vec<u8>>,
 ) -> Result<()> {
-    use common::proto::pack::Packer;
     let asked = asked_key(&conversation, &who);
     // The MLS application gate checked the sender's role at its own epoch.
     // We only vouch for invitations we actually requested.
@@ -1006,19 +1005,9 @@ pub(crate) fn forward_welcome(
     let env = crate::mls::seal_welcome_blob(welcome, gid, me, who, kp_ref, &signer)?;
     let envelope = match history {
         Some(history) => recovery::welcome_envelope(env, &history, &signer)?,
-        None => common::proto::mls_wire::MlsEnvelopeP::Welcome(env),
+        None => MlsEnvelopeP::Welcome(env),
     };
-    let id = crate::data::message::next_dispatch_id();
-    let frame = crate::delivery::prepare_dispatch(
-        &who,
-        &me,
-        &signer,
-        &id,
-        envelope.ser()?,
-        common::proto::client_rel::Wake::Message,
-        0,
-    )?;
-    let mut copies = vec![(who, id, OpType::Welcome, frame)];
+    let mut copies = vec![welcome_copy(who, &envelope, &me, &signer)?];
     crate::delivery::enqueue_batch(&mut copies)?;
     crate::data::app_prefs::remove(&asked)?;
     core().spawn(async move {
@@ -1108,29 +1097,27 @@ async fn legacy_add(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
         let (kp, kp_ref) = crate::messaging::session::fetch_verified_keypackage(&ctx, &who, true)
             .await
             .map_err(|e| no_keys_error(&who, e))?;
-        let mut group = load_group(ctx.provider, &group_id)?;
+        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
         if group.member_count() + 1 > crate::mls::MAX_GROUP_MEMBERS {
             bail!("a group is limited to {} members", crate::mls::MAX_GROUP_MEMBERS);
         }
-        // Existing members apply this Commit at the epoch it was built in, so
-        // capture that before the merge moves us on.
-        let commit_epoch = group.epoch();
         let (commit, welcome) = group
             .add_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[kp])
             .map_err(|e| anyhow!("add_members: {e}"))?;
         let env =
             crate::mls::make_welcome_envelope(welcome, group_id, our_ipk, who, kp_ref, &ipk_signer)
                 .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
-        if let Err(e) = ctx.dht.deliver_welcome(&env).await {
-            group.clear_pending_commit(ctx.provider);
-            bail!("deliver_welcome: {e}");
-        }
+        // Queued with the commit, so the joiner never holds an epoch the members never reach.
+        let welcome = welcome_copy(who, &MlsEnvelopeP::Welcome(env), &our_ipk, &ipk_signer)?;
         let recipients = Conversation::recipients(&conversation);
-        let copies =
-            outbox_commit(&recipients, &commit, group_id, commit_epoch, &ipk_signer)?;
-        group
-            .merge_pending_commit(ctx.provider)
-            .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
+        let copies = publish_commit(
+            ctx.provider,
+            &mut group,
+            &recipients,
+            &commit,
+            &ipk_signer,
+            Some(welcome),
+        )?;
         Conversation::sync_group(&conversation, &group.roster(), group.group_meta().as_ref())?;
         recovery::dispatch(copies).await;
         announce(conversation, SystemEvent::Added { who: who.into() }).await;
@@ -1158,7 +1145,7 @@ async fn evict(
     }
 
     with_mls!(ctx, {
-        let mut group = load_group(ctx.provider, &group_id)?;
+        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
         let idx = group
             .member_index_by_ipk(&who)
             .ok_or_else(|| anyhow!("that member is not in this group"))?;
@@ -1166,15 +1153,11 @@ async fn evict(
         // Address the Commit to the roster as it stands now, the removed member included: they
         // need it to learn they are out.
         let recipients = Conversation::recipients(&conversation);
-        let commit_epoch = group.epoch();
         let commit = group
             .remove_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[idx])
             .map_err(|e| anyhow!("remove_members: {e}"))?;
         let copies =
-            outbox_commit(&recipients, &commit, group_id, commit_epoch, &ipk_signer)?;
-        group
-            .merge_pending_commit(ctx.provider)
-            .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
+            publish_commit(ctx.provider, &mut group, &recipients, &commit, &ipk_signer, None)?;
 
         // The tree, not our intent, is the roster: the commit may have
         // carried more than this one removal.
@@ -1195,7 +1178,7 @@ async fn legacy_leave(conversation: [u8; 16]) -> Result<()> {
     require_not_stranding_the_group(&conversation, &our_ipk)?;
 
     with_mls!(ctx, {
-        let mut group = load_group(ctx.provider, &group_id)?;
+        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
         let recipients = Conversation::recipients(&conversation);
         let commit_epoch = group.epoch();
 
@@ -1205,8 +1188,9 @@ async fn legacy_leave(conversation: [u8; 16]) -> Result<()> {
         let proposal = group
             .leave(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?)
             .map_err(|e| anyhow!("leave: {e}"))?;
-        let copies =
-            outbox_commit(&recipients, &proposal, group_id, commit_epoch, &ipk_signer)?;
+        let mut copies =
+            sealed_copies(&recipients, &proposal, group_id, commit_epoch, &ipk_signer)?;
+        crate::delivery::enqueue_batch(&mut copies)?;
         recovery::dispatch(copies).await;
 
         Conversation::deactivate_member(&conversation, &our_ipk)?;
@@ -1218,15 +1202,14 @@ async fn legacy_leave(conversation: [u8; 16]) -> Result<()> {
     })
 }
 
-/// Outboxes a sealed copy per recipient so an offline member still applies the change. The
-/// caller merges the commit, then sends the copies with [`recovery::dispatch`].
-fn outbox_commit(
-    recipients: &[[u8; 32]], commit: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
+/// A sealed copy of `message` per recipient, so an offline member still applies it.
+fn sealed_copies(
+    recipients: &[[u8; 32]], message: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
     epoch: u64, ipk_signer: &SigningKey,
 ) -> Result<Vec<recovery::Copy>> {
-    let sealed = SealedMessage::from_mls_out(commit, group_id, epoch)
+    let sealed = SealedMessage::from_mls_out(message, group_id, epoch)
         .map_err(|e| anyhow!("seal commit: {e}"))?;
-    let mut copies = recovery::copies(&recovery::addressed(
+    Ok(recovery::copies(&recovery::addressed(
         &sealed,
         crate::data::message::next_dispatch_id(),
         recipients,
@@ -1234,9 +1217,55 @@ fn outbox_commit(
         OpType::Control,
         common::proto::client_rel::Wake::Message,
         0,
-    )?);
-    crate::delivery::enqueue_batch(&mut copies)?;
+    )?))
+}
+
+/// Queues our pending commit for every recipient, `welcome` beside it, with the mark that it left,
+/// then merges it. Whatever fails here the next change settles. The caller sends the copies with
+/// [`recovery::dispatch`].
+fn publish_commit(
+    provider: &PromtuzMlsProvider, group: &mut MlsGroupHandle, recipients: &[[u8; 32]],
+    commit: &openmls::prelude::MlsMessageOut, ipk_signer: &SigningKey,
+    welcome: Option<recovery::Copy>,
+) -> Result<Vec<recovery::Copy>> {
+    // Members apply it at the epoch it was built in, which the merge moves us past.
+    let (group_id, epoch) = (group.group_id(), group.epoch());
+    let mut copies = sealed_copies(recipients, commit, group_id, epoch, ipk_signer)?;
+    copies.extend(welcome);
+    crate::delivery::enqueue_commit(&mut copies, &group_id, epoch)?;
+    group.merge_pending_commit(provider).map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
     Ok(copies)
+}
+
+/// Settles the commit a failed or interrupted change left pending before the next is built: merged
+/// if it was queued, since members hold it or will, and dropped otherwise.
+fn load_settled(
+    provider: &PromtuzMlsProvider, conversation: &[u8; 16], group_id: &[u8; 32],
+) -> Result<MlsGroupHandle> {
+    let mut group = load_group(provider, group_id)?;
+    if !group.has_pending_commit() {
+        return Ok(group);
+    }
+    if crate::delivery::commit_left(group_id, group.epoch())? {
+        warn!("GROUP: merging a commit queued before an interruption");
+        group.merge_pending_commit(provider)?;
+        Conversation::sync_group(conversation, &group.roster(), group.group_meta().as_ref())?;
+    } else {
+        warn!("GROUP: dropping a commit that never left");
+        group.clear_pending_commit(provider);
+    }
+    Ok(group)
+}
+
+/// `envelope` framed for `who`'s outbox row.
+fn welcome_copy(
+    who: [u8; 32], envelope: &MlsEnvelopeP, me: &[u8; 32], signer: &SigningKey,
+) -> Result<recovery::Copy> {
+    use common::proto::pack::Packer;
+    let id = crate::data::message::next_dispatch_id();
+    let wake = common::proto::client_rel::Wake::Message;
+    let frame = crate::delivery::prepare_dispatch(&who, me, signer, &id, envelope.ser()?, wake, 0)?;
+    Ok((who, id, OpType::Welcome, frame))
 }
 
 /// Drop our copy of a group we're out of. The conversation keeps its history.
@@ -1334,4 +1363,61 @@ fn leaf_for(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, our_ipk: &[u8; 32],
 ) -> Result<openmls_basic_credential::SignatureKeyPair> {
     crate::messaging::session::leaf_signer_for_group(provider, group, our_ipk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ScopedCore;
+    use crate::test_support::mls::Party;
+    use crate::test_support::mls::commit_of;
+    use crate::test_support::mls::found;
+    use crate::test_support::mls::with_failing_trigger;
+
+    /// A commit queued before its merge failed has reached the members, so the next change merges
+    /// it; one that never reached the outbox is dropped. Either way the next change commits, and
+    /// the members follow it.
+    #[tokio::test]
+    async fn the_next_change_settles_a_commit_left_pending() {
+        let scope = ScopedCore::new();
+        let [alice, bob, carol, dave] = [0xA7, 0xB7, 0xC7, 0xD7].map(Party::new);
+        let gid = [0xE7; 32];
+        let meta = GroupMeta { title: String::new(), founder: alice.ipk, state: None };
+        let (mut group, [mut at_bob, _]) = found(&alice, gid, Some(&meta), [&bob, &carol]);
+        let conversation =
+            Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk, carol.ipk]).unwrap();
+        Conversation::bind_group(&conversation, &gid).unwrap();
+        let provider = &alice.provider;
+        let publish = |group: &mut MlsGroupHandle, commit| {
+            publish_commit(provider, group, &[bob.ipk, carol.ipk], commit, &alice.identity, None)
+        };
+        let epoch = group.epoch();
+
+        let carol_at = group.member_index_by_ipk(&carol.ipk).unwrap();
+        let removal = group.remove_members(provider, &alice.leaf, &[carol_at]).unwrap();
+        let merge = || publish(&mut group, &removal);
+        assert!(with_failing_trigger(&alice.db, "INSERT ON mls_storage", merge).is_err());
+        drop(group);
+        let mut group = load_settled(provider, &conversation, &gid).unwrap();
+        assert_eq!(group.epoch(), epoch + 1, "the queued removal is merged");
+        let removal = commit_of(bob.receive(&mut at_bob, &removal));
+        at_bob.merge_staged_commit(&bob.provider, removal).unwrap();
+
+        let (add, _) = group.add_members(provider, &alice.leaf, &[dave.kp()]).unwrap();
+        let queue = || publish(&mut group, &add);
+        assert!(with_failing_trigger(scope.core.db.outbox(), "INSERT ON outbox", queue).is_err());
+        drop(group);
+        let mut group = load_settled(provider, &conversation, &gid).unwrap();
+        assert_eq!(group.epoch(), epoch + 1, "the add that never left is dropped");
+
+        let (add, welcome) = group.add_members(provider, &alice.leaf, &[dave.kp()]).unwrap();
+        publish(&mut group, &add).unwrap();
+        let add = commit_of(bob.receive(&mut at_bob, &add));
+        at_bob.merge_staged_commit(&bob.provider, add).unwrap();
+        let at_dave = dave.join(&welcome);
+        assert_eq!(group.epoch(), epoch + 2);
+        for member in [&at_bob, &at_dave] {
+            assert_eq!((member.epoch(), member.roster()), (group.epoch(), group.roster()));
+        }
+    }
 }

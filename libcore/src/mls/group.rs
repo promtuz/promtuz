@@ -540,6 +540,11 @@ impl MlsGroupHandle {
         })
     }
 
+    /// openmls keeps it across a restart, and refuses adds, removals and leaves while it stands.
+    pub fn has_pending_commit(&self) -> bool {
+        self.inner.pending_commit().is_some()
+    }
+
     /// Drops a commit built but not sent, so the group takes the next one.
     pub fn clear_pending_commit(&mut self, provider: &PromtuzMlsProvider) {
         let dropped = provider.storage().atomic(|| {

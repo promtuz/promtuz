@@ -95,14 +95,46 @@ pub(crate) fn enqueue_batch(copies:&mut [([u8;32],[u8;16],OpType,Vec<u8>)])->any
 
 pub(crate) fn enqueue_batch_in(conn: &mut Connection, copies: &mut [([u8;32],[u8;16],OpType,Vec<u8>)]) -> anyhow::Result<()> {
     let tx=conn.transaction()?;
+    batch_tx(&tx, copies)?;
+    tx.commit()?;Ok(())
+}
+
+fn batch_tx(
+    tx: &Connection, copies: &mut [([u8; 32], [u8; 16], OpType, Vec<u8>)],
+) -> anyhow::Result<()> {
     for (to,id,op,bytes) in copies {
-        enqueue_tx(&tx,id,*op,Some(*to),bytes)?;
+        enqueue_tx(tx,id,*op,Some(*to),bytes)?;
         // A concurrent/replayed enqueue keeps the first envelope. Live sends
         // must use the same bytes the reconciler will replay.
         *bytes = tx.query_row("SELECT payload FROM outbox WHERE id=?1 AND target_ipk=?2",
             params![id.as_slice(),to.as_slice()],|r|r.get(0))?;
     }
-    tx.commit()?;Ok(())
+    Ok(())
+}
+
+/// Queues a commit's copies with the mark that it left the device, built at `epoch`, so neither
+/// lands without the other.
+pub(crate) fn enqueue_commit(
+    copies: &mut [([u8; 32], [u8; 16], OpType, Vec<u8>)], group: &[u8; 32], epoch: u64,
+) -> anyhow::Result<()> {
+    let mut conn = core().db.outbox().lock();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO commit_left (group_id, epoch) VALUES (?1, ?2)",
+        params![group, epoch],
+    )?;
+    batch_tx(&tx, copies)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Whether the commit `group` built at `epoch` was queued for its members.
+pub(crate) fn commit_left(group: &[u8; 32], epoch: u64) -> anyhow::Result<bool> {
+    Ok(core().db.outbox().lock().query_row(
+        "SELECT EXISTS(SELECT 1 FROM commit_left WHERE group_id = ?1 AND epoch = ?2)",
+        params![group, epoch],
+        |r| r.get(0),
+    )?)
 }
 
 /// Retires one member's copy; each member acks on its own schedule.

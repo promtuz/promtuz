@@ -80,6 +80,15 @@ const MIGRATION_ARRAY: &[M] = &[
     "#,
     ),
     M::up("CREATE INDEX idx_outbox_due ON outbox(state, next_attempt);"),
+    // The epoch a group's latest outboxed commit was built at, written with its copies.
+    M::up(
+        r#"--sql
+        CREATE TABLE commit_left (
+          group_id BLOB PRIMARY KEY,
+          epoch    INTEGER NOT NULL
+        ) WITHOUT ROWID;
+    "#,
+    ),
 ];
 pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
