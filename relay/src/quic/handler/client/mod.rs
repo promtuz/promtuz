@@ -92,7 +92,7 @@ pub struct ClientContext {
 
     /// Cancelled at process shutdown, not when this connection ends.
     pub cancel: CancellationToken,
-    /// Keys the last `DrainQueue` sent, deleted on `AckDrain`.
+    /// Keys the last `DrainQueue` sent, deleted once an `AckDrain` names their id.
     pub pending_drain: Mutex<Vec<MessageKey>>,
 
     /// The latest verified `DrainAuth`; a newer one replaces it.

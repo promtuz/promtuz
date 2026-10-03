@@ -120,18 +120,24 @@ async fn one_relay_authenticates_delivers_and_drains_over_tls_without_client_udp
     drop(b);
     eventually(|| !node.relay.clients.read().contains_key(&b_ipk)).await;
     let offline = dispatch(&a_key, b_ipk, [3; 16], b"opaque wake");
-    assert!(matches!(send(&a, offline.clone()).await, DispatchAckP::Queued { .. }));
-    assert_eq!(messages(), 1);
+    let unstored = dispatch(&a_key, b_ipk, [4; 16], b"fails to store");
+    for queued in [&offline, &unstored] {
+        assert!(matches!(send(&a, queued.clone()).await, DispatchAckP::Queued { .. }));
+    }
+    assert_eq!(messages(), 2);
 
     let b = authenticated(&node, &b_key).await;
     let drained = drain(&b, vec![]).await;
     assert_eq!(
         drained.iter().map(|d| (d.id, d.payload.clone(), d.sig)).collect::<Vec<_>>(),
-        [(offline.id, offline.payload, offline.sig)]
+        [&offline, &unstored].map(|d| (d.id, d.payload.clone(), d.sig))
     );
-    assert_eq!(messages(), 1, "a drain alone keeps custody");
+    assert_eq!(messages(), 2, "a drain alone keeps custody");
     assert_eq!(drain(&b, vec![]).await, drained, "an unacknowledged drain is delivered again");
-    ask_address(&b, vec![CRelayPacket::AckDrain]).await;
+    ask_address(&b, vec![CRelayPacket::AckDrain { ids: vec![offline.id.0] }]).await;
+    assert_eq!(messages(), 1, "what the phone did not store stays queued");
+    assert_eq!(drain(&b, vec![]).await, drained[1..]);
+    ask_address(&b, vec![CRelayPacket::AckDrain { ids: vec![unstored.id.0] }]).await;
     assert_eq!(messages(), 0);
 }
 

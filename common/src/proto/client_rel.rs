@@ -248,8 +248,9 @@ pub enum CRelayPacket {
     DeliverAck,
 
     DrainQueue,
-    /// The client has durably stored the drained messages, so the relay may clear its queue.
-    AckDrain,
+    /// The drained messages the client stored durably. The relay clears only these, so the rest
+    /// come again on the next drain.
+    AckDrain { ids: Vec<[u8; 16]> },
 
     /// The user's [`crate::proto::dht_p2p::queue_fetch_signing_input`] signature, which this
     /// relay presents as `QueueFetch.user_sig` to every home in the user's set.

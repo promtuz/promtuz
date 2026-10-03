@@ -67,7 +67,7 @@ pub(super) async fn handle_packet(
         Query(query) => handle_misc(query, ctx.clone(), tx).await,
         Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue => handle_drain_queue(ctx.clone(), tx).await,
-        AckDrain => handle_ack_drain(ctx.clone(), tx).await,
+        AckDrain { ids } => handle_ack_drain(ctx.clone(), ids, tx).await,
         DrainAuth { timestamp, sig } => handle_drain_auth(ctx.clone(), timestamp, sig.0).await,
         // Answers the round `run_remote_ack_round` parked; an unsolicited `AckAuth` is dropped.
         AckAuth { sig, timestamp } => {

@@ -26,8 +26,10 @@ use crate::storage::queued_dispatch;
 
 /// Bytes one `DrainQueue` ships before stopping; the client re-issues it for the rest.
 const DRAIN_MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
+/// Ids one `DrainQueue` ships, so the client's `AckDrain` stays well inside one frame.
+const DRAIN_MAX_BATCH_IDS: usize = 16 * 1024;
 
-/// Delivered entries stay on disk until `AckDrain`, which the client sends once it has stored
+/// Delivered entries stay on disk until an `AckDrain` names them, once the client has stored
 /// them durably.
 pub(super) async fn handle_drain_queue(
     ctx: ClientCtxHandle, tx: &mut SendStream,
@@ -128,10 +130,12 @@ pub(super) async fn handle_drain_queue(
 /// The home ack is best-effort: a lost one only means duplicate deliveries, which the client
 /// dedupes by id.
 pub(super) async fn handle_ack_drain(
-    ctx: ClientCtxHandle, tx: &mut SendStream,
+    ctx: ClientCtxHandle, ids: Vec<[u8; 16]>, tx: &mut SendStream,
 ) -> Result<()> {
+    let stored: std::collections::HashSet<[u8; 16]> = ids.into_iter().collect();
     // A key may come from either keyspace; removing it from the other is a no-op.
-    let keys = std::mem::take(&mut *ctx.pending_drain.lock());
+    let mut keys = std::mem::take(&mut *ctx.pending_drain.lock());
+    keys.retain(|key| stored.contains(&key.id));
     if !keys.is_empty() {
         let mut batch = ctx.relay.store.batch();
         for key in &keys {
@@ -143,10 +147,14 @@ pub(super) async fn handle_ack_drain(
     }
 
     let remote_state = ctx.pending_remote_drain.lock().take();
-    if let Some(state) = remote_state
-        && let Err(err) = run_remote_ack_round(&ctx, tx, state).await {
+    if let Some(mut state) = remote_state {
+        state.ids.retain(|id| stored.contains(id));
+        if !state.ids.is_empty()
+            && let Err(err) = run_remote_ack_round(&ctx, tx, state).await
+        {
             trace!("DRAIN: remote ack-fanout fell through: {err}");
         }
+    }
 
     Ok(())
 }
@@ -221,7 +229,7 @@ struct DrainBatch {
 
 impl DrainBatch {
     fn is_full(&self) -> bool {
-        self.bytes >= DRAIN_MAX_BATCH_BYTES
+        self.bytes >= DRAIN_MAX_BATCH_BYTES || self.seen.len() >= DRAIN_MAX_BATCH_IDS
     }
 
     /// `false` when `id` already went out this drain. The caller still tracks

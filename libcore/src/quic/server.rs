@@ -314,7 +314,7 @@ impl Session {
     async fn ack_drain(&self, ipk: VerifyingKey, drained: &HashSet<[u8; 16]>) -> Result<()> {
         let conn = &self.conn;
         let (mut tx, mut rx) = conn.open_bi().await?;
-        CRelayPacket::AckDrain.send(&mut tx).await?;
+        CRelayPacket::AckDrain { ids: drained.iter().copied().collect() }.send(&mut tx).await?;
         tx.finish()?;
         let reply = tokio::time::timeout(Duration::from_secs(10), read_relay_packet(&mut rx)).await??;
         let Some(reply) = reply else { return Ok(()) };
@@ -364,7 +364,7 @@ impl Session {
             Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
         }
         // Queued messages arrive as `Deliver` frames on this stream. Unlike live delivery, the
-        // drain is acked as one batch via `AckDrain` once everything is stored.
+        // drain is acked as one batch via `AckDrain`, naming what was stored.
         let mut previous = HashSet::new();
         for _ in 0..16 {
             let (mut tx, mut rx) = conn.open_bi().await?;
