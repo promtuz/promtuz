@@ -14,12 +14,13 @@ import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import com.promtuz.chat.ui.components.MenuAction
 
-/** [thumb] is what the entry point draws and what flies; [load] produces the full picture once open. */
+/** [thumb] is a fallback preview; [encoded] or [filePath] retains the original image for playback and export. */
 data class MediaItem(
     val key: String,
     val thumb: ImageBitmap?,
@@ -39,6 +40,7 @@ data class MediaItem(
     /** Extra overflow menu groups after the built-in entries. */
     val actions: List<List<MenuAction>> = emptyList(),
     val message: com.promtuz.chat.domain.model.MessageLocation? = null,
+    val encoded: ByteArray? = null,
 )
 
 /** The one bubble video playing in place, if any. A second play, or the viewer, takes it over. */
@@ -76,7 +78,23 @@ class MediaSession(items: List<MediaItem>, val startIndex: Int) {
     var items by mutableStateOf(items)
 }
 
-class MediaOrigin(val coordinates: LayoutCoordinates, val cornerRadius: Dp, val clip: (() -> Rect?)?)
+/** Updated by a renderer without recomposing the whole message for every animation frame. */
+internal class MediaFrame {
+    var image: ImageBitmap? = null
+        set(value) {
+            field = value
+            if (value != null) size = IntSize(value.width, value.height)
+        }
+    var size by mutableStateOf(IntSize.Zero)
+        private set
+}
+
+class MediaOrigin(
+    val coordinates: LayoutCoordinates,
+    val cornerRadius: Dp,
+    val clip: (() -> Rect?)?,
+    val image: (() -> ImageBitmap?)? = null,
+)
 
 /** The band a list shows its items in, in window coordinates. */
 val LocalMediaClip = compositionLocalOf<(() -> Rect?)?> { null }
@@ -108,6 +126,8 @@ object MediaViewer {
 
     internal fun origin(key: String): MediaOrigin? = origins[key]?.takeIf { it.coordinates.isAttached }
 
+    internal fun originImage(key: String): ImageBitmap? = origin(key)?.image?.invoke()
+
     /** [key]'s visible band in [host]'s coordinates, if its list declared one. */
     fun originClipIn(key: String, host: LayoutCoordinates?): Rect? {
         val h = host?.takeIf { it.isAttached } ?: return null
@@ -130,14 +150,18 @@ object MediaViewer {
 }
 
 /** Marks this node as the on-screen home of [key]: the viewer opens from and closes to it. */
-fun Modifier.mediaOrigin(key: String, cornerRadius: Dp): Modifier = this then MediaOriginElement(key, cornerRadius)
+fun Modifier.mediaOrigin(key: String, cornerRadius: Dp, image: (() -> ImageBitmap?)? = null): Modifier =
+    this then MediaOriginElement(key, cornerRadius, image)
 
-private data class MediaOriginElement(val key: String, val cornerRadius: Dp) : ModifierNodeElement<MediaOriginNode>() {
-    override fun create() = MediaOriginNode(key, cornerRadius)
+private data class MediaOriginElement(
+    val key: String, val cornerRadius: Dp, val image: (() -> ImageBitmap?)?,
+) : ModifierNodeElement<MediaOriginNode>() {
+    override fun create() = MediaOriginNode(key, cornerRadius, image)
     override fun update(node: MediaOriginNode) {
-        if (node.key != key) MediaViewer.origins.remove(node.key)
+        if (node.key != key) node.unregister()
         node.key = key
         node.cornerRadius = cornerRadius
+        node.image = image
     }
     override fun InspectorInfo.inspectableProperties() {
         name = "mediaOrigin"
@@ -145,13 +169,21 @@ private data class MediaOriginElement(val key: String, val cornerRadius: Dp) : M
     }
 }
 
-private class MediaOriginNode(var key: String, var cornerRadius: Dp) :
+private class MediaOriginNode(var key: String, var cornerRadius: Dp, var image: (() -> ImageBitmap?)?) :
     Modifier.Node(), GlobalPositionAwareModifierNode, CompositionLocalConsumerModifierNode {
+    private var registeredOrigin: MediaOrigin? = null
+
     override fun onGloballyPositioned(coordinates: LayoutCoordinates) {
-        MediaViewer.origins[key] = MediaOrigin(coordinates, cornerRadius, currentValueOf(LocalMediaClip))
+        val origin = MediaOrigin(coordinates, cornerRadius, currentValueOf(LocalMediaClip)) { image?.invoke() }
+        registeredOrigin = origin
+        MediaViewer.origins[key] = origin
     }
 
-    override fun onDetach() {
-        if (MediaViewer.origins[key]?.coordinates?.isAttached != true) MediaViewer.origins.remove(key)
+    fun unregister() {
+        // A recycled list node must release its frame without removing a newer origin with the same key.
+        if (MediaViewer.origins[key] === registeredOrigin) MediaViewer.origins.remove(key)
+        registeredOrigin = null
     }
+
+    override fun onDetach() = unregister()
 }

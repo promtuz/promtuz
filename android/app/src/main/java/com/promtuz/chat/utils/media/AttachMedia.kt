@@ -20,8 +20,13 @@ data class PickedFile(val path: String, val name: String, val mime: String)
  *  layout, unlike copyPixelsToBuffer. */
 fun Bitmap.toRgba(): ByteArray {
     val src = if (config == Bitmap.Config.ARGB_8888) this else copy(Bitmap.Config.ARGB_8888, false)
-    val px = IntArray(src.width * src.height)
-    src.getPixels(px, 0, src.width, 0, 0, src.width, src.height)
+    val px = try {
+        IntArray(src.width * src.height).also {
+            src.getPixels(it, 0, src.width, 0, 0, src.width, src.height)
+        }
+    } finally {
+        if (src !== this) src.recycle()
+    }
     val out = ByteArray(px.size * 4)
     var o = 0
     for (p in px) {

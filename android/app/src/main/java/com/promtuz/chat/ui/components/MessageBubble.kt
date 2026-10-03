@@ -205,6 +205,8 @@ fun MessageBubble(
                                 content, textColor, appearance.type.fontScale,
                                 metaLabel, outgoing,
                                 onOpen = onMediaTap,
+                                onDownload = onDownload,
+                                onOpenFile = onOpen,
                             )
                         content is MessageContent.Attachment && tile ->
                             MediaTileBlock(

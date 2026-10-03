@@ -193,6 +193,21 @@ pub fn stage_image(rgba: Vec<u8>, width: u32, height: u32) -> u64 {
     id
 }
 
+pub fn stage_encoded_image(bytes: Vec<u8>) -> Result<u64> {
+    let image = crate::media::process_encoded_image(
+        &bytes,
+        crate::media::MediaPolicy { max_bytes: 256 * 1024, max_edge: 16_384 },
+    )?.ok_or_else(|| anyhow!("The prepared image is not AVIF."))?;
+    let mut s = blank(KIND_IMAGE);
+    s.mime = image.mime.into();
+    s.size = image.bytes.len() as u64;
+    s.width = image.width;
+    s.height = image.height;
+    s.blob = Some(image.bytes);
+    s.state = READY;
+    Ok(insert(s))
+}
+
 pub fn stage_attachment(
     source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
     thumb_h: u32,

@@ -8,7 +8,6 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.StickerRef
@@ -17,8 +16,8 @@ import com.promtuz.chat.domain.model.toRecord
 import com.promtuz.chat.domain.model.toRef
 import com.promtuz.chat.domain.model.toUi
 import com.promtuz.chat.utils.extensions.fromHex
-import com.promtuz.chat.utils.media.decodeDownscaled
-import com.promtuz.chat.utils.media.toRgba
+import com.promtuz.chat.utils.media.pickImageSource
+import com.promtuz.chat.utils.media.ImagePreparationException
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.CancellationException
@@ -40,7 +39,7 @@ data class UiPackPreview(
 )
 
 @Immutable
-data class PickedSticker(val uri: Uri, val preview: ImageBitmap?)
+data class PickedSticker(val uri: Uri, val preview: ImageBitmap?, val encoded: ByteArray? = null)
 
 class StickersVM(private val application: Application) : ViewModel() {
     val packs: StateFlow<List<UiStickerPack>> =
@@ -90,12 +89,13 @@ class StickersVM(private val application: Application) : ViewModel() {
         viewModelScope.launch {
             try {
                 val decoded = fresh.map { uri ->
-                    val image = decodeDownscaled(application, uri, TILE_MAX_EDGE) ?: throw UnreadableImage()
-                    PickedSticker(uri, image.asImageBitmap())
+                    val image = pickImageSource(application, uri, STICKER_EDGE, sticker = true)
+                    if (image.preserveOriginal) throw ImagePreparationException("Use an AVIF to keep this image’s HDR or colors in a sticker.")
+                    PickedSticker(uri, image.preview, image.encoded?.takeIf { it.size <= 1024 * 1024 })
                 }
                 picks += decoded
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { error = "Couldn’t open the selected images. Try choosing them again." }
+            catch (e: Exception) { error = (e as? ImagePreparationException)?.message ?: "Couldn’t open the selected images. Try choosing them again." }
             finally { decoding = false }
         }
     }
@@ -117,6 +117,7 @@ class StickersVM(private val application: Application) : ViewModel() {
                 error = when (e) {
                     is uniffi.core.CoreException.Refused -> e.msg
                     is UnreadableImage -> "Couldn’t open an image. Remove it and try again."
+                    is ImagePreparationException -> e.message
                     else -> "Couldn’t publish. Check your connection and try again."
                 }
             } finally { publishing = false }
@@ -129,9 +130,10 @@ class StickersVM(private val application: Application) : ViewModel() {
 
     private suspend fun sources(uris: List<Uri>): List<StickerSource> = withContext(Dispatchers.IO) {
         uris.map { uri ->
-            val bmp = decodeDownscaled(application, uri, STICKER_EDGE) ?: throw UnreadableImage()
-            try { StickerSource(bmp.toRgba(), bmp.width.toUInt(), bmp.height.toUInt()) }
-            finally { bmp.recycle() }
+            val image = pickImageSource(application, uri, STICKER_EDGE, sticker = true)
+            if (image.preserveOriginal) throw ImagePreparationException("Use an AVIF to keep this image’s HDR or colors in a sticker.")
+            val prepared = image.encoded?.let { CoreBridge.prepareEncodedImage(it, sticker = true) }
+            StickerSource(image.rgba ?: ByteArray(0), image.width.toUInt(), image.height.toUInt(), prepared?.bytes)
         }
     }
 
@@ -139,7 +141,6 @@ class StickersVM(private val application: Application) : ViewModel() {
         const val RECENT_LIMIT = 24
         /** libcore fits the picture inside this; decoding larger is wasted work. */
         const val STICKER_EDGE = 512
-        const val TILE_MAX_EDGE = 192
     }
 }
 

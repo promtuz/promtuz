@@ -1,11 +1,12 @@
 package com.promtuz.chat.presentation.viewmodel
 
-import android.graphics.Bitmap
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.utils.media.PhotoCrop
-import com.promtuz.chat.utils.media.decodeAvatar
+import com.promtuz.chat.utils.media.AvatarPicture
+import com.promtuz.chat.utils.media.AvatarSource
+import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.prepareAvatar
 import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
@@ -19,7 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-data class OwnProfile(val name: String = "", val picture: ImageBitmap? = null, val bio: String = "", val identity: String = "")
+data class OwnProfile(val name: String = "", val picture: AvatarPicture? = null, val bio: String = "", val identity: String = "")
 
 sealed interface ProfileWork {
     data object Idle : ProfileWork
@@ -54,17 +55,28 @@ class ProfileVM(private val group: String? = null) : ViewModel() {
 
     private suspend fun readProfile() {
         val name = if (group == null) CoreBridge.profileName() else CoreBridge.conversation(group.fromHex())?.displayName.orEmpty()
-        val picture = (if (group == null) CoreBridge.profilePicture() else CoreBridge.groupPicture(group.fromHex()))?.let { decodeAvatar(it) }
+        val picture = (if (group == null) CoreBridge.profilePicture() else CoreBridge.groupPicture(group.fromHex()))?.let { prepareAvatar(it) }
         _profile.value = OwnProfile(name, picture, if (group == null) CoreBridge.profileBio() else "", if (group == null) withContext(Dispatchers.IO) { uniffi.core.profileIdentity().toHex() } else group)
     }
 
-    fun savePicture(source: Bitmap, crop: PhotoCrop, requestId: String) = change({ _savedPhoto.value = requestId }) {
-        val rgba = withContext(Dispatchers.Default) {
-            val bitmap = crop.render(source)
-            try { bitmap.toRgba() } finally { bitmap.recycle() }
+    fun savePicture(source: AvatarSource, crop: PhotoCrop, requestId: String) = change({ _savedPhoto.value = requestId }) {
+        when (source) {
+            is AvatarSource.Still -> {
+                val rgba = withContext(Dispatchers.Default) {
+                    val bitmap = crop.render(source.bitmap)
+                    try { bitmap.toRgba() } finally { bitmap.recycle() }
+                }
+                if (group == null) CoreBridge.setProfilePicture(rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
+                else CoreBridge.setGroupPicture(group.fromHex(), rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
+            }
+            is AvatarSource.Encoded -> {
+                val bytes = if (source.canCrop) CoreBridge.prepareAvatarImage(source.original,
+                    uniffi.core.AvatarCropRecord(crop.centerX.toDouble(), crop.centerY.toDouble(), crop.zoom.toDouble()),
+                ).bytes else source.picture.encoded
+                if (group == null) CoreBridge.setProfilePictureEncoded(bytes)
+                else CoreBridge.setGroupPictureEncoded(group.fromHex(), bytes)
+            }
         }
-        if (group == null) CoreBridge.setProfilePicture(rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
-        else CoreBridge.setGroupPicture(group.fromHex(), rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
     }
 
     fun removePicture() = change {
@@ -89,7 +101,12 @@ class ProfileVM(private val group: String? = null) : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 Timber.tag("Profile").w(e, "Picture change failed")
-                _work.value = ProfileWork.Failed("Couldn't save your changes. Try again.")
+                val reason = when (e) {
+                    is uniffi.core.CoreException.Refused -> e.msg
+                    is ImagePreparationException -> e.message
+                    else -> null
+                }
+                _work.value = ProfileWork.Failed(reason ?: "Couldn't save your changes. Try again.")
             }
         }
     }

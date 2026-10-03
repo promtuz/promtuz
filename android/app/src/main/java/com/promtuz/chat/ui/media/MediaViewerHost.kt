@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -103,8 +104,13 @@ import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.utils.media.saveToGallery
 import com.promtuz.chat.utils.media.saveFileToGallery
+import com.promtuz.chat.utils.media.saveEncodedImageToGallery
 import com.promtuz.chat.utils.media.shareFile
 import com.promtuz.chat.utils.media.sharePicture
+import com.promtuz.chat.utils.media.shareEncodedImage
+import com.promtuz.chat.utils.media.EncodedImage
+import com.promtuz.chat.utils.media.ImageWindowColorMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.snapshotFlow
@@ -125,6 +131,7 @@ private enum class Phase { Opening, Open, Closing }
 
 /** A copy of the picture flying between rects; the entry point itself never moves. */
 private class Flight(
+    val key: String,
     val image: ImageBitmap?,
     val from: Rect,
     val to: Rect,
@@ -134,6 +141,7 @@ private class Flight(
     /** The visible band at either end; null is the whole screen. */
     val fromClip: Rect? = null,
     val toClip: Rect? = null,
+    val fromAlpha: Float = 1f,
 )
 
 /** Mount once above navigation. */
@@ -154,11 +162,13 @@ private fun Viewer(session: MediaSession) {
 
     val pager = rememberPagerState(session.startIndex) { session.items.size }
     val zooms = remember { HashMap<String, ZoomState>() }
+    val frames = remember { HashMap<String, MediaFrame>() }
     fun zoomOf(key: String) = zooms.getOrPut(key) { ZoomState() }
 
     var phase by remember { mutableStateOf(Phase.Opening) }
     var flight by remember { mutableStateOf<Flight?>(null) }
-    val progress = remember { Animatable(0f) }
+    var progress by remember { mutableStateOf(Animatable(0f)) }
+    var closeAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val dismissY = remember { Animatable(0f) }
     val backScale = remember { Animatable(0f) }
     var chrome by remember { mutableStateOf(true) }
@@ -191,7 +201,7 @@ private fun Viewer(session: MediaSession) {
     fun currentRect(): Rect {
         val f = flight
         if (phase != Phase.Open && f != null) return lerp(f.from, f.to, progress.value)
-        val item = current ?: return Rect.Zero
+        val item = session.items.getOrNull(pager.currentPage) ?: return Rect.Zero
         val z = zoomOf(item.key)
         var r = if (z.viewport == Size.Zero) fitInto(item.width, item.height, viewport) else z.displayed()
         r = r.translate(0f, dismissY.value)
@@ -205,9 +215,12 @@ private fun Viewer(session: MediaSession) {
     }
 
     fun close(afterClose: () -> Unit = {}) {
-        val item = current ?: run { MediaViewer.close(); afterClose(); return }
+        val item = session.items.getOrNull(pager.currentPage) ?: run { MediaViewer.close(); afterClose(); return }
         if (phase == Phase.Closing) return
         val from = currentRect()
+        val priorFlight = flight?.takeIf { it.key == item.key }
+        val interruptedOpening = phase == Phase.Opening
+        val openingProgress = progress.value
         val target = originRect(item)
         // No origin on screen: the picture lives above or below the chat's viewport, older
         // items above, so it leaves that way rather than shrinking into the middle.
@@ -217,42 +230,65 @@ private fun Viewer(session: MediaSession) {
             from.size * 0.6f,
         )
         flight = Flight(
-            image = item.thumb,
+            key = item.key,
+            image = priorFlight?.image ?: frames[item.key]?.image ?: MediaViewer.originImage(item.key) ?: item.thumb,
             from = from, to = target?.first ?: gone,
-            fromRadius = 0f, toRadius = target?.second ?: 0f,
+            fromRadius = if (interruptedOpening && priorFlight != null) {
+                lerp(priorFlight.fromRadius, priorFlight.toRadius, openingProgress)
+            } else 0f,
+            toRadius = target?.second ?: 0f,
             fade = target == null,
+            fromClip = if (interruptedOpening && priorFlight != null) {
+                val full = Rect(Offset.Zero, viewport)
+                lerp(priorFlight.fromClip ?: full, priorFlight.toClip ?: full, openingProgress)
+            } else null,
             toClip = if (target != null) MediaViewer.originClipIn(item.key, hostCoords[0]) else null,
+            fromAlpha = if (interruptedOpening && priorFlight?.fade == true) openingProgress else 1f,
         )
+        // A fresh progress object starts the return at this exact rect, even mid-opening.
+        progress = Animatable(0f)
+        closeAction = afterClose
         phase = Phase.Closing
-        scope.launch {
-            progress.snapTo(0f)
-            progress.animateTo(1f, tween(CLOSE_MS, easing = flightEase))
-            MediaViewer.close()
-            afterClose()
+    }
+
+    LaunchedEffect(phase) {
+        when (phase) {
+            Phase.Opening -> {
+                val vp = snapshotFlow { viewport }.first { it != Size.Zero }
+                val item = session.items[session.startIndex]
+                val image = MediaViewer.originImage(item.key) ?: item.thumb
+                frames.getOrPut(item.key) { MediaFrame() }.image = image
+                val to = fitInto(image?.width ?: item.width, image?.height ?: item.height, vp)
+                val origin = originRect(item)
+                flight = Flight(
+                    key = item.key, image = image,
+                    from = origin?.first ?: Rect(to.center - Offset(to.width * 0.25f, to.height * 0.25f), to.size * 0.5f),
+                    to = to,
+                    fromRadius = origin?.second ?: 0f, toRadius = 0f,
+                    fade = origin == null,
+                    fromClip = if (origin != null) MediaViewer.originClipIn(item.key, hostCoords[0]) else null,
+                )
+                val opening = progress
+                opening.animateTo(1f, tween(OPEN_MS, easing = flightEase))
+                if (phase == Phase.Opening && progress === opening) phase = Phase.Open
+            }
+            Phase.Open -> {
+                // Keep the landed copy while the page (or a video's surface) gets its first frame.
+                val landed = flight
+                delay(FLIGHT_HOLD_MS)
+                if (phase == Phase.Open && flight === landed) flight = null
+            }
+            Phase.Closing -> {
+                progress.animateTo(1f, tween(CLOSE_MS, easing = flightEase))
+                if (MediaViewer.session === session) {
+                    MediaViewer.close()
+                    closeAction?.invoke()
+                }
+            }
         }
     }
 
-    LaunchedEffect(Unit) {
-        val vp = snapshotFlow { viewport }.first { it != Size.Zero }
-        val item = session.items[session.startIndex]
-        val to = fitInto(item.width, item.height, vp)
-        val origin = originRect(item)
-        flight = Flight(
-            image = item.thumb,
-            from = origin?.first ?: Rect(to.center - Offset(to.width * 0.25f, to.height * 0.25f), to.size * 0.5f),
-            to = to,
-            fromRadius = origin?.second ?: 0f, toRadius = 0f,
-            fade = origin == null,
-            fromClip = if (origin != null) MediaViewer.originClipIn(item.key, hostCoords[0]) else null,
-        )
-        progress.snapTo(0f)
-        progress.animateTo(1f, tween(OPEN_MS, easing = flightEase))
-        phase = Phase.Open
-        // The copy stays a beat after landing: the page beneath, and a video's surface with
-        // it, gets its first frame up before the copy is taken away.
-        delay(FLIGHT_HOLD_MS)
-        flight = null
-    }
+    ImageWindowColorMode(flight?.image, active = flight != null)
 
     PredictiveBackHandler { events: Flow<BackEventCompat> ->
         backActive = true
@@ -325,8 +361,17 @@ private fun Viewer(session: MediaSession) {
                 userScrollEnabled = current?.let { !zoomOf(it.key).zoomed } ?: true,
             ) { index ->
                 val item = session.items[index]
+                val frame = remember(item.key) {
+                    frames.getOrPut(item.key) {
+                        MediaFrame().apply { image = MediaViewer.originImage(item.key) ?: item.thumb }
+                    }
+                }
+                DisposableEffect(item.key, frame) {
+                    onDispose { if (frames[item.key] === frame) frames.remove(item.key) }
+                }
                 Page(
                     item = item,
+                    frame = frame,
                     zoom = zoomOf(item.key),
                     dismissY = dismissY,
                     dismissThreshold = dismissThresholdPx,
@@ -346,7 +391,8 @@ private fun Viewer(session: MediaSession) {
             val p = progress.value
             val rect = lerp(f.from, f.to, p)
             val radius = lerp(f.fromRadius, f.toRadius, p)
-            val alpha = if (!f.fade) 1f else if (phase == Phase.Closing) 1f - p else p
+            val alpha = if (phase == Phase.Closing) f.fromAlpha * (if (f.fade) 1f - p else 1f)
+                else if (f.fade) p else 1f
             val img = f.image
             val full = Rect(Offset.Zero, size)
             val band = lerp(f.fromClip ?: full, f.toClip ?: full, p)
@@ -370,16 +416,30 @@ private fun Viewer(session: MediaSession) {
             onSave = { item ->
                 scope.launch {
                     val file = item.filePath
-                    val ok = if (file != null) saveFileToGallery(context, file, item.mime, item.shareName)
-                    else (item.load() ?: item.thumb)?.let { saveToGallery(context, it, item.shareName) } == true
+                    val bytes = item.encoded
+                    val ok = try {
+                        when {
+                            file != null -> saveFileToGallery(context, file, item.mime, item.shareName)
+                            bytes != null -> saveEncodedImageToGallery(context, bytes, item.mime, item.shareName)
+                            else -> (item.load() ?: item.thumb)?.let { saveToGallery(context, it, item.shareName) } == true
+                        }
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { false }
                     Toast.makeText(context, if (ok) "Saved to gallery" else "Couldn’t save", Toast.LENGTH_SHORT).show()
                 }
             },
             onShare = { item ->
                 scope.launch {
                     val file = item.filePath
-                    if (file != null) shareFile(context, java.io.File(file), item.mime)
-                    else (item.load() ?: item.thumb)?.let { sharePicture(context, it, item.shareName) }
+                    val bytes = item.encoded
+                    try {
+                        when {
+                            file != null -> shareFile(context, java.io.File(file), item.mime)
+                            bytes != null -> shareEncodedImage(context, bytes, item.mime, item.shareName)
+                            else -> (item.load() ?: item.thumb)?.let { sharePicture(context, it, item.shareName) }
+                        }
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { Toast.makeText(context, "Couldn’t share", Toast.LENGTH_SHORT).show() }
                 }
             },
         )
@@ -405,6 +465,7 @@ private fun DrawScope.drawCover(image: ImageBitmap, rect: Rect, alpha: Float) {
 @Composable
 private fun Page(
     item: MediaItem,
+    frame: MediaFrame,
     zoom: ZoomState,
     dismissY: Animatable<Float, *>,
     dismissThreshold: Float,
@@ -416,14 +477,19 @@ private fun Page(
 ) {
     val scope = rememberCoroutineScope()
     val touchSlop = LocalViewConfiguration.current.touchSlop
-    val full by produceState(item.thumb, item) { value = item.load() ?: item.thumb }
+    val poster = remember(item.key) { frame.image ?: item.thumb }
+    val full by produceState(poster, item) {
+        value = if (item.encoded == null && item.filePath == null) item.load() ?: poster else poster
+    }
+    val imageSize = frame.size.takeUnless { it == IntSize.Zero } ?: IntSize(item.width, item.height)
+    SideEffect { zoom.fitted = fitInto(imageSize.width, imageSize.height, zoom.viewport).size }
 
     Box(
         Modifier
             .fillMaxSize()
             .onSizeChanged {
                 zoom.viewport = Size(it.width.toFloat(), it.height.toFloat())
-                zoom.fitted = fitInto(item.width, item.height, zoom.viewport).size
+                zoom.fitted = fitInto(imageSize.width, imageSize.height, zoom.viewport).size
             }
             .pointerInput(zoom) {
                 detectTapGestures(
@@ -496,7 +562,7 @@ private fun Page(
         contentAlignment = Alignment.Center,
     ) {
         val bitmap = full
-        val fitted = fitInto(item.width, item.height, zoom.viewport)
+        val fitted = fitInto(imageSize.width, imageSize.height, zoom.viewport)
         val video = item.videoPath?.let { rememberVideoPlayer(it, active, adopt = InlinePlayback.adopt(item.key)) }
         Box(
             Modifier
@@ -510,8 +576,12 @@ private fun Page(
         ) {
             when {
                 video != null -> VideoSurface(video, item, Modifier.fillMaxSize())
-                bitmap != null -> Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                else -> Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.1f)))
+                else -> EncodedImage(
+                    bytes = item.encoded, filePath = item.filePath, poster = bitmap, contentDescription = null,
+                    modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
+                    maxEdge = 4096, animate = active,
+                    onFrameChanged = { frame.image = it },
+                )
             }
         }
         if (video != null) VideoControls(

@@ -1,6 +1,5 @@
 package com.promtuz.chat.utils.media
 
-import android.util.LruCache
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -22,14 +21,36 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-/** Decoded pictures by hex IPK, misses included. A picture change empties the cache and moves
+private const val AVATAR_EDGE = 256
+private const val MAX_AVATAR_BYTES = 64 * 1024
+
+/** Original AVIF and its reusable display source. Treat [encoded] as immutable. */
+class AvatarPicture internal constructor(
+    val encoded: ByteArray,
+    internal val prepared: PreparedEncodedImage,
+) {
+    val poster: ImageBitmap get() = prepared.poster
+    val hdr: Boolean get() = prepared.hdr
+
+    // The animation's direct buffer is a separate allocation from the retained original.
+    internal val allocationBytes: Long = encoded.size.toLong() + prepared.allocationBytes
+}
+
+/** Pictures by hex IPK, misses included. A picture change empties the cache and moves
  *  [generation], which every [rememberAvatar] keys on. */
 object AvatarImages {
-    private val cache = LruCache<String, Any>(128)
-    private val NONE = Any()
+    private const val MAX_CACHE_ENTRIES = 128
+    private const val MAX_CACHE_BYTES = 16 * 1024 * 1024L
+    private class Entry(val picture: AvatarPicture?) {
+        val allocationBytes: Long = picture?.allocationBytes ?: 0L
+    }
+
+    private val cache = LinkedHashMap<String, Entry>(16, 0.75f, true)
+    private var cacheBytes = 0L
     private val cacheLock = Any()
     private val loads = Mutex()
 
@@ -53,19 +74,21 @@ object AvatarImages {
         }
     }
 
-    fun peek(ipkHex: String): ImageBitmap? = synchronized(cacheLock) {
-        cache.get(ipkHex) as? ImageBitmap
+    fun peekPicture(ipkHex: String): AvatarPicture? = synchronized(cacheLock) {
+        cache[ipkHex]?.picture
     }
 
-    suspend fun load(ipkHex: String): ImageBitmap? = withContext(Dispatchers.IO) {
+    /** Static consumers such as notifications use the same cache and keep a poster-only API. */
+    fun peek(ipkHex: String): ImageBitmap? = peekPicture(ipkHex)?.poster
+
+    suspend fun load(ipkHex: String): ImageBitmap? = loadPicture(ipkHex)?.poster
+
+    suspend fun loadPicture(ipkHex: String): AvatarPicture? = withContext(Dispatchers.IO) {
         loads.withLock {
             while (true) {
                 currentCoroutineContext().ensureActive()
                 val startedAt = synchronized(cacheLock) {
-                    when (val hit = cache.get(ipkHex)) {
-                        is ImageBitmap -> return@withLock hit
-                        NONE -> return@withLock null
-                    }
+                    cache[ipkHex]?.let { return@withLock it.picture }
                     _generation.value
                 }
                 val bytes = try {
@@ -77,12 +100,21 @@ object AvatarImages {
                     Timber.tag("Avatar").d(e, "Picture unavailable")
                     return@withLock null // A failed read is not an authoritative absence.
                 }
-                val image = bytes?.let { decodeAvatar(it) }
+                val image = bytes?.let { prepareAvatar(it) }
                 currentCoroutineContext().ensureActive()
                 synchronized(cacheLock) {
                     // Invalidation can land mid-decode; retry rather than cache the older result.
                     if (startedAt == _generation.value) {
-                        cache.put(ipkHex, image ?: NONE)
+                        val entry = Entry(image)
+                        cache.put(ipkHex, entry)?.let { cacheBytes -= it.allocationBytes }
+                        cacheBytes += entry.allocationBytes
+                        val oldest = cache.entries.iterator()
+                        while (cache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) {
+                            cacheBytes -= oldest.next().value.allocationBytes
+                            oldest.remove()
+                        }
+                        // Do not recycle evicted posters: visible rows and notifications may
+                        // still own them. Prepared sources never retain a native decoder.
                         return@withLock image
                     }
                 }
@@ -93,24 +125,34 @@ object AvatarImages {
     }
 
     fun invalidateAll() = synchronized(cacheLock) {
-        cache.evictAll()
+        cache.clear()
+        cacheBytes = 0L
         _generation.value++
     }
 }
 
 @Composable
-fun rememberAvatar(ipkHex: String?): ImageBitmap? {
+fun rememberAvatar(ipkHex: String?): AvatarPicture? {
     if (ipkHex == null) return null
     val generation by AvatarImages.generation.collectAsState()
     return key(ipkHex) {
         // Keeps the picture during a refresh, but never carries it to another person in a reused row.
-        produceState(AvatarImages.peek(ipkHex), generation) {
-            value = AvatarImages.load(ipkHex)
+        produceState(AvatarImages.peekPicture(ipkHex), generation) {
+            value = AvatarImages.loadPicture(ipkHex)
         }.value
     }
 }
 
-/** Match core's 256px avatar encoder; a small compressed file can still decode huge. */
-suspend fun decodeAvatar(bytes: ByteArray): ImageBitmap? = withContext(Dispatchers.Default) {
-    decodeAvif(bytes, maxEdge = 256)
+/** Match core's avatar limits; a small compressed file can still declare huge coded frames. */
+suspend fun prepareAvatar(bytes: ByteArray): AvatarPicture? = withContext(Dispatchers.Default) {
+    if (bytes.isEmpty() || bytes.size > MAX_AVATAR_BYTES) return@withContext null
+    imageDecodeWork.withPermit {
+        // Own the original independently of the caller and retain it for viewing/export.
+        val original = bytes.copyOf()
+        val prepared = prepareEncodedImage(original, sourceMaxEdge = AVATAR_EDGE, targetEdge = AVATAR_EDGE)
+            ?: return@withPermit null
+        AvatarPicture(original, prepared)
+    }
 }
+
+suspend fun decodeAvatar(bytes: ByteArray): ImageBitmap? = prepareAvatar(bytes)?.poster

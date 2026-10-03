@@ -49,9 +49,6 @@ use common::utils::now_secs;
 
 use crate::platform::Refused;
 use parking_lot::Mutex;
-use ravif::Encoder;
-use ravif::Img;
-use rgb::FromSlice;
 
 use crate::data::identity::Identity;
 use crate::data::identity::IdentitySigner;
@@ -101,6 +98,7 @@ pub struct SourceImage {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub encoded: Option<Vec<u8>>,
 }
 
 pub struct PackView {
@@ -478,7 +476,17 @@ async fn publish(
         let mut out = Vec::with_capacity(images.len());
         let mut position = known.len() as u32;
         for img in images {
-            let (avif, width, height) = encode_sticker(&img.rgba, img.width, img.height)?;
+            let (avif, width, height) = if let Some(bytes) = img.encoded {
+                let image = crate::media::process_encoded_image(
+                    &bytes,
+                    crate::media::MediaPolicy { max_bytes: STICKER_MAX_BYTES, max_edge: STICKER_EDGE },
+                ).map_err(|e| Refused(e.to_string()))?
+                    .ok_or_else(|| Refused("Choose an AVIF, GIF, or still image.".into()))?;
+                (image.bytes, image.width as u16, image.height as u16)
+            } else {
+                let (bytes, width, height) = crate::media::compress_sticker(&img.rgba, img.width, img.height)?;
+                (bytes, width as u16, height as u16)
+            };
             let id = *blake3::hash(&avif).as_bytes();
             if known.contains(&id) || out.iter().any(|(r, _): &Encoded| r.sticker_id == id) {
                 continue; // the same picture twice is one sticker
@@ -532,38 +540,6 @@ async fn publish(
     let pending = db::PendingUpload { pack: row, stickers: all, requests };
     db::save_upload(&pending)?;
     resume_upload(&pending).await
-}
-
-fn encode_sticker(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, u16, u16)> {
-    if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
-        bail!("bad picture buffer");
-    }
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
-        .expect("len checked");
-    let fit = |w: u32, h: u32, edge: u32| {
-        let s = edge as f64 / w.max(h) as f64;
-        if s >= 1.0 {
-            (w, h)
-        } else {
-            (((w as f64) * s).round().max(1.0) as u32, ((h as f64) * s).round().max(1.0) as u32)
-        }
-    };
-    let mut edge = STICKER_EDGE;
-    for quality in [78.0f32, 62.0, 48.0] {
-        let (w, h) = fit(width, height, edge);
-        let scaled = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
-        let out = Encoder::new()
-            .with_quality(quality)
-            .with_alpha_quality(85.0)
-            .with_speed(7)
-            .encode_rgba(Img::new(scaled.as_raw().as_rgba(), w as usize, h as usize))?
-            .avif_file;
-        if out.len() <= STICKER_MAX_BYTES {
-            return Ok((out, w as u16, h as u16));
-        }
-        edge = (edge * 3 / 4).max(128);
-    }
-    bail!("picture would not fit a sticker")
 }
 
 /// A gateway may serve no sticker store or another one; either way the request is safe to retry.

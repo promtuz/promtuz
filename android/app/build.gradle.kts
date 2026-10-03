@@ -435,8 +435,7 @@ dependencies {
     // here with the catalog version. >=5.17 is 16KB-page-safe.
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
-    // Bundled AVIF decoder (libavif + dav1d). The platform ImageDecoder is
-    // device-specific — absent on API 26–30 and some 31+ builds reject our
-    // encoder's output — so decode goes through this first.
+    // Bundled AVIF sequence decoder and still-image fallback. Platform decoding
+    // preserves supported HDR/color profiles; libavif also works below API 31.
     implementation("org.aomedia.avif.android:avif:1.3.0.841110fd")
 }

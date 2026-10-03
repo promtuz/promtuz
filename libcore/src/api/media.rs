@@ -5,6 +5,113 @@ use common::types::bytes::fixed;
 use crate::platform::CoreError;
 use crate::state::core;
 
+/// A complete encoded image. Animation and color information stay in the container.
+#[derive(uniffi::Record)]
+pub struct PreparedImageRecord {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct AvifInfoRecord {
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+    pub frame_count: u32,
+    pub duration_ms: Option<u64>,
+    pub has_alpha: Option<bool>,
+    pub chroma_subsampling: Option<String>,
+    pub bit_depth: u8,
+    pub color_primaries: Option<u16>,
+    pub transfer_characteristics: Option<u16>,
+    pub matrix_coefficients: Option<u16>,
+    pub full_range: Option<bool>,
+    pub has_gain_map: bool,
+    pub has_icc: bool,
+    pub rotation_quarter_turns: u8,
+    pub mirror_axis: Option<u8>,
+    pub decoded_pixel_count: u64,
+    pub max_coded_edge: u32,
+    pub content_light_level: Option<AvifContentLightLevelRecord>,
+    pub mastering_display: Option<AvifMasteringDisplayRecord>,
+}
+
+/// Source content light bounds in nits. A declared zero means unspecified;
+/// absence of the metadata is represented by None on AvifInfoRecord.
+#[derive(uniffi::Record)]
+pub struct AvifContentLightLevelRecord {
+    pub max_content_light_level: u16,
+    pub max_frame_average_light_level: u16,
+}
+
+/// Source mastering display, with CIE xy coordinates scaled by 50000 and
+/// luminance in units of 1/10000 nit. These are not the viewing device's limits.
+#[derive(uniffi::Record)]
+pub struct AvifMasteringDisplayRecord {
+    pub red_x: u16,
+    pub red_y: u16,
+    pub green_x: u16,
+    pub green_y: u16,
+    pub blue_x: u16,
+    pub blue_y: u16,
+    pub white_x: u16,
+    pub white_y: u16,
+    pub max_luminance: u32,
+    pub min_luminance: u32,
+}
+
+#[uniffi::export]
+pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError> {
+    Ok(crate::media::inspect_avif(&bytes)?.map(|info| AvifInfoRecord {
+        width: info.width, height: info.height, animated: info.animated, bit_depth: info.bit_depth,
+        frame_count: info.frame_count, duration_ms: info.duration_ms,
+        has_alpha: info.has_alpha, chroma_subsampling: info.chroma_subsampling,
+        color_primaries: info.color_primaries, transfer_characteristics: info.transfer_characteristics,
+        matrix_coefficients: info.matrix_coefficients, full_range: info.full_range,
+        has_gain_map: info.has_gain_map, has_icc: info.has_icc,
+        rotation_quarter_turns: info.rotation_quarter_turns, mirror_axis: info.mirror_axis,
+        decoded_pixel_count: info.decoded_pixel_count, max_coded_edge: info.max_coded_edge,
+        content_light_level: info.content_light_level.map(|light| AvifContentLightLevelRecord {
+            max_content_light_level: light.max_content_light_level,
+            max_frame_average_light_level: light.max_frame_average_light_level,
+        }),
+        mastering_display: info.mastering_display.map(|display| AvifMasteringDisplayRecord {
+            red_x: display.red_x, red_y: display.red_y,
+            green_x: display.green_x, green_y: display.green_y,
+            blue_x: display.blue_x, blue_y: display.blue_y,
+            white_x: display.white_x, white_y: display.white_y,
+            max_luminance: display.max_luminance, min_luminance: display.min_luminance,
+        }),
+    }))
+}
+
+/// Inspect AVIF without re-encoding it, or convert the complete GIF sequence to AVIF.
+/// The host runs this on its media worker and retains the original until preparation succeeds.
+#[uniffi::export]
+pub fn prepare_encoded_image(bytes: Vec<u8>, sticker: bool) -> Result<PreparedImageRecord, CoreError> {
+    let policy = if sticker {
+        crate::media::MediaPolicy {
+            max_bytes: common::proto::sticker::STICKER_MAX_BYTES,
+            max_edge: common::proto::sticker::STICKER_EDGE,
+        }
+    } else {
+        crate::media::MediaPolicy { max_bytes: 32 * 1024 * 1024, max_edge: 16_384 }
+    };
+    let image = crate::media::process_encoded_image(&bytes, policy)
+        .map_err(|e| CoreError::Refused { msg: e.to_string() })?
+        .ok_or_else(|| anyhow::anyhow!("This image format cannot be prepared as AVIF."))?;
+    Ok(PreparedImageRecord {
+        bytes: image.bytes,
+        mime: image.mime.into(),
+        width: image.width,
+        height: image.height,
+        animated: image.animated,
+    })
+}
+
 /// Eligibility for recipient uploads only. Unknown/lost/metered networks
 /// must report false; this never restricts the original sender's transfers.
 #[uniffi::export]

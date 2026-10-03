@@ -9,6 +9,36 @@ use crate::data::peer_avatar::AvatarUpdate;
 use crate::platform::CoreError;
 use crate::state::core;
 
+/// Crop coordinates relative to the original source, with zoom from 1 to 5.
+#[derive(uniffi::Record)]
+pub struct AvatarCropRecord {
+    pub center_x: f64,
+    pub center_y: f64,
+    pub zoom: f64,
+}
+
+/// Prepares an encoded preview without changing the saved profile. GIF cropping
+/// applies to every frame; an AVIF original is kept intact with `crop = None`.
+#[uniffi::export]
+pub fn prepare_avatar_image(
+    bytes: Vec<u8>, crop: Option<AvatarCropRecord>,
+) -> Result<super::media::PreparedImageRecord, CoreError> {
+    let crop = crop.map(|crop| crate::media::AvatarCrop {
+        center_x: crop.center_x,
+        center_y: crop.center_y,
+        zoom: crop.zoom,
+    });
+    let image = crate::media::prepare_avatar_image(&bytes, crop)
+        .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
+    Ok(super::media::PreparedImageRecord {
+        bytes: image.bytes,
+        mime: image.mime.into(),
+        width: image.width,
+        height: image.height,
+        animated: image.animated,
+    })
+}
+
 #[uniffi::export]
 pub fn profile_identity() -> Vec<u8> { Identity::get().map(|i| i.ipk().to_vec()).unwrap_or_default() }
 
@@ -27,15 +57,26 @@ pub fn profile_picture() -> Option<Vec<u8>> {
 #[uniffi::export]
 pub fn set_profile_picture(rgba: Vec<u8>, width: u32, height: u32) -> Result<(), CoreError> {
     let avif = crate::media::avatar_from_rgba(&rgba, width, height)?;
-    let revision = Identity::set_avatar(Some(&avif))?;
-    crate::messaging::welcome::broadcast_avatar(AvatarUpdate { revision, avif: Some(avif) });
-    Ok(())
+    save_profile_picture(Some(avif))
+}
+
+/// Saves exactly the prepared AVIF shown by the editor, including its animation
+/// and colour metadata. Validation completes before revision/storage changes.
+#[uniffi::export]
+pub fn set_profile_picture_encoded(avif: Vec<u8>) -> Result<(), CoreError> {
+    let image = crate::media::validate_avatar_avif(&avif)
+        .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
+    save_profile_picture(Some(image.bytes))
 }
 
 #[uniffi::export]
 pub fn clear_profile_picture() -> Result<(), CoreError> {
-    let revision = Identity::set_avatar(None)?;
-    crate::messaging::welcome::broadcast_avatar(AvatarUpdate { revision, avif: None });
+    save_profile_picture(None)
+}
+
+fn save_profile_picture(avif: Option<Vec<u8>>) -> Result<(), CoreError> {
+    let revision = Identity::set_avatar(avif.as_deref())?;
+    crate::messaging::welcome::broadcast_avatar(AvatarUpdate { revision, avif });
     Ok(())
 }
 
@@ -121,14 +162,36 @@ pub fn group_picture(conversation_id: Vec<u8>) -> Result<Option<Vec<u8>>, CoreEr
 pub async fn set_group_picture(
     conversation_id: Vec<u8>, rgba: Option<Vec<u8>>, width: u32, height: u32,
 ) -> Result<(), CoreError> {
+    update_group_picture(conversation_id, move || {
+        Ok(rgba.map(|bytes| crate::media::avatar_from_rgba(&bytes, width, height)).transpose()?)
+    })
+    .await
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn set_group_picture_encoded(
+    conversation_id: Vec<u8>, avif: Vec<u8>,
+) -> Result<(), CoreError> {
+    update_group_picture(conversation_id, move || {
+        let image = crate::media::validate_avatar_avif(&avif)
+            .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
+        Ok(Some(image.bytes))
+    })
+    .await
+}
+
+/// Both input routes share the permission check, serialized revision allocation
+/// and durable update. Only the prepared payload changes between them.
+async fn update_group_picture(
+    conversation_id: Vec<u8>, prepare: impl FnOnce() -> Result<Option<Vec<u8>>, CoreError> + Send,
+) -> Result<(), CoreError> {
     let _one = core().groups.picture_write.lock().await;
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let me = Identity::local_ipk().ok_or_else(|| anyhow::anyhow!("no identity"))?;
     if !crate::data::conversation::Conversation::may_edit(&conv, &me) {
         return Err(anyhow::anyhow!("only admins can change the group's photo").into());
     }
-    let avif =
-        rgba.map(|bytes| crate::media::avatar_from_rgba(&bytes, width, height)).transpose()?;
+    let avif = prepare()?;
     let revision = crate::data::group_picture::snapshot(&conv)
         .map(|(r, _)| r)
         .unwrap_or(0)

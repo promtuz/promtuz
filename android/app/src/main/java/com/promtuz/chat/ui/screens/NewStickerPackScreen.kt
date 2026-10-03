@@ -3,7 +3,6 @@ package com.promtuz.chat.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -49,6 +48,7 @@ import com.promtuz.chat.ui.components.GroupActionButton
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.utils.media.EncodedImage
 import org.koin.androidx.compose.koinViewModel
 
 /** Must match the protocol limits in common::proto::sticker. */
@@ -173,7 +173,11 @@ private fun PickTile(pick: PickedSticker, enabled: Boolean, onRemove: () -> Unit
             Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(colors.surfaceContainerHigh),
             contentAlignment = Alignment.Center,
         ) {
-            pick.preview?.let { Image(it, null, Modifier.fillMaxSize().padding(6.dp), contentScale = ContentScale.Fit) }
+            EncodedImage(
+                bytes = pick.encoded, poster = pick.preview, contentDescription = null,
+                modifier = Modifier.fillMaxSize().padding(6.dp), contentScale = ContentScale.Fit,
+                maxEdge = 512,
+            )
         }
         if (enabled) Box(
             Modifier

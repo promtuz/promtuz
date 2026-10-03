@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,7 +35,7 @@ import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.StickerPackSheet
 import com.promtuz.chat.ui.components.listPadding
-import com.promtuz.chat.utils.media.rememberStickerBitmap
+import com.promtuz.chat.utils.media.StickerImage
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
@@ -70,9 +69,7 @@ fun StickersScreen(
                     ) {
                         Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
                             pack.cover?.let { cover ->
-                                rememberStickerBitmap(cover)?.let {
-                                    Image(it, null, Modifier.size(26.dp), contentScale = ContentScale.Fit)
-                                }
+                                StickerImage(cover, null, Modifier.size(26.dp), contentScale = ContentScale.Fit)
                             }
                         }
                     }

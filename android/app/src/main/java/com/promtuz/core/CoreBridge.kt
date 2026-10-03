@@ -200,10 +200,16 @@ object CoreBridge {
     suspend fun setGroupPicture(conv: ByteArray, rgba: ByteArray?, width: Int = 0, height: Int = 0) =
         uniffi.core.setGroupPicture(conv, rgba, width.toUInt(), height.toUInt())
 
+    suspend fun setGroupPictureEncoded(conv: ByteArray, avif: ByteArray) =
+        uniffi.core.setGroupPictureEncoded(conv, avif)
+
     suspend fun profilePicture(): ByteArray? = withContext(Dispatchers.IO) { ffiProfilePicture() }
 
     suspend fun setProfilePicture(rgba: ByteArray, width: Int, height: Int) =
         withContext(Dispatchers.IO) { ffiSetProfilePicture(rgba, width.toUInt(), height.toUInt()) }
+
+    suspend fun setProfilePictureEncoded(avif: ByteArray) =
+        withContext(Dispatchers.IO) { uniffi.core.setProfilePictureEncoded(avif) }
 
     suspend fun clearProfilePicture() = withContext(Dispatchers.IO) { ffiClearProfilePicture() }
 
@@ -306,6 +312,17 @@ object CoreBridge {
     // Staged items encode at pick time and ring the doorbell under "staging".
     suspend fun stageImage(rgba: ByteArray, width: Int, height: Int): ULong =
         withContext(Dispatchers.IO) { ffiStageImage(rgba, width.toUInt(), height.toUInt()) }
+
+    suspend fun prepareEncodedImage(bytes: ByteArray, sticker: Boolean = false): uniffi.core.PreparedImageRecord =
+        withContext(Dispatchers.Default) { uniffi.core.prepareEncodedImage(bytes, sticker) }
+
+    suspend fun prepareAvatarImage(bytes: ByteArray, crop: uniffi.core.AvatarCropRecord? = null): uniffi.core.PreparedImageRecord =
+        withContext(Dispatchers.Default) { uniffi.core.prepareAvatarImage(bytes, crop) }
+
+    fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
+
+    suspend fun stageEncodedImage(bytes: ByteArray): ULong =
+        withContext(Dispatchers.IO) { uniffi.core.stageEncodedImage(bytes) }
 
     /** The blur is ready when this returns; the hash comes later. */
     suspend fun stageAttachment(

@@ -43,12 +43,13 @@ pub struct StickerPackPreview {
     pub stickers: Vec<StickerRecord>,
 }
 
-/// Tightly packed RGBA.
+/// Either tightly packed SDR RGBA or the original encoded AVIF/GIF.
 #[derive(uniffi::Record)]
 pub struct StickerSource {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub encoded: Option<Vec<u8>>,
 }
 
 pub(crate) fn record(row: &StickerRow, token: &[u8; 32], store: u16) -> StickerRecord {
@@ -157,7 +158,7 @@ pub async fn create_sticker_pack(
 ) -> Result<Vec<u8>, CoreError> {
     let images = images
         .into_iter()
-        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height })
+        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height, encoded: i.encoded })
         .collect();
     let id =
         on_runtime(
@@ -174,7 +175,7 @@ pub async fn add_to_sticker_pack(
     let pack = fixed::<16>(&pack, "dispatch_id")?;
     let images = images
         .into_iter()
-        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height })
+        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height, encoded: i.encoded })
         .collect();
     on_runtime(async move { crate::stickers::append(pack, images).await.inspect_err(log_publish) })
         .await

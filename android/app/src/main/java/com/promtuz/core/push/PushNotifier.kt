@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -446,10 +447,16 @@ object PushNotifier {
 
     private suspend fun notificationAvatar(key: String, px: Int = 128): Bitmap? {
         val src = com.promtuz.chat.utils.media.AvatarImages.load(key)?.asAndroidBitmap() ?: return null
-        val scaled = Bitmap.createScaledBitmap(src, px, px, true)
         val out = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        val scale = maxOf(px.toFloat() / src.width, px.toFloat() / src.height)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            isFilterBitmap = true
+            shader = BitmapShader(src, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
+                setLocalMatrix(Matrix().apply {
+                    setScale(scale, scale)
+                    postTranslate((px - src.width * scale) / 2f, (px - src.height * scale) / 2f)
+                })
+            }
         }
         Canvas(out).drawCircle(px / 2f, px / 2f, px / 2f, paint)
         return out

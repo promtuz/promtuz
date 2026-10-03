@@ -48,6 +48,12 @@ pub fn stage_image(rgba: Vec<u8>, width: u32, height: u32) -> u64 {
     crate::staging::stage_image(rgba, width, height)
 }
 
+/// Keep an already prepared AVIF intact. Larger images use the existing attachment path.
+#[uniffi::export]
+pub fn stage_encoded_image(bytes: Vec<u8>) -> Result<u64, CoreError> {
+    Ok(crate::staging::stage_encoded_image(bytes)?)
+}
+
 /// The blurred preview is ready when this returns; the manifest hash runs off-thread.
 #[uniffi::export]
 pub fn stage_attachment(

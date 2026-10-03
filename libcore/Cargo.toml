@@ -60,12 +60,16 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 x509-parser = "0.18.1"
 # HTTPS downloads of encrypted sticker objects.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
-# Still-image pipeline (FILE_TRANSFER.md): RGBA→AVIF + blurred thumb.
-# `image` decoders off — the platform supplies decoded RGBA pixels.
-image = { version = "0.25", default-features = false }
+# Shared image/sticker pipeline: retain AVIF sources, composite GIF animations,
+# and encode platform-decoded SDR pixels. Other decoders stay on the platform.
+image = { version = "0.25", default-features = false, features = ["gif"] }
 # `threading` = parallel encode (rayon). Base dep skips `asm` so x86_64
 # (emulator, CI) never needs nasm; aarch64 layers it on below.
 ravif = { version = "0.11", default-features = false, features = ["threading"] }
+# Already used by ravif; the sequence path needs a persistent encoder context
+# and its AV1 configuration instead of encoding every frame as a still image.
+rav1e = { version = "0.7", default-features = false, features = ["threading"] }
+avif-serialize = "0.8"
 # ravif's pixel types; `FromSlice` casts &[u8]→&[RGBA8] copy-free. Already
 # in the tree via ravif — direct line pulls zero new code.
 rgb = "0.8"

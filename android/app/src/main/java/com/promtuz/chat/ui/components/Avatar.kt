@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.components
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -12,21 +11,22 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.promtuz.chat.ui.media.MediaFrame
+import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.mediaOrigin
+import com.promtuz.chat.utils.media.AvatarPicture
+import com.promtuz.chat.utils.media.EncodedImageContent
 
 const val AVATAR_RADIUS_RATIO = 2.875f;
 
@@ -36,7 +36,7 @@ fun Avatar(
     size: Dp = 52.dp,
     clipRatio: Float = AVATAR_RADIUS_RATIO,
     statusColor: Color? = null,
-    image: ImageBitmap? = null,
+    image: AvatarPicture? = null,
     onClick: (() -> Unit)? = null,
     originKey: String? = null,
     identityKey: String = originKey ?: name,
@@ -48,13 +48,16 @@ fun Avatar(
         .take(2)
         .joinToString("").uppercase()
     val interactionSource = remember { MutableInteractionSource() }
+    val frame = remember(identityKey, image) { MediaFrame() }
 
-    Box(Modifier.size(size).then(if (originKey != null) Modifier.mediaOrigin(originKey, size / clipRatio) else Modifier)) {
+    Box(Modifier.size(size).then(if (originKey != null) {
+        Modifier.mediaOrigin(originKey, size / clipRatio) { frame.image ?: image?.poster }
+    } else Modifier)) {
         Box(
             Modifier
                 .fillMaxSize()
                 .clip(clip)
-                .background(avatarColor(identityKey))
+                .background(if (image == null) avatarColor(identityKey) else Color.Transparent)
                 .clickable(
                     enabled = onClick != null,
                     interactionSource = interactionSource,
@@ -62,10 +65,13 @@ fun Avatar(
                     onClick?.invoke()
                 }, contentAlignment = Alignment.Center
         ) {
-            if (image != null) Image(
-                image, null,
-                Modifier.fillMaxSize(),
+            if (image != null) EncodedImageContent(
+                prepared = image.prepared,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
+                animate = MediaViewer.session == null,
+                onFrameChanged = { frame.image = it },
             ) else Text(
                 fallbackChars,
                 fontWeight = FontWeight.Bold,
@@ -99,7 +105,7 @@ fun GroupAvatar(
     clipRatio: Float = AVATAR_RADIUS_RATIO,
     conversation: String? = null,
     onClick: (() -> Unit)? = null,
-    onPhotoClick: ((ImageBitmap) -> Unit)? = null,
+    onPhotoClick: ((AvatarPicture) -> Unit)? = null,
 ) {
     val image = com.promtuz.chat.utils.media.rememberAvatar(conversation?.let { "group:$it" })
     if (image != null) {

@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,7 +44,7 @@ import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiStickerPack
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.stage.ChatMotion
-import com.promtuz.chat.utils.media.rememberStickerBitmap
+import com.promtuz.chat.utils.media.StickerImage
 import kotlinx.coroutines.launch
 
 internal val StickerGap = 8.dp
@@ -134,9 +133,7 @@ fun StickerPanelBody(
                             color = if (selected) accent else colors.onSurfaceVariant,
                             maxLines = 1,
                         ) else section.stickers.firstOrNull()?.let { cover ->
-                            rememberStickerBitmap(cover)?.let {
-                                Image(it, null, Modifier.size(TabSize), contentScale = ContentScale.Fit)
-                            }
+                            StickerImage(cover, null, Modifier.size(TabSize))
                         }
                     }
                 }
@@ -180,12 +177,13 @@ fun StickerPanelBody(
 
 @Composable
 fun StickerCell(ref: StickerRef, onClick: (() -> Unit)? = null) {
-    val bitmap = rememberStickerBitmap(ref)
     Box(
         Modifier.aspectRatio(1f).then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        else Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f)))
+        StickerImage(
+            ref, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
+            placeholderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f),
+        )
     }
 }

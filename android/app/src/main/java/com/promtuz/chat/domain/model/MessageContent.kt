@@ -3,18 +3,35 @@ package com.promtuz.chat.domain.model
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.ImageBitmap
 
-/** Media variants hold process-cached [ImageBitmap]s so value equality is stable across re-reads. */
+/** Media variants keep a cached poster alongside their original encoded image. */
 @Immutable
 sealed interface MessageContent {
     data class Text(val text: String) : MessageContent
 
-    /** Inline image; [bitmap] is null when this API level can't decode AVIF. */
+    /** Inline image; [bitmap] is a poster, while [encoded] retains animation and color information. */
     data class Image(
         val caption: String,
         val bitmap: ImageBitmap?,
         val width: Int,
         val height: Int,
-    ) : MessageContent
+        val encoded: ByteArray? = null,
+        val mime: String = "image/avif",
+    ) : MessageContent {
+        override fun equals(other: Any?) = other is Image &&
+            caption == other.caption && bitmap == other.bitmap &&
+            width == other.width && height == other.height && mime == other.mime &&
+            (encoded === other.encoded ||
+                (encoded != null && other.encoded != null && encoded.contentEquals(other.encoded)))
+
+        override fun hashCode(): Int {
+            var result = caption.hashCode()
+            result = 31 * result + (bitmap?.hashCode() ?: 0)
+            result = 31 * result + width
+            result = 31 * result + height
+            result = 31 * result + (encoded?.contentHashCode() ?: 0)
+            return 31 * result + mime.hashCode()
+        }
+    }
 
     /** Media messages sharing a `group_id`, drawn as one unit; each item stays its own message. */
     data class Album(

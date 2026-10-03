@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -58,6 +60,8 @@ import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.media.mediaOrigin
 import com.promtuz.chat.ui.media.InlinePlayback
 import com.promtuz.chat.ui.media.MediaItem
+import com.promtuz.chat.ui.media.MediaFrame
+import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.VideoSurface
 import com.promtuz.chat.ui.media.rememberVideoPlayer
 import androidx.compose.runtime.DisposableEffect
@@ -65,7 +69,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import androidx.compose.ui.res.painterResource
-import com.promtuz.chat.utils.media.rememberStickerBitmap
+import com.promtuz.chat.utils.media.EncodedImage
+import com.promtuz.chat.utils.media.StickerImage
 
 private val AlbumGap = 2.dp
 
@@ -79,18 +84,22 @@ fun ImageBlock(
 ) {
     val ratio = if (image.width > 0 && image.height > 0) image.width.toFloat() / image.height else 1f
     val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
+    val frame = remember(originKey) { MediaFrame() }
     Column {
         // No clip of its own: the bubble's shape does the rounding.
         Box(
             Modifier
                 .mediaSize(ratio)
-                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) else Modifier)
+                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) { frame.image } else Modifier)
                 .then(if (onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
                 .background(textColor.copy(alpha = 0.10f)),
         ) {
-            image.bitmap?.let {
-                Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            }
+            EncodedImage(
+                bytes = image.encoded, poster = image.bitmap, contentDescription = null,
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                maxEdge = 2048, animate = MediaViewer.session == null,
+                onFrameChanged = { frame.image = it },
+            )
         }
         if (image.caption.isNotEmpty()) {
             Caption(image.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
@@ -103,23 +112,49 @@ fun AlbumBlock(
     album: MessageContent.Album, textColor: Color, fontScale: Float, metaLabel: String,
     outgoing: Boolean = false,
     onOpen: ((String) -> Unit)? = null,
+    onDownload: ((String) -> Unit)? = null,
+    onOpenFile: ((String) -> Unit)? = null,
 ) {
     val ratios = album.items.map { item ->
-        (item.content as? MessageContent.Image)?.let { if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f } ?: 1f
+        when (val content = item.content) {
+            is MessageContent.Image -> if (content.width > 0 && content.height > 0) content.width.toFloat() / content.height else 1f
+            is MessageContent.Attachment -> content.thumb?.let { it.width.toFloat() / it.height } ?: 1f
+            else -> 1f
+        }
     }
     val cells = remember(ratios) { albumLayout(ratios) }
     Column {
         Layout(
             content = {
                 album.items.forEach { item ->
+                    val content = item.content
+                    val frame = remember(item.dispatchIdHex) { MediaFrame() }
+                    val open: (() -> Unit)? = when (content) {
+                        is MessageContent.Image -> onOpen?.let { { it(item.dispatchIdHex) } }
+                        is MessageContent.Attachment -> if (content.transferState == 2 && content.localPath != null) {
+                            if (content.isMediaTile) onOpen?.let { { it(item.dispatchIdHex) } }
+                            else onOpenFile?.let { { it(content.localPath) } }
+                        } else null
+                        else -> null
+                    }
                     Box(
                         Modifier
-                            .mediaOrigin(item.dispatchIdHex, 0.dp)
-                            .then(if (onOpen != null) Modifier.tapOnly { onOpen(item.dispatchIdHex) } else Modifier)
+                            .mediaOrigin(item.dispatchIdHex, 0.dp) { frame.image }
+                            .then(if (open != null) Modifier.tapOnly(open) else Modifier)
                             .background(textColor.copy(alpha = 0.10f)),
                     ) {
-                        albumBitmap(item.content)?.let {
-                            Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        when (content) {
+                            is MessageContent.Image -> EncodedImage(
+                                bytes = content.encoded, poster = content.bitmap, contentDescription = null,
+                                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                                maxEdge = 2048, animate = MediaViewer.session == null,
+                                onFrameChanged = { frame.image = it },
+                            )
+                            is MessageContent.Attachment -> MediaTileContent(
+                                content, textColor, outgoing, item.dispatchIdHex, onDownload,
+                                onFrameChanged = { frame.image = it },
+                            )
+                            else -> Unit
                         }
                     }
                 }
@@ -162,12 +197,6 @@ private fun Modifier.mediaSize(ratio: Float) = layout { measurable, constraints 
 }
 
 private val MediaMaxHeight = 360.dp
-
-private fun albumBitmap(content: MessageContent) = when (content) {
-    is MessageContent.Image -> content.bitmap
-    is MessageContent.Attachment -> content.thumb
-    else -> null
-}
 
 @Composable
 fun AttachmentBlock(
@@ -233,7 +262,31 @@ fun MediaTileBlock(
     val thumb = att.thumb ?: return
     val ratio = thumb.width.toFloat() / thumb.height
     val corner = LocalChatAppearance.current.bubble.cornerRadius.dp
-    val video = att.mime.startsWith("video/")
+    val ready = att.transferState == 2 && att.localPath != null
+    val frame = remember(originKey) { MediaFrame() }
+    Column {
+        Box(
+            Modifier
+                .mediaSize(ratio)
+                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) { frame.image } else Modifier)
+                .then(if (ready && onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
+                .background(textColor.copy(alpha = 0.10f)),
+        ) {
+            MediaTileContent(att, textColor, outgoing, originKey, onDownload, onFrameChanged = { frame.image = it })
+        }
+        if (att.caption.isNotEmpty()) Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
+    }
+}
+
+/** The same download, progress and playback controls serve both a lone tile and an album cell. */
+@Composable
+private fun BoxScope.MediaTileContent(
+    att: MessageContent.Attachment, textColor: Color, outgoing: Boolean,
+    originKey: String?, onDownload: ((String) -> Unit)?,
+    onFrameChanged: ((ImageBitmap?) -> Unit)? = null,
+) {
+    val thumb = att.thumb
+    val video = att.mime.startsWith("video/") && thumb != null
     val ready = att.transferState == 2 && att.localPath != null
     // Until the bytes land only the ring is a control, so a tap never lights the whole picture.
     val download: (() -> Unit)? = when {
@@ -241,55 +294,56 @@ fun MediaTileBlock(
         att.transferState == 1 || att.transferState == 4 -> null
         else -> onDownload?.let { { it(att.fileIdHex) } }
     }
-    Column {
-        Box(
-            Modifier
-                .mediaSize(ratio)
-                .then(if (originKey != null) Modifier.mediaOrigin(originKey, corner) else Modifier)
-                .then(if (ready && onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
-                .background(textColor.copy(alpha = 0.10f)),
-        ) {
-            Image(thumb, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            // A clip plays in its own bubble; tapping the playing picture carries it into the viewer.
-            val playingHere = video && ready && originKey != null && InlinePlayback.key == originKey
-            if (playingHere) {
-                val player = rememberVideoPlayer(att.localPath!!, active = true)
-                DisposableEffect(player) {
-                    InlinePlayback.attach(originKey, player)
-                    onDispose { if (InlinePlayback.key == originKey) InlinePlayback.stop() }
-                }
-                LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
-                VideoSurface(player, MediaItem(originKey, thumb, thumb.width, thumb.height), Modifier.fillMaxSize())
-            }
-            if (!ready) Box(
-                Modifier.align(Alignment.Center)
-                    .then(if (download != null) Modifier.pressScale(download) else Modifier)
-                    .size(44.dp).clip(RoundedCornerShape(22.dp))
-                    .background(Color.Black.copy(alpha = 0.45f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (outgoing || att.transferState == 1) {
-                    if (att.transferTotal > 0) CircularProgressIndicator(
-                        progress = { att.transferHave.toFloat() / att.transferTotal },
-                        modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp,
-                    ) else CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
-                } else Image(painterResource(R.drawable.ic_media_download), "Download", Modifier.size(24.dp))
-            } else if (video && !playingHere) Image(
-                painterResource(R.drawable.ic_media_play_badge), "Play",
-                Modifier.align(Alignment.Center)
-                    .then(if (originKey != null) Modifier.pressScale({ InlinePlayback.play(originKey) }) else Modifier)
-                    .size(48.dp),
-            )
-            Text(
-                if (att.transferState == 4) "Waiting…" else Formatter.formatShortFileSize(LocalContext.current, att.size),
-                style = MaterialTheme.typography.labelSmall, color = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                    .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
-        if (att.caption.isNotEmpty()) Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
+    if (thumb != null) EncodedImage(
+        filePath = att.localPath.takeIf { ready && att.mime.startsWith("image/") }, poster = thumb, contentDescription = null,
+        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+        maxEdge = 2048, animate = MediaViewer.session == null,
+        onFrameChanged = onFrameChanged,
+    ) else if (ready) Column(
+        Modifier.align(Alignment.Center).padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        FileGlyph(att.mime, textColor, LocalChatColors.current.accent)
+        Text(att.name, color = textColor, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
+    // A clip plays in its own bubble; tapping the playing picture carries it into the viewer.
+    val playingHere = video && ready && originKey != null && InlinePlayback.key == originKey
+    if (playingHere && thumb != null) {
+        val player = rememberVideoPlayer(att.localPath!!, active = true)
+        DisposableEffect(player) {
+            InlinePlayback.attach(originKey, player)
+            onDispose { if (InlinePlayback.key == originKey) InlinePlayback.stop() }
+        }
+        LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
+        VideoSurface(player, MediaItem(originKey, thumb, thumb.width, thumb.height), Modifier.fillMaxSize())
+    }
+    if (!ready) Box(
+        Modifier.align(Alignment.Center)
+            .then(if (download != null) Modifier.pressScale(download) else Modifier)
+            .size(44.dp).clip(RoundedCornerShape(22.dp))
+            .background(Color.Black.copy(alpha = 0.45f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (outgoing || att.transferState == 1) {
+            if (att.transferTotal > 0) CircularProgressIndicator(
+                progress = { att.transferHave.toFloat() / att.transferTotal },
+                modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp,
+            ) else CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
+        } else Image(painterResource(R.drawable.ic_media_download), "Download", Modifier.size(24.dp))
+    } else if (video && !playingHere) Image(
+        painterResource(R.drawable.ic_media_play_badge), "Play",
+        Modifier.align(Alignment.Center)
+            .then(if (originKey != null) Modifier.pressScale({ InlinePlayback.play(originKey) }) else Modifier)
+            .size(48.dp),
+    )
+    Text(
+        if (att.transferState == 4) "Waiting…" else Formatter.formatShortFileSize(LocalContext.current, att.size),
+        style = MaterialTheme.typography.labelSmall, color = Color.White,
+        modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+            .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
 }
 
 /** With a [surface] the player is its own pill on the wallpaper; without one it sits inside a bubble. */
@@ -345,15 +399,17 @@ fun StickerBlock(sticker: MessageContent.Sticker, textColor: Color) {
         .coerceIn(0.5f, 2f)
     val width = if (ratio >= 1f) StickerBox else StickerBox * ratio
     val height = width / ratio
-    val bitmap = rememberStickerBitmap(ref)
     Box(
         Modifier
             .size(width, height)
-            .clip(RoundedCornerShape(10.dp))
-            .then(if (bitmap == null) Modifier.background(textColor.copy(alpha = 0.08f)) else Modifier),
+            .clip(RoundedCornerShape(10.dp)),
         Alignment.Center,
     ) {
-        bitmap?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+        StickerImage(
+            ref, null, Modifier.fillMaxSize(),
+            contentScale = ContentScale.Fit, animate = MediaViewer.session == null,
+            placeholderColor = textColor.copy(alpha = 0.08f),
+        )
     }
 }
 
