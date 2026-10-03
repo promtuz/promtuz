@@ -1,6 +1,5 @@
-//! Identity-signed requests that survive loss or retirement of an MLS epoch.
-//! These carry no chat content. A refresh needs a fresh member-owned KP; a
-//! leave remains actionable after the leaving device has deleted its keys.
+//! Identity-signed requests that survive loss or retirement of an MLS epoch, with no chat content.
+//! A refresh needs a fresh member-owned KP; a leave still works after the leaver deleted its keys.
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -11,6 +10,7 @@ use common::proto::mls_wire::GroupMemberRequest;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::group_member_request_signing_input;
 use common::proto::pack::Packer;
+use common::utils::now_secs;
 use ed25519_dalek::Signer;
 use serde::Deserialize;
 use serde::Serialize;
@@ -20,6 +20,7 @@ use crate::data::conversation::Conversation;
 use crate::db::outbox::OpType;
 use crate::mls::MlsGroupHandle;
 use crate::mls::PromtuzMlsProvider;
+use crate::state::core;
 
 #[derive(Serialize, Deserialize)]
 struct Pending {
@@ -42,8 +43,27 @@ fn load(gid: &[u8; 32], action: &GroupMemberAction) -> Option<Pending> {
         .and_then(|b| postcard::from_bytes(&b).ok())
 }
 
+fn left_key(gid: &[u8; 32]) -> String {
+    format!("group_left:{}", hex::encode(gid))
+}
+
 pub fn left(gid: &[u8; 32]) -> bool {
-    load(gid, &GroupMemberAction::Leave).is_some()
+    app_prefs::get(&left_key(gid)).is_some() || load(gid, &GroupMemberAction::Leave).is_some()
+}
+
+/// Our leave reached the tree: keep that fact, drop the request behind it.
+pub fn leave_carried(gid: &[u8; 32]) -> Result<()> {
+    app_prefs::set(&left_key(gid), "1")?;
+    app_prefs::remove(&key(gid, &GroupMemberAction::Leave))
+}
+
+/// A leave nobody carried in this long is not going to be; the request stops
+/// waking former members while the marker keeps standing.
+const LEAVE_REQUEST_LIFE_MS: u64 = 30 * 24 * 3_600_000;
+
+/// The minting time a UUIDv7 nonce carries.
+fn minted_ms(nonce: &[u8; 16]) -> u64 {
+    u64::from_be_bytes([0, 0, nonce[0], nonce[1], nonce[2], nonce[3], nonce[4], nonce[5]])
 }
 
 pub fn refreshed(gid: &[u8; 32]) -> Result<()> {
@@ -92,7 +112,7 @@ fn begin(conversation: [u8; 16], action: GroupMemberAction) -> Result<()> {
         app_prefs::set(&key(&gid, &action), &hex::encode(postcard::to_allocvec(&pending)?))?;
     }
     let action = action.clone();
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = send(gid, action).await {
             log::debug!("GROUP: member request remains pending: {e}");
         }
@@ -110,8 +130,13 @@ pub fn refresh(conversation: [u8; 16]) -> Result<()> {
 
 async fn send(gid: [u8; 32], action: GroupMemberAction) -> Result<()> {
     let Some(mut pending) = load(&gid, &action) else { return Ok(()) };
-    let now = crate::utils::systime().as_secs();
+    let now = now_secs();
     if now.saturating_sub(pending.last_sent) < 60 {
+        return Ok(());
+    }
+    if action == GroupMemberAction::Leave
+        && (now * 1000).saturating_sub(minted_ms(&pending.request.nonce.0)) > LEAVE_REQUEST_LIFE_MS
+    {
         return Ok(());
     }
     let (me, signer) = super::local_signer()?;
@@ -127,7 +152,7 @@ async fn send(gid: [u8; 32], action: GroupMemberAction) -> Result<()> {
                 *to,
                 id,
                 OpType::Control,
-                crate::messaging::prepare_dispatch(
+                crate::delivery::prepare_dispatch(
                     to,
                     &me,
                     &signer,
@@ -159,7 +184,7 @@ pub fn resume() {
                 continue;
             };
             let action = action.clone();
-            crate::RUNTIME.spawn(async move {
+            core().spawn(async move {
                 let _ = send(gid, action).await;
             });
         }
@@ -193,7 +218,7 @@ pub fn received(gid: [u8; 32], request: GroupMemberRequest) -> Result<()> {
     } else {
         // The requester may predate the current committer. A known member can
         // relay the original signature; it cannot alter the requested action.
-        crate::RUNTIME.spawn(async move {
+        core().spawn(async move {
             let Ok((me, signer)) = super::local_signer() else { return };
             let Ok(payload) =
                 (MlsEnvelopeP::GroupMemberRequest { group: gid.into(), request }).ser()
@@ -201,7 +226,7 @@ pub fn received(gid: [u8; 32], request: GroupMemberRequest) -> Result<()> {
                 return;
             };
             let id = crate::data::message::next_dispatch_id();
-            crate::messaging::dispatch_to_member(
+            crate::delivery::dispatch_to_member(
                 &state.committer,
                 &me,
                 &signer,

@@ -2,8 +2,10 @@
 //! no longer used, but the owner's signature covers it, so shared cards keep it.
 use crate::data::identity::Identity;
 use anyhow::{Result, anyhow, ensure};
+use common::crypto::verify_ed25519;
 use common::types::bytes::Bytes;
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use common::types::bytes::fixed;
+use ed25519_dalek::{Signer, SigningKey};
 use hpke_rs::{Hpke, HpkeKeyPair, Mode};
 use hpke_rs_crypto::types::{AeadAlgorithm, KdfAlgorithm, KemAlgorithm};
 use hpke_rs_rust_crypto::HpkeRustCrypto;
@@ -54,10 +56,8 @@ pub(crate) fn verify_card(bytes: &[u8]) -> Result<Card> {
     ensure!(bytes.len() <= 512, "card too large");
     let card: Card = postcard::from_bytes(bytes)?;
     ensure!(!card.name.trim().is_empty() && card.name.chars().count() <= 32, "invalid name");
-    VerifyingKey::from_bytes(&card.ipk)?.verify_strict(
-        &card_input(&card.ipk, &card.name, &card.request_key)?,
-        &Signature::from_bytes(&card.signature.0),
-    )?;
+    let input = card_input(&card.ipk, &card.name, &card.request_key)?;
+    verify_ed25519(&card.ipk, &input, &card.signature.0)?;
     Ok(card)
 }
 #[derive(uniffi::Record)]
@@ -68,7 +68,7 @@ pub struct ContactCardPreview {
 }
 #[uniffi::export]
 pub fn contact_card(ipk: Vec<u8>) -> Result<Vec<u8>, crate::platform::CoreError> {
-    let who = crate::api::messaging::to_ipk32(&ipk)?;
+    let who = fixed::<32>(&ipk, "ipk")?;
     if Identity::get().is_some_and(|i| i.ipk() == who) {
         return own_card().map_err(Into::into);
     }
@@ -89,8 +89,8 @@ pub fn preview_contact_card(
     })
 }
 
-/// The direct chat with a card's owner, named from the card until they tell us
-/// more. Opening it sends nothing; their first message from us is the request.
+/// The direct chat with a card's owner, named from the card until their profile arrives.
+/// Opening it sends nothing; our first message to them is the request.
 #[uniffi::export]
 pub fn chat_from_card(bytes: Vec<u8>) -> Result<Vec<u8>, crate::platform::CoreError> {
     let result = (|| -> Result<_> {
@@ -101,20 +101,18 @@ pub fn chat_from_card(bytes: Vec<u8>) -> Result<Vec<u8>, crate::platform::CoreEr
     })();
     result.map_err(Into::into)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn signer(n: u8) -> SigningKey {
-        SigningKey::from_bytes(&[n; 32])
-    }
 
     #[test]
     fn card_name_and_request_key_cannot_be_replaced_by_the_sharer() {
-        let original = make_card(&signer(4), "Owner".into()).unwrap();
+        let original = make_card(&SigningKey::from_bytes(&[4; 32]), "Owner".into()).unwrap();
         let mut card = verify_card(&original).unwrap();
         card.name = "Impersonator".into();
         assert!(verify_card(&postcard::to_allocvec(&card).unwrap()).is_err());
-        card = verify_card(&original).unwrap();
+        let mut card = verify_card(&original).unwrap();
         card.request_key[0] ^= 1;
         assert!(verify_card(&postcard::to_allocvec(&card).unwrap()).is_err());
     }

@@ -1,42 +1,54 @@
+use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
+use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DispatchAckP;
+use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
-use log::debug;
-use log::warn;
+use common::proto::client_rel::Wake;
+use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::KeyPackageRecord;
+use common::proto::mls_wire::MlsEnvelopeP;
+use common::proto::mls_wire::PairDeclineP;
+use common::proto::mls_wire::pair_decline_signing_input;
+use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
+use common::types::bytes::ByteVec;
+use common::types::bytes::Bytes;
+use common::utils::now_ms;
+use ed25519_dalek::SigningKey;
+use log::debug;
+use log::info;
+use log::warn;
+use parking_lot::Mutex;
+use rusqlite::Connection;
 use rusqlite::params;
 
+use crate::data::identity::Identity;
 use crate::data::message::STATUS_FAILED;
 use crate::data::message::STATUS_SENT;
-use crate::db::outbox::OUTBOX_DB;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
 use crate::quic::dht_client::DhtClient;
-use crate::quic::dht_client::KpOutcomeFilter;
+use crate::quic::server::Session;
+use crate::state::core;
 
-/// Durability verdict for a dispatch attempt. `outcome_for_ack` is the single
-/// ack→durability mapping shared by the live send path (Task 6) and the
-/// reconciler (Task 7) so the "which ack retires the row" decision can't drift.
+/// Durability verdict for a dispatch attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LastOutcome {
     Durable,
-    Queued,
     Reachable,
     Terminal,
-    /// Reconciler-only: no ack came back within TTL. Never returned by
-    /// `outcome_for_ack`.
+    /// No ack came back; only the reconciler produces it.
     Silence,
 }
 
-/// Map a relay `DispatchAckP` to its durability verdict. Exhaustive on purpose:
-/// a new ack variant must be a compile error here, not a silent miscategory.
+/// Exhaustive on purpose: a new ack variant must be a compile error here, not a silent miscategory.
 pub fn outcome_for_ack(ack: &DispatchAckP) -> LastOutcome {
     use LastOutcome::*;
     match ack {
-        // `Queued` is the relay's local-fallback ack, returned only AFTER a
-        // `put_sync` fsync (see forward.rs::store_in_rocks) — a durable handoff,
-        // so the message is "sent" even if the recipient is offline. Treating it
-        // as non-durable was the "stuck pending until the recipient logs in" bug.
+        // `Queued` comes only after the relay's fsync, a durable handoff, so the message is sent
+        // even while the recipient is offline.
         DispatchAckP::Forwarded { .. }
         | DispatchAckP::Delivered { .. }
         | DispatchAckP::Queued { .. } => Durable,
@@ -55,9 +67,7 @@ pub fn accepted_at_secs(ack: &DispatchAckP) -> Option<u64> {
     }
 }
 
-// SQLite integers are i64; rusqlite's u64 binder rejects anything past
-// i64::MAX. Real ms timestamps fit, but the u64::MAX "never/always due"
-// sentinel would overflow — saturate so it stays i64::MAX, not a wrapped -1.
+// SQLite integers are i64: saturate so a `u64::MAX` sentinel stays `i64::MAX` instead of wrapping.
 fn ms_i64(ms: u64) -> i64 {
     ms.min(i64::MAX as u64) as i64
 }
@@ -68,22 +78,22 @@ pub fn enqueue(id: &[u8], op: OpType, target_ipk: Option<[u8; 32]>, payload: &[u
     }
 }
 
-fn enqueue_tx(conn: &rusqlite::Connection, id: &[u8], op: OpType, target: Option<[u8;32]>, payload:&[u8]) -> anyhow::Result<()> {
+fn enqueue_tx(conn: &Connection, id: &[u8], op: OpType, target: Option<[u8;32]>, payload:&[u8]) -> anyhow::Result<()> {
     conn.execute("INSERT INTO outbox(id,op_type,target_ipk,payload,created_at,next_attempt)
         VALUES (?1,?2,?3,?4,?5,0) ON CONFLICT(id,COALESCE(target_ipk,X'')) DO NOTHING",
-        params![id,op as u8,target.as_ref().map(|p|p.as_slice()),payload,ms_i64(crate::utils::systime().as_millis() as u64)])?;
+        params![id,op as u8,target.as_ref().map(|p|p.as_slice()),payload,ms_i64(now_ms())])?;
     Ok(())
 }
 
 pub(crate) fn enqueue_checked(id:&[u8],op:OpType,target:Option<[u8;32]>,payload:&[u8])->anyhow::Result<()> {
-    enqueue_tx(&OUTBOX_DB.lock(),id,op,target,payload)
+    enqueue_tx(&core().db.outbox().lock(),id,op,target,payload)
 }
 
 pub(crate) fn enqueue_batch(copies:&mut [([u8;32],[u8;16],OpType,Vec<u8>)])->anyhow::Result<()> {
-    enqueue_batch_in(&mut OUTBOX_DB.lock(), copies)
+    enqueue_batch_in(&mut core().db.outbox().lock(), copies)
 }
 
-fn enqueue_batch_in(conn: &mut rusqlite::Connection, copies: &mut [([u8;32],[u8;16],OpType,Vec<u8>)]) -> anyhow::Result<()> {
+pub(crate) fn enqueue_batch_in(conn: &mut Connection, copies: &mut [([u8;32],[u8;16],OpType,Vec<u8>)]) -> anyhow::Result<()> {
     let tx=conn.transaction()?;
     for (to,id,op,bytes) in copies {
         enqueue_tx(&tx,id,*op,Some(*to),bytes)?;
@@ -95,98 +105,95 @@ fn enqueue_batch_in(conn: &mut rusqlite::Connection, copies: &mut [([u8;32],[u8;
     tx.commit()?;Ok(())
 }
 
-/// Retire one member's copy of a dispatch. The rest of the fan-out is
-/// untouched — each member acks on its own schedule.
+/// Retires one member's copy; each member acks on its own schedule.
 pub fn retire(id: &[u8], target: Option<[u8; 32]>) {
-    OUTBOX_DB
-        .lock()
-        .execute(
-            "DELETE FROM outbox WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
-            params![id, target.as_ref().map(|t| t.as_slice())],
-        )
-        .ok();
+    retire_tx(&core().db.outbox().lock(), id, target).ok();
 }
 
-/// Drop every copy of a dispatch, whoever it was addressed to.
+pub(crate) fn retire_tx(
+    conn: &Connection, id: &[u8], target: Option<[u8; 32]>,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM outbox WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+        params![id, target.as_ref().map(|t| t.as_slice())],
+    )
+}
+
 pub fn retire_all(id: &[u8]) {
-    OUTBOX_DB.lock().execute("DELETE FROM outbox WHERE id = ?1", params![id]).ok();
+    retire_all_tx(&core().db.outbox().lock(), id).ok();
 }
 
-/// Is any member's copy still queued? Used to keep the pending-send recovery
-/// pass from rebuilding a dispatch already owned by the outbox reconciler.
+pub(crate) fn retire_all_tx(conn: &Connection, id: &[u8]) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])
+}
+
+/// Keeps pending-send recovery from rebuilding a dispatch the reconciler already owns.
 pub fn any_pending(id: &[u8]) -> bool {
-    OUTBOX_DB
-        .lock()
-        .query_row("SELECT COUNT(*) FROM outbox WHERE id = ?1 AND state = 0", params![id], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map(|n| n > 0)
-        .unwrap_or(false)
+    any_pending_tx(&core().db.outbox().lock(), id).unwrap_or(false)
 }
 
-/// Drop every queued op targeting this peer (forget-contact cascade).
+pub(crate) fn any_pending_tx(conn: &Connection, id: &[u8]) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT COUNT(*) FROM outbox WHERE id = ?1 AND state = 0", params![id], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|n| n > 0)
+}
+
 pub fn forget_target(ipk: &[u8; 32]) {
-    OUTBOX_DB
-        .lock()
-        .execute("DELETE FROM outbox WHERE target_ipk = ?1", params![ipk.as_slice()])
-        .ok();
+    forget_target_tx(&core().db.outbox().lock(), ipk).ok();
 }
 
-/// Count of pending (state = 0) ops queued for this peer (diagnostics read).
+pub(crate) fn forget_target_tx(conn: &Connection, ipk: &[u8; 32]) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM outbox WHERE target_ipk = ?1", params![ipk.as_slice()])
+}
+
 pub fn pending_ops_for(ipk: &[u8; 32]) -> u32 {
-    OUTBOX_DB
-        .lock()
-        .query_row(
-            "SELECT COUNT(*) FROM outbox WHERE target_ipk = ?1 AND state = 0",
-            params![ipk.as_slice()],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n as u32)
-        .unwrap_or(0)
+    pending_ops_for_tx(&core().db.outbox().lock(), ipk).unwrap_or(0)
 }
 
-pub fn due(now_ms: u64) -> Vec<OutboxRow> {
-    let conn = OUTBOX_DB.lock();
-    let mut stmt = conn
-        .prepare("SELECT * FROM outbox WHERE state = 0 AND next_attempt <= ?1 ORDER BY created_at ASC")
-        .expect("prepare due");
-    stmt.query_map(params![ms_i64(now_ms)], OutboxRow::from_row)
-        .expect("query due")
-        .filter_map(|r| r.ok())
-        .collect()
+pub(crate) fn pending_ops_for_tx(conn: &Connection, ipk: &[u8; 32]) -> rusqlite::Result<u32> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM outbox WHERE target_ipk = ?1 AND state = 0",
+        params![ipk.as_slice()],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u32)
 }
 
-pub fn record_attempt(id: &[u8], target: Option<[u8; 32]>, next_attempt: u64) {
-    OUTBOX_DB
-        .lock()
-        .execute(
-            "UPDATE outbox SET attempts = attempts + 1, next_attempt = ?3 \
-             WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
-            params![id, target.as_ref().map(|t| t.as_slice()), ms_i64(next_attempt)],
-        )
-        .ok();
+pub(crate) fn due_tx(conn: &Connection, now_ms: u64) -> rusqlite::Result<Vec<OutboxRow>> {
+    crate::db::all(
+        conn,
+        "SELECT * FROM outbox WHERE state = 0 AND next_attempt <= ?1 ORDER BY created_at ASC",
+        params![ms_i64(now_ms)],
+        OutboxRow::from_row,
+    )
 }
 
-pub fn mark_dead(id: &[u8], target: Option<[u8; 32]>) {
-    OUTBOX_DB
-        .lock()
-        .execute(
-            "UPDATE outbox SET state = 1 \
-             WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
-            params![id, target.as_ref().map(|t| t.as_slice())],
-        )
-        .ok();
+pub(crate) fn record_attempt_tx(
+    conn: &Connection, id: &[u8], target: Option<[u8; 32]>, next_attempt: u64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE outbox SET attempts = attempts + 1, next_attempt = ?3 \
+         WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+        params![id, target.as_ref().map(|t| t.as_slice()), ms_i64(next_attempt)],
+    )
 }
 
-// ponytail: calibration knobs — retry cadence and death thresholds, tuned by
-// feel not measurement. Adjust when real relay behaviour is observed.
-const BASE_BACKOFF_MS: u64 = 1_000; // first retry after ~1s
-const CAP_BACKOFF_MS: u64 = 300_000; // backoff capped at 5 min
-const QUEUED_ESCALATION_MAX: u32 = 5; // Queued IS delivery in single-relay/dev; retire after N reconnects
+pub(crate) fn mark_dead_tx(
+    conn: &Connection, id: &[u8], target: Option<[u8; 32]>,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE outbox SET state = 1 \
+         WHERE id = ?1 AND COALESCE(target_ipk, X'') = COALESCE(?2, X'')",
+        params![id, target.as_ref().map(|t| t.as_slice())],
+    )
+}
+
+const BASE_BACKOFF_MS: u64 = 1_000;
+const CAP_BACKOFF_MS: u64 = 300_000;
 const DEAD_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000; // non-message silence past 7d dies
 const MESSAGE_SILENCE_MAX: u32 = 6; // fail a message after this many no-ack retries (~2min)
 
-/// What a pending row does after this attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
     KeepRetrying,
@@ -194,15 +201,11 @@ pub enum Next {
     Dead,
 }
 
-/// The terminal-decision policy — the whole reliability contract. Never fails a
-/// message prematurely; never lets a persistently-`Reachable` op die (the
-/// original KP-publish bug).
+/// Never fails a message prematurely, and never lets a persistently `Reachable` op die.
 pub fn classify(op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Next {
     match last {
         LastOutcome::Durable | LastOutcome::Terminal => Next::Retire,
-        LastOutcome::Queued =>
-            if attempts >= QUEUED_ESCALATION_MAX { Next::Retire } else { Next::KeepRetrying },
-        LastOutcome::Reachable => Next::KeepRetrying, // a NEGATIVE response still proves reachability — never kill
+        LastOutcome::Reachable => Next::KeepRetrying, // a negative response still proves reachability
         // attempts-gated, not wall-clock, so an offline-queued msg isn't failed on reconnect
         LastOutcome::Silence => match op {
             OpType::Message if attempts >= MESSAGE_SILENCE_MAX => Next::Dead,
@@ -212,51 +215,45 @@ pub fn classify(op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Ne
     }
 }
 
-// Exponential backoff. A plain `BASE << attempts` overflows u64 for large
-// `attempts`; cap the shift AND the value.
+// A plain `BASE << attempts` overflows u64, so cap the shift and the value.
 fn next_backoff(attempts: u32) -> u64 {
     let shift = attempts.min(32); // 1000<<32 fits u64; caps well above CAP anyway
     (BASE_BACKOFF_MS << shift).min(CAP_BACKOFF_MS)
 }
 
-/// Re-dispatch every durably-queued `due` row over the live relay connection.
-/// Called once per reconnect from `quic::server::handle`. No connection →
-/// return (next reconnect retries); never marks a row Silence for a stream we
-/// simply never opened.
-pub async fn reconcile() {
-    let now = crate::utils::systime().as_millis() as u64;
-    let (conn, dht_client) = {
-        let g = crate::state::RELAY.read();
-        (
-            g.as_ref().and_then(|r| r.connection.clone()),
-            g.as_ref().and_then(|r| r.dht_client.clone()),
-        )
-    };
-    let Some(conn) = conn else { return };
+/// Re-dispatches every due row over `session`'s connection.
+pub async fn reconcile(session: &Session) {
+    reconcile_in(core().db.outbox(), session).await
+}
 
-    for row in due(now) {
+/// One pass per session at a time: an overlapping pass would resend the same rows and count each
+/// attempt twice.
+async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
+    let Ok(_pass) = session.reconciling.try_lock() else { return };
+    let now = now_ms();
+    let conn = &session.conn;
+
+    let rows = due_tx(&outbox.lock(), now).unwrap_or_default();
+    for row in rows {
         let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
         let target: Option<[u8; 32]> =
             row.target_ipk.as_ref().and_then(|t| t.as_slice().try_into().ok());
         let mut accepted_timestamp = None;
         let outcome = match op {
             OpType::KpPublish => {
-                let Some(dht) = dht_client.clone() else { continue }; // no dht client → retry next reconnect
                 let Ok(recs) = Vec::<KeyPackageRecord>::deser(&row.payload) else {
-                    retire(&row.id, target); // poison payload can never publish — drop it
+                    // A poison payload can never publish.
+                    retire_tx(&outbox.lock(), &row.id, target).ok();
                     continue;
                 };
-                match dht.publish_keypackages(&recs, KpOutcomeFilter::Default).await {
+                match session.dht.publish_keypackages(&recs).await {
                     Ok(()) => LastOutcome::Durable,
-                    // Relay answered but the DHT isn't ready — Reachable keeps
-                    // retrying forever, never dies. This is THE KP-bug fix.
+                    // The relay answered but the DHT is not ready: keep retrying, never die.
                     Err(_) => LastOutcome::Reachable,
                 }
             },
-            // Message/Welcome ride the framed-Dispatch stream. Re-send the STORED
-            // framed bytes verbatim (already `.pack()`-framed from Task 6). Any
-            // open/write/finish/read error, or a non-DispatchAck reply, reads as
-            // Silence (transport drop / no answer).
+            // Replay the stored `.pack()`-framed bytes verbatim. Any transport error, or a reply
+            // other than a `DispatchAck`, reads as Silence.
             _ => tokio::time::timeout(std::time::Duration::from_secs(15), async { match conn.open_bi().await {
                 Ok((mut send, mut recv)) => {
                     if send.write_all(&row.payload).await.is_ok()
@@ -284,7 +281,7 @@ pub async fn reconcile() {
                         continue;
                     }
                 }
-                retire(&row.id, target);
+                retire_tx(&outbox.lock(), &row.id, target).ok();
             },
             Next::Dead => {
                 if op == OpType::Message {
@@ -293,207 +290,337 @@ pub async fn reconcile() {
                         continue;
                     }
                 }
-                mark_dead(&row.id, target);
+                mark_dead_tx(&outbox.lock(), &row.id, target).ok();
             },
             Next::KeepRetrying => {
                 if matches!(op, OpType::Message) {
                     debug!("MESSAGE: {} still pending — {outcome:?} (attempt {})", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
                 }
-                record_attempt(&row.id, target, now + next_backoff(row.attempts));
+                record_attempt_tx(
+                    &outbox.lock(),
+                    &row.id,
+                    target,
+                    now + next_backoff(row.attempts),
+                )
+                .ok();
             },
         }
     }
 }
 
+/// Signs and sends one dispatch of opaque bytes. With `outbox`, the framed bytes are persisted and
+/// re-sent until a durable ack; `None` sends once.
+pub(crate) async fn dispatch_envelope(
+    session: Option<&Session>, to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey,
+    env_bytes: Vec<u8>, wake: Wake, outbox: Option<OpType>,
+) -> Result<()> {
+    let id = crate::data::message::next_dispatch_id();
+    let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&sig_message).to_bytes()
+    };
+    let fwd = DispatchP {
+        to:             Bytes(to),
+        from:           Bytes(our_ipk),
+        id:             Bytes(id),
+        payload:        ByteVec(env_bytes),
+        sig:            Bytes(sig),
+        accepted_at_ms: 0,
+        wake,
+        ttl_ms:         0,
+    };
+    let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
+    if let Some(op) = outbox {
+        enqueue(&id, op, Some(to), &bytes);
+    }
+
+    let Some(session) = session else {
+        info!("MESSAGE: offline — dispatch to {} not sent", hex::encode(&to[..4]));
+        bail!("offline");
+    };
+    let (mut tx, mut rx) =
+        session.conn.open_bi().await.map_err(|e| anyhow!("open dispatch stream: {e}"))?;
+    tx.write_all(&bytes).await.map_err(|e| anyhow!("write dispatch: {e}"))?;
+    tx.finish().map_err(|e| anyhow!("finish dispatch: {e}"))?;
+    let ack = match SRelayPacket::unpack(&mut rx).await {
+        Ok(SRelayPacket::DispatchAck(ack)) => ack,
+        Ok(other) => bail!("unexpected dispatch reply: {other:?}"),
+        Err(e) => bail!("dispatch ack: {e}"),
+    };
+    if outcome_for_ack(&ack) != LastOutcome::Durable {
+        bail!("relay did not accept dispatch: {ack:?}");
+    }
+    if outbox.is_some() {
+        retire(&id, Some(to));
+    }
+    Ok(())
+}
+
+/// Signed with our IPK rather than sent through MLS, since accepting the group is what failed. The
+/// inviter marks us rejected and fails the messages it sent while pending.
+pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
+    let our_ipk = Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))?;
+    let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
+    let ts = now_ms();
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&pair_decline_signing_input(&our_ipk, &to, reason, ts)).to_bytes()
+    };
+    let envelope = MlsEnvelopeP::PairDecline(PairDeclineP {
+        sender_ipk: Bytes(our_ipk),
+        recipient_ipk: Bytes(to),
+        reason,
+        timestamp: ts,
+        sig: Bytes(sig),
+    });
+    let env_bytes = envelope.ser().map_err(|e| anyhow!("encode decline: {e}"))?;
+    let session = core().session();
+    dispatch_envelope(
+        session.as_deref(),
+        to,
+        our_ipk,
+        &ipk_signer,
+        env_bytes,
+        Wake::No,
+        Some(OpType::Control),
+    )
+    .await
+}
+
+pub(crate) fn prepare_dispatch(
+    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
+    wake: Wake, ttl_ms: u64,
+) -> Result<Vec<u8>> {
+    let sig_message = dispatch_sig_message(to, our_ipk, id, &payload);
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&sig_message).to_bytes()
+    };
+    let fwd = DispatchP {
+        to:             Bytes(*to),
+        from:           Bytes(*our_ipk),
+        id:             Bytes(*id),
+        payload:        ByteVec(payload),
+        sig:            Bytes(sig),
+        accepted_at_ms: 0,
+        wake,
+        ttl_ms,
+    };
+    // `.pack()`, not `.ser()`: the relay reads length-prefixed frames. The outbox stores, sends and
+    // replays these exact bytes.
+    CRelayPacket::Dispatch(fwd).pack()
+        .map_err(|e| anyhow!("frame dispatch: {e}"))
+}
+
+/// Enqueues and sends one member's copy. `Silence` covers every transport failure and leaves the
+/// outbox row for the reconciler.
+pub(crate) async fn dispatch_to_member(
+    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
+    op: OpType, wake: Wake, ttl_ms: u64,
+) -> LastOutcome {
+    let Ok(bytes) = prepare_dispatch(to, our_ipk, ipk_signer, id, payload, wake, ttl_ms) else {
+        return LastOutcome::Terminal;
+    };
+    let mut copies = [(*to, *id, op, bytes)];
+    if let Err(e) = enqueue_batch(&mut copies) {
+        warn!("MESSAGE: could not queue dispatch: {e}");
+        return LastOutcome::Silence;
+    }
+    dispatch_queued(core().session().as_deref(), to, id, op, &copies[0].3).await
+}
+
+/// Sends one queued copy over `session`; every failure leaves the outbox row to the reconciler.
+pub(crate) async fn dispatch_queued(
+    session: Option<&Session>, to: &[u8; 32], id: &[u8; 16], op: OpType, bytes: &[u8],
+) -> LastOutcome {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let Some(session) = session else {
+            info!("MESSAGE: offline — {} queued in outbox", hex::encode(&to[..4]));
+            return LastOutcome::Silence;
+        };
+        let Ok((mut send, mut recv)) = session.conn.open_bi().await else {
+            debug!("MESSAGE: {} send stream failed to open; left in outbox", hex::encode(&to[..4]));
+            return LastOutcome::Silence;
+        };
+        if send.write_all(&bytes).await.is_err() || send.finish().is_err() {
+            debug!("MESSAGE: {} interrupted mid-send; left in outbox", hex::encode(&to[..4]));
+            return LastOutcome::Silence;
+        }
+        match SRelayPacket::unpack(&mut recv).await {
+            Ok(SRelayPacket::DispatchAck(ack)) => {
+                let outcome = outcome_for_ack(&ack);
+                if matches!(outcome, LastOutcome::Durable | LastOutcome::Terminal) {
+                    // Store the member outcome before retiring its durable outbox
+                    // row. A crash or DB failure must not lose the only evidence.
+                    if matches!(op, OpType::Message) {
+                        let status = if matches!(outcome, LastOutcome::Durable) {
+                            crate::data::message::STATUS_SENT
+                        } else {
+                            crate::data::message::STATUS_FAILED
+                        };
+                        if let Err(e) = crate::data::receipts::send_result(
+                            id,
+                            Some(*to),
+                            status,
+                            accepted_at_secs(&ack),
+                        ) {
+                            warn!("MESSAGE: receipt persistence failed, retaining outbox: {e}");
+                            return LastOutcome::Silence;
+                        }
+                    }
+                    retire(id, Some(*to));
+                }
+                outcome
+            },
+            _ => LastOutcome::Silence,
+        }
+    })
+    .await;
+    outcome.unwrap_or(LastOutcome::Silence)
+}
+
 #[cfg(test)]
 mod tests {
+    use common::proto::client_rel::CRelayPacket;
+    use common::proto::client_rel::Wake;
+    use ed25519_dalek::SigningKey;
+
     use super::*;
+    use crate::test_support::net;
+
+    fn outbox() -> Mutex<Connection> {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::outbox::migrate(&mut conn);
+        Mutex::new(conn)
+    }
+
+    /// A relay that answers proves a row can still go out, so only silence kills one: after a few
+    /// attempts for a message, after a week for anything else.
+    #[test]
+    fn only_silence_kills_an_outbox_row() {
+        use LastOutcome::*;
+        use Next::*;
+        use OpType::*;
+        let acks = [
+            (DispatchAckP::Queued { accepted_at_ms: 1 }, Durable),
+            (DispatchAckP::Delivered { accepted_at_ms: 1 }, Durable),
+            (DispatchAckP::Forwarded { accepted_at_ms: 1 }, Durable),
+            (DispatchAckP::QueueFull, Reachable),
+            (DispatchAckP::Error { reason: String::new() }, Reachable),
+            (DispatchAckP::NotFound, Terminal),
+            (DispatchAckP::InvalidSig, Terminal),
+        ];
+        for (ack, outcome) in acks {
+            assert_eq!(outcome_for_ack(&ack), outcome, "{ack:?}");
+        }
+
+        let rows = [
+            (Message, Durable, 0, 0, Retire),
+            (Control, Terminal, 0, 0, Retire),
+            (KpPublish, Reachable, u32::MAX, u64::MAX, KeepRetrying),
+            (Message, Silence, MESSAGE_SILENCE_MAX - 1, 0, KeepRetrying),
+            (Message, Silence, MESSAGE_SILENCE_MAX, 0, Dead),
+            (Message, Silence, 0, DEAD_TTL_MS + 1, Dead),
+            (Control, Silence, u32::MAX, DEAD_TTL_MS, KeepRetrying),
+            (Welcome, Silence, 0, DEAD_TTL_MS + 1, Dead),
+        ];
+        for (op, last, attempts, age, next) in rows {
+            assert_eq!(classify(op, last, attempts, age), next, "{op:?} {last:?} {attempts} {age}");
+        }
+
+        // `reconcile` reads each row's op back from its discriminant.
+        for op in [Message, Welcome, KpPublish, Control] {
+            assert_eq!(OpType::from_u8(op as u8), Some(op));
+        }
+        assert_eq!(OpType::from_u8(4), None);
+
+        let cap = CAP_BACKOFF_MS;
+        for (attempts, delay) in [
+            (0, BASE_BACKOFF_MS),
+            (1, 2_000),
+            (8, 256_000),
+            (9, cap),
+            (31, cap),
+            (32, cap),
+            (33, cap),
+            (u32::MAX, cap),
+        ] {
+            assert_eq!(next_backoff(attempts), delay, "attempt {attempts}");
+        }
+    }
 
     #[test]
     fn fanout_enqueue_is_atomic_and_replay_keeps_the_original_envelope() {
-        let mut conn=rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE outbox(id BLOB,op_type INTEGER,target_ipk BLOB,payload BLOB,created_at INTEGER,next_attempt INTEGER);
-            CREATE UNIQUE INDEX k ON outbox(id,COALESCE(target_ipk,X''));
-            CREATE TRIGGER refuse BEFORE INSERT ON outbox WHEN length(NEW.payload)=3 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-        let mut copies = [([2;32],[1;16],OpType::Message,b"first".to_vec()),
-            ([3;32],[1;16],OpType::Message,b"bad".to_vec())];
-        assert!(enqueue_batch_in(&mut conn,&mut copies).is_err());
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM outbox",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+        let outbox = outbox();
+        let mut conn = outbox.lock();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER refuse BEFORE INSERT ON outbox
+             WHEN NEW.payload = CAST('bad' AS BLOB) BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+        let (alice, bob, id) = ([2; 32], [3; 32], [1; 16]);
+        let mut copies = [
+            (alice, id, OpType::Message, b"first".to_vec()),
+            (bob, id, OpType::Message, b"bad".to_vec()),
+        ];
+        assert!(enqueue_batch_in(&mut conn, &mut copies).is_err());
+        assert!(due_tx(&conn, u64::MAX).unwrap().is_empty(), "no member's copy is queued alone");
+
         conn.execute_batch("DROP TRIGGER refuse;").unwrap();
         copies[1].3 = b"first".to_vec();
-        enqueue_batch_in(&mut conn,&mut copies).unwrap();
+        enqueue_batch_in(&mut conn, &mut copies).unwrap();
+        // A replay seals fresh ciphertext, but the live send must reuse what the outbox holds.
         copies[0].3 = b"retry".to_vec();
-        enqueue_batch_in(&mut conn,&mut copies).unwrap();
-        assert_eq!(copies[0].3,b"first", "the live attempt reuses the durable envelope");
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM outbox WHERE payload=?1",[b"first".as_slice()],|r|r.get::<_,u32>(0)).unwrap(),2);
+        enqueue_batch_in(&mut conn, &mut copies).unwrap();
+        assert_eq!(copies[0].3, b"first");
+        let rows = due_tx(&conn, u64::MAX).unwrap();
+        assert_eq!(rows.len(), 2, "one row per member");
+        assert!(rows.iter().all(|r| r.payload == b"first"));
+
+        retire_tx(&conn, &id, Some(alice)).unwrap();
+        assert!(any_pending_tx(&conn, &id).unwrap(), "each member acknowledges on its own");
+        retire_tx(&conn, &id, Some(bob)).unwrap();
+        assert!(!any_pending_tx(&conn, &id).unwrap());
     }
 
-    #[test]
-    fn outcome_for_ack_maps_all_variants() {
-        use LastOutcome::*;
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Delivered { accepted_at_ms: 1 }), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Forwarded { accepted_at_ms: 1 }), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued { accepted_at_ms: 1 }), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::QueueFull), Reachable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Error { reason: String::new() }), Reachable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::NotFound), Terminal));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::InvalidSig), Terminal));
-    }
+    /// The timer and a reconnect both start passes; while one waits on the relay, another must
+    /// neither resend its rows nor count a second attempt against them.
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_passes_send_a_row_once_and_count_one_attempt() {
+        let _clock = net::step_paused_clock();
+        let (ours, relay) = net::connection().await;
+        let session = net::session(ours);
+        let outbox = outbox();
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let (peer, id) = ([8; 32], [9; 16]);
+        let frame = prepare_dispatch(
+            &peer,
+            &signer.verifying_key().to_bytes(),
+            &signer,
+            &id,
+            b"control".to_vec(),
+            Wake::No,
+            0,
+        )
+        .unwrap();
+        enqueue_tx(&outbox.lock(), &id, OpType::Control, Some(peer), &frame).unwrap();
 
-    #[test]
-    fn reachable_never_dies_even_when_ancient() {
-        // THE KP-bug guard: a DhtUnavailable kp_publish, however old or
-        // however many attempts, keeps retrying — never Dead, never Retire.
-        assert!(matches!(
-            classify(OpType::KpPublish, LastOutcome::Reachable, 9999, u64::MAX),
-            Next::KeepRetrying
-        ));
-    }
-
-    #[test]
-    fn only_silence_past_ttl_dies() {
-        assert!(matches!(
-            classify(OpType::Message, LastOutcome::Silence, 0, DEAD_TTL_MS + 1),
-            Next::Dead
-        ));
-        assert!(matches!(
-            classify(OpType::Message, LastOutcome::Silence, 0, 0),
-            Next::KeepRetrying
-        ));
-    }
-
-    #[test]
-    fn message_silence_dies_after_bounded_attempts() {
-        assert!(matches!(classify(OpType::Message, LastOutcome::Silence, MESSAGE_SILENCE_MAX, 0), Next::Dead));
-        assert!(matches!(classify(OpType::Message, LastOutcome::Silence, MESSAGE_SILENCE_MAX - 1, 0), Next::KeepRetrying));
-    }
-
-    /// `reconcile` decodes with `from_u8(..).unwrap_or(Message)`, so a variant
-    /// missing from the match reconciles as a Message and tries to fail a
-    /// message row that was never written.
-    #[test]
-    fn op_type_round_trips_through_its_discriminant() {
-        for op in [OpType::Message, OpType::Welcome, OpType::KpPublish, OpType::Control] {
-            assert_eq!(OpType::from_u8(op as u8), Some(op));
-        }
-    }
-
-    /// Control ops carry no message row, so the attempt bound that fails a
-    /// message doesn't apply — only the age cutoff retires them.
-    #[test]
-    fn control_retries_past_the_message_attempt_bound() {
-        assert!(matches!(
-            classify(OpType::Control, LastOutcome::Silence, MESSAGE_SILENCE_MAX, 0),
-            Next::KeepRetrying
-        ));
-        assert!(matches!(
-            classify(OpType::Control, LastOutcome::Silence, 0, DEAD_TTL_MS + 1),
-            Next::Dead
-        ));
-    }
-
-    #[test]
-    fn queued_retires_after_bounded_escalation() {
-        assert!(matches!(
-            classify(OpType::Message, LastOutcome::Queued, QUEUED_ESCALATION_MAX, 0),
-            Next::Retire
-        ));
-        assert!(matches!(
-            classify(OpType::Message, LastOutcome::Queued, 0, 0),
-            Next::KeepRetrying
-        ));
-    }
-
-    #[test]
-    fn durable_retires() {
-        assert!(matches!(classify(OpType::Message, LastOutcome::Durable, 0, 0), Next::Retire));
-    }
-
-    #[test]
-    fn next_backoff_is_monotonic_and_capped() {
-        assert_eq!(next_backoff(0), BASE_BACKOFF_MS);
-        // Large attempts saturate to the cap with no panic/overflow.
-        assert_eq!(next_backoff(100), CAP_BACKOFF_MS);
-        for a in 0..64 {
-            assert!(next_backoff(a) <= CAP_BACKOFF_MS);
-        }
-    }
-
-    #[test]
-    fn kp_publish_stays_pending_when_dht_unavailable() {
-        let dir = std::env::temp_dir().join("promtuz-outbox-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
-        let id = b"kp-stays-pending"; // unique id → robust to the other outbox test's rows
-        retire(id, None); // clean slate for this id
-        enqueue(id, OpType::KpPublish, None, b"records");
-        record_attempt(id, None, 0); // a failed publish attempt — still due-now
-        assert_eq!(
-            due(u64::MAX).iter().filter(|r| r.id == id).count(),
-            1,
-            "KpPublish must stay pending after a failed attempt"
-        );
-        retire(id, None); // cleanup
-    }
-
-    #[test]
-    fn outbox_enqueue_due_retire() {
-        // db() calls process::exit(1) if PROMTUZ_DATA_DIR is unset; point it at a
-        // scratch dir. OUTBOX_DB is a process-global shared connection, so other
-        // tests write to it concurrently — filter every assertion by this id.
-        let dir = std::env::temp_dir().join("promtuz-outbox-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        let id = [1u8; 16];
-        let alice = [2u8; 32];
-        let mine = |now: u64| due(now).into_iter().filter(|r| r.id == id).count();
-        retire_all(&id); // clean slate for this id
-        enqueue(&id, OpType::Message, Some(alice), b"payload");
-        assert_eq!(mine(u64::MAX), 1);
-
-        // Re-enqueue of the same (id, target) is a silent no-op — still one row.
-        enqueue(&id, OpType::Message, Some(alice), b"payload");
-        assert_eq!(mine(u64::MAX), 1);
-
-        // Future backoff excludes the row from due-now.
-        record_attempt(&id, Some(alice), u64::MAX);
-        assert_eq!(mine(0), 0);
-
-        // Dead rows never surface.
-        mark_dead(&id, Some(alice));
-        assert_eq!(mine(u64::MAX), 0);
-
-        retire_all(&id);
-        assert_eq!(mine(u64::MAX), 0);
-    }
-
-    /// The fan-out guarantee: the same dispatch id addressed to two members is
-    /// two independent rows, and retiring one leaves the other queued. Keyed on
-    /// id alone, the second enqueue would have been swallowed and that member
-    /// would never have been retried.
-    #[test]
-    fn a_fan_out_keeps_one_row_per_member() {
-        let dir = std::env::temp_dir().join("promtuz-outbox-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
-
-        let id = [0x5Au8; 16];
-        let alice = [0xA1u8; 32];
-        let bob = [0xB2u8; 32];
-        let mine = || due(u64::MAX).into_iter().filter(|r| r.id == id).count();
-        retire_all(&id);
-
-        enqueue(&id, OpType::Message, Some(alice), b"copy-a");
-        enqueue(&id, OpType::Message, Some(bob), b"copy-b");
-        assert_eq!(mine(), 2, "one row per recipient");
-
-        retire(&id, Some(alice));
-        assert_eq!(mine(), 1, "retiring Alice's copy leaves Bob's queued");
-        assert!(any_pending(&id), "the fan-out is not drained yet");
-
-        retire(&id, Some(bob));
-        assert!(!any_pending(&id), "drained once every member is retired");
-        retire_all(&id);
+        // Reads every dispatch and acknowledges none.
+        let relay = tokio::spawn(async move {
+            let (mut ids, mut unanswered) = (Vec::new(), Vec::new());
+            while let Ok((send, mut recv)) = relay.accept_bi().await {
+                if let Ok(CRelayPacket::Dispatch(dispatch)) = CRelayPacket::unpack(&mut recv).await
+                {
+                    ids.push(dispatch.id.0);
+                }
+                unanswered.push(send);
+            }
+            ids
+        });
+        tokio::join!(reconcile_in(&outbox, &session), reconcile_in(&outbox, &session));
+        session.conn.close(0u32.into(), b"done");
+        assert_eq!(relay.await.unwrap(), [id]);
+        assert_eq!(due_tx(&outbox.lock(), u64::MAX).unwrap()[0].attempts, 1);
     }
 }

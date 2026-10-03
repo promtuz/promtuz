@@ -1,11 +1,11 @@
-//! Bounded, process-local transmission evidence. No peer/file identifiers,
-//! addresses, keys or payloads are retained here. Counters are cumulative;
-//! take two snapshots to measure an experiment, not a production failure rate.
+//! Process-local transmission counters and a bounded event history. Nothing here holds
+//! identifiers, addresses, keys or payloads.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+use common::utils::now_ms;
 use parking_lot::Mutex;
 
 const HISTORY_LIMIT: usize = 128;
@@ -35,7 +35,7 @@ pub(crate) enum Event {
     TransferComplete,
 }
 
-static EVENTS: Lazy<Mutex<VecDeque<(u64, Event)>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+static EVENTS: LazyLock<Mutex<VecDeque<(u64, Event)>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 static DIRECT_SENT: AtomicU64 = AtomicU64::new(0);
 static RELAY_SENT: AtomicU64 = AtomicU64::new(0);
 static CONTENT_SENT: AtomicU64 = AtomicU64::new(0);
@@ -43,7 +43,7 @@ static VERIFIED_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static TCP_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn record(event: Event) {
-    let at = crate::utils::systime().as_millis() as u64;
+    let at = now_ms();
     let mut events = EVENTS.lock();
     if events.len() == HISTORY_LIMIT {
         events.pop_front();
@@ -52,10 +52,8 @@ pub(crate) fn record(event: Event) {
     log::debug!("transmission: {event:?}");
 }
 
-/// QUIC datagram payload accepted by UDP or the bounded TCP relay queue. This includes
-/// handshakes and retransmissions, excludes relay framing/IP overhead and
-/// does NOT claim the remote relay delivered/billed these bytes. Setup packets
-/// accepted on both relay paths count twice, including the bounded TCP race.
+/// QUIC datagram bytes accepted by UDP or the TCP relay queue, not bytes delivered. Setup
+/// packets sent on both relay paths count twice.
 pub(super) fn sent_datagram(relayed: bool, bytes: usize) {
     let counter = if relayed { &RELAY_SENT } else { &DIRECT_SENT };
     counter.fetch_add(bytes as u64, Ordering::Relaxed);

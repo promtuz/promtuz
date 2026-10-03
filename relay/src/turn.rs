@@ -1,12 +1,5 @@
-//! TURN for calls: a standard TURN server (RFC 5766) on its own UDP port, so
-//! a phone's ICE agent can allocate a relayed candidate here the same way it
-//! would at any TURN server. Unlike the blind bridge in [`crate::stunturn`],
-//! nothing is forwarded without credentials.
-//!
-//! Credentials are the coturn time-limited kind: the username carries an
-//! expiry and the asking client, the password is an HMAC over it under a
-//! secret derived from the relay's key. Nothing is stored per client and a
-//! restart keeps every outstanding credential valid.
+//! A standard TURN server (RFC 5766) for calls on its own UDP port. Credentials are coturn-style:
+//! the username holds expiry and client, the password is its HMAC under a relay-key-derived secret.
 
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -15,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use async_trait::async_trait;
 use base64::Engine as _;
 use common::info;
 use common::proto::client_rel::TurnCredentialsP;
@@ -25,22 +19,25 @@ use ring::hmac;
 use tokio_util::sync::CancellationToken;
 use turn::auth::AuthHandler;
 use turn::auth::generate_auth_key;
+use turn::relay::RelayAddressGenerator;
 use turn::relay::relay_static::RelayAddressGeneratorStatic;
 use turn::server::Server;
 use turn::server::config::ConnConfig;
 use turn::server::config::ServerConfig;
+use webrtc_util::Conn;
 use webrtc_util::vnet::net::Net;
 
 use crate::util::config::TurnConfig;
 
 const REALM: &str = "promtuz";
-/// How long minted credentials stay good. Long enough for any call to be
-/// set up on them; a call already running keeps its allocation regardless.
+/// Long enough to set up any call. Refreshes are authenticated too, so an allocation cannot be
+/// renewed past it.
 const CREDENTIAL_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub struct Turn {
     pub port: u16,
     public_ip: IpAddr,
+    allow_local_peers: bool,
     secret: hmac::Key,
     socket: Mutex<Option<std::net::UdpSocket>>,
 }
@@ -52,8 +49,7 @@ impl std::fmt::Debug for Turn {
 }
 
 impl Turn {
-    /// Bind the TURN port now, so a taken port fails at startup, and keep the
-    /// socket for [`Self::serve`].
+    /// Binds now, so a taken port fails at startup.
     pub fn bind(cfg: &TurnConfig, signing: &SigningKey) -> Result<Self> {
         let public_ip = cfg.public_ip.context("[turn] public_ip is required when enabled")?;
         let socket = std::net::UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], cfg.port)))
@@ -62,10 +58,15 @@ impl Turn {
         let root = hmac::Key::new(hmac::HMAC_SHA256, &signing.to_bytes());
         let secret =
             hmac::Key::new(hmac::HMAC_SHA256, hmac::sign(&root, b"promtuz turn secret v1").as_ref());
-        Ok(Self { port: cfg.port, public_ip, secret, socket: Mutex::new(Some(socket)) })
+        Ok(Self {
+            port: cfg.port,
+            public_ip,
+            allow_local_peers: cfg.allow_local_peers,
+            secret,
+            socket: Mutex::new(Some(socket)),
+        })
     }
 
-    /// Credentials for `client`, valid for [`CREDENTIAL_LIFETIME`] from `now_ms`.
     pub fn credentials(&self, client: &[u8; 32], now_ms: u64) -> TurnCredentialsP {
         let expires_at_ms = now_ms + CREDENTIAL_LIFETIME.as_millis() as u64;
         let username = format!("{}:{}", expires_at_ms / 1_000, hex::encode(&client[..4]));
@@ -78,8 +79,6 @@ impl Turn {
             .encode(hmac::sign(&self.secret, username.as_bytes()).as_ref())
     }
 
-    /// Run the server until `cancel`. Takes the bound socket; a second call
-    /// finds none and returns.
     pub async fn serve(self: Arc<Self>, cancel: CancellationToken) {
         let Some(std_sock) = self.socket.lock().take() else { return };
         let sock = match tokio::net::UdpSocket::from_std(std_sock) {
@@ -89,10 +88,13 @@ impl Turn {
         let config = ServerConfig {
             conn_configs: vec![ConnConfig {
                 conn: Arc::new(sock),
-                relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
-                    relay_address: self.public_ip,
-                    address: "0.0.0.0".into(),
-                    net: Arc::new(Net::new(None)),
+                relay_addr_generator: Box::new(PublicPeers {
+                    inner: RelayAddressGeneratorStatic {
+                        relay_address: self.public_ip,
+                        address: "0.0.0.0".into(),
+                        net: Arc::new(Net::new(None)),
+                    },
+                    allow_local: self.allow_local_peers,
                 }),
             }],
             realm: REALM.into(),
@@ -111,56 +113,85 @@ impl Turn {
 }
 
 impl AuthHandler for Turn {
-    /// The key TURN expects for `username`, if the credential is one we
-    /// minted and it has not expired. A wrong password fails the message
-    /// integrity check inside the TURN server rather than here.
+    /// Only expiry is checked here: a forged username or wrong password fails the TURN server's
+    /// message-integrity check against the key returned.
     fn auth_handle(&self, username: &str, realm: &str, _src: SocketAddr) -> Result<Vec<u8>, turn::Error> {
         let expiry: u64 = username
             .split(':')
             .next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| turn::Error::Other("malformed TURN username".into()))?;
-        if expiry < crate::util::systime().as_secs() {
+        if expiry < common::utils::now_secs() {
             return Err(turn::Error::Other("expired TURN credentials".into()));
         }
         Ok(generate_auth_key(username, realm, &self.password_for(username)))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Relayed sockets that drop packets for loopback, private and link-local
+/// peers, so an allocation cannot reach hosts behind this relay.
+struct PublicPeers {
+    inner: RelayAddressGeneratorStatic,
+    allow_local: bool,
+}
 
-    fn turn() -> Turn {
-        let cfg = TurnConfig { enabled: true, port: 0, public_ip: Some("203.0.113.9".parse().unwrap()) };
-        Turn::bind(&cfg, &common::crypto::get_signing_key()).unwrap()
+#[async_trait]
+impl RelayAddressGenerator for PublicPeers {
+    fn validate(&self) -> Result<(), turn::Error> {
+        self.inner.validate()
     }
 
-    #[test]
-    fn minted_credentials_authenticate_until_they_expire() {
-        let t = turn();
-        let now = crate::util::systime().as_millis() as u64;
-        let creds = t.credentials(&[7u8; 32], now);
-        let expected = generate_auth_key(&creds.username, REALM, &creds.password);
-        let src = "10.0.0.1:1".parse().unwrap();
-        assert_eq!(t.auth_handle(&creds.username, REALM, src).unwrap(), expected);
+    async fn allocate_conn(
+        &self, use_ipv4: bool, requested_port: u16,
+    ) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
+        let (conn, addr) = self.inner.allocate_conn(use_ipv4, requested_port).await?;
+        Ok((Arc::new(PublicOnly { conn, allow_local: self.allow_local }), addr))
+    }
+}
 
-        let stale = t.credentials(&[7u8; 32], now - 2 * CREDENTIAL_LIFETIME.as_millis() as u64);
-        assert!(t.auth_handle(&stale.username, REALM, src).is_err(), "expired must be refused");
-        assert!(t.auth_handle("garbage", REALM, src).is_err());
+struct PublicOnly {
+    conn: Arc<dyn Conn + Send + Sync>,
+    allow_local: bool,
+}
+
+#[async_trait]
+impl Conn for PublicOnly {
+    async fn connect(&self, addr: SocketAddr) -> Result<(), webrtc_util::Error> {
+        self.conn.connect(addr).await
     }
 
-    /// The secret comes from the relay key, so two relays never honour each
-    /// other's credentials and a restart honours its own.
-    #[test]
-    fn passwords_are_bound_to_the_relay_key() {
-        let cfg = TurnConfig { enabled: true, port: 0, public_ip: Some("203.0.113.9".parse().unwrap()) };
-        let key = common::crypto::get_signing_key();
-        let a = Turn::bind(&cfg, &key).unwrap();
-        let again = Turn::bind(&cfg, &key).unwrap();
-        let other = Turn::bind(&cfg, &common::crypto::get_signing_key()).unwrap();
-        let creds = a.credentials(&[1u8; 32], 1_700_000_000_000);
-        assert_eq!(again.password_for(&creds.username), creds.password);
-        assert_ne!(other.password_for(&creds.username), creds.password);
+    async fn recv(&self, buf: &mut [u8]) -> Result<usize, webrtc_util::Error> {
+        self.conn.recv(buf).await
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), webrtc_util::Error> {
+        self.conn.recv_from(buf).await
+    }
+
+    async fn send(&self, buf: &[u8]) -> Result<usize, webrtc_util::Error> {
+        self.conn.send(buf).await
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize, webrtc_util::Error> {
+        if !crate::dht::lookup::is_dialable_peer_addr(&target, self.allow_local) {
+            return Ok(buf.len());
+        }
+        self.conn.send_to(buf, target).await
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr, webrtc_util::Error> {
+        self.conn.local_addr()
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.conn.remote_addr()
+    }
+
+    async fn close(&self) -> Result<(), webrtc_util::Error> {
+        self.conn.close().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
     }
 }

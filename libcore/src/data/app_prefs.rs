@@ -1,23 +1,24 @@
-//! App-wide settings that belong to the user rather than the device.
-//!
-//! They lived in SharedPreferences, which `backup_rules.xml` does not ship —
-//! it carries the encrypted blob and nothing else — so every reinstall silently
-//! reset them. Here they ride the blob, and cost iOS nothing to reuse.
-//!
-//! Stringly-typed on purpose: each value is read once, by a screen that already
-//! knows what it means.
+//! Settings that belong to the user rather than the device, so they ride the backup blob.
 
 use anyhow::Result;
+use rusqlite::Connection;
 
-use crate::db::messages::MESSAGES_DB;
+use crate::db::all;
+use crate::state::core;
 
 pub fn get(key: &str) -> Option<String> {
-    let conn = MESSAGES_DB.lock();
+    get_tx(&core().db.messages().lock(), key)
+}
+
+pub fn get_tx(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM app_prefs WHERE key = ?1", [key], |r| r.get(0)).ok()
 }
 
 pub fn set(key: &str, value: &str) -> Result<()> {
-    let conn = MESSAGES_DB.lock();
+    set_tx(&core().db.messages().lock(), key, value)
+}
+
+pub fn set_tx(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO app_prefs (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -27,35 +28,36 @@ pub fn set(key: &str, value: &str) -> Result<()> {
 }
 
 pub fn remove(key: &str) -> Result<()> {
-    MESSAGES_DB.lock().execute("DELETE FROM app_prefs WHERE key = ?1", [key])?;
+    remove_tx(&core().db.messages().lock(), key)
+}
+
+pub fn remove_tx(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM app_prefs WHERE key = ?1", [key])?;
     Ok(())
 }
 
-/// `(key, value)` for every key starting with `prefix`.
 pub fn with_prefix(prefix: &str) -> Vec<(String, String)> {
-    let conn = MESSAGES_DB.lock();
-    conn.prepare("SELECT key, value FROM app_prefs WHERE substr(key, 1, length(?1)) = ?1")
-        .and_then(|mut s| s.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?))).map(|r| r.flatten().collect()))
-        .unwrap_or_default()
+    with_prefix_tx(&core().db.messages().lock(), prefix)
 }
 
-/// Every setting, for the backup snapshot.
-pub fn dump_all() -> Vec<(String, String)> {
-    let conn = MESSAGES_DB.lock();
-    conn.prepare("SELECT key, value FROM app_prefs")
-        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|r| r.flatten().collect()))
-        .unwrap_or_default()
+pub fn with_prefix_tx(conn: &Connection, prefix: &str) -> Vec<(String, String)> {
+    all(
+        conn,
+        "SELECT key, value FROM app_prefs WHERE substr(key, 1, length(?1)) = ?1",
+        [prefix],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap_or_default()
 }
 
-/// Restore settings. `INSERT OR IGNORE`: a setting the user has already changed
-/// on this device outranks the snapshot's memory of it.
-pub fn import_rows(rows: &[(String, String)]) -> Result<usize> {
-    let mut conn = MESSAGES_DB.lock();
-    let tx = conn.transaction()?;
+pub fn dump_all_tx(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    all(conn, "SELECT key, value FROM app_prefs", [], |r| Ok((r.get(0)?, r.get(1)?)))
+}
+
+pub fn import_rows_tx(conn: &Connection, rows: &[(String, String)]) -> Result<usize> {
     let mut n = 0usize;
     for (k, v) in rows {
-        n += tx.execute("INSERT OR IGNORE INTO app_prefs (key, value) VALUES (?1, ?2)", (k, v))?;
+        n += conn.execute("INSERT OR IGNORE INTO app_prefs (key, value) VALUES (?1, ?2)", (k, v))?;
     }
-    tx.commit()?;
     Ok(n)
 }

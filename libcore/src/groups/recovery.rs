@@ -3,6 +3,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
+use log::warn;
+use common::crypto::verify_ed25519;
 use common::proto::client_rel::Wake;
 use common::proto::mls_wire::AppPayload;
 use common::proto::mls_wire::GroupMessage;
@@ -11,19 +13,17 @@ use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::group_envelope_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
-use ed25519_dalek::Signature;
+use common::utils::now_secs;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use openmls::prelude::MlsMessageIn;
 use openmls::prelude::ProcessedMessageContent;
 use openmls::prelude::tls_codec::Deserialize as _;
-use openmls::prelude::tls_codec::Serialize as _;
 use rusqlite::params;
 
 use crate::data::conversation::Conversation;
 use crate::db::outbox::OpType;
-use crate::messaging::InboundDecoded;
-use crate::messaging::SealedMessage;
+use crate::messaging::receive::InboundDecoded;
+use crate::messaging::send::SealedMessage;
 use crate::mls::MlsGroupHandle;
 use crate::mls::PromtuzMlsProvider;
 use crate::mls::recovery::Candidate;
@@ -34,6 +34,7 @@ use crate::mls::recovery::Transaction;
 use crate::mls::recovery::{
     self as journal,
 };
+use crate::state::core;
 
 pub type Copy = ([u8; 32], [u8; 16], OpType, Vec<u8>);
 
@@ -53,7 +54,7 @@ pub fn finish_clears() -> Result<()> {
             .try_into()
             .map_err(|_| anyhow!("invalid cleared group"))?;
         journal::clear_replay(&PromtuzMlsProvider::shared(), &gid, value.parse()?)?;
-        crate::db::messages::MESSAGES_DB
+        core().db.messages()
             .lock()
             .execute("DELETE FROM app_prefs WHERE key=?1 AND value=?2", params![key, value])?;
     }
@@ -101,7 +102,7 @@ pub fn addressed(
                 id,
                 logical_id,
                 kind: kind as i64,
-                frame: crate::messaging::prepare_dispatch(
+                frame: crate::delivery::prepare_dispatch(
                     to,
                     &me,
                     signer,
@@ -117,12 +118,11 @@ pub fn addressed(
 
 /// Seal a logical payload once, retaining its original recipient set for
 /// recovery. Replays never disclose pre-join content to newly added members.
-pub fn queue(
-    provider: &PromtuzMlsProvider, gid: [u8; 32], id: [u8; 16], payload: Vec<u8>,
-    recipients: &[[u8; 32]], signer: &SigningKey, kind: OpType, wake: Wake, ttl_ms: u64,
-    durable: bool,
+pub fn queue_locked(
+    outbox: &parking_lot::Mutex<rusqlite::Connection>, provider: &PromtuzMlsProvider,
+    gid: [u8; 32], id: [u8; 16], payload: Vec<u8>, recipients: &[[u8; 32]], signer: &SigningKey,
+    kind: OpType, wake: Wake, ttl_ms: u64, durable: bool,
 ) -> Result<Vec<Copy>> {
-    let _operation = journal::operation_lock(&gid).lock();
     let mut operation =
         Transaction::open(provider, gid, None)?.ok_or_else(|| anyhow!("no group state"))?;
     if kind == OpType::Message {
@@ -144,19 +144,18 @@ pub fn queue(
     let recipients: Vec<_> =
         recipients.iter().copied().filter(|r| roster.contains(r) && *r != me).collect();
     ensure!(!recipients.is_empty(), "no original recipients remain in the group");
-    let leaf = crate::messaging::leaf_signer_for_group(&operation.provider, &operation.group, &me)?;
+    let leaf = crate::messaging::session::leaf_signer_for_group(&operation.provider, &operation.group, &me)?;
     let bytes = postcard::to_allocvec(&GroupMessage {
         id:      id.into(),
         payload: payload.clone().into(),
     })?;
-    let message = operation.group.create_application_message(&operation.provider, &leaf, &bytes)?;
-    let sealed = SealedMessage {
-        group_id:  gid,
-        epoch:     operation.group.epoch(),
-        branch:    Some(operation.parent),
-        mls_bytes: message.tls_serialize_detached()?,
-        proof:     None,
-    };
+    let mut sealed = crate::messaging::send::seal_application_message(
+        &operation.provider,
+        &mut operation.group,
+        &leaf,
+        &bytes,
+    )?;
+    sealed.branch = Some(operation.parent);
     let jobs = addressed(&sealed, id, &recipients, signer, kind, wake, ttl_ms)?;
     // Requests are regenerated from pending intent, and forwarded Welcomes are
     // specific to a commit. Neither is a replayable application action.
@@ -175,7 +174,7 @@ pub fn queue(
         None,
     )?;
     let mut copies = copies(&jobs);
-    crate::delivery::enqueue_batch(&mut copies)?;
+    crate::delivery::enqueue_batch_in(&mut outbox.lock(), &mut copies)?;
     if durable {
         materialized(provider, &jobs)?;
     }
@@ -222,7 +221,8 @@ pub fn flush_jobs(provider: &PromtuzMlsProvider, gid: [u8; 32]) -> Result<Vec<Co
 pub async fn dispatch(copies: Vec<Copy>) -> usize {
     let mut delivered = 0;
     for (to, id, kind, bytes) in copies {
-        if crate::messaging::dispatch_queued(&to, &id, kind, &bytes).await
+        if crate::delivery::dispatch_queued(core().session().as_deref(), &to, &id, kind, &bytes)
+            .await
             == crate::delivery::LastOutcome::Durable
         {
             delivered += 1;
@@ -254,8 +254,7 @@ pub fn receive(
         &branch,
         &envelope.mls_message.0,
     );
-    VerifyingKey::from_bytes(&sender)?
-        .verify_strict(&transcript, &Signature::from_bytes(&envelope.sender_sig.0))?;
+    verify_ed25519(&sender, &transcript, &envelope.sender_sig.0)?;
     let Some(mut operation) = Transaction::open(provider, gid, Some(branch))? else {
         let Some(group) = MlsGroupHandle::load(provider, &gid)? else {
             if let Some(conversation) = Conversation::for_group(&gid)
@@ -288,7 +287,7 @@ pub fn receive(
         // A data frame commonly arrives before its commit. Give ordinary
         // reordering time to drain before asking for fresh membership keys.
         if count == 0 {
-            crate::RUNTIME.spawn(async move {
+            core().spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 if let Some(conversation) = Conversation::for_group(&gid) {
                     super::resume(conversation);
@@ -324,9 +323,10 @@ pub fn receive(
         Err(e) if e.is_spent_secret() => {
             // The MLS transaction may have committed just before a messages
             // database failure. Redelivery must finish those durable effects.
+            drop(operation);
             if let Some(conversation) = Conversation::for_group(&gid) {
                 reconcile_events(provider, gid, conversation)?;
-                apply_received(provider, gid, conversation)?;
+                deliver_plaintext(provider, gid, conversation)?;
             }
             return Ok(InboundDecoded::ApplicationUndecryptable);
         },
@@ -402,7 +402,7 @@ pub fn receive(
     }
     let result = operation.publish(candidate, &[], None, received.as_ref())?;
     if let Some(group) = MlsGroupHandle::load(provider, &gid)? {
-        let conversation = crate::messaging::home_for_group(&group, &author)?;
+        let conversation = crate::messaging::welcome::home_for_group(&group, &author)?;
         if result.needs_recovery {
             super::member_requests::refresh(conversation)?;
         }
@@ -413,11 +413,11 @@ pub fn receive(
             super::changed(
                 conversation,
                 &changed,
-                crate::quic::server::accepted_at_secs(accepted_at_ms),
+                crate::messaging::receive::accepted_at_secs(accepted_at_ms),
             )?;
         }
         reconcile_events(provider, gid, conversation)?;
-        apply_received(provider, gid, conversation)?;
+        deliver_plaintext(provider, gid, conversation)?;
         if result.previous != result.head {
             super::resume(conversation);
         }
@@ -425,14 +425,29 @@ pub fn receive(
     Ok(InboundDecoded::ApplicationBuffered)
 }
 
-pub fn apply_received(
+/// Applies every staged payload in arrival order. Only storage fails it: a rejected payload is
+/// dropped.
+pub fn deliver_plaintext(
     provider: &PromtuzMlsProvider, gid: [u8; 32], conversation: [u8; 16],
 ) -> Result<()> {
-    let conn = provider.storage().connection();
-    let pending = {
-        let conn = conn.lock();
+    deliver_with(provider, gid, |m| {
+        crate::messaging::receive::receive_application_content(
+            conversation,
+            m.author,
+            m.id,
+            m.accepted_at_ms,
+            &m.payload,
+        )
+    })
+}
+
+/// [`deliver_plaintext`] with `apply` storing each payload.
+fn deliver_with(
+    provider: &PromtuzMlsProvider, gid: [u8; 32], mut apply: impl FnMut(&Received) -> Result<()>,
+) -> Result<()> {
+    let pending = provider.storage().with_conn(|conn| -> Result<Vec<Received>> {
         let mut q = conn.prepare("SELECT sender,dispatch_id,accepted_at_ms,payload FROM mls_group_received WHERE group_id=?1 AND applied=0 ORDER BY rowid")?;
-        q.query_map([gid], |r| {
+        Ok(q.query_map([gid], |r| {
             Ok(Received {
                 author:         r.get(0)?,
                 id:             r.get(1)?,
@@ -440,18 +455,23 @@ pub fn apply_received(
                 payload:        r.get(3)?,
             })
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+    })?;
     for message in pending {
-        crate::quic::server::receive_application_content(
-            conversation,
-            message.author,
-            message.id,
-            message.accepted_at_ms,
-            &message.payload,
-        )?;
-        conn.lock().execute("UPDATE mls_group_received SET applied=1,payload=X'' WHERE group_id=?1 AND sender=?2 AND dispatch_id=?3",
-            params![gid, message.author, message.id])?;
+        if let Err(e) = apply(&message) {
+            if crate::utils::is_storage_error(&e) {
+                return Err(e);
+            }
+            warn!(
+                "MESSAGE: dropped a rejected payload from {} in {}: {e:#}",
+                hex::encode(&message.author[..4]),
+                hex::encode(&gid[..4])
+            );
+        }
+        provider.storage().with_conn(|conn| {
+            conn.execute("UPDATE mls_group_received SET applied=1,payload=X'' WHERE group_id=?1 AND sender=?2 AND dispatch_id=?3",
+                params![gid, message.author, message.id])
+        })?;
     }
     Ok(())
 }
@@ -466,9 +486,12 @@ pub async fn reconcile(conversation: [u8; 16]) -> Result<()> {
     recover_missing_branches(&provider, gid, conversation)?;
     reconcile_events(&provider, gid, conversation)?;
     restore_requests(&provider, gid, conversation, &me)?;
-    apply_received(&provider, gid, conversation)?;
+    {
+        let _operation = journal::operation_lock(&gid).lock();
+        deliver_plaintext(&provider, gid, conversation)?;
+    }
     if super::member_requests::left(&gid) {
-        journal::prune(&provider, &gid, crate::utils::systime().as_secs())?;
+        journal::prune(&provider, &gid, now_secs())?;
         return Ok(());
     }
     for replay in journal::replay_needed(&provider, &gid)? {
@@ -496,7 +519,8 @@ pub async fn reconcile(conversation: [u8; 16]) -> Result<()> {
             1 => Wake::Message,
             _ => Wake::Call,
         };
-        match queue(
+        match crate::messaging::send::queue_application(
+            core().db.outbox(),
             &provider,
             gid,
             replay.id,
@@ -514,7 +538,7 @@ pub async fn reconcile(conversation: [u8; 16]) -> Result<()> {
             Err(e) => log::warn!("GROUP: replay remains pending: {e}"),
         }
     }
-    journal::prune(&provider, &gid, crate::utils::systime().as_secs())?;
+    journal::prune(&provider, &gid, now_secs())?;
     Ok(())
 }
 
@@ -527,7 +551,7 @@ fn recover_missing_branches(
         let mut q = conn.prepare(
             "SELECT DISTINCT i.sender FROM mls_branch_inbox i LEFT JOIN mls_branches b ON b.group_id=i.group_id AND b.branch=i.branch WHERE i.group_id=?1 AND i.received_at<=?2 AND (b.branch IS NULL OR length(b.snapshot)=0)",
         )?;
-        q.query_map(params![gid, crate::utils::systime().as_secs().saturating_sub(60)], |r| {
+        q.query_map(params![gid, now_secs().saturating_sub(60)], |r| {
             r.get::<_, [u8; 32]>(0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -555,9 +579,9 @@ fn reconcile_events(
         // Joining history authenticates the group; it is not chat history.
         let timestamp = {
             use rusqlite::OptionalExtension;
-            provider.storage().connection().lock().query_row(
+            provider.storage().with_conn(|conn| conn.query_row(
                 "SELECT created_at FROM mls_branches WHERE group_id=?1 AND branch=?2 AND change_blob IS NOT NULL",
-                params![gid, pair[1].branch.0], |r| r.get::<_, u64>(0)).optional()?
+                params![gid, pair[1].branch.0], |r| r.get::<_, u64>(0)).optional())?
         };
         if let Some(timestamp) = timestamp {
             super::changed(conversation, &change, timestamp)?;
@@ -651,4 +675,50 @@ fn restore_requests(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::net::Device;
+
+    /// A rejected payload is dropped so it cannot block the group's queue. A failed store keeps
+    /// the rest staged, and the next delivery applies them first, in arrival order.
+    #[test]
+    fn a_rejected_payload_is_dropped_and_a_failed_store_keeps_the_rest_staged() {
+        let device = Device::new(7);
+        let gid = [7; 32];
+        let message = |n: u8| Received {
+            author:         [n; 32],
+            id:             [n; 16],
+            accepted_at_ms: u64::from(n),
+            payload:        vec![n],
+        };
+        let stage = |batch: &[Received]| {
+            for m in batch {
+                m.stage(&device.db.mls().lock(), &gid, &[0; 32]).unwrap();
+            }
+        };
+        let mut stored = Vec::new();
+        stage(&[message(1), message(2), message(3)]);
+        let failed = deliver_with(&device.provider, gid, |m| match m.payload[0] {
+            1 => Err(anyhow!("revision not permitted")),
+            3 => Err(rusqlite::Error::InvalidQuery.into()),
+            n => {
+                stored.push(n);
+                Ok(())
+            },
+        });
+        assert!(crate::utils::is_storage_error(&failed.unwrap_err()));
+        assert_eq!(stored, [2]);
+
+        stage(&[message(4)]);
+        deliver_with(&device.provider, gid, |m| {
+            stored.push(m.payload[0]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(stored, [2, 3, 4]);
+        deliver_with(&device.provider, gid, |_| panic!("nothing is left to apply")).unwrap();
+    }
 }

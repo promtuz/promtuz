@@ -9,13 +9,12 @@ use chacha20poly1305::KeyInit;
 use chacha20poly1305::Nonce;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::aead::Payload;
+use common::crypto::verify_ed25519;
 use common::proto::mls_wire::GroupBranch;
 use common::proto::mls_wire::GroupChange;
 use common::proto::mls_wire::group_change_signing_input;
-use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::random::OpenMlsRand;
 use serde::Deserialize;
@@ -40,9 +39,7 @@ pub fn verify_member_request(
         &request.nonce.0,
         &request.action,
     );
-    VerifyingKey::from_bytes(&request.who.0)?
-        .verify_strict(&input, &Signature::from_bytes(&request.signature.0))?;
-    Ok(())
+    Ok(verify_ed25519(&request.who.0, &input, &request.signature.0)?)
 }
 
 pub fn member_requests(
@@ -135,11 +132,7 @@ pub fn sign(
 }
 
 fn signature(gid: &[u8; 32], parent: Option<&[u8; 32]>, proof: &GroupBranch) -> Result<()> {
-    VerifyingKey::from_bytes(&proof.author.0)?.verify_strict(
-        &transcript(gid, parent, proof)?,
-        &Signature::from_bytes(&proof.signature.0),
-    )?;
-    Ok(())
+    Ok(verify_ed25519(&proof.author.0, &transcript(gid, parent, proof)?, &proof.signature.0)?)
 }
 
 fn transition(gid: &[u8; 32], parent: &GroupBranch, next: &GroupBranch) -> Result<()> {
@@ -173,9 +166,8 @@ fn transition(gid: &[u8; 32], parent: &GroupBranch, next: &GroupBranch) -> Resul
             &signed.branch.0,
             &signed.by.0,
             &signed.change,
-        );
-        VerifyingKey::from_bytes(&signed.by.0)?
-            .verify_strict(&input, &Signature::from_bytes(&signed.sig.0))?;
+        )?;
+        verify_ed25519(&signed.by.0, &input, &signed.sig.0)?;
         let expected = if before.state.is_none() {
             ensure!(
                 signed.change == GroupChange::Upgrade

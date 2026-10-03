@@ -1,10 +1,3 @@
-use std::sync::Arc;
-
-use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
-use quinn::Endpoint;
-use tokio::runtime::Runtime;
-
 pub mod api;
 pub mod call;
 pub mod data;
@@ -17,11 +10,10 @@ pub mod messaging;
 pub mod mls;
 pub mod p2p;
 pub mod platform;
+pub mod presence;
 mod contact_card;
 mod requests;
 mod profile_sync;
-mod profile_details_sync;
-mod profile_reconciliation;
 pub mod push;
 pub mod quic;
 pub mod staging;
@@ -30,17 +22,7 @@ pub mod stickers;
 pub mod transfer;
 pub mod utils;
 
+#[cfg(test)]
+mod test_support;
+
 uniffi::setup_scaffolding!();
-
-//////////////////////////////////////////////
-//============ GLOBAL VARIABLES ============//
-//////////////////////////////////////////////
-
-/// Global Tokio Runtime
-pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().unwrap());
-
-pub static ENDPOINT: OnceCell<Arc<Endpoint>> = OnceCell::new();
-
-/// Resolver seeds captured at `init`, for ad-hoc lookups outside the relay
-/// loop (e.g. discovering a push gateway to register `P → token`).
-pub static RESOLVER_SEEDS: OnceCell<Vec<crate::data::ResolverSeed>> = OnceCell::new();

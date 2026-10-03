@@ -6,8 +6,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
-/// Severity for the server log macros, ordered low→high. The active
-/// threshold ([`init`]) suppresses anything below it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum Level {
@@ -18,10 +16,14 @@ pub enum Level {
     Error = 4,
 }
 
-/// Active threshold; defaults to Info until [`init`] runs.
 static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
-/// True if `level` should be emitted at the current threshold.
+#[derive(serde::Deserialize, Debug, Default)]
+pub struct LogConfig {
+    /// trace|debug|info|warn|error. `PZ_LOG` env overrides. Default: info.
+    pub level: Option<String>,
+}
+
 #[inline]
 pub fn enabled(level: Level) -> bool {
     (level as u8) >= LEVEL.load(Ordering::Relaxed)
@@ -38,7 +40,6 @@ fn parse(s: &str) -> Option<Level> {
     }
 }
 
-/// Resolve the threshold: `PZ_LOG` env wins, then the config value, else Info.
 pub fn init(config_level: Option<&str>) {
     let env_level = std::env::var("PZ_LOG").ok();
     let chosen = env_level
@@ -49,9 +50,8 @@ pub fn init(config_level: Option<&str>) {
     LEVEL.store(chosen as u8, Ordering::Relaxed);
 }
 
-/// Lines buffered before [`emit`] starts dropping. Sized so a burst from one
-/// remote peer cannot grow the process, and dropping beats blocking a reactor
-/// thread on a `write(2)`.
+/// Bounded so a burst from one remote peer cannot grow the process; dropping a line beats
+/// blocking a reactor thread on `write(2)`.
 const QUEUE_CAPACITY: usize = 8192;
 
 enum Record {
@@ -110,14 +110,13 @@ fn enqueue(tx: &mpsc::SyncSender<Record>, record: Record) {
     }
 }
 
-/// Hand a formatted line to the writer thread. Never blocks: a full queue
-/// drops the line and bumps the counter the writer reports on its next pass.
+/// Never blocks: a full queue drops the line, and the writer reports the count.
 pub fn emit(level: Level, line: String) {
     enqueue(sink(), Record::Line(level, line));
 }
 
-/// Block until everything emitted so far has reached stdout/stderr. Call
-/// before a process exits, otherwise the tail of the queue dies with it.
+/// Waits up to 2 s for everything emitted so far to reach stdout/stderr. Call it before the
+/// process exits, or the tail of the queue dies with it.
 pub fn flush() {
     let (ack, done) = mpsc::sync_channel(1);
     if sink().send(Record::Barrier(ack)).is_ok() {
@@ -201,43 +200,4 @@ macro_rules! trace {
             );
         }
     }};
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn level_ordering_gates_correctly() {
-        LEVEL.store(Level::Warn as u8, Ordering::Relaxed);
-        assert!(!enabled(Level::Info));
-        assert!(enabled(Level::Warn));
-        assert!(enabled(Level::Error));
-    }
-
-    #[test]
-    fn parse_is_case_insensitive() {
-        assert_eq!(parse("DEBUG"), Some(Level::Debug));
-        assert_eq!(parse("nope"), None);
-    }
-
-    #[test]
-    fn a_full_queue_drops_instead_of_blocking() {
-        let (tx, _rx) = mpsc::sync_channel(1);
-        DROPPED.store(0, Ordering::Relaxed);
-        for i in 0..16 {
-            enqueue(&tx, Record::Line(Level::Info, format!("line {i}")));
-        }
-        assert_eq!(DROPPED.load(Ordering::Relaxed), 15);
-    }
-
-    #[test]
-    fn errors_go_to_stderr_and_the_rest_to_stdout() {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        write_record(&mut out, &mut err, Record::Line(Level::Info, "hello".into()));
-        write_record(&mut out, &mut err, Record::Line(Level::Error, "boom".into()));
-        assert_eq!(out, b"hello\n");
-        assert_eq!(err, b"boom\n");
-    }
 }

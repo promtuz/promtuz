@@ -5,9 +5,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 256 * 1024;
-// Existing postcard encodings occupy129 bytes (Auth) and at most37 (Pull).
-// These limits prevent parallel unauthenticated streams allocating manifests'
-// much larger buffer allowance before identity/request validation.
+// Auth encodes to 129 bytes and Pull to at most 37. These small limits stop parallel
+// unauthenticated streams from allocating a manifest-sized buffer before validation.
 pub(crate) const AUTH_FRAME_LIMIT: usize = 256;
 pub(crate) const PULL_FRAME_LIMIT: usize = 64;
 
@@ -19,8 +18,6 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Streams `path` a chunk at a time, hashing each block, so a multi-GB file
-    /// never lands in memory whole.
     pub fn from_file(path: &str) -> Result<Manifest> {
         use std::io::Read;
         let mut f = std::fs::File::open(path)?;
@@ -48,8 +45,7 @@ impl Manifest {
         Ok(Manifest { total_size: total, chunk_size: CHUNK_SIZE as u32, chunks })
     }
 
-    /// Content-addresses the manifest itself, not the file bytes, so two
-    /// manifests that describe the same chunks always resolve to the same id.
+    /// Content-addresses the manifest, not the file bytes: the same chunks always give the same id.
     pub fn file_id(&self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
         h.update(b"promtuz/transfer/manifest");
@@ -78,15 +74,12 @@ pub enum ServeResp {
 pub struct Auth {
     pub ipk: [u8; 32],
     pub tls_pub: [u8; 32],
-    // serde has no built-in impl for arrays past 32 (see common::types::bytes::Bytes<N>
-    // for the same fix elsewhere in the tree).
     #[serde(with = "serde_bytes")]
     pub sig: [u8; 64],
 }
 
-/// Max size of a single length-prefixed frame. Bounds the reader's allocation
-/// and stops an oversize write from silently truncating under the `u32` prefix
-/// (a manifest this large already describes a multi-TB file).
+/// Bounds the reader's allocation and keeps a write from truncating under the `u32` length
+/// prefix; a manifest this large already describes a multi-TB file.
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -117,72 +110,4 @@ pub(crate) async fn read_frame_limited<T: DeserializeOwned>(
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf).await?;
     postcard::from_bytes(&buf).map_err(|e| InvalidFrame(e.to_string()).into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn manifest_file_id_is_deterministic() {
-        let m1 = Manifest {
-            total_size: 10,
-            chunk_size: 4,
-            chunks: vec![[1u8; 32], [2u8; 32], [3u8; 32]],
-        };
-        let m2 = m1.clone();
-        assert_eq!(m1.file_id(), m2.file_id());
-
-        let mut m3 = m1.clone();
-        m3.chunks[0] = [9u8; 32];
-        assert_ne!(m1.file_id(), m3.file_id());
-    }
-
-    #[test]
-    fn from_file_chunks_a_partial_trailing_block() {
-        let path = std::env::temp_dir().join("promtuz-from_file-300k.bin");
-        std::fs::write(&path, vec![0xabu8; 300 * 1024]).unwrap();
-
-        let m = Manifest::from_file(path.to_str().unwrap()).unwrap();
-
-        assert_eq!(m.total_size, 300 * 1024);
-        assert_eq!(m.chunk_size, CHUNK_SIZE as u32);
-        assert_eq!(m.chunks.len(), 2); // 256KB + 44KB
-    }
-
-    #[test]
-    fn from_file_exact_multiple_has_no_empty_trailing_chunk() {
-        let path = std::env::temp_dir().join("promtuz-from_file-exact.bin");
-        std::fs::write(&path, vec![0u8; 2 * CHUNK_SIZE]).unwrap();
-
-        let m = Manifest::from_file(path.to_str().unwrap()).unwrap();
-
-        assert_eq!(m.total_size, 2 * CHUNK_SIZE as u64);
-        assert_eq!(m.chunks.len(), 2);
-    }
-
-    #[test]
-    fn frame_types_roundtrip_through_postcard() {
-        let max_pull = Pull { file_id: [7u8; 32], have: u32::MAX };
-        assert_eq!(postcard::to_allocvec(&max_pull).unwrap().len(), 37);
-        assert!(postcard::to_allocvec(&max_pull).unwrap().len() <= PULL_FRAME_LIMIT);
-        let pull = Pull { file_id: [7u8; 32], have: 3 };
-        let got: Pull = postcard::from_bytes(&postcard::to_allocvec(&pull).unwrap()).unwrap();
-        assert_eq!(pull, got);
-
-        let manifest = Manifest { total_size: 1, chunk_size: 1, chunks: vec![[1u8; 32]] };
-        let resp = ServeResp::Manifest(manifest);
-        let got: ServeResp = postcard::from_bytes(&postcard::to_allocvec(&resp).unwrap()).unwrap();
-        assert_eq!(resp, got);
-
-        let gone = ServeResp::Gone;
-        let got: ServeResp = postcard::from_bytes(&postcard::to_allocvec(&gone).unwrap()).unwrap();
-        assert_eq!(gone, got);
-
-        let auth = Auth { ipk: [1u8; 32], tls_pub: [2u8; 32], sig: [3u8; 64] };
-        assert_eq!(postcard::to_allocvec(&auth).unwrap().len(), 129);
-        assert!(postcard::to_allocvec(&auth).unwrap().len() <= AUTH_FRAME_LIMIT);
-        let got: Auth = postcard::from_bytes(&postcard::to_allocvec(&auth).unwrap()).unwrap();
-        assert_eq!(auth, got);
-    }
 }

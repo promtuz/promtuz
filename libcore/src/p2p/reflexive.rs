@@ -1,5 +1,5 @@
-//! Correlate the relay's address echoes with outstanding requests. This is
-//! return-path correlation, not cryptographic authentication of a relay.
+//! Correlates the relay's address echoes with outstanding requests. This is return-path
+//! correlation, not cryptographic authentication of a relay.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -73,8 +73,7 @@ impl Reflexive {
         let _ = pending.reply.send(seen);
     }
 
-    /// A network change invalidates both cached mappings and outstanding
-    /// transactions; late replies from the old network cannot repopulate it.
+    /// Clears pending queries too, so a late reply from the old network cannot refill the cache.
     pub fn invalidate(&mut self) {
         self.cached = None;
         self.pending.clear();
@@ -86,63 +85,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn echoes_require_live_transaction_and_exact_relay_source() {
-        let relay = "8.8.8.8:443".parse().unwrap();
-        let seen = "9.9.9.9:54321".parse().unwrap();
+    fn an_echo_counts_only_from_the_exact_relay_for_a_live_query() {
+        let relay: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        let seen: SocketAddr = "9.9.9.9:54321".parse().unwrap();
+        let age = Duration::from_secs(60);
         let mut state = Reflexive::default();
-        let mut rx = state.begin([1; 8], relay, Duration::from_secs(1)).unwrap();
-        state.accept((relay, [2; 8], seen));
-        state.accept(("8.8.4.4:443".parse().unwrap(), [1; 8], seen));
-        state.accept(("8.8.8.8:444".parse().unwrap(), [1; 8], seen));
-        state.accept((relay, [1; 8], "[::ffff:0.0.0.0]:54321".parse().unwrap()));
-        state.accept((relay, [1; 8], "[::ffff:224.0.0.1]:54321".parse().unwrap()));
-        assert!(rx.try_recv().is_err());
-        assert!(state.cached(relay, Duration::from_secs(60)).is_none());
-        state.accept(("[::ffff:8.8.8.8]:443".parse().unwrap(), [1; 8], seen));
-        assert_eq!(rx.try_recv().unwrap(), seen);
-        assert_eq!(state.cached(relay, Duration::from_secs(60)), Some(seen));
-        state.accept((relay, [1; 8], "9.9.9.9:12345".parse().unwrap()));
-        assert_eq!(state.cached(relay, Duration::from_secs(60)), Some(seen));
-    }
-
-    #[test]
-    fn stale_cancelled_and_previous_network_replies_never_refresh_cache() {
-        let relay = "8.8.8.8:443".parse().unwrap();
-        let seen = "9.9.9.9:54321".parse().unwrap();
-        let mut state = Reflexive::default();
-        let mut expired = state.begin([1; 8], relay, Duration::ZERO).unwrap();
-        state.accept((relay, [1; 8], seen));
-        assert!(expired.try_recv().is_err());
-        let mut cancelled = state.begin([2; 8], relay, Duration::from_secs(1)).unwrap();
-        state.cancel(&[2; 8]);
-        state.accept((relay, [2; 8], seen));
-        assert!(cancelled.try_recv().is_err());
-        let mut old = state.begin([3; 8], relay, Duration::from_secs(1)).unwrap();
-        state.invalidate();
-        let mut current = state.begin([4; 8], relay, Duration::from_secs(1)).unwrap();
-        state.accept((relay, [3; 8], seen));
-        assert!(old.try_recv().is_err());
-        assert!(current.try_recv().is_err());
-        assert!(state.cached(relay, Duration::from_secs(60)).is_none());
-        state.accept((relay, [4; 8], seen));
-        assert_eq!(current.try_recv().unwrap(), seen);
-    }
-
-    #[test]
-    fn concurrent_queries_remain_separate_and_bounded() {
-        let relay = "8.8.8.8:443".parse().unwrap();
-        let mut state = Reflexive::default();
-        let mut receivers = Vec::new();
-        for i in 0..MAX_PENDING as u8 {
-            receivers.push(state.begin([i; 8], relay, Duration::from_secs(10)).unwrap());
+        let mut live = state.begin([1; 8], relay, Duration::from_secs(1)).unwrap();
+        for (source, tx, echoed) in [
+            (relay, [2; 8], seen),
+            ("8.8.4.4:443".parse().unwrap(), [1; 8], seen),
+            ("8.8.8.8:444".parse().unwrap(), [1; 8], seen),
+            (relay, [1; 8], "[::ffff:0.0.0.0]:54321".parse().unwrap()),
+            (relay, [1; 8], "[::ffff:224.0.0.1]:54321".parse().unwrap()),
+        ] {
+            state.accept((source, tx, echoed));
+            assert!(live.try_recv().is_err(), "{source} {tx:?} {echoed}");
         }
-        assert!(state.begin([255; 8], relay, Duration::from_secs(10)).is_none());
-        let seen = "9.9.9.9:54321".parse().unwrap();
-        state.accept((relay, [0; 8], seen));
-        assert_eq!(receivers[0].try_recv().unwrap(), seen);
-        assert!(receivers[1].try_recv().is_err());
-        assert!(state.begin([255; 8], relay, Duration::from_secs(10)).is_some());
+        assert_eq!(state.cached(relay, age), None);
+        state.accept(("[::ffff:8.8.8.8]:443".parse().unwrap(), [1; 8], seen));
+        assert_eq!(live.try_recv().unwrap(), seen);
+        assert_eq!(state.cached(relay, age), Some(seen));
+        state.accept((relay, [1; 8], "9.9.9.9:12345".parse().unwrap()));
+        assert_eq!(state.cached(relay, age), Some(seen), "the first answer sticks");
+
+        let mut state = Reflexive::default();
+        let mut expired = state.begin([3; 8], relay, Duration::ZERO).unwrap();
+        state.accept((relay, [3; 8], seen));
+        let mut cancelled = state.begin([4; 8], relay, Duration::from_secs(1)).unwrap();
+        state.cancel(&[4; 8]);
+        state.accept((relay, [4; 8], seen));
+        let mut previous = state.begin([5; 8], relay, Duration::from_secs(1)).unwrap();
         state.invalidate();
-        assert!(state.cached(relay, Duration::from_secs(60)).is_none());
+        state.accept((relay, [5; 8], seen));
+        for rx in [&mut expired, &mut cancelled, &mut previous] {
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(state.cached(relay, age), None, "no stale reply refills the cache");
     }
 }

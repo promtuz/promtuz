@@ -1,16 +1,12 @@
-use serde::Serialize;
 use crate::db::utils::ulid::ULID;
 use crate::events::Emittable;
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum MessageEv {
-    /// A new message was received and decrypted. `sender` is the member who
-    /// wrote it, which in a group is not the conversation.
+    /// `sender` is the member who wrote it, which in a group is not the conversation.
     Received {
         id: ULID,
-        #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
-        #[serde(with = "serde_bytes")]
         sender: [u8; 32],
         content: String,
         timestamp: u64,
@@ -18,58 +14,38 @@ pub enum MessageEv {
     /// Our sent message was accepted by the relay
     Sent {
         id: ULID,
-        #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
         content: String,
         timestamp: u64,
     },
-    /// Our sent message failed
     Failed {
         id: ULID,
-        #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
         reason: String,
     },
-    /// A message's text changed (our edit, or an inbound peer Edit).
+    /// Our edit or an inbound peer edit.
     Edited {
         id: ULID,
-        #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
         content: String,
     },
-    /// A message was deleted (tombstoned for-everyone, or removed for-me).
+    /// Tombstoned for everyone, or removed for me.
     Deleted {
         id: ULID,
-        #[serde(with = "serde_bytes")]
         conversation: [u8; 16],
-    },
-    /// Legacy receipt event retained for binding compatibility. Current receipt
-    /// updates notify through on_db_changed; readers query persisted per-member
-    /// evidence and aggregate status instead of inferring a watermark.
-    Receipt {
-        #[serde(with = "serde_bytes")]
-        conversation: [u8; 16],
-        #[serde(with = "serde_bytes")]
-        member: [u8; 32],
-        #[serde(with = "serde_bytes")]
-        upto: [u8; 16],
-        status: u8,
     },
 }
 
 impl Emittable for MessageEv {
     fn emit(self) {
-        if let Some(events) = crate::platform::EVENTS.get() {
+        if let Some(events) = crate::state::core().events.get() {
             events.on_message(self.into());
         }
     }
 }
 
-/// A member's live activity changed — an ephemeral, unstored signal.
-/// `activity` is an OR of `common::proto::client_rel::ACTIVITY_*` bits;
-/// `0` = present-but-idle. The UI decides how to render (typing dots, etc.).
-/// Carries the conversation as well as the member, so a group header can
-/// aggregate several people typing at once.
+/// Ephemeral and never stored. `activity` is an OR of `client_rel::ACTIVITY_*` bits; `0` means
+/// present but idle.
 #[derive(Debug, Clone)]
 pub struct ActivityEv {
     pub conversation: [u8; 16],
@@ -79,13 +55,12 @@ pub struct ActivityEv {
 
 impl Emittable for ActivityEv {
     fn emit(self) {
-        if let Some(events) = crate::platform::EVENTS.get() {
+        if let Some(events) = crate::state::core().events.get() {
             events.on_activity(self.conversation.to_vec(), self.peer.to_vec(), self.activity);
         }
     }
 }
 
-/// A contact's presence changed (online / idle-since / offline-last-seen).
 #[derive(Debug, Clone)]
 pub struct PresenceEv {
     pub peer: [u8; 32],
@@ -94,15 +69,13 @@ pub struct PresenceEv {
 
 impl Emittable for PresenceEv {
     fn emit(self) {
-        if let Some(events) = crate::platform::EVENTS.get() {
+        if let Some(events) = crate::state::core().events.get() {
             events.on_presence(self.peer.to_vec(), self.presence);
         }
     }
 }
 
-/// A reaction was added or removed. `reactor` is the author's IPK (compare to
-/// self for "mine"); `add` distinguishes add from remove. Group-ready — each
-/// member's reaction carries its own `reactor`.
+/// `reactor` is the author's IPK; `add` is false when the reaction is removed.
 #[derive(Debug, Clone)]
 pub struct ReactionEv {
     pub conversation: [u8; 16],
@@ -114,7 +87,7 @@ pub struct ReactionEv {
 
 impl Emittable for ReactionEv {
     fn emit(self) {
-        if let Some(events) = crate::platform::EVENTS.get() {
+        if let Some(events) = crate::state::core().events.get() {
             events.on_reaction(self.conversation.to_vec(), self.dispatch_id.to_vec(), self.reactor.to_vec(), self.emoji, self.add);
         }
     }

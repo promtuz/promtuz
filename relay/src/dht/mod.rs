@@ -1,24 +1,13 @@
-//! Relay-side peer mesh: Kademlia routing over `peer/5`, hosting the
-//! sticky-home offline queue ([`forward`]/[`queue_drain`]/[`store`])
-//! and the MLS stash relay ([`mls`]).
-//!
-//! Top-level [`Dht`] struct wires the sub-systems together; the logic
-//! lives in sibling modules.
+//! Relay-to-relay mesh: Kademlia routing over `peer/5`, the sticky-home offline queue and the MLS
+//! stash relay.
 
-// Some routing/lookup/store helpers are only reachable from code paths
-// that aren't always compiled in; suppress dead-code warnings so the
-// noise doesn't drown out real warnings.
-#![allow(dead_code)]
 
-// config + metrics are `pub` because they're referenced from public
-// types like `DhtConfig` in `Dht::new` (already re-exported below).
 pub(crate) mod bootstrap;
 pub mod config;
 pub(crate) mod forward;
 pub(crate) mod handler;
-
+pub(crate) mod home;
 pub(crate) mod lookup;
-pub mod metrics;
 pub(crate) mod mls;
 pub(crate) mod peer_dial;
 pub(crate) mod push_replication;
@@ -26,14 +15,17 @@ pub(crate) mod push_wake;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
+pub(crate) mod rpc;
 pub(crate) mod store;
 pub(crate) mod sync;
 pub(crate) mod tls_extract;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 
-use anyhow::Result;
+use common::proto::RelayId;
 use common::proto::client_res::GatewayDescriptor;
 use common::quic::id::NodeId;
 pub use config::DhtConfig;
@@ -43,197 +35,77 @@ use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
 
-use self::metrics::Metrics;
 use self::mls::kp::KpFetchLimiters;
 use self::mls::welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
 use crate::quic::resolver_link::ResolverLinkHandle;
 use crate::storage::db::Store;
 
-/// Top-level DHT runtime state.
-///
-/// Lock granularity:
-/// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
-/// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring the existing
-///   `Relay::clients` pattern.
-///
-/// All sub-locks are `parking_lot` and *never* held across `await` —
-/// callers clone what they need out of the lock first (project-wide rule).
-///
-/// `routing`/`peer_conns` are `pub(crate)` because only
-/// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
-/// `metrics` are `pub` so admin tools (`bin/ldb.rs` and friends) can read
-/// without going through accessor stubs.
+/// DHT runtime state. Every lock here is `parking_lot` and is never held across an `await`.
 #[derive(Debug)]
 pub struct Dht {
-    /// 256-bucket routing table.
     pub(crate) routing: RwLock<RoutingTable>,
 
-    /// Shared fjall store (the *same* store the relay's message queue uses —
-    /// keyspaces, not databases, separate the two domains). Keyspace handles
-    /// are cheap `Clone`s held on [`Store`], so DHT code reaches them as
-    /// `dht.store.queue` / `.keypackage` / `.welcome` directly.
     pub(crate) store: Arc<Store>,
 
-    /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
-    /// reference held here; routing-table entries hold a `Weak`.
-    ///
-    /// **Verified TLS pubkey caching.** The value is a
-    /// `(Connection, [u8; 32])` tuple where the second element is the
-    /// peer's Ed25519 cert SPKI extracted post-handshake from
-    /// `connection.peer_identity()`. The relay-side TLS verifier ALSO
-    /// checks `BLAKE3(spki) == claimed_node_id` (defense-in-depth) at
-    /// dial time; a mismatch closes the connection with
-    /// `CloseReason::DhtMalformedKey` before the entry is cached. See
-    /// `dht::lookup::connect_to_peer` and `dht::handler::handle_peer_connection`
-    /// for the two callsite paths.
-    ///
-    /// Inbound (server-side) entries do *not* populate the pubkey
-    /// because the relay's QUIC server config currently uses
-    /// `with_no_client_auth()` — clients (peer dialers) do not present
-    /// certs during the handshake, so `peer_identity()` returns `None`.
-    /// In that case we cache the connection with `[0u8; 32]` and rely
-    /// on outbound dials (and `NodeDescriptor.pubkey` in
-    /// `FindNode`/`FindValue` responses) to backfill the verified
-    /// pubkey before any cert-pinning consumer reads it. This gap is
-    /// documented as a follow-up; closing it requires enabling mTLS
-    /// on `peer/5`, which lives in `common/src/quic/config.rs` and
-    /// is out of scope for this dispatch.
+    /// Live `peer/5` connections with each peer's verified key. Outbound: the cert SPKI, whose
+    /// `BLAKE3(SPKI) == NodeId` pin after the handshake is the dial's only identity check.
+    /// Inbound: the verified `DhtHello` pubkey.
     pub(crate) peer_conns: RwLock<HashMap<NodeId, (Connection, [u8; 32])>>,
 
-    /// Resolver session handle for the bootstrap-retry path. Wired in
-    /// after `Dht::new` via [`Self::attach_resolver`] because
-    /// `ResolverLinkHandle` is a relay-side type that can't
-    /// be passed through the constructor without a circular import
-    /// (this module is reachable from `relay/src/relay/mod.rs`).
-    ///
-    /// `None` in unit-test fixtures (`fresh_dht`) and in legacy
-    /// configs where the DHT runs without a resolver link. The
-    /// scheduler's bootstrap-retry branch checks `Option` and degrades
-    /// to "log the warning, do nothing" when absent.
     pub(crate) resolver: parking_lot::RwLock<Option<ResolverLinkHandle>>,
 
-    /// This relay's NodeId — `BLAKE3(NodeKey)`.
     pub node_id: NodeId,
 
-    /// This relay's identity signing key. Used to sign `relay_sig` on
-    /// every outgoing `PresenceRecord` and tombstones. Distinct from the
-    /// TLS server key (`Relay::keys::signing` is the one and only identity
-    /// key — see `relay/src/relay/mod.rs::RelayKeys`).
     pub signing_key: SigningKey,
 
-    /// Local copy of the runtime config so DHT code paths don't have to
-    /// reach back into `Relay::cfg`.
     pub cfg: DhtConfig,
 
-    /// Aggregate operation counters.
-    pub metrics: Metrics,
-
-    /// QUIC endpoint we use to dial outbound peer connections. Cloned
-    /// from `Relay::endpoint` at construction. `Option` because the unit
-    /// tests in `store.rs` / `lookup.rs` build `Dht`s without a live
-    /// endpoint (they only exercise local-only code paths).
     pub(crate) endpoint: Option<Endpoint>,
 
-    /// `peer/5` ALPN client config — used by `lookup.rs::connect_to_peer`
-    /// to dial outbound DHT peer connections. Same `Option` rationale
-    /// as [`endpoint`].
     pub(crate) peer_client_cfg: Option<Arc<ClientConfig>>,
 
-    /// Per-peer inbound-RPC rate limiters. One
-    /// `governor::RateLimiter` per RPC class (cheap / expensive /
-    /// bulk), keyed on the requester's `NodeId`. The default keyed
-    /// state store evicts idle peers automatically so a churn-heavy
-    /// workload doesn't grow the limiters unboundedly. Shared
-    /// reference because the dispatcher in `handler.rs` checks the
-    /// limiter on every inbound stream.
     pub(crate) rate_limiters: rate_limit::PerPeerLimiters,
 
-    /// Per-`(target_ipk, requester_relay_id)` rate limiter for
-    /// `KeyPackageFetch` (`MAX_KP_FETCH_PER_HOUR = 60`).
-    /// Distinct from [`Self::rate_limiters`] (which is keyed on the
-    /// requester alone, the coarse first-line bulkhead) because the
-    /// anti-pinning policy demands per-pair attribution: a misbehaving
-    /// relay draining Bob's stash must not freeze its quota for
-    /// legitimate fetches against Alice's stash.
     pub(crate) kp_fetch_limiters: KpFetchLimiters,
 
-    /// Per-relay rate limiter for the
-    /// `WelcomePublish` / `WelcomeFetch` / `WelcomeAck` family. The
-    /// welcome RPCs are classified `Bulk` in [`Self::rate_limiters`]
-    /// (the coarse first-line bulkhead); this dedicated limiter adds a
-    /// welcome-specific quota so a peer that's well under the per-relay
-    /// bulk quota cannot still pin a single recipient's welcome queue.
-    /// Mirrors the [`Self::kp_fetch_limiters`] pattern.
     pub(crate) welcome_limiters: WelcomeLimiters,
 
-    /// Shared reference to the relay's connected-clients map.
-    ///
-    /// The home-side `Forward` handler in
-    /// [`crate::dht::forward::handle_forward_rpc`] uses this to short-
-    /// circuit to local-deliver when the recipient is currently
-    /// authenticated *here* — avoiding a write into `cf_dht_queue` that
-    /// would just be drained moments later when the user pulls. The
-    /// `Connection` value is exactly the one `RelayRef::clients` holds;
-    /// we share an `Arc<RwLock<...>>` clone rather than a back-pointer
-    /// to `Relay` so unit tests that build a bare `Dht` (without a full
-    /// `Relay`) can still drive the handler with a stubbed map.
-    ///
-    /// **Lock contract**: `parking_lot::RwLock`; never held across an
-    /// `await` (project-wide rule). Callers clone the `Connection` out
-    /// of the guard before any I/O — same pattern
-    /// `quic/handler/client/events/forward.rs::handle_forward` uses on
-    /// the sender path.
-    ///
-    /// `Option<...>` so the bare-`Dht` unit-test fixtures
-    /// (`store::tests::fresh_dht`, `lookup::tests::fresh_dht`) keep
-    /// compiling — a relay-level `Relay::new` populates this via
-    /// [`Self::attach_clients`].
+    pub(crate) wake_limiter: rate_limit::KeyedLimiter<[u8; 32]>,
+
+    #[cfg(test)]
+    pub(crate) limiter_clock: rate_limit::LimiterClock,
+
+    /// One pending-push replay at a time, rotating through the backlog.
+    pub(crate) push_retry_in_flight: AtomicBool,
+    pub(crate) push_retry_cursor: AtomicUsize,
+
+    /// The relay's authenticated clients, so a home can deliver straight to a recipient
+    /// connected here.
     pub(crate) clients: Option<ClientsMap>,
 
     /// Current user-signed active-relay leases. Shared with the client
     /// handler so a lease relay can reject stale cross-relay routes.
     pub(crate) presence_leases: Option<PresenceLeases>,
 
-    /// Shared `IPK -> P` map for offline push wake-up.
-    pub(crate) push_pseudonyms: Option<PushMap>,
-
-    /// Cached push-gateway directory, refreshed from the resolver. The enqueue
-    /// path dials one of these to send a [`WakeRequest`], verifying its
-    /// `PUSH_GATEWAY` capability at dial. Empty → no wakes.
+    /// Gateways from the resolver whose certificate carries `PUSH_GATEWAY`. Empty means no wakes.
     pub(crate) push_gateways: PushGateways,
 
-    /// Latches once [`routing`] has been observed holding `K` or more
-    /// peers. Read by [`routing::self_in_top_k`] to tell "this network
-    /// is smaller than K" apart from "this relay lost sight of a network
-    /// it knows is bigger".
-    ///
-    /// [`routing`]: Self::routing
-    routing_dense: std::sync::atomic::AtomicBool,
+    /// One live connection per gateway, redialed once it has closed.
+    pub(crate) gateway_conns: RwLock<HashMap<RelayId, Connection>>,
 }
 
-/// Shared reference to the relay's connected-clients map. Aliased so
-/// the field type stays readable. See `Dht::clients` for the lock
-/// contract and the `Option<...>` rationale.
 pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
 pub(crate) type PresenceLeases = Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>;
-pub(crate) type PushMap = Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>;
 
-/// Cached push-gateway descriptors from the resolver. See `Dht::push_gateways`.
 pub(crate) type PushGateways = Arc<RwLock<Vec<GatewayDescriptor>>>;
 
 impl Dht {
-    /// Construct the runtime DHT state over the shared fjall [`Store`].
-    ///
-    /// The same store the relay opened for its message queue is reused;
-    /// keyspaces (`dht_presence` / `dht_queue` / `dht_keypackage` /
-    /// `dht_welcome`) separate the two domains and are all opened up front in
-    /// [`Store::open`], so there is nothing to verify here. Returns `Result`
-    /// only to keep the call sites stable.
     pub fn new(
         node_id: NodeId, signing_key: SigningKey, cfg: DhtConfig, store: Arc<Store>,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        let clock = rate_limit::LimiterClock::default();
+        Self {
             routing: RwLock::new(RoutingTable::empty(node_id)),
             store,
             peer_conns: RwLock::new(HashMap::new()),
@@ -241,47 +113,38 @@ impl Dht {
             node_id,
             signing_key,
             cfg,
-            metrics: Metrics::new(),
             endpoint: None,
             peer_client_cfg: None,
-            rate_limiters: rate_limit::PerPeerLimiters::new(),
-            kp_fetch_limiters: KpFetchLimiters::new(),
-            welcome_limiters: WelcomeLimiters::new(),
+            rate_limiters: rate_limit::PerPeerLimiters::new(&clock),
+            kp_fetch_limiters: KpFetchLimiters::new(&clock),
+            welcome_limiters: WelcomeLimiters::new(&clock),
+            wake_limiter: push_wake::wake_limiter(&clock),
+            #[cfg(test)]
+            limiter_clock: clock,
+            push_retry_in_flight: AtomicBool::new(false),
+            push_retry_cursor: AtomicUsize::new(0),
             clients: None,
             presence_leases: None,
-            push_pseudonyms: None,
             push_gateways: Arc::new(RwLock::new(Vec::new())),
-            routing_dense: std::sync::atomic::AtomicBool::new(false),
-        })
+            gateway_conns: RwLock::new(HashMap::new()),
+        }
     }
 
-    /// True once this relay has seen its routing table hold at least
-    /// `config::K` peers. See [`routing::self_in_top_k`].
-    pub(crate) fn routing_was_dense(&self) -> bool {
-        self.routing_dense.load(std::sync::atomic::Ordering::Relaxed)
+    /// Drop limiter rows whose buckets have refilled. Keys are free to mint,
+    /// so without this each keyed limiter is a slow leak.
+    pub(crate) fn sweep_limiters(&self) {
+        self.rate_limiters.sweep();
+        self.kp_fetch_limiters.sweep();
+        self.welcome_limiters.sweep();
+        self.wake_limiter.retain_recent();
+        self.wake_limiter.shrink_to_fit();
     }
 
-    pub(crate) fn mark_routing_dense(&self) {
-        self.routing_dense.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Wire the outbound-dial machinery in. Called by `Relay::new` after
-    /// the QUIC endpoint and per-role client configs have been built.
-    /// Split from `Dht::new` so unit tests that only need DB-level state
-    /// don't have to construct a full QUIC stack.
     pub fn attach_dialer(&mut self, endpoint: Endpoint, peer_client_cfg: Arc<ClientConfig>) {
         self.endpoint = Some(endpoint);
         self.peer_client_cfg = Some(peer_client_cfg);
     }
 
-    /// Wire a shared reference to the relay's connected-clients map.
-    /// Called by `Relay::new` *after* both the `Relay` and the `Dht`
-    /// are constructed, so the same `Arc<RwLock<HashMap<...>>>`
-    /// the relay-side hands to the per-client handler is also visible
-    /// to the home-side `Forward` handler.
-    ///
-    /// Idempotent and safe to skip in unit-test fixtures that don't
-    /// drive the home-side delivery path.
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
     }
@@ -290,42 +153,165 @@ impl Dht {
         self.presence_leases = Some(leases);
     }
 
-    pub fn attach_push(&mut self, pseudonyms: PushMap) {
-        self.push_pseudonyms = Some(pseudonyms);
-    }
-
-    /// Wire the resolver-session handle for the bootstrap-retry path.
-    /// Called by `relay/src/main.rs` after `ResolverLink::new` produces
-    /// its `client_handle`.
-    ///
-    /// Idempotent: a second call replaces the cached handle. The
-    /// scheduler reads `dht.resolver.read().clone()` on each tick so
-    /// the swap is visible to the next bootstrap-retry attempt.
-    ///
-    /// Takes `&self` (not `&mut self`) so the call-site can pass an
-    /// `Arc<Dht>` without unwrapping — the field is interior-mutable
-    /// behind a `parking_lot::RwLock`.
     pub fn attach_resolver(&self, handle: ResolverLinkHandle) {
         *self.resolver.write() = Some(handle);
     }
 
-    /// Close every cached peer connection and clear the map. Called by
-    /// the `Relay`-level shutdown handler so in-flight DHT RPCs cleanly
-    /// finish before the QUIC endpoint is torn down.
-    ///
-    /// Symmetric to the resolver's `Resolver::close`
-    /// (`resolver/src/resolver/mod.rs`).
     pub async fn shutdown(&self) {
         use common::quic::CloseReason;
-        // Drain the map first so we don't hold the write lock across the
-        // (synchronous, but still capability-effecting) close calls.
         let conns: Vec<Connection> = {
             let mut guard = self.peer_conns.write();
             guard.drain().map(|(_, (c, _pk))| c).collect()
         };
         for conn in conns {
             CloseReason::ShuttingDown.close(&conn);
-            self.metrics.inc_peer_conns_closed();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use common::proto::mls_wire::KpPublishMode;
+    use common::proto::mls_wire::MLS_WIRE_VERSION;
+    use common::proto::mls_wire::welcome_ack_signing_input;
+    use common::proto::mls_wire::welcome_fetch_signing_input;
+    use common::utils::now_ms;
+    use ed25519_dalek::Signer;
+
+    use super::forward::forward_to_homes;
+    use super::mls::kp_originate::originate_fetch;
+    use super::mls::kp_originate::originate_publish;
+    use super::mls::welcome_originate::originate_welcome_ack;
+    use super::mls::welcome_originate::originate_welcome_fetch;
+    use super::mls::welcome_originate::originate_welcome_publish;
+    use super::rate_limit::RpcClass;
+    use super::*;
+    use crate::test_support::dht;
+    use crate::test_support::dispatch;
+    use crate::test_support::ipk;
+    use crate::test_support::key;
+    use crate::test_support::kp_record;
+    use crate::test_support::kp_sig;
+    use crate::test_support::queued;
+    use crate::test_support::unreachable_peer;
+    use crate::test_support::welcome;
+
+    const HOUR: u64 = 3_600_000;
+
+    /// One relay is a whole network: its only selected home is a write quorum for messages,
+    /// KeyPackages and Welcomes. Once a second home is selected, its failure never shrinks the
+    /// quorum to one, and the message stays in local custody. Rows: (second home, quorum met).
+    #[tokio::test]
+    async fn a_lone_home_is_a_quorum_and_a_failed_second_home_is_not() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        for (second_home, quorum) in [(false, true), (true, false)] {
+            let seed = if second_home { 20 } else { 10 };
+            if second_home {
+                dht.routing.write().insert(unreachable_peer(2));
+            }
+            let now = now_ms();
+            let to = ipk(seed);
+            let sent = dispatch(&key(seed + 1), to, [seed; 16], b"offline");
+            assert_eq!(forward_to_homes(dht.clone(), sent, now).await.is_ok(), quorum);
+            assert_eq!(queued(&dht, &to), [[seed; 16]]);
+
+            let owner = key(seed + 2);
+            let records = vec![kp_record(&owner, [seed; 32], now + HOUR)];
+            let sig = kp_sig(&owner, &records, KpPublishMode::Publish, now);
+            let published =
+                originate_publish(&dht, ipk(seed + 2), records, KpPublishMode::Publish, now, sig)
+                    .await;
+            assert_eq!((published.homes_succeeded, published.quorum_met), (1, quorum));
+
+            let invite = welcome(&key(seed + 3), ipk(seed + 4), seed);
+            assert_eq!(originate_welcome_publish(&dht, invite, now).await, quorum);
+        }
+    }
+
+    /// A lone relay stores, serves and retires KeyPackages and Welcomes by itself, and an
+    /// unsigned publication stores nothing.
+    #[tokio::test]
+    async fn a_lone_relay_serves_and_retires_what_it_stored() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        let (owner, now) = (key(3), now_ms());
+        let owner_ipk = owner.verifying_key().to_bytes();
+        let first = vec![kp_record(&owner, [1; 32], now + HOUR)];
+        let unsigned =
+            originate_publish(&dht, owner_ipk, first.clone(), KpPublishMode::Publish, now, [0; 64])
+                .await;
+        assert_eq!((unsigned.homes_succeeded, unsigned.quorum_met), (0, false));
+        assert!(originate_fetch(&dht, owner_ipk, now).await.record.is_none());
+        let sig = kp_sig(&owner, &first, KpPublishMode::Publish, now);
+        assert!(
+            originate_publish(&dht, owner_ipk, first, KpPublishMode::Publish, now, sig)
+                .await
+                .quorum_met
+        );
+        let refill = vec![kp_record(&owner, [2; 32], now + HOUR)];
+        let sig = kp_sig(&owner, &refill, KpPublishMode::Refill, now);
+        assert!(
+            originate_publish(&dht, owner_ipk, refill, KpPublishMode::Refill, now, sig)
+                .await
+                .quorum_met
+        );
+        let mut vended = Vec::new();
+        for _ in 0..2 {
+            vended.push(originate_fetch(&dht, owner_ipk, now).await.record.unwrap().kp_ref.0[0]);
+        }
+        vended.sort();
+        assert_eq!(vended, [1, 2], "each package is vended once");
+        assert!(originate_fetch(&dht, owner_ipk, now).await.record.is_none());
+
+        let recipient = key(4);
+        let recipient_ipk = recipient.verifying_key().to_bytes();
+        let mut forged = welcome(&key(5), recipient_ipk, 1);
+        forged.sender_sig.0[0] ^= 1;
+        assert!(!originate_welcome_publish(&dht, forged, now).await);
+        assert!(originate_welcome_publish(&dht, welcome(&key(5), recipient_ipk, 1), now).await);
+        let fetch_sig = || {
+            let msg =
+                welcome_fetch_signing_input(MLS_WIRE_VERSION, &recipient_ipk, &dht.node_id, now);
+            recipient.sign(&msg).to_bytes()
+        };
+        let entries = originate_welcome_fetch(&dht, recipient_ipk, now, fetch_sig()).await;
+        let ids: Vec<[u8; 8]> = entries.iter().map(|entry| entry.welcome_id.0).collect();
+        assert_eq!(ids.len(), 1);
+        let msg =
+            welcome_ack_signing_input(MLS_WIRE_VERSION, &recipient_ipk, &dht.node_id, &ids, now);
+        originate_welcome_ack(&dht, recipient_ipk, ids, now, recipient.sign(&msg).to_bytes()).await;
+        assert!(originate_welcome_fetch(&dht, recipient_ipk, now, fetch_sig()).await.is_empty());
+    }
+
+    /// RLY-05: keys are free to mint, so every keyed limiter must forget a key once its bucket
+    /// has refilled, and keep it until then.
+    #[test]
+    fn sweeping_forgets_limiter_keys_once_their_buckets_refill() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        let peer = NodeId::from_bytes([2; 32]);
+        for class in [RpcClass::Cheap, RpcClass::Expensive, RpcClass::Bulk] {
+            dht.rate_limiters.check(&peer, class).unwrap();
+        }
+        dht.kp_fetch_limiters.check(&[3; 32], &peer).unwrap();
+        dht.welcome_limiters.check(&peer).unwrap();
+        dht.wake_limiter.check_key(&[4; 32]).unwrap();
+        let keys = |dht: &Dht| {
+            let peers = &dht.rate_limiters;
+            [
+                peers.cheap.len(),
+                peers.expensive.len(),
+                peers.bulk.len(),
+                dht.kp_fetch_limiters.per_pair.len(),
+                dht.kp_fetch_limiters.per_target.len(),
+                dht.welcome_limiters.limiter.len(),
+                dht.wake_limiter.len(),
+            ]
+        };
+        dht.sweep_limiters();
+        assert_eq!(keys(&dht), [1; 7]);
+        dht.limiter_clock.advance(Duration::from_secs(3600));
+        dht.sweep_limiters();
+        assert_eq!(keys(&dht), [0; 7]);
     }
 }

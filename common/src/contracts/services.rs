@@ -1,0 +1,13 @@
+//! Relay service guarantees, advertised over an authenticated connection.
+//! IDs here belong to the service namespace, not MLS application contracts.
+
+/// v1: per-replica atomic KeyPackage publish and consume, durable consumption before handoff, and
+/// no resurrection by a publish retry. Delegated homes must advertise it too.
+pub const KEY_PACKAGE_CUSTODY: u16 = 1;
+pub const KEY_PACKAGE_CUSTODY_VERSION: u16 = 1;
+
+/// Owner-only, bounded read of each home's available KeyPackage references. Delegation is bound to
+/// the owner's signed relay ID and needs the same guarantee on every storage connection.
+pub const KEY_PACKAGE_INVENTORY: u16 = 2;
+pub const KEY_PACKAGE_INVENTORY_VERSION: u16 = 1;
+pub mod key_inventory;

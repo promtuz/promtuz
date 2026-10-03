@@ -11,6 +11,7 @@ Group=pzresolver
 ExecStart=/usr/bin/pzresolver --config /etc/promtuz/resolver.toml
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=65536
 
 # Least-privilege hardening. /usr stays read-only; /etc/promtuz is writable so
 # the resolver can generate its key, write a CSR, and read the enrolled cert.

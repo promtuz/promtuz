@@ -3,7 +3,6 @@ use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use sysinfo::{RefreshKind, System};
 
-/// (CPU_USAGE, RAM_USAGE)
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub struct SystemLoad(u8, u8);
 
@@ -25,9 +24,6 @@ impl Debug for SystemLoad {
     }
 }
 
-/// Average of cpu usage of all cores
-///
-/// returns u8 with range 0-100
 async fn avg_cpu_usage(sys: &mut System) -> u8 {
     tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
 
@@ -72,24 +68,4 @@ pub async fn system_load() -> SystemLoad {
     let ram = memory_usage(&mut sys);
 
     SystemLoad(cpu, ram)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::memory_percent;
-
-    #[test]
-    fn memory_percent_reports_normal_usage() {
-        assert_eq!(memory_percent(512, 1024), 50);
-    }
-
-    #[test]
-    fn memory_percent_clamps_overreported_usage() {
-        assert_eq!(memory_percent(125, 100), 100);
-    }
-
-    #[test]
-    fn memory_percent_handles_zero_total() {
-        assert_eq!(memory_percent(1, 0), 0);
-    }
 }

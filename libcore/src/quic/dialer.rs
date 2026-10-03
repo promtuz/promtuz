@@ -6,33 +6,22 @@ use std::time::Duration;
 use common::node::config::DEFAULT_RESOLVER_PORT;
 use common::quic::protorole::ProtoRole;
 use common::quic::tunnel;
-use once_cell::sync::OnceCell;
 use quinn::{Connection, ConnectionError, Endpoint};
 use thiserror::Error;
 
-use crate::ENDPOINT;
 use crate::data::ResolverSeed;
+use crate::state::core;
 
 const UDP_HEAD_START: Duration = Duration::from_secs(2);
 const TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
-struct ClientConfigs {
-    quic: quinn::ClientConfig,
-    roots: rustls::RootCertStore,
-}
-
-static CONFIGS: OnceCell<ClientConfigs> = OnceCell::new();
-
-pub(crate) fn initialize(
-    quic: quinn::ClientConfig, roots: rustls::RootCertStore,
-) -> anyhow::Result<()> {
-    CONFIGS
-        .set(ClientConfigs { quic, roots })
-        .map_err(|_| anyhow::anyhow!("node dialer initialized twice"))
+pub(crate) struct ClientConfigs {
+    pub quic:  quinn::ClientConfig,
+    pub roots: rustls::RootCertStore,
 }
 
 pub(crate) fn roots() -> anyhow::Result<&'static rustls::RootCertStore> {
-    Ok(&CONFIGS.get().ok_or_else(|| anyhow::anyhow!("node dialer not initialized"))?.roots)
+    Ok(&core().net.get().ok_or_else(|| anyhow::anyhow!("node dialer not initialized"))?.dialer.roots)
 }
 
 pub fn quinn_err<E>(e: E) -> DialerError
@@ -92,13 +81,11 @@ fn validate_protocol(conn: &Connection) -> Result<(), DialerError> {
     Ok(())
 }
 
-/// Phone-to-node dialing shared by discovery, messaging, push registration and
-/// store uploads. The outer Control pipe reveals no user identity: the existing
-/// inner protocol retains its own authentication and privacy boundary.
+/// The outer Control pipe reveals no user identity; the inner protocol keeps its own
+/// authentication and privacy boundary.
 pub(crate) async fn connect(addr: SocketAddr, name: &str) -> Result<Connection, DialerError> {
-    let endpoint = ENDPOINT.get().ok_or_else(|| io::Error::other("endpoint not initialized"))?;
-    let configs = CONFIGS.get().ok_or_else(|| io::Error::other("node dialer not initialized"))?;
-    connect_with(endpoint, configs, addr, name).await
+    let net = core().net.get().ok_or_else(|| io::Error::other("endpoint not initialized"))?;
+    connect_with(&net.endpoint, &net.dialer, addr, name).await
 }
 
 async fn connect_with(
@@ -186,9 +173,8 @@ async fn race_transports(
                 }
             },
             Ok(conn) => {
-                // A simultaneously-ready rejection from the other carrier
-                // cannot be hidden by select ordering. Pending losers are
-                // cancelled; successful losers must be explicitly closed.
+                // A simultaneously ready rejection from the other carrier must not hide behind
+                // select order. Pending losers are cancelled; successful losers must be closed.
                 match other {
                     Some(Err(error)) if error.is_security() => {
                         conn.close(0u32.into(), b"other node carrier rejected");
@@ -215,9 +201,8 @@ async fn ready_result<F: std::future::Future>(
     .await
 }
 
-/// Own both transport layers during setup and after handoff. Cancelling any
-/// intermediate await closes the private endpoint and pipe; late workers can
-/// never touch a replacement connection.
+/// Owns both transport layers during setup and after handoff: cancelling any await closes the
+/// private endpoint and pipe, so late workers never touch a replacement connection.
 struct PipeGuard {
     channel: Arc<tunnel::Channel>,
     endpoint: Option<Endpoint>,
@@ -263,10 +248,9 @@ async fn connect_tunnel(
         .await
         .map_err(quic_failure)?;
     validate_protocol(&conn)?;
-    tokio::spawn(async move {
-        // Do not retain a Connection clone here: callers that fail during an
-        // application handshake rely on dropping their last handle to close it.
-        // The endpoint stays live until Quinn finishes that connection's drain.
+    core().spawn(async move {
+        // No Connection clone here: a caller failing its handshake drops its last handle to close
+        // it. The endpoint stays live until Quinn finishes that connection's drain.
         tokio::select! {
             _ = guard.endpoint.as_ref().unwrap().wait_idle() => {},
             _ = guard.channel.closed() => {},
@@ -280,9 +264,7 @@ pub async fn connect_to_any_seed(seeds: &[ResolverSeed]) -> Result<Connection, D
     let mut last_err: Option<DialerError> = None;
 
     for seed in seeds {
-        // Resolve host[:port] -> SocketAddr at dial time (DNS + default port),
-        // so a DNS repoint is picked up on reconnect. A resolve failure just
-        // moves to the next seed rather than aborting the whole attempt.
+        // Resolved at dial time so a DNS repoint is picked up on reconnect.
         let addr = match seed.addr.resolve(DEFAULT_RESOLVER_PORT).await {
             Ok(a) => a,
             Err(err) => {
@@ -312,48 +294,102 @@ pub async fn connect_to_any_seed(seeds: &[ResolverSeed]) -> Result<Connection, D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::proto::client_res::{ClientRequest, ClientResponse};
-    use common::proto::pack::{Packer, Unpacker};
-    use ed25519_dalek::SigningKey;
+    use crate::test_support::net;
 
-    fn tls_configs() -> (Arc<rustls::ServerConfig>, quinn::ServerConfig, ClientConfigs) {
-        // Parallel fixtures may race to install the same process-wide provider.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let rcgen::CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert.der().clone()).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
-        let mut tls =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.der().clone()], key.into())
-                .unwrap();
-        tls.alpn_protocols = vec![tunnel::ALPN.to_vec()];
-        let mut inner_tls = tls.clone();
-        inner_tls.alpn_protocols = vec![ProtoRole::Client.alpn().into_bytes()];
-        let inner = quinn::ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from(inner_tls).unwrap(),
-        ));
-        let quic = common::quic::config::build_client_cfg(ProtoRole::Client, &roots).unwrap();
-        (Arc::new(tls), inner, ClientConfigs { quic, roots })
+    fn configs(role: ProtoRole, roots: rustls::RootCertStore) -> ClientConfigs {
+        ClientConfigs { quic: net::client_config(role, &roots), roots }
     }
 
-    fn peer_configs(alpn: &[u8]) -> (quinn::ServerConfig, quinn::ClientConfig) {
-        crate::quic::peer_config::test_peer_configs_with_protocols(
-            &SigningKey::from_bytes(&[199; 32]),
-            vec![alpn.to_vec()],
-        )
-        .unwrap()
-    }
-
+    /// No downgrade: a security failure on either carrier beats a success on the other, and the
+    /// successful carrier is closed.
     #[tokio::test]
-    async fn native_udp_node_still_serves_without_a_tcp_listener() {
-        let (server_config, client_config) = peer_configs(ProtoRole::Client.alpn().as_bytes());
-        let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = server.local_addr().unwrap();
+    async fn a_security_rejection_from_either_carrier_wins() {
+        for udp_rejected in [false, true] {
+            let (conn, _relay) = net::connection().await;
+            let rejected = Err(DialerError::Security(anyhow::anyhow!("rejected relay identity")));
+            let (udp, tcp) = if udp_rejected {
+                (rejected, Ok(conn.clone()))
+            } else {
+                (Ok(conn.clone()), rejected)
+            };
+            let result = race_transports(std::future::ready(udp), std::future::ready(tcp)).await;
+            assert!(matches!(result, Err(DialerError::Security(_))), "{result:?}");
+            assert!(conn.close_reason().is_some(), "the successful carrier is closed");
+        }
+    }
+
+    /// A refused certificate or a wrong negotiated protocol over UDP never opens a TCP handshake.
+    #[tokio::test]
+    async fn a_udp_security_failure_never_tries_tcp() {
+        for (role, trusted) in [(ProtoRole::Client, false), (ProtoRole::Peer, true)] {
+            let (server, roots) = net::server(role);
+            let addr = server.local_addr().unwrap();
+            let tcp = std::net::TcpListener::bind(addr).unwrap();
+            tcp.set_nonblocking(true).unwrap();
+            let serving = tokio::spawn(async move {
+                if let Ok(conn) = server.accept().await.unwrap().await {
+                    conn.closed().await;
+                }
+            });
+            let roots = if trusted { roots } else { rustls::RootCertStore::empty() };
+            let result =
+                connect_with(&net::client_endpoint(), &configs(role, roots), addr, "localhost")
+                    .await;
+            assert!(matches!(result, Err(DialerError::Security(_))), "{role:?}: {result:?}");
+            assert_eq!(tcp.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock, "{role:?}");
+            serving.await.unwrap();
+        }
+    }
+
+    /// With UDP blackholed, cold discovery completes over the TLS carrier: both ends derive the
+    /// same client-auth binding, the TCP origin is kept, and the relay going away closes promptly.
+    #[tokio::test(start_paused = true)]
+    async fn udp_blackhole_falls_back_to_anonymous_tls_for_cold_discovery_and_closes_promptly() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use common::proto::client_res::ClientRequest;
+        use common::proto::client_res::ClientResponse;
+        use common::proto::pack::Packer;
+        use common::proto::pack::Unpacker;
+
+        let _clock = net::step_paused_clock();
+        let (tls, mut roots) = net::tls_server(tunnel::ALPN);
+        let (inner, inner_roots) = net::tls_server(ProtoRole::Client.alpn().as_bytes());
+        roots.roots.extend(inner_roots.roots);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Swallows every UDP Initial, so whatever answers cannot have come over native UDP.
+        let blackhole = tokio::net::UdpSocket::bind(addr).await.unwrap();
+        let swallowed = Arc::new(AtomicUsize::new(0));
+        let dropping = tokio::spawn({
+            let swallowed = swallowed.clone();
+            async move {
+                let mut packet = [0; 2048];
+                while blackhole.recv_from(&mut packet).await.is_ok() {
+                    swallowed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+        let (restart_tx, restart_rx) = tokio::sync::oneshot::channel::<()>();
         let serving = tokio::spawn(async move {
-            let conn = server.accept().await.unwrap().await.unwrap();
+            let (stream, origin) = listener.accept().await.unwrap();
+            let accepted =
+                tunnel::accept(stream, Arc::new(tls), tunnel::FEATURE_CONTROL).await.unwrap();
+            assert_eq!(accepted.mode, tunnel::AcceptedMode::Control);
+            let channel = accepted.channel;
+            let socket = channel.clone().socket(channel.local_addr(), channel.peer_addr());
+            let endpoint = Endpoint::new_with_abstract_socket(
+                quinn::EndpointConfig::default(),
+                Some(net::quic_server(inner)),
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            )
+            .unwrap();
+            let conn = endpoint.accept().await.unwrap().await.unwrap();
+            assert_eq!(conn.remote_address(), origin, "the TCP origin is kept");
+            bound_tx.send(common::quic::client_auth_binding(&conn).unwrap()).unwrap();
             let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
             assert!(matches!(
                 ClientRequest::unpack(&mut rx).await.unwrap(),
@@ -363,230 +399,62 @@ mod tests {
                 .await
                 .unwrap();
             tx.finish().unwrap();
-            conn.closed().await;
+            restart_rx.await.unwrap();
+            channel.close();
+            endpoint.close(0u32.into(), b"relay restart");
         });
-        let endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let configs = ClientConfigs { quic: client_config, roots: rustls::RootCertStore::empty() };
-        let conn = connect_with(&endpoint, &configs, addr, "peer").await.unwrap();
-        let (mut tx, mut rx) = conn.open_bi().await.unwrap();
-        tx.write_all(&ClientRequest::GetRelays().pack().unwrap()).await.unwrap();
-        tx.finish().unwrap();
-        assert!(matches!(ClientResponse::unpack(&mut rx).await.unwrap(),
-            ClientResponse::GetRelays { relays } if relays.is_empty()));
-        conn.close(0u32.into(), b"done");
-        tokio::time::timeout(Duration::from_secs(2), serving).await.unwrap().unwrap();
-    }
 
-    #[tokio::test]
-    async fn slow_udp_only_node_keeps_its_connect_budget_after_tcp_is_refused() {
-        let (server_config, client_config) = peer_configs(ProtoRole::Client.alpn().as_bytes());
-        let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = server.local_addr().unwrap();
-        // The same numeric TCP port has no listener. An old UDP-only server
-        // may still need retransmissions after the new TCP head start expires.
-        drop(tokio::net::TcpListener::bind(addr).await.unwrap());
-        let serving = tokio::spawn(async move {
-            tokio::time::sleep(UDP_HEAD_START + Duration::from_millis(250)).await;
-            let conn = server.accept().await.unwrap().await.unwrap();
-            conn.closed().await;
-        });
-        let endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let configs = ClientConfigs { quic: client_config, roots: rustls::RootCertStore::empty() };
-        let started = tokio::time::Instant::now();
-        let conn = tokio::time::timeout(
-            Duration::from_secs(6),
-            connect_with(&endpoint, &configs, addr, "peer"),
+        let conn = connect_with(
+            &net::client_endpoint(),
+            &configs(ProtoRole::Client, roots),
+            addr,
+            "localhost",
         )
         .await
-        .unwrap()
         .unwrap();
-        assert!(started.elapsed() >= UDP_HEAD_START);
-        conn.close(0u32.into(), b"done");
-        tokio::time::timeout(Duration::from_secs(2), serving).await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn either_carriers_ready_security_error_overrides_simultaneous_success() {
-        for udp_failed in [false, true] {
-            let (server_config, client_config) = peer_configs(ProtoRole::Client.alpn().as_bytes());
-            let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-            let client = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            let dial =
-                client.connect_with(client_config, server.local_addr().unwrap(), "peer").unwrap();
-            let (accepted, conn) =
-                tokio::join!(async { server.accept().await.unwrap().await.unwrap() }, async {
-                    dial.await.unwrap()
-                },);
-            let failure = Err(DialerError::Security(anyhow::anyhow!("rejected peer identity")));
-            let success = Ok(conn.clone());
-            let (udp, tcp) = if udp_failed { (failure, success) } else { (success, failure) };
-            let result = race_transports(std::future::ready(udp), std::future::ready(tcp)).await;
-            assert!(matches!(result, Err(DialerError::Security(_))));
-            assert!(conn.close_reason().is_some(), "the successful loser must also close");
-            accepted.close(0u32.into(), b"done");
-        }
-    }
-
-    #[tokio::test]
-    async fn rejected_certificate_and_wrong_negotiated_protocol_never_try_tcp() {
-        for wrong_protocol in [false, true] {
-            let alpn =
-                if wrong_protocol { "unexpected/10".to_owned() } else { ProtoRole::Client.alpn() };
-            let (server_config, permissive_client) = peer_configs(alpn.as_bytes());
-            let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-            let addr = server.local_addr().unwrap();
-            let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
-            let serving = tokio::spawn(async move {
-                if let Ok(conn) = server.accept().await.unwrap().await {
-                    conn.closed().await;
-                }
-            });
-            let roots = rustls::RootCertStore::empty();
-            let quic = if wrong_protocol {
-                permissive_client
-            } else {
-                common::quic::config::build_client_cfg(ProtoRole::Client, &roots).unwrap()
-            };
-            let configs = ClientConfigs { quic, roots };
-            let endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            let result = connect_with(&endpoint, &configs, addr, "peer").await;
-            assert!(matches!(result, Err(DialerError::Security(_))), "{result:?}");
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), tcp.accept()).await.is_err(),
-                "a rejected UDP identity/protocol must not start a TCP handshake"
-            );
-            tokio::time::timeout(Duration::from_secs(2), serving).await.unwrap().unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn udp_blackhole_falls_back_to_anonymous_tls_for_cold_discovery_and_closes_promptly() {
-        use common::proto::client_res::RelayDescriptor;
-        use common::quic::id::NodeId;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let (tls, inner, configs) = tls_configs();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        // Consume and count every UDP Initial, deliberately returning nothing.
-        // The successful RPC below therefore cannot have used native UDP.
-        let udp = tokio::net::UdpSocket::bind(addr).await.unwrap();
-        let udp_packets = Arc::new(AtomicUsize::new(0));
-        let dropping = tokio::spawn({
-            let udp_packets = udp_packets.clone();
-            async move {
-                let mut bytes = [0u8; 4096];
-                while udp.recv_from(&mut bytes).await.is_ok() {
-                    udp_packets.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        });
-        let (closed_tx, close_rx) = tokio::sync::oneshot::channel();
-        let (binding_tx, binding_rx) = tokio::sync::oneshot::channel();
-        let serving = tokio::spawn(async move {
-            let (stream, peer) = listener.accept().await.unwrap();
-            let accepted = tunnel::accept(stream, tls, tunnel::FEATURE_CONTROL).await.unwrap();
-            assert_eq!(accepted.mode, tunnel::AcceptedMode::Control);
-            let channel = accepted.channel;
-            let socket = channel.clone().socket(channel.local_addr(), channel.peer_addr());
-            let endpoint = Endpoint::new_with_abstract_socket(
-                quinn::EndpointConfig::default(),
-                Some(inner),
-                socket,
-                Arc::new(quinn::TokioRuntime),
-            )
-            .unwrap();
-            let conn = endpoint.accept().await.unwrap().await.unwrap();
-            assert_eq!(conn.remote_address(), peer, "preserve the actual TCP origin");
-            binding_tx.send(common::quic::client_auth_binding(&conn).unwrap()).unwrap();
-            let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
-            assert!(matches!(
-                ClientRequest::unpack(&mut rx).await.unwrap(),
-                ClientRequest::GetRelays()
-            ));
-            tx.write_all(
-                &ClientResponse::GetRelays {
-                    relays: vec![RelayDescriptor {
-                        id: NodeId::from_bytes([71; 32]),
-                        addr,
-                        pubkey: [72; 32].into(),
-                    }],
-                }
-                .pack()
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-            tx.finish().unwrap();
-            close_rx.await.unwrap();
-            channel.close();
-            endpoint.close(0u32.into(), b"test relay restart");
-        });
-        let endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let conn = connect_with(&endpoint, &configs, addr, "localhost").await.unwrap();
-        assert!(udp_packets.load(Ordering::Relaxed) > 0, "UDP really was attempted and dropped");
-        assert_eq!(
-            common::quic::client_auth_binding(&conn).unwrap(),
-            binding_rx.await.unwrap(),
-            "the unchanged relay proof transcript must bind the same inner exporter on both sides"
-        );
+        assert!(swallowed.load(Ordering::Relaxed) > 0, "UDP was tried first");
+        assert_eq!(common::quic::client_auth_binding(&conn).unwrap(), bound_rx.await.unwrap());
         let (mut tx, mut rx) = conn.open_bi().await.unwrap();
         tx.write_all(&ClientRequest::GetRelays().pack().unwrap()).await.unwrap();
         tx.finish().unwrap();
-        let response = ClientResponse::unpack(&mut rx).await.unwrap();
-        assert!(matches!(response, ClientResponse::GetRelays { relays }
-            if relays.len() == 1 && relays[0].id == NodeId::from_bytes([71; 32])));
-        closed_tx.send(()).unwrap();
+        assert!(matches!(
+            ClientResponse::unpack(&mut rx).await.unwrap(),
+            ClientResponse::GetRelays { relays } if relays.is_empty()
+        ));
+        restart_tx.send(()).unwrap();
+        // The tunnel guard that closes the connection runs on the core runtime in real time, so a
+        // stepped clock could expire this wait before it gets there.
+        tokio::time::resume();
         tokio::time::timeout(Duration::from_secs(2), conn.closed()).await.unwrap();
         serving.await.unwrap();
         dropping.abort();
     }
 
-    #[tokio::test]
-    async fn cancelling_after_tls_admission_closes_the_private_pipe() {
-        let (tls, _inner, configs) = tls_configs();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let dialing =
-            tokio::spawn(async move { connect_tunnel(&configs, addr, "localhost").await });
-        let (stream, _) = listener.accept().await.unwrap();
-        let channel = tunnel::accept(stream, tls, tunnel::FEATURE_CONTROL).await.unwrap().channel;
-        // First inner Initial proves the caller has constructed its private
-        // endpoint/guard, rather than merely cancelling TCP establishment.
-        tokio::time::timeout(Duration::from_secs(2), channel.recv()).await.unwrap().unwrap();
-        dialing.abort();
-        assert!(dialing.await.unwrap_err().is_cancelled());
-        tokio::time::timeout(Duration::from_secs(2), channel.closed()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn dropping_a_connected_client_releases_its_pipe_without_explicit_close() {
-        let (tls, inner, configs) = tls_configs();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (channel_tx, channel_rx) = tokio::sync::oneshot::channel();
+    /// An old UDP-only relay answering after the TCP head start, with TCP refused, still connects
+    /// within the original budget.
+    #[tokio::test(start_paused = true)]
+    async fn slow_udp_only_node_keeps_its_connect_budget_after_tcp_is_refused() {
+        let _clock = net::step_paused_clock();
+        let (server, roots) = net::server(ProtoRole::Client);
+        let addr = server.local_addr().unwrap();
+        drop(std::net::TcpListener::bind(addr).unwrap());
         let serving = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let channel =
-                tunnel::accept(stream, tls, tunnel::FEATURE_CONTROL).await.unwrap().channel;
-            let socket = channel.clone().socket(channel.local_addr(), channel.peer_addr());
-            let endpoint = Endpoint::new_with_abstract_socket(
-                quinn::EndpointConfig::default(),
-                Some(inner),
-                socket,
-                Arc::new(quinn::TokioRuntime),
-            )
-            .unwrap();
-            let conn = endpoint.accept().await.unwrap().await.unwrap();
-            channel_tx.send(channel.clone()).unwrap();
-            channel.closed().await;
-            endpoint.close(0u32.into(), b"test complete");
-            conn.closed().await;
+            tokio::time::sleep(UDP_HEAD_START + Duration::from_millis(250)).await;
+            if let Ok(conn) = server.accept().await.unwrap().await {
+                conn.closed().await;
+            }
         });
-        let conn = connect_tunnel(&configs, addr, "localhost").await.unwrap();
-        let channel = channel_rx.await.unwrap();
-        // No explicit Connection::close, exactly like an early-returning caller.
-        drop(conn);
-        tokio::time::timeout(Duration::from_secs(5), channel.closed()).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let conn = connect_with(
+            &net::client_endpoint(),
+            &configs(ProtoRole::Client, roots),
+            addr,
+            "localhost",
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= UDP_HEAD_START);
+        conn.close(0u32.into(), b"done");
         serving.await.unwrap();
     }
 }

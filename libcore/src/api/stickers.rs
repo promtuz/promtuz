@@ -2,14 +2,15 @@
 
 use common::proto::pack::Packer;
 use common::proto::sticker::StickerRef;
+use common::types::bytes::fixed;
+use common::utils::now_secs;
 
 use crate::api::messaging::on_runtime;
-use crate::api::messaging::to_conv16;
-use crate::api::messaging::to_did16;
 use crate::data::identity::Identity;
 use crate::data::stickers as db;
 use crate::data::stickers::StickerRow;
 use crate::platform::CoreError;
+use crate::state::core;
 use crate::stickers::SourceImage;
 
 /// A sticker reference and its display dimensions. The token grants access
@@ -24,7 +25,6 @@ pub struct StickerRecord {
     pub height: u32,
 }
 
-/// A kept pack with its roster, in picker order.
 #[derive(uniffi::Record)]
 pub struct StickerPackRecord {
     pub pack: Vec<u8>,
@@ -34,7 +34,6 @@ pub struct StickerPackRecord {
     pub stickers: Vec<StickerRecord>,
 }
 
-/// The pack behind a received sticker, before deciding to keep it.
 #[derive(uniffi::Record)]
 pub struct StickerPackPreview {
     pub pack: Vec<u8>,
@@ -44,7 +43,7 @@ pub struct StickerPackPreview {
     pub stickers: Vec<StickerRecord>,
 }
 
-/// A decoded picture for a new sticker: tightly packed RGBA.
+/// Tightly packed RGBA.
 #[derive(uniffi::Record)]
 pub struct StickerSource {
     pub rgba: Vec<u8>,
@@ -75,7 +74,7 @@ pub(crate) fn to_ref(s: &StickerRecord) -> Result<StickerRef, CoreError> {
 }
 
 fn my_ipk() -> Option<[u8; 32]> {
-    Identity::get().map(|i| i.ipk())
+    Identity::local_ipk()
 }
 
 fn pack_record(
@@ -95,7 +94,7 @@ pub fn sticker_packs() -> Vec<StickerPackRecord> {
     let me = my_ipk();
     db::list_packs()
         .into_iter()
-        .map(|p| pack_record(&p, &db::stickers_of(&p.pack_id), me))
+        .map(|p| pack_record(&p, &db::stickers_of(&p.pack_id).unwrap_or_default(), me))
         .collect()
 }
 
@@ -135,7 +134,6 @@ pub async fn sticker_pack_preview(sticker: StickerRecord) -> Result<StickerPackP
     })
 }
 
-/// Keep the pack a sticker belongs to.
 #[uniffi::export]
 pub async fn install_sticker_pack(sticker: StickerRecord) -> Result<(), CoreError> {
     let r = to_ref(&sticker)?;
@@ -144,7 +142,7 @@ pub async fn install_sticker_pack(sticker: StickerRecord) -> Result<(), CoreErro
 
 #[uniffi::export]
 pub fn remove_sticker_pack(pack: Vec<u8>) -> Result<(), CoreError> {
-    let pack = to_did16(&pack)?;
+    let pack = fixed::<16>(&pack, "dispatch_id")?;
     crate::stickers::remove(&pack).map_err(Into::into)
 }
 
@@ -152,8 +150,7 @@ fn log_publish(e: &anyhow::Error) {
     log::warn!("STICKERS: publish failed: {e:#}");
 }
 
-/// Publish a new pack from decoded pictures. Returns the pack id once the
-/// store has every object; the pack is kept locally at the same time.
+/// Returns the pack id once the store has every object; the pack is also kept locally.
 #[uniffi::export]
 pub async fn create_sticker_pack(
     name: String, images: Vec<StickerSource>,
@@ -170,12 +167,11 @@ pub async fn create_sticker_pack(
     Ok(id.to_vec())
 }
 
-/// Add pictures to a pack this identity created.
 #[uniffi::export]
 pub async fn add_to_sticker_pack(
     pack: Vec<u8>, images: Vec<StickerSource>,
 ) -> Result<(), CoreError> {
-    let pack = to_did16(&pack)?;
+    let pack = fixed::<16>(&pack, "dispatch_id")?;
     let images = images
         .into_iter()
         .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height })
@@ -189,8 +185,8 @@ pub async fn add_to_sticker_pack(
 pub fn send_sticker(
     conversation_id: Vec<u8>, sticker: StickerRecord, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let reply_to = reply_to.as_deref().map(to_did16).transpose()?;
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let reply_to = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
     let r = to_ref(&sticker)?;
     let row = crate::data::media::MediaRow {
         kind: crate::data::media::KIND_STICKER,
@@ -207,10 +203,10 @@ pub fn send_sticker(
         sticker: Some(r.ser().map_err(|e| anyhow::anyhow!("encode sticker ref: {e}"))?),
     };
     let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
-    let _ = db::touch_recent(&r.pack, &r.id, crate::utils::systime().as_secs());
-    crate::RUNTIME.spawn(async move {
+    let _ = db::touch_recent(&r.pack, &r.id, now_secs());
+    core().spawn(async move {
         let sent = async {
-            let payload = crate::messaging::rebuild_pending_payload(&to, &msg)?;
+            let payload = crate::messaging::body::rebuild_pending_payload(&to, &msg)?;
             crate::messaging::send_prepared(to, &msg, payload).await
         };
         if let Err(e) = sent.await {
@@ -224,7 +220,7 @@ pub fn send_sticker(
 /// picker open; core rate-limits per pack.
 #[uniffi::export]
 pub fn refresh_sticker_packs() {
-    crate::RUNTIME.spawn(crate::stickers::refresh_kept());
+    core().spawn(crate::stickers::refresh_kept());
 }
 
 #[uniffi::export]

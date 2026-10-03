@@ -1,59 +1,35 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use common::info;
 use common::proto::RelayId;
 use common::proto::client_res::RelayDescriptor;
+use common::quic::CloseReason;
+use common::server::accept::source_group;
 use common::types::bytes::Bytes;
+use common::warn;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use quinn::Connection;
+use tokio::task::JoinHandle;
 
-/// Registrations one [`source_group`] may hold at once. Registration proves
-/// only possession of a freshly generated keypair, so the source address is
-/// the one scarce resource an unauthenticated peer has to spend.
+/// Counted per [`source_group`]. Registration proves only possession of a fresh keypair, so
+/// the source address is the one scarce resource an unauthenticated peer has to spend.
 pub const MAX_REGISTRATIONS_PER_SOURCE: usize = 8;
 
-/// Per-relay registry entry held under the resolver's `relays` map.
-///
-/// `last_heartbeat_at` is the resolver's local-clock observation of the
-/// most recent authenticated `RelayHello`/`RelayHeartbeat` from this
-/// relay. It is used as the recency proxy for the `rtt_near` ranking in
-/// [`ClientRequest::GetBootstrapPeers`]: until the resolver tracks
-/// per-relay RTT directly (Vivaldi-or-similar, future work),
-/// most-recently-heard-from is the best signal of "this relay has
-/// good network position towards us."
-///
-/// Stored as `Instant` rather than ms-since-epoch so the recency
-/// comparison is monotonic regardless of wall-clock jumps. Wrapped in a
-/// `Mutex` so the heartbeat path can update it under the registry's
-/// outer `RwLock` *read* guard — a recency bump is per-entry-local state
-/// that doesn't need to gate every other reader on the map.
-///
-/// [`ClientRequest::GetBootstrapPeers`]: common::proto::client_res::ClientRequest::GetBootstrapPeers
 #[derive(Debug, Clone)]
 pub struct RelayEntry {
     pub id: RelayId,
     pub conn: Arc<Connection>,
-    /// Relay's full Ed25519 identity public key, captured from the
-    /// authenticated `RelayHello` at registration time. Carried so the
-    /// resolver can include it in [`RelayDescriptor`] responses without
-    /// re-deriving from the cert chain on every `GetRelays` /
-    /// `GetBootstrapPeers` call. See `RelayDescriptor::pubkey` doc for
-    /// why bootstrap consumers need this.
     pub pubkey: Bytes<32>,
-    /// Instant of the last authenticated lifetime packet
-    /// (`RelayHello` or `RelayHeartbeat`). Wrapped in `Arc<Mutex<...>>`
-    /// so heartbeat-driven updates don't require the outer registry
-    /// `RwLock` to be taken in write mode.
     pub last_heartbeat_at: Arc<Mutex<Instant>>,
-    /// Set by the first authenticated heartbeat. An established entry is
-    /// one whose holder stayed connected past a heartbeat interval, which
-    /// is what [`admit`] refuses to evict for a newcomer.
     established: Arc<AtomicBool>,
 }
 
@@ -72,19 +48,10 @@ impl RelayEntry {
         descriptor(self.id, self.conn.remote_address(), self.pubkey)
     }
 
-    /// Latest observation of this relay's liveness, as an [`Instant`].
-    /// Cloned out of the per-entry `Mutex` so callers don't hold the
-    /// lock across whatever they do next.
     pub fn last_heartbeat_at(&self) -> Instant {
         *self.last_heartbeat_at.lock()
     }
 
-    /// Update [`Self::last_heartbeat_at`] to `now`. Called from the
-    /// authenticated `RelayHeartbeat` path. The update is unconditional
-    /// — the caller has already verified the heartbeat is fresh and
-    /// well-signed (`Resolver::verify_heartbeat`), so an out-of-order
-    /// arrival should still bump recency: it's a strictly newer
-    /// observation than whatever was stored before.
     pub fn touch_heartbeat(&self, now: Instant) {
         *self.last_heartbeat_at.lock() = now;
         self.established.store(true, Ordering::Relaxed);
@@ -106,7 +73,104 @@ fn descriptor(id: RelayId, addr: SocketAddr, pubkey: Bytes<32>) -> RelayDescript
     RelayDescriptor { id, addr, pubkey }
 }
 
-/// An occupied registry slot reduced to the fields [`admit`] ranks on.
+/// The registered relays or gateways, keyed by id; the last connection to register an id wins.
+#[derive(Debug)]
+pub struct Directory {
+    pub kind: &'static str,
+    map: RwLock<HashMap<RelayId, RelayEntry>>,
+    cap: usize,
+    /// Gateways send no heartbeat, so eviction would always take a live one.
+    evict: bool,
+    /// Bumped on every membership change; invalidates the cached `GetRelays` response.
+    pub generation: AtomicU64,
+}
+
+impl Directory {
+    pub fn new(kind: &'static str, cap: usize, evict: bool) -> Arc<Self> {
+        Arc::new(Self { kind, map: RwLock::default(), cap, evict, generation: AtomicU64::new(0) })
+    }
+
+    pub fn admit(
+        &self, id: RelayId, pubkey: Bytes<32>, conn: Arc<Connection>,
+    ) -> Result<(), CloseReason> {
+        let kind = self.kind;
+        let mut map = self.map.write();
+
+        // The pointer-guarded watcher (`watch`) makes the displaced connection's cleanup a no-op,
+        // so it cannot evict the new entry.
+        let replaced = map.remove(&id);
+        if let Some(existing) = &replaced
+            && !Arc::ptr_eq(&existing.conn, &conn)
+            && existing.conn.close_reason().is_none()
+        {
+            info!("{kind}({id}) reconnected, superseding prior session");
+            CloseReason::Reconnecting.close(&existing.conn);
+        }
+
+        let slots: Vec<Slot> = map.values().map(RelayEntry::slot).collect();
+        match admit(&slots, conn.remote_address().ip(), self.cap, Instant::now()) {
+            Admission::Insert => {},
+            Admission::Evict(victim) if self.evict => {
+                if let Some(evicted) = map.remove(&victim) {
+                    CloseReason::RegistryFull.close(&evicted.conn);
+                }
+            },
+            _ => {
+                if replaced.is_some() {
+                    self.generation.fetch_add(1, Ordering::Release);
+                }
+                warn!(
+                    "{kind}({}) rejected: no admissible slot ({}/{})",
+                    conn.remote_address(),
+                    map.len(),
+                    self.cap
+                );
+                return Err(CloseReason::RegistryFull);
+            },
+        }
+
+        map.insert(id, RelayEntry::new(id, conn, pubkey));
+        self.generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// Removes the entry once its connection closes, but only while the entry still holds that
+    /// connection: a re-registration can land between `closed()` and the write lock.
+    pub fn watch(self: &Arc<Self>, id: RelayId, conn: Arc<Connection>) -> JoinHandle<()> {
+        let dir = self.clone();
+        tokio::spawn(async move {
+            let _ = conn.closed().await;
+            let mut map = dir.map.write();
+            if map.get(&id).is_some_and(|e| Arc::ptr_eq(&e.conn, &conn)) {
+                map.remove(&id);
+                dir.generation.fetch_add(1, Ordering::Release);
+            }
+        })
+    }
+
+    /// The entry must hold this very connection, so a signed heartbeat replayed over another
+    /// session cannot refresh its liveness.
+    pub fn touch(&self, id: &RelayId, conn: &Arc<Connection>) -> bool {
+        let map = self.map.read();
+        let entry = map.get(id).filter(|e| Arc::ptr_eq(&e.conn, conn));
+        entry.inspect(|e| e.touch_heartbeat(Instant::now())).is_some()
+    }
+
+    pub fn snapshot(&self) -> Vec<RelayEntry> {
+        self.map.read().values().cloned().collect()
+    }
+
+    pub fn descriptors(&self) -> Vec<RelayDescriptor> {
+        self.map.read().values().map(RelayEntry::to_descriptor).collect()
+    }
+
+    pub fn close_all(&self) {
+        for entry in self.map.read().values() {
+            entry.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
     pub id:          RelayId,
@@ -122,32 +186,12 @@ pub enum Admission {
     Reject,
 }
 
-/// Quota key for a source address. IPv4 counts per address; IPv6 counts per
-/// /64, because a single host is routinely handed a whole /64 and could
-/// otherwise present an unlimited supply of distinct addresses.
-fn source_group(ip: IpAddr) -> [u8; 16] {
-    match ip {
-        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-        IpAddr::V6(v6) => {
-            let [a, b, c, d, ..] = v6.segments();
-            Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0).octets()
-        },
-    }
-}
-
-/// How long an established slot keeps its eviction protection without a
-/// heartbeat. Three intervals tolerates two lost heartbeats before a relay is
-/// treated as gone.
+/// Three intervals, so two lost heartbeats do not cost a relay its eviction protection.
 pub const HEARTBEAT_TIMEOUT: Duration =
     Duration::from_secs(common::quic::RESOLVER_RELAY_HEARTBEAT_INTERVAL * 3);
 
-/// Decide whether a registration from `applicant_ip` may take a slot.
-///
-/// `slots` must already exclude any entry the applicant is replacing under
-/// last-connection-wins. At capacity a slot is displaced only if it has yet to
-/// heartbeat or has gone silent past [`HEARTBEAT_TIMEOUT`], least-recently
-/// -heard-from first: a flood of fresh identities cannot push out a live relay,
-/// and a squatter that heartbeats once cannot hold a slot forever.
+/// `slots` must exclude the entry being replaced. At capacity, only a slot that never heartbeated
+/// or went silent past [`HEARTBEAT_TIMEOUT`] is evicted: a flood cannot push out a live relay.
 pub fn admit(
     slots: &[Slot], applicant_ip: IpAddr, capacity: usize, now: Instant,
 ) -> Admission {
@@ -171,18 +215,12 @@ pub fn admit(
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
-    use std::time::Duration;
+    use std::net::Ipv6Addr;
 
     use super::*;
 
     fn id(seed: u8) -> RelayId {
-        let mut b = [0u8; 32];
-        b[0] = seed;
-        RelayId::from_bytes(b)
-    }
-
-    fn ip(last: u8) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+        RelayId::from_bytes([seed; 32])
     }
 
     fn slot(seed: u8, ip: IpAddr, established: bool, last_seen: Instant) -> Slot {
@@ -190,77 +228,38 @@ mod tests {
     }
 
     #[test]
-    fn admits_while_under_capacity() {
-        let now = Instant::now();
-        let slots = [slot(1, ip(1), true, now)];
-        assert_eq!(admit(&slots, ip(2), 8, Instant::now()), Admission::Insert);
-    }
-
-    #[test]
-    fn rejects_past_the_per_source_cap() {
-        let now = Instant::now();
-        let slots: Vec<Slot> = (0..MAX_REGISTRATIONS_PER_SOURCE as u8)
-            .map(|i| slot(i, ip(9), false, now))
-            .collect();
-        assert_eq!(admit(&slots, ip(9), 1024, Instant::now()), Admission::Reject);
-        assert_eq!(admit(&slots, ip(8), 1024, Instant::now()), Admission::Insert);
-    }
-
-    #[test]
-    fn per_source_cap_counts_only_the_applicant_group() {
-        let now = Instant::now();
-        let mut slots: Vec<Slot> = (0..MAX_REGISTRATIONS_PER_SOURCE as u8)
-            .map(|i| slot(i, ip(9), false, now))
-            .collect();
-        slots.push(slot(100, ip(8), false, now));
-        assert_eq!(admit(&slots, ip(8), 1024, Instant::now()), Admission::Insert);
-    }
-
-    #[test]
-    fn ipv6_addresses_share_a_quota_across_the_same_64() {
-        let now = Instant::now();
-        let v6 = |host: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, host));
-        let slots: Vec<Slot> = (0..MAX_REGISTRATIONS_PER_SOURCE as u8)
-            .map(|i| slot(i, v6(i as u16), false, now))
-            .collect();
-
-        assert_eq!(admit(&slots, v6(999), 1024, Instant::now()), Admission::Reject);
-
-        let other_64 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1));
-        assert_eq!(admit(&slots, other_64, 1024, Instant::now()), Admission::Insert);
-    }
-
-    #[test]
-    fn at_capacity_evicts_the_oldest_unestablished_slot() {
-        let now = Instant::now();
-        let slots = [
-            slot(1, ip(1), true, now),
-            slot(2, ip(2), false, now - Duration::from_secs(30)),
-            slot(3, ip(3), false, now - Duration::from_secs(120)),
+    fn admission_caps_each_source_and_evicts_only_silent_relays() {
+        let t0 = Instant::now();
+        let (ms, second) = (Duration::from_millis(1), Duration::from_secs(1));
+        let v4 = |last| IpAddr::V4(Ipv4Addr::new(10, 0, 0, last));
+        let v6 = |subnet, host| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, subnet, 0, 0, 0, host));
+        let full = |ip: &dyn Fn(u8) -> IpAddr| -> Vec<Slot> {
+            (0..MAX_REGISTRATIONS_PER_SOURCE as u8).map(|i| slot(i, ip(i), false, t0)).collect()
+        };
+        let one_v4 = full(&|_| v4(9));
+        let one_64 = full(&|i| v6(1, u16::from(i)));
+        let mapped = IpAddr::V6(Ipv4Addr::new(10, 0, 0, 9).to_ipv6_mapped());
+        let mixed = [
+            slot(1, v4(1), true, t0),
+            slot(2, v4(2), false, t0 + 2 * second),
+            slot(3, v4(3), false, t0 + second),
         ];
-        assert_eq!(admit(&slots, ip(4), slots.len(), now), Admission::Evict(id(3)));
-    }
+        let live = [slot(1, v4(1), true, t0), slot(2, v4(2), true, t0 + second)];
 
-    #[test]
-    fn at_capacity_never_evicts_a_live_established_slot() {
-        let now = Instant::now();
-        let slots = [slot(1, ip(1), true, now), slot(2, ip(2), true, now)];
-        assert_eq!(admit(&slots, ip(3), slots.len(), now), Admission::Reject);
-    }
-
-    #[test]
-    fn an_established_slot_that_stopped_heartbeating_ages_out() {
-        let now = Instant::now();
-        let slots = [slot(1, ip(1), true, now - HEARTBEAT_TIMEOUT), slot(2, ip(2), true, now)];
-        assert_eq!(admit(&slots, ip(3), slots.len(), now), Admission::Evict(id(1)));
-    }
-
-    #[test]
-    fn descriptor_carries_the_observed_socket_addr() {
-        let addr = SocketAddr::from(([203, 0, 113, 7], 4433));
-        let d = descriptor(id(5), addr, Bytes([7u8; 32]));
-        assert_eq!(d.addr, addr);
-        assert_eq!(d.id, id(5));
-        assert_eq!(d.pubkey, Bytes([7u8; 32]));
+        use Admission::*;
+        let cases: [(&[Slot], IpAddr, usize, Instant, Admission); 9] = [
+            (&one_v4, v4(9), 1024, t0, Reject),
+            (&one_v4, mapped, 1024, t0, Reject),
+            (&one_v4, v4(8), 1024, t0, Insert),
+            (&one_64, v6(1, 999), 1024, t0, Reject),
+            (&one_64, v6(2, 1), 1024, t0, Insert),
+            (&one_v4, v4(9), one_v4.len(), t0, Reject),
+            (&mixed, v4(4), mixed.len(), t0 + 2 * second, Evict(id(3))),
+            (&live, v4(3), live.len(), t0 + HEARTBEAT_TIMEOUT - ms, Reject),
+            (&live, v4(3), live.len(), t0 + HEARTBEAT_TIMEOUT, Evict(id(1))),
+        ];
+        for (i, (slots, ip, capacity, now, want)) in cases.into_iter().enumerate() {
+            assert_eq!(admit(slots, ip, capacity, now), want, "case {i}");
+        }
     }
 }

@@ -1,14 +1,5 @@
-//! Home-replica offline-queue persistence over the `dht_queue` keyspace.
-//!
-//! Owns the sticky-home store-and-forward queue: [`enqueue_for_home`]
-//! (writer, per-recipient capped), [`lookup_queue_for_user`] /
-//! [`delete_queue_entries`] (the `QueueFetch` / `QueueFetchAck` read +
-//! GC paths), and [`plan_drift_migrations`] / [`delete_migrated_entry`]
-//! (the K-set drift-migration sweep driven by the scheduler).
-//!
-//! Values are postcard-encoded [`DispatchP`] keyed by the 56-byte
-//! [`MessageKey`] (`recipient(32) || ts_be(8) || dispatch_id(16)`), so a
-//! 32-byte prefix scan groups a recipient's queue oldest-first.
+//! The home queue in the `dht_queue` keyspace: postcard [`DispatchP`] rows under [`MessageKey`], so
+//! a recipient prefix scan reads the queue oldest first.
 
 use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::ForwardOutcome;
@@ -16,16 +7,13 @@ use common::proto::pack::MAX_FRAME_BYTES;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
-use common::quic::xor32;
 
 use super::Dht;
-use super::config::K;
 use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
 
-/// One sender's share of a recipient's [`MAX_QUEUED_PER_RECIPIENT`] slots.
-/// Kept above `MAX_FETCH_QUEUE_BATCH` so a single busy conversation still
-/// pages normally.
+/// One sender's share of a recipient's [`MAX_QUEUED_PER_RECIPIENT`] slots. Kept above
+/// `MAX_FETCH_QUEUE_BATCH` so a single busy conversation still pages normally.
 const MAX_QUEUED_PER_SENDER: usize = 128;
 
 /// Ceiling on queued bytes deserialized to attribute rows to their sender
@@ -34,21 +22,14 @@ const SENDER_SCAN_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 pub(crate) enum QueueAdmission {
     Insert,
-    /// This exact `(dispatch_id, sender)` is already queued — a retransmit.
     AlreadyQueued,
-    /// A different sender holds this `dispatch_id` for this recipient.
     IdTakenByOther,
     Full,
     ScanFailed,
 }
 
-/// Admission scan for a queue of [`MessageKey`]-shaped keys: per-recipient cap,
-/// per-sender quota, and duplicate-id rejection.
-///
-/// `sender_of` decodes a row's sender because the home queue stores `DispatchP`
-/// and the local fallback queue stores `DeliverP`. Attribution is byte-budgeted
-/// — past [`SENDER_SCAN_BYTE_BUDGET`] only the per-recipient cap binds, so a
-/// queue of MiB-scale rows is never read whole on an inbound dispatch.
+/// Per-recipient cap, per-sender share and one row per id. Past [`SENDER_SCAN_BYTE_BUDGET`] rows go
+/// unattributed and only the per-recipient cap binds.
 pub(crate) fn admit_to_queue(
     ks: &fjall::Keyspace, recipient: &[u8; 32], dispatch_id: &[u8; 16], sender: &[u8; 32],
     sender_of: impl Fn(&[u8]) -> Option<[u8; 32]>,
@@ -58,8 +39,7 @@ pub(crate) fn admit_to_queue(
     let mut attributed_bytes: usize = 0;
     let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
     for guard in ks.prefix(recipient) {
-        // Treat a corrupted iterator as "we can't be sure we're under the
-        // cap" — better to reject than silently overrun.
+        // A failed scan cannot prove the queue is under its cap, so it rejects.
         let Ok((key_bytes, value)) = guard.into_inner() else {
             return QueueAdmission::ScanFailed;
         };
@@ -95,47 +75,12 @@ pub(crate) fn admit_to_queue(
     QueueAdmission::Insert
 }
 
-/// Retention for a `dht_queue` row, past which it is swept regardless of
-/// whether the recipient ever drained.
-const QUEUE_ENTRY_TTL_MS: u64 = 7 * 24 * 3_600_000;
-
-/// Rows evicted per expiry sweep.
-const MAX_EXPIRE_PER_SWEEP: usize = 1024;
-
-/// Serialized-byte budget for one batch of queued dispatches, leaving framing
-/// headroom under [`MAX_FRAME_BYTES`]. A batch that ignored this would produce
-/// a `QueueFetchResp` the packer refuses, stranding the queue permanently.
+/// Leaves framing headroom under [`MAX_FRAME_BYTES`]. A bigger batch would make a `QueueFetchResp`
+/// the packer refuses, stranding the queue for good.
 const QUEUE_BATCH_MAX_BYTES: usize = MAX_FRAME_BYTES - 64 * 1024;
 
-/// Planning half of the K-set drift migration.
-///
-/// Walks `cf_dht_queue` once and identifies up to `max` queue entries
-/// whose recipient `user_ipk` is no longer in this relay's K-closest
-/// set. Returns the (key, dispatch) pairs the caller should attempt to
-/// migrate via outbound `Forward` RPCs. A successful migration deletes
-/// the local entry — but the deletion is the *async* caller's
-/// responsibility because it must wait for ≥`FORWARD_K_MIN`
-/// confirmations from the new K-closest set first.
-///
-/// **Why split the sync planner from the I/O half**: this walk is sync
-/// (holds the routing lock briefly per recipient), while the migration
-/// itself needs async outbound `Forward` RPCs. The scheduler composes
-/// the two: `plan_drift_migrations` → spawn a task per candidate → on
-/// success the migrator deletes the local queue entry (see
-/// [`super::sync::run_drift_migration_sweep`]).
-///
-/// **Per-message K-set check**: one routing-table read per queued entry,
-/// bounded by `MAX_MIGRATE_PER_SWEEP` (256) so a pathologically full
-/// disk can't stall the sweep.
-///
-/// **Out of scope**: `messages` keyspace entries are *not*
-/// migrated — that CF is the local-fallback safety net owned by the
-/// sender's relay. Only `cf_dht_queue` (the home-replica queue) is
-/// subject to drift.
-///
-/// This walk also evicts rows past [`QUEUE_ENTRY_TTL_MS`]: it is the only
-/// periodic full scan of the keyspace, so the expiry sweep rides along with it
-/// rather than duplicating the iteration from the scheduler.
+/// Up to `max` queued rows whose recipient no longer has this relay among its homes. The caller
+/// deletes a row only after a durable handover.
 pub(crate) fn plan_drift_migrations(
     dht: &Dht, max: usize,
 ) -> Vec<(MessageKey, DispatchP)> {
@@ -144,17 +89,6 @@ pub(crate) fn plan_drift_migrations(
         return out;
     }
 
-    let self_id = dht.node_id;
-    let now_ms = crate::util::systime().as_millis() as u64;
-    let mut expired: Vec<Vec<u8>> = Vec::new();
-
-    // Cache the per-recipient drift decision so we don't recompute it
-    // for every message of the same recipient. The cap is per-sweep,
-    // so if a single recipient has 1000 messages and we drifted out
-    // of K for them, we'd otherwise issue 1000 routing-table reads
-    // for the same answer. Bounded by O(distinct recipients with
-    // drifted queues), which in practice is far smaller than the
-    // per-sweep cap.
     let mut drifted: std::collections::HashMap<[u8; 32], bool> =
         std::collections::HashMap::new();
 
@@ -163,50 +97,16 @@ pub(crate) fn plan_drift_migrations(
             Ok(kv) => kv,
             Err(_) => continue,
         };
-        // Validate the key shape and pull the 32-byte recipient prefix.
-        if key_bytes.len() != MessageKey::SIZE {
-            continue;
-        }
-        let mut user_ipk = [0u8; 32];
-        user_ipk.copy_from_slice(&key_bytes[0..32]);
-
-        let mut ts_be = [0u8; 8];
-        ts_be.copy_from_slice(&key_bytes[32..40]);
-        if now_ms.saturating_sub(u64::from_be_bytes(ts_be)) > QUEUE_ENTRY_TTL_MS {
-            if expired.len() < MAX_EXPIRE_PER_SWEEP {
-                expired.push(key_bytes.to_vec());
-            }
-            continue;
-        }
-
-        let is_drifted = match drifted.get(&user_ipk) {
-            Some(b) => *b,
-            None => {
-                let target_id = NodeId::from_bytes(user_ipk);
-                let candidates = dht.routing.read().find_closest(&target_id, K);
-                // Permissive sparse-table policy: sparse routing (< K
-                // candidates) means we *might* still be K-closest by
-                // virtue of nobody else being closer. Treat that as "not
-                // drifted" so a freshly-bootstrapped relay doesn't migrate
-                // every entry away on its first sweep.
-                let drifted_now = if candidates.len() < K {
-                    false
-                } else {
-                    let self_dist = xor32(self_id.as_bytes(), &user_ipk);
-                    let kth_dist = xor32(candidates[K - 1].id.as_bytes(), &user_ipk);
-                    self_dist > kth_dist
-                };
-                drifted.insert(user_ipk, drifted_now);
-                drifted_now
-            }
-        };
-        if !is_drifted {
-            continue;
-        }
-
         let Some(key) = MessageKey::parse(&key_bytes) else {
             continue;
         };
+        let user_ipk = key.recipient;
+        let is_drifted = *drifted
+            .entry(user_ipk)
+            .or_insert_with(|| !super::routing::homes(dht, &NodeId::from_bytes(user_ipk)).1);
+        if !is_drifted {
+            continue;
+        }
         let Ok(dispatch) = DispatchP::deser(&value) else {
             continue;
         };
@@ -215,66 +115,19 @@ pub(crate) fn plan_drift_migrations(
             break;
         }
     }
-
-    for key in &expired {
-        let _ = dht.store.queue.remove(key);
-    }
     out
 }
 
-/// Delete a single migrated `cf_dht_queue` entry by its composite
-/// `MessageKey`. Used by the migration driver after an outbound
-/// `Forward` to the new K-closest succeeded. Returns
-/// `true` on a successful delete.
-///
-/// Public-to-the-crate so the `evict_expired` driver in the scheduler
-/// can call it from its async migration loop. Lock-free; fjall keyspace
-/// handles are internally concurrency-safe for writes from multiple tasks.
 pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
     dht.store.queue.remove(key.as_bytes()).is_ok()
 }
 
-/// Persist a queued [`DispatchP`] into [`CF_DHT_QUEUE`] for the recipient's
-/// home-relay queue. Used by:
-///
-/// - `forward_to_homes` when the sender relay discovers it is itself in
-///   the recipient's K-closest set — the self-store short-circuit.
-/// - The home-side `DhtRequest::Forward` handler, to durably enqueue an
-///   inbound dispatch for an offline recipient.
-///
-/// **Cap enforcement.** One bounded exact `prefix()` scan over the `dht_queue`
-/// keyspace enforces three things: the per-recipient
-/// [`crate::storage::MAX_QUEUED_PER_RECIPIENT`] cap, the per-sender
-/// [`MAX_QUEUED_PER_SENDER`] share of it, and single-occupancy of a
-/// `dispatch.id` within the recipient's queue.
-///
-/// `now_ms` is the *home's* clock, never a wire-supplied timestamp: it is the
-/// secondary sort key of [`MessageKey`] and drives the retention sweep, so an
-/// injected dispatch must not be able to place itself at the head of the queue
-/// or outside the sweep's reach.
-///
-/// Returns:
-/// - [`ForwardOutcome::Stored`] on a successful queue write, or when this exact
-///   `(from, id)` is already queued (retries are idempotent).
-/// - [`ForwardOutcome::QueueFull`] when the recipient is at
-///   `MAX_QUEUED_PER_RECIPIENT`, or this sender is at
-///   `MAX_QUEUED_PER_SENDER` for this recipient; the dispatch is *not*
-///   stored.
-/// - [`ForwardOutcome::BadSig`] as a defensive surface for an internal
-///   error (postcard serialisation failure, fjall write failure) and for a
-///   `dispatch.id` already queued under a different sender. The
-///   on-the-wire semantics of `BadSig` is "we will
-///   not accept this dispatch" — surfacing infrastructure failures the
-///   same way avoids a silent message-loss path.
-///
-/// Durability: writes use `WriteOptions::set_sync(true)` so the WAL fsyncs
-/// before this returns — same pattern as
-/// [`store_record`] and the legacy `store_in_rocks` in
-/// `relay/src/quic/handler/client/events/forward.rs`.
-///
+/// `now_ms` is the home's clock, never a wire timestamp: it orders the queue and drives the
+/// retention sweep, so an injected dispatch cannot jump the queue or escape the sweep.
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
+    let _admission = dht.store.admission(user_ipk);
     match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0, |v| {
         DispatchP::deser(v).ok().map(|d| d.from.0)
     }) {
@@ -284,7 +137,6 @@ pub(crate) fn enqueue_for_home(
             return ForwardOutcome::BadSig;
         },
         QueueAdmission::Full => {
-            dht.metrics.inc_dht_queue_full_rejections();
             return ForwardOutcome::QueueFull;
         },
     }
@@ -295,58 +147,19 @@ pub(crate) fn enqueue_for_home(
         Err(_) => return ForwardOutcome::BadSig,
     };
 
-    // Queues the group-commit fsync. `Stored` is a durable promise, so the
-    // caller must await `Store::persist_barrier` before it puts that on the
-    // wire.
+    // Queues the group-commit fsync. `Stored` is a durable promise, so the caller awaits
+    // `Store::persist_barrier` before putting it on the wire.
     if dht.store.put_sync(&dht.store.queue, key.as_bytes(), &value).is_err() {
         return ForwardOutcome::BadSig;
     }
 
-    dht.metrics.inc_dht_queue_writes();
     ForwardOutcome::Stored
 }
 
-
-/// Read up to `max` queued [`DispatchP`]s for `user_ipk` from
-/// `cf_dht_queue`, oldest first.
-///
-/// **Ordering** is naturally chronological: the on-disk `MessageKey`
-/// shape `recipient(32) || ts_be(8) || dispatch_id(16)` makes the
-/// big-endian timestamp the secondary sort key, so a prefix iterator
-/// yields older messages before newer ones for a given recipient. The
-/// home-side `QueueFetch` handler returns this Vec verbatim into a
-/// `QueueFetchResp`, then the `exhausted` flag is computed by the
-/// caller (whether more keys exist past the cap).
-///
-/// Returns:
-/// - `Vec<(MessageKey, DispatchP)>` — bounded by `max` entries.
-///   The `MessageKey` is included so the caller can also
-///   `delete_queue_entries` on the same iterator pass if it wants to
-///   build a one-shot drain instead of a fetch-then-ack cycle (the
-///   sticky-home flow does the latter, but the former is a useful
-///   primitive for the migration pass).
-/// - Empty Vec when there's no queue for `user_ipk` — a soft "nothing to
-///   drain" the home-side handler also accepts.
-///
-/// **Caller's contract**: `parking_lot` lock-discipline applies (no
-/// guards held across `await`); this function is sync and takes none.
-///
-pub(crate) fn lookup_queue_for_user(
-    dht: &Dht, user_ipk: &[u8; 32], max: usize,
-) -> Vec<(MessageKey, DispatchP)> {
-    queue_batch_for_user(dht, user_ipk, max).0
-}
-
-/// [`lookup_queue_for_user`] plus the `exhausted` flag a `QueueFetchResp`
-/// carries: `true` iff the returned batch covers every drainable row for
-/// `user_ipk`.
-///
-/// The batch is bounded by `max` entries *and* by [`QUEUE_BATCH_MAX_BYTES`] of
-/// serialized dispatch. A single row larger than the whole budget can never be
-/// framed into any response, so it is deleted rather than skipped — skipping
-/// would leave it consuming a queue slot forever.
+/// Also returns whether the batch covers every drainable row. Rows too big to frame or past their
+/// sender-declared life are deleted rather than left at the head of the queue.
 pub(crate) fn queue_batch_for_user(
-    dht: &Dht, user_ipk: &[u8; 32], max: usize,
+    dht: &Dht, user_ipk: &[u8; 32], max: usize, now_ms: u64,
 ) -> (Vec<(MessageKey, DispatchP)>, bool) {
     let mut out: Vec<(MessageKey, DispatchP)> = Vec::new();
     if max == 0 {
@@ -354,50 +167,47 @@ pub(crate) fn queue_batch_for_user(
     }
 
     let mut used: usize = 0;
-    let mut oversize: Vec<Vec<u8>> = Vec::new();
+    let mut dead: Vec<Vec<u8>> = Vec::new();
+    let mut oversize = 0usize;
     let mut exhausted = true;
 
-    // fjall's exact prefix scan + the MessageKey layout (recipient || ts_be
-    // || dispatch_id) yields this recipient's queue oldest-first.
     for guard in dht.store.queue.prefix(user_ipk) {
         let (key_bytes, value) = match guard.into_inner() {
             Ok(kv) => kv,
-            // Soft-fail on iterator corruption: return what we collected
-            // so the caller still drains *something*. The next sweep
-            // re-attempts.
             Err(_) => {
                 exhausted = false;
                 break;
-            }
+            },
         };
         let Some(key) = MessageKey::parse(&key_bytes) else {
-            // Malformed key (length mismatch, etc.) — skip and continue;
-            // this is the same defensive policy the legacy local-queue
-            // drain uses.
             continue;
         };
         if value.len() > QUEUE_BATCH_MAX_BYTES {
-            oversize.push(key_bytes.to_vec());
+            oversize += 1;
+            dead.push(key_bytes.to_vec());
+            continue;
+        }
+        let Ok(dispatch) = DispatchP::deser(&value) else {
+            continue;
+        };
+        if dispatch.is_expired(now_ms) {
+            dead.push(key_bytes.to_vec());
             continue;
         }
         if out.len() >= max || used.saturating_add(value.len()) > QUEUE_BATCH_MAX_BYTES {
             exhausted = false;
             break;
         }
-        let Ok(dispatch) = DispatchP::deser(&value) else {
-            continue;
-        };
         used += value.len();
         out.push((key, dispatch));
     }
 
-    for key in &oversize {
+    for key in &dead {
         let _ = dht.store.queue.remove(key);
     }
-    if !oversize.is_empty() {
+    if oversize > 0 {
         common::warn!(
-            "dht_queue: dropped {} unframeable entr(ies) (> {QUEUE_BATCH_MAX_BYTES} bytes) for {}",
-            oversize.len(),
+            "dht_queue: dropped {oversize} unframeable entr(ies) (> {QUEUE_BATCH_MAX_BYTES} bytes) for {}",
             hex::encode(&user_ipk[..4])
         );
     }
@@ -405,30 +215,7 @@ pub(crate) fn queue_batch_for_user(
     (out, exhausted)
 }
 
-/// Delete every `cf_dht_queue` entry for `user_ipk` whose
-/// `dispatch_id` appears in `dispatch_ids`. Returns the count of
-/// successful deletions.
-///
-/// **Why we iterate-and-filter** rather than computing the full
-/// 56-byte `MessageKey` from `(user_ipk, ts, id)` directly: we don't
-/// know the original `ts_ms` (it was the `now_ms` at write time, which
-/// the requesting relay doesn't have access to). The `dispatch_id`
-/// alone identifies the write — but the on-disk key includes the
-/// timestamp as a non-prefix component, so the only way to find the
-/// matching key is a prefix scan. Bounded by the per-recipient cap
-/// (`MAX_QUEUED_PER_RECIPIENT = 1024`), so the worst-case scan is
-/// trivial relative to the rest of the RPC's signature-verify cost.
-///
-/// **Idempotent**: a `dispatch_id` that's already gone (or never
-/// existed) contributes 0 to the count. The home-side
-/// `QueueFetchAck` handler retries on transient failures, so a partial
-/// delete on the first attempt converges over a few rounds.
-///
-/// Durability: deletions are journal-buffered (no fsync). This is
-/// intentional — losing a delete on crash means the dispatch is
-/// re-delivered next reconnect (the client dedupes by id), which is
-/// strictly better than the alternative cost of fsyncing every per-id
-/// delete.
+/// Not fsynced: a delete lost in a crash only redelivers, and the client dedupes by id.
 pub(crate) fn delete_queue_entries(
     dht: &Dht, user_ipk: &[u8; 32], dispatch_ids: &[[u8; 16]],
 ) -> usize {
@@ -436,8 +223,6 @@ pub(crate) fn delete_queue_entries(
         return 0;
     }
 
-    // Collect target keys first, delete in a second pass (don't mutate the
-    // keyspace mid-iteration).
     let target: std::collections::HashSet<[u8; 16]> = dispatch_ids.iter().copied().collect();
     let mut victims: Vec<Vec<u8>> = Vec::new();
 
@@ -446,13 +231,7 @@ pub(crate) fn delete_queue_entries(
             Ok(k) => k,
             Err(_) => break,
         };
-        // Last 16 bytes of the 56-byte key are the dispatch_id.
-        if key_bytes.len() != MessageKey::SIZE {
-            continue;
-        }
-        let mut id = [0u8; 16];
-        id.copy_from_slice(&key_bytes[40..56]);
-        if target.contains(&id) {
+        if MessageKey::parse(&key_bytes).is_some_and(|key| target.contains(&key.id)) {
             victims.push(key_bytes.to_vec());
         }
     }
@@ -466,555 +245,157 @@ pub(crate) fn delete_queue_entries(
     count
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    use common::proto::client_rel::dispatch_sig_message;
-    use common::quic::id::NodeId;
-    use ed25519_dalek::Signer;
-    use ed25519_dalek::SigningKey;
+    use common::proto::client_rel::DeliverP;
+    use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
 
     use super::*;
-    use crate::dht::Dht;
-    use crate::dht::DhtConfig;
+    use crate::quic::handler::client::events::forward::dispatch_to_deliver;
+    use crate::test_support::dht;
+    use crate::test_support::dispatch;
+    use crate::test_support::ipk;
+    use crate::test_support::key;
+    use crate::test_support::put_queued;
+    use crate::test_support::queued;
 
-    /// Deterministic-distinct seed counter so `fresh_signing_key()` calls
-    /// return distinct ids without an RNG dep.
-    ///
-    /// Tests don't need cryptographic randomness — they need *distinct*
-    /// keypairs. `from_bytes` lets us derive a key from a counter-bumped
-    /// seed cheaply.
-    fn fresh_signing_key() -> SigningKey {
-        static SEQ: AtomicU64 = AtomicU64::new(1);
-        let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let mut seed = [0u8; 32];
-        seed[..8].copy_from_slice(&n.to_le_bytes());
-        // Spread non-zero bytes throughout the seed so two consecutive
-        // counter values yield very different Ed25519 secret scalars.
-        seed[31] = (n & 0xff) as u8;
-        seed[16] = ((n >> 8) & 0xff) as u8;
-        SigningKey::from_bytes(&seed)
+    const NOW: u64 = 1_700_000_000_000;
+
+    fn id(n: usize) -> [u8; 16] {
+        let mut id = [0; 16];
+        id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        id
     }
 
-    /// Build a `Dht` instance backed by a fresh tempdir fjall. The
-    /// DB lives in `/tmp` so the test doesn't pollute the workspace
-    /// (each test gets its own subdir keyed off a counter).
-    fn fresh_dht(self_id: NodeId) -> Arc<Dht> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-dht-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = fresh_signing_key();
-        let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
-    }
-
-
-    fn wall_clock_ms() -> u64 {
-        crate::util::systime().as_millis() as u64
-    }
-
-    fn build_dispatch(
-        from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
-    ) -> DispatchP {
-        let from_ipk: [u8; 32] = from_user.verifying_key().to_bytes();
-        let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
-        let sig = from_user.sign(&msg);
-        DispatchP {
-            to:      (*to_ipk).into(),
-            from:    from_ipk.into(),
-            id:      id.into(),
-            payload: payload.to_vec().into(),
-            sig:     sig.to_bytes().into(),
-            accepted_at_ms: 1,
-            wake:    common::proto::client_rel::Wake::No,
-            ttl_ms:  0,
-        }
-    }
-
+    /// On-disk format that survives deploys: recipient, big-endian acceptance time, then id, so
+    /// a prefix scan drains one user's queue oldest first.
     #[test]
-    fn enqueue_for_home_writes_with_correct_key_shape() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let id: [u8; 16] = [0xAB; 16];
-        let dispatch = build_dispatch(&from_user, &to_ipk, id, b"payload-x");
-        let now: u64 = 1_700_000_000_000;
-
-        let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now);
-        assert_eq!(outcome, ForwardOutcome::Stored);
-
-        // Read back via the prefix iterator the way the home-side
-        // QueueFetch handler does. The key shape is
-        // `MessageKey { recipient: to_ipk, ts_be: now, id }` per
-        // `enqueue_for_home`.
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        let mut values: Vec<Vec<u8>> = Vec::new();
-        for guard in dht.store.queue.prefix(to_ipk) {
-            let (k, v) = guard.into_inner().expect("iter");
-            keys.push(k.to_vec());
-            values.push(v.to_vec());
-        }
-        assert_eq!(keys.len(), 1, "exactly one queued message expected");
-        let key = &keys[0];
-        // 32-byte recipient + 8-byte big-endian ts + 16-byte id = 56.
-        assert_eq!(key.len(), 56, "MessageKey is 56 bytes");
-        assert_eq!(&key[0..32], &to_ipk[..]);
-        assert_eq!(&key[32..40], &now.to_be_bytes()[..]);
-        assert_eq!(&key[40..56], &id[..]);
-
-        // Value is a postcard-encoded DispatchP — round-trip it.
-        let decoded = DispatchP::deser(&values[0]).expect("postcard");
-        assert_eq!(decoded, dispatch);
+    fn queue_rows_are_keyed_by_recipient_then_big_endian_time_then_id() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        let to = ipk(2);
+        let later = dispatch(&key(3), to, [0xBB; 16], b"later");
+        let earlier = dispatch(&key(3), to, [0xAA; 16], b"earlier");
+        assert_eq!(enqueue_for_home(&dht, &to, &later, 2_000), ForwardOutcome::Stored);
+        assert_eq!(enqueue_for_home(&dht, &to, &earlier, 1_000), ForwardOutcome::Stored);
+        let rows: Vec<(Vec<u8>, DispatchP)> = dht
+            .store
+            .queue
+            .prefix(to)
+            .map(|row| {
+                let (key, value) = row.into_inner().unwrap();
+                (key.to_vec(), DispatchP::deser(&value).unwrap())
+            })
+            .collect();
+        let key_of = |at: u64, id: [u8; 16]| [&to[..], &at.to_be_bytes(), &id].concat();
+        assert_eq!(
+            rows,
+            [(key_of(1_000, [0xAA; 16]), earlier), (key_of(2_000, [0xBB; 16]), later)]
+        );
     }
 
+    /// Per-recipient cap without writing the overflow, one sender's share below it in both
+    /// queues, idempotent retries, refused id squatting, and recipients that never share a cap.
     #[test]
-    fn enqueue_for_home_returns_queue_full_at_cap() {
-        // Fill `cf_dht_queue` for one recipient up to the cap; the next
-        // write returns `QueueFull` and does NOT actually write the new
-        // entry (we observe by checking the count remained at the cap).
-        //
-        // We use a deliberately *small* test cap by just exhausting the
-        // real `MAX_QUEUED_PER_RECIPIENT = 1024` cap — it's slow but
-        // bounded, and the test budget tolerates it (~30 ms in
-        // practice). This keeps the test honest: we exercise the
-        // production constant rather than mocking it out.
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let now: u64 = 1_700_000_000_000;
-
-        // Direct CF write to bypass the cap (so we can fill quickly).
-        // Each entry needs a distinct `(ts, id)` so the keys don't
-        // collide. Fill exactly to the cap.
-        for i in 0..MAX_QUEUED_PER_RECIPIENT {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            let key = MessageKey::new(&to_ipk, now + (i as u64), &id);
-            // Tiny dummy value — only the count matters for the cap
-            // check; the actual deserializability of the value is
-            // unrelated to the cap-enforcement path under test.
-            dht.store.queue.insert(key.as_bytes(), b"x").expect("put");
+    fn admission_caps_each_recipient_and_sender_and_refuses_a_taken_id() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        let full = ipk(10);
+        for n in 0..MAX_QUEUED_PER_RECIPIENT {
+            dht.store
+                .queue
+                .insert(MessageKey::new(&full, NOW + n as u64, &id(n)).as_bytes(), b"x")
+                .unwrap();
         }
+        let overflow = dispatch(&key(11), full, [0xFF; 16], b"overflow");
+        assert_eq!(enqueue_for_home(&dht, &full, &overflow, NOW), ForwardOutcome::QueueFull);
+        assert!(!queued(&dht, &full).contains(&[0xFF; 16]), "the overflow is not written");
+        let other = ipk(12);
+        let elsewhere = dispatch(&key(11), other, [1; 16], b"another recipient");
+        assert_eq!(enqueue_for_home(&dht, &other, &elsewhere, NOW), ForwardOutcome::Stored);
 
-        // One more should be rejected with QueueFull.
-        let dispatch = build_dispatch(&from_user, &to_ipk, [0xFF; 16], b"overflow");
-        let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now + 99_999);
-        assert_eq!(outcome, ForwardOutcome::QueueFull);
-
-        // And the rejected entry must NOT have been written. Count
-        // remains exactly at the cap (the `[0xFF; 16]` id we'd have
-        // used absent the cap is not in the queue).
-        let mut found_overflow = false;
-        for guard in dht.store.queue.prefix(to_ipk) {
-            let k = guard.key().expect("iter");
-            if k.ends_with(&[0xFF; 16]) {
-                found_overflow = true;
-                break;
-            }
+        let (to, hog, legit) = (ipk(13), key(14), key(15));
+        for n in 0..MAX_QUEUED_PER_SENDER {
+            put_queued(&dht, &to, NOW + n as u64, &dispatch(&hog, to, id(n), b"hog"));
         }
-        assert!(!found_overflow, "QueueFull rejection must not write the entry");
-    }
+        let more = dispatch(&hog, to, [0xEE; 16], b"hog");
+        assert_eq!(enqueue_for_home(&dht, &to, &more, NOW), ForwardOutcome::QueueFull);
+        let theirs = dispatch(&legit, to, [0xEF; 16], b"legit");
+        assert_eq!(enqueue_for_home(&dht, &to, &theirs, NOW), ForwardOutcome::Stored);
 
-    /// The local fallback queue stores `DeliverP` and is reached whenever the
-    /// K-home fan-out misses quorum, so it needs the same admission scan.
-    #[test]
-    fn fallback_queue_caps_one_sender_below_the_recipient_cap() {
-        use common::proto::client_rel::DeliverP;
-
-        let relay = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let dht = fresh_dht(NodeId::new(relay.verifying_key().to_bytes()));
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let hog: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
-        let other: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
-        let decode = |v: &[u8]| DeliverP::deser(v).ok().map(|d| d.from.0);
-
-        let row = |from: [u8; 32], id: [u8; 16]| DeliverP {
-            id:             id.into(),
-            from:           from.into(),
-            payload:        b"x".to_vec().into(),
-            sig:            [0u8; 64].into(),
-            accepted_at_ms: 0,
-            ttl_ms:         0,
-        };
-
-        for i in 0..MAX_QUEUED_PER_SENDER {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            assert!(matches!(
-                admit_to_queue(&dht.store.messages, &to_ipk, &id, &hog, decode),
-                QueueAdmission::Insert
-            ));
-            let key = MessageKey::new(&to_ipk, i as u64, &id);
-            dht.store.messages.insert(key.as_bytes(), row(hog, id).ser().unwrap()).unwrap();
+        // The relay's local fallback queue holds `DeliverP` rows under the same rule.
+        let sender_of = |value: &[u8]| DeliverP::deser(value).ok().map(|d| d.from.0);
+        for n in 0..MAX_QUEUED_PER_SENDER {
+            let row = dispatch_to_deliver(dispatch(&hog, to, id(n), b"hog"));
+            dht.store
+                .messages
+                .insert(MessageKey::new(&to, n as u64, &id(n)).as_bytes(), row.ser().unwrap())
+                .unwrap();
         }
-
+        let hog_ipk = hog.verifying_key().to_bytes();
+        let legit_ipk = legit.verifying_key().to_bytes();
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to_ipk, &[0xEE; 16], &hog, decode),
+            admit_to_queue(&dht.store.messages, &to, &[0xEE; 16], &hog_ipk, sender_of),
             QueueAdmission::Full
         ));
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to_ipk, &[0xEF; 16], &other, decode),
+            admit_to_queue(&dht.store.messages, &to, &[0xEF; 16], &legit_ipk, sender_of),
             QueueAdmission::Insert
         ));
+
+        let to = ipk(16);
+        let first = dispatch(&key(17), to, [7; 16], b"first");
+        assert_eq!(enqueue_for_home(&dht, &to, &first, NOW), ForwardOutcome::Stored);
+        assert_eq!(
+            enqueue_for_home(&dht, &to, &first, NOW + 500),
+            ForwardOutcome::Stored,
+            "a retry is idempotent"
+        );
+        let squat = dispatch(&key(18), to, [7; 16], b"squat");
+        assert_eq!(enqueue_for_home(&dht, &to, &squat, NOW + 900), ForwardOutcome::BadSig);
+        assert_eq!(queued(&dht, &to), [[7; 16]]);
     }
 
+    /// RLY-26: a client retry racing its first attempt is still stored once.
     #[test]
-    fn enqueue_for_home_caps_one_sender_below_the_recipient_cap() {
-        let relay = fresh_signing_key();
-        let hog = fresh_signing_key();
-        let other = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let now = wall_clock_ms();
-
-        for i in 0..MAX_QUEUED_PER_SENDER {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            let dispatch = build_dispatch(&hog, &to_ipk, id, b"hog");
-            assert_eq!(
-                enqueue_for_home(&dht, &to_ipk, &dispatch, now + i as u64),
-                ForwardOutcome::Stored
-            );
-        }
-
-        let overflow = build_dispatch(&hog, &to_ipk, [0xEE; 16], b"hog");
-        assert_eq!(enqueue_for_home(&dht, &to_ipk, &overflow, now), ForwardOutcome::QueueFull);
-
-        let from_other = build_dispatch(&other, &to_ipk, [0xEF; 16], b"legit");
-        assert_eq!(enqueue_for_home(&dht, &to_ipk, &from_other, now), ForwardOutcome::Stored);
-    }
-
-    #[test]
-    fn enqueue_for_home_refuses_a_duplicate_dispatch_id() {
-        let relay = fresh_signing_key();
-        let alice = fresh_signing_key();
-        let mallory = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let now = wall_clock_ms();
-
-        let first = build_dispatch(&alice, &to_ipk, [7u8; 16], b"first");
-        assert_eq!(enqueue_for_home(&dht, &to_ipk, &first, now), ForwardOutcome::Stored);
-
-        // A retry of the same dispatch is idempotent, not a second row.
-        assert_eq!(enqueue_for_home(&dht, &to_ipk, &first, now + 500), ForwardOutcome::Stored);
-
-        let squat = build_dispatch(&mallory, &to_ipk, [7u8; 16], b"squat");
-        assert_eq!(enqueue_for_home(&dht, &to_ipk, &squat, now + 900), ForwardOutcome::BadSig);
-
-        let queued = lookup_queue_for_user(&dht, &to_ipk, 8);
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].1.payload.0, b"first");
-    }
-
-    #[test]
-    fn enqueue_for_home_does_not_count_other_recipients_against_cap() {
-        // Cap is per-recipient. Filling user A's queue must not cause
-        // user B to see `QueueFull`. Catches a regression where the
-        // `starts_with` filter is dropped and the iterator walks into
-        // adjacent users' keyspaces.
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let user_a = fresh_signing_key();
-        let user_b = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let ipk_a: [u8; 32] = user_a.verifying_key().to_bytes();
-        let ipk_b: [u8; 32] = user_b.verifying_key().to_bytes();
-        let now: u64 = 1_700_000_000_000;
-
-        // Fill user A's queue to the cap.
-        for i in 0..MAX_QUEUED_PER_RECIPIENT {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            let key = MessageKey::new(&ipk_a, now + (i as u64), &id);
-            dht.store.queue.insert(key.as_bytes(), b"x").expect("put");
-        }
-
-        // User B's first write must succeed.
-        let dispatch_b = build_dispatch(&from_user, &ipk_b, [1u8; 16], b"hi-B");
-        let outcome = enqueue_for_home(&dht, &ipk_b, &dispatch_b, now);
-        assert_eq!(outcome, ForwardOutcome::Stored);
-    }
-
-    // -----------------------------------------------------------------
-    // Sticky-home — `lookup_queue_for_user` + `delete_queue_entries`
-    // + `plan_drift_migrations` (the K-set migration planner)
-    // -----------------------------------------------------------------
-
-    use common::proto::dht_p2p::NodeDescriptor;
-
-    #[test]
-    fn lookup_queue_for_user_returns_chronological_order() {
-        // The on-disk key shape is `recipient(32) || ts_be(8) || id(16)`,
-        // so the prefix iterator naturally yields oldest-first within a
-        // single user. Catches a regression where a future change to
-        // the prefix-extractor or key shape breaks ordering.
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        // Insert in non-chronological order (later ts first).
-        let dispatch_b = build_dispatch(&from_user, &to_ipk, [2u8; 16], b"second");
-        let dispatch_a = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"first");
-        enqueue_for_home(&dht, &to_ipk, &dispatch_b, 200);
-        enqueue_for_home(&dht, &to_ipk, &dispatch_a, 100);
-
-        let got = lookup_queue_for_user(&dht, &to_ipk, 8);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].1.id.0, [1u8; 16]); // ts=100 first
-        assert_eq!(got[1].1.id.0, [2u8; 16]); // ts=200 second
-    }
-
-    #[test]
-    fn lookup_queue_for_user_caps_at_max() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        for i in 0..10u8 {
-            let mut id = [0u8; 16];
-            id[0] = i;
-            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"x");
-            enqueue_for_home(&dht, &to_ipk, &dispatch, 100 + i as u64);
-        }
-
-        let got = lookup_queue_for_user(&dht, &to_ipk, 3);
-        assert_eq!(got.len(), 3);
-        // First three by ts.
-        for (i, item) in got.iter().enumerate() {
-            assert_eq!(item.1.id.0[0], i as u8);
+    fn concurrent_retries_of_one_dispatch_are_stored_once() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        for round in 0..20u8 {
+            let to = ipk(round);
+            let sent = dispatch(&key(100), to, [round; 16], b"retried");
+            std::thread::scope(|scope| {
+                for at in 0..8 {
+                    let (dht, sent) = (&dht, &sent);
+                    scope.spawn(move || enqueue_for_home(dht, &to, sent, NOW + at));
+                }
+            });
+            assert_eq!(queued(&dht, &to), [[round; 16]], "round {round}");
         }
     }
 
+    /// A batch always fits a frame, and rows that could never go out, too big to frame or past
+    /// their sender's ttl, are deleted rather than left to stall the head of the queue (RLY-02).
     #[test]
-    fn queue_batch_stops_at_the_byte_budget() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        let payload = vec![0x5Au8; QUEUE_BATCH_MAX_BYTES * 2 / 3];
-        for i in 0..3u8 {
-            let dispatch = build_dispatch(&from_user, &to_ipk, [i; 16], &payload);
-            enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms() + i as u64);
+    fn batches_fit_a_frame_and_drop_rows_that_could_never_be_delivered() {
+        let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
+        let to = ipk(30);
+        let big = vec![0x5A; QUEUE_BATCH_MAX_BYTES * 2 / 3];
+        for n in 0..3 {
+            put_queued(&dht, &to, NOW + n as u64, &dispatch(&key(31), to, id(n), &big));
         }
+        let (batch, exhausted) = queue_batch_for_user(&dht, &to, MAX_FETCH_QUEUE_BATCH, NOW);
+        assert_eq!((batch.len(), exhausted), (1, false), "a second row would overrun the frame");
 
-        let (batch, exhausted) = queue_batch_for_user(&dht, &to_ipk, 64);
-        assert_eq!(batch.len(), 1, "a second entry would overrun the frame budget");
-        assert!(!exhausted, "the requester must be told to page");
-
-        let encoded: usize = batch.iter().map(|(_, d)| d.ser().expect("ser").len()).sum();
-        assert!(encoded <= QUEUE_BATCH_MAX_BYTES);
-    }
-
-    #[test]
-    fn queue_batch_drops_an_entry_too_large_to_ever_frame() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        // Sorts ahead of the deliverable entry, so a batch builder that
-        // stopped instead of dropping would never reach the latter.
-        let wedge = MessageKey::new(&to_ipk, 1, &[0u8; 16]);
-        dht.store
-            .queue
-            .insert(wedge.as_bytes(), vec![0u8; QUEUE_BATCH_MAX_BYTES + 1])
-            .expect("put");
-
-        let dispatch = build_dispatch(&from_user, &to_ipk, [3u8; 16], b"deliverable");
-        enqueue_for_home(&dht, &to_ipk, &dispatch, 2);
-
-        let (batch, exhausted) = queue_batch_for_user(&dht, &to_ipk, 64);
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].1.id.0, [3u8; 16]);
+        let to = ipk(32);
+        let unframable = MessageKey::new(&to, 1, &[0; 16]);
+        dht.store.queue.insert(unframable.as_bytes(), vec![0; QUEUE_BATCH_MAX_BYTES + 1]).unwrap();
+        for n in 1..=MAX_FETCH_QUEUE_BATCH {
+            let mut ring = dispatch(&key(31), to, id(n), b"ring");
+            (ring.accepted_at_ms, ring.ttl_ms) = (NOW - 60_000, 40_000);
+            put_queued(&dht, &to, 1 + n as u64, &ring);
+        }
+        put_queued(&dht, &to, NOW, &dispatch(&key(31), to, [0xFF; 16], b"live"));
+        let (batch, exhausted) = queue_batch_for_user(&dht, &to, MAX_FETCH_QUEUE_BATCH, NOW);
+        assert_eq!(batch.iter().map(|(_, d)| d.id.0).collect::<Vec<_>>(), [[0xFF; 16]]);
         assert!(exhausted);
-        assert!(dht.store.queue.get(wedge.as_bytes()).expect("get").is_none());
-    }
-
-    #[test]
-    fn lookup_queue_for_user_returns_empty_for_unknown_recipient() {
-        let relay = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let unknown_ipk = [0xFFu8; 32];
-        let got = lookup_queue_for_user(&dht, &unknown_ipk, 8);
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn delete_queue_entries_removes_listed_ids_only() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        let ids = [[1u8; 16], [2u8; 16], [3u8; 16], [4u8; 16]];
-        for &id in &ids {
-            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"d");
-            enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
-        }
-
-        let removed = delete_queue_entries(&dht, &to_ipk, &[ids[1], ids[3]]);
-        assert_eq!(removed, 2);
-
-        let remaining = lookup_queue_for_user(&dht, &to_ipk, 8);
-        assert_eq!(remaining.len(), 2);
-        let remaining_ids: std::collections::HashSet<[u8; 16]> =
-            remaining.iter().map(|(_, d)| d.id.0).collect();
-        assert!(remaining_ids.contains(&[1u8; 16]));
-        assert!(remaining_ids.contains(&[3u8; 16]));
-    }
-
-    #[test]
-    fn delete_queue_entries_idempotent_for_missing_ids() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        let dispatch = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"alone");
-        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
-
-        // Delete a never-stored id alongside the one that exists.
-        let removed = delete_queue_entries(&dht, &to_ipk, &[[1u8; 16], [2u8; 16]]);
-        assert_eq!(removed, 1, "only the present id contributes");
-
-        let remaining = lookup_queue_for_user(&dht, &to_ipk, 8);
-        assert!(remaining.is_empty());
-    }
-
-    /// `plan_drift_migrations` returns entries whose recipient is no
-    /// longer K-closest to self. Set self_id far from the recipient and
-    /// install K peers strictly closer; the planner returns the entry.
-    #[test]
-    fn drift_plan_migrates_queue_when_drifted_out_of_k_closest() {
-        // Build a relay whose self_id is `[0xFF; 32]` (far from
-        // a recipient at `[0; 32]`); K closer peers force drift.
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 0xFF;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        // Install K=3 peers strictly closer to all-zeros target.
-        for i in 0..3u8 {
-            let mut s = [0u8; 32];
-            s[31] = i;
-            let id = NodeId::new(s);
-            let desc = NodeDescriptor {
-                id,
-                addr: "127.0.0.1:1".parse().unwrap(),
-                pubkey: [0u8; 32].into(),
-            };
-            dht.routing.write().insert(desc);
-        }
-
-        // Pre-populate the queue for an all-zeros recipient.
-        let from_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = [0u8; 32];
-        let dispatch = build_dispatch(&from_user, &to_ipk, [9u8; 16], b"drifted");
-        enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms());
-
-        let migrations = plan_drift_migrations(&dht, 16);
-        assert_eq!(migrations.len(), 1);
-        assert_eq!(migrations[0].1.id.0, [9u8; 16]);
-    }
-
-    /// When self is *still* in K-closest, the planner returns nothing
-    /// (no migration needed). The default fixture
-    /// has an empty routing table → permissive sparse policy → self
-    /// counts as K-closest → no entries returned.
-    #[test]
-    fn drift_plan_no_migration_when_still_owner() {
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        let dispatch = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"stay");
-        enqueue_for_home(&dht, &to_ipk, &dispatch, 100);
-
-        // Empty routing table → permissive → not drifted.
-        let migrations = plan_drift_migrations(&dht, 16);
-        assert!(migrations.is_empty());
-    }
-
-    /// Cap respected.
-    #[test]
-    fn drift_plan_caps_migration_at_max_per_sweep() {
-        // Force drift for many users, then verify the planner stops
-        // at the requested cap.
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 0xFF;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        // K closer peers for all-zeros prefix targets.
-        for i in 0..3u8 {
-            let mut s = [0u8; 32];
-            s[31] = i;
-            let id = NodeId::new(s);
-            let desc = NodeDescriptor {
-                id,
-                addr: "127.0.0.1:1".parse().unwrap(),
-                pubkey: [0u8; 32].into(),
-            };
-            dht.routing.write().insert(desc);
-        }
-
-        // 5 distinct users with leading-zero-byte IPKs so drift
-        // applies to all of them.
-        let from_user = fresh_signing_key();
-        for i in 0..5u8 {
-            let mut to_ipk = [0u8; 32];
-            to_ipk[31] = 0xA0 | i; // distinct but still "close to 0" target
-            let dispatch = build_dispatch(&from_user, &to_ipk, [i; 16], b"cap");
-            enqueue_for_home(&dht, &to_ipk, &dispatch, wall_clock_ms());
-        }
-
-        let migrations = plan_drift_migrations(&dht, 3);
-        assert_eq!(migrations.len(), 3, "cap respected");
+        assert_eq!(queued(&dht, &to), [[0xFF; 16]], "dead rows are deleted, not skipped");
     }
 }

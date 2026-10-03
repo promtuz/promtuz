@@ -1,10 +1,4 @@
-//! The audio path between the platform's real-time threads and the call
-//! session: Opus both ways and an adaptive jitter buffer on the way out.
-//!
-//! The platform pushes 20 ms of 48 kHz mono PCM per capture tick and pulls
-//! the same per playback tick, both across the FFI as little-endian bytes.
-//! Capture is encoded on the calling thread and handed to the session; the
-//! session parks decoded-later packets here and playback drains them.
+//! Opus encoding for capture, and an adaptive jitter buffer that decodes for playback.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -21,7 +15,6 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// One frame: 20 ms at 48 kHz.
 pub const FRAME_SAMPLES: usize = 960;
 const BITRATE: i32 = 32_000;
-/// Loss the encoder plans for with its in-band FEC.
 const EXPECTED_LOSS_PERCENT: i32 = 10;
 /// Opus never produces more than this for one 20 ms frame at our bitrate.
 const MAX_PACKET: usize = 400;
@@ -57,9 +50,6 @@ impl AudioPath {
         *self.muted.lock()
     }
 
-    /// Encode one captured frame, or `None` while muted or for a frame of
-    /// the wrong size. Muted means nothing is sent: the far end's decoder
-    /// conceals a short gap and then plays silence.
     pub fn encode(&self, pcm: &[u8]) -> Option<Vec<u8>> {
         if self.muted() || pcm.len() != FRAME_SAMPLES * 2 {
             return None;
@@ -72,7 +62,6 @@ impl AudioPath {
         Some(out)
     }
 
-    /// The next `frames` of playback as little-endian PCM.
     pub fn playback(&self, frames: usize) -> Vec<u8> {
         let mut jitter = self.jitter.lock();
         let mut out = Vec::with_capacity(frames * FRAME_SAMPLES * 2);
@@ -85,33 +74,17 @@ impl AudioPath {
     }
 }
 
-/// Packets waiting for their playout slot, keyed by RTP sequence number.
-///
-/// Depth adapts to the network: arrivals that land after their slot deepen
-/// it, a buffer that runs deep for a while drains a frame at a time. A
-/// missing packet is filled from the next one's FEC when that has arrived,
-/// and concealed by the decoder otherwise.
+/// Packets waiting for their playout slot, keyed by extended RTP sequence number.
 pub struct Jitter {
     decoder: Decoder,
     queue: BTreeMap<u64, Vec<u8>>,
-    /// The sequence number playback expects next; `None` before the first packet.
+    /// The sequence number playback expects next; `None` until playback starts.
     next: Option<u64>,
-    /// Frames of delay before playback starts draining.
+    highest: u64,
+    /// Target playout delay in frames.
     depth: usize,
-    /// Since when the queue has held more than `depth + 1` frames.
     deep_since: Option<Instant>,
-    /// Frames played since the depth last changed.
     since_change: u32,
-    pub stats: JitterStats,
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-pub struct JitterStats {
-    pub received: u64,
-    pub played: u64,
-    pub concealed: u64,
-    pub late: u64,
-    pub fec: u64,
 }
 
 impl Jitter {
@@ -120,36 +93,34 @@ impl Jitter {
             decoder: Decoder::new(SAMPLE_RATE, Channels::Mono)?,
             queue: BTreeMap::new(),
             next: None,
+            highest: 0,
             depth: MIN_DEPTH,
             deep_since: None,
             since_change: 0,
-            stats: JitterStats::default(),
         })
     }
 
-    /// A packet off the wire. `seq` is the RTP sequence number, extended.
+    /// `seq` is the extended RTP sequence number.
     pub fn push(&mut self, seq: u64, packet: Vec<u8>) {
-        self.stats.received += 1;
+        self.highest = self.highest.max(seq);
         if let Some(next) = self.next {
             if seq < next {
-                // Its slot has played. Every late arrival argues for more
-                // delay, up to the ceiling.
-                self.stats.late += 1;
+                // Its slot has played: a late arrival deepens the buffer, up to the ceiling.
                 if self.depth < MAX_DEPTH && self.since_change > 10 {
                     self.depth += 1;
                     self.since_change = 0;
                 }
                 return;
             }
-            // A jump of a second or more is a new talkspurt after a long
-            // silence or a restart: resync instead of concealing 50 frames.
+            // A jump of a second or more, after a long silence or a restart, resyncs
+            // instead of concealing 50 frames.
             if seq > next + 50 {
                 self.queue.clear();
                 self.next = Some(seq);
             }
         }
         self.queue.insert(seq, packet);
-        // Runaway backlog, as after playback stalled: play from the newest.
+        // A runaway backlog, as after a playback stall, drops the oldest packets.
         while self.queue.len() > MAX_DEPTH + 2 {
             let (&first, _) = self.queue.iter().next().unwrap();
             self.queue.remove(&first);
@@ -157,8 +128,7 @@ impl Jitter {
         }
     }
 
-    /// The next 20 ms of playback. Silence until the buffer has filled to
-    /// depth once; from then on every slot is played, filled or concealed.
+    /// The next 20 ms of playback; silence until the buffer first fills to `depth`.
     pub fn pop(&mut self) -> [i16; FRAME_SAMPLES] {
         let mut pcm = [0i16; FRAME_SAMPLES];
         let Some(next) = self.next.or_else(|| self.queue.keys().next().copied()) else {
@@ -170,11 +140,13 @@ impl Jitter {
             }
             self.next = Some(next);
         }
-        self.stats.played += 1;
+        // The sender is quiet: hold rather than conceal frames that were never sent.
+        if self.queue.is_empty() && next > self.highest {
+            return pcm;
+        }
         self.since_change += 1;
 
-        // A buffer that stays deeper than it needs to be is latency for
-        // nothing: after two steady seconds, drop one frame of it.
+        // A buffer that stays deep for two seconds sheds one frame of delay.
         if self.queue.len() > self.depth + 1 {
             let since = *self.deep_since.get_or_insert_with(Instant::now);
             if since.elapsed().as_secs() >= 2 && self.depth > MIN_DEPTH {
@@ -192,14 +164,9 @@ impl Jitter {
                     self.conceal(&mut pcm);
                 }
             },
-            // Lost. The next packet's FEC carries this one when it has
-            // arrived; otherwise the decoder extrapolates.
+            // Lost: recover it from the next packet's FEC if that is here, else conceal.
             None => match self.queue.get(&(next + 1)) {
-                Some(following)
-                    if self.decoder.decode(following, &mut pcm, true).is_ok() =>
-                {
-                    self.stats.fec += 1;
-                },
+                Some(following) if self.decoder.decode(following, &mut pcm, true).is_ok() => {},
                 _ => self.conceal(&mut pcm),
             },
         }
@@ -208,7 +175,6 @@ impl Jitter {
     }
 
     fn conceal(&mut self, pcm: &mut [i16; FRAME_SAMPLES]) {
-        self.stats.concealed += 1;
         if self.decoder.decode(&[], pcm, false).is_err() {
             pcm.fill(0);
         }
@@ -218,127 +184,91 @@ impl Jitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::transfer::tone_packets;
 
-    fn tone(phase: &mut f32) -> Vec<u8> {
-        let mut out = Vec::with_capacity(FRAME_SAMPLES * 2);
-        for _ in 0..FRAME_SAMPLES {
-            *phase += 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32;
-            let s = (phase.sin() * 8000.0) as i16;
-            out.extend_from_slice(&s.to_le_bytes());
-        }
-        out
+    enum Step {
+        Push(u64),
+        Play(u64),
+        /// Plays this packet's forward error correction for the slot before it.
+        Fec(u64),
+        Hold,
     }
 
-    fn energy(pcm: &[i16]) -> f64 {
-        pcm.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / pcm.len() as f64
+    fn packet(packets: &[Vec<u8>], seq: u64) -> &[u8] {
+        &packets[seq as usize % packets.len()]
     }
 
-    #[test]
-    fn frames_round_trip_through_opus_and_the_buffer() {
-        // The audio device drives push and pop in lockstep, one of each per
-        // 20 ms tick, so the buffer holds only its depth. Prime the depth,
-        // then interleave.
-        let path = AudioPath::new().unwrap();
-        let mut phase = 0.0;
-        let packets: Vec<Vec<u8>> = (0..22).map(|_| path.encode(&tone(&mut phase)).unwrap()).collect();
-        assert!(packets.iter().all(|p| p.len() < MAX_PACKET));
-        let mut out = Vec::new();
-        {
-            let mut jitter = path.jitter.lock();
-            jitter.push(0, packets[0].clone());
-            jitter.push(1, packets[1].clone());
-            for seq in 2..22u64 {
-                jitter.push(seq, packets[seq as usize].clone());
-                for s in jitter.pop() {
-                    out.extend_from_slice(&s.to_le_bytes());
-                }
+    /// Every pop must equal what one decoder fed the expected packets in order produces, so a
+    /// dropped, concealed or reordered frame shows up as a mismatch.
+    fn check(packets: &[Vec<u8>], steps: &[Step]) {
+        let mut jitter = Jitter::new().unwrap();
+        let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+        for (i, step) in steps.iter().enumerate() {
+            let mut expected = [0i16; FRAME_SAMPLES];
+            match *step {
+                Step::Push(seq) => {
+                    jitter.push(seq, packet(packets, seq).to_vec());
+                    continue;
+                },
+                Step::Play(seq) => {
+                    reference.decode(packet(packets, seq), &mut expected, false).map(drop)
+                },
+                Step::Fec(seq) => {
+                    reference.decode(packet(packets, seq), &mut expected, true).map(drop)
+                },
+                Step::Hold => Ok(()),
             }
+            .unwrap();
+            assert!(jitter.pop() == expected, "step {i}");
         }
-        assert_eq!(out.len(), 20 * FRAME_SAMPLES * 2);
-        let pcm: Vec<i16> = out.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
-        // The first frames prime the codec; the tail must carry the tone.
-        assert!(energy(&pcm[10 * FRAME_SAMPLES..]) > 1_000_000.0, "audio came out silent");
-        let stats = path.jitter.lock().stats;
-        assert_eq!(stats.played, 20);
-        assert_eq!(stats.concealed, 0);
     }
 
     #[test]
-    fn muted_capture_sends_nothing() {
-        let path = AudioPath::new().unwrap();
-        path.set_muted(true);
-        assert!(path.encode(&vec![0u8; FRAME_SAMPLES * 2]).is_none());
-        path.set_muted(false);
-        assert!(path.encode(&vec![0u8; FRAME_SAMPLES * 2]).is_some());
-        assert!(path.encode(&[0u8; 10]).is_none(), "a short frame is refused");
-    }
-
-    #[test]
-    fn a_lost_packet_is_filled_from_fec_or_concealed_and_playback_never_stalls() {
-        let path = AudioPath::new().unwrap();
-        let mut phase = 0.0;
-        let packets: Vec<Vec<u8>> = (0..32).map(|_| path.encode(&tone(&mut phase)).unwrap()).collect();
-        let mut jitter = path.jitter.lock();
-        // Prime the depth, then push and pop in lockstep, dropping two packets.
-        // The one-frame lead means the packet after a hole is already buffered,
-        // so each hole is covered by its follower's FEC rather than concealed.
-        jitter.push(0, packets[0].clone());
-        jitter.push(1, packets[1].clone());
-        for seq in 2..32u64 {
-            if seq != 12 && seq != 20 {
-                jitter.push(seq, packets[seq as usize].clone());
+    fn the_jitter_buffer_plays_every_frame_it_has_in_order_and_holds_through_pauses() {
+        use Step::*;
+        let packets = tone_packets(8);
+        let after_three = |packet: &[u8], fec: bool| {
+            let mut decoder = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+            let mut pcm = [0i16; FRAME_SAMPLES];
+            for p in &packets[..3] {
+                decoder.decode(p, &mut pcm, false).unwrap();
             }
-            jitter.pop();
-        }
-        let stats = jitter.stats;
-        assert_eq!(stats.played, 30, "every slot plays, present or not");
-        assert_eq!(stats.fec + stats.concealed, 2, "each hole filled exactly once");
-        assert!(stats.fec >= 1, "FEC from the following packet covers a single loss");
-    }
+            decoder.decode(packet, &mut pcm, fec).unwrap();
+            pcm
+        };
+        assert!(after_three(&packets[4], true) != after_three(&[], false), "the packets carry FEC");
 
-    #[test]
-    fn late_arrivals_deepen_the_buffer_and_a_deep_buffer_drains() {
-        let path = AudioPath::new().unwrap();
-        let mut phase = 0.0;
-        let mut jitter = path.jitter.lock();
-        let mut seq = 0u64;
-        for _ in 0..MIN_DEPTH {
-            jitter.push(seq, path.encode(&tone(&mut phase)).unwrap());
-            seq += 1;
-        }
-        for _ in 0..12 {
-            jitter.pop();
-        }
-        // Everything up to here has played; something from the past shows up.
-        jitter.push(0, path.encode(&tone(&mut phase)).unwrap());
-        assert_eq!(jitter.depth, MIN_DEPTH + 1, "a late packet buys a frame of delay");
-        assert_eq!(jitter.stats.late, 1);
-
-        // Now it runs deep: the queue holds far more than the target.
-        let next = jitter.next.unwrap();
-        for i in 0..(MAX_DEPTH as u64) {
-            jitter.push(next + i, path.encode(&tone(&mut phase)).unwrap());
-        }
-        jitter.deep_since = Some(Instant::now() - std::time::Duration::from_secs(3));
-        jitter.pop();
-        assert_eq!(jitter.depth, MIN_DEPTH, "two steady seconds shed the extra frame");
-    }
-
-    #[test]
-    fn a_far_jump_resyncs_instead_of_concealing_the_gap() {
-        let path = AudioPath::new().unwrap();
-        let mut phase = 0.0;
-        let mut jitter = path.jitter.lock();
-        for seq in 0..3u64 {
-            jitter.push(seq, path.encode(&tone(&mut phase)).unwrap());
-        }
-        for _ in 0..3 {
-            jitter.pop();
-        }
-        jitter.push(500, path.encode(&tone(&mut phase)).unwrap());
-        jitter.push(501, path.encode(&tone(&mut phase)).unwrap());
-        jitter.pop();
-        assert_eq!(jitter.next, Some(501));
-        assert_eq!(jitter.stats.concealed, 0);
+        let mut paused = vec![Push(0), Push(1), Push(2), Play(0), Play(1), Play(2)];
+        paused.extend((0..50).map(|_| Hold));
+        paused.extend([Push(3), Push(4), Play(3), Play(4)]);
+        check(&packets, &paused);
+        check(&packets, &[Push(0), Push(1), Play(0), Push(3), Play(1), Push(2), Play(2), Play(3)]);
+        let lost = [
+            Push(0),
+            Push(1),
+            Play(0),
+            Push(2),
+            Play(1),
+            Push(4),
+            Play(2),
+            Push(5),
+            Fec(4),
+            Play(4),
+            Play(5),
+        ];
+        check(&packets, &lost);
+        let jump = [
+            Push(0),
+            Push(1),
+            Push(2),
+            Play(0),
+            Play(1),
+            Play(2),
+            Push(500),
+            Push(501),
+            Play(500),
+            Play(501),
+        ];
+        check(&packets, &jump);
     }
 }

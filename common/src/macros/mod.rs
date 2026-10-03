@@ -1,5 +1,4 @@
-/// MUST BE USED AT STARTUP
-/// NEVER USE AT RUNTIME
+/// Startup only, never at runtime: it exits the process on error.
 #[macro_export]
 macro_rules! graceful {
     ($expr:expr, $msg:expr) => {
@@ -16,7 +15,6 @@ macro_rules! graceful {
     };
 }
 
-/// Use to early return
 #[macro_export]
 macro_rules! ret {
     ($expr:expr) => {

@@ -67,3 +67,6 @@ enabled = false
 enabled = false
 # port = 3478
 # public_ip = "203.0.113.9"
+# Relayed packets to loopback, private and link-local peers are dropped unless
+# this is set; only a test cluster on one network wants it.
+# allow_local_peers = false

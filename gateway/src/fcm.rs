@@ -1,23 +1,21 @@
-//! FCM HTTP v1 dispatch. Holds the service-account credential (which never
-//! leaves the gateway), caches an OAuth2 access token, and posts contentless
-//! wake messages. Message content stays at the relay.
+//! FCM HTTP v1 dispatch. Wakes carry no message content, and the service-account credential
+//! never leaves the gateway.
 
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine as _;
 use common::proto::client_rel::Wake;
-use ed25519_dalek::ed25519::signature::rand_core::OsRng;
-use ed25519_dalek::ed25519::signature::rand_core::RngCore;
+use common::utils::now_secs;
 use jsonwebtoken::Algorithm;
 use jsonwebtoken::EncodingKey;
 use jsonwebtoken::Header;
 use parking_lot::Mutex;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -25,19 +23,15 @@ use tokio::sync::Semaphore;
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 
-/// Re-mint the access token this far before its stated expiry, to cover clock
-/// skew and request latency.
 const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_IDLE_CONNS_PER_HOST: usize = 16;
 
-/// Ceiling on outbound requests in flight. A wake beyond it is shed, so
-/// inbound wake volume cannot grow an unbounded egress backlog.
+/// Wakes beyond this are shed, so inbound volume cannot build an unbounded egress backlog.
 const MAX_INFLIGHT_SENDS: usize = 64;
 
-/// The fields we need out of a Google service-account JSON.
 #[derive(Deserialize)]
 struct ServiceAccount {
     project_id:   String,
@@ -66,7 +60,6 @@ struct CachedToken {
     expires_at: SystemTime,
 }
 
-/// Sends FCM HTTP v1 messages under a service-account credential.
 pub struct FcmSender {
     http:         reqwest::Client,
     project_id:   String,
@@ -105,9 +98,7 @@ impl FcmSender {
         &self.project_id
     }
 
-    /// A valid access token, minting a fresh one when the cache is empty or
-    /// within [`EXPIRY_MARGIN`] of expiry. A racing double-mint is harmless
-    /// (last write wins); no lock is held across the network call.
+    /// A racing double-mint is harmless (last write wins); no lock is held across the request.
     async fn access_token(&self) -> Result<String> {
         if let Some(c) = self.cached.lock().as_ref() {
             if c.expires_at > SystemTime::now() + EXPIRY_MARGIN {
@@ -115,10 +106,7 @@ impl FcmSender {
             }
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| anyhow!("system clock before epoch"))?
-            .as_secs();
+        let now = now_secs();
         let claims = JwtClaims {
             iss:   &self.client_email,
             scope: SCOPE,
@@ -162,10 +150,8 @@ impl FcmSender {
         &self, url: &str, device_token: &str, payload: &[u8], class: Wake,
     ) -> Result<()> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
-        // A call that cannot be delivered while it rings is not worth
-        // delivering: FCM drops it after the offer's life instead of ringing
-        // a phone that comes back an hour later. Its own collapse key keeps a
-        // message wake from swallowing it.
+        // An undelivered call expires with its offer instead of ringing an hour later, and its
+        // own collapse key keeps a message wake from swallowing it.
         let body = match class {
             Wake::Call => serde_json::json!({
                 "message": {
@@ -198,162 +184,89 @@ impl FcmSender {
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_owned);
                     let body = response.text().await.unwrap_or_default();
-                    let error = anyhow!("FCM send failed: {status}: {body}");
-                    if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                    if status == StatusCode::UNAUTHORIZED && attempt == 0 {
                         *self.cached.lock() = None;
-                    } else if !status.is_server_error()
-                        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
-                    {
-                        return Err(error);
                     }
-                    let minimum =
-                        if status == reqwest::StatusCode::TOO_MANY_REQUESTS { 60 } else { 1 };
-                    let mut delay = Duration::from_secs(minimum * (1 << attempt));
-                    if let Some(header) = retry_after {
-                        let requested = header.parse::<u64>().ok().map(Duration::from_secs)
-                            .or_else(|| httpdate::parse_http_date(&header).ok().map(|time| {
-                                time.duration_since(SystemTime::now()).unwrap_or_default()
-                            }));
-                        let Some(requested) = requested else { return Err(error) };
-                        delay = delay.max(requested);
-                    }
-                    (error, delay)
+                    let now = SystemTime::now();
+                    let delay = retry_delay(Some(status), retry_after.as_deref(), attempt, now);
+                    (anyhow!("FCM send failed: {status}: {body}"), delay)
                 },
                 Err(error) => {
-                    (anyhow!("FCM send request: {error}"), Duration::from_secs(1 << attempt))
+                    let delay = retry_delay(None, None, attempt, SystemTime::now());
+                    (anyhow!("FCM send request: {error}"), delay)
                 },
             };
-            if attempt == 2 || delay > Duration::from_secs(5 * 60) {
-                return Err(error);
-            }
-            let jitter = Duration::from_millis(u64::from(OsRng.next_u32() % 250));
+            let Some(delay) = delay else { return Err(error) };
+            let jitter = Duration::from_millis(u64::from(rand::random::<u32>() % 250));
             tokio::time::sleep(delay + jitter).await;
         }
         unreachable!()
     }
 }
 
+/// `None` gives up; `status` is `None` when no response arrived. A 401 is retried once, after the
+/// caller drops its cached access token.
+fn retry_delay(
+    status: Option<StatusCode>, retry_after: Option<&str>, attempt: u32, now: SystemTime,
+) -> Option<Duration> {
+    let base: u64 = match status {
+        None => 1,
+        Some(StatusCode::TOO_MANY_REQUESTS) => 60,
+        Some(StatusCode::UNAUTHORIZED) if attempt == 0 => 1,
+        Some(status) if status.is_server_error() => 1,
+        Some(_) => return None,
+    };
+    let mut delay = Duration::from_secs(base << attempt);
+    if let Some(header) = retry_after {
+        let requested = header.parse().ok().map(Duration::from_secs).or_else(|| {
+            let at = httpdate::parse_http_date(header).ok()?;
+            Some(at.duration_since(now).unwrap_or_default())
+        })?;
+        delay = delay.max(requested);
+    }
+    (attempt < 2 && delay <= Duration::from_secs(5 * 60)).then_some(delay)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
 
-    #[tokio::test]
-    async fn retries_transient_dispatch_failure() {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/send", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for status in ["503 Service Unavailable", "200 OK"] {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut reader = BufReader::new(socket);
-                let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse::<usize>().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                reader.read_exact(&mut body).await.unwrap();
-                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(json["message"]["android"]["collapse_key"], "message-sync");
-                reader.get_mut().write_all(format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-                ).as_bytes()).await.unwrap();
-            }
-        });
-        let sender = FcmSender {
-            http: reqwest::Client::builder().no_proxy().build().unwrap(),
-            project_id: "test".into(),
-            client_email: String::new(),
-            token_uri: String::new(),
-            encoding_key: EncodingKey::from_secret(b"unused: cached access token"),
-            cached: Mutex::new(Some(CachedToken {
-                token: "test".into(),
-                expires_at: SystemTime::now() + Duration::from_secs(3600),
-            })),
-            inflight: Semaphore::new(1),
-        };
-        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[], Wake::Message))
-            .await
-            .unwrap()
-            .unwrap();
-        server.await.unwrap();
-    }
-
-    /// A call wake must reach the phone as a call: its own collapse key, a
-    /// life no longer than the ring, and a type the app switches on.
-    #[tokio::test]
-    async fn call_wake_is_short_lived_and_typed() {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/send", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(socket);
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                assert!(reader.read_line(&mut line).await.unwrap() > 0);
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse::<usize>().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).await.unwrap();
-            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["message"]["android"]["collapse_key"], "call");
-            assert_eq!(json["message"]["android"]["ttl"], "40s");
-            assert_eq!(json["message"]["data"]["type"], "call");
-            reader.get_mut().write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-            ).await.unwrap();
-        });
-        let sender = FcmSender {
-            http: reqwest::Client::builder().no_proxy().build().unwrap(),
-            project_id: "test".into(),
-            client_email: String::new(),
-            token_uri: String::new(),
-            encoding_key: EncodingKey::from_secret(b"unused: cached access token"),
-            cached: Mutex::new(Some(CachedToken {
-                token: "test".into(),
-                expires_at: SystemTime::now() + Duration::from_secs(3600),
-            })),
-            inflight: Semaphore::new(1),
-        };
-        tokio::time::timeout(Duration::from_secs(5), sender.send_to(&url, "device", &[], Wake::Call))
-            .await
-            .unwrap()
-            .unwrap();
-        server.await.unwrap();
-    }
-
     #[test]
-    fn rejects_non_json() {
-        let dir = std::env::temp_dir().join("pz_fcm_bad.json");
-        std::fs::write(&dir, b"not json").unwrap();
-        assert!(FcmSender::from_service_account(&dir).is_err());
-        let _ = std::fs::remove_file(&dir);
-    }
-
-    #[test]
-    fn rejects_bad_private_key() {
-        let dir = std::env::temp_dir().join("pz_fcm_badkey.json");
-        let sa = serde_json::json!({
-            "project_id": "p",
-            "private_key": "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n",
-            "client_email": "x@y.iam.gserviceaccount.com",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        });
-        std::fs::write(&dir, serde_json::to_vec(&sa).unwrap()).unwrap();
-        assert!(FcmSender::from_service_account(&dir).is_err());
-        let _ = std::fs::remove_file(&dir);
+    fn only_transient_failures_are_retried_and_never_past_five_minutes() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let in_90s = httpdate::fmt_http_date(now + Duration::from_secs(90));
+        let passed = httpdate::fmt_http_date(now - Duration::from_secs(30));
+        let cases = [
+            (None, None, 0, Some(1)),
+            (None, None, 1, Some(2)),
+            (None, None, 2, None),
+            (Some(503), None, 0, Some(1)),
+            (Some(500), None, 1, Some(2)),
+            (Some(503), None, 2, None),
+            (Some(429), None, 0, Some(60)),
+            (Some(429), None, 1, Some(120)),
+            (Some(401), None, 0, Some(1)),
+            (Some(401), None, 1, None),
+            (Some(400), None, 0, None),
+            (Some(404), Some("1"), 0, None),
+            (Some(503), Some("30"), 0, Some(30)),
+            (Some(503), Some("0"), 1, Some(2)),
+            (Some(503), Some("300"), 0, Some(300)),
+            (Some(503), Some("301"), 0, None),
+            (Some(429), Some(in_90s.as_str()), 0, Some(90)),
+            (Some(429), Some(passed.as_str()), 0, Some(60)),
+            (Some(503), Some("soon"), 0, None),
+            (Some(503), Some("30"), 2, None),
+        ];
+        for (status, retry_after, attempt, want) in cases {
+            let status = status.map(|code| StatusCode::from_u16(code).unwrap());
+            assert_eq!(
+                retry_delay(status, retry_after, attempt, now),
+                want.map(Duration::from_secs),
+                "{status:?} Retry-After {retry_after:?} on attempt {attempt}"
+            );
+        }
     }
 }

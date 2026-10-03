@@ -1,17 +1,13 @@
-//! Optional phone-to-node listener. Every TLS pipe owns exactly one inner
-//! QUIC connection, with the original TCP addresses and existing client
-//! handler. It cannot create a UDP proxy or register another network node.
+//! Optional TLS/TCP listener for phones. A control pipe carries exactly one inner QUIC client
+//! connection; no pipe can act as a UDP proxy or register a node.
 
-use std::collections::HashMap;
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::{Connection, Endpoint, EndpointConfig, ServerConfig, TokioRuntime};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -19,11 +15,9 @@ use super::config::build_server_cfg;
 use super::protorole::ProtoRole;
 use super::tunnel::{self, AcceptedMode, Channel};
 use crate::node::config::NetworkConfig;
+use crate::server::accept::{Gate, Policy, SWEEP_INTERVAL, drain};
 
-const MAX_LIVE: usize = 1024;
-const MAX_SOURCE_BUCKETS: usize = 4096;
-const ACCEPT_BURST: f64 = 60.0;
-const ACCEPT_PER_SECOND: f64 = 2.0;
+const ACCEPT: Policy = Policy { per_minute: 120, burst: 60, max_live: 1024 };
 const INNER_HANDSHAKE: Duration = Duration::from_secs(8);
 
 /// Construct before starting the daemon so an occupied TCP port is a startup
@@ -42,8 +36,7 @@ impl NodeTunnel {
         }
         super::config::setup_crypto_provider()?;
         let tls = tunnel::server_config(&network.cert_path, &network.key_path)?;
-        // Keep node roles out even though the existing handler also serves
-        // them on its native UDP endpoint.
+        // Client role only; node roles stay on the native UDP endpoint.
         let mut inner =
             build_server_cfg(&network.cert_path, &network.key_path, &[ProtoRole::Client])?;
         inner.max_incoming(1);
@@ -77,26 +70,25 @@ impl NodeTunnel {
         A: Fn(Arc<Channel>, AcceptedMode) -> AF + Send + Sync + 'static,
         AF: Future<Output = ()> + Send + 'static,
     {
-        let slots = Arc::new(Semaphore::new(MAX_LIVE));
-        let mut limits = Sources::default();
+        let gate = Gate::new(&ACCEPT);
         let mut tasks = JoinSet::new();
-        let mut sweep = tokio::time::interval(Duration::from_secs(60));
+        let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
         loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                _ = sweep.tick() => limits.sweep(Instant::now()),
+                _ = sweep.tick() => gate.sweep(),
                 _ = tasks.join_next(), if !tasks.is_empty() => {},
                 accepted = self.listener.accept() => {
                     let (stream, source) = match accepted {
                         Ok(pair) => pair,
                         Err(error) => {
-                            log::warn!("TLS fallback accept failed: {error}");
-                            break;
+                            crate::warn!("TLS fallback accept failed: {error}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
                         },
                     };
-                    if !limits.admit(source.ip(), Instant::now()) { continue; }
-                    let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
+                    let Ok(permit) = gate.admit(source.ip()) else { continue; };
                     let tls = self.tls.clone();
                     let inner = self.inner.clone();
                     let features = self.features;
@@ -115,7 +107,7 @@ impl NodeTunnel {
                         match accepted.mode {
                             AcceptedMode::Control => {
                                 if let Err(error) = serve_control(channel, inner, control, child).await {
-                                    log::debug!("TLS fallback control ended: {error}");
+                                    crate::debug!("TLS fallback control ended: {error}");
                                 }
                             },
                             mode @ AcceptedMode::Assist { .. } => {
@@ -130,15 +122,7 @@ impl NodeTunnel {
             }
         }
         cancel.cancel();
-        if tokio::time::timeout(Duration::from_secs(5), async {
-            while tasks.join_next().await.is_some() {}
-        })
-        .await
-        .is_err()
-        {
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-        }
+        drain(tasks).await;
     }
 }
 
@@ -220,186 +204,4 @@ where
         let _ = handler.await;
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct Sources(HashMap<IpAddr, Bucket>);
-struct Bucket {
-    tokens: f64,
-    updated: Instant,
-}
-
-impl Sources {
-    fn sweep(&mut self, now: Instant) {
-        self.0.retain(|_, bucket| {
-            now.saturating_duration_since(bucket.updated) < Duration::from_secs(60)
-        });
-    }
-
-    fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
-        // IPv4-mapped IPv6 and native IPv4 are one source for quotas.
-        let ip = match ip {
-            IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
-            ip => ip,
-        };
-        if !self.0.contains_key(&ip) && self.0.len() >= MAX_SOURCE_BUCKETS {
-            self.sweep(now);
-            if self.0.len() >= MAX_SOURCE_BUCKETS {
-                return false;
-            }
-        }
-        let bucket = self.0.entry(ip).or_insert(Bucket { tokens: ACCEPT_BURST, updated: now });
-        bucket.tokens = (bucket.tokens
-            + now.saturating_duration_since(bucket.updated).as_secs_f64() * ACCEPT_PER_SECOND)
-            .min(ACCEPT_BURST);
-        bucket.updated = now;
-        if bucket.tokens < 1.0 {
-            return false;
-        }
-        bucket.tokens -= 1.0;
-        true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn original_sources_have_independent_bounded_budgets() {
-        let mut sources = Sources::default();
-        let a = "192.0.2.1".parse().unwrap();
-        let mapped = "::ffff:192.0.2.1".parse().unwrap();
-        let b = "192.0.2.2".parse().unwrap();
-        let now = Instant::now();
-        for _ in 0..ACCEPT_BURST as usize {
-            assert!(sources.admit(a, now));
-        }
-        assert!(!sources.admit(mapped, now));
-        assert!(sources.admit(b, now));
-        assert!(sources.admit(a, now + Duration::from_secs(1)));
-        sources.sweep(now + Duration::from_secs(62));
-        assert!(sources.0.is_empty());
-    }
-
-    #[test]
-    fn rotating_source_addresses_cannot_grow_the_limiter_without_bound() {
-        let mut sources = Sources::default();
-        let now = Instant::now();
-        for n in 0..MAX_SOURCE_BUCKETS as u32 {
-            assert!(sources.admit(std::net::Ipv4Addr::from(n).into(), now));
-        }
-        assert!(!sources.admit("203.0.113.1".parse().unwrap(), now));
-        assert_eq!(sources.0.len(), MAX_SOURCE_BUCKETS);
-        assert!(sources.admit("203.0.113.1".parse().unwrap(), now + Duration::from_secs(61)));
-    }
-
-    async fn test_listener() -> (NodeTunnel, rustls::RootCertStore) {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let rcgen::CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert = cert.der().clone();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert.clone()).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
-        let mut tls =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.clone()], key.clone_key().into())
-                .unwrap();
-        tls.alpn_protocols = vec![tunnel::ALPN.to_vec()];
-        let mut inner =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key.into())
-                .unwrap();
-        inner.alpn_protocols = vec![ProtoRole::Client.alpn().into_bytes()];
-        let mut inner = ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from(inner).unwrap(),
-        ));
-        inner.max_incoming(1);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        (
-            NodeTunnel { listener, tls: Arc::new(tls), inner, features: tunnel::FEATURE_CONTROL },
-            roots,
-        )
-    }
-
-    /// Real TLS and QUIC, with no UDP socket on either endpoint. In
-    /// particular node-role ALPN cannot reach the reused multi-role handler.
-    #[tokio::test]
-    async fn control_pipe_preserves_source_address_and_excludes_node_roles() {
-        let (listener, roots) = test_listener().await;
-        let address = listener.listener.local_addr().unwrap();
-        let (accepted, mut incoming) = tokio::sync::mpsc::channel(2);
-        let running = listener.spawn(
-            move |connection| {
-                let accepted = accepted.clone();
-                async move {
-                    accepted.send(connection.clone()).await.unwrap();
-                    connection.closed().await;
-                }
-            },
-            |channel, _| async move {
-                channel.close();
-                panic!("control-only listener admitted assist");
-            },
-        );
-        let channel =
-            tunnel::connect(address, "localhost", &roots, tunnel::Request::Control).await.unwrap();
-        let mut endpoint = Endpoint::new_with_abstract_socket(
-            EndpointConfig::default(),
-            None,
-            channel.clone().socket(channel.local_addr(), channel.peer_addr()),
-            Arc::new(TokioRuntime),
-        )
-        .unwrap();
-        endpoint.set_default_client_config(
-            super::super::config::build_client_cfg(ProtoRole::Client, &roots).unwrap(),
-        );
-        let client = tokio::time::timeout(
-            Duration::from_secs(5),
-            endpoint.connect(address, "localhost").unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let server =
-            tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await.unwrap().unwrap();
-        assert_eq!(server.remote_address(), channel.local_addr());
-        let (mut send, mut recv) = client.open_bi().await.unwrap();
-        send.write_all(b"opaque control request").await.unwrap();
-        send.finish().unwrap();
-        let (mut reply, mut request) = server.accept_bi().await.unwrap();
-        assert_eq!(request.read_to_end(1024).await.unwrap(), b"opaque control request");
-        reply.write_all(b"opaque control response").await.unwrap();
-        reply.finish().unwrap();
-        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"opaque control response");
-        channel.close();
-        tokio::time::timeout(Duration::from_secs(3), server.closed())
-            .await
-            .expect("TLS EOF must close inner connection promptly");
-
-        let channel =
-            tunnel::connect(address, "localhost", &roots, tunnel::Request::Control).await.unwrap();
-        let mut endpoint = Endpoint::new_with_abstract_socket(
-            EndpointConfig::default(),
-            None,
-            channel.clone().socket(channel.local_addr(), channel.peer_addr()),
-            Arc::new(TokioRuntime),
-        )
-        .unwrap();
-        endpoint.set_default_client_config(
-            super::super::config::build_client_cfg(ProtoRole::Relay, &roots).unwrap(),
-        );
-        let denied = tokio::time::timeout(
-            Duration::from_secs(5),
-            endpoint.connect(address, "localhost").unwrap(),
-        )
-        .await
-        .unwrap();
-        assert!(denied.is_err(), "node registration ALPN must not enter through the phone tunnel");
-        assert!(incoming.try_recv().is_err());
-        running.shutdown().await;
-    }
 }

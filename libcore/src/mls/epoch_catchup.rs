@@ -1,83 +1,9 @@
-//! Out-of-order epoch buffer.
-//!
-//! # Problem
-//!
-//! MLS is *strictly epoch-ordered*: a Commit `C_n` advances the group
-//! from epoch `n-1` to epoch `n`. Application messages are tagged
-//! with their epoch. Because promtuz's home relays may deliver
-//! out-of-order — or because a recipient drains a multi-week backlog
-//! after reconnect — the recipient frequently sees an Application
-//! at epoch=N+k *before* the load-bearing Commit that advances them
-//! from N → N+1 → ... → N+k.
-//!
-//! Within a single epoch, openmls handles reorder natively (skip-key
-//! cache). **Across** epochs, we (promtuz) must buffer. That's this
-//! module.
-//!
-//! # Storage
-//!
-//! Backed by the migrated SQLite table `mls_epoch_ahead`:
-//!
-//! ```sql
-//! CREATE TABLE mls_epoch_ahead (
-//!     group_id        BLOB    NOT NULL,
-//!     epoch           INTEGER NOT NULL,
-//!     dispatch_id     BLOB    NOT NULL,
-//!     msg_blob        BLOB    NOT NULL,
-//!     received_at_ms  INTEGER NOT NULL,
-//!     accepted_at_ms  INTEGER NOT NULL DEFAULT 0,
-//!     original_dispatch_id BLOB,
-//!     dispatch_sender BLOB,
-//!     PRIMARY KEY (group_id, dispatch_id)
-//! );
-//! ```
-//!
-//! New entries use a sender-scoped hash as the `dispatch_id` buffer key;
-//! `original_dispatch_id` and `dispatch_sender` retain the signed outer
-//! identity separately. One member's chosen ID cannot occupy another
-//! member's slot. Old entries retain their legacy key and remain drainable.
-//!
-//! # Bounded buffer
-//!
-//! Cap is `MAX_EPOCH_AHEAD_BUFFER = 512` per group.
-//! On overflow we **drop the newest entry** (stack-style):
-//!
-//! > Reasoning: the oldest entries are most likely the load-bearing
-//! > commits, and we want to preserve those because a missing commit
-//! > blocks epoch advance. New application messages at a far-ahead
-//! > epoch are more likely to also be load-bearing-supplemented;
-//! > dropping them is preferable to dropping commits.
-//!
-//! "Newest" is defined by `received_at_ms` (the wall-clock time at
-//! `push`); when a new push would exceed the cap, the *incoming*
-//! message itself is dropped (because all existing rows have an
-//! earlier `received_at_ms` than `now`). [`PushOutcome`] surfaces
-//! the result so callers can log / surface a UI signal.
-//!
-//! # Drain
-//!
-//! After processing a commit that advances the local epoch, the
-//! caller invokes [`EpochCatchupBuffer::drain_when_ready`] which:
-//!
-//! 1. Re-scans the table for rows where `epoch <= group.epoch()`.
-//! 2. Feeds each row's `msg_blob` to the group's `process_incoming` — yielding either a decrypted
-//!    Application, a staged Commit (which advances epoch further), or an error (msg too old /
-//!    cipher invalid).
-//! 3. Applications are returned to the caller; staged commits are auto-merged in the same loop
-//!    iteration.
-//! 4. Repeats until no more progress.
-//!
-//! The drain is **bounded** — at most `EPOCH_CATCHUP_LIMIT = 1024`
-//! commits per call. Beyond that, we just stop draining.
-
-// Public surface here is consumed by `messaging.rs`; the cdylib
-// compiler can't see across the JNI boundary so flags it as dead.
-// Mirrors the `provider.rs` pattern.
-#![allow(dead_code)]
+//! Holds MLS messages that arrive ahead of the group's epoch until a commit catches it up.
 
 use std::sync::Arc;
 
-use openmls::prelude::ApplicationMessage;
+use common::utils::now_ms;
+use openmls::prelude::ContentType;
 use openmls::prelude::ProcessedMessageContent;
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -89,41 +15,22 @@ use super::group::CommitOutcome;
 use super::group::MlsGroupHandle;
 use super::group::mls_message_from_bytes;
 use super::provider::PromtuzMlsProvider;
+use super::recovery::Received;
 use super::types::MlsGroupError;
 
-/// Outcome of [`EpochCatchupBuffer::push`]. Mirrors the
-/// task-prompt's contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // messaging.rs caller.
 pub enum PushOutcome {
-    /// Row was inserted. Buffer count for this group did not exceed
-    /// the cap.
     Inserted,
-    /// The incoming row was dropped because the buffer is at cap.
-    /// We drop the *newest* — and since the incoming is by definition
-    /// newest, it doesn't get persisted. The caller should log the
-    /// discard.
+    /// The buffer is full, so the incoming message was dropped.
     Discarded,
-    /// A row with the same `(group_id, dispatch_id)` already exists.
-    /// We treat this as idempotent; the existing row's `msg_blob` is
-    /// preserved (the duplicate is bytewise identical anyway by
-    /// dispatch-layer deduplication).
+    /// Already buffered; the stored row is kept.
     Replaced,
 }
 
-/// Hard cap on commits processed per [`EpochCatchupBuffer::drain_when_ready`]
-/// call. Protects against pathological backlogs that would block the
-/// caller for >1s.
-#[allow(dead_code)] // messaging.rs caller.
+/// Cap on rows one drain processes, so a huge backlog cannot stall the caller.
 pub const EPOCH_CATCHUP_LIMIT: usize = 1024;
 
-/// Out-of-order epoch buffer for a single libcore.
-///
-/// **Single instance per libcore process** — the buffer is
-/// `(group_id, dispatch_id)`-keyed across *all* groups, so we share
-/// one instance. Cloneable via the inner `Arc<Mutex<Connection>>`.
 #[derive(Clone)]
-#[allow(dead_code)] // messaging.rs caller.
 pub struct EpochCatchupBuffer {
     conn: Arc<Mutex<Connection>>,
 }
@@ -145,86 +52,33 @@ pub enum Drained {
     },
 }
 
-impl Drained {
-    #[cfg(test)]
-    pub fn message(self) -> Option<ProcessedApplicationMessage> {
-        match self {
-            Self::Message(m) => Some(m),
-            Self::Change { .. } => None,
-        }
-    }
-}
-
-/// Decrypted application message returned by
-/// [`EpochCatchupBuffer::drain_when_ready`].
 #[derive(Debug)]
-#[allow(dead_code)] // messaging.rs caller.
 pub struct ProcessedApplicationMessage {
-    /// The dispatch id of the buffered envelope. Caller may use this
-    /// to ack the corresponding row in `cf_dht_queue`.
+    /// The original dispatch id, or the buffer key of a row saved without one.
     pub dispatch_id: Vec<u8>,
     /// Verified outer sender when the original dispatch identity was saved.
     /// Distinct from the authenticated MLS author in `sender` below.
     pub dispatch_sender: Option<[u8; 32]>,
-    /// Plaintext bytes the application wrote at send time.
     pub plaintext: Vec<u8>,
-    /// Epoch at which the message was encrypted. Always `<=`
-    /// `group.epoch()` after a successful drain step.
-    pub epoch: u64,
-    /// Origin-relay acceptance time of the dispatch that carried this message,
-    /// so a buffered message is dated when it was sent. Falls back to the
-    /// buffer's own receive time for rows written before it was recorded.
+    /// When the origin relay accepted the dispatch, so a buffered message keeps its send date.
+    /// Rows from before that was recorded use their buffer time.
     pub accepted_at_ms: u64,
-    /// The member who wrote it, off the authenticated MLS leaf. Recovered at
-    /// drain time rather than at buffer time, so a message that waited out
-    /// several epochs still attributes to its real author instead of to
-    /// whoever's envelope happened to unblock the queue.
+    /// The author, read off the authenticated MLS leaf at drain time rather than from whichever
+    /// envelope unblocked the queue.
     pub sender: [u8; 32],
 }
 
-#[allow(dead_code)] // messaging.rs caller.
 impl EpochCatchupBuffer {
-    /// Build a buffer over a caller-supplied SQLite connection.
-    /// The connection must already have the MLS migrations applied
-    /// (which include the `mls_epoch_ahead` table).
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
 
-    /// Push a buffered MLS message for a group.
-    ///
-    /// `msg_epoch` is the message's claimed epoch (parsed from the
-    /// `MlsApplicationEnvelopeP::epoch` field by the caller — we do
-    /// not re-parse here because the caller has the postcard
-    /// envelope already). `dispatch_id` is the outer DispatchP id
-    /// bytes.
-    ///
-    /// If `msg_epoch < group.epoch()`, the caller should *feed directly*
-    /// to the group (openmls may decrypt from cached past-epoch material)
-    /// rather than buffering. We don't enforce this here; the buffer is
-    /// happy to stash any epoch — but in practice the caller filters
-    /// before pushing.
-    ///
-    /// Returns:
-    /// - [`PushOutcome::Inserted`] on a fresh row,
-    /// - [`PushOutcome::Replaced`] on a `(group_id, dispatch_id)` duplicate (idempotent),
-    /// - [`PushOutcome::Discarded`] if the group's buffer count already equals
-    ///   [`MAX_EPOCH_AHEAD_BUFFER`].
-    #[cfg(test)]
-    pub fn push(
-        &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
-        dispatch_id: Vec<u8>, accepted_at_ms: u64,
-    ) -> Result<PushOutcome, MlsGroupError> {
-        self.push_inner(group, msg_bytes, msg_epoch, dispatch_id, accepted_at_ms, None)
-    }
-
-    /// The caller has verified DispatchP's signature over sender, ID and
-    /// payload. Preserve that identity through epoch catch-up, without
-    /// trusting a ciphertext hash as the message's logical ID.
+    /// The caller has verified the dispatch signature over sender, id and payload.
     pub fn push_dispatch(
         &self, group: &MlsGroupHandle, msg_bytes: Vec<u8>, msg_epoch: u64,
         sender: [u8; 32], dispatch_id: [u8; 16], accepted_at_ms: u64,
     ) -> Result<PushOutcome, MlsGroupError> {
+        // Keyed by sender and id together, so one member cannot take another's slot.
         let mut hash = blake3::Hasher::new();
         hash.update(b"promtuz-epoch-dispatch-v1\0");
         hash.update(&sender);
@@ -245,17 +99,13 @@ impl EpochCatchupBuffer {
         original: Option<([u8; 32], [u8; 16])>,
     ) -> Result<PushOutcome, MlsGroupError> {
         let group_id = group.group_id();
-        let now_ms = unix_now_ms();
+        let now_ms = now_ms();
         let mut conn = self.conn.lock();
 
-        // Wrap the count-then-insert in a single BEGIN IMMEDIATE
-        // transaction so two concurrent pushes can't both observe
-        // `count = MAX-1` and both insert (silently bumping the buffer
-        // above the cap).
+        // One IMMEDIATE transaction, so two pushes cannot both pass the cap check.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
 
-        // Idempotent on (group_id, dispatch_id).
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM mls_epoch_ahead \
@@ -271,7 +121,6 @@ impl EpochCatchupBuffer {
             return Ok(PushOutcome::Replaced);
         }
 
-        // Buffer cap check — count existing rows for this group.
         let count: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM mls_epoch_ahead WHERE group_id = ?1",
@@ -292,7 +141,7 @@ impl EpochCatchupBuffer {
         let over_rows = count as usize >= MAX_EPOCH_AHEAD_BUFFER;
         let over_bytes = bytes as u64 + msg_bytes.len() as u64 > super::MAX_EPOCH_AHEAD_BYTES;
         if over_rows || over_bytes {
-            // Drop newest (i.e. drop the incoming).
+            // Drop the newest, which is the incoming message.
             log::warn!(
                 "EpochCatchupBuffer: group_id={} buffer full ({} rows, {} bytes), dropping newest \
                  (this group may be stuck — consider RequestRejoin)",
@@ -327,542 +176,304 @@ impl EpochCatchupBuffer {
         Ok(PushOutcome::Inserted)
     }
 
-    /// Drain any newly-processable buffered messages after a
-    /// commit-merge that advanced the group's epoch.
-    ///
-    /// Pseudocode:
-    ///
-    /// ```text
-    /// loop:
-    ///     for (epoch, ent) in scan(group_id) where epoch <= group.epoch():
-    ///         feed_to_openmls(ent.msg_blob)
-    ///         delete(ent)
-    ///         if produced an Application: append to result
-    ///         if produced a staged Commit: merge_staged_commit() — restart loop
-    ///     break when no progress
-    /// ```
-    ///
-    /// Returns the list of decrypted Application messages produced
-    /// during the drain (in the order they were processed). Staged
-    /// commits found in the buffer are auto-merged; the caller does
-    /// not need to look at them. Errors during processing are
-    /// logged and the offending row is *deleted* (a permanently
-    /// undecryptable message is data loss either way, and re-trying
-    /// across reconnects would just amplify CPU cost).
+    /// Merges buffered commits and stages buffered messages as the group's epoch reaches them. An
+    /// undecryptable row is deleted; a failed write keeps its row and stops the drain.
     pub fn drain_when_ready(
         &self, group: &mut MlsGroupHandle, provider: &PromtuzMlsProvider,
-    ) -> Result<Vec<Drained>, MlsGroupError> {
+    ) -> Vec<Drained> {
         let group_id = group.group_id();
         let mut output = Vec::new();
         let mut iterations = 0usize;
 
+        let delete_row = |dispatch_id: &[u8]| match self.forget(provider, &group_id, dispatch_id) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("EpochCatchupBuffer: could not delete a drained row: {e}");
+                false
+            },
+        };
+
         loop {
-            if iterations >= EPOCH_CATCHUP_LIMIT {
-                log::warn!(
-                    "EpochCatchupBuffer::drain_when_ready: group_id={} hit \
-                     EPOCH_CATCHUP_LIMIT = {}, stopping drain (potentially stuck)",
-                    hex::encode(&group_id[..4]),
-                    EPOCH_CATCHUP_LIMIT
-                );
-                break;
-            }
-            iterations += 1;
-
-            let current_epoch = group.epoch();
-
-            // Find a candidate row to process: epoch <= current.
-            // We pick the *oldest* (lowest received_at_ms) to give
-            // commits priority — they're most likely to unblock epoch advance.
-            let candidate: Option<(Vec<u8>, Vec<u8>, u64, u64, Option<Vec<u8>>, Option<[u8; 32]>)> = {
-                let conn = self.conn.lock();
-                conn.query_row(
-                    "SELECT dispatch_id, msg_blob, epoch, \
-                            COALESCE(NULLIF(accepted_at_ms, 0), received_at_ms), \
-                            original_dispatch_id, dispatch_sender \
-                     FROM mls_epoch_ahead \
-                     WHERE group_id = ?1 AND epoch <= ?2 \
-                     ORDER BY epoch ASC, received_at_ms ASC LIMIT 1",
-                    params![&group_id[..], current_epoch as i64],
-                    |r| {
-                        let did: Vec<u8> = r.get(0)?;
-                        let blob: Vec<u8> = r.get(1)?;
-                        let ep: i64 = r.get(2)?;
-                        let at: i64 = r.get(3)?;
-                        Ok((did, blob, ep as u64, at as u64, r.get(4)?, r.get(5)?))
-                    },
-                )
-                .ok()
-            };
-
-            let Some((
-                dispatch_id,
-                msg_blob,
-                msg_epoch,
-                accepted_at_ms,
-                original_id,
-                dispatch_sender,
-            )) = candidate
-            else {
+            let batch = self.ready(&group_id, group.epoch());
+            if batch.is_empty() {
                 break; // no progressable rows
-            };
-
-            // Process FIRST, delete on success (or on a hard
-            // parse-error that means re-trying would never make
-            // progress — those still get deleted to keep the buffer
-            // from filling with poison messages). The previous
-            // "delete-then-process" pattern lost a message on any
-            // transient panic during processing.
-            //
-            // Helper closure: delete the row by `(group_id, dispatch_id)`.
-            let delete_row = |dispatch_id: &[u8]| -> Result<(), MlsGroupError> {
-                let conn = self.conn.lock();
-                conn.execute(
-                    "DELETE FROM mls_epoch_ahead \
-                     WHERE group_id = ?1 AND dispatch_id = ?2",
-                    params![&group_id[..], dispatch_id],
-                )
-                .map_err(|e| {
-                    MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e))
-                })?;
-                Ok(())
-            };
-
-            // Feed to openmls.
-            let in_msg = match mls_message_from_bytes(&msg_blob) {
-                Ok(m) => m,
-                Err(e) => {
-                    log::warn!("EpochCatchupBuffer: malformed buffered msg dropped: {e}");
-                    // Hard parse error → no point retrying; delete.
-                    delete_row(&dispatch_id)?;
-                    continue;
-                },
-            };
-            let proto = match in_msg.try_into_protocol_message() {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("EpochCatchupBuffer: buffered msg is not a ProtocolMessage: {e:?}");
-                    delete_row(&dispatch_id)?;
-                    continue;
-                },
-            };
-
-            match group.process_incoming(provider, proto).map(|p| (p.sender, p.content)) {
-                Ok((sender, ProcessedMessageContent::ApplicationMessage(app))) => {
-                    let message = application_to_processed(
-                        app,
-                        original_id.unwrap_or_else(|| dispatch_id.clone()),
-                        msg_epoch,
-                        accepted_at_ms,
-                        sender,
-                        dispatch_sender,
+            }
+            for (dispatch_id, msg_blob, accepted_at_ms, original_id, dispatch_sender) in batch {
+                if iterations >= EPOCH_CATCHUP_LIMIT {
+                    log::warn!(
+                        "EpochCatchupBuffer::drain_when_ready: group_id={} hit \
+                         EPOCH_CATCHUP_LIMIT = {}, stopping drain (potentially stuck)",
+                        hex::encode(&group_id[..4]),
+                        EPOCH_CATCHUP_LIMIT
                     );
-                    if group.application_is_permitted(&sender, &message.plaintext) {
-                        output.push(Drained::Message(message));
-                    }
-                    delete_row(&dispatch_id)?;
-                },
-                Ok((sender, ProcessedMessageContent::StagedCommitMessage(staged))) => {
-                    // The same gate as the live path: a commit that arrived
-                    // early is no more trusted for having waited.
-                    match group.merge_staged_commit_if_permitted(provider, *staged, sender) {
-                        Ok(outcome) => {
-                            if let CommitOutcome::Merged(Some(changed)) = outcome {
-                                output.push(Drained::Change { changed, accepted_at_ms });
+                    return output;
+                }
+                iterations += 1;
+
+                let in_msg = match mls_message_from_bytes(&msg_blob) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::warn!("EpochCatchupBuffer: malformed buffered msg dropped: {e}");
+                        if !delete_row(&dispatch_id) {
+                            return output;
+                        }
+                        continue;
+                    },
+                };
+                let proto = match in_msg.try_into_protocol_message() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!(
+                            "EpochCatchupBuffer: buffered msg is not a ProtocolMessage: {e:?}"
+                        );
+                        if !delete_row(&dispatch_id) {
+                            return output;
+                        }
+                        continue;
+                    },
+                };
+
+                // The message, what it stages or merges, and its row land together, so a failed
+                // write leaves the group as it was and the row for the next drain.
+                let landed = provider.storage().atomic(|| {
+                    let processed =
+                        group.process_incoming(provider, proto).map_err(Unlanded::Refused)?;
+                    let sender = processed.sender;
+                    let drained = match processed.content {
+                        // The same gate as the live path: a commit that arrived early is no more
+                        // trusted for having waited.
+                        ProcessedMessageContent::StagedCommitMessage(staged) => {
+                            let outcome = group
+                                .merge_staged_commit_if_permitted(provider, *staged, sender)
+                                .map_err(Unlanded::Failed)?;
+                            match outcome {
+                                CommitOutcome::Merged(Some(changed)) => {
+                                    Some(Drained::Change { changed, accepted_at_ms })
+                                },
+                                _ => None,
                             }
-                            delete_row(&dispatch_id)?;
                         },
-                        Err(e) => {
-                            log::warn!("EpochCatchupBuffer: merge_staged_commit failed: {e}");
-                            // Don't delete — let the next drain re-attempt
-                            // (in case state catches up). The
-                            // EPOCH_CATCHUP_LIMIT loop bound prevents
-                            // an infinite spin on a permanently-stuck
-                            // commit.
+                        ProcessedMessageContent::ApplicationMessage(app) => {
+                            let message = ProcessedApplicationMessage {
+                                dispatch_id: original_id.unwrap_or_else(|| dispatch_id.clone()),
+                                dispatch_sender,
+                                plaintext: app.into_bytes(),
+                                accepted_at_ms,
+                                sender,
+                            };
+                            let permitted =
+                                group.application_is_permitted(&sender, &message.plaintext);
+                            if permitted && let Ok(id) = message.dispatch_id.as_slice().try_into() {
+                                let received = Received {
+                                    author: sender,
+                                    id,
+                                    accepted_at_ms,
+                                    payload: message.plaintext.clone(),
+                                };
+                                let staged = provider
+                                    .storage()
+                                    .with_conn(|conn| received.stage(conn, &group_id, &[0; 32]));
+                                staged.map_err(|e| Unlanded::Failed(e.into()))?;
+                            }
+                            permitted.then_some(Drained::Message(message))
                         },
-                    }
-                },
-                Ok((_, ProcessedMessageContent::ProposalMessage(_)))
-                | Ok((_, ProcessedMessageContent::ExternalJoinProposalMessage(_))) => {
-                    // Proposals from the buffer have no caller; they
-                    // should already have been rolled into a commit
-                    // by the time they appear here. Drop silently.
-                    delete_row(&dispatch_id)?;
-                },
-                Err(e) => {
-                    log::warn!("EpochCatchupBuffer: process_incoming error on buffered msg: {e}");
-                    // Permanent crypto failure → delete (re-trying
-                    // won't help) — but log loudly so the user sees
-                    // it. Soft failures (transient I/O during
-                    // openmls processing) would loop here, bounded
-                    // by EPOCH_CATCHUP_LIMIT.
-                    delete_row(&dispatch_id)?;
-                },
+                        // Nothing uses a buffered proposal.
+                        _ => None,
+                    };
+                    let forgotten = self.forget(provider, &group_id, &dispatch_id);
+                    forgotten.map_err(|e| Unlanded::Failed(e.into()))?;
+                    Ok(drained)
+                });
+                match landed {
+                    Ok(drained) => output.extend(drained),
+                    Err(Unlanded::Refused(e)) => {
+                        log::warn!("EpochCatchupBuffer: dropping a buffered message: {e}");
+                        if !delete_row(&dispatch_id) {
+                            return output;
+                        }
+                    },
+                    Err(Unlanded::Failed(e)) => {
+                        log::warn!("EpochCatchupBuffer: buffered message kept for a retry: {e}");
+                        // The handle took part of the change in memory; storage rolled back.
+                        if let Ok(Some(at_epoch)) = MlsGroupHandle::load(provider, &group_id) {
+                            *group = at_epoch;
+                        }
+                        return output;
+                    },
+                }
             }
         }
 
-        Ok(output)
+        output
     }
 
-    /// Drop every buffered row for a group (forget-contact cascade).
-    pub fn purge_group(&self, group_id: &[u8; 32]) -> Result<(), MlsGroupError> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM mls_epoch_ahead WHERE group_id = ?1", params![&group_id[..]])
-            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
-        Ok(())
+    /// Deletes a drained row, inside `provider`'s open operation when the buffer shares its
+    /// database.
+    fn forget(
+        &self, provider: &PromtuzMlsProvider, group_id: &[u8; 32], dispatch_id: &[u8],
+    ) -> rusqlite::Result<()> {
+        let delete = |conn: &Connection| {
+            let sql = "DELETE FROM mls_epoch_ahead WHERE group_id = ?1 AND dispatch_id = ?2";
+            conn.execute(sql, params![&group_id[..], dispatch_id]).map(|_| ())
+        };
+        if Arc::ptr_eq(&self.conn, &provider.storage().connection()) {
+            provider.storage().with_conn(delete)
+        } else {
+            delete(&self.conn.lock())
+        }
     }
 
-    /// Number of rows currently buffered for a group. Test helper +
-    /// future UI metric.
-    pub fn buffered_count(&self, group_id: &[u8; 32]) -> Result<usize, MlsGroupError> {
-        let conn = self.conn.lock();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM mls_epoch_ahead WHERE group_id = ?1",
-                params![&group_id[..]],
-                |r| r.get(0),
-            )
-            .map_err(|e| MlsGroupError::Storage(super::types::PromtuzMlsStorageError::Sqlite(e)))?;
-        Ok(n as usize)
-    }
-}
-
-/// Bridge an openmls `ApplicationMessage` into our public-facing
-/// struct.
-fn application_to_processed(
-    app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64, accepted_at_ms: u64,
-    sender: [u8; 32], dispatch_sender: Option<[u8; 32]>,
-) -> ProcessedApplicationMessage {
-    ProcessedApplicationMessage {
-        dispatch_id,
-        dispatch_sender,
-        plaintext: app.into_bytes(),
-        epoch,
-        accepted_at_ms,
-        sender,
+    /// The rows at the lowest buffered epoch the group has reached, in arrival order with its
+    /// commits last: merging a commit retires the keys the epoch's other messages need.
+    fn ready(&self, group_id: &[u8; 32], epoch: u64) -> Vec<Buffered> {
+        let mut rows: Vec<Buffered> = crate::db::all(
+            &self.conn.lock(),
+            "SELECT dispatch_id, msg_blob, COALESCE(NULLIF(accepted_at_ms, 0), received_at_ms), \
+                    original_dispatch_id, dispatch_sender \
+             FROM mls_epoch_ahead \
+             WHERE group_id = ?1 AND epoch = \
+                (SELECT MIN(epoch) FROM mls_epoch_ahead WHERE group_id = ?1 AND epoch <= ?2) \
+             ORDER BY received_at_ms ASC",
+            params![&group_id[..], epoch as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap_or_default();
+        rows.sort_by_key(|row| is_commit(&row.1));
+        rows
     }
 }
 
-/// Wall-clock millis since Unix epoch. We only use this for ordering
-/// within the buffer and for diagnostic logs; not exposed to the
-/// network.
-fn unix_now_ms() -> u64 {
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+/// Why a buffered message did not land. Either way its transaction rolled back.
+enum Unlanded {
+    /// It will never apply, so its row goes.
+    Refused(MlsGroupError),
+    /// Storage failed, so the row waits for the next drain.
+    Failed(MlsGroupError),
+}
+
+impl From<super::types::PromtuzMlsStorageError> for Unlanded {
+    fn from(e: super::types::PromtuzMlsStorageError) -> Self {
+        Self::Failed(e.into())
+    }
+}
+
+/// Dispatch id, message, acceptance time, original dispatch id and its sender.
+type Buffered = (Vec<u8>, Vec<u8>, u64, Option<Vec<u8>>, Option<[u8; 32]>);
+
+fn is_commit(msg_blob: &[u8]) -> bool {
+    mls_message_from_bytes(msg_blob)
+        .ok()
+        .and_then(|m| m.try_into_protocol_message().ok())
+        .is_some_and(|m| m.content_type() == ContentType::Commit)
 }
 
 #[cfg(test)]
 mod tests {
-    use openmls::prelude::*;
-    use rusqlite::Connection;
+    use openmls::prelude::MlsMessageOut;
+    use openmls::prelude::tls_codec::Serialize as _;
 
     use super::*;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::group::PROMTUZ_CIPHERSUITE;
-    use crate::mls::group::mls_message_to_bytes;
+    use crate::mls::storage::tags;
+    use crate::test_support::mls::*;
 
-    /// Build a single shared connection so the provider and the
-    /// buffer point at the same DB. (Fresh cache per test; SQLite
-    /// in-memory.)
-    fn build_provider_and_buffer() -> (PromtuzMlsProvider, EpochCatchupBuffer) {
-        let mut conn = Connection::open_in_memory().expect("in-memory db");
-        apply_mls_migrations(&mut conn);
-        let conn = Arc::new(Mutex::new(conn));
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let buffer = EpochCatchupBuffer::new(conn);
-        (provider, buffer)
+    fn bytes(msg: &MlsMessageOut) -> Vec<u8> {
+        msg.tls_serialize_detached().unwrap()
     }
 
-    /// Test fixture identical to the one in `group::tests`.
-    struct Party {
-        ipk_signer: ed25519_dalek::SigningKey,
-        ipk:        [u8; 32],
-        sig_kp:     openmls_basic_credential::SignatureKeyPair,
-    }
-    impl Party {
-        fn new(provider: &PromtuzMlsProvider, seed: u8) -> Self {
-            let ipk_signer = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
-            let ipk = ipk_signer.verifying_key().to_bytes();
-            let sig_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
-                .expect("sig kp");
-            sig_kp.store(provider.storage()).expect("store sig kp");
-            Self { ipk_signer, ipk, sig_kp }
-        }
-
-        /// The leaf key under a credential its identity signed for.
-        fn cwk(&self) -> CredentialWithKey {
-            CredentialWithKey {
-                credential:    crate::mls::credential::bound_credential(
-                    &self.ipk_signer,
-                    self.sig_kp.public(),
-                )
-                .into(),
-                signature_key: self.sig_kp.public().into(),
-            }
-        }
-    }
-
-    fn make_kp(provider: &PromtuzMlsProvider, party: &Party) -> KeyPackage {
-        let cwk = party.cwk();
-        let bundle = KeyPackage::builder()
-            .leaf_node_capabilities(Capabilities::new(
-                None,
-                Some(&[PROMTUZ_CIPHERSUITE]),
-                None,
-                None,
-                None,
-            ))
-            .build(PROMTUZ_CIPHERSUITE, provider, &party.sig_kp, cwk)
-            .expect("build kp");
-        bundle.key_package().clone()
-    }
-
-    /// Build alice → adds bob → returns alice_group, bob_group at
-    /// the same epoch. Both groups in *one* shared provider so
-    /// alice can send and bob can receive without cross-DB plumbing.
-    fn pair_setup()
-    -> (PromtuzMlsProvider, EpochCatchupBuffer, MlsGroupHandle, MlsGroupHandle, Party, Party) {
-        let (provider_a, buffer_a) = build_provider_and_buffer();
-        // bob has his own provider (his KP bundle lives in his
-        // storage so openmls can find his init/enc keys).
-        let mut conn_b = Connection::open_in_memory().expect("b conn");
-        apply_mls_migrations(&mut conn_b);
-        let conn_b = Arc::new(Mutex::new(conn_b));
-        let provider_b = PromtuzMlsProvider::new(conn_b.clone());
-
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-
-        let mut alice_group =
-            MlsGroupHandle::create(&provider_a, &alice.sig_kp, alice.cwk(), &[0xAA; 32], None)
-                .expect("create alice group");
-        let bob_kp = make_kp(&provider_b, &bob);
-        let (_commit, welcome) =
-            alice_group.add_members(&provider_a, &alice.sig_kp, &[bob_kp]).expect("add bob");
-        alice_group.merge_pending_commit(&provider_a).expect("merge");
-
-        // Round-trip through tls_codec to extract the inner Welcome
-        // (openmls 0.8 gates `into_welcome()` behind test-utils
-        // feature; cfg(test) only fires for openmls itself, not
-        // dependents).
-        use openmls::prelude::tls_codec::Deserialize as _;
-        use openmls::prelude::tls_codec::Serialize as _;
-        let bytes = welcome.tls_serialize_detached().expect("ser");
-        let in_msg = MlsMessageIn::tls_deserialize_exact(&bytes).expect("deser");
-        let welcome_msg = match in_msg.extract() {
-            MlsMessageBodyIn::Welcome(w) => w,
-            other => panic!("expected welcome, got {other:?}"),
+    fn messages(drained: Vec<Drained>) -> Vec<ProcessedApplicationMessage> {
+        let message = |d| match d {
+            Drained::Message(m) => Some(m),
+            Drained::Change { .. } => None,
         };
-        let join = MlsGroupJoinConfig::default();
-        let staged =
-            StagedWelcome::new_from_welcome(&provider_b, &join, welcome_msg, None).expect("staged");
-        let bob_group = MlsGroupHandle::wrap(staged.into_group(&provider_b).expect("into"));
-        // Move bob's group to alice's provider so we can use a
-        // single buffer. We have to load it from alice's storage —
-        // easiest: store alice's provider and bob's separately, but
-        // build the buffer on top of alice's provider since bob is
-        // the one buffering (alice sends, bob receives).
-        //
-        // Replan: we want bob to be the buffering side. Use bob's
-        // provider for the buffer.
-        drop(buffer_a);
-        let buffer_b = EpochCatchupBuffer::new(conn_b);
-        (provider_a, buffer_b, alice_group, bob_group, alice, bob)
+        drained.into_iter().filter_map(message).collect()
     }
 
-    // -------------------------------------------------------------
-    // Test 2: Process the commit; drain_when_ready returns the
-    // buffered application message.
-    // -------------------------------------------------------------
+    fn buffered(conn: &Mutex<Connection>) -> i64 {
+        conn.lock().query_row("SELECT COUNT(*) FROM mls_epoch_ahead", [], |r| r.get(0)).unwrap()
+    }
+
+    /// Buffered rows are keyed by outer sender and dispatch id, keep their first bytes and time,
+    /// drain with the MLS author rather than the carrier, and drain only once.
     #[test]
     fn dispatch_identity_survives_reload_without_cross_sender_collisions() {
-        let (provider_a, buffer, mut alice_group, _bob_group, alice, bob) = pair_setup();
-        let mut encode = |bytes: &[u8]| {
-            let msg =
-                alice_group.create_application_message(&provider_a, &alice.sig_kp, bytes).unwrap();
-            mls_message_to_bytes(&msg).unwrap()
-        };
-        let first_bytes = encode(b"first");
-        let second = encode(b"forwarded by another member");
-        let legacy = encode(b"old buffer row");
-        let provider_b = PromtuzMlsProvider::new(buffer.conn.clone());
-        let group = MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
+        let (alice, bob) = (Party::new(1), Party::new(2));
+        let gid = [0xAA; 32];
+        let (mut ga, [group]) = found(&alice, gid, None, [&bob]);
+        let first = bytes(&alice.seal(&mut ga, b"first"));
+        let forwarded = bytes(&alice.seal(&mut ga, b"forwarded"));
+        let legacy = bytes(&alice.seal(&mut ga, b"legacy"));
+        let buffer = EpochCatchupBuffer::new(bob.db.clone());
         let epoch = group.epoch();
-        assert_eq!(
-            buffer
-                .push_dispatch(&group, first_bytes.clone(), epoch, alice.ipk, [9; 16], 123)
-                .unwrap(),
-            PushOutcome::Inserted
-        );
-        assert_eq!(
-            buffer.push_dispatch(&group, second.clone(), epoch, alice.ipk, [9; 16], 999).unwrap(),
-            PushOutcome::Replaced
-        );
-        assert_eq!(
-            buffer.push_dispatch(&group, second, epoch, bob.ipk, [9; 16], 124).unwrap(),
-            PushOutcome::Inserted
-        );
-        buffer.push(&group, legacy, epoch, vec![10; 16], 125).unwrap();
-        let conn = buffer.conn.clone();
-        drop(buffer);
-        drop(group);
-        let buffer = EpochCatchupBuffer::new(conn);
-        let mut group =
-            MlsGroupHandle::load(&provider_b, &alice_group.group_id()).unwrap().unwrap();
-        let drained: Vec<_> = buffer
-            .drain_when_ready(&mut group, &provider_b)
-            .unwrap()
-            .into_iter()
-            .filter_map(Drained::message)
-            .collect();
+        let push = |msg: &[u8], sender, at| {
+            buffer.push_dispatch(&group, msg.to_vec(), epoch, sender, [9; 16], at).unwrap()
+        };
+        assert_eq!(push(&first, alice.ipk, 123), PushOutcome::Inserted);
+        assert_eq!(push(&forwarded, alice.ipk, 999), PushOutcome::Replaced);
+        assert_eq!(push(&forwarded, bob.ipk, 124), PushOutcome::Inserted);
+        buffer.push_inner(&group, legacy, epoch, vec![10; 16], 125, None).unwrap();
+
+        let buffer = EpochCatchupBuffer::new(bob.db.clone());
+        let mut group = bob.group(&gid);
+        let drained = messages(buffer.drain_when_ready(&mut group, &bob.provider));
+        let row = |sender| {
+            let m = drained.iter().find(|m| m.dispatch_sender == sender).unwrap();
+            (m.dispatch_id.clone(), m.plaintext.clone(), m.accepted_at_ms, m.sender)
+        };
         assert_eq!(drained.len(), 3);
-        let first = drained.iter().find(|m| m.dispatch_sender == Some(alice.ipk)).unwrap();
-        assert_eq!(first.dispatch_id, vec![9; 16]);
-        assert_eq!(first.plaintext, b"first");
-        assert_eq!(first.accepted_at_ms, 123, "replay preserves original bytes and timestamp");
-        let forwarded = drained.iter().find(|m| m.dispatch_sender == Some(bob.ipk)).unwrap();
-        assert_eq!(forwarded.dispatch_id, vec![9; 16]);
-        assert_eq!(forwarded.sender, alice.ipk, "outer carrier does not become MLS author");
-        let legacy = drained.iter().find(|m| m.dispatch_sender.is_none()).unwrap();
-        assert_eq!(legacy.dispatch_id, vec![10; 16]);
-        assert_eq!(legacy.plaintext, b"old buffer row");
-        assert_eq!(buffer.buffered_count(&group.group_id()).unwrap(), 0);
-        // A post-drain replay consumes no new MLS generation and cannot
-        // produce a second application message even before upper-layer dedup.
-        buffer.push_dispatch(&group, first_bytes, epoch, alice.ipk, [9; 16], 123).unwrap();
-        assert!(buffer.drain_when_ready(&mut group, &provider_b).unwrap().is_empty());
+        assert_eq!(row(Some(alice.ipk)), (vec![9; 16], b"first".to_vec(), 123, alice.ipk));
+        assert_eq!(row(Some(bob.ipk)), (vec![9; 16], b"forwarded".to_vec(), 124, alice.ipk));
+        assert_eq!(row(None), (vec![10; 16], b"legacy".to_vec(), 125, alice.ipk));
+        assert_eq!(buffered(&bob.db), 0);
+
+        buffer.push_dispatch(&group, first, epoch, alice.ipk, [9; 16], 123).unwrap();
+        assert!(buffer.drain_when_ready(&mut group, &bob.provider).is_empty());
     }
 
+    /// An epoch's messages drain before its commit whatever order they arrived in. A failed stage,
+    /// delete or merge keeps the message or commit whole for the next drain.
     #[test]
-    fn drain_when_ready_returns_now_processable_application() {
-        let (provider_a, buffer, mut alice_group, mut bob_group, alice, _bob) = pair_setup();
-        // bob's provider is implicit in `buffer`; re-construct
-        // a handle to it for openmls calls.
-        let bob_conn = buffer.conn.clone();
-        let provider_b = PromtuzMlsProvider::new(bob_conn);
-
-        // Alice sends an Application message at the current epoch.
-        // Bob is NOT going to process it directly; instead, we
-        // simulate "received before the load-bearing thing" by
-        // pushing it into the buffer, then immediately draining
-        // (epoch already matches → drain processes it).
-        let plaintext = b"buffered-then-drained";
-        let alice_msg = alice_group
-            .create_application_message(&provider_a, &alice.sig_kp, plaintext)
-            .expect("encrypt");
-        let bytes = mls_message_to_bytes(&alice_msg).expect("ser");
-        let dispatch_id = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        // Push at the *current* epoch — the drain will pick it up.
-        let sent_at_ms = 1_700_000_000_000;
-        let outcome = buffer
-            .push(&bob_group, bytes, bob_group.epoch(), dispatch_id.clone(), sent_at_ms)
-            .expect("push");
-        assert_eq!(outcome, PushOutcome::Inserted);
-
-        let drained: Vec<_> = buffer
-            .drain_when_ready(&mut bob_group, &provider_b)
-            .expect("drain")
-            .into_iter()
-            .filter_map(Drained::message)
-            .collect();
-        assert_eq!(drained.len(), 1, "exactly one application drained");
-        assert_eq!(drained[0].plaintext, plaintext);
-        assert_eq!(drained[0].dispatch_id, dispatch_id);
-        assert_eq!(
-            drained[0].accepted_at_ms, sent_at_ms,
-            "send time survives the buffer — the drain must not date it to now"
-        );
-        assert_eq!(buffer.buffered_count(&bob_group.group_id()).unwrap(), 0);
-    }
-
-    // -------------------------------------------------------------
-    // Test 3: Buffer overflow drops newest (push returns Discarded),
-    // logs warning.
-    // -------------------------------------------------------------
-    #[test]
-    fn buffer_overflow_drops_newest() {
-        let (provider_b, buffer, _alice_group, bob_group, _alice, _bob) = pair_setup();
-        let _ = provider_b;
-        // Fill to the cap with synthetic msg blobs (each with a
-        // distinct dispatch_id so insert doesn't dedupe).
-        let gid = bob_group.group_id();
-        for i in 0..MAX_EPOCH_AHEAD_BUFFER {
-            // Use a non-zero, distinct 4-byte id.
-            let id = (i as u32).to_be_bytes().to_vec();
-            let outcome = buffer.push(&bob_group, vec![0x42; 16], 999, id, 0).expect("push");
-            assert_eq!(outcome, PushOutcome::Inserted);
+    fn the_drain_never_loses_a_message_or_a_commit_to_arrival_order_or_a_failure() {
+        let (alice, bob) = (Party::new(3), Party::new(4));
+        let gid = [0x44; 32];
+        let (mut ga, [mut gb]) = found(&alice, gid, None, [&bob]);
+        let commit = |ga: &mut MlsGroupHandle| {
+            let commit = alice.update(ga);
+            ga.merge_pending_commit(&alice.provider).unwrap();
+            commit
+        };
+        let to_two = commit(&mut ga);
+        let x = alice.seal(&mut ga, b"x");
+        let to_three = commit(&mut ga);
+        let y = alice.seal(&mut ga, b"y");
+        let buffer = EpochCatchupBuffer::new(bob.db.clone());
+        // The commit that ends epoch 2 arrives before the post made in it.
+        for (id, msg, epoch) in [(1, &to_three, 2), (2, &x, 2), (3, &y, 3)] {
+            buffer.push_dispatch(&gb, bytes(msg), epoch, alice.ipk, [id; 16], 0).unwrap();
         }
-        assert_eq!(buffer.buffered_count(&gid).unwrap(), MAX_EPOCH_AHEAD_BUFFER);
+        let staged = commit_of(bob.receive(&mut gb, &to_two));
+        gb.merge_staged_commit(&bob.provider, staged).unwrap();
 
-        // Push one more — should be Discarded.
-        let outcome =
-            buffer.push(&bob_group, vec![0x99; 16], 999, vec![0xFF; 4], 0).expect("push (cap)");
-        assert_eq!(outcome, PushOutcome::Discarded);
-        assert_eq!(
-            buffer.buffered_count(&gid).unwrap(),
-            MAX_EPOCH_AHEAD_BUFFER,
-            "count unchanged after Discarded"
-        );
-    }
-
-    // -------------------------------------------------------------
-    // Test 4: Persistence — buffered message survives buffer
-    // re-construction over the same connection.
-    // -------------------------------------------------------------
-    #[test]
-    fn buffered_message_persists_across_buffer_reconstructions() {
-        let (provider_b, buffer, _alice_group, bob_group, _alice, _bob) = pair_setup();
-        let _ = provider_b;
-        let gid = bob_group.group_id();
-        let id = vec![0xBE, 0xEF];
-
-        let outcome = buffer.push(&bob_group, vec![0x55; 32], 7, id.clone(), 0).expect("push");
-        assert_eq!(outcome, PushOutcome::Inserted);
-
-        // Reconstruct a fresh EpochCatchupBuffer over the same
-        // connection (simulates a libcore restart that preserves
-        // the SQLite file).
-        let buffer2 = EpochCatchupBuffer::new(buffer.conn.clone());
-        assert_eq!(buffer2.buffered_count(&gid).unwrap(), 1);
-
-        // Idempotent re-push of the same dispatch_id is Replaced.
-        let outcome2 = buffer2.push(&bob_group, vec![0x55; 32], 7, id, 0).expect("push2");
-        assert_eq!(outcome2, PushOutcome::Replaced);
-        assert_eq!(buffer2.buffered_count(&gid).unwrap(), 1);
-    }
-
-    // -------------------------------------------------------------
-    // Test 5: Stale message (epoch < current, malformed bytes) gets
-    // dropped during drain rather than persisting forever.
-    // -------------------------------------------------------------
-    #[test]
-    fn stale_or_malformed_buffered_messages_are_dropped_on_drain() {
-        let (provider_a, buffer, _alice_group, mut bob_group, _alice, _bob) = pair_setup();
-        let _ = provider_a;
-        let bob_conn = buffer.conn.clone();
-        let provider_b = PromtuzMlsProvider::new(bob_conn);
-
-        // Push a malformed (non-MLS) blob at the current epoch.
-        let dispatch_id = vec![0xCA, 0xFE];
-        let outcome = buffer
-            .push(
-                &bob_group,
-                b"definitely-not-an-mls-frame".to_vec(),
-                bob_group.epoch(),
-                dispatch_id,
-                0,
-            )
-            .expect("push");
-        assert_eq!(outcome, PushOutcome::Inserted);
-        assert_eq!(buffer.buffered_count(&bob_group.group_id()).unwrap(), 1);
-
-        // Drain — the malformed row is silently dropped.
-        let drained = buffer.drain_when_ready(&mut bob_group, &provider_b).expect("drain");
-        assert_eq!(drained.len(), 0, "malformed blob produces no application");
-        assert_eq!(
-            buffer.buffered_count(&bob_group.group_id()).unwrap(),
-            0,
-            "row was deleted regardless of decode failure"
-        );
+        let posts =
+            |drained| messages(drained).into_iter().map(|m| m.plaintext).collect::<Vec<_>>();
+        let (x, y) = (b"x".to_vec(), b"y".to_vec());
+        // The epoch secrets are written after the new tree and context.
+        let mid_merge =
+            format!("INSERT ON mls_storage WHEN NEW.key_tag = {}", tags::GROUP_EPOCH_SECRETS);
+        let failures = [
+            ("INSERT ON mls_group_received", vec![], 3),
+            ("DELETE ON mls_epoch_ahead", vec![], 3),
+            (&mid_merge, vec![x.clone()], 2),
+        ];
+        for (failing, drained, left) in failures {
+            let drain = || buffer.drain_when_ready(&mut gb, &bob.provider);
+            let got = posts(with_failing_trigger(&bob.db, failing, drain));
+            assert_eq!((got, buffered(&bob.db), gb.epoch()), (drained, left, 2), "{failing}");
+        }
+        assert_eq!(posts(buffer.drain_when_ready(&mut gb, &bob.provider)), [y.clone()]);
+        assert_eq!(buffered(&bob.db), 0);
+        assert_eq!(gb.epoch(), ga.epoch());
+        let sql = "SELECT payload FROM mls_group_received ORDER BY rowid";
+        let staged: Vec<Vec<u8>> = crate::db::all(&bob.db.lock(), sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(staged, [x, y]);
     }
 }

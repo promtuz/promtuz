@@ -1,223 +1,96 @@
-//! Sender-side K-closest dispatch fan-out (sticky-home).
-//!
-//! When a relay receives a `Dispatch` from a connected client and the
-//! recipient is **not** online locally, this module routes the dispatch to
-//! the K "home" relays: the K relays whose NodeIds are closest by XOR to
-//! the recipient's `user_ipk`. Each home either delivers locally (recipient
-//! online there) or queues the dispatch in `cf_dht_queue` for later pickup.
-//!
-//! This module implements that fan-out from the *sender* side. It is the
-//! sister to [`super::queue_drain`] (the recipient-side fetch from the
-//! same K homes) and shares its shape — `K_MIN`-quorum success criterion,
-//! `JoinSet`-based parallel dispatch, and a self-store short-circuit when
-//! the sender relay is itself in the K-closest set.
-//!
-//! Each `Forward` carries the unmodified `DispatchP` plus an outer
-//! sender-relay signature (two-layer signing); the home reports
-//! `Delivered` vs `Stored` so the sender can drive the originating
-//! client's [`DispatchAckP::Delivered`] / [`DispatchAckP::Forwarded`] ack.
-//!
-//! ## Lock contract
-//!
-//! Same as the rest of `dht/`: `parking_lot` guards are never held
-//! across `await`. `dht.routing.read().find_closest(...)` is the only
-//! routing-table read; we clone descriptors out and release the lock
-//! before any I/O.
+//! Sticky-home routing: the sender relay fans a dispatch out to the recipient's homes, the `K`
+//! relays closest to the recipient's IPK.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
-use common::proto::Sender;
+use common::crypto::verify_ed25519;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::DispatchP;
-use common::proto::client_rel::PresenceP;
-use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::activity_sig_message;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::ActivityForward;
-use common::proto::dht_p2p::ActivityForwardResp;
-use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
 use common::proto::dht_p2p::Forward;
 use common::proto::dht_p2p::ForwardOutcome;
 use common::proto::dht_p2p::ForwardResp;
-use common::proto::dht_p2p::LiveForward;
-use common::proto::dht_p2p::LiveForwardResp;
-use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::dht_p2p::PresenceConsent;
 use common::proto::dht_p2p::PresenceLease;
-use common::proto::dht_p2p::PresenceReplicationResp;
 use common::proto::dht_p2p::RelayPresenceState;
 use common::proto::dht_p2p::forward_signing_input;
-use common::proto::dht_p2p::live_forward_signing_input;
-use common::proto::pack::Packer;
-use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
-use common::quic::xor32;
-use ed25519_dalek::Signature;
+use common::utils::now_ms;
 use ed25519_dalek::Signer;
-use ed25519_dalek::VerifyingKey;
 use thiserror::Error;
-use tokio::time::timeout;
 
 use super::Dht;
 use super::config::FORWARD_TIMEOUT_MS;
-use super::config::K;
 use super::config::write_quorum;
+use super::home::forward_via_active_lease;
+use super::home::handle_presence_lease_rpc;
+use super::home::handle_presence_state_rpc;
+use super::rpc::fan_out;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
+const ACTIVITY_MAX_SKEW_MS: u64 = 30_000;
 
-/// Per-home outcome of a single `Forward` RPC during the fan-out. Used to
-/// build the [`ForwardSummary`] tally — the caller (typically
-/// `client/events/forward.rs::handle_forward`) only needs the aggregated
-/// counts, but per-home audit is preserved for diagnostic logging and
-/// metrics correlation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HomeReply {
     pub node_id: NodeId,
     pub outcome: ForwardOutcome,
 }
 
-/// Caller-friendly summary of a fan-out attempt. Counts are encoded as
-/// per-home `Vec<NodeId>`s rather than scalars so the caller can attribute
-/// successes/failures to specific peers when logging or producing
-/// observability events.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ForwardSummary {
-    /// All K homes the sender attempted (including self when self is in
-    /// the K-closest set). Length is `K` in the steady-state case;
-    /// shorter when the routing table holds fewer than K-1 peers.
     pub homes_tried:          Vec<NodeId>,
-    /// Homes that returned [`ForwardOutcome::Delivered`] — recipient was
-    /// online there and received the dispatch.
     pub delivered_at:         Vec<NodeId>,
-    /// Homes that returned [`ForwardOutcome::Stored`] — recipient was
-    /// offline; the dispatch was durably queued.
     pub stored_at:            Vec<NodeId>,
-    /// Homes that returned anything else, paired with the outcome for
-    /// diagnostic surface.
     pub failed_at:            Vec<HomeReply>,
 }
 
 impl ForwardSummary {
-    /// Sum of `delivered_at + stored_at` — the count of homes that
-    /// successfully accepted the dispatch.
     pub fn success_count(&self) -> usize {
         self.delivered_at.len() + self.stored_at.len()
     }
 
-    /// True iff at least one home returned `Delivered`. The sender
-    /// promotes its client-side ack from `Forwarded` to `Delivered` in
-    /// this case.
     pub fn any_delivered(&self) -> bool {
         !self.delivered_at.is_empty()
     }
 
-    /// Whether the selected homes met their write requirement.
     pub fn meets_k_min(&self) -> bool {
         self.success_count() >= write_quorum(self.homes_tried.len())
     }
+
+    fn record(&mut self, node_id: NodeId, outcome: ForwardOutcome) {
+        match outcome {
+            ForwardOutcome::Delivered => self.delivered_at.push(node_id),
+            ForwardOutcome::Stored => self.stored_at.push(node_id),
+            other => self.failed_at.push(HomeReply { node_id, outcome: other }),
+        }
+    }
 }
 
-/// Failure modes for the fan-out path. Distinguishes "we couldn't even
-/// try" (no homes / no DHT) from "we tried but didn't reach quorum"
-/// because the caller wants the same fallback behaviour for both — but
-/// metrics and logs benefit from the distinction.
 #[derive(Debug, Error)]
 pub(crate) enum ForwardError {
-    /// `dht.routing.find_closest(target, K)` returned an empty list. The
-    /// routing table is empty (bootstrap incomplete) so the fan-out
-    /// cannot proceed.
-    #[error("forward: routing table empty for target")]
-    NoHomes,
-    /// Fewer successes than the selected homes require. Carries the gap so the caller
-    /// can include it in fallback-path log messages.
     #[error("forward: insufficient replicas (wanted {wanted}, got {got})")]
     InsufficientReplicas { wanted: usize, got: usize, summary: Box<ForwardSummary> },
 }
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Run the sender-side fan-out for a `dispatch` whose recipient is not
-/// online on the sending relay.
-///
-/// 1. Compute the K-closest homes by XOR distance to the recipient's `user_ipk` (raw 32 bytes —
-///    same key derivation as `lookup_value`).
-/// 2. If `self_id` is among the K-closest, locally enqueue the dispatch via
-///    [`super::store::enqueue_for_home`] and treat the outcome as one of the K acks (mirrors the
-///    publish-path's `self_should_store` path).
-/// 3. For every remote home, dispatch a `Forward` RPC over `peer/5` in parallel, collecting
-///    outcomes via `tokio::task::JoinSet`.
-/// 4. Wait up to [`FORWARD_TIMEOUT_MS`] total wall-clock for replies.
-/// 5. Tally the `ForwardSummary`; require one success for a sole home, otherwise two.
-///
-/// **Caller's contract** (typically
-/// `relay/src/quic/handler/client/events/forward.rs::handle_forward`):
-///
-/// - Verifies the embedded `dispatch.sig` *before* calling here (the sender-relay must not forward
-///   an unsigned dispatch). The wire-level `Forward::verify` deliberately does not re-check
-///   `dispatch.sig`; the home relay re-checks at delivery time.
-/// - On `Err(_)` falls back to the local `cf_messages` queue safety net.
-///
-/// **Self-Forward never wraps in a wire `Forward`.** The sender-relay's
-/// own `forward_to_homes` shortcuts straight to
-/// [`super::store::enqueue_for_home`] when self is in the K-closest set;
-/// it does not construct a wire `Forward` for itself, sign it, and feed
-/// it through the dispatcher. The wire signature is an attestation of
-/// "I, sender_relay, forwarded this to you, home_relay" — pointing at
-/// itself would be circular.
+/// The caller has verified `dispatch.sig`. Homes check it again, since `Forward::verify` covers
+/// only the relay's outer signature.
 pub(crate) async fn forward_to_homes(
     dht: Arc<Dht>, dispatch: DispatchP, now_ms: u64,
 ) -> Result<ForwardSummary, ForwardError> {
-    dht.metrics.inc_forwards_sent();
 
-    // 1. Compute the K-closest homes. The user's IPK is the DHT key directly (raw 32 bytes, *not*
-    //    `BLAKE3(IPK)`); same derivation `lookup_value` uses for `FindValue`.
+    // A user's IPK is its DHT key as is, not hashed.
     let user_ipk_bytes: [u8; 32] = dispatch.to.0;
-    let target_id = NodeId::from_bytes(user_ipk_bytes);
+    let (descriptors, self_is_home) =
+        super::routing::homes(&dht, &NodeId::from_bytes(user_ipk_bytes));
 
-    let descriptors: Vec<NodeDescriptor> = {
-        let routing = dht.routing.read();
-        routing.find_closest(&target_id, K)
-    };
-
-    // Decide whether self is among the K-closest using the same XOR
-    // comparison the publish path uses. `find_closest` excludes self,
-    // so we need a separate self-vs-Kth-distance check.
     let self_id = dht.node_id;
-    let self_is_in_k = if descriptors.len() < K {
-        // Sparse routing table — be permissive (self is "trivially" in
-        // the K-closest because there aren't K others). Mirrors the same
-        // permissiveness in `store::self_is_owner` and
-        // `publish::self_should_store`.
-        true
-    } else {
-        let self_dist = xor32(self_id.as_bytes(), &user_ipk_bytes);
-        let kth = &descriptors[K - 1];
-        let kth_dist = xor32(kth.id.as_bytes(), &user_ipk_bytes);
-        self_dist < kth_dist
-    };
-
-    if descriptors.is_empty() && !self_is_in_k {
-        // Routing table is empty AND self isn't a home (impossible in
-        // practice: empty routing → permissive self_is_in_k → branch
-        // unreachable, but the type system doesn't know that). Surface
-        // explicitly so the caller can fall back to local queue.
-        return Err(ForwardError::NoHomes);
-    }
-    // 2. Self-store short-circuit. If self is in the K-closest, we add a self-record to the summary
-    //    without dialing ourselves over the network.
     let mut summary = ForwardSummary::default();
     let mut homes_tried: Vec<NodeId> = descriptors.iter().map(|peer| peer.id).collect();
 
-    if self_is_in_k {
+    if self_is_home {
         homes_tried.push(self_id);
         let outcome = if let Some(lease) = dht
             .store
@@ -236,39 +109,22 @@ pub(crate) async fn forward_to_homes(
                 stored
             }
         };
-        match outcome {
-            ForwardOutcome::Delivered => summary.delivered_at.push(self_id),
-            ForwardOutcome::Stored => {
-                summary.stored_at.push(self_id);
-                // Only new content push-wakes; receipts/edits/etc. wait for drain.
-                if dispatch.wake.wakes() {
-                    dht.trigger_wake(&user_ipk_bytes, dispatch.wake);
-                }
-            },
-            other => summary.failed_at.push(HomeReply { node_id: self_id, outcome: other }),
+        // Only new content push-wakes; receipts/edits/etc. wait for drain.
+        if matches!(outcome, ForwardOutcome::Stored) && dispatch.wake.wakes() {
+            dht.trigger_wake(&user_ipk_bytes, dispatch.wake);
         }
+        summary.record(self_id, outcome);
     }
 
-    // 3. Build the wire `Forward` once — the same `Forward` is sent to every remote home (one
-    //    signature, K-1 transmissions) since the transcript covers `(dispatch.id, sender_relay_id,
-    //    timestamp)`, none of which depend on the home being addressed — one signature, multiplexed
-    //    over every home.
-    let forward_pkt = build_signed_forward(&dht, dispatch, now_ms);
-
-    // 4. Fan-out RPCs against the K-1 (or K) remote descriptors in parallel, bounded by
-    //    [`FORWARD_TIMEOUT_MS`] total wall-clock.
-    let remote_replies = remote_forward_parallel(&dht, &descriptors, &forward_pkt).await;
-
-    for reply in remote_replies {
-        match reply.outcome {
-            ForwardOutcome::Delivered => summary.delivered_at.push(reply.node_id),
-            ForwardOutcome::Stored => summary.stored_at.push(reply.node_id),
-            other => summary.failed_at.push(HomeReply { node_id: reply.node_id, outcome: other }),
+    // One signature serves every home: the transcript does not name the home.
+    let forward = DhtRequest::Forward(build_signed_forward(&dht, dispatch, now_ms));
+    for (node_id, reply) in fan_out(&dht, &descriptors, &forward, FORWARD_TIMEOUT_MS).await {
+        if let DhtResponse::Forward(ForwardResp { outcome }) = reply {
+            summary.record(node_id, outcome);
         }
     }
     summary.homes_tried = homes_tried;
 
-    // 5. Quorum decision.
     let required = write_quorum(summary.homes_tried.len());
     if !summary.meets_k_min() {
         let got = summary.success_count();
@@ -279,262 +135,36 @@ pub(crate) async fn forward_to_homes(
         });
     }
 
-    if summary.any_delivered() {
-        dht.metrics.inc_forwards_delivered();
-    } else {
-        dht.metrics.inc_forwards_stored();
-    }
-
     Ok(summary)
 }
 
-/// Fan an ephemeral activity to every known recipient home. Unlike message
-/// forwarding, success is best-effort: an absent recipient is dropped.
+/// Best effort, unlike message forwarding: an absent recipient misses the activity.
 pub(crate) async fn forward_activity_to_homes(dht: Arc<Dht>, activity: ActivityP) {
-    let target = NodeId::from_bytes(activity.to.0);
-    let peers = dht.routing.read().find_closest(&target, K);
-    let mut set = tokio::task::JoinSet::new();
-    for peer in peers {
-        let dht = dht.clone();
-        let activity = activity.clone();
-        set.spawn(async move {
-            let Some(conn) = super::lookup::connect_to_peer(&dht, &peer).await.ok() else { return };
-            let Ok(bytes) =
-                DhtPacket::Request(DhtRequest::ActivityForward(ActivityForward { activity }))
-                    .pack()
-            else {
-                return;
-            };
-            let Ok((mut tx, mut rx)) = conn.open_bi().await else { return };
-            if tx.write_all(&bytes).await.is_err() || tx.finish().is_err() {
-                return;
-            }
-            let _ = DhtPacket::unpack(&mut rx).await;
-        });
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(FORWARD_TIMEOUT_MS);
-    while !set.is_empty() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            set.abort_all();
-            break;
-        }
-        if timeout(remaining, set.join_next()).await.is_err() {
-            set.abort_all();
-            break;
-        }
-    }
+    to_homes(&dht, activity.to.0, DhtRequest::ActivityForward(ActivityForward { activity })).await;
 }
 
-/// Deliver a remote activity only to a currently-connected recipient.
-pub(crate) async fn handle_activity_forward_rpc(
-    dht: &Arc<Dht>, forward: ActivityForward, now_ms: u64,
-) -> ActivityForwardResp {
-    let activity = forward.activity;
-    if now_ms.abs_diff(activity.timestamp) > 30_000 {
-        return ActivityForwardResp { delivered: false };
-    }
-    let valid = (|| {
-        let key = VerifyingKey::from_bytes(&activity.from).ok()?;
-        let sig = Signature::from_slice(&*activity.sig).ok()?;
-        key.verify_strict(
-            &activity_sig_message(
-                &activity.to,
-                &activity.from,
-                &activity.group_id,
-                activity.activity,
-                activity.timestamp,
-            ),
-            &sig,
-        )
-        .ok()
-    })()
-    .is_some();
-    if !valid {
-        return ActivityForwardResp { delivered: false };
-    }
-    let conn = dht.clients.as_ref().and_then(|clients| clients.read().get(&activity.to.0).cloned());
-    let Some(conn) = conn else { return ActivityForwardResp { delivered: false } };
-    let delivered = if let Ok((mut tx, _)) = conn.open_bi().await {
-        SRelayPacket::Activity(activity).send(&mut tx).await.is_ok() && tx.finish().is_ok()
-    } else {
-        false
-    };
-    ActivityForwardResp { delivered }
+/// Replies are ignored: each caller is best effort.
+async fn to_homes(dht: &Arc<Dht>, user: [u8; 32], req: DhtRequest) {
+    let (homes, _) = super::routing::homes(dht, &NodeId::from_bytes(user));
+    fan_out(dht, &homes, &req, FORWARD_TIMEOUT_MS).await;
 }
 
 pub(crate) async fn forward_presence_consent(dht: Arc<Dht>, consent: PresenceConsent) {
-    let peers = dht.routing.read().find_closest(&NodeId::from_bytes(consent.recipient.0), K);
-    let mut set = tokio::task::JoinSet::new();
-    for peer in peers {
-        let dht = dht.clone();
-        let consent = consent.clone();
-        set.spawn(async move {
-            let Some(conn) = super::lookup::connect_to_peer(&dht, &peer).await.ok() else { return };
-            let Ok(bytes) = DhtPacket::Request(DhtRequest::PresenceConsent(consent)).pack() else {
-                return;
-            };
-            let Ok((mut tx, mut rx)) = conn.open_bi().await else { return };
-            if tx.write_all(&bytes).await.is_err() || tx.finish().is_err() {
-                return;
-            };
-            let _ = DhtPacket::unpack(&mut rx).await;
-        });
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(FORWARD_TIMEOUT_MS);
-    while !set.is_empty() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            set.abort_all();
-            break;
-        }
-        if timeout(remaining, set.join_next()).await.is_err() {
-            set.abort_all();
-            break;
-        }
-    }
+    to_homes(&dht, consent.recipient.0, DhtRequest::PresenceConsent(consent)).await;
 }
 
-/// Publish current active-relay lease to recipient homes. The lease is
-/// user-signed; homes also bind publication to its authenticated relay.
+/// The lease is user-signed, and homes also bind it to the relay that publishes it.
 pub(crate) async fn forward_presence_lease(dht: Arc<Dht>, lease: PresenceLease) {
-    let _ = handle_presence_lease_rpc(&dht, lease.clone(), dht.node_id, crate::util::systime().as_millis() as u64).await;
-    let peers = dht.routing.read().find_closest(&NodeId::from_bytes(lease.user.0), K);
-    for peer in peers {
-        let dht = dht.clone();
-        let lease = lease.clone();
-        tokio::spawn(async move {
-            let Some(conn) = super::lookup::connect_to_peer(&dht, &peer).await.ok() else { return };
-            let Ok(bytes) = DhtPacket::Request(DhtRequest::PresenceLease(lease)).pack() else { return };
-            let Ok((mut tx, mut rx)) = conn.open_bi().await else { return };
-            if tx.write_all(&bytes).await.is_ok() && tx.finish().is_ok() {
-                let _ = DhtPacket::unpack(&mut rx).await;
-            }
-        });
-    }
+    let _ = handle_presence_lease_rpc(&dht, lease.clone(), dht.node_id, now_ms()).await;
+    to_homes(&dht, lease.user.0, DhtRequest::PresenceLease(lease)).await;
 }
+
 pub(crate) async fn forward_presence_state(dht: Arc<Dht>, record: RelayPresenceState) {
-    // `find_closest` excludes self. Store locally too: in sparse tables this
-    // relay can be a recipient home, and state is one bounded row per pair.
-    let _ = handle_presence_state_rpc(&dht, record.clone(), dht.node_id, crate::util::systime().as_millis() as u64).await;
-    let peers = dht.routing.read().find_closest(&NodeId::from_bytes(record.recipient.0), K);
-    for peer in peers {
-        let dht = dht.clone();
-        let record = record.clone();
-        tokio::spawn(async move {
-            let Some(conn) = super::lookup::connect_to_peer(&dht, &peer).await.ok() else { return };
-            let Ok(bytes) = DhtPacket::Request(DhtRequest::PresenceState(record)).pack() else {
-                return;
-            };
-            let Ok((mut tx, mut rx)) = conn.open_bi().await else { return };
-            if tx.write_all(&bytes).await.is_ok() && tx.finish().is_ok() {
-                let _ = DhtPacket::unpack(&mut rx).await;
-            }
-        });
-    }
+    // Stored here too: this relay can be a recipient home, and state is one bounded row per pair.
+    let _ = handle_presence_state_rpc(&dht, record.clone(), dht.node_id, now_ms()).await;
+    to_homes(&dht, record.recipient.0, DhtRequest::PresenceState(record)).await;
 }
 
-pub(crate) async fn handle_presence_consent_rpc(
-    dht: &Arc<Dht>, consent: PresenceConsent, now_ms: u64,
-) -> PresenceReplicationResp {
-    if !consent.verify(now_ms) {
-        return PresenceReplicationResp { accepted: false };
-    }
-    PresenceReplicationResp { accepted: dht.store.put_presence_consent(&consent).unwrap_or(false) }
-}
-
-pub(crate) async fn handle_presence_state_rpc(
-    dht: &Arc<Dht>, record: RelayPresenceState, authenticated_relay: NodeId, now_ms: u64,
-) -> PresenceReplicationResp {
-    if !record.verify(&authenticated_relay, now_ms)
-        || !dht.store.has_presence_consent(&record.who.0, &record.recipient.0)
-    {
-        return PresenceReplicationResp { accepted: false };
-    }
-    let Ok(newest) = dht.store.put_presence_state(
-        &record.recipient.0,
-        &record.who.0,
-        &record.state,
-        record.version,
-        record.observed_at_ms,
-        record.lease.expires_at_ms,
-    ) else {
-        return PresenceReplicationResp { accepted: false };
-    };
-    if newest
-        && let Some(conn) = dht
-            .clients
-            .as_ref()
-            .and_then(|clients| clients.read().get(&record.recipient.0).cloned())
-        && let Ok((mut tx, _)) = conn.open_bi().await
-    {
-        let _ = SRelayPacket::Presence(vec![PresenceP { who: record.who, state: record.state }])
-            .send(&mut tx)
-            .await;
-        let _ = tx.finish();
-    }
-    PresenceReplicationResp { accepted: true }
-}
-
-pub(crate) async fn handle_presence_lease_rpc(
-    dht: &Arc<Dht>, lease: PresenceLease, authenticated_relay: NodeId, now_ms: u64,
-) -> PresenceReplicationResp {
-    if lease.relay_id != authenticated_relay || !lease.verify(now_ms) {
-        return PresenceReplicationResp { accepted: false };
-    }
-    PresenceReplicationResp { accepted: dht.store.put_presence_lease(&lease).unwrap_or(false) }
-}
-
-/// Lease-relay side of cross-relay live delivery. Never queues: failure tells
-/// recipient homes to take their normal durable queue and push-wake path.
-pub(crate) async fn handle_live_forward_rpc(
-    dht: &Arc<Dht>, forward: LiveForward, authenticated_relay: NodeId, now_ms: u64,
-) -> LiveForwardResp {
-    if forward.dispatch.to.0 != forward.lease.user.0
-        || forward.sender_relay_id != authenticated_relay
-        || forward.lease.relay_id != dht.node_id
-        || !forward.lease.verify(now_ms)
-        || now_ms.abs_diff(forward.timestamp) > common::proto::dht_p2p::MAX_DHT_HELLO_SKEW_MS
-        || !verify_dispatch_user_sig(&forward.dispatch)
-        || dht.presence_leases.as_ref().and_then(|leases| leases.read().get(&forward.lease.user.0).cloned())
-            != Some(forward.lease.clone())
-    {
-        return LiveForwardResp { delivered: false };
-    }
-    let Some(sender_pubkey) = resolve_sender_pubkey(dht, &forward.sender_relay_id) else {
-        return LiveForwardResp { delivered: false };
-    };
-    let Ok(key) = VerifyingKey::from_bytes(&sender_pubkey) else {
-        return LiveForwardResp { delivered: false };
-    };
-    if key
-        .verify_strict(
-            &live_forward_signing_input(
-                &forward.dispatch.id.0,
-                &forward.lease,
-                &forward.sender_relay_id,
-                forward.timestamp,
-            ),
-            &Signature::from_bytes(&forward.sig.0),
-        )
-        .is_err()
-    {
-        return LiveForwardResp { delivered: false };
-    }
-    let conn = dht.clients.as_ref().and_then(|clients| clients.read().get(&forward.dispatch.to.0).cloned());
-    let Some(conn) = conn else { return LiveForwardResp { delivered: false } };
-    let delivery = crate::quic::handler::client::events::forward::dispatch_to_deliver(&forward.dispatch);
-    LiveForwardResp {
-        delivered: crate::quic::handler::client::events::forward::try_deliver(&conn, &delivery)
-            .await
-            .is_ok(),
-    }
-}
-
-/// Construct a fully-signed [`Forward`] for `dispatch` using `dht.signing_key`
-/// — the relay's identity key, **not** the TLS sub-key. The identity key is
-/// what the home relay's `Forward::verify` pulls from the routing-table
-/// entry for `sender_relay_id`.
 fn build_signed_forward(dht: &Dht, dispatch: DispatchP, timestamp: u64) -> Forward {
     let sender_relay_id = dht.node_id;
     let msg = forward_signing_input(&dispatch.id.0, &sender_relay_id, timestamp);
@@ -542,511 +172,63 @@ fn build_signed_forward(dht: &Dht, dispatch: DispatchP, timestamp: u64) -> Forwa
     Forward { dispatch, sender_relay_id, timestamp, sig: sig.into() }
 }
 
-// ---------------------------------------------------------------------------
-// Remote fan-out
-// ---------------------------------------------------------------------------
-
-/// Issue `Forward` RPCs against every descriptor in `peers` in parallel,
-/// bounded by [`FORWARD_TIMEOUT_MS`] total wall-clock. Each RPC opens
-/// its own bi-stream so no peer can head-of-line-block any other.
-///
-/// Returns a per-peer reply for every peer that responded inside the
-/// budget. Peers whose RPCs timed out, panicked, or whose connection
-/// failed are *omitted* from the result rather than recorded as a
-/// synthetic failure outcome — letting the caller's tally treat
-/// "no response" identically to "no entry in the result set". The
-/// summary's `homes_tried` list is computed at the call-site so the
-/// caller doesn't lose track of who was attempted.
-async fn remote_forward_parallel(
-    dht: &Arc<Dht>, peers: &[NodeDescriptor], forward: &Forward,
-) -> Vec<HomeReply> {
-    use tokio::task::JoinSet;
-    let mut set: JoinSet<Option<HomeReply>> = JoinSet::new();
-
-    for peer in peers.iter().cloned() {
-        let dht_ref = dht.clone();
-        let forward_clone = forward.clone();
-        set.spawn(async move {
-            let outcome = remote_forward_one(&dht_ref, &peer, &forward_clone).await;
-            outcome.map(|o| HomeReply { node_id: peer.id, outcome: o })
-        });
-    }
-
-    let mut results = Vec::with_capacity(peers.len());
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(FORWARD_TIMEOUT_MS);
-    while !set.is_empty() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            // Out of budget; surrender any still-in-flight tasks. The
-            // home will eventually respond into a closed stream — that's
-            // a fact-of-life with timeout-bounded RPCs and matches the
-            // publish-path's same surrender behaviour.
-            set.abort_all();
-            break;
-        }
-        match timeout(remaining, set.join_next()).await {
-            Ok(Some(Ok(Some(r)))) => results.push(r),
-            Ok(Some(Ok(None))) => {}, // RPC failed without an outcome
-            Ok(Some(Err(_))) => {},   // task panicked or canceled
-            Ok(None) => break,        // set empty
-            Err(_) => {
-                set.abort_all();
-                break;
-            },
-        }
-    }
-    results
-}
-
-/// Single `Forward` RPC against `peer`. Reuses the cached `peer_conns`
-/// connection if alive; otherwise opens a fresh one via the shared
-/// `lookup::connect_to_peer` path so this module pulls from / populates
-/// the same `peer_conns` cache as the publish/lookup paths.
-///
-/// Returns `Some(outcome)` on a structurally valid round-trip and
-/// `None` on any RPC-level failure (connect failed, write failed,
-/// response was the wrong variant). The caller treats `None` as
-/// "this home contributed nothing to the K_MIN tally".
-async fn remote_forward_one(
-    dht: &Arc<Dht>, peer: &NodeDescriptor, forward: &Forward,
-) -> Option<ForwardOutcome> {
-    let conn = super::lookup::connect_to_peer(dht, peer).await.ok()?;
-
-    let pkt = DhtPacket::Request(DhtRequest::Forward(forward.clone()));
-    let bytes = pkt.pack().ok()?;
-
-    let (mut send, mut recv) = conn.open_bi().await.ok()?;
-    send.write_all(&bytes).await.ok()?;
-    send.finish().ok()?;
-
-    let resp = DhtPacket::unpack(&mut recv).await.ok()?;
-    match resp {
-        DhtPacket::Response(DhtResponse::Forward(ForwardResp { outcome })) => Some(outcome),
-        // Wrong response variant — peer is misbehaving. We deliberately
-        // do *not* close the connection here: the peer's misbehaviour
-        // will surface again on the next RPC and the per-peer rate
-        // limiter on the inbound side will eventually trip. Closing
-        // optimistically would create connect/disconnect storms under
-        // a buggy-but-not-malicious peer.
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Home-side `Forward` handler (sticky-home)
-// ---------------------------------------------------------------------------
-
-/// Home-side handler for `DhtRequest::Forward`. Receives a `Forward`,
-/// verifies the outer sender-relay signature plus the embedded dispatch
-/// signature, then either delivers to the recipient locally (online) or
-/// queues into `cf_dht_queue` (offline).
-///
-/// **Verification ladder**:
-///
-/// 1. Look up the sender-relay's verifying pubkey from the routing table entry for
-///    `fwd.sender_relay_id`. The DhtHello handshake populates that entry, so an unauthenticated
-///    dialer cannot land here. If the pubkey is missing entirely, return `BadSig` — there's nothing
-///    to verify against.
-/// 2. `Forward::verify(&fwd, sender_relay_pubkey, now_ms)` — outer sig + skew check.
-/// 3. Confirm we *are* in the recipient's K-closest. The sender shouldn't have routed to us if
-///    we're not, but K-set drift races are real; return `NotOwner` so the sender re-fans-out.
-/// 4. Verify the embedded `dispatch.sig` (user-layer) — `Forward::verify` deliberately doesn't
-///    (two-layer signing contract).
-/// 5. Online recipient short-circuit: if the recipient is currently authenticated on this relay,
-///    deliver via the same `try_deliver` path the sender-side `handle_forward` uses. Return
-///    `Delivered` on success.
-/// 6. Otherwise enqueue via [`super::store::enqueue_for_home`] (which enforces the per-recipient
-///    cap and returns `Stored` / `QueueFull` accordingly).
-///
-/// **Outcome semantics**: see [`ForwardOutcome`] — every rejection
-/// path returns a distinct outcome variant; the dispatcher does not
-/// close the connection (only the wire-validator's hard-protocol
-/// failures do). The `CloseReason::DhtForwardRejected` is reserved for
-/// outer-validator failures; this handler returns soft-rejects in the
-/// response body so the sender can attribute failures to specific homes.
-///
-/// **Lock contract**: routing-table read is scoped + cloned out before
-/// any `await`; the connected-clients read is the same.
-pub(crate) async fn handle_forward_rpc(dht: &Arc<Dht>, fwd: Forward, now_ms: u64) -> ForwardResp {
-    // 1. Resolve sender_relay's verifying pubkey from the routing table. The DhtHello handshake
-    //    populates the routing entry's `pubkey` field; if it's the placeholder `[0u8; 32]` (the
-    //    `with_no_client_auth()` inbound case), we cannot verify and conservatively reject. The
-    //    peer_conns cache is the secondary source — it's populated for outbound dials and may have
-    //    a verified pubkey when the routing entry doesn't.
-    let sender_pubkey = match resolve_sender_pubkey(dht, &fwd.sender_relay_id) {
-        Some(pk) => pk,
-        None => return ForwardResp { outcome: ForwardOutcome::BadSig },
-    };
-
-    // 2. Outer sender-relay signature + skew check.
-    if fwd.verify(&sender_pubkey, now_ms).is_err() {
-        return ForwardResp { outcome: ForwardOutcome::BadSig };
-    }
-
-    // 3. Are we in the recipient's K-closest? Defensive — sender shouldn't have routed here
-    //    otherwise.
-    let recipient_ipk: [u8; 32] = fwd.dispatch.to.0;
-    if !self_is_in_k_closest(dht, &recipient_ipk) {
-        return ForwardResp { outcome: ForwardOutcome::NotOwner };
-    }
-
-    // 4. Embedded user-layer dispatch signature.
-    if !verify_dispatch_user_sig(&fwd.dispatch) {
-        return ForwardResp { outcome: ForwardOutcome::BadSig };
-    }
-
-    // 5. Online-recipient short-circuit. Snapshot the connection out of the lock before any await
-    //    (project-wide rule); the `clients` map field is `Option` so unit-test fixtures can skip
-    //    the local-deliver path entirely.
-    let recipient_conn = dht.clients.as_ref().and_then(|map| {
-        let guard = map.read();
-        guard.get(&recipient_ipk).cloned()
-    });
-
-    if let Some(conn) = recipient_conn {
-        let delivery =
-            crate::quic::handler::client::events::forward::dispatch_to_deliver(&fwd.dispatch);
-        if crate::quic::handler::client::events::forward::try_deliver(&conn, &delivery)
-            .await
-            .is_ok()
-        {
-            return ForwardResp { outcome: ForwardOutcome::Delivered };
-        }
-        // Local entry was stale (peer reset, ack timeout, etc.). Fall
-        // through to the queue path — same fallback shape as
-        // `handle_forward`. We do NOT evict the stale entry here:
-        // that's a per-relay concern owned by the sender-side
-        // forward path, and races with re-handshakes complicate it.
-        // The next `Forward` for the same recipient will trigger the
-        // same fall-through and the queue grows by one extra entry —
-        // bounded by `MAX_QUEUED_PER_RECIPIENT`.
-    }
-
-    // 6. A recipient home may know a still-valid assignment to another relay
-    // where the user is actively connected. Try that relay before durable
-    // queueing; it returns false for every non-delivery condition.
-    if is_primary_home(dht, &recipient_ipk)
-        && let Some(lease) = dht.store.get_presence_lease(&recipient_ipk).filter(|lease| lease.verify(now_ms))
-        && forward_via_active_lease(dht, &fwd.dispatch, lease).await
-    {
-        return ForwardResp { outcome: ForwardOutcome::Delivered };
-    }
-
-    // 7. Offline (or live delivery failed): durably enqueue.
-    let outcome = super::store::enqueue_for_home(dht, &recipient_ipk, &fwd.dispatch, now_ms);
-    if matches!(outcome, ForwardOutcome::Stored) {
-        if dht.store.persist_barrier().wait().await.is_err() {
-            return ForwardResp { outcome: ForwardOutcome::BadSig };
-        }
-        if fwd.dispatch.wake.wakes() {
-            dht.trigger_wake(&recipient_ipk, fwd.dispatch.wake);
-        }
-    }
-    ForwardResp { outcome }
-}
-
-/// Ask the relay named by a valid home-held lease to deliver only to its local
-/// recipient connection. No response, invalid route, or a missing descriptor
-/// is deliberately indistinguishable from an offline recipient.
-fn forward_via_active_lease<'a>(
-    dht: &'a Arc<Dht>, dispatch: &'a DispatchP, lease: PresenceLease,
-) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-    Box::pin(async move {
-        let peer = dht
-            .routing
-            .read()
-            .find_closest(&lease.relay_id, K)
-            .into_iter()
-            .find(|peer| peer.id == lease.relay_id);
-        let Some(peer) = peer else { return false };
-        let Ok(conn) = super::lookup::connect_to_peer(dht, &peer).await else { return false };
-        let timestamp = crate::util::systime().as_millis() as u64;
-        let sig = dht.signing_key.sign(&live_forward_signing_input(
-            &dispatch.id.0, &lease, &dht.node_id, timestamp,
-        ));
-        let Ok(bytes) = DhtPacket::Request(DhtRequest::LiveForward(LiveForward {
-            dispatch: dispatch.clone(),
-            lease,
-            sender_relay_id: dht.node_id,
-            timestamp,
-            sig: sig.to_bytes().into(),
-        }))
-        .pack() else {
-            return false;
-        };
-        let Ok((mut tx, mut rx)) = conn.open_bi().await else { return false };
-        if tx.write_all(&bytes).await.is_err() || tx.finish().is_err() {
-            return false;
-        }
-        matches!(
-            DhtPacket::unpack(&mut rx).await,
-            Ok(DhtPacket::Response(DhtResponse::LiveForward(LiveForwardResp { delivered: true })))
-        )
-    })
-}
-
-/// Exactly one home attempts live delivery. Other homes retain durable fallback.
-fn is_primary_home(dht: &Dht, recipient: &[u8; 32]) -> bool {
-    let target = NodeId::from_bytes(*recipient);
-    let mut homes = dht.routing.read().find_closest(&target, K);
-    homes.push(NodeDescriptor {
-        id: dht.node_id,
-        addr: "0.0.0.0:0".parse().expect("valid unspecified address"),
-        pubkey: [0; 32].into(),
-    });
-    homes.sort_unstable_by_key(|home| (xor32(home.id.as_bytes(), recipient), home.id));
-    homes.first().is_some_and(|home| home.id == dht.node_id)
-}
-
-/// Look up `sender_relay_id` in the routing table and `peer_conns`
-/// cache; return the verifying pubkey if either source has one.
-///
-/// The routing-table source is authoritative under the `DhtHello`
-/// handshake. The `peer_conns` source is a fallback for the case where
-/// a peer has connected and we cached the cert SPKI but the
-/// routing-table insert lost a race. Either source's `[0u8; 32]`
-/// placeholder (the inbound `with_no_client_auth()` case) is treated as
-/// "no pubkey known".
-fn resolve_sender_pubkey(dht: &Dht, sender_relay_id: &NodeId) -> Option<[u8; 32]> {
-    // Try routing table first.
-    let from_routing: Option<[u8; 32]> = {
-        let routing = dht.routing.read();
-        let candidates = routing.find_closest(sender_relay_id, 1);
-        candidates
-            .into_iter()
-            .find(|d| &d.id == sender_relay_id)
-            .map(|d| d.pubkey.0)
-            .filter(|pk| pk != &[0u8; 32])
-    };
-    if let Some(pk) = from_routing {
-        return Some(pk);
-    }
-    // Fallback to peer_conns.
-    let from_conns: Option<[u8; 32]> = {
-        let conns = dht.peer_conns.read();
-        conns.get(sender_relay_id).map(|(_, pk)| *pk).filter(|pk| pk != &[0u8; 32])
-    };
-    from_conns
-}
-
-/// Verify the user-layer `dispatch.sig` against `dispatch.from` and
-/// the canonical [`dispatch_sig_message`] transcript. This is the
-/// *embedded* signature `Forward::verify` deliberately does not check
-/// (two-layer signing contract).
-fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
-    let Ok(vk) = VerifyingKey::from_bytes(&dispatch.from.0) else {
-        return false;
-    };
-    let sig = Signature::from_bytes(&dispatch.sig.0);
+/// Checked at ingress and again at each home: `Forward::verify` covers only the relay's signature.
+pub(crate) fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
     let msg =
         dispatch_sig_message(&dispatch.to.0, &dispatch.from.0, &dispatch.id.0, &dispatch.payload);
-    vk.verify_strict(&msg, &sig).is_ok()
+    verify_ed25519(&dispatch.from.0, &msg, &dispatch.sig.0).is_ok()
 }
 
-/// True iff `dht.self_id` would be in the K-closest for `target` under
-/// the current routing table. Same permissive sparse-table policy as
-/// `forward_to_homes::self_is_in_k`.
-fn self_is_in_k_closest(dht: &Dht, target: &[u8; 32]) -> bool {
-    let target_id = NodeId::from_bytes(*target);
-    let descriptors = {
-        let routing = dht.routing.read();
-        routing.find_closest(&target_id, K)
-    };
-    if descriptors.len() < K {
-        // Sparse-table permissive: same policy as `store::self_is_owner`
-        // and `forward_to_homes::self_is_in_k`. A fresh-joiner relay
-        // accepts forwards for users it might not yet know are in
-        // someone else's K-closest — better to over-accept and let
-        // the next sweep re-balance than under-accept and silently
-        // drop messages.
-        return true;
+pub(crate) fn activity_is_authentic(activity: &ActivityP, now_ms: u64) -> bool {
+    if now_ms.abs_diff(activity.timestamp) > ACTIVITY_MAX_SKEW_MS {
+        return false;
     }
-    let self_dist = xor32(dht.node_id.as_bytes(), target);
-    let kth_dist = xor32(descriptors[K - 1].id.as_bytes(), target);
-    self_dist <= kth_dist
+    let msg = activity_sig_message(
+        &activity.to,
+        &activity.from,
+        &activity.group_id,
+        activity.activity,
+        activity.timestamp,
+    );
+    verify_ed25519(&activity.from, &msg, &activity.sig).is_ok()
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    use common::proto::client_rel::DispatchP;
-    use common::proto::client_rel::dispatch_sig_message;
-    use common::proto::dht_p2p::ForwardOutcome;
-    use common::quic::id::NodeId;
-    use ed25519_dalek::Signer;
-    use ed25519_dalek::SigningKey;
-
     use super::*;
-    use crate::dht::Dht;
-    use crate::dht::DhtConfig;
 
-    /// Counter-derived signing key — distinct keys per call without an
-    /// RNG dep.
-    fn fresh_signing_key() -> SigningKey {
-        static SEQ: AtomicU64 = AtomicU64::new(1);
-        let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let mut seed = [0u8; 32];
-        seed[..8].copy_from_slice(&n.to_le_bytes());
-        seed[31] = (n & 0xff) as u8;
-        seed[16] = ((n >> 8) & 0xff) as u8;
-        SigningKey::from_bytes(&seed)
-    }
-
-    fn fresh_dht(self_id: NodeId) -> Arc<Dht> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-fwd-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = fresh_signing_key();
-        let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
-    }
-
-    /// Build a fresh, internally-consistent `DispatchP` from `from_user`
-    /// to `to_user`. Mirrors the `build_dispatch` helper in
-    /// `common/src/proto/dht_p2p.rs`'s test module.
-    fn build_dispatch(
-        from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
-    ) -> DispatchP {
-        let from_ipk: [u8; 32] = from_user.verifying_key().to_bytes();
-        let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
-        let sig = from_user.sign(&msg);
-        DispatchP {
-            to: (*to_ipk).into(),
-            from: from_ipk.into(),
-            id: id.into(),
-            payload: payload.to_vec().into(),
-            sig: sig.to_bytes().into(),
-            accepted_at_ms: 1,
-            wake: common::proto::client_rel::Wake::No,
-            ttl_ms: 0,
+    /// The quorum counts the homes selected before any RPC: a sole home is enough, and from two
+    /// homes on, two must hold the dispatch. Rows: homes selected, delivered, stored, met.
+    #[test]
+    fn a_sole_home_is_a_quorum_and_otherwise_two_homes_must_hold_it() {
+        let id = |n: u8| NodeId::from_bytes([n; 32]);
+        for (selected, delivered, stored, met) in [
+            (0, 0, 0, false),
+            (1, 0, 1, true),
+            (1, 0, 0, false),
+            (2, 0, 1, false),
+            (2, 1, 1, true),
+            (2, 0, 2, true),
+            (4, 1, 0, false),
+            (4, 0, 2, true),
+        ] {
+            let mut summary = ForwardSummary {
+                homes_tried: (0..selected).map(id).collect(),
+                ..Default::default()
+            };
+            for n in 0..selected {
+                let outcome = match n {
+                    n if n < delivered => ForwardOutcome::Delivered,
+                    n if n < delivered + stored => ForwardOutcome::Stored,
+                    _ => ForwardOutcome::BadSig,
+                };
+                summary.record(id(n), outcome);
+            }
+            assert_eq!(
+                summary.meets_k_min(),
+                met,
+                "{selected} homes, {delivered} delivered, {stored} stored"
+            );
         }
-    }
-
-    // -------------------------------------------------------------------
-    // ForwardSummary tally arithmetic — pure-function tests
-    // -------------------------------------------------------------------
-
-    fn id_for(n: u8) -> NodeId {
-        let mut b = [0u8; 32];
-        b[0] = n;
-        NodeId::new(b)
-    }
-
-    #[test]
-    fn forward_summary_two_stored_meets_k_min_no_delivered() {
-        let mut s = ForwardSummary::default();
-        s.stored_at.push(id_for(1));
-        s.stored_at.push(id_for(2));
-        assert_eq!(s.success_count(), 2);
-        assert!(!s.any_delivered());
-        assert!(s.meets_k_min());
-    }
-
-    #[test]
-    fn forward_summary_one_delivered_one_stored_meets_k_min_with_delivered() {
-        let mut s = ForwardSummary::default();
-        s.delivered_at.push(id_for(1));
-        s.stored_at.push(id_for(2));
-        assert_eq!(s.success_count(), 2);
-        assert!(s.any_delivered());
-        assert!(s.meets_k_min());
-    }
-
-    #[test]
-    fn forward_summary_failed_outcomes_do_not_count_toward_quorum() {
-        // Two failures + one success = 1 success; below K_MIN=2 so the
-        // tally must reject. Specifically catches a regression where
-        // `failed_at.len()` accidentally feeds into `success_count`.
-        let mut s = ForwardSummary::default();
-        s.stored_at.push(id_for(1));
-        s.failed_at.push(HomeReply { node_id: id_for(2), outcome: ForwardOutcome::NotOwner });
-        s.failed_at.push(HomeReply { node_id: id_for(3), outcome: ForwardOutcome::QueueFull });
-        assert_eq!(s.success_count(), 1);
-        assert!(!s.meets_k_min());
-    }
-
-    #[test]
-    fn forward_summary_all_delivered_meets_k_min() {
-        // Edge case: every home delivered locally (recipient is online
-        // on multiple homes — possible during reconnection windows).
-        let mut s = ForwardSummary::default();
-        for n in 1..=3 {
-            s.delivered_at.push(id_for(n));
-        }
-        assert_eq!(s.success_count(), 3);
-        assert!(s.any_delivered());
-        assert!(s.meets_k_min());
-    }
-
-    // -------------------------------------------------------------------
-    // forward_to_homes — integration with empty routing table
-    // -------------------------------------------------------------------
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn forward_keeps_two_home_requirement_when_remote_rpc_fails() {
-        let dht = fresh_dht(NodeId::new([0; 32]));
-        let key = fresh_signing_key().verifying_key().to_bytes();
-        let remote_id = NodeId::new(key);
-        dht.routing.write().insert(NodeDescriptor {
-            id:     remote_id,
-            pubkey: key.into(),
-            addr:   "127.0.0.1:9".parse().unwrap(),
-        });
-        let sender = fresh_signing_key();
-        let to = fresh_signing_key().verifying_key().to_bytes();
-        let dispatch = build_dispatch(&sender, &to, [1; 16], b"offline");
-        let error = forward_to_homes(dht.clone(), dispatch, 1_700_000_000_000).await.unwrap_err();
-        match error {
-            ForwardError::InsufficientReplicas { wanted, got, summary } => {
-                assert_eq!(wanted, 2);
-                assert_eq!(got, 1);
-                assert!(summary.homes_tried.contains(&remote_id));
-                assert!(!summary.meets_k_min());
-            },
-            other => panic!("unexpected failure: {other:?}"),
-        }
-        assert!(dht.store.queue.prefix(to).next().is_some());
-    }
-
-    /// The sole home accepts an offline dispatch without a false replication failure.
-    #[tokio::test(flavor = "current_thread")]
-    async fn forward_to_homes_lone_relay_accepts_self_stored_dispatch() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [1u8; 16], b"hi");
-
-        let now: u64 = 1_700_000_000_000;
-        let res = forward_to_homes(dht.clone(), dispatch, now).await;
-        let summary = res.expect("single-home storage is successful");
-        assert_eq!(summary.stored_at, vec![dht.node_id]);
-        assert_eq!(summary.homes_tried, vec![dht.node_id]);
-        assert!(summary.delivered_at.is_empty());
-        assert!(summary.meets_k_min());
-
-        // Self-store must have durably written the dispatch into
-        // `cf_dht_queue` under the recipient's IPK prefix — regression
-        // guard against the self-store branch silently no-op'ing the
-        // on-disk write (e.g. `enqueue_for_home` replaced by a stub).
-        assert!(
-            dht.store.queue.prefix(to_ipk).next().is_some(),
-            "self-store must have written to dht_queue"
-        );
     }
 }

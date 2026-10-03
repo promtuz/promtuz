@@ -1,12 +1,9 @@
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::macros::PRAGMA;
 use super::macros::from_row;
 use crate::db::utils::ulid::ULID;
 
@@ -14,49 +11,38 @@ use crate::db::utils::ulid::ULID;
 pub struct MessageRow {
     /// ULID string (26 chars, time-sortable)
     pub id: ULID,
-    /// Which conversation this belongs to — the universal chat scope.
-    /// Locally minted and immutable; see [`ConversationRow::mls_group_id`]
-    /// for why the MLS group id can't hold this job.
     #[serde(with = "serde_bytes")]
     pub conversation_id: [u8; 16],
-    /// Who spoke, when that isn't us. `None` = the local user, which is how
-    /// every outgoing row and every pre-group inbound row reads. In a group
-    /// this is the authoritative inner MLS leaf credential, not the outer
-    /// envelope sender.
+    /// `None` on our own rows. In a group this is the author named by the MLS leaf credential,
+    /// not the envelope sender.
     pub sender_ipk: Option<Vec<u8>>,
     pub content: String,
     /// 1 = sent by us, 0 = received
     pub outgoing: bool,
     pub timestamp: u64,
-    /// 0 = pending, 1 = sent, 2 = failed
+    /// 0 = pending, 1 = sent, 2 = failed, 3 = delivered, 4 = read
     pub status: u8,
-    /// Sender-minted monotonic id (16 bytes); NULL on legacy rows.
-    /// Cross-device dedup + convergence key — the ULID `id` stays the
-    /// row PK / ordering key.
+    /// Sender-minted 16-byte id, NULL on legacy rows. The cross-device dedup key; the ULID `id`
+    /// stays the row key and sort order.
     pub dispatch_id: Option<Vec<u8>>,
-    /// Sender edited this message's text after sending.
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
     /// dispatch_id of the message this one quotes (reply). NULL = plain text.
     pub reply_to: Option<Vec<u8>>,
-    /// 0 for an ordinary message, else a `SYSTEM_*` code narrating a
-    /// membership or title change. On a system row `sender_ipk` is who acted
-    /// and `content` names the target — a hex IPK for the membership events,
-    /// the new title for a rename.
+    /// 0 for an ordinary message, else a `SYSTEM_*` code. On a system row `sender_ipk` is who acted
+    /// and `content` names the target: a hex IPK for membership events, the new title for a rename.
     pub system: u8,
 }
 
-/// Not a system row — an ordinary message.
 pub const SYSTEM_NONE: u8 = 0;
 pub const SYSTEM_ADDED: u8 = 1;
 pub const SYSTEM_LEFT: u8 = 2;
 pub const SYSTEM_REMOVED: u8 = 3;
 pub const SYSTEM_TITLED: u8 = 4;
-/// A call, narrated where it happened. `sender_ipk` is who called, `content`
-/// how it went: `answered:<seconds>`, `missed`, `declined`, `busy`,
-/// `unanswered`, `cancelled` or `failed`. `dispatch_id` is the call id, the
-/// same on both phones, so each records the call exactly once.
+/// `sender_ipk` called; `content` is `answered:<seconds>`, `missed`, `declined`, `busy`,
+/// `unanswered`, `cancelled` or `failed`. `dispatch_id` is the call id, the same on both phones,
+/// so each records the call once.
 pub const SYSTEM_CALL: u8 = 5;
 /// `sender_ipk` changed a member's role; `content` is `<member hex>:<role>`.
 pub const SYSTEM_ROLE: u8 = 6;
@@ -66,9 +52,7 @@ pub const SYSTEM_RULES: u8 = 7;
 
 from_row!(MessageRow { id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to, system });
 
-/// One emoji reaction on a message. Keyed by `reactor` (an IPK, not a
-/// me/them bool) so a multi-member group attributes each reaction to its
-/// author. `dispatch_id` names the reacted message.
+/// `dispatch_id` names the message and `reactor` the IPK that reacted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionRow {
     #[serde(with = "serde_bytes")]
@@ -83,36 +67,22 @@ pub struct ReactionRow {
 
 from_row!(ReactionRow { conversation_id, dispatch_id, reactor, emoji, timestamp });
 
-/// A chat, of any size. The scope every message, reaction, receipt and media
-/// row hangs off.
-///
-/// `id` is minted locally and never changes. `mls_group_id` is a *pointer* to
-/// the crypto group currently backing this conversation, and it moves: the
-/// send path re-creates a group whose local state went missing, `heal_dead_group`
-/// re-establishes after a restore, and an inbound Welcome adopts the peer's
-/// group on a re-pair. Keying history on the group id would strand it on every
-/// one of those; keying on `id` and repointing this column survives them.
+/// A chat of any size. History keys on `id`, minted locally and never changed, because the MLS
+/// group behind a chat moves: it is re-created, healed after a restore and adopted on a re-pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationRow {
     #[serde(with = "serde_bytes")]
     pub id: [u8; 16],
-    /// Kept at the top of the home list.
-    #[serde(default)]
     pub pinned: bool,
-    /// No notifications from this chat.
-    #[serde(default)]
     pub muted: bool,
-    /// Newest message we already alerted for, in unix seconds. Persisted rather
-    /// than held in memory: the case that needs it is a wake-drain in a fresh
-    /// process, whose heap is empty and whose unread set is hours old.
-    #[serde(default)]
+    /// Newest message already alerted for, in unix seconds. Persisted for the wake drain, which
+    /// runs in a fresh process.
     pub alerted_at: u64,
     /// 0 = direct (2 members), 1 = group.
     pub kind: u8,
     /// Group name. Empty for a direct chat, which titles itself from the peer.
     pub title: String,
-    /// The MLS group currently backing this conversation, or `None` before one
-    /// has been created (a contact added but never messaged).
+    /// The MLS group behind this chat now; `None` until a first message creates one.
     pub mls_group_id: Option<Vec<u8>>,
     pub created_at: u64,
     /// Who founded the group; `None` for backfilled and direct conversations.
@@ -121,8 +91,7 @@ pub struct ConversationRow {
 
 from_row!(ConversationRow { id, pinned, muted, alerted_at, kind, title, mls_group_id, created_at, created_by });
 
-/// One member's place in a conversation. Both parties of a direct chat get a
-/// row, including us, so the roster reads the same for 1:1 and N.
+/// Both parties of a direct chat, us included, get a row, so every roster reads alike.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberRow {
     #[serde(with = "serde_bytes")]
@@ -169,9 +138,7 @@ const MIGRATION_ARRAY: &[M] = &[
     CREATE INDEX idx_reactions_msg ON reactions(peer_ipk, dispatch_id);",
     ),
     M::up("ALTER TABLE messages ADD COLUMN reply_to BLOB;"),
-    // Delivery dedup ledger: a dispatch we already decrypted must never be
-    // re-decrypted (the MLS ratchet consumed its key → SecretReuseError).
-    // Redelivery from the other K-home relays on reconnect is the trigger.
+    // Dispatches already decrypted, whose keys the ratchet has spent. Other homes redeliver them.
     M::up(
         "CREATE TABLE seen_dispatch (
             peer_ipk BLOB NOT NULL CHECK(length(peer_ipk) = 32),
@@ -180,17 +147,14 @@ const MIGRATION_ARRAY: &[M] = &[
             PRIMARY KEY (peer_ipk, dispatch_id)
         ) WITHOUT ROWID;",
     ),
-    // Local read high-water-mark per peer: the newest incoming dispatch_id the
-    // user has read. Drives the home-list unread count; mark_read upserts it.
+    // Per-peer read watermark: the newest incoming dispatch_id the user has read.
     M::up(
         "CREATE TABLE read_state (
             peer_ipk BLOB PRIMARY KEY CHECK(length(peer_ipk) = 32),
             upto_dispatch_id BLOB NOT NULL
         ) WITHOUT ROWID;",
     ),
-    // Per-message media metadata (Image inline bytes / Attachment thumb +
-    // file_id), keyed to the message it belongs to. The caption stays on
-    // messages.content; this only holds the media side of the payload.
+    // A message's media; its caption stays in `messages.content`.
     M::up(
         "CREATE TABLE message_media (
             peer_ipk    BLOB NOT NULL,
@@ -208,18 +172,8 @@ const MIGRATION_ARRAY: &[M] = &[
             PRIMARY KEY (peer_ipk, dispatch_id)
         );",
     ),
-    // The conversation re-key. Every chat-scoped table moves off `peer_ipk`
-    // and onto a locally-minted conversation id, and `messages` gains the
-    // in-group `sender_ipk` the scope column used to double as.
-    //
-    // One migration, five table rebuilds: SQLite can't retype a column in
-    // place, and doing them separately would rewrite `messages` twice.
-    //
-    // Existing rows are carried across on a peer→conversation map built from
-    // every table that referenced a peer, so a chat that only ever had, say, a
-    // read watermark still gets its conversation. Our own membership row is
-    // added lazily by the data layer — the local IPK lives in another database
-    // and static migration SQL can't reach it.
+    // Re-keys chat tables from `peer_ipk` to a local conversation id. Our own member row is added
+    // later by the data layer, since our IPK lives in another database.
     M::up(
         r#"
         CREATE TABLE conversations (
@@ -356,17 +310,10 @@ const MIGRATION_ARRAY: &[M] = &[
         DROP TABLE conv_map;
         "#,
     ),
-    // System rows: membership and title changes narrated inline with the
-    // messages they sit between. A column rather than a side table because
-    // they order, page and dedup exactly like messages do — the only thing
-    // that differs is how they render.
+    // System rows are messages, since they order, page and dedup like messages.
     M::up("ALTER TABLE messages ADD COLUMN system INTEGER NOT NULL DEFAULT 0;"),
-    // What a peer calls themselves, as told to a group we share. Keyed on the
-    // person rather than on the conversation: the same someone in two groups is
-    // one someone, and a name learned in either should read the same in both.
-    //
-    // Never a substitute for `contacts.name` — that one the local user chose,
-    // this one its subject asserted. Resolution keeps them in that order.
+    // Names peers give themselves in shared groups, keyed by person so one name reads the same in
+    // every group. Ranks below `contacts.name`, which the local user chose.
     M::up(
         "CREATE TABLE peer_names ( \
              ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
@@ -374,26 +321,20 @@ const MIGRATION_ARRAY: &[M] = &[
              updated_at INTEGER NOT NULL \
          ) WITHOUT ROWID;",
     ),
-    // Pinned / muted / last-alerted were SharedPreferences, which Auto Backup
-    // does not carry — `backup_rules.xml` ships the blob and nothing else — so
-    // they were quietly lost on every reinstall. They are facts about a
-    // conversation, so they live on it and ride the blob with it.
+    // Pinned, muted and last-alerted live on the conversation, so the backup blob carries them.
     M::up(
         "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0; \
          ALTER TABLE conversations ADD COLUMN muted INTEGER NOT NULL DEFAULT 0; \
          ALTER TABLE conversations ADD COLUMN alerted_at INTEGER NOT NULL DEFAULT 0;",
     ),
-    // App-wide settings that are the user's, not the device's, so a restore
-    // brings them back. Stringly-typed on purpose: a settings row is read once
-    // by a screen that already knows what it means.
+    // The user's app-wide settings, kept here so a restore brings them back.
     M::up(
         "CREATE TABLE app_prefs ( \
              key   TEXT PRIMARY KEY, \
              value TEXT NOT NULL \
          ) WITHOUT ROWID;",
     ),
-    // Voice notes: the one fact about a recording the bubble needs before it
-    // decodes anything. Pictures leave it 0.
+    // Voice note length, which the bubble needs before decoding. 0 for other media.
     M::up("ALTER TABLE message_media ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;"),
     // Persist message references and installed packs; image bytes are cached separately.
     M::up(
@@ -430,10 +371,8 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("ALTER TABLE messages ADD COLUMN notification_seen INTEGER NOT NULL DEFAULT 1;
         CREATE INDEX idx_messages_notification_pending ON messages(conversation_id)
             WHERE notification_seen = 0 AND outgoing = 0 AND deleted = 0;"),
-    // What a peer looks like, by their own account: the picture beside the
-    // name in `peer_names`, asserted the same way. Outranked by nothing local,
-    // since a picture is theirs alone to choose. Its own table because either
-    // can arrive without the other, and a picture must not mint a name row.
+    // Pictures peers give themselves, like `peer_names`. A separate table, since a picture must not
+    // mint a name row.
     M::up(
         "CREATE TABLE peer_avatars ( \
              ipk        BLOB PRIMARY KEY CHECK(length(ipk) = 32), \
@@ -480,9 +419,8 @@ const MIGRATION_ARRAY: &[M] = &[
         name TEXT NOT NULL, card BLOB NOT NULL, expires_ms INTEGER NOT NULL,
         status INTEGER NOT NULL DEFAULT 0, wire BLOB, PRIMARY KEY(peer, outgoing)
     ) WITHOUT ROWID;"),
-    // A delete may arrive before its post, including across MLS catch-up.
-    // Scope by author so another member cannot reserve a victim's target ID.
-    // Like Seen, this compact ledger survives clearing visible history.
+    // A delete may arrive before its post, even across MLS catch-up. Scoped by author so no member
+    // can reserve another's target id; like Seen, it survives clearing history.
     M::up("CREATE TABLE message_deletions (
         conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
         sender_ipk BLOB NOT NULL CHECK(length(sender_ipk) = 32),
@@ -551,8 +489,8 @@ const MIGRATION_ARRAY: &[M] = &[
         FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
         WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;"),
     M::up("DROP TABLE contact_requests;"),
-    // Groups name owners now, and a group with signed rules caches them here.
-    // Until a group converts, its founder is its one owner.
+    // A group with signed rules caches its state here. Until it converts, its founder is its one
+    // owner.
     M::up("ALTER TABLE conversations ADD COLUMN group_state BLOB;
         UPDATE conversation_members SET role = CASE WHEN member_ipk IS
             (SELECT created_by FROM conversations c WHERE c.id = conversation_id) THEN 2 ELSE 0 END
@@ -563,121 +501,145 @@ const MIGRATION_ARRAY: &[M] = &[
             change_id BLOB NOT NULL,
             PRIMARY KEY(conversation_id, change_id)
         ) WITHOUT ROWID;"),
+    M::up("CREATE INDEX idx_media_file ON message_media(file_id) WHERE file_id IS NOT NULL;
+        CREATE INDEX idx_messages_dispatch ON messages(dispatch_id) WHERE dispatch_id IS NOT NULL;"),
+    // Every incoming message owns a receipt row from here on, so unread and
+    // pending counts come off these two indexes instead of a scan.
+    M::up("INSERT OR IGNORE INTO incoming_receipts(message_id,is_read)
+        SELECT m.id, CASE WHEN r.upto_dispatch_id IS NOT NULL AND m.dispatch_id<=r.upto_dispatch_id THEN 1 ELSE 0 END
+        FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
+        WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;
+        CREATE INDEX idx_incoming_pending ON incoming_receipts(message_id) WHERE pending=1;
+        CREATE INDEX idx_incoming_unread ON incoming_receipts(message_id) WHERE is_read=0;"),
 ];
-/// A migration's index in the array *is* its schema version, so the array is
-/// append-only: inserting one shifts every later version, and a device already
-/// past that point re-runs the wrong statements. Add at the end, always.
-const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+/// A migration's index is its schema version, so the array is append-only: an insert shifts every
+/// later version, and a device already past it runs the wrong statements.
+pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
-pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let mut conn = Connection::open(super::db("messages")).expect("db open failed");
-    PRAGMA!(conn, MIGRATIONS);
-    super::register_change_hook(
-        &conn,
-        &[
-            "messages",
-            "message_recipients",
-            "message_audiences",
-            "receipt_peers",
-            "incoming_receipts",
-            "reactions",
-            "message_media",
-            "conversations",
-            "conversation_members",
-            "peer_names",
-            "peer_avatars",
-            "peer_profiles",
-            "prefs",
-            "group_pictures",
-            "sticker_packs",
-            "stickers",
-            "sticker_recents",
-        ],
-    );
+/// The tables whose commits the client watches.
+pub(super) const WATCHED: &[&str] = &[
+    "messages",
+    "message_recipients",
+    "message_audiences",
+    "receipt_peers",
+    "incoming_receipts",
+    "reactions",
+    "message_media",
+    "conversations",
+    "conversation_members",
+    "peer_names",
+    "peer_avatars",
+    "peer_profiles",
+    "prefs",
+    "group_pictures",
+    "sticker_packs",
+    "stickers",
+    "sticker_recents",
+];
 
-    Mutex::new(conn)
-});
-
-#[cfg(test)]
-pub(crate) fn open_in_memory() -> Connection {
-    let mut conn = Connection::open_in_memory().expect("open in-memory db");
-    PRAGMA!(conn, MIGRATIONS);
-    conn
+pub fn migrate(conn: &mut Connection) {
+    super::prepare(conn, &MIGRATIONS);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::message::Message;
+    use crate::test_support::data::ulid;
+
+    /// A database a release left at schema `version`, holding what `seed` wrote, upgraded.
+    fn migrate_from(version: usize, seed: impl FnOnce(&Connection)) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATION_ARRAY[..version]).to_latest(&mut conn).unwrap();
+        seed(&conn);
+        migrate(&mut conn);
+        conn
+    }
 
     #[test]
     fn receipt_migration_keeps_old_read_state_without_inventing_times_or_audiences() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        Migrations::from_slice(&MIGRATION_ARRAY[..26]).to_latest(&mut conn).unwrap();
-        for n in [1u8, 2] {
-            conn.execute("INSERT INTO messages(id,conversation_id,sender_ipk,content,outgoing,timestamp,status,dispatch_id) VALUES (?1,?2,?3,'old',0,1,1,?4)",
-                (format!("{n:026}"),[9;16].as_slice(),[2;32].as_slice(),[n;16].as_slice())).unwrap();
-        }
-        conn.execute(
-            "INSERT INTO read_state VALUES (?1,?2)",
-            ([9; 16].as_slice(), [1; 16].as_slice()),
+        let conn = migrate_from(26, |conn| {
+            for n in [1u8, 2] {
+                conn.execute(
+                    "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, \
+                     timestamp, status, dispatch_id) VALUES (?1, ?2, ?3, 'old', 0, 1, 1, ?4)",
+                    (ulid(n), [9u8; 16].as_slice(), [2u8; 32].as_slice(), [n; 16].as_slice()),
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO read_state VALUES (?1, ?2)",
+                ([9u8; 16].as_slice(), [1u8; 16].as_slice()),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO member_read_state VALUES (?1, ?2, ?3)",
+                ([9u8; 16].as_slice(), [2u8; 32].as_slice(), [2u8; 16].as_slice()),
+            )
+            .unwrap();
+        });
+        let rows: Vec<(bool, Option<u64>, Option<u64>, bool)> = crate::db::all(
+            &conn,
+            "SELECT is_read, delivered_at, read_at, pending FROM incoming_receipts ORDER BY message_id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO member_read_state VALUES (?1,?2,?3)",
-            ([9; 16].as_slice(), [2; 32].as_slice(), [2; 16].as_slice()),
-        )
-        .unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
-        let rows=conn.prepare("SELECT is_read,delivered_at,read_at,pending FROM incoming_receipts ORDER BY message_id").unwrap()
-            .query_map([],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,Option<u64>>(1)?,r.get::<_,Option<u64>>(2)?,r.get::<_,bool>(3)?))).unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(rows, vec![(true, None, None, false), (false, None, None, false)]);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM message_audiences", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM message_recipients", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-            0
-        );
+        for table in ["message_audiences", "message_recipients"] {
+            let n: u32 =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "no audience is invented in {table}");
+        }
     }
 
     #[test]
     fn deletion_ledger_migration_preserves_history_and_backfills_only_known_authors() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        // Version 24 introduced the deletion ledger. Keep the pre-migration
-        // fixture pinned even as later migrations are appended.
-        Migrations::from_slice(&MIGRATION_ARRAY[..23]).to_latest(&mut conn).unwrap();
-        for (id, outgoing, deleted, sender) in [
-            (1u8, false, true, Some(vec![1; 32])),
-            (2, false, false, Some(vec![1; 32])),
-            (3, true, true, None),
-            (4, false, true, None),
-        ] {
-            conn.execute(
-                "INSERT INTO messages (id,conversation_id,sender_ipk,content,outgoing,timestamp,dispatch_id,deleted)
-                 VALUES (?1,?2,?3,'existing',?4,123,?5,?6)",
-                (id.to_string(), vec![2; 16], sender, outgoing, vec![id; 16], deleted),
-            ).unwrap();
-        }
-        MIGRATIONS.to_latest(&mut conn).unwrap();
-        let markers: Vec<Vec<u8>> = conn
-            .prepare("SELECT dispatch_id FROM message_deletions")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(markers, vec![vec![1; 16]]);
+        let conn = migrate_from(23, |conn| {
+            for (n, outgoing, deleted, sender) in [
+                (1u8, false, true, Some([1u8; 32])),
+                (2, false, false, Some([1; 32])),
+                (3, true, true, None),
+                (4, false, true, None),
+            ] {
+                conn.execute(
+                    "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, \
+                     timestamp, dispatch_id, deleted) VALUES (?1, ?2, ?3, 'existing', ?4, 123, ?5, ?6)",
+                    (ulid(n), [2u8; 16].as_slice(), sender.as_ref().map(|s| s.as_slice()), outgoing,
+                     [n; 16].as_slice(), deleted),
+                )
+                .unwrap();
+            }
+        });
+        let markers: Vec<Vec<u8>> =
+            crate::db::all(&conn, "SELECT dispatch_id FROM message_deletions", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(markers, vec![vec![1u8; 16]]);
         let kept: u32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE content='existing' AND timestamp=123",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM messages WHERE content = 'existing'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 4);
+    }
+
+    #[test]
+    fn legacy_rows_without_dispatch_ids_still_read_back() {
+        let peer = [5u8; 32];
+        let conn = migrate_from(1, |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status) \
+                 VALUES (?1, ?3, 'theirs', 0, 42, 1), (?2, ?3, 'mine', 1, 43, 1)",
+                (ulid(1), ulid(2), peer.as_slice()),
+            )
+            .unwrap();
+        });
+        let conversation: [u8; 16] =
+            conn.query_row("SELECT id FROM conversations", [], |r| r.get(0)).unwrap();
+        let rows = Message::get_messages_tx(&conn, &conversation, 10, "").unwrap();
+        let me = [7u8; 32];
+        let read: Vec<_> = rows
+            .iter()
+            .map(|r| (r.content.as_str(), r.dispatch_id.clone(), r.sender(&me)))
+            .collect();
+        assert_eq!(read, vec![("theirs", None, peer), ("mine", None, me)]);
     }
 }

@@ -1,9 +1,5 @@
-//! Relay store inspector. Dumps the fjall keyspaces so we can see what's
-//! actually queued/stashed for whom.
-//!
-//! Usage: `cargo run -p relay --bin ldb -- [db_path]`  (default: `db`).
-//! NOTE: fjall is single-writer — STOP the relay before running this, or the
-//! open will fail on the directory lock. Data persists across a restart.
+//! Dumps the relay's fjall keyspaces: `cargo run -p relay --bin ldb -- [db_path]` (default `db`).
+//! fjall is single-writer, so stop the relay first or the open fails on the directory lock.
 
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchP;
@@ -21,7 +17,6 @@ fn main() -> anyhow::Result<()> {
     eprintln!("== opening fjall store at {path} ==");
     let store = Store::open(&path)?;
 
-    // --- messages (sender-relay local store) ---
     println!("\n=== messages ===");
     let mut n = 0;
     for guard in store.messages.iter() {
@@ -37,7 +32,6 @@ fn main() -> anyhow::Result<()> {
     }
     println!("  ({n} rows)");
 
-    // --- dht_queue (offline queue: recipient(32)||ts_be(8)||id(16) -> DispatchP) ---
     println!("\n=== dht_queue (offline messages awaiting drain) ===");
     n = 0;
     for guard in store.queue.iter() {
@@ -55,7 +49,6 @@ fn main() -> anyhow::Result<()> {
     }
     println!("  ({n} rows)");
 
-    // --- dht_welcome (stashed welcomes: value = expires_at_ms(8 be) || WelcomeEnvelopeP) ---
     println!("\n=== dht_welcome (stashed welcomes) ===");
     n = 0;
     for guard in store.welcome.iter() {
@@ -80,17 +73,8 @@ fn main() -> anyhow::Result<()> {
     }
     println!("  ({n} rows)");
 
-    // --- dht_keypackage (published KPs) — just a count + owners ---
     println!("\n=== dht_keypackage (published KeyPackages) ===");
-    n = 0;
-    for guard in store.keypackage.iter() {
-        let (_key, value) = guard.into_inner()?;
-        n += 1;
-        if n <= 20 {
-            println!("  kp row ({} bytes)", value.len());
-        }
-    }
-    println!("  ({n} rows total)");
+    println!("  ({} rows total)",store.key_packages.count()?);
 
     Ok(())
 }

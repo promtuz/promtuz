@@ -11,8 +11,8 @@ use serde::Serialize;
 
 pub const ROLE_MEMBER: u8 = 0;
 pub const ROLE_ADMIN: u8 = 1;
-/// XMTP's super admin: everything an admin may do, plus choosing owners and
-/// whether admins appoint admins. A group always has one.
+/// Everything an admin may do, plus choosing owners and whether admins appoint admins. A group
+/// always has one.
 pub const ROLE_OWNER: u8 = 2;
 
 /// Who runs a group and by what rules, signed into its MLS context.
@@ -263,29 +263,20 @@ mod tests {
     fn roles_decide_who_may_ask_for_what() {
         let (mut s, roster) = group();
         let ask = |s: &GroupState, by, change| apply(s, &roster, &A, &signed(by, change));
-
         assert!(
             ask(&s, C, GroupChange::Remove { who: D.into() }).is_err(),
-            "a member removes nobody"
+            "a member removes no one"
         );
-        assert!(
-            ask(&s, B, GroupChange::Remove { who: A.into() }).is_err(),
-            "an admin can't remove an owner"
-        );
-        assert!(
-            ask(&s, B, GroupChange::Role { who: C.into(), role: ROLE_ADMIN }).is_err(),
-            "admins don't appoint by default"
-        );
+        assert!(ask(&s, B, GroupChange::Remove { who: A.into() }).is_err(), "admins keep owners");
+        let appoint = |who: [u8; 32], role| GroupChange::Role { who: who.into(), role };
+        assert!(ask(&s, B, appoint(C, ROLE_ADMIN)).is_err(), "admins don't appoint by default");
         let rules = GroupRules { admins_appoint: true, ..s.rules };
         assert!(ask(&s, B, GroupChange::Rules(rules)).is_err(), "only owners let admins appoint");
 
         s = ask(&s, A, GroupChange::Rules(rules)).unwrap();
-        s = ask(&s, B, GroupChange::Role { who: C.into(), role: ROLE_ADMIN }).unwrap();
+        s = ask(&s, B, appoint(C, ROLE_ADMIN)).unwrap();
         assert_eq!(s.role(&C), ROLE_ADMIN);
-        assert!(
-            ask(&s, B, GroupChange::Role { who: D.into(), role: ROLE_OWNER }).is_err(),
-            "only owners make owners"
-        );
+        assert!(ask(&s, B, appoint(D, ROLE_OWNER)).is_err(), "only owners make owners");
 
         let quiet = GroupRules { members_send: false, members_add: false, ..s.rules };
         s = ask(&s, B, GroupChange::Rules(quiet)).unwrap();
@@ -299,16 +290,10 @@ mod tests {
         let add = signed(C, GroupChange::Add { who: vec![[9; 32].into()] });
         assert!(apply(&s, &roster, &A, &add).is_ok());
         assert!(apply(&s, &roster, &B, &add).is_err(), "B isn't the committer");
-
-        assert!(
-            apply(&s, &roster, &C, &signed(C, GroupChange::Takeover)).is_err(),
-            "a member can't"
-        );
-        assert!(
-            apply(&s, &roster, &A, &signed(B, GroupChange::Takeover)).is_err(),
-            "B takes over itself"
-        );
-        let s = apply(&s, &roster, &B, &signed(B, GroupChange::Takeover)).unwrap();
+        let takeover = |by| signed(by, GroupChange::Takeover);
+        assert!(apply(&s, &roster, &C, &takeover(C)).is_err(), "a member can't");
+        assert!(apply(&s, &roster, &A, &takeover(B)).is_err(), "B takes over itself");
+        let s = apply(&s, &roster, &B, &takeover(B)).unwrap();
         assert_eq!(s.committer, B);
         assert!(apply(&s, &roster, &B, &add).is_ok());
     }
@@ -319,32 +304,20 @@ mod tests {
         let left: Vec<_> = roster.iter().copied().filter(|m| *m != A).collect();
         // A commits, so A hands over before leaving.
         let s = apply(&s, &roster, &A, &signed(A, GroupChange::Handover { to: B.into() })).unwrap();
-        assert!(
-            apply(&s, &roster, &B, &signed(A, GroupChange::Leave { successor: None })).is_err()
-        );
-        let s =
-            apply(&s, &roster, &B, &signed(A, GroupChange::Leave { successor: Some(C.into()) }))
-                .unwrap();
+        let leave = |successor: Option<[u8; 32]>| {
+            signed(A, GroupChange::Leave { successor: successor.map(Into::into) })
+        };
+        assert!(apply(&s, &roster, &B, &leave(None)).is_err(), "the last owner names a successor");
+        let s = apply(&s, &roster, &B, &leave(Some(C))).unwrap();
         assert_eq!((s.owners.clone(), s.committer), (vec![C], B));
         assert!(s.check(&left).is_ok());
 
         // The last owner can't be demoted, and a demoted committer hands on.
-        assert!(
-            apply(
-                &s,
-                &left,
-                &B,
-                &signed(B, GroupChange::Role { who: C.into(), role: ROLE_MEMBER })
-            )
-            .is_err()
-        );
-        let s = apply(
-            &s,
-            &left,
-            &B,
-            &signed(C, GroupChange::Role { who: B.into(), role: ROLE_MEMBER }),
-        )
-        .unwrap();
+        let demote = |by, who: [u8; 32]| {
+            signed(by, GroupChange::Role { who: who.into(), role: ROLE_MEMBER })
+        };
+        assert!(apply(&s, &left, &B, &demote(B, C)).is_err());
+        let s = apply(&s, &left, &B, &demote(C, B)).unwrap();
         assert_eq!(s.committer, C);
     }
 }

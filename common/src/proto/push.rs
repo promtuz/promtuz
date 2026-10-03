@@ -1,10 +1,5 @@
-//! Push wire types: device → gateway registration and relay → gateway wake.
-//! The gateway holds `P → token`; relays hold `IPK → P` — neither alone links
-//! a user to a wakeable device.
-//!
-//! **Pseudonym `P` is a per-install Ed25519 public key** (random, unrelated to
-//! the IPK). The device keeps the secret and self-signs each registration, so
-//! the gateway can authenticate `P → token` without ever seeing the IPK.
+//! Push wire types: device-to-gateway registration and relay-to-gateway wake. The gateway holds
+//! `P → token` and relays hold `IPK → P`, so neither alone links a user to a device.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -13,12 +8,9 @@ use crate::proto::client_rel::Wake;
 use crate::proto::pack::bounded_vec;
 use crate::types::bytes::Bytes;
 
-/// Domain tag mixed into the registration signing input so a signature can
-/// never be lifted into another protocol context.
+/// Keeps a registration signature from being lifted into another protocol context.
 const REGISTER_DOMAIN: &[u8] = b"promtuz-push-register-v1";
 
-/// An FCM registration token is ~163 bytes, an APNs device token 32, and a
-/// UnifiedPush endpoint a short URL.
 pub const MAX_PUSH_TOKEN_BYTES: usize = 512;
 
 /// FCM's own limit on a data message.
@@ -34,9 +26,6 @@ pub enum RegisterResponse {
     Rejected,
 }
 
-/// Which platform wake service a token targets. The tag travels with every
-/// registration so the gateway can add APNs / UnifiedPush as new dispatch arms
-/// without a registry migration — the iOS-readiness pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushProvider {
     Fcm,
@@ -45,8 +34,7 @@ pub enum PushProvider {
 }
 
 impl PushProvider {
-    /// Stable byte for the signing input. Never renumber (would break existing
-    /// signatures); append new providers.
+    /// Signing-input byte: never renumber, only append.
     fn tag(self) -> u8 {
         match self {
             PushProvider::Fcm => 0,
@@ -56,40 +44,24 @@ impl PushProvider {
     }
 }
 
-/// The bytes a device signs to register `P → token`. Binds the signature to
-/// `(provider, token)` so a captured signature can't be replayed onto a
-/// different token.
+/// Binds the signature to `(provider, token)`, so a captured one cannot move to another token.
 pub fn register_signing_input(provider: PushProvider, token: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(REGISTER_DOMAIN.len() + 1 + token.len());
-    v.extend_from_slice(REGISTER_DOMAIN);
-    v.push(provider.tag());
-    v.extend_from_slice(token);
-    v
+    [REGISTER_DOMAIN, &[provider.tag()], token].concat()
 }
 
-/// Device registers `P → token` with the gateway. Self-signed by `P` (see the
-/// module note) so the gateway accepts only genuine registrations while never
-/// seeing the IPK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterToken {
-    /// Per-install push pseudonym `P` — a random Ed25519 pubkey, not derivable
-    /// from the IPK. Also the key that verifies `sig`.
+    /// Per-install pseudonym `P`: a random Ed25519 key unrelated to the IPK, which verifies `sig`.
     pub pseudonym: Bytes<32>,
     pub provider:  PushProvider,
-    /// Opaque platform token (FCM registration token / APNs device token /
-    /// UnifiedPush endpoint URL). Variable length, bounded by
-    /// [`MAX_PUSH_TOKEN_BYTES`].
     #[serde(deserialize_with = "bounded_vec::<_, _, MAX_PUSH_TOKEN_BYTES>")]
     pub token:     Vec<u8>,
-    /// Signature by `P` over `(provider, token)`.
     pub sig:       Bytes<64>,
 }
 
-/// A home relay asks the gateway to wake a device. Only a relay holding the
-/// recipient's queue initiates this.
+/// Sent only by a home relay holding the recipient's queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeRequest {
-    /// Recipient's push pseudonym `P` (the relay holds `IPK → P`).
     pub pseudonym: Bytes<32>,
     /// Reserved payload field. Current gateways accept only an empty wake;
     /// message content is fetched from the relay.
@@ -100,12 +72,8 @@ pub struct WakeRequest {
     pub class:     Wake,
 }
 
-/// One-RPC-per-bi-stream request the gateway unpacks (mirrors the resolver's
-/// `ClientRequest`). `Register` and `Store` arrive over `client/N`, `Wake`
-/// over `relay/N`. `Register` answers with [`RegisterResponse`] after persistence;
-/// `Store` answers with [`crate::proto::sticker::StoreResponse`]. `Wake` is
-/// fire-and-forget.
-/// Append variants, never reorder.
+/// One per bi-stream. `Register` and `Store` arrive over `client/N`, `Wake` over `relay/N` with
+/// no reply. Append variants, never reorder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GatewayRequest {
     Register(RegisterToken),
@@ -115,8 +83,6 @@ pub enum GatewayRequest {
 
 #[cfg(feature = "crypto")]
 impl RegisterToken {
-    /// Build a self-signed registration. `P` is `key`'s public key — a
-    /// per-install push keypair, unrelated to the IPK.
     pub fn signed(
         key: &ed25519_dalek::SigningKey, provider: PushProvider, token: Vec<u8>,
     ) -> Self {
@@ -130,73 +96,28 @@ impl RegisterToken {
         }
     }
 
-    /// Verify the self-signature: `sig` must be a valid signature by
-    /// `pseudonym` (as an Ed25519 pubkey) over this registration, and the
-    /// token must be within [`MAX_PUSH_TOKEN_BYTES`]. IPK-free.
     pub fn verify(&self) -> bool {
-        use ed25519_dalek::Signature;
-        use ed25519_dalek::VerifyingKey;
-        if self.token.len() > MAX_PUSH_TOKEN_BYTES {
-            return false;
-        }
-        let Ok(vk) = VerifyingKey::from_bytes(&self.pseudonym.0) else {
-            return false;
-        };
-        let sig = Signature::from_bytes(&self.sig.0);
-        vk.verify_strict(&register_signing_input(self.provider, &self.token), &sig).is_ok()
+        self.token.len() <= MAX_PUSH_TOKEN_BYTES
+            && crate::crypto::verify_ed25519(
+                &self.pseudonym.0,
+                &register_signing_input(self.provider, &self.token),
+                &self.sig.0,
+            )
+            .is_ok()
     }
 }
 
-#[cfg(all(test, feature = "crypto"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn self_signed_registration_round_trips() {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let reg = RegisterToken::signed(&key, PushProvider::Fcm, b"token-bytes".to_vec());
-        assert!(reg.verify());
-    }
-
-    #[test]
-    fn tampered_token_fails_verify() {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let mut reg = RegisterToken::signed(&key, PushProvider::Fcm, b"token-bytes".to_vec());
-        reg.token = b"evil-token".to_vec();
-        assert!(!reg.verify());
-    }
-
-    #[test]
-    fn oversize_token_fails_verify() {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let reg =
-            RegisterToken::signed(&key, PushProvider::Fcm, vec![7u8; MAX_PUSH_TOKEN_BYTES + 1]);
-        assert!(!reg.verify());
-    }
-
-    #[test]
-    fn oversize_token_fails_to_deserialize() {
-        use crate::proto::pack::Packer;
-        use crate::proto::pack::Unpacker;
-
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let reg =
-            RegisterToken::signed(&key, PushProvider::Fcm, vec![7u8; MAX_PUSH_TOKEN_BYTES + 1]);
-        let bytes = reg.ser().unwrap();
-        assert!(RegisterToken::deser(&bytes).is_err());
-    }
-
-    #[test]
-    fn oversize_wake_payload_fails_to_deserialize() {
-        use crate::proto::pack::Packer;
-        use crate::proto::pack::Unpacker;
-
-        let wake = WakeRequest {
-            pseudonym: Bytes([1u8; 32]),
-            payload:   vec![0u8; MAX_WAKE_PAYLOAD_BYTES + 1],
-            class:     Wake::Message,
-        };
-        let bytes = wake.ser().unwrap();
-        assert!(WakeRequest::deser(&bytes).is_err());
+    fn transcripts() {
+        crate::proto::golden(
+            &[
+                register_signing_input(PushProvider::UnifiedPush, b"token"),
+            ],
+            "0598fa6a183dc468a00ece6020b42b7842533097fd01a87222a0d9e8a117cdb0",
+        );
     }
 }

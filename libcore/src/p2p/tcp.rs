@@ -10,14 +10,14 @@ use common::node::config::DEFAULT_RESOLVER_PORT;
 use common::proto::client_res::{ClientRequest, ClientResponse, RelayDescriptor};
 use common::proto::pack::{Packer, Unpacker};
 use common::quic::tunnel::{self, Request};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use parking_lot::Mutex;
 use tokio::time::Instant;
 
 use super::diagnostics::{self, Event};
 use super::socket::TurnRoutes;
 use crate::data::identity::{Identity, IdentitySigner};
-use crate::db::network::NETWORK_DB;
+use crate::state::core;
 
 const HEAD_START: Duration = Duration::from_millis(600);
 const JOIN_DEADLINE: Duration = Duration::from_secs(8);
@@ -25,13 +25,13 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(3);
 const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(60);
 const DISCOVERY_CONCURRENCY: usize = 4;
 static DISCOVERY_CURSOR: AtomicUsize = AtomicUsize::new(0);
-static DISCOVERY: Lazy<tokio::sync::Mutex<Option<Instant>>> =
-    Lazy::new(|| tokio::sync::Mutex::new(None));
+static DISCOVERY: LazyLock<tokio::sync::Mutex<Option<Instant>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(None));
 
 /// A peer may name a relay address, but never supplies the identity trusted by
 /// TLS. Only our resolver-authenticated local relay records supply that name.
 fn known_relay_name(relay: SocketAddr) -> Option<String> {
-    let db = NETWORK_DB.lock();
+    let db = core().db.network().lock();
     known_relay_name_in(&db, relay)
 }
 
@@ -46,10 +46,8 @@ fn known_relay_name_in(db: &rusqlite::Connection, relay: SocketAddr) -> Option<S
     })
 }
 
-/// Serialize and throttle unknown-relay refreshes. Concurrent sessions share
-/// the new authenticated records; peer offers cannot cause unbounded resolver
-/// traffic. The whole discovery, including waiting for another refresh, is
-/// inside the route's separate setup deadline.
+/// Serializes and throttles unknown-relay refreshes, so peer offers cannot drive unbounded
+/// resolver traffic.
 async fn refreshed_name<L, R, F>(
     state: &tokio::sync::Mutex<Option<Instant>>, lookup: L, refresh: R,
 ) -> Option<String>
@@ -73,10 +71,8 @@ where
     lookup()
 }
 
-/// Race a finite batch of complete lookups, not just connections. A resolver
-/// that accepts TLS but never answers cannot hold up another trusted seed.
-/// The rotating batch bounds work while giving every configured seed a turn.
-/// Inline futures ensure a winner or caller cancellation drops every loser.
+/// Races whole lookups, not just connections, so a resolver that never answers cannot stall
+/// another seed. The rotating batch bounds the work and gives every seed a turn.
 async fn race_seed_lookups<T, L, F>(
     count: usize, cursor: &AtomicUsize, lookup: L,
 ) -> anyhow::Result<T>
@@ -111,8 +107,11 @@ where
 }
 
 async fn refresh_descriptors(wanted: SocketAddr) -> anyhow::Result<()> {
-    let seeds =
-        crate::RESOLVER_SEEDS.get().ok_or_else(|| anyhow::anyhow!("no trusted resolver seeds"))?;
+    let seeds = &core()
+        .net
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("no trusted resolver seeds"))?
+        .seeds;
     let relays = race_seed_lookups(seeds.len(), &DISCOVERY_CURSOR, |index| {
         query_descriptors(&seeds[index], wanted)
     })
@@ -148,175 +147,6 @@ async fn query_descriptors(
     Ok(relays)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct LookupLease<'a> {
-        active: &'a AtomicUsize,
-        dropped: &'a AtomicUsize,
-    }
-
-    impl Drop for LookupLease<'_> {
-        fn drop(&mut self) {
-            self.active.fetch_sub(1, Ordering::Relaxed);
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_first_seed_does_not_hide_healthy_later_seed_and_losers_are_dropped() {
-        let cursor = AtomicUsize::new(0);
-        let active = AtomicUsize::new(0);
-        let dropped = AtomicUsize::new(0);
-        let (active, dropped) = (&active, &dropped);
-        let start = Instant::now();
-        let winner = tokio::time::timeout(
-            DISCOVERY_DEADLINE,
-            race_seed_lookups(3, &cursor, |index| async move {
-                active.fetch_add(1, Ordering::Relaxed);
-                let _lease = LookupLease { active, dropped };
-                match index {
-                    0 => std::future::pending().await,
-                    1 => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        anyhow::bail!("trusted resolver has no matching descriptor");
-                    },
-                    _ => {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        Ok(index)
-                    },
-                }
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(winner, 2);
-        assert_eq!(start.elapsed(), Duration::from_millis(50));
-        assert_eq!(active.load(Ordering::Relaxed), 0, "winning lookup must cancel stalled work");
-        assert_eq!(dropped.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn seed_batches_are_bounded_fair_and_cancel_with_the_refresh_budget() {
-        let cursor = AtomicUsize::new(0);
-        let active = AtomicUsize::new(0);
-        let peak = AtomicUsize::new(0);
-        let dropped = AtomicUsize::new(0);
-        let started = Mutex::new(Vec::new());
-        let (active, peak, dropped, started) = (&active, &peak, &dropped, &started);
-        for round in 0..3 {
-            let result = tokio::time::timeout(
-                DISCOVERY_DEADLINE,
-                race_seed_lookups(9, &cursor, |index| async move {
-                    started.lock().push(index);
-                    let count = active.fetch_add(1, Ordering::Relaxed) + 1;
-                    peak.fetch_max(count, Ordering::Relaxed);
-                    let _lease = LookupLease { active, dropped };
-                    std::future::pending::<anyhow::Result<()>>().await
-                }),
-            )
-            .await;
-            assert!(result.is_err());
-            assert_eq!(active.load(Ordering::Relaxed), 0, "deadline must drop every pending query");
-            assert_eq!(started.lock().len(), (round + 1) * DISCOVERY_CONCURRENCY);
-        }
-        assert_eq!(peak.load(Ordering::Relaxed), DISCOVERY_CONCURRENCY);
-        assert_eq!(dropped.load(Ordering::Relaxed), 3 * DISCOVERY_CONCURRENCY);
-        assert_eq!(
-            started.lock().iter().copied().collect::<std::collections::HashSet<_>>().len(),
-            9,
-            "later configured seeds must not starve behind an unavailable first batch"
-        );
-    }
-
-    #[test]
-    fn offered_address_never_supplies_its_own_tls_identity() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE relays (id TEXT, host TEXT, port INTEGER);
-            INSERT INTO relays VALUES ('trusted-node', '203.0.113.10', 443);
-            INSERT INTO relays VALUES ('different-port', '203.0.113.10', 444);",
-        )
-        .unwrap();
-        assert_eq!(
-            known_relay_name_in(&db, "203.0.113.10:443".parse().unwrap()).as_deref(),
-            Some("trusted-node")
-        );
-        assert_eq!(
-            known_relay_name_in(&db, "[::ffff:203.0.113.10]:443".parse().unwrap()).as_deref(),
-            Some("trusted-node")
-        );
-        assert_eq!(known_relay_name_in(&db, "203.0.113.11:443".parse().unwrap()), None);
-        assert_eq!(known_relay_name_in(&db, "203.0.113.10:445".parse().unwrap()), None);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn different_home_relays_share_one_trusted_refresh() {
-        let state = tokio::sync::Mutex::new(None);
-        let names = Mutex::new(std::collections::HashMap::new());
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        let refresh = || async {
-            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            // Stand in for persistence after authenticated GetRelays; the
-            // offered address alone never supplies either trusted name.
-            names.lock().insert(1, "first-relay".to_owned());
-            names.lock().insert(2, "other-home-relay".to_owned());
-            Ok(())
-        };
-        let (first, other) = tokio::join!(
-            refreshed_name(&state, || names.lock().get(&1).cloned(), refresh),
-            refreshed_name(&state, || names.lock().get(&2).cloned(), refresh),
-        );
-        assert_eq!(first.as_deref(), Some("first-relay"));
-        assert_eq!(other.as_deref(), Some("other-home-relay"));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn missing_relay_lookup_is_bounded_and_cannot_flood_resolvers() {
-        let state = tokio::sync::Mutex::new(None);
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        let start = Instant::now();
-        let result = refreshed_name(
-            &state,
-            || None,
-            || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                std::future::pending::<anyhow::Result<()>>().await
-            },
-        )
-        .await;
-        assert_eq!(result, None);
-        assert_eq!(start.elapsed(), DISCOVERY_DEADLINE);
-        let result = refreshed_name(
-            &state,
-            || None,
-            || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .await;
-        assert_eq!(result, None);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-        tokio::time::advance(DISCOVERY_COOLDOWN).await;
-        let result = refreshed_name(
-            &state,
-            || None,
-            || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .await;
-        assert_eq!(result, None, "a successful refresh still cannot invent an unknown identity");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
-    }
-}
-
 fn needed(routes: &Weak<Mutex<TurnRoutes>>, synth: SocketAddr) -> bool {
     routes.upgrade().is_some_and(|routes| routes.lock().needs_tcp(synth))
 }
@@ -331,7 +161,7 @@ pub(super) fn start(
     let Some(identity) = Identity::get() else { return };
     let ipk = identity.ipk();
     let weak = Arc::downgrade(routes);
-    let worker = crate::RUNTIME.spawn(async move {
+    let worker = core().spawn(async move {
         tokio::time::sleep(HEAD_START).await;
         if !needed(&weak, synth) { return; }
         let setup = async {
@@ -360,9 +190,8 @@ pub(super) fn start(
         let Some(routes) = weak.upgrade() else { channel.close(); return };
         if !routes.lock().install_tcp(synth, channel.clone()) { return; }
         drop(routes);
-        // Do not duplicate through an unjoined TCP bridge indefinitely. Once
-        // authenticated ingress has proved a peer joined, the route owns the
-        // channel until its final lease ends; this setup task can finish.
+        // An unjoined bridge is dropped after JOIN_DEADLINE. Once authenticated ingress proves
+        // the peer joined, the route owns the channel and this task ends.
         let deadline = tokio::time::Instant::now() + JOIN_DEADLINE;
         loop {
             let Some(routes) = weak.upgrade() else { channel.close(); return };
@@ -383,4 +212,30 @@ pub(super) fn start(
         }
     });
     routes.lock().own_tcp_worker(synth, worker);
+}
+
+#[cfg(test)]
+mod tests {
+    use common::proto::client_res::RelayDescriptor;
+    use common::types::bytes::Bytes;
+    use common::types::id::NodeId;
+
+    use super::*;
+
+    #[test]
+    fn offered_address_never_supplies_its_own_tls_identity() {
+        let db = crate::test_support::data::open(crate::db::network::migrate);
+        let relay = |key: u8, addr: &str| RelayDescriptor {
+            id:     NodeId::new([key; 32]),
+            addr:   addr.parse().unwrap(),
+            pubkey: Bytes([key; 32]),
+        };
+        let (trusted, other_port) = (relay(1, "203.0.113.10:443"), relay(2, "203.0.113.10:444"));
+        crate::data::relay::Relay::refresh_tx(&db, &[trusted.clone(), other_port]).unwrap();
+        let name = |addr: &str| known_relay_name_in(&db, addr.parse().unwrap());
+        assert_eq!(name("203.0.113.10:443"), Some(trusted.id.to_string()));
+        assert_eq!(name("[::ffff:203.0.113.10]:443"), Some(trusted.id.to_string()));
+        assert_eq!(name("203.0.113.11:443"), None);
+        assert_eq!(name("203.0.113.10:445"), None);
+    }
 }

@@ -1,12 +1,9 @@
 //! Transactions and branch history for group commits.
 //!
-//! OpenMLS makes several storage calls per operation. Run those calls against
-//! an isolated provider, then publish the resulting group, its branch history,
-//! and outgoing work in one SQLite transaction. Nothing from a failed or stale
-//! operation may reach the network. Historical states are only used to process
-//! messages; we never encrypt from an old snapshot or rewind a sender ratchet.
-
-use std::sync::Arc;
+//! The MLS connection stays in one SQLite transaction from [`Transaction::open`] to
+//! [`Transaction::publish`]: OpenMLS writes, branch history and outgoing work commit together, and
+//! a failed or stale operation rolls back before reaching the network. Historical states only
+//! process messages; nothing encrypts from an old snapshot or rewinds a sender ratchet.
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -27,6 +24,8 @@ use sha2::Sha256;
 
 use super::MlsGroupHandle;
 use super::PromtuzMlsProvider;
+use super::PromtuzStorageProvider;
+use super::storage::Operation;
 
 pub type Branch = [u8; 32];
 
@@ -37,36 +36,40 @@ pub fn operation_lock(group: &[u8; 32]) -> &'static Mutex<()> {
 }
 
 pub fn registered(provider: &PromtuzMlsProvider, gid: &[u8; 32]) -> Result<bool> {
-    Ok(provider.storage().connection().lock().query_row(
-        "SELECT EXISTS(SELECT 1 FROM mls_recovery_roots WHERE group_id=?1)",
-        [gid],
-        |r| r.get(0),
-    )?)
+    provider.storage().with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mls_recovery_roots WHERE group_id=?1)",
+            [gid],
+            |r| r.get(0),
+        )?)
+    })
 }
 
 pub fn replay_watermark(provider: &PromtuzMlsProvider, gid: &[u8; 32]) -> Result<u64> {
-    Ok(provider.storage().connection().lock().query_row(
-        "SELECT COALESCE(MAX(sequence),0) FROM mls_replay WHERE group_id=?1",
-        [gid],
-        |r| r.get(0),
-    )?)
+    provider.storage().with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM mls_replay WHERE group_id=?1",
+            [gid],
+            |r| r.get(0),
+        )?)
+    })
 }
 
 pub fn discard_replay(provider: &PromtuzMlsProvider, gid: &[u8; 32], id: &[u8; 16]) -> Result<()> {
-    provider
-        .storage()
-        .connection()
-        .lock()
-        .execute("DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2", params![gid, id])?;
-    Ok(())
+    provider.storage().with_conn(|conn| {
+        conn.execute("DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2", params![gid, id])?;
+        Ok(())
+    })
 }
 
 pub fn clear_replay(provider: &PromtuzMlsProvider, gid: &[u8; 32], through: u64) -> Result<()> {
-    provider.storage().connection().lock().execute(
-        "DELETE FROM mls_replay WHERE group_id=?1 AND sequence<=?2",
-        params![gid, through],
-    )?;
-    Ok(())
+    provider.storage().with_conn(|conn| {
+        conn.execute(
+            "DELETE FROM mls_replay WHERE group_id=?1 AND sequence<=?2",
+            params![gid, through],
+        )?;
+        Ok(())
+    })
 }
 
 pub fn discard_message_replay(
@@ -74,33 +77,31 @@ pub fn discard_message_replay(
 ) -> Result<()> {
     use common::proto::mls_wire::AppPayload;
     use common::proto::pack::Unpacker;
-    let connection = provider.storage().connection();
-    let mut conn = connection.lock();
-    let tx = conn.transaction()?;
-    let rows = {
-        let mut q = tx.prepare("SELECT dispatch_id,payload FROM mls_replay WHERE group_id=?1")?;
-        q.query_map([gid], |r| Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (id, payload) in rows {
-        let related = matches!(AppPayload::deser(&payload), Ok(AppPayload::Edit { target: t, .. }
-            | AppPayload::Revise { target: t, .. } | AppPayload::React { target: t, .. }) if t == *target);
-        if id == *target || related {
-            tx.execute(
-                "DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2",
-                params![gid, id],
-            )?;
+    provider.storage().with_tx(|tx| {
+        let rows = {
+            let mut q = tx.prepare("SELECT dispatch_id,payload FROM mls_replay WHERE group_id=?1")?;
+            q.query_map([gid], |r| Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, payload) in rows {
+            let related = matches!(AppPayload::deser(&payload), Ok(AppPayload::Edit { target: t, .. }
+                | AppPayload::Revise { target: t, .. } | AppPayload::React { target: t, .. }) if t == *target);
+            if id == *target || related {
+                tx.execute(
+                    "DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2",
+                    params![gid, id],
+                )?;
+            }
         }
-    }
-    tx.commit()?;
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn recoverable_groups(provider: &PromtuzMlsProvider) -> Result<Vec<[u8; 32]>> {
-    let connection = provider.storage().connection();
-    let conn = connection.lock();
-    let mut q = conn.prepare("SELECT group_id FROM mls_recovery_roots r WHERE EXISTS(SELECT 1 FROM mls_branches b WHERE b.group_id=r.group_id AND b.parent IS NOT NULL) OR EXISTS(SELECT 1 FROM mls_join_history j WHERE j.group_id=r.group_id)")?;
-    Ok(q.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    provider.storage().with_conn(|conn| {
+        let mut q = conn.prepare("SELECT group_id FROM mls_recovery_roots r WHERE EXISTS(SELECT 1 FROM mls_branches b WHERE b.group_id=r.group_id AND b.parent IS NOT NULL) OR EXISTS(SELECT 1 FROM mls_join_history j WHERE j.group_id=r.group_id)")?;
+        Ok(q.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,27 +121,6 @@ fn storage_key(group: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 impl Snapshot {
-    /// Merge only keys changed by an isolated operation. Other groups and a
-    /// concurrent KeyPackage refill retain ownership of their global rows.
-    fn apply_global_changes(&self, updated: &Self, conn: &Connection) -> Result<()> {
-        for old in &self.0 {
-            if updated.0.contains(old) { continue; }
-            let current: Option<Vec<u8>> = conn.query_row(
-                "SELECT value FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
-                params![old.tag, old.key], |r| r.get(0),
-            ).optional()?;
-            ensure!(current.as_ref() == Some(&old.value), "key changed concurrently");
-            conn.execute("DELETE FROM mls_storage WHERE group_id=X'' AND key_tag=?1 AND sub_key=?2",
-                params![old.tag, old.key])?;
-        }
-        for row in &updated.0 {
-            if self.0.contains(row) { continue; }
-            conn.execute("INSERT INTO mls_storage(group_id,key_tag,sub_key,value) VALUES(X'',?1,?2,?3)",
-                params![row.tag, row.key, row.value])?;
-        }
-        Ok(())
-    }
-
     fn read(conn: &Connection, key: &[u8]) -> Result<Self> {
         let mut q = conn.prepare("SELECT key_tag, sub_key, value FROM mls_storage WHERE group_id=?1 ORDER BY key_tag, sub_key")?;
         Ok(Self(
@@ -183,9 +163,8 @@ impl Snapshot {
     }
 }
 
-/// A dispatch already signed and framed, ready for the ordinary durable outbox.
-/// Keeping it beside the epoch transition closes the crash window between the
-/// MLS database and that outbox (which live in separate SQLite files).
+/// A dispatch signed and framed for the durable outbox. Stored beside the epoch transition, it
+/// closes the crash window between the MLS database and the outbox, separate SQLite files.
 pub struct DispatchJob {
     pub recipient:  [u8; 32],
     pub id:         [u8; 16],
@@ -209,6 +188,19 @@ pub struct Received {
     pub payload:        Vec<u8>,
 }
 
+impl Received {
+    /// Holds the plaintext for `groups::recovery::deliver_plaintext`. A group without branches
+    /// stages under the zero branch.
+    pub(crate) fn stage(
+        &self, conn: &Connection, gid: &[u8; 32], branch: &Branch,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT OR IGNORE INTO mls_group_received(group_id,branch,sender,dispatch_id,accepted_at_ms,payload) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![gid, branch, self.author, self.id, self.accepted_at_ms, self.payload],
+        )
+    }
+}
+
 /// A verified commit's election key. Rank is read from its parent, never from
 /// the roles that the commit grants itself. Timestamps play no part.
 pub struct Candidate {
@@ -219,12 +211,10 @@ pub struct Candidate {
 }
 
 pub struct Transaction {
-    live:         Arc<Mutex<Connection>>,
+    operation:    Operation,
     key:          Vec<u8>,
     group_id:     [u8; 32],
-    expected:     Snapshot,
     source:       Snapshot,
-    source_blob:  Option<Vec<u8>>,
     pub parent:   Branch,
     pub provider: PromtuzMlsProvider,
     pub group:    MlsGroupHandle,
@@ -237,31 +227,32 @@ pub struct Published {
     pub needs_recovery: bool,
 }
 
-/// Build replacement keys without touching the source session or consuming
-/// live KeyPackages. Publication retires the old keys and saves the mapping
-/// and all invitations in the same transaction as the new session.
+/// Builds a migration's replacement keys. The source stays until publish retires it, recording the
+/// mapping and every invitation in the new session's transaction.
 pub(super) struct Replacement {
-    live: Arc<Mutex<Connection>>,
-    source: [u8; 32],
-    expected: Snapshot,
-    globals: Snapshot,
+    operation:    Operation,
+    source:       [u8; 32],
     pub provider: PromtuzMlsProvider,
 }
 
 impl Replacement {
     pub fn open(provider: &PromtuzMlsProvider, source: [u8; 32]) -> Result<Self> {
-        let live = provider.storage().connection();
-        let (expected, globals) = {
-            let conn = live.lock();
-            (Snapshot::read(&conn, &storage_key(&source)?)?, Snapshot::read(&conn, &[])?)
-        };
-        ensure!(!expected.0.is_empty(), "migration source is missing");
-        let mut conn = Connection::open_in_memory()?;
-        crate::db::mls::apply_mls_migrations(&mut conn);
-        globals.write(&conn, &[])?;
-        expected.write(&conn, &storage_key(&source)?)?;
-        Ok(Self { live, source, expected, globals,
-            provider: PromtuzMlsProvider::new(Arc::new(Mutex::new(conn))) })
+        let operation = provider.storage().begin()?;
+        ensure!(
+            !Snapshot::read(operation.conn(), &storage_key(&source)?)?.0.is_empty(),
+            "migration source is missing"
+        );
+        let provider = PromtuzMlsProvider::new(provider.storage().connection());
+        Ok(Self { operation, source, provider })
+    }
+
+    /// Nothing may already stand where the replacement is built.
+    pub fn ensure_absent(&self, target: &[u8; 32]) -> Result<()> {
+        ensure!(
+            Snapshot::read(self.operation.conn(), &storage_key(target)?)?.0.is_empty(),
+            "migration target already exists"
+        );
+        Ok(())
     }
 
     pub fn publish(
@@ -272,18 +263,11 @@ impl Replacement {
         super::branch_proof::verify_history(&gid, history, group)?;
         let key = storage_key(&gid)?;
         let source_key = storage_key(&self.source)?;
-        let connection = self.provider.storage().connection();
-        let fresh = connection.lock();
-        let snapshot = Snapshot::read(&fresh, &key)?;
-        let globals = Snapshot::read(&fresh, &[])?;
-        let mut conn = self.live.lock();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        ensure!(Snapshot::read(&tx, &source_key)? == self.expected, "migration source changed; retry");
-        ensure!(Snapshot::read(&tx, &key)?.0.is_empty(), "migration target already exists");
+        let Self { operation, source, .. } = self;
+        let tx = operation.conn();
+        let snapshot = Snapshot::read(tx, &key)?;
         tx.execute("INSERT INTO mls_group_migrations(group_id,target,conversation) VALUES(?1,?2,?3)",
-            params![self.source,gid,conversation])?;
-        self.globals.apply_global_changes(&globals, &tx)?;
-        snapshot.write(&tx, &key)?;
+            params![source,gid,conversation])?;
         let branch = group.branch_id();
         tx.execute("INSERT INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)", params![gid,branch])?;
         tx.execute("INSERT INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,X'',?4,?5)",
@@ -301,165 +285,141 @@ impl Replacement {
         }
         tx.execute("DELETE FROM mls_storage WHERE group_id=?1", [&source_key])?;
         tx.execute("DELETE FROM mls_group_size WHERE group_id=?1", [&source_key])?;
-        tx.execute("DELETE FROM mls_migration_consents WHERE group_id=?1", [self.source])?;
-        tx.commit()?;
+        tx.execute("DELETE FROM mls_migration_consents WHERE group_id=?1", [source])?;
+        operation.commit()?;
         Ok(())
     }
 }
 
 impl Transaction {
-    /// `None` selects the live head. A branch selects the retained parent of an
-    /// arriving commit, including when another commit has already won locally.
+    /// `None` selects the live head; a branch selects an arriving commit's retained parent, even
+    /// when another commit already won locally. The connection stays locked in one transaction
+    /// until [`Self::publish`], and a drop before that rolls everything back.
     pub fn open(
         provider: &PromtuzMlsProvider, group_id: [u8; 32], branch: Option<Branch>,
     ) -> Result<Option<Self>> {
-        let live = provider.storage().connection();
+        let operation = provider.storage().begin()?;
         let key = storage_key(&group_id)?;
-        let (expected, globals, source_blob) = {
-            let conn = live.lock();
-            let expected = Snapshot::read(&conn, &key)?;
-            if expected.0.is_empty() {
-                return Ok(None);
-            }
-            let blob = branch
-                .map(|id| {
-                    conn.query_row(
-                        "SELECT snapshot FROM mls_branches WHERE group_id=?1 AND branch=?2",
-                        params![group_id, id],
-                        |r| r.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()
-                })
-                .transpose()?
-                .flatten();
-            (expected, Snapshot::read(&conn, &[])?, blob)
-        };
-        if source_blob.as_ref().is_some_and(|b| b.is_empty()) {
+        let live = Snapshot::read(operation.conn(), &key)?;
+        if live.0.is_empty() {
             return Ok(None);
         }
-        let source = source_blob
-            .as_deref()
-            .map(Snapshot::decode)
-            .transpose()?
-            .unwrap_or_else(|| expected.clone());
-        let mut isolated = Connection::open_in_memory()?;
-        crate::db::mls::apply_mls_migrations(&mut isolated);
-        globals.write(&isolated, &[])?;
-        source.write(&isolated, &key)?;
-        let fork = PromtuzMlsProvider::new(Arc::new(Mutex::new(isolated)));
-        let group = MlsGroupHandle::load(&fork, &group_id)?
+        let retained = match branch {
+            Some(id) => {
+                let blob: Option<Vec<u8>> = operation
+                    .conn()
+                    .query_row(
+                        "SELECT snapshot FROM mls_branches WHERE group_id=?1 AND branch=?2",
+                        params![group_id, id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                match blob {
+                    Some(blob) if blob.is_empty() => return Ok(None),
+                    Some(blob) => Some(Snapshot::decode(&blob)?),
+                    None => None,
+                }
+            },
+            None => None,
+        };
+        // A historical branch is processed on the live rows; publish puts the
+        // canonical head back.
+        let source = match retained {
+            Some(rows) => {
+                rows.write(operation.conn(), &key)?;
+                rows
+            },
+            None => live,
+        };
+        let provider = PromtuzMlsProvider::new(provider.storage().connection());
+        let group = MlsGroupHandle::load(&provider, &group_id)?
             .ok_or_else(|| anyhow!("group snapshot missing"))?;
         let parent = group.branch_id();
         if branch.is_some_and(|id| id != parent) {
             return Ok(None);
         }
         if branch.is_none() {
-            let path = canonical_path(&live.lock(), &group_id)?;
+            let path = canonical_path(operation.conn(), &group_id)?;
             ensure!(
                 path.last().is_none_or(|head| *head == parent),
                 "group is recovering newer state"
             );
         }
-        Ok(Some(Self {
-            live,
-            key,
-            group_id,
-            expected,
-            source,
-            source_blob,
-            parent,
-            provider: fork,
-            group,
-        }))
+        Ok(Some(Self { operation, key, group_id, source, parent, provider, group }))
     }
 
-    /// Atomically publish the result. A concurrent operation invalidates the
-    /// snapshot comparison; its caller retries from fresh state, never sends
-    /// the ciphertext produced by the rejected transaction.
+    /// Records the branch made, leaves the live rows at the canonical head and queues the outgoing
+    /// work, all in the operation's transaction.
     pub fn publish(
         self, candidate: Option<Candidate>, jobs: &[DispatchJob], replay: Option<&Replay>,
         received: Option<&Received>,
     ) -> Result<Published> {
-        let branch = self.group.branch_id();
-        ensure!(candidate.is_some() || branch == self.parent, "unrecorded epoch transition");
-        let snapshot = Snapshot::read(&self.provider.storage().connection().lock(), &self.key)?;
-        let mut conn = self.live.lock();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        ensure!(
-            Snapshot::read(&tx, &self.key)? == self.expected,
-            "group changed concurrently; retry"
-        );
-        if let Some(expected) = self.source_blob.as_ref() {
-            let actual: Vec<u8> = tx.query_row(
-                "SELECT snapshot FROM mls_branches WHERE group_id=?1 AND branch=?2",
-                params![self.group_id, self.parent],
-                |r| r.get(0),
-            )?;
-            ensure!(&actual == expected, "historical group changed concurrently; retry");
-        }
+        let Self { operation, key, group_id, source, parent, provider: _, group } = self;
+        let branch = group.branch_id();
+        ensure!(candidate.is_some() || branch == parent, "unrecorded epoch transition");
+        let tx = operation.conn();
+        let snapshot = Snapshot::read(tx, &key)?;
         tx.execute(
             "INSERT OR IGNORE INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)",
-            params![self.group_id, self.parent],
+            params![group_id, parent],
         )?;
         tx.execute("INSERT OR IGNORE INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot) VALUES(?1,?2,NULL,?3,0,X'',?4)",
-            params![self.group_id, self.parent, self.group.epoch().saturating_sub(u64::from(candidate.is_some())), self.source.encode()?])?;
-        let previous = canonical_path(&tx, &self.group_id)?
+            params![group_id, parent, group.epoch().saturating_sub(u64::from(candidate.is_some())), source.encode()?])?;
+        let previous = canonical_path(tx, &group_id)?
             .last()
             .copied()
             .ok_or_else(|| anyhow!("group has no recovery root"))?;
         if let Some(candidate) = candidate {
             tx.execute("UPDATE mls_branches SET archived_at=COALESCE(archived_at,unixepoch()) WHERE group_id=?1 AND branch=?2",
-                params![self.group_id,self.parent])?;
+                params![group_id,parent])?;
             let hash: [u8; 32] = Sha256::digest(&candidate.message).into();
             tx.execute("INSERT OR IGNORE INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,commit_blob,snapshot,change_blob,proof) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![self.group_id, branch, self.parent, self.group.epoch(), candidate.rank, hash,
+                params![group_id, branch, parent, group.epoch(), candidate.rank, hash,
                     candidate.message, snapshot.encode()?, candidate.change.map(|c| postcard::to_allocvec(&c)).transpose()?, candidate.proof.map(|p| postcard::to_allocvec(&p)).transpose()?])?;
         } else {
             tx.execute(
                 "UPDATE mls_branches SET snapshot=?3 WHERE group_id=?1 AND branch=?2",
-                params![self.group_id, branch, snapshot.encode()?],
+                params![group_id, branch, snapshot.encode()?],
             )?;
         }
-        let path = canonical_path(&tx, &self.group_id)?;
+        let path = canonical_path(tx, &group_id)?;
         let head = *path.last().ok_or_else(|| anyhow!("group has no canonical head"))?;
         let canonical = path.contains(&branch);
         let head_snapshot: Vec<u8> = tx.query_row(
             "SELECT snapshot FROM mls_branches WHERE group_id=?1 AND branch=?2",
-            params![self.group_id, head],
+            params![group_id, head],
             |r| r.get(0),
         )?;
         let needs_recovery = head_snapshot.is_empty();
-        if !needs_recovery {
-            Snapshot::decode(&head_snapshot)?.write(&tx, &self.key)?;
+        if !needs_recovery && head != branch {
+            Snapshot::decode(&head_snapshot)?.write(tx, &key)?;
         }
         if let Some(replay) = replay {
             ensure!(branch == head, "cannot send from a historical branch");
             tx.execute("INSERT INTO mls_replay(group_id,dispatch_id,branch,payload,recipients,wake,kind) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(group_id,dispatch_id) DO UPDATE SET branch=excluded.branch",
-                params![self.group_id, replay.id, branch, replay.payload, postcard::to_allocvec(&replay.recipients)?, replay.wake, replay.kind])?;
+                params![group_id, replay.id, branch, replay.payload, postcard::to_allocvec(&replay.recipients)?, replay.wake, replay.kind])?;
         }
         for job in jobs {
             tx.execute("INSERT OR IGNORE INTO mls_dispatch_ids(group_id,dispatch_id,logical_id) VALUES(?1,?2,?3)",
-                params![self.group_id, job.id, job.logical_id])?;
+                params![group_id, job.id, job.logical_id])?;
             tx.execute("INSERT OR IGNORE INTO mls_dispatch_jobs(group_id,branch,recipient,dispatch_id,kind,frame) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![self.group_id, branch, job.recipient, job.id, job.kind, job.frame])?;
+                params![group_id, branch, job.recipient, job.id, job.kind, job.frame])?;
         }
         if let Some(received) = received {
-            tx.execute("INSERT OR IGNORE INTO mls_group_received(group_id,branch,sender,dispatch_id,accepted_at_ms,payload) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![self.group_id, branch, received.author, received.id, received.accepted_at_ms, received.payload])?;
+            received.stage(tx, &group_id, &branch)?;
         }
-        tx.commit()?;
+        operation.commit()?;
         Ok(Published { previous, head, canonical, needs_recovery })
     }
 }
 
 pub fn logical_dispatch(id: &[u8]) -> Result<Vec<u8>> {
-    let conn = crate::db::mls::stash_db_handle();
-    let mapped: Option<Vec<u8>> = conn
-        .lock()
-        .query_row("SELECT logical_id FROM mls_dispatch_ids WHERE dispatch_id=?1", [id], |r| {
+    let mapped: Option<Vec<u8>> = PromtuzMlsProvider::shared().storage().with_conn(|conn| {
+        conn.query_row("SELECT logical_id FROM mls_dispatch_ids WHERE dispatch_id=?1", [id], |r| {
             r.get(0)
         })
-        .optional()?;
+        .optional()
+    })?;
     Ok(mapped.unwrap_or_else(|| id.to_vec()))
 }
 
@@ -474,8 +434,10 @@ pub fn dispatch_id(branch: &Branch, logical_id: &[u8; 16]) -> [u8; 16] {
 pub fn history(
     provider: &PromtuzMlsProvider, gid: &[u8; 32], parent: Branch,
 ) -> Result<Vec<GroupBranch>> {
-    let connection = provider.storage().connection();
-    let conn = connection.lock();
+    provider.storage().with_conn(|conn| history_in(conn, gid, parent))
+}
+
+fn history_in(conn: &Connection, gid: &[u8; 32], parent: Branch) -> Result<Vec<GroupBranch>> {
     let prefix: Option<Vec<u8>> = conn
         .query_row("SELECT history FROM mls_join_history WHERE group_id=?1", [gid], |r| r.get(0))
         .optional()?;
@@ -528,26 +490,24 @@ pub fn accept_root(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, proof: &GroupBranch,
 ) -> Result<()> {
     let gid = group.group_id();
-    let connection = provider.storage().connection();
-    let mut conn = connection.lock();
-    if conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM mls_recovery_roots WHERE group_id=?1)",
-        [gid],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok(());
-    }
     super::branch_proof::verify_history(&gid, &[proof.clone()], group)?;
-    let snapshot = Snapshot::read(&conn, &storage_key(&gid)?)?;
-    let tx = conn.transaction()?;
-    tx.execute(
-        "INSERT INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)",
-        params![gid, group.branch_id()],
-    )?;
-    tx.execute("INSERT INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,?4,?5,?6)",
-        params![gid,group.branch_id(),group.epoch(),proof.commit_hash.0,snapshot.encode()?,postcard::to_allocvec(proof)?])?;
-    tx.commit()?;
-    Ok(())
+    provider.storage().with_tx(|tx| {
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mls_recovery_roots WHERE group_id=?1)",
+            [gid],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Ok(());
+        }
+        let snapshot = Snapshot::read(tx, &storage_key(&gid)?)?;
+        tx.execute(
+            "INSERT INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)",
+            params![gid, group.branch_id()],
+        )?;
+        tx.execute("INSERT INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,?4,?5,?6)",
+            params![gid,group.branch_id(),group.epoch(),proof.commit_hash.0,snapshot.encode()?,postcard::to_allocvec(proof)?])?;
+        Ok(())
+    })
 }
 
 pub fn next_history(
@@ -583,20 +543,22 @@ pub fn accept_welcome(
 ) -> Result<MlsGroupHandle> {
     let gid = envelope.group_id.0;
     let _operation = operation_lock(&gid).lock();
-    let live = provider.storage().connection();
+    let operation = provider.storage().begin()?;
     let key = storage_key(&gid)?;
-    let (expected, globals) = {
-        let conn = live.lock();
-        let expected = Snapshot::read(&conn, &key)?;
-        (expected, Snapshot::read(&conn, &[])?)
+    // The history a replacement has to improve on, read before the Welcome
+    // takes the rows over. A refused invitation rolls the old state back.
+    let previous = if Snapshot::read(operation.conn(), &key)?.0.is_empty() {
+        None
+    } else {
+        let old_group = MlsGroupHandle::load(provider, &gid)?
+            .ok_or_else(|| anyhow!("old group missing"))?;
+        let history = history_in(operation.conn(), &gid, old_group.branch_id())?;
+        Snapshot(Vec::new()).write(operation.conn(), &key)?;
+        Some(history)
     };
-    let mut isolated = Connection::open_in_memory()?;
-    crate::db::mls::apply_mls_migrations(&mut isolated);
-    globals.write(&isolated, &[])?;
-    let fork = PromtuzMlsProvider::new(Arc::new(Mutex::new(isolated)));
-    let group = super::process_welcome(&fork, envelope)?;
+    let group = super::process_welcome(provider, envelope)?;
     let plaintext = super::branch_proof::open(
-        &fork,
+        provider,
         &group,
         super::branch_proof::INVITATION_LABEL,
         sealed_history,
@@ -612,18 +574,15 @@ pub fn accept_welcome(
         })
     });
 
-    if !expected.0.is_empty() {
+    if let Some(previous) = previous {
         if restores_keys {
-            let old_group = MlsGroupHandle::load(provider, &gid)?
-                .ok_or_else(|| anyhow!("old group missing"))?;
-            let previous = self::history(provider, &gid, old_group.branch_id())?;
             ensure!(
                 preferred_history(&previous, &history, true),
                 "resync invitation moves onto a losing branch"
             );
         } else {
-            let conn = live.lock();
-            let previous: Option<([u8; 32], Vec<u8>)> = conn
+            let joined: Option<([u8; 32], Vec<u8>)> = operation
+                .conn()
                 .query_row(
                     "SELECT inviter,history FROM mls_join_history WHERE group_id=?1",
                     [gid],
@@ -631,7 +590,7 @@ pub fn accept_welcome(
                 )
                 .optional()?;
             let (inviter, old) =
-                previous.ok_or_else(|| anyhow!("existing member must request key recovery"))?;
+                joined.ok_or_else(|| anyhow!("existing member must request key recovery"))?;
             ensure!(
                 inviter == envelope.sender_ipk.0,
                 "replacement invitation is not from the original inviter"
@@ -659,15 +618,8 @@ pub fn accept_welcome(
         history.last().is_some_and(|p| p.branch.0 == group.branch_id()),
         "invitation history does not identify its MLS state"
     );
-    let fresh = fork.storage().connection();
-    let fresh = fresh.lock();
-    let snapshot = Snapshot::read(&fresh, &key)?;
-    let updated_globals = Snapshot::read(&fresh, &[])?;
-    let mut conn = live.lock();
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    ensure!(Snapshot::read(&tx, &key)? == expected, "group changed while processing an invitation");
-    globals.apply_global_changes(&updated_globals, &tx)?;
-    snapshot.write(&tx, &key)?;
+    let tx = operation.conn();
+    let snapshot = Snapshot::read(tx, &key)?;
     let branch = group.branch_id();
     tx.execute(
         "INSERT OR REPLACE INTO mls_recovery_roots(group_id,branch) VALUES(?1,?2)",
@@ -683,34 +635,51 @@ pub fn accept_welcome(
         "UPDATE mls_keypackage_stash SET consumed=1 WHERE kp_ref=?1",
         [envelope.kp_ref_used.0],
     )?;
-    tx.commit()?;
-    drop(conn);
-    MlsGroupHandle::load(provider, &gid)?.ok_or_else(|| anyhow!("invited group missing"))
+    operation.commit()?;
+    Ok(group)
 }
 
 /// Keep rollback secrets only for the transport's seven-day retry window.
 /// Public signed history survives; a later fork uses an authenticated fresh
 /// Welcome instead of silently reviving discarded key material.
 pub fn prune(provider: &PromtuzMlsProvider, gid: &[u8; 32], now: u64) -> Result<()> {
-    let connection = provider.storage().connection();
-    let conn = connection.lock();
-    let Some(head) = canonical_path(&conn, gid)?.last().copied() else { return Ok(()) };
-    conn.execute("UPDATE mls_branches SET snapshot=X'' WHERE group_id=?1 AND branch<>?2 AND COALESCE(archived_at,created_at)<?3",
-        params![gid,head,now.saturating_sub(7 * 24 * 60 * 60)])?;
-    conn.execute(
-        "UPDATE mls_group_received SET payload=X'' WHERE group_id=?1 AND applied=1",
-        [gid],
-    )?;
-    let cutoff = now.saturating_sub(7 * 24 * 60 * 60);
-    conn.execute(
-        "DELETE FROM mls_replay WHERE group_id=?1 AND created_at<?2",
-        params![gid, cutoff],
-    )?;
-    conn.execute(
-        "DELETE FROM mls_branch_inbox WHERE group_id=?1 AND received_at<?2",
-        params![gid, cutoff],
-    )?;
-    Ok(())
+    provider.storage().with_tx(|conn| {
+        let Some(head) = canonical_path(conn, gid)?.last().copied() else { return Ok(()) };
+        let cutoff = now.saturating_sub(7 * 24 * 60 * 60);
+        conn.execute("UPDATE mls_branches SET snapshot=X'' WHERE group_id=?1 AND branch<>?2 AND COALESCE(archived_at,created_at)<?3",
+            params![gid,head,cutoff])?;
+        conn.execute(
+            "UPDATE mls_group_received SET payload=X'' WHERE group_id=?1 AND applied=1",
+            [gid],
+        )?;
+        conn.execute(
+            "DELETE FROM mls_replay WHERE group_id=?1 AND created_at<?2",
+            params![gid, cutoff],
+        )?;
+        conn.execute(
+            "DELETE FROM mls_branch_inbox WHERE group_id=?1 AND received_at<?2",
+            params![gid, cutoff],
+        )?;
+        Ok(())
+    })
+}
+
+impl PromtuzStorageProvider {
+    /// Erases every row of one group without loading it, so broken state goes too. The leaf
+    /// signer, under the empty group id, survives.
+    pub(crate) fn forget_group(&self, gid: &[u8; 32]) -> Result<()> {
+        let key = storage_key(gid)?;
+        self.with_tx(|tx| {
+            tx.execute("DELETE FROM mls_storage WHERE group_id=?1", [&key])?;
+            tx.execute("DELETE FROM mls_group_size WHERE group_id=?1", [&key])?;
+            for table in ["mls_branches", "mls_recovery_roots", "mls_replay", "mls_dispatch_jobs",
+                "mls_dispatch_ids", "mls_branch_inbox", "mls_group_received", "mls_join_history",
+                "mls_recovery_retries", "mls_migration_consents", "mls_epoch_ahead"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE group_id=?1"), [gid])?;
+            }
+            Ok(())
+        })
+    }
 }
 
 pub fn canonical_path(conn: &Connection, group: &[u8; 32]) -> Result<Vec<Branch>> {
@@ -733,9 +702,11 @@ pub fn canonical_path(conn: &Connection, group: &[u8; 32]) -> Result<Vec<Branch>
 }
 
 pub fn replay_needed(provider: &PromtuzMlsProvider, group: &[u8; 32]) -> Result<Vec<Replay>> {
-    let conn = provider.storage().connection();
-    let conn = conn.lock();
-    let path = canonical_path(&conn, group)?;
+    provider.storage().with_conn(|conn| replay_needed_in(conn, group))
+}
+
+fn replay_needed_in(conn: &Connection, group: &[u8; 32]) -> Result<Vec<Replay>> {
+    let path = canonical_path(conn, group)?;
     let mut q = conn.prepare("SELECT dispatch_id,branch,payload,recipients,wake,kind FROM mls_replay WHERE group_id=?1 ORDER BY rowid")?;
     let mut rows = q.query([group])?;
     let mut pending = Vec::new();
@@ -756,4 +727,39 @@ pub fn replay_needed(provider: &PromtuzMlsProvider, group: &[u8; 32]) -> Result<
         });
     }
     Ok(pending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// At each fork the higher rank wins and then the lower commit hash, whatever hangs below the
+    /// losers; a cycle in stored history is an error rather than an endless walk.
+    #[test]
+    fn branch_election_follows_rank_then_commit_hash_and_refuses_a_cycle() {
+        let conn = crate::db::Stores::in_memory(String::new()).mls();
+        let conn = conn.lock();
+        let (gid, branch) = ([7; 32], |n: u8| [n; 32]);
+        conn.execute("INSERT INTO mls_recovery_roots VALUES (?1, ?2)", params![gid, branch(0)])
+            .unwrap();
+        // Branch, parent, rank and commit hash.
+        let rows = [(0, None, 0, 0u8), (1, Some(0), 0, 1), (2, Some(0), 1, 9), (3, Some(2), 0, 5)];
+        let rows = rows.into_iter().chain([(4, Some(2), 0, 3), (5, Some(1), 2, 0)]);
+        for (id, parent, rank, hash) in rows {
+            conn.execute(
+                "INSERT INTO mls_branches(group_id, branch, parent, epoch, rank, commit_hash, \
+                 snapshot) VALUES (?1, ?2, ?3, 0, ?4, ?5, X'')",
+                params![gid, branch(id), parent.map(branch), rank, [hash; 32]],
+            )
+            .unwrap();
+        }
+        assert_eq!(canonical_path(&conn, &gid).unwrap(), [branch(0), branch(2), branch(4)]);
+
+        conn.execute(
+            "UPDATE mls_branches SET parent = ?2 WHERE group_id = ?1 AND branch = ?3",
+            params![gid, branch(4), branch(0)],
+        )
+        .unwrap();
+        assert!(canonical_path(&conn, &gid).is_err());
+    }
 }

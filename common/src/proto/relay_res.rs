@@ -1,5 +1,3 @@
-//! Relay to Resolver Proto
-
 use std::fmt::Debug;
 
 use serde::Deserialize;
@@ -11,98 +9,39 @@ use crate::proto::pack::Packer;
 use crate::sysutils::SystemLoad;
 use crate::types::bytes::Bytes;
 
-/// Domain separation tag mixed into the [`LifetimeP::RelayHello`] signed
-/// transcript. Bumping this value forces a clean wire-format break.
+/// Each hello and heartbeat domain is distinct, so a signature never verifies as another kind.
 pub const RELAY_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-relay-hello-v1";
 
-/// Domain separation tag mixed into the [`LifetimeP::RelayHeartbeat`] signed
-/// transcript. Distinct from [`RELAY_HELLO_SIG_DOMAIN`] so a captured
-/// signature for one packet kind cannot be replayed as the other.
 pub const RELAY_HEARTBEAT_SIG_DOMAIN: &[u8] = b"promtuz-relay-heartbeat-v1";
 
-/// Domain separation tag for [`LifetimeP::GatewayHello`]. Distinct from the
-/// relay tags so a relay's hello can't be replayed as a gateway registration.
 pub const GATEWAY_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-gateway-hello-v1";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum LifetimeP {
-    /// Initial registration message sent by a relay node to a resolver.
-    ///
-    /// Carries the relay's full Ed25519 identity public key alongside the
-    /// derived [`RelayId`] so the resolver can both verify the id-to-key
-    /// binding (`BLAKE3(pubkey)`) and check the attached signature.
-    ///
-    /// `sig` is an Ed25519 signature over:
-    /// `RELAY_HELLO_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
-    ///   || relay_id (32 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
+    /// `sig` covers [`relay_hello_signing_input`].
     RelayHello {
-        /// Stable cryptographic ID derived from the node's public key.
         relay_id:  RelayId,
-        /// Full Ed25519 identity public key of the relay. Required so the
-        /// resolver can recover the verification key from the wire — a hash
-        /// is not invertible, so the id alone is insufficient.
         pubkey:    Bytes<32>,
         timestamp: u128,
-        /// Ed25519 signature over the transcript described on this enum.
         sig:       Bytes<64>,
-        // TODO: I'd rather use bitset
-        // pub capabilities: Vec<String>,
     },
 
-    /// Resolver's acknowledgement of a node registration (`NodeHello`).
-    ///
-    /// Confirms acceptance, conveys heartbeat timing, or explains rejection.
     HelloAck {
-        /// Resolver's current unix time (used for clock-drift checking).
         resolver_time: u128,
     },
 
-    /// Periodic heartbeat sent by a node to indicate that it is still alive
-    /// and to provide useful runtime metrics to the resolver.
-    ///
-    /// Authenticated identically to [`LifetimeP::RelayHello`]: carries the
-    /// relay's full Ed25519 pubkey alongside the derived [`RelayId`] so
-    /// the resolver can re-verify both id binding and signature on every
-    /// heartbeat. Without this any peer that knew a registered relay's
-    /// `relay_id` could spoof liveness signals once liveness logic lands.
-    ///
-    /// `sig` is an Ed25519 signature over:
-    /// `RELAY_HEARTBEAT_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
-    ///   || relay_id (32 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
+    /// `sig` covers [`relay_heartbeat_signing_input`].
     RelayHeartbeat {
-        /// The node's stable cryptographic ID.
         relay_id: RelayId,
-
-        /// Full Ed25519 identity public key of the relay. Carried for the
-        /// same reason as [`LifetimeP::RelayHello::pubkey`] — `relay_id` is
-        /// a BLAKE3 hash and isn't invertible, so the resolver needs the
-        /// full key to verify the attached signature.
         pubkey: Bytes<32>,
-
-        /// Sender-local unix time in milliseconds. Bound into the signed
-        /// transcript so the resolver can reject replays outside an
-        /// accepted clock-skew window.
         timestamp: u128,
-
-        /// Ed25519 signature over the transcript described on this enum.
         sig: Bytes<64>,
-
-        /// Packed load value:
-        ///
-        /// upper 7 bits = CPU usage (0–100), lower 7 bits = memory usage (0–100).
         load: SystemLoad,
-
-        /// Node uptime in seconds since its last restart.
         uptime_seconds: u64,
     },
 
-    /// Registration + keepalive for a push gateway. Same shape and auth as
-    /// [`LifetimeP::RelayHello`] (the sig binds id↔pubkey + freshness), but a
-    /// distinct variant so the resolver files it in its gateway directory.
-    /// The gateway's `PUSH_GATEWAY` capability is **not** verified here — the
-    /// resolver never sees its cert (no client auth); a relay verifies the
-    /// capability when it dials the gateway. Re-sent periodically as liveness.
-    /// Appended last (postcard variant order).
+    /// Same transcript as `RelayHello` under `GATEWAY_HELLO_SIG_DOMAIN`. `PUSH_GATEWAY` is checked
+    /// by dialers, not here. Appended last (postcard variant order).
     GatewayHello {
         gateway_id: RelayId,
         pubkey:     Bytes<32>,
@@ -111,60 +50,40 @@ pub enum LifetimeP {
     },
 }
 
-/// Builds the canonical signing transcript for [`LifetimeP::RelayHello`].
-///
-/// Both the relay (signing side) and the resolver (verifying side) call
-/// this to derive the exact byte string fed to Ed25519 — using a single
-/// helper keeps the two sides byte-for-byte identical.
 pub fn relay_hello_signing_input(
     relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128, binding: &[u8; 32],
 ) -> Vec<u8> {
-    let mut buf = signing_input(RELAY_HELLO_SIG_DOMAIN, relay_id, pubkey, timestamp);
-    buf.extend_from_slice(binding);
-    buf
+    signing_input(RELAY_HELLO_SIG_DOMAIN, relay_id, pubkey, timestamp, binding)
 }
 
-/// Builds the canonical signing transcript for [`LifetimeP::RelayHeartbeat`].
-///
-/// Mirrors [`relay_hello_signing_input`] field-for-field; the only
-/// difference is the domain separation tag, which prevents cross-protocol
-/// signature replay between the two packet kinds.
 pub fn relay_heartbeat_signing_input(
     relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
 ) -> Vec<u8> {
-    signing_input(RELAY_HEARTBEAT_SIG_DOMAIN, relay_id, pubkey, timestamp)
+    signing_input(RELAY_HEARTBEAT_SIG_DOMAIN, relay_id, pubkey, timestamp, &[])
 }
 
-/// Builds the canonical signing transcript for [`LifetimeP::GatewayHello`].
-/// Same field layout as the relay helpers, distinct domain tag.
 pub fn gateway_hello_signing_input(
     gateway_id: &RelayId, pubkey: &[u8; 32], timestamp: u128, binding: &[u8; 32],
 ) -> Vec<u8> {
-    let mut buf = signing_input(GATEWAY_HELLO_SIG_DOMAIN, gateway_id, pubkey, timestamp);
-    buf.extend_from_slice(binding);
-    buf
+    signing_input(GATEWAY_HELLO_SIG_DOMAIN, gateway_id, pubkey, timestamp, binding)
 }
 
-/// Shared low-level transcript builder. Kept private so callers go through
-/// the per-packet helpers above and can't accidentally pass the wrong
-/// domain tag.
 fn signing_input(
-    domain: &[u8], relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
+    domain: &[u8], relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128, binding: &[u8],
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(domain.len() + 2 + RelayId::LEN + 32 + 16);
-    buf.extend_from_slice(domain);
-    buf.extend_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
-    buf.extend_from_slice(relay_id.as_bytes());
-    buf.extend_from_slice(pubkey);
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf
+    [
+        domain,
+        &crate::PROTOCOL_VERSION.to_be_bytes(),
+        relay_id.as_bytes(),
+        pubkey,
+        &timestamp.to_be_bytes(),
+        binding,
+    ]
+    .concat()
 }
 
-/// The label a node's hello to the resolver exports its session binding
-/// under. The hello transcripts above gain the binding as a suffix, so a
-/// hello is good on the connection it was sent over and nowhere else — a
-/// resolver that received one cannot forward it to another within the
-/// freshness window and re-home the node there.
+/// Hello transcripts end with the session binding exported under this label, so a resolver
+/// cannot forward a hello to another resolver and re-home the node there.
 pub const NODE_HELLO_EXPORTER_LABEL: &[u8] = b"promtuz node hello v1";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -177,5 +96,25 @@ impl ResolverPacket {
         let packet = self.pack()?;
         tx.write_all(&packet).await?;
         Ok(tx.flush().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcripts() {
+        let id = RelayId::from_bytes([1; 32]);
+        crate::proto::golden(
+            &[
+                relay_hello_signing_input(&id, &[2; 32], 0x0102, &[3; 32]),
+                relay_heartbeat_signing_input(&id, &[2; 32], 0x0102),
+                gateway_hello_signing_input(&id, &[2; 32], 0x0102, &[3; 32]),
+            ],
+            "b161f2df1ff0ddb5d2550c17bdb3a901387c660c098ae94da92c9349d3ddf5b2
+             2363b0d911f375b80ee040166a9b4dca5a6c587303a5d85de7cffa8f751fa904
+             1e42714d7d2845563f2a86d608facd2f5e78939a0aa0fabe975f96e29fac234c",
+        );
     }
 }

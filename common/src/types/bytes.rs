@@ -39,6 +39,10 @@ impl<const N: usize> From<Bytes<N>> for [u8; N] {
     }
 }
 
+pub fn fixed<const N: usize>(bytes: &[u8], what: &str) -> anyhow::Result<[u8; N]> {
+    bytes.try_into().map_err(|_| anyhow::anyhow!("{what} must be {N} bytes"))
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 #[serde(transparent)]
 pub struct ByteVec(#[serde(with = "serde_bytes")] pub Vec<u8>);

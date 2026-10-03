@@ -12,9 +12,10 @@ ExecStart=/usr/bin/pzrelay --config /etc/promtuz/relay.toml
 WorkingDirectory=/var/lib/pzrelay
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=65536
 
 # Least-privilege hardening. /usr stays read-only; the writable paths are the
-# RocksDB state dir and /etc/promtuz (the relay generates its key, writes a
+# fjall state dir and /etc/promtuz (the relay generates its key, writes a
 # CSR, and reads the enrolled cert there).
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -1,0 +1,78 @@
+AppPayload
+  0 Text 00 02 68 69
+  1 Receipt 01 00 11*16
+  2 Edit 02 11*16 02 68 69
+  3 Delete 03 11*16
+  4 React 04 11*16 02 68 69 01
+  5 Reply 05 11*16 02 68 69
+  6 PairAck 06
+  7 P2p 07 01 00 7f 00 00 01 01 00 11*16 33*32
+  8 Image 08 02 68 69 00 02 68 69 01 02 01 03
+  9 Attachment 09 02 68 69 01 11*16 02 68 69 02 68 69 01 00 33*32
+ 10 FileWant 0a 33*32
+ 11 Post 0b 00 00 02 68 69
+ 12 Revise 0c 11*16 00 02 68 69
+ 13 System 0d 03 02 68 69
+ 14 Profile 0e 02 68 69
+ 15 Avatar 0f 01 00
+ 16 AvatarSync 10 00 01
+ 17 AvatarAck 11 01
+ 18 P2pOffer 12 11*16 00 01 00 00 11*16 33*32
+ 19 Call 13 07 11*16 01
+ 20 ProfileDetails 14 01 02 68 69 02 68 69 00
+ 21 ProfileDetailsSync 15 01 01 00
+ 22 ProfileDetailsAck 16 01
+ 23 GroupPicture 17 01 01 01 02
+ 24 AttachmentSharing 18 11*16 33*32 01 02 01 22*32
+ 25 ReceiptDetails 19 01 11*16 01 01 00
+ 26 Unpaired 1a
+ 27 GroupRequest 1b 02
+ 28 GroupAdmins 1c 01 20 22*32
+ 29 GroupWelcome 1d 20 22*32 20 22*32 01 01
+ 30 GroupInvitation 1e 20 22*32 20 22*32 01 01 01 02
+Wake No=00 Message=01 Call=02
+StickerRef aa*16 bb*32 cc*32 82 02
+NodeId::new([1; 32]) SUKQJEDR5WITCSNIBU53PCI7ZVGGYHR5CSWYPCJZVAHZXGUR4CGA
+blob_key 60 e9 1f 7c f7 51 7a 37 07 b8 ae 73 b5 cb ec 1a de 96 93 12 24 cd f1 26 c5 ff 0b 97 b2 72 46 88
+key_package_stash_prefix ec 99 06 86 0f c6 29 95 a4 e3 af 79 34 3d 35 04 f8 f9 f2 87 e1 36 fb f3 b3 dd e3 70 20 57 87 3a
+NodeCapabilities 3f 00 00 00 RELAY=0x1 PUSH_GATEWAY=0x2 BLOB_STORE=0x4 CALL_RELAY=0x8 HIGH_AVAILABILITY=0x10 STICKER_STORE=0x20
+CHandshakePacket: Hello Proof
+SHandshakePacket: Challenge HandshakeResult
+ServerHandshakeResultP: Accept Reject
+CRelayPacket: Query Dispatch Activity DeliverAck DrainQueue AckDrain DrainAuth AckAuth PublishKeyPackage FetchKeyPackage PublishWelcome FetchWelcomes AckWelcomes SubscribePresence SetPresence RegisterPush TurnCredentials ServiceCapabilities KeyPackageInventory
+SRelayPacket: QueryResult DispatchAck Deliver Activity AckAuthRequest KeyPackagePublished KeyPackageFetched WelcomePublished WelcomesFetched WelcomesAcked DhtUnavailable Presence TurnCredentials ServiceCapabilities KeyPackageInventory
+DispatchAckP: Queued Delivered NotFound InvalidSig QueueFull Forwarded Error
+QueryP: PubAddress
+QueryResultP: PubAddress NotFound Error
+PresenceState: Online Idle Offline
+PresenceMode: Active Idle
+MlsEnvelopeP: Application Welcome PairDecline ContactRequest GroupApplication GroupWelcome GroupMemberRequest GroupMigrationReady GroupMigrationWelcome
+Body: Text Image Attachment Sticker Voice
+CallMsg: Offer Ringing Answer Candidate Media Camera Restart End
+CallCandidate: Host ServerReflexive Relayed
+CallEnd: Hangup Declined Busy Unanswered Failed
+SystemEvent: Added Left Removed Titled AddedBy RemovedBy
+GroupRequest: Add Remove Sync Change Ready RecoveryReady
+GroupChange: Add Remove Leave Role Rules Handover Takeover Upgrade MemberRequest
+GroupMemberAction: Refresh Leave
+ReceiptKind: Delivered Read
+KpPublishMode: Publish Refill
+KeyPackagePublishOutcome: Stored BadSig Expired NotOwner RateLimited TooMany StaticFieldsConflict Unavailable
+KeyPackageFetchOutcome: Found NoStash NotOwner RateLimited Unavailable
+KeyPackageRefillOutcome: Appended BadSig Expired NotOwner RateLimited TooMany StaticFieldsConflict Unavailable
+WelcomePublishOutcome: Stored BadSig StaleTimestamp NotOwner QueueFull RateLimited
+WelcomeFetchOutcome: Found BadSig NotOwner RateLimited
+DhtPacket: Request Response
+DhtRequest: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch KeyPackageRefill WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
+DhtResponse: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch KeyPackageRefill WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
+ForwardOutcome: Delivered Stored NotOwner QueueFull BadSig RateLimited
+GatewayRequest: Register Wake Store
+RegisterResponse: Registered Rejected
+PushProvider: Fcm Apns UnifiedPush
+StoreRequest: PutBlob PutManifest
+StoreReject: BadSignature NotOwner StaleVersion TooLarge QuotaExceeded WrongStore Unavailable PackFull MissingBlob
+StoreResponse: Ok Rejected
+ResolverPacket: Lifetime
+LifetimeP: RelayHello HelloAck RelayHeartbeat GatewayHello
+ClientRequest: GetRelays GetBootstrapPeers GetGateways GetStores
+ClientResponse: GetRelays GetBootstrapPeers GetGateways GetStores

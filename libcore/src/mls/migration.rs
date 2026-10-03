@@ -6,16 +6,15 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
+use common::crypto::verify_ed25519;
 use common::proto::mls_wire::GroupMigrationApproval;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::group_migration_signing_input;
 use common::proto::mls_wire::group_migration_welcome_signing_input;
 use common::proto::pack::Packer;
-use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use openmls::prelude::KeyPackage;
 use openmls_traits::OpenMlsProvider;
 use rusqlite::OptionalExtension;
@@ -93,11 +92,8 @@ impl Source {
 
     pub fn verify(&self, approval: &GroupMigrationApproval) -> Result<()> {
         ensure!(self.members.contains(&approval.who.0), "migration approval is not from a member");
-        VerifyingKey::from_bytes(&approval.who.0)?.verify_strict(
-            &group_migration_signing_input(&self.group, &self.branch),
-            &Signature::from_bytes(&approval.signature.0),
-        )?;
-        Ok(())
+        let input = group_migration_signing_input(&self.group, &self.branch);
+        Ok(verify_ed25519(&approval.who.0, &input, &approval.signature.0)?)
     }
 
     pub fn verify_all(&self, approvals: &[GroupMigrationApproval]) -> Result<()> {
@@ -125,55 +121,55 @@ impl Source {
 pub fn completed(
     provider: &PromtuzMlsProvider, old: &[u8; 32],
 ) -> Result<Option<([u8; 32], [u8; 16])>> {
-    Ok(provider
-        .storage()
-        .connection()
-        .lock()
-        .query_row(
-            "SELECT target,conversation FROM mls_group_migrations WHERE group_id=?1",
-            [old],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+    provider.storage().with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT target,conversation FROM mls_group_migrations WHERE group_id=?1",
+                [old],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    })
 }
 
 pub fn destination(provider: &PromtuzMlsProvider, target: &[u8; 32]) -> Result<Option<[u8; 16]>> {
-    Ok(provider
-        .storage()
-        .connection()
-        .lock()
-        .query_row("SELECT conversation FROM mls_group_migrations WHERE target=?1", [target], |r| {
-            r.get(0)
-        })
-        .optional()?)
+    provider.storage().with_conn(|conn| {
+        Ok(conn
+            .query_row("SELECT conversation FROM mls_group_migrations WHERE target=?1", [target], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    })
 }
 
 pub fn remember(
     provider: &PromtuzMlsProvider, source: &Source, approval: &GroupMigrationApproval,
 ) -> Result<()> {
     source.verify(approval)?;
-    provider.storage().connection().lock().execute(
-        "INSERT INTO mls_migration_consents(group_id,branch,who,signature) VALUES(?1,?2,?3,?4)
-         ON CONFLICT(group_id,who) DO UPDATE SET branch=excluded.branch,signature=excluded.signature,last_sent=0
-         WHERE branch<>excluded.branch",
-        params![source.group,source.branch,approval.who.0,approval.signature.0],
-    )?;
-    Ok(())
+    provider.storage().with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO mls_migration_consents(group_id,branch,who,signature) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(group_id,who) DO UPDATE SET branch=excluded.branch,signature=excluded.signature,last_sent=0
+             WHERE branch<>excluded.branch",
+            params![source.group,source.branch,approval.who.0,approval.signature.0],
+        )?;
+        Ok(())
+    })
 }
 
 pub fn approvals(
     provider: &PromtuzMlsProvider, source: &Source,
 ) -> Result<Vec<GroupMigrationApproval>> {
-    let connection = provider.storage().connection();
-    let conn = connection.lock();
-    let mut q = conn.prepare("SELECT who,signature FROM mls_migration_consents WHERE group_id=?1 AND branch=?2 ORDER BY who")?;
-    Ok(q.query_map(params![source.group, source.branch], |r| {
-        Ok(GroupMigrationApproval {
-            who:       r.get::<_, [u8; 32]>(0)?.into(),
-            signature: r.get::<_, [u8; 64]>(1)?.into(),
-        })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+    provider.storage().with_conn(|conn| {
+        let mut q = conn.prepare("SELECT who,signature FROM mls_migration_consents WHERE group_id=?1 AND branch=?2 ORDER BY who")?;
+        Ok(q.query_map(params![source.group, source.branch], |r| {
+            Ok(GroupMigrationApproval {
+                who:       r.get::<_, [u8; 32]>(0)?.into(),
+                signature: r.get::<_, [u8; 64]>(1)?.into(),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+    })
 }
 
 pub fn create(
@@ -212,7 +208,8 @@ pub fn create(
         "migration packages change the roster"
     );
     let gid = source.target();
-    let (leaf, credential) = crate::messaging::build_self_credential(signer)?;
+    operation.ensure_absent(&gid)?;
+    let (leaf, credential) = crate::messaging::session::build_self_credential(signer)?;
     leaf.store(operation.provider.storage()).map_err(|e| anyhow!("store signer: {e:?}"))?;
     let mut group = MlsGroupHandle::create(
         &operation.provider,
@@ -271,7 +268,7 @@ pub fn create(
             id,
             logical_id: id,
             kind: crate::db::outbox::OpType::Welcome as i64,
-            frame: crate::messaging::prepare_dispatch(
+            frame: crate::delivery::prepare_dispatch(
                 who,
                 &source.founder,
                 signer,
@@ -297,10 +294,9 @@ pub fn accept(
             && envelope.welcome_blob.0.len() <= common::proto::mls_wire::MAX_WELCOME_BYTES,
         "migration too large"
     );
-    VerifyingKey::from_bytes(&from)?.verify_strict(
-        &group_migration_welcome_signing_input(&old, &branch, approvals, envelope, sealed_history),
-        &Signature::from_bytes(signature),
-    )?;
+    let input =
+        group_migration_welcome_signing_input(&old, &branch, approvals, envelope, sealed_history);
+    verify_ed25519(&from, &input, signature)?;
     ensure!(
         envelope.sender_ipk.0 == from && envelope.recipient_ipk.0 == me,
         "misaddressed migration"
@@ -325,6 +321,7 @@ pub fn accept(
         "migration does not match our current group"
     );
     source.verify_all(approvals)?;
+    operation.ensure_absent(&envelope.group_id.0)?;
     let group = super::process_welcome(&operation.provider, envelope)?;
     source.verify_target(&group)?;
     let history =

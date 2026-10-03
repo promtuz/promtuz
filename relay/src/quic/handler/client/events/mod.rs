@@ -24,12 +24,11 @@ pub mod misc;
 pub mod mls_relay;
 pub mod presence;
 
-/// Budget for opening an outbound stream to a client or peer. A remote that
-/// grants no stream credit otherwise pins the calling task forever.
+/// Bounds opening an outbound stream: a remote that grants no stream credit would pin the task.
 pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Detach `task`, dropping it when `cancel` fires so it cannot outlive the
-/// connection handler that started it.
+/// Detaches `task` and drops it when `cancel` fires. Callers pass the process token, so the task
+/// can outlive the connection that started it.
 pub(crate) fn spawn_tied<F>(cancel: &CancellationToken, task: F)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -43,7 +42,6 @@ where
     });
 }
 
-/// Drive `tasks` to completion with at most `concurrency` in flight.
 pub(crate) async fn bounded_fanout<F>(tasks: Vec<F>, concurrency: usize)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -66,19 +64,12 @@ pub(super) async fn handle_packet(
     use CRelayPacket::*;
 
     match packet {
-        // Handshake(packet) => handle_handshake(packet, ctx.clone(), tx).await,
         Query(query) => handle_misc(query, ctx.clone(), tx).await,
         Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue => handle_drain_queue(ctx.clone(), tx).await,
         AckDrain => handle_ack_drain(ctx.clone(), tx).await,
-        // Sticky-home. The packet has no response; we drop
-        // verification failures silently (a malicious client could
-        // otherwise probe the verifier — see `drain_auth.rs`).
         DrainAuth { timestamp, sig } => handle_drain_auth(ctx.clone(), timestamp, sig.0).await,
-        // Sticky-home. Hand-off to the parked `oneshot::Sender`
-        // installed by `handle_ack_drain` before sending the
-        // `AckAuthRequest`. If no sender is parked (out-of-order client
-        // — sent AckAuth without our request), drop silently.
+        // Answers the round `run_remote_ack_round` parked; an unsolicited `AckAuth` is dropped.
         AckAuth { sig, timestamp } => {
             if let Some(sender) = ctx.ack_auth.lock().take() {
                 let _ = sender.send(AckAuthPayload { sig: sig.0, timestamp });
@@ -86,10 +77,6 @@ pub(super) async fn handle_packet(
             Ok(())
         },
 
-        // Tier-1 MLS DHT-RPC wrappers. Each handler verifies the
-        // wrapper sig + skew, originates the peer/5 fan-out, and
-        // replies with the matching SRelayPacket (or DhtUnavailable
-        // when this relay has DHT disabled).
         PublishKeyPackage { records, timestamp, mode, sig } => {
             mls_relay::handle_publish_keypackage(ctx.clone(), records, timestamp, mode, sig.0, tx)
                 .await
@@ -119,8 +106,16 @@ pub(super) async fn handle_packet(
         },
 
         TurnCredentials => misc::handle_turn_credentials(ctx.clone(), tx).await,
+        KeyPackageInventory { request } => {
+            mls_relay::handle_keypackage_inventory(ctx.clone(), &request.0, tx).await
+        },
+        ServiceCapabilities => {
+            use common::proto::{Sender, client_rel::SRelayPacket};
+            let support=if ctx.relay.dht.is_some() { crate::dht::mls::service_support() } else { common::contracts::Support::default() };
+            SRelayPacket::ServiceCapabilities { supported:support.encode().into() }.send(tx).await?;
+            Ok(())
+        },
 
-        // Ignore Extra
         _ => Ok(()),
     }
 }

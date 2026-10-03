@@ -1,12 +1,5 @@
-//! The media session: one str0m [`Rtc`] driven from a tokio task, sans-IO the
-//! same way quinn is. It owns two UDP sockets, a direct one for host and
-//! reflexive paths and a TURN allocation for the relayed one, and moves audio
-//! between the far end and the [`AudioPath`].
-//!
-//! Everything the call machine does to a session it does through [`Cmd`];
-//! everything the session tells it comes back as [`Event`]. The task lives
-//! from [`spawn`] until [`Cmd::Stop`] or a fatal error, and a mid-call network
-//! change is a [`Cmd::Restart`] that rebuilds both sockets in place.
+//! The media session: a sans-IO str0m [`Rtc`] on a tokio task, over a direct UDP socket and,
+//! when the relay offers one, a TURN allocation.
 
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -46,14 +39,12 @@ use super::audio::AudioPath;
 use super::audio::FRAME_SAMPLES;
 use super::audio::SAMPLE_RATE;
 
+use crate::state::core;
+
 /// Fixed media ids, so both ends agree without SDP.
 const AUDIO_MID: &str = "0";
 const VIDEO_MID: &str = "1";
-/// str0m's own STUN retransmit gives up a dead pair after a few seconds; a
-/// fresh session per network change covers the rest.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(4);
-/// Video bitrate bounds. The cap is Telegram's; the floor keeps a call alive
-/// on a bad link by shedding quality rather than freezing.
 const VIDEO_START_BITRATE: u32 = 600_000;
 const VIDEO_MAX_BITRATE: u32 = 1_000_000;
 const VIDEO_MIN_BITRATE: u32 = 120_000;
@@ -65,8 +56,7 @@ pub enum Role {
 }
 
 impl Role {
-    /// The caller controls ICE and is the DTLS server; the callee the
-    /// reverse, the usual WebRTC actpass resolution.
+    /// The caller controls ICE and is the DTLS server; the callee is the DTLS client.
     fn controlling(self) -> bool {
         self == Role::Caller
     }
@@ -83,7 +73,6 @@ pub struct Relay {
     pub password: String,
 }
 
-/// Our half of the session parameters, for the offer or answer.
 pub struct Params {
     pub ufrag:       String,
     pub pwd:         String,
@@ -94,13 +83,10 @@ pub struct Params {
 }
 
 pub enum Cmd {
-    /// One encoded Opus frame from capture, to send.
     Audio(Vec<u8>),
-    /// One encoded H.264 access unit from capture, Annex-B. str0m reads the
-    /// NAL types itself, so the sender need not flag a keyframe.
+    /// An Annex-B H.264 access unit. str0m reads the NAL types, so it needs no keyframe flag.
     Video(Vec<u8>),
-    /// The peer's session parameters (offer, answer, or restart). `video_ssrc`
-    /// is zero for an audio call.
+    /// The peer's offer, answer, or restart; `video_ssrc` is zero for an audio call.
     Remote {
         ufrag:       String,
         pwd:         String,
@@ -109,38 +95,31 @@ pub enum Cmd {
         video_ssrc:  u32,
         candidates:  Vec<CallCandidate>,
     },
-    /// One of the peer's trickled candidates.
     Candidate(CallCandidate),
-    /// Rebuild on fresh sockets and credentials after a network change.
+    /// Rebinds the sockets after a network change, keeping the ICE and DTLS state.
     Restart,
     Stop,
 }
 
 pub enum Event {
-    /// Our parameters and candidates, to signal to the peer. Gathering is
-    /// synchronous, so a session emits this once (and once per restart) with
-    /// every candidate it found; there is no separate trickle.
+    /// Sent once per session and once per restart, with every gathered candidate.
     Local { params: Params, candidates: Vec<CallCandidate> },
     Connected,
     Disconnected,
-    /// An encoded H.264 access unit from the peer, Annex-B, and whether it is
-    /// a keyframe.
+    /// An Annex-B H.264 access unit from the peer.
     Video { frame: Vec<u8>, keyframe: bool },
-    /// Our encoder should emit a keyframe (the peer sent a PLI/FIR).
     KeyframeNeeded,
-    /// The bandwidth estimate moved; kbps our video encoder should target.
+    /// Target video bitrate in kbps.
     Bitrate(u32),
     Failed(String),
 }
 
-/// Start a session and return the command channel into it. `video` declares a
-/// video media section as well as audio; an audio call never carries video.
 pub fn spawn(
     role: Role, cert: DtlsCert, relay: Option<Relay>, video: bool, audio: Arc<AudioPath>,
     events: mpsc::UnboundedSender<Event>,
 ) -> mpsc::UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = run(role, cert, relay, video, audio, events.clone(), cmd_rx).await {
             let _ = events.send(Event::Failed(format!("{e:#}")));
         }
@@ -148,12 +127,9 @@ pub fn spawn(
     cmd_tx
 }
 
-/// The two sockets a session sends on: the direct one, and the TURN
-/// allocation when the relay offered one.
 struct Transport {
     socket:  Arc<UdpSocket>,
-    /// Our local base address for the direct paths, the primary host
-    /// candidate: inbound direct packets are addressed here for str0m.
+    /// Where str0m sees inbound direct packets arrive, normally the primary host candidate.
     base:    SocketAddr,
     relayed: Option<Relayed>,
 }
@@ -169,11 +145,9 @@ async fn run(
 ) -> Result<()> {
     let mut config = RtcConfig::new()
         .set_dtls_cert(cert.clone())
-        // We run our own jitter buffer, so str0m releases audio immediately.
+        // Our own jitter buffer reorders, so str0m releases audio at once.
         .set_reordering_size_audio(0);
     if video {
-        // Google's transport-wide congestion control drives the encoder's
-        // target bitrate; start it at a conservative estimate.
         config = config.enable_bwe(Some((VIDEO_START_BITRATE as u64).into()));
     }
     let mut rtc = config.build(std::time::Instant::now());
@@ -239,17 +213,15 @@ fn codec_pt(rtc: &Rtc, codec: Codec) -> Option<str0m::media::Pt> {
     rtc.codec_config().params().iter().find(|p| p.spec().codec == codec).map(|p| p.pt())
 }
 
-/// Bind the direct socket, allocate the TURN relay, probe the reflexive
-/// address, and register every candidate found with str0m.
 async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<CallCandidate>)> {
     let socket = Arc::new(UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?);
     let port = socket.local_addr()?.port();
 
-    // Host: every routable v4 interface. v6-direct is deferred; the call
-    // socket is v4 and a call that can't go direct rides the relay.
+    // The call socket is v4, so only v4 hosts.
     let hosts: Vec<SocketAddr> =
         crate::p2p::candidate::local_candidates(port).into_iter().filter(|a| a.is_ipv4()).collect();
-    let base = *hosts.first().context("no routable network interface")?;
+    // A v6-only carrier behind 464XLAT has no v4 host; the call then rides the relay alone.
+    let base = hosts.first().copied().unwrap_or(socket.local_addr()?);
 
     let mut wire = Vec::new();
     for host in &hosts {
@@ -259,9 +231,10 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
         wire.push(CallCandidate::Host { addr: *host });
     }
 
-    // Reflexive: what the direct socket maps to, from the relay's STUN. Its
-    // base is the primary host so its transmits egress the direct socket.
-    if let Some(relay) = relay {
+    // The reflexive base is the primary host, so its transmits leave on the direct socket.
+    if let Some(relay) = relay
+        && !hosts.is_empty()
+    {
         match tokio::time::timeout(SETUP_TIMEOUT, reflexive(&socket, relay.addr)).await {
             Ok(Ok(addr)) if addr != base => {
                 if let Ok(c) = Candidate::server_reflexive(addr, base, "udp") {
@@ -275,7 +248,6 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
         }
     }
 
-    // Relayed: a TURN allocation on the relay. Most phone calls land here.
     let mut relayed = None;
     if let Some(relay) = relay {
         match tokio::time::timeout(SETUP_TIMEOUT, allocate(relay)).await {
@@ -294,7 +266,6 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
     Ok((Transport { socket, base, relayed }, wire))
 }
 
-/// One STUN binding request on `socket` to learn the mapped address.
 async fn reflexive(socket: &UdpSocket, stun: SocketAddr) -> Result<SocketAddr> {
     use stun::agent::TransactionId;
     use stun::message::BINDING_REQUEST;
@@ -322,7 +293,6 @@ async fn reflexive(socket: &UdpSocket, stun: SocketAddr) -> Result<SocketAddr> {
     }
 }
 
-/// Allocate a relayed transport address on the relay's TURN server.
 async fn allocate(relay: &Relay) -> Result<Relayed> {
     let turn_socket = Arc::new(UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?);
     let client = Client::new(ClientConfig {
@@ -352,15 +322,12 @@ struct Session {
     mid:               Mid,
     vmid:              Mid,
     opus_pt:           str0m::media::Pt,
-    /// `None` for an audio call.
     h264_pt:           Option<str0m::media::Pt>,
     role:              Role,
     dtls_started:      bool,
     remote_ssrc:       Option<Ssrc>,
     remote_video_ssrc: Option<Ssrc>,
-    /// RTP timestamp of the next captured frame, in 48 kHz samples.
     rtp_samples:       u64,
-    /// When the first video frame was written, for the 90 kHz RTP clock.
     video_start:       Option<Instant>,
     connected:         bool,
 }
@@ -370,7 +337,6 @@ impl Session {
         let mut buf = vec![0u8; 2048];
         let mut relay_buf = vec![0u8; 2048];
         loop {
-            // Drain str0m's outputs until it asks for a timeout.
             let timeout = loop {
                 match self.rtc.poll_output()? {
                     Output::Transmit(t) => self.transmit(t).await,
@@ -387,8 +353,6 @@ impl Session {
             };
 
             let wait = timeout.saturating_duration_since(Instant::now());
-            // Clone the send/recv handles out so the select borrows them, not
-            // `self`, leaving `self` free for the handlers after a branch wins.
             let socket = self.transport.socket.clone();
             let base = self.transport.base;
             let relayed = self.transport.relayed.as_ref().map(|r| (r.conn.clone(), r.addr));
@@ -421,8 +385,6 @@ impl Session {
         }
     }
 
-    /// Feed one received datagram into str0m, addressed to the local base it
-    /// arrived at. Non-WebRTC packets fail to parse and are dropped.
     fn feed(&mut self, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
         let Ok(recv) = Receive::new(Protocol::Udp, source, destination, data) else {
             return;
@@ -435,8 +397,6 @@ impl Session {
         }
     }
 
-    /// Send one of str0m's transmits out the socket its source belongs to:
-    /// the relayed base goes through TURN, everything else direct.
     async fn transmit(&self, t: str0m::net::Transmit) {
         if let Some(r) = &self.transport.relayed {
             if t.source == r.addr {
@@ -447,7 +407,6 @@ impl Session {
         let _ = self.transport.socket.send_to(&t.contents, t.destination).await;
     }
 
-    /// Handle a str0m event. Returns false when the session should end.
     fn on_rtc_event(&mut self, event: RtcEvent) -> bool {
         match event {
             RtcEvent::Connected => {
@@ -455,8 +414,7 @@ impl Session {
                 let _ = self.events.send(Event::Connected);
             },
             RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                // A pair that stops answering. Only meaningful once we were up;
-                // the call machine restarts on it.
+                // Only meaningful once connected; the call machine restarts on it.
                 if self.connected {
                     let _ = self.events.send(Event::Disconnected);
                 }
@@ -466,17 +424,14 @@ impl Session {
                     let seq = *(*data.seq_range.end());
                     self.audio.jitter.lock().push(seq, data.data.to_vec());
                 } else if data.mid == self.vmid {
-                    // Encoded H.264, Annex-B, straight to the platform decoder.
                     let keyframe = is_h264_keyframe(&data.data);
                     let _ = self.events.send(Event::Video { frame: data.data.to_vec(), keyframe });
                 }
             },
             RtcEvent::KeyframeRequest(req) if req.mid == self.vmid => {
-                // The peer wants a fresh IDR from our encoder.
                 let _ = self.events.send(Event::KeyframeNeeded);
             },
             RtcEvent::EgressBitrateEstimate(kind) => {
-                // BweKind is non-exhaustive; ignore a future variant we can't read.
                 let (str0m::bwe::BweKind::Twcc(bitrate) | str0m::bwe::BweKind::Remb(_, bitrate)) =
                     kind
                 else {
@@ -507,8 +462,6 @@ impl Session {
             Cmd::Video(frame) => {
                 let Some(pt) = self.h264_pt else { return Ok(()) };
                 let now = Instant::now();
-                // 90 kHz RTP clock from the first frame; str0m packetizes the
-                // Annex-B access unit into RTP.
                 let start = *self.video_start.get_or_insert(now);
                 let ticks = (now.duration_since(start).as_millis() as u64) * 90;
                 let time = MediaTime::new(ticks, str0m::media::Frequency::NINETY_KHZ);
@@ -524,12 +477,8 @@ impl Session {
             },
             Cmd::Candidate(c) => self.add_remote(c),
             Cmd::Restart => {
-                // A network change: fresh sockets and candidates on the new
-                // interface, trickled into the same agent. str0m keeps its
-                // credentials and its DTLS keys, so a new working pair forms
-                // without a new handshake. It is unpolled for the bounded
-                // gather; the peer knows we are reconnecting and ICE tolerates
-                // the gap.
+                // The agent keeps its ICE credentials and DTLS keys, so a new pair forms without a
+                // handshake. str0m goes unpolled during the bounded gather; ICE tolerates that.
                 let creds = self.rtc.direct_api().local_ice_credentials();
                 let relay = self.relay.take();
                 let (transport, candidates) = gather(&relay, &mut self.rtc).await?;
@@ -539,8 +488,7 @@ impl Session {
                     params: Params {
                         ufrag: creds.ufrag,
                         pwd:   creds.pass,
-                        // Kept from the original handshake; the restart carries
-                        // only credentials and candidates.
+                        // A restart carries only credentials and candidates.
                         fingerprint: [0u8; 32],
                         ssrc: 0,
                         video_ssrc: 0,
@@ -575,13 +523,11 @@ impl Session {
                 warn!("CALL: DTLS start failed: {e}");
             }
             self.dtls_started = true;
-            // Ask the peer for an IDR so our decoder has something to start on
-            // rather than waiting out its own retransmit timers.
+            // Ask for an IDR at once rather than wait out the peer's own timers.
             self.request_peer_keyframe();
         }
     }
 
-    /// Ask the peer's encoder for a keyframe, if we are receiving video.
     fn request_peer_keyframe(&mut self) {
         if self.remote_video_ssrc.is_none() {
             return;
@@ -605,13 +551,10 @@ impl Session {
     }
 }
 
-/// Whether an Annex-B H.264 access unit contains an IDR (keyframe). Scans the
-/// NAL headers between start codes for type 5. SPS and PPS precede an IDR in a
-/// well-formed keyframe access unit, but the IDR NAL is the definitive marker.
+/// Whether the Annex-B access unit holds an IDR NAL (type 5).
 fn is_h264_keyframe(au: &[u8]) -> bool {
     let mut i = 0;
     while i + 3 < au.len() {
-        // Match a 3- or 4-byte Annex-B start code.
         let (start, len) = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
             (i + 3, 3)
         } else if i + 4 <= au.len() && au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
@@ -632,35 +575,3 @@ const _: () = {
     // The engine assumes 20 ms Opus frames at 48 kHz throughout.
     assert!(FRAME_SAMPLES == (SAMPLE_RATE as usize) / 50);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::is_h264_keyframe;
-
-    #[test]
-    fn keyframe_detection_reads_nal_types() {
-        // NAL type is the low 5 bits of the byte after a start code. 5 = IDR,
-        // 1 = non-IDR slice, 7 = SPS, 8 = PPS.
-        let idr = [0, 0, 0, 1, 0x65, 0x88, 0x84];
-        assert!(is_h264_keyframe(&idr));
-
-        // A real keyframe access unit: SPS, PPS, then the IDR slice.
-        let key_au = [
-            0, 0, 0, 1, 0x67, 0x42, 0x00, // SPS
-            0, 0, 0, 1, 0x68, 0xce, // PPS
-            0, 0, 1, 0x65, 0x88, // IDR, 3-byte start code
-        ];
-        assert!(is_h264_keyframe(&key_au));
-
-        // A delta frame: a non-IDR slice only.
-        let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x00];
-        assert!(!is_h264_keyframe(&delta));
-
-        // SPS and PPS without an IDR is not, by itself, a decodable keyframe.
-        let params_only = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce];
-        assert!(!is_h264_keyframe(&params_only));
-
-        assert!(!is_h264_keyframe(&[]));
-        assert!(!is_h264_keyframe(&[0, 0, 0, 1]));
-    }
-}

@@ -1,35 +1,5 @@
-//! Iterative `FindNode` / `FindValue` walks with α=3 parallelism and
-//! per-hop hedging.
-//!
-//! ## Algorithm
-//!
-//! We maintain three logical sets:
-//!
-//! - **`pending`**: the candidate shortlist of peers we *might* query,
-//!   sorted by XOR distance to `target`.
-//! - **`in_flight`**: the peers we've sent a request to and are still
-//!   waiting for. Bounded at `α = 3`.
-//! - **`queried`**: peers that have already responded (or been hedged-out).
-//!
-//! Termination:
-//! 1. We've contacted the K strictly-closest peers in `pending` and none
-//!    returns a closer-than-current peer, OR
-//! 2. `LOOKUP_MAX_HOPS` exceeded, OR
-//! 3. `LOOKUP_RPC_TIMEOUT_MS` total wall-clock elapsed.
-//!
-//! ## Hedging
-//!
-//! When a request hasn't returned within `LOOKUP_HEDGE_MS`, we *don't*
-//! cancel it — instead we fire a duplicate to the next-best candidate.
-//! Whichever responds first wins; the loser's reply (if it eventually
-//! arrives) is folded back into the candidate pool opportunistically.
-//!
-//! ## Lock contract
-//!
-//! Like the rest of `dht/`, we never hold a `parking_lot` guard across
-//! `await`. The `routing.read().find_closest(...)` call is the only
-//! routing-table read; we clone the descriptors out and release the
-//! lock before any I/O.
+//! Iterative `FindNode` walk, α requests per round. After its first reply, a round ends once
+//! `LOOKUP_HEDGE_MS` passes without another.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -37,11 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use common::proto::dht_p2p::DhtHello;
-use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
 use common::proto::dht_p2p::FindNode;
@@ -49,10 +16,10 @@ use common::proto::dht_p2p::MAX_FIND_NODE_RESULTS;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::dht_p2p::dht_hello_signing_input;
 use common::proto::pack::Packer;
-use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
 use common::quic::xor32;
 use common::types::bytes::Bytes;
+use common::utils::now_ms;
 use ed25519_dalek::Signer;
 use quinn::Connection;
 use thiserror::Error;
@@ -66,41 +33,19 @@ use super::config::LOOKUP_MAX_HOPS;
 use super::config::LOOKUP_RPC_TIMEOUT_MS;
 use super::config::MAX_LOOKUP_CANDIDATES;
 use super::routing::InsertOutcome;
-use super::routing::PingFailedOutcome;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Failure modes for an iterative lookup.
 #[derive(Debug, Error)]
 pub enum LookupError {
-    /// Routing table empty — bootstrap has not yet completed.
     #[error("lookup: no candidates in routing table (bootstrap not done?)")]
     NoCandidates,
 
-    /// Total wall-clock budget exhausted before convergence.
     #[error("lookup: timed out after {LOOKUP_RPC_TIMEOUT_MS}ms")]
     Timeout,
 
-    /// `LOOKUP_MAX_HOPS` exceeded without termination — typically means a
-    /// network partition or hostile peers feeding loops.
     #[error("lookup: exceeded {LOOKUP_MAX_HOPS} hops")]
     MaxHopsExceeded,
-
-    /// Failed to open a peer connection (TLS, handshake, DNS). Surfaced
-    /// only when *every* candidate failed — a single peer failure is
-    /// folded into the iteration silently.
-    #[error("lookup: peer connect failed: {0}")]
-    PeerConnect(#[source] anyhow::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Internal candidate state
-// ---------------------------------------------------------------------------
-
-/// Candidate peer in the lookup shortlist, decorated with its XOR
-/// distance to the lookup target so we can sort cheaply.
 #[derive(Clone, Debug)]
 struct Candidate {
     desc:     NodeDescriptor,
@@ -111,20 +56,9 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
     xor32(target, peer.as_bytes())
 }
 
-// ---------------------------------------------------------------------------
-// Peer address admission
-// ---------------------------------------------------------------------------
-
-/// Whether `addr` is a legitimate destination for an outbound `peer/5`
-/// dial.
-///
-/// Descriptor addresses are peer-supplied, so dialling one aims this
-/// relay's QUIC Initials — with this relay's source IP — at a host of
-/// the peer's choosing. Unroutable and special-purpose classes are
-/// always refused; loopback and private ranges are refused unless
-/// `allow_local` (`DhtConfig::allow_local_peer_addrs`) is set for a
-/// single-host test cluster.
-fn is_dialable_peer_addr(addr: &SocketAddr, allow_local: bool) -> bool {
+/// Peer-supplied addresses (`peer/5` dials, TURN targets) aim this relay's packets at a host of
+/// the peer's choosing: special ranges are refused, loopback and private ones unless `allow_local`.
+pub(crate) fn is_dialable_peer_addr(addr: &SocketAddr, allow_local: bool) -> bool {
     if addr.port() == 0 {
         return false;
     }
@@ -155,60 +89,11 @@ fn is_dialable_peer_addr(addr: &SocketAddr, allow_local: bool) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Connection management
-// ---------------------------------------------------------------------------
-
-/// Open (or reuse) a QUIC connection to `peer`. Cached in `dht.peer_conns`
-/// alongside the verified Ed25519 cert pubkey extracted post-handshake.
-///
-/// On any cached-but-dead connection, we evict and re-dial. Drops are
-/// cheap because the inner `quinn::Connection` is `Arc`-shared internally.
-///
-/// **TLS pubkey check:** after the handshake completes, we extract the
-/// server's leaf-cert SPKI via
-/// [`crate::dht::tls_extract::extract_and_verify_pubkey`] and
-/// **reject** the connection if `BLAKE3(spki) != peer.id`. The TLS
-/// layer already validated the cert chain against the configured root
-/// CA; this post-handshake check is defense-in-depth for the
-/// (hypothetical) scenario where a CA mints a cert whose SPKI does
-/// not match the relay's NodeId. On rejection we close with
-/// `CloseReason::DhtMalformedKey` and bump
-/// `metrics.cert_pubkey_extraction_failures`.
-///
-/// **Application-layer signed handshake:** before returning
-/// the connection to the caller, we send a [`DhtHello`] (Ed25519-signed
-/// transcript binding our `node_id` to our `pubkey` and a fresh
-/// timestamp) on a fresh uni-stream. The receiver verifies and uses the
-/// bound NodeId for routing-table inserts and rate-limit keying for
-/// the rest of the connection's lifetime — this closes the
-/// inbound-no-mTLS gap without enabling mTLS on `peer/5` (which would
-/// break the `client/5` co-tenant on the same `Endpoint`).
-///
-/// **Fire-and-forget hello, no synchronous ack.** We send the hello on
-/// a uni-stream and return the connection immediately; if the peer
-/// rejects, the next RPC's bi-stream will fail because the connection
-/// is closed. This matches the relay-to-resolver `RelayHello` flow
-/// (`relay/src/quic/resolver_link.rs::hello`) — adding a synchronous
-/// ack would cost a round-trip per dial without any extra security
-/// (the dialer can't *act* on the ack: a successful subsequent RPC
-/// proves the peer accepted the hello, and a failed RPC could equally
-/// be caused by the receiver rejecting the hello mid-flight).
-///
-/// **TODO (integration suite).** The full QUIC-stream-level test of
-/// "outbound dial → DhtHello uni-stream → inbound accept_uni → verify →
-/// bi-stream RPC" needs real connections; today we test the
-/// signing/verification helper round-trip in isolation
-/// (`common::proto::dht_p2p::tests::dht_hello_two_relays_authenticate
-/// _each_other_synchronously`) and rely on the unit tests of each
-/// half. A real two-relay harness covers the rest.
-///
-/// Visible to the rest of `dht/` (e.g. `forward.rs`, `queue_drain.rs`) so
-/// the cache + dial path is shared rather than duplicated.
+/// A fresh dial pins the cert to `peer.id`, then sends our `DhtHello` without waiting for an ack:
+/// a peer that rejects it closes the connection and the next RPC fails.
 pub(crate) async fn connect_to_peer(
     dht: &Arc<Dht>, peer: &NodeDescriptor,
 ) -> anyhow::Result<Connection> {
-    // Fast path: hit the cache.
     if let Some((conn, _pk)) = dht.peer_conns.read().get(&peer.id).cloned()
         && conn.close_reason().is_none() {
             return Ok(conn);
@@ -236,11 +121,9 @@ pub(crate) async fn connect_to_peer(
         .connect_with(client_cfg.as_ref().clone(), peer.addr, &sni)?
         .await?;
 
-    // Post-handshake cert-pubkey extraction + binding check (item 1).
     let verified_pubkey = match crate::dht::tls_extract::extract_and_verify_pubkey(&conn, &peer.id) {
         Ok(pk) => pk,
         Err(e) => {
-            dht.metrics.inc_cert_pubkey_extraction_failures();
             common::warn!(
                 "DHT connect_to_peer: post-handshake pubkey extraction failed for {}: {e}",
                 peer.id
@@ -253,12 +136,7 @@ pub(crate) async fn connect_to_peer(
         }
     };
 
-    // Send our signed `DhtHello` as the first frame on the connection.
-    // Failure here is non-fatal-to-the-handshake (the peer will simply
-    // close on its end), but we surface it so the dialer sees the
-    // failure and the caller can decide whether to retry.
     if let Err(e) = send_dht_hello(dht, &conn).await {
-        dht.metrics.inc_dht_hello_rejected();
         common::warn!(
             "DHT connect_to_peer: failed to send DhtHello to {}: {e}; closing",
             peer.id
@@ -270,10 +148,7 @@ pub(crate) async fn connect_to_peer(
         ));
     }
 
-    // Cache. Race: another task may have raced ahead with a connection
-    // to the same peer; if so, drop the loser. Both `Connection`s are
-    // independently usable — the eventual consistency is only about
-    // *which* one future calls reuse.
+    // A live connection cached by a concurrent dial wins over this one.
     {
         let mut conns = dht.peer_conns.write();
         if let Some((existing, _)) = conns.get(&peer.id).cloned()
@@ -282,13 +157,14 @@ pub(crate) async fn connect_to_peer(
             }
         conns.insert(peer.id, (conn.clone(), verified_pubkey));
     }
-    dht.metrics.inc_peer_conns_opened();
+    let outcome = dht.routing.write().insert(NodeDescriptor {
+        id: peer.id,
+        addr: peer.addr,
+        pubkey: verified_pubkey.into(),
+    });
+    probe_pending_ping(dht, outcome);
 
-    // Bidirectional: serve inbound RPCs on this outbound connection too, so
-    // the peer can reuse it to call us back (the `peer_conns` cache is shared
-    // across both directions). The peer's identity is the dial's verified
-    // cert NodeId-binding — no second `DhtHello` needed. Spawned only on a
-    // fresh dial; the fast-path reuse above already has a serve loop.
+    // Serve the peer's RPCs on this connection too; a cached connection already has a serve loop.
     tokio::spawn(crate::dht::handler::serve_peer_streams(
         dht.clone(),
         conn.clone(),
@@ -298,17 +174,8 @@ pub(crate) async fn connect_to_peer(
     Ok(conn)
 }
 
-/// Send our signed [`DhtHello`] on a freshly-opened uni-stream. The
-/// transcript is built via [`dht_hello_signing_input`], so dialer
-/// (this) and receiver (`relay/src/dht/handler.rs::recv_and_verify_hello`)
-/// always agree byte-for-byte.
-///
-/// Lives next to [`connect_to_peer`] (rather than a free fn in
-/// `dht/mod.rs`) because it's the only call-site and stays close to
-/// the dial-path it serves.
 async fn send_dht_hello(dht: &Arc<Dht>, conn: &Connection) -> anyhow::Result<()> {
     let node_id = dht.node_id;
-    // The dialer's own pubkey: derivable from the signing key.
     let pubkey: [u8; 32] = dht.signing_key.verifying_key().to_bytes();
     let timestamp = now_ms();
     let binding = common::quic::session_binding(conn, common::proto::dht_p2p::DHT_HELLO_EXPORTER_LABEL)?;
@@ -329,92 +196,31 @@ async fn send_dht_hello(dht: &Arc<Dht>, conn: &Connection) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Wall-clock now in ms-since-Unix-epoch. Inlined here (rather than
-/// pulled from `crate::util::systime`) for the same reason as
-/// `handler.rs::now_ms` — keeps `dht::lookup` free of cross-module
-/// dependencies for a one-line helper. Tests get to override at the
-/// caller via `DhtHello`'s `timestamp` field, never via this helper.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Send one DHT request over a fresh bi-stream and read the response.
-///
-/// Send one DHT request over a fresh bi-stream: open_bi → write request →
-/// finish() the send side → read length-prefixed response → done.
-///
-/// Wraps the entire round-trip in a `LOOKUP_RPC_TIMEOUT_MS` deadline so
-/// a single slow peer can't stall the iteration past its budget.
-async fn rpc_one(conn: &Connection, req: DhtRequest) -> anyhow::Result<DhtResponse> {
-    let pkt = DhtPacket::Request(req);
-    let bytes = pkt.pack()?;
-
-    let (mut send, mut recv) = conn.open_bi().await?;
-    send.write_all(&bytes).await?;
-    send.finish()?;
-
-    let resp = DhtPacket::unpack(&mut recv).await?;
-    match resp {
-        DhtPacket::Response(r) => Ok(r),
-        DhtPacket::Request(_) => {
-            Err(anyhow::anyhow!("rpc_one: peer sent a Request where a Response was expected"))
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Liveness probing
-// ---------------------------------------------------------------------------
-
-/// Fold one observation of `peer` into the routing table's liveness
-/// state: a success resets the failure counter and feeds the RTT EMA, a
-/// failure advances the counter and — at
-/// [`super::routing::PING_FAILURES_BEFORE_EVICTION`] — evicts the entry
-/// and promotes a parked candidate in its place.
-///
-/// Every path that talks to a peer calls this, so the table's LRU
-/// ordering tracks reachability rather than first-contact order.
-pub(crate) fn record_liveness(dht: &Dht, peer: &NodeId, alive: bool, rtt_ms: u32) {
+pub(crate) fn record_liveness(dht: &Dht, peer: &NodeId, alive: bool) {
     let mut routing = dht.routing.write();
     if alive {
-        routing.ping_succeeded(peer, rtt_ms);
-        return;
-    }
-    let outcome = routing.ping_failed(peer);
-    drop(routing);
-    if matches!(outcome, PingFailedOutcome::Evicted | PingFailedOutcome::EvictedAndPromoted) {
-        dht.metrics.inc_bucket_evictions();
+        routing.ping_succeeded(peer);
+    } else {
+        routing.ping_failed(peer);
     }
 }
 
-/// Probe `peer` with a `FindNode` for its own id and record the result.
-/// `peer/5` has no dedicated PING RPC, and `FindNode` is the cheapest
-/// round-trip that proves the peer is both reachable and serving.
+/// `peer/5` has no PING, so a `FindNode` for the peer's own id is the liveness probe.
 pub(crate) async fn probe_peer(dht: &Arc<Dht>, peer: &NodeDescriptor) -> bool {
-    dht.metrics.inc_pings_sent();
-    let started = Instant::now();
     let req = DhtRequest::FindNode(FindNode {
         target:    (*peer.id.as_bytes()).into(),
         requester: dht.node_id,
     });
-    let alive = match connect_to_peer(dht, peer).await {
-        Ok(conn) => matches!(
-            timeout(Duration::from_millis(LOOKUP_RPC_TIMEOUT_MS), rpc_one(&conn, req)).await,
-            Ok(Ok(DhtResponse::FindNode(_)))
-        ),
-        Err(_) => false,
-    };
-    record_liveness(dht, &peer.id, alive, started.elapsed().as_millis() as u32);
+    let alive = matches!(
+        super::rpc::rpc(dht, peer, &req, LOOKUP_RPC_TIMEOUT_MS).await,
+        Some(DhtResponse::FindNode(_))
+    );
+    record_liveness(dht, &peer.id, alive);
     alive
 }
 
-/// Act on a [`super::routing::RoutingTable::insert`] result: a full
-/// bucket parks the newcomer in the replacement cache and hands back its
-/// LRU entry, which only frees a slot once probed to death. Detached
-/// because every insert site is on a latency-sensitive path.
+/// A full bucket hands back its LRU entry, which frees a slot only once probed dead. Detached
+/// because every insert site is latency-sensitive.
 pub(crate) fn probe_pending_ping(dht: &Arc<Dht>, outcome: InsertOutcome) {
     let InsertOutcome::PendingPing(lru) = outcome else {
         return;
@@ -425,38 +231,21 @@ pub(crate) fn probe_pending_ping(dht: &Arc<Dht>, outcome: InsertOutcome) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// FindNode iterative walk
-// ---------------------------------------------------------------------------
-
-/// Iterative `FindNode` walk to discover the k closest peers to `target`.
-///
-/// Used by:
-/// - bootstrap's "self-FindNode" forced-convergence step,
-/// - the publish path to find STORE recipients,
-/// - bucket-refresh to re-discover stale ranges.
-///
-/// Returns the top-k peers by XOR distance the walk converged on.
 pub(crate) async fn lookup_node(
     dht: Arc<Dht>, target: NodeId,
 ) -> Result<Vec<NodeDescriptor>, LookupError> {
-    dht.metrics.inc_lookups_started();
 
     let target_bytes = *target.as_bytes();
 
-    // Seed the shortlist from the routing table. No `await` between
-    // taking the read guard and dropping it — clone descriptors out.
     let initial: Vec<NodeDescriptor> = {
         let routing = dht.routing.read();
         routing.find_closest(&target, K * 2)
     };
 
     if initial.is_empty() {
-        dht.metrics.inc_lookups_failed();
         return Err(LookupError::NoCandidates);
     }
 
-    // The "shortlist" — kept sorted by distance ascending.
     let mut candidates: Vec<Candidate> = initial
         .into_iter()
         .map(|desc| {
@@ -484,31 +273,9 @@ pub(crate) async fn lookup_node(
     )
     .await;
 
-    match res {
-        Ok(_) => {
-            dht.metrics.inc_lookups_succeeded();
-            Ok(closest_so_far.into_iter().take(K).map(|c| c.desc).collect())
-        }
-        Err(e) => {
-            dht.metrics.inc_lookups_failed();
-            Err(e)
-        }
-    }
+    res.map(|_| closest_so_far.into_iter().take(K).map(|c| c.desc).collect())
 }
 
-// ---------------------------------------------------------------------------
-// Shared iterative loop
-// ---------------------------------------------------------------------------
-
-/// Drive the α-parallel iterative `FindNode` loop with hedging. Used by
-/// `lookup_node`.
-///
-/// Returns `Ok(())` when the walk converged peacefully (`closest_so_far`
-/// is now populated), `Err(LookupError)` on timeout / max-hops.
-//
-// Seven args is the iterative-walk state (target + four mutable
-// candidate sets + deadline). Bundling into a `LookupCtx` struct would
-// split borrow patterns awkwardly across the loop body. Allow the arity.
 #[allow(clippy::too_many_arguments)]
 async fn run_iterative_loop(
     dht: &Arc<Dht>, target: &[u8; 32], candidates: &mut Vec<Candidate>,
@@ -525,7 +292,6 @@ async fn run_iterative_loop(
             return Err(LookupError::MaxHopsExceeded);
         }
 
-        // 1. Snapshot the next α candidates that haven't been queried.
         let mut batch: Vec<NodeDescriptor> = Vec::with_capacity(ALPHA);
         for c in candidates.iter() {
             if !queried.contains(&c.desc.id) {
@@ -536,11 +302,9 @@ async fn run_iterative_loop(
             }
         }
         if batch.is_empty() {
-            // Nothing left to query — loop has converged.
             return Ok(());
         }
 
-        // 2. Fire α requests in parallel.
         let mut set: JoinSet<RpcResult> = JoinSet::new();
         for desc in batch.iter() {
             queried.insert(desc.id);
@@ -610,60 +374,27 @@ async fn run_iterative_loop(
         }
     }
 }
-/// One-hop `FindNode` RPC outcome, collapsed from the wire
-/// `DhtResponse` for the iterative loop's match arm.
 enum RpcResult {
     FindNodeReply(Vec<NodeDescriptor>),
     Failed,
 }
 
-/// Connect (or reuse) and issue one `FindNode` RPC against `peer`.
 async fn send_one_hop(
     dht: &Arc<Dht>, peer: NodeDescriptor, target: [u8; 32],
 ) -> RpcResult {
-    let started = Instant::now();
-    let conn = match connect_to_peer(dht, &peer).await {
-        Ok(c) => c,
-        Err(_) => {
-            record_liveness(dht, &peer.id, false, 0);
-            return RpcResult::Failed;
-        },
-    };
-
     let req = DhtRequest::FindNode(FindNode {
         target:    target.into(),
         requester: dht.node_id,
     });
-
-    let resp = match timeout(
-        Duration::from_millis(LOOKUP_RPC_TIMEOUT_MS),
-        rpc_one(&conn, req),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(_)) | Err(_) => {
-            record_liveness(dht, &peer.id, false, 0);
-            return RpcResult::Failed;
-        },
-    };
-
-    record_liveness(dht, &peer.id, true, started.elapsed().as_millis() as u32);
-
+    let resp = super::rpc::rpc(dht, &peer, &req, LOOKUP_RPC_TIMEOUT_MS).await;
+    record_liveness(dht, &peer.id, resp.is_some());
     match resp {
-        DhtResponse::FindNode(r) => RpcResult::FindNodeReply(r.closer),
-        // Wrong response variant — peer is misbehaving. Treat as failure.
+        Some(DhtResponse::FindNode(r)) => RpcResult::FindNodeReply(r.closer),
         _ => RpcResult::Failed,
     }
 }
 
-/// Merge a peer's reply descriptors into the candidate pool, dropping
-/// duplicates and anything this relay would refuse to dial. Each new
-/// entry gets its distance computed once.
-///
-/// `new` is truncated to [`MAX_FIND_NODE_RESULTS`] independently of the
-/// same cap enforced by `FindNodeResp`'s deserializer, so the walk's
-/// per-hop growth stays bounded regardless of how the reply reached us.
+/// Caps `new` itself, so a hop's growth stays bounded however the reply was decoded.
 fn integrate_descriptors(
     target: &[u8; 32], candidates: &mut Vec<Candidate>, new: &[NodeDescriptor],
     allow_local: bool,
@@ -678,132 +409,66 @@ fn integrate_descriptors(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    use ed25519_dalek::SigningKey;
-
     use super::*;
-    use crate::dht::Dht;
-    use crate::dht::DhtConfig;
 
-    fn fresh_signing_key() -> SigningKey {
-        static SEQ: AtomicU64 = AtomicU64::new(1);
-        let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let mut seed = [0u8; 32];
-        seed[..8].copy_from_slice(&n.to_le_bytes());
-        seed[31] = (n & 0xff) as u8;
-        SigningKey::from_bytes(&seed)
-    }
-
-    fn fresh_dht(self_id: NodeId) -> Arc<Dht> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-lookup-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = fresh_signing_key();
-        let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
-    }
-
-    /// `lookup_node` against an empty routing table must return
-    /// `LookupError::NoCandidates` immediately — the rest of the
-    /// iterative algorithm cannot be exercised without spinning up
-    /// real QUIC connections (out of scope for unit tests; integration
-    /// tests cover it).
-    #[tokio::test(flavor = "current_thread")]
-    async fn lookup_node_with_empty_routing_table_returns_no_candidates() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let mut target_seed = [0u8; 32];
-        target_seed[0] = 2;
-        let target = NodeId::new(target_seed);
-
-        let result = lookup_node(dht, target).await;
-        assert!(matches!(result, Err(LookupError::NoCandidates)));
-    }
-
-    // -------- peer address admission ------------------------------------
-
-    fn addr(s: &str) -> SocketAddr {
-        s.parse().unwrap()
-    }
-
+    /// SSRF: a peer-advertised address is never a special range, and is loopback or private
+    /// only on a single-host test cluster. Rows: addresses, then dialable (by default, locally).
     #[test]
-    fn non_routable_addresses_are_never_dialable() {
-        for s in [
-            "0.0.0.0:4433",
-            "224.0.0.1:4433",
-            "255.255.255.255:4433",
-            "169.254.1.1:4433",
-            "192.0.2.1:4433",
-            "93.184.216.34:0",
-            "[::]:4433",
-            "[ff02::1]:4433",
-            "[fe80::1]:4433",
-        ] {
-            assert!(!is_dialable_peer_addr(&addr(s), false), "{s} must be refused");
-            assert!(!is_dialable_peer_addr(&addr(s), true), "{s} must be refused even locally");
+    fn peer_addresses_are_dialed_only_when_routable() {
+        let rows: [(&[&str], (bool, bool)); 3] = [
+            (
+                &[
+                    "0.0.0.0:4433",
+                    "224.0.0.1:4433",
+                    "255.255.255.255:4433",
+                    "169.254.1.1:4433",
+                    "192.0.2.1:4433",
+                    "93.184.216.34:0",
+                    "[::]:4433",
+                    "[ff02::1]:4433",
+                    "[fe80::1]:4433",
+                ],
+                (false, false),
+            ),
+            (
+                &[
+                    "127.0.0.1:4433",
+                    "10.1.2.3:4433",
+                    "192.168.0.5:4433",
+                    "[::1]:4433",
+                    "[fd00::1]:4433",
+                ],
+                (false, true),
+            ),
+            (&["93.184.216.34:4433", "[2606:4700::1111]:4433"], (true, true)),
+        ];
+        for (addrs, expected) in rows {
+            for addr in addrs {
+                let addr: SocketAddr = addr.parse().unwrap();
+                let dialable =
+                    (is_dialable_peer_addr(&addr, false), is_dialable_peer_addr(&addr, true));
+                assert_eq!(dialable, expected, "{addr}");
+            }
         }
     }
 
     #[test]
-    fn loopback_and_private_addresses_are_gated_on_the_local_flag() {
-        for s in ["127.0.0.1:4433", "10.1.2.3:4433", "192.168.0.5:4433", "[::1]:4433", "[fd00::1]:4433"]
-        {
-            assert!(!is_dialable_peer_addr(&addr(s), false), "{s} must be refused by default");
-            assert!(is_dialable_peer_addr(&addr(s), true), "{s} must be allowed when opted in");
-        }
-    }
-
-    #[test]
-    fn public_addresses_are_dialable() {
-        for s in ["93.184.216.34:4433", "[2606:4700::1111]:4433"] {
-            assert!(is_dialable_peer_addr(&addr(s), false), "{s} must be dialable");
-        }
-    }
-
-    // -------- candidate integration -------------------------------------
-
-    fn peer_desc(n: u8, addr_str: &str) -> NodeDescriptor {
-        NodeDescriptor {
-            id:     NodeId::new([n; 32]),
-            addr:   addr(addr_str),
-            pubkey: [n; 32].into(),
-        }
-    }
-
-    #[test]
-    fn integrate_descriptors_drops_non_routable_peers() {
-        let target = [0u8; 32];
-        let mut candidates = Vec::new();
-        let new = vec![peer_desc(1, "93.184.216.34:4433"), peer_desc(2, "127.0.0.1:4433")];
-        integrate_descriptors(&target, &mut candidates, &new, false);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].desc.id, new[0].id);
-    }
-
-    #[test]
-    fn integrate_descriptors_caps_a_reply_at_the_wire_bound() {
-        let target = [0u8; 32];
-        let mut candidates = Vec::new();
-        let new: Vec<NodeDescriptor> = (0..MAX_FIND_NODE_RESULTS as u8 + 10)
-            .map(|n| peer_desc(n, "93.184.216.34:4433"))
+    fn a_lookup_reply_adds_only_dialable_peers_up_to_the_wire_bound() {
+        let reply: Vec<NodeDescriptor> = (0..MAX_FIND_NODE_RESULTS as u8 + 3)
+            .map(|n| NodeDescriptor {
+                id:     NodeId::new([n; 32]),
+                addr:   if n == 0 { "127.0.0.1:4433" } else { "93.184.216.34:4433" }
+                    .parse()
+                    .unwrap(),
+                pubkey: [n; 32].into(),
+            })
             .collect();
-        integrate_descriptors(&target, &mut candidates, &new, false);
-        assert_eq!(candidates.len(), MAX_FIND_NODE_RESULTS);
+        let mut candidates = Vec::new();
+        integrate_descriptors(&[0; 32], &mut candidates, &reply, false);
+        let added: Vec<NodeId> = candidates.iter().map(|c| c.desc.id).collect();
+        let expected: Vec<NodeId> = reply[1..MAX_FIND_NODE_RESULTS].iter().map(|d| d.id).collect();
+        assert_eq!(added, expected);
     }
 }

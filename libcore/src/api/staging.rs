@@ -1,16 +1,12 @@
 //! Composer staging: FFI for the media buffer that sits in front of a send.
 
-use crate::api::messaging::to_did16;
-use crate::api::messaging::to_conv16;
-use crate::platform::CoreError;
+use common::types::bytes::fixed;
 
-/// A staged item, projected for the client.
-///
-/// Carries no encoded bytes on purpose: the client already holds the picked
-/// URI and draws its own preview from that, so a 256KB AVIF crossing the FFI
-/// per item — on every re-read of the buffer — would buy nothing. `thumb` is
-/// the exception, since an attachment has no client-side preview to fall back
-/// on.
+use crate::platform::CoreError;
+use crate::state::core;
+
+/// Carries no encoded bytes: the client previews from its picked URI. `thumb` is the exception,
+/// since an attachment has no client-side preview.
 #[derive(uniffi::Record)]
 pub struct StagedRecord {
     pub id:     u64,
@@ -45,16 +41,14 @@ impl From<crate::staging::Staged> for StagedRecord {
     }
 }
 
-/// Put a picked photo in the buffer. Returns its id at once — the AVIF pass
-/// runs off-thread and the item flips to ready (or failed, for an over-budget
-/// photo) through the `"staging"` re-read doorbell.
+/// Returns the id at once; the AVIF pass runs off-thread and the item turns ready, or failed when
+/// over budget, through the `"staging"` doorbell.
 #[uniffi::export]
 pub fn stage_image(rgba: Vec<u8>, width: u32, height: u32) -> u64 {
     crate::staging::stage_image(rgba, width, height)
 }
 
-/// Put a picked file in the buffer. The blurred preview is computed before this
-/// returns so there's something to draw; the manifest hash runs off-thread.
+/// The blurred preview is ready when this returns; the manifest hash runs off-thread.
 #[uniffi::export]
 pub fn stage_attachment(
     source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
@@ -63,17 +57,10 @@ pub fn stage_attachment(
     Ok(crate::staging::stage_attachment(source_path, name, mime, thumb_rgba, thumb_w, thumb_h)?)
 }
 
-/// Remove one item from the buffer. Safe mid-prepare — the running pass finds
-/// the id gone and drops its result.
+/// Safe mid-prepare: the running pass finds the id gone and drops its result.
 #[uniffi::export]
 pub fn discard_staged(id: u64) {
     crate::staging::discard(id);
-}
-
-/// Empty the buffer.
-#[uniffi::export]
-pub fn clear_staged() {
-    crate::staging::clear();
 }
 
 /// The buffer's contents, in the order they'll send.
@@ -82,20 +69,15 @@ pub fn staged_items() -> Vec<StagedRecord> {
     crate::staging::list().into_iter().map(Into::into).collect()
 }
 
-/// Send the staged items to `to_ipk` as one album (or a lone message), with
-/// `caption` on the first and `reply_to` quoting a prior message on all of
-/// them. Fire-and-forget like the other sends: the `Result` reports invalid
-/// input synchronously, outcomes arrive via `on_message`.
-///
-/// Every id must be ready. A caller that sends mid-encode should wait for the
-/// buffer to settle rather than have items silently dropped.
+/// One album, or a lone message, with `caption` on the first item. Every id must be ready or the
+/// send fails; outcomes arrive via `on_message`.
 #[uniffi::export]
 pub fn send_staged(
     conversation_id: Vec<u8>, ids: Vec<u64>, caption: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let reply = reply_to.as_deref().map(to_did16).transpose()?;
-    crate::RUNTIME.spawn(async move {
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let reply = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
+    core().spawn(async move {
         if let Err(e) = crate::staging::commit(to, ids, caption, reply).await {
             log::error!("STAGING: commit failed: {e}");
         }
@@ -103,27 +85,24 @@ pub fn send_staged(
     Ok(())
 }
 
-/// Replace a prior message's body with a staged item — the media half of an
-/// edit. Refused by the compatibility matrix unless the swap is legal (an
-/// attachment can only become another attachment, and so on); the item stays in
-/// the buffer either way, so a refusal doesn't cost the user their pick.
+/// Replaces a prior message's body with a staged item. An illegal swap is refused, and the item
+/// stays in the buffer either way.
 #[uniffi::export]
 pub fn revise_with_staged(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, staged_id: u64, caption: String,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let target = to_did16(&dispatch_id)?;
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
     let body = crate::staging::body_of(staged_id, caption)?;
-    // Landed before this returns, not on the spawned task: the caller clears
-    // the buffer next, and an attachment the buffer lets go of is unlinked
-    // unless a message already names it.
+    // Applied before returning: the caller clears the buffer next, which unlinks an attachment no
+    // message names yet.
     if let Some((row, content)) =
-        crate::messaging::apply_revise_body(&to, &target, body.clone(), true, None)?
+        crate::messaging::body::apply_revise_body(&to, &target, body.clone(), true, None)?
     {
         use crate::events::Emittable;
         crate::events::messaging::MessageEv::Edited { id: row.id, conversation: to, content }.emit();
     }
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = crate::messaging::send_control(
             to,
             common::proto::mls_wire::AppPayload::Revise { target, body },
@@ -139,13 +118,13 @@ pub fn revise_with_staged(
 /// Share sheet waits for durable message creation before releasing its staged files.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn commit_shared(conversation_id: Vec<u8>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    crate::RUNTIME.spawn(async move {
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    core().spawn(async move {
         if ids.is_empty() {
             anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
             let message = crate::data::message::Message::save_outgoing(to, &caption, None)?;
-            let payload = crate::messaging::rebuild_pending_payload(&to, &message)?;
-            crate::RUNTIME.spawn(async move {
+            let payload = crate::messaging::body::rebuild_pending_payload(&to, &message)?;
+            core().spawn(async move {
                 if let Err(e) = crate::messaging::send_prepared(to, &message, payload).await {
                     log::debug!("SHARE: text remains pending: {e}");
                 }

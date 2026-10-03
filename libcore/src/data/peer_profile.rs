@@ -1,5 +1,5 @@
 //! Owner-asserted names and bios, revisioned across all shared chats.
-use crate::db::messages::MESSAGES_DB;
+use crate::state::core;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -10,6 +10,7 @@ pub struct ProfileUpdate {
     pub bio: String,
     pub card: Vec<u8>,
 }
+crate::db::from_row!(ProfileUpdate { revision, name, bio, card });
 impl ProfileUpdate {
     pub fn into_payload(self) -> common::proto::mls_wire::AppPayload {
         common::proto::mls_wire::AppPayload::ProfileDetails {
@@ -21,7 +22,7 @@ impl ProfileUpdate {
     }
 }
 pub fn notify_changed() {
-    if let Some(events) = crate::platform::EVENTS.get() {
+    if let Some(events) = core().events.get() {
         events.on_db_changed(vec![
             "peer_profiles".into(),
             "contacts".into(),
@@ -47,19 +48,12 @@ pub fn apply_tx(conn: &Connection, who: &[u8; 32], update: &ProfileUpdate) -> Re
         (who.as_slice(), &update.name, &update.bio, revision, &update.card))? != 0)
 }
 pub fn get(who: &[u8; 32]) -> Option<ProfileUpdate> {
-    MESSAGES_DB
+    core().db.messages()
         .lock()
         .query_row(
             "SELECT revision, name, bio, card FROM peer_profiles WHERE ipk = ?1",
             [who.as_slice()],
-            |r| {
-                Ok(ProfileUpdate {
-                    revision: r.get(0)?,
-                    name: r.get(1)?,
-                    bio: r.get(2)?,
-                    card: r.get(3)?,
-                })
-            },
+            ProfileUpdate::from_row,
         )
         .ok()
 }

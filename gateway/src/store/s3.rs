@@ -1,12 +1,11 @@
 //! S3 object reads, writes and deletes authenticated with AWS Signature V4.
 
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use common::utils::now_secs;
 use hmac::Hmac;
 use hmac::Mac;
 use hmac::digest::KeyInit;
@@ -14,7 +13,6 @@ use sha2::Digest;
 use sha2::Sha256;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Generous for one 256 KiB object.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct S3 {
@@ -98,7 +96,6 @@ impl S3 {
         Ok(())
     }
 
-    /// Gone afterwards, whether or not it was there.
     pub async fn delete(&self, key: &str) -> Result<()> {
         let uri = self.uri(key);
         let payload_hash = hex::encode(Sha256::digest(b""));
@@ -132,7 +129,6 @@ impl S3 {
         Ok(())
     }
 
-    /// `None` on 404.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let uri = self.uri(key);
         let payload_hash = hex::encode(Sha256::digest(b""));
@@ -170,10 +166,8 @@ impl S3 {
     }
 }
 
-/// `(YYYYMMDDTHHMMSSZ, YYYYMMDD)` for now.
 fn now_stamps() -> (String, String) {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (y, mo, d, h, mi, s) = civil(secs);
+    let (y, mo, d, h, mi, s) = civil(now_secs());
     (format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z"), format!("{y:04}{mo:02}{d:02}"))
 }
 
@@ -200,8 +194,7 @@ fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Percent-encode a URI path the way SigV4 canonicalises it: unreserved
-/// characters and `/` pass, everything else is `%XX` uppercase.
+/// Percent-encodes a path the way SigV4 canonicalises it.
 fn canonical_uri(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for b in path.bytes() {
@@ -215,9 +208,8 @@ fn canonical_uri(path: &str) -> String {
     out
 }
 
-/// The `Authorization` header for one request. `extra` are further headers to
-/// sign, lowercase names, beyond the three every request carries. No query
-/// string: the store never sends one.
+/// `extra` holds further headers to sign, with lowercase names. The query string is empty
+/// because the store never sends one.
 #[allow(clippy::too_many_arguments)]
 fn sign(
     secret_key: &str, access_key: &str, region: &str, method: &str, host: &str, uri: &str,
@@ -258,13 +250,10 @@ fn sign(
 mod tests {
     use super::*;
 
-    /// The worked GET example from the S3 SigV4 reference ("Signature
-    /// Calculations for the Authorization Header: Transferring Payload in a
-    /// Single Chunk", GET Object). One vector pins the whole chain: URI and
-    /// header canonicalisation, scope, and the four-step key derivation.
+    /// The GET Object example from the AWS SigV4 reference, plus the calendar edges `civil` must
+    /// get right on the dates it signs.
     #[test]
-    fn matches_the_aws_get_object_example() {
-        let empty = hex::encode(Sha256::digest(b""));
+    fn requests_are_signed_like_the_aws_sigv4_example() {
         let auth = sign(
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
             "AKIAIOSFODNN7EXAMPLE",
@@ -273,7 +262,7 @@ mod tests {
             "examplebucket.s3.amazonaws.com",
             "/test.txt",
             &[("range", "bytes=0-9")],
-            &empty,
+            &hex::encode(Sha256::digest(b"")),
             "20130524T000000Z",
             "20130524",
         );
@@ -283,18 +272,10 @@ mod tests {
              SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, \
              Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
         );
-    }
-
-    #[test]
-    fn civil_dates_are_right_at_the_edges() {
         assert_eq!(civil(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil(951_782_400), (2000, 2, 29, 0, 0, 0));
         assert_eq!(civil(1_369_353_600), (2013, 5, 24, 0, 0, 0));
         assert_eq!(civil(1_735_689_599), (2024, 12, 31, 23, 59, 59));
-    }
-
-    #[test]
-    fn canonical_uri_escapes_the_reserved() {
         assert_eq!(canonical_uri("/b/packs/ab/b/cd"), "/b/packs/ab/b/cd");
         assert_eq!(canonical_uri("/b/a b+c"), "/b/a%20b%2Bc");
     }

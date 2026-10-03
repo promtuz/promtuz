@@ -1,10 +1,4 @@
-//! Pictures people assert about themselves, learned inside a shared chat.
-//!
-//! The companion of [`peer_name`](crate::data::peer_name), with one difference
-//! in standing: the address book holds a *name* the local user chose, but never
-//! a picture, so what a person says they look like is the only account there
-//! is. Stored as the AVIF bytes they sent, capped at [`MAX_AVATAR_BYTES`] so a
-//! hostile member cannot park a payload here under the name of a face.
+//! Pictures people assert about themselves, stored as the AVIF bytes they sent.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -12,27 +6,24 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::bail;
 use common::proto::mls_wire::MAX_AVATAR_BYTES;
+use common::utils::now_secs;
 use rusqlite::Connection;
 
-use crate::db::messages::MESSAGES_DB;
-use crate::utils::systime;
+use crate::state::core;
 
-/// Moves whenever any picture changes, ours or theirs. The DB doorbell only
-/// says that *something* in the messages DB committed, which is every message;
-/// a client that caches decoded pictures compares this instead, and re-decodes
-/// only when a picture actually moved.
+/// Moves whenever any picture changes. The DB doorbell fires on every commit, so a client caching
+/// decoded pictures compares this instead.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
 }
 
-/// Called after a successful write and after releasing its DB lock. SQLite's
-/// commit hook fires earlier, so publish a second doorbell after the generation
-/// moves. Own-profile writes need this too: the identity DB has no change hook.
+/// Call after releasing the DB lock: the commit hook fired before the generation moved, and the
+/// identity DB has no hook at all.
 pub(crate) fn notify_changed() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    if let Some(events) = crate::platform::EVENTS.get() {
+    if let Some(events) = core().events.get() {
         events.on_db_changed(vec!["peer_avatars".into()]);
     }
 }
@@ -49,9 +40,8 @@ impl AvatarUpdate {
     }
 }
 
-/// Refuse anything that is not a plausibly small AVIF file. The size cap is
-/// the wire contract; the `ftyp` box is the cheapest tell that the bytes are
-/// an image container at all rather than whatever a sender chose to label one.
+/// The size cap is the wire contract; the `ftyp` box is the cheapest tell that the bytes are an
+/// image container at all.
 pub fn check_avif(bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_AVATAR_BYTES {
         bail!("picture is {} bytes, over the {MAX_AVATAR_BYTES} cap", bytes.len());
@@ -66,7 +56,7 @@ pub fn check_avif(bytes: &[u8]) -> Result<()> {
 /// which shared chat carried it. A NULL picture is a durable removal tombstone.
 pub fn apply(who: &[u8; 32], update: &AvatarUpdate) -> Result<()> {
     let changed = {
-        let conn = MESSAGES_DB.lock();
+        let conn = core().db.messages().lock();
         apply_tx(&conn, who, update)?
     };
     if changed {
@@ -84,13 +74,13 @@ pub(crate) fn apply_tx(conn: &Connection, who: &[u8; 32], update: &AvatarUpdate)
         "INSERT INTO peer_avatars (ipk, avif, updated_at, revision) VALUES (?1, ?2, ?3, ?4) \
          ON CONFLICT(ipk) DO UPDATE SET avif = excluded.avif, updated_at = excluded.updated_at, \
              revision = excluded.revision WHERE excluded.revision > peer_avatars.revision",
-        (who.as_slice(), update.avif.as_deref(), systime().as_secs(), revision),
+        (who.as_slice(), update.avif.as_deref(), now_secs(), revision),
     )?;
     Ok(changed != 0)
 }
 
 pub fn get(who: &[u8; 32]) -> Option<Vec<u8>> {
-    let conn = MESSAGES_DB.lock();
+    let conn = core().db.messages().lock();
     get_tx(&conn, who)
 }
 
@@ -103,19 +93,18 @@ pub fn get_tx(conn: &Connection, who: &[u8; 32]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::messages::open_in_memory;
+    use crate::test_support::data::open;
 
-    /// The smallest thing the gate accepts: an ISOBMFF `ftyp` box and a byte
-    /// of nothing after it. Real AVIF follows; the store never decodes.
+    /// The smallest bytes the gate accepts: an ISOBMFF `ftyp` box. The store never decodes them.
     fn avif_like(fill: u8) -> Vec<u8> {
-        let mut v = vec![0, 0, 0, 0x1c, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f'];
+        let mut v = b"\0\0\0\x1cftypavif".to_vec();
         v.push(fill);
         v
     }
 
     #[test]
-    fn reordered_updates_and_replays_cannot_resurrect_a_removed_picture() {
-        let conn = open_in_memory();
+    fn stale_copies_and_non_avif_bytes_never_replace_a_picture() {
+        let conn = open(crate::db::messages::migrate);
         let who = [7u8; 32];
         let old = AvatarUpdate { revision: 10, avif: Some(avif_like(1)) };
         let latest = AvatarUpdate { revision: 12, avif: Some(avif_like(2)) };
@@ -124,40 +113,38 @@ mod tests {
         assert!(!apply_tx(&conn, &who, &old).unwrap());
         assert_eq!(get_tx(&conn, &who), latest.avif);
         assert!(apply_tx(&conn, &who, &removal).unwrap());
-        // Duplicate copies arriving through another shared chat also do nothing.
+        // Copies of the same update arriving through other shared chats change nothing.
         assert!(!apply_tx(&conn, &who, &latest).unwrap());
         assert!(!apply_tx(&conn, &who, &removal).unwrap());
-        assert_eq!(get_tx(&conn, &who), None);
-        let revision: u64 = conn.query_row(
-            "SELECT revision FROM peer_avatars WHERE ipk = ?1", [who.as_slice()], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(revision, removal.revision, "removal revision survives future reads");
+        assert_eq!(get_tx(&conn, &who), None, "the removal holds");
         let next = AvatarUpdate { revision: 14, avif: Some(avif_like(3)) };
         assert!(apply_tx(&conn, &who, &next).unwrap());
         assert_eq!(get_tx(&conn, &who), next.avif);
 
-        let fresh_peer = [8u8; 32];
-        assert!(apply_tx(&conn, &fresh_peer, &removal).unwrap());
-        assert!(!apply_tx(&conn, &fresh_peer, &old).unwrap());
-        assert_eq!(get_tx(&conn, &fresh_peer), None, "removal may arrive before any upload");
-    }
-
-    #[test]
-    fn the_gate_refuses_what_is_not_a_small_avif() {
-        let conn = open_in_memory();
-        let who = [8u8; 32];
-
-        let mut oversized = avif_like(0);
-        oversized.resize(MAX_AVATAR_BYTES + 1, 0);
-        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(oversized) }).is_err(), "over the cap");
-
-        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(b"not an image at all".to_vec()) }).is_err(), "no ftyp box");
-        assert!(apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(vec![]) }).is_err(), "empty");
-
-        assert_eq!(get_tx(&conn, &who), None, "a refused picture leaves no row");
+        let fresh = [8u8; 32];
+        assert!(apply_tx(&conn, &fresh, &removal).unwrap());
+        assert!(!apply_tx(&conn, &fresh, &old).unwrap(), "a removal may arrive before any upload");
+        assert_eq!(get_tx(&conn, &fresh), None);
 
         let mut at_cap = avif_like(0);
         at_cap.resize(MAX_AVATAR_BYTES, 0);
-        apply_tx(&conn, &who, &AvatarUpdate { revision: 1, avif: Some(at_cap) }).expect("exactly the cap is allowed");
+        let mut over_cap = at_cap.clone();
+        over_cap.push(0);
+        let stranger = [9u8; 32];
+        for refused in [over_cap, b"not an image at all".to_vec(), Vec::new()] {
+            let update = AvatarUpdate { revision: 1, avif: Some(refused) };
+            assert!(apply_tx(&conn, &stranger, &update).is_err());
+        }
+        let rows: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM peer_avatars WHERE ipk = ?1",
+                [stranger.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a refused picture leaves no row, not even a revision");
+        assert!(
+            apply_tx(&conn, &stranger, &AvatarUpdate { revision: 1, avif: Some(at_cap) }).unwrap()
+        );
     }
 }

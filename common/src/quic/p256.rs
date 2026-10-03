@@ -7,7 +7,6 @@ use ed25519_dalek::pkcs8::DecodePrivateKey;
 
 use crate::error;
 
-/// Tries to read a valid SEC1 PEM Private key
 #[allow(clippy::result_unit_err)]
 pub fn secret_from_key(key_path: &Path) -> Result<SigningKey, ()> {
     let pem = fs::read_to_string(key_path).map_err(|err| {
@@ -21,17 +20,7 @@ pub fn secret_from_key(key_path: &Path) -> Result<SigningKey, ()> {
     Ok(secret)
 }
 
-/// Loads an Ed25519 PKCS#8 PEM key from disk, generating one on first run.
-///
-/// On first boot the operator typically does not have a separate identity
-/// key on disk yet (that's what `secret_from_key` is for in the TLS path,
-/// which is shipped with `certgen`). Rather than force them to run another
-/// tool just for this, we generate a fresh Ed25519 key, persist it as PKCS#8
-/// PEM with `0o600` permissions, and continue.
-///
-/// The resulting file holds the relay's *long-term identity* secret —
-/// distinct from the TLS server key — and is what `RelayHello` to the
-/// resolver is signed with. Treat the file like an SSH host key.
+/// Loads the node's Ed25519 PKCS#8 key, creating it with mode 0600 on first run.
 #[allow(clippy::result_unit_err)]
 #[cfg(unix)]
 pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
@@ -57,11 +46,6 @@ pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
             })?;
         }
 
-    // ed25519-dalek 2.x's `SigningKey::generate` takes a `rand_core` 0.6
-    // CSPRNG, but the workspace's `rand` crate sits on rand_core 0.9.
-    // Avoid the version mismatch by sampling 32 bytes directly from the
-    // OS and feeding them into `SigningKey::from_bytes` (which is the
-    // documented constructor for Ed25519 seed material).
     use rand::TryRng;
     let mut seed = [0u8; 32];
     rand::rngs::SysRng
@@ -88,8 +72,6 @@ pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
 #[allow(clippy::result_unit_err)]
 #[cfg(not(unix))]
 pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
-    // Non-unix targets: fall back to the basic loader. On Windows the
-    // permission story is different and out of scope for now — we expect
-    // operators on Windows to provision the key themselves.
+    // Non-unix operators provision the key themselves.
     secret_from_key(key_path)
 }

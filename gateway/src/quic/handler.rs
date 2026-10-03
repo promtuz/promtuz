@@ -10,35 +10,35 @@ use common::proto::push::WakeRequest;
 use common::proto::sticker::StoreReject;
 use common::proto::sticker::StoreResponse;
 use common::quic::protorole::ProtoRole;
+use common::server::accept::quota;
 use common::warn;
+use governor::RateLimiter;
 use quinn::Connection;
 
 use crate::gateway::Gateway;
 
-/// Per-connection handler. Serves the one-RPC-per-bi-stream contract (mirrors
-/// the resolver's client handler): each accepted bi-stream is one
-/// [`GatewayRequest`], dispatched on its own task so a slow send can't
-/// head-of-line block the connection's other streams.
-///
-/// `Register` (devices, `client/5`) verifies + stores `P → token`. `Wake`
-/// (home relays, `relay/5`) resolves `P → token` and pushes it. `Register`
-/// replies after saving the token; `Store` replies after handling an upload.
+const CLIENT_RPC_PER_MIN: u32 = 300;
+const RELAY_RPC_PER_MIN: u32 = 1200;
+const RPC_BURST: u32 = 300;
+
+/// One request per bi-stream. `Register` and `Store` reply; `Wake` does not.
 pub struct Handler;
 
 impl Handler {
     pub async fn handle(conn: Connection, gateway: Arc<Gateway>) {
         let addr = conn.remote_address();
 
-        // Only devices (`client/5`, registration) and home relays (`relay/5`,
-        // wake) talk to the gateway. Anything else is closed, and each role
-        // gets its own verb: a device registers, a relay wakes.
         let role = match ProtoRole::from_conn(&conn) {
             Some(role @ (ProtoRole::Client | ProtoRole::Relay)) => role,
             Some(_) => return conn.close(0u32.into(), b"UnsupportedALPN"),
             None => return conn.close(0u32.into(), b"NoALPN"),
         };
 
+        let per_minute =
+            if role == ProtoRole::Relay { RELAY_RPC_PER_MIN } else { CLIENT_RPC_PER_MIN };
+        let limiter = RateLimiter::direct(quota(per_minute, RPC_BURST));
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+            limiter.until_ready().await;
             let gateway = gateway.clone();
             tokio::spawn(async move {
                 match GatewayRequest::unpack(&mut recv).await {
@@ -93,9 +93,8 @@ impl Handler {
 
     async fn dispatch_wake(gateway: &Gateway, req: WakeRequest) {
         let p = hex::encode(&req.pseudonym.0[..8]);
-        // A wake carries nothing: the message is waiting at the relay, and the
-        // device fetches it there. Bytes offered here would be forwarded under
-        // the gateway's FCM credentials to a phone that never asked for them.
+        // A wake carries nothing: the device fetches the message from its relay, and any bytes
+        // here would reach a phone under the gateway's FCM credentials.
         if !req.payload.is_empty() {
             warn!("gateway: wake for P={p} carried a payload; dropped");
             return;

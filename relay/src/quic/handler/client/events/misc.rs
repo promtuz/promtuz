@@ -27,21 +27,16 @@ pub(super) async fn handle_misc(
     }
 }
 
-/// Mint TURN credentials for the authenticated client, or say we run no
-/// TURN server.
 pub(super) async fn handle_turn_credentials(ctx: ClientCtxHandle, tx: &mut SendStream) -> Result<()> {
     let creds = ctx
         .relay
         .turn
         .as_ref()
-        .map(|t| t.credentials(&ctx.ipk.to_bytes(), crate::util::systime().as_millis() as u64));
+        .map(|t| t.credentials(&ctx.ipk.to_bytes(), common::utils::now_ms()));
     SRelayPacket::TurnCredentials(creds).send(tx).await.map_err(|e| e.into())
 }
 
-/// Store `IPK → P` so the DHT enqueue path can wake this device. Bound to the
-/// connection-authenticated `ctx.ipk`; the client cannot register for another
-/// IPK. Not cleared on disconnect (an offline device is exactly the one to
-/// wake). Fire-and-forget — no reply.
+/// The pseudonym survives disconnect: an offline device is exactly the one to wake.
 pub(super) async fn handle_register_push(
     pseudonym: [u8; 32], timestamp: u64, sig: [u8; 64], ctx: ClientCtxHandle,
 ) -> Result<()> {
@@ -55,14 +50,11 @@ pub(super) async fn handle_register_push(
         timestamp,
         user_sig: sig.into(),
     };
-    if !crate::dht::push_replication::valid_publish(&publish, crate::util::systime().as_millis() as u64) {
+    if !crate::dht::push_replication::valid_publish(&publish, common::utils::now_ms()) {
         return Ok(());
     }
-    // Keep this relay's local durable record for DHT-disabled deployments;
-    // enabled DHT relays fan the exact user-signed record to target homes.
     let store = ctx.relay.store.clone();
     tokio::task::spawn_blocking(move || store.put_push_pseudonym(&ipk, &pseudonym)).await??;
-    ctx.relay.push_pseudonyms.write().insert(ipk, pseudonym);
     if let Some(dht) = ctx.relay.dht.clone() {
         spawn_tied(&ctx.cancel, crate::dht::push_replication::replicate_to_homes(dht, publish));
     }

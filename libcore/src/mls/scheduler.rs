@@ -1,82 +1,45 @@
-//! KeyPackage rotation scheduler.
-//!
-//! # Responsibilities
-//!
-//! - **On reconnect**: ensure the stash is full
-//!   ([`KeyPackageStash::ensure_stash_full`]) — the relay-side homes
-//!   may have GC'd expired entries while we were offline.
-//! - **On periodic tick** (`KP_SCHEDULER_TICK_MS`): check
-//!   [`KeyPackageStash::should_refill`] / [`should_rotate`] and act.
-//!
-//! # Why a separate module
-//!
-//! The stash logic lives in `mls::keypackage`; the dialer is in
-//! `quic::dht_client`. The scheduler is the *coordinator* — when both
-//! "you have low stash" and "the dialer is wired" are true, mint and
-//! publish. Splitting it lets the scheduler grow indep of either
-//! sibling's implementation details, and lets us unit-test the
-//! decision logic with a fake clock + fake dialer.
-//!
-//! # Clock injection
-//!
-//! Tests pass a closure `now_ms_fn: impl Fn() -> u64` so they can pin
-//! "rotation due" without wall-clock games. The default
-//! [`run_once`] entry point reads `crate::utils::systime`.
+//! KeyPackage upkeep: refill, rotation and republishing the stash to our homes.
 
-#![allow(dead_code)] // The production caller is a tokio::spawn from
-// `quic/server.rs`, which needs the production DhtClient wiring.
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use common::proto::mls_wire::KeyPackageRecord;
+use common::proto::pack::Packer;
+use common::utils::now_ms;
 use ed25519_dalek::SigningKey;
+use log::debug;
+use log::warn;
+use tokio_util::sync::CancellationToken;
 
 use super::keypackage::KeyPackageStash;
 use super::provider::PromtuzMlsProvider;
 use crate::db::outbox::OpType;
 use crate::quic::dht_client::DhtClient;
-use crate::quic::dht_client::KpOutcomeFilter;
-use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::pack::Packer;
+use crate::quic::relay_dht_client::RelayDhtClient;
+use crate::state::core;
 
-/// Outcome of one scheduler tick. Surfaced to the caller (a UI metric
-/// or log line) without exposing the internal fan-out detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerOutcome {
-    /// The stash is healthy; no minting or publishing was done.
     NoOp,
-    /// We minted fresh KPs and enqueued them for durable publish. A
-    /// best-effort publish is attempted immediately, but the batch may
-    /// still be pending in the outbox until a home Stored quorum. Useful
-    /// for a metrics counter ("KP refills minted").
     Refilled { count: usize },
-    /// We rotated the entire stash (anti-pinning trigger). Distinct
-    /// from [`Self::Refilled`] so a UI can surface the cadence event.
     Rotated { count: usize },
 }
 
-/// Run one scheduler tick. Single entry point so the production
-/// `tokio::spawn`-driven loop and the test-fixture call into the
-/// same function.
-///
-/// Order of operations:
-/// 1. If the stash is empty / under low water →
-///    [`KeyPackageStash::ensure_stash_full`] mints up to
-///    `KP_STASH_TARGET` records, publishes via
-///    [`DhtClient::publish_keypackages`].
-/// 2. Else if `should_rotate` (oldest unconsumed KP older than
-///    `KP_SCHEDULED_ROTATION_MS`) → mint a full batch and publish it as a
-///    snapshot, replacing the previous generation at the home.
-/// 3. Else → NoOp.
-///
-/// # Errors
-///
-/// - `KeyPackageStashError::*` → propagated from
-///   `KeyPackageStash::generate_one` / `rotate_periodic`.
-/// - [`DhtClientError::*`] → propagated from the dialer.
 pub async fn run_once<C: DhtClient>(
     provider: &PromtuzMlsProvider, stash: &KeyPackageStash, ipk_signer: &SigningKey,
     dht: &C, now_ms: u64,
 ) -> Result<SchedulerOutcome> {
+    let (outcome, records) = tick(provider, stash, ipk_signer, now_ms)?;
+    publish_kp_batch(dht, &records).await;
+    Ok(outcome)
+}
+
+/// What one tick mints, and the records it publishes.
+fn tick(
+    provider: &PromtuzMlsProvider, stash: &KeyPackageStash, ipk_signer: &SigningKey, now_ms: u64,
+) -> Result<(SchedulerOutcome, Vec<KeyPackageRecord>)> {
     if stash.should_refill(now_ms) {
         stash
             .ensure_stash_full(provider, ipk_signer)
@@ -85,44 +48,32 @@ pub async fn run_once<C: DhtClient>(
         let recs = stash
             .unconsumed_records(now_ms)
             .map_err(|e| anyhow!("unconsumed_records: {e}"))?;
-        if recs.is_empty() {
-            return Ok(SchedulerOutcome::NoOp);
-        }
         let count = recs.len();
-        publish_kp_batch(dht, &recs).await;
-        return Ok(SchedulerOutcome::Refilled { count });
+        let outcome =
+            if count == 0 { SchedulerOutcome::NoOp } else { SchedulerOutcome::Refilled { count } };
+        return Ok((outcome, recs));
     }
 
     if stash.should_rotate(now_ms) {
+        // Publish, not Refill: the home caps a refill at `KP_STASH_TARGET` including what it
+        // holds, which a full batch never fits. Publishing also evicts the old generation there.
         let recs = stash
             .rotate_periodic(provider, ipk_signer, now_ms)
             .map_err(|e| anyhow!("rotate_periodic: {e}"))?;
-        if recs.is_empty() {
-            return Ok(SchedulerOutcome::NoOp);
-        }
-        // Snapshot Publish, not additive Refill: the home caps a refill at
-        // `retained + incoming <= KP_STASH_TARGET`, which a full rotation batch
-        // can never satisfy. Publishing the new generation also evicts the old
-        // one at the home, so a hoarded KP stops being fetchable.
         let count = recs.len();
-        publish_kp_batch(dht, &recs).await;
-        return Ok(SchedulerOutcome::Rotated { count });
+        let outcome =
+            if count == 0 { SchedulerOutcome::NoOp } else { SchedulerOutcome::Rotated { count } };
+        return Ok((outcome, recs));
     }
 
-    Ok(SchedulerOutcome::NoOp)
+    Ok((SchedulerOutcome::NoOp, Vec::new()))
 }
 
-/// Enqueue a KP batch to the durable outbox, then best-effort publish it.
-/// On ANY publish error the op is left in the outbox for the reconciler to
-/// retry on reconnect — NEVER propagated (a failed publish used to be lost
-/// forever once `should_refill` went false).
-/// True once our KeyPackage has been published to a quorum of homes — i.e.
-/// we're discoverable and pairable. The share screen gates the QR on this so
-/// a brand-new user can't hand out a link nobody can pair with (PAIRING.md).
+/// Set once a KeyPackage publish succeeds. The share screen holds back the QR until then, so a new
+/// user cannot hand out a link nobody can pair with.
 pub static KP_PUBLISH_READY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Whether our KeyPackage is quorum-published (share-QR gate).
 pub fn kp_publish_ready() -> bool {
     KP_PUBLISH_READY.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -134,7 +85,7 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     let Ok(payload) = records.ser() else { return };
     let kp_id = blake3::hash(&payload).as_bytes()[..16].to_vec();
     crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
-    match dht.publish_keypackages(records, KpOutcomeFilter::Default).await {
+    match dht.publish_keypackages(records).await {
         Ok(()) => {
             crate::delivery::retire(&kp_id, None);
             KP_PUBLISH_READY.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -143,222 +94,113 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     }
 }
 
-/// Republish the client's current KP stash to the relay on connect. Publish is
-/// otherwise gated on local stash low-water (`should_refill`), so a relay that
-/// lost our KP (restart/wipe/eviction) would never get it back. Idempotent.
+/// Republishes the stash on connect. Otherwise publishing waits for low water, and a relay that
+/// lost our KeyPackages would never get them back.
 pub async fn ensure_kp_published<C: DhtClient>(
     provider: &PromtuzMlsProvider, stash: &KeyPackageStash, ipk_signer: &SigningKey, dht: &C,
 ) {
-    // Self-heal after an MLS_WIRE_VERSION bump: records minted under the old
-    // version fail every peer's sig check — purge so the fill below mints
-    // valid replacements and the snapshot Publish evicts them relay-side.
-    let purged =
-        stash.purge_invalid_records(crate::utils::systime().as_millis() as u64);
+    // Purge records peers would reject, so the fill below mints replacements.
+    let purged = stash.purge_invalid_records(now_ms());
     if purged > 0 {
         log::info!("ensure_kp_published: purged {purged} stale-version KP records; re-minting");
     }
-    // Guarantee a full stash first (mints if low — covers a fresh or migration-wiped stash).
     if let Err(e) = stash.ensure_stash_full(provider, ipk_signer) {
         log::warn!("ensure_kp_published: ensure_stash_full failed: {e}");
     }
-    let now = crate::utils::systime().as_millis() as u64;
+    let now = now_ms();
     match stash.unconsumed_records(now) {
         Ok(recs) => publish_kp_batch(dht, &recs).await,
         Err(e) => log::warn!("ensure_kp_published: unconsumed_records failed: {e}"),
     }
 }
 
-// ---------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------
+/// How often the KP scheduler checks for refill or rotation work.
+const KP_SCHEDULER_TICK_MS: u64 = 60_000;
+
+pub(crate) async fn run_scheduler_loop(client: Arc<RelayDhtClient>, cancel: CancellationToken) {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let stash_db = core().db.mls();
+    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
+    let our_ipk_bytes = match crate::data::identity::Identity::get() {
+        Some(i) => i.ipk(),
+        None => {
+            warn!("MLS scheduler: identity unavailable; loop exiting");
+            return;
+        },
+    };
+    let signing = match crate::data::identity::secret_key_signing(&our_ipk_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("MLS scheduler: signing key unavailable: {e}; loop exiting");
+            return;
+        },
+    };
+    // Republish on connect: the relay may have lost our KP while the local stash is still full,
+    // so `should_refill` would never fire.
+    crate::mls::scheduler::ensure_kp_published(&provider, &stash, &signing, client.as_ref()).await;
+    run_scheduler_inner(
+        &provider,
+        &stash,
+        &signing,
+        client.as_ref(),
+        Duration::from_millis(KP_SCHEDULER_TICK_MS),
+        cancel,
+    )
+    .await;
+}
+
+async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
+    provider: &crate::mls::PromtuzMlsProvider, stash: &crate::mls::KeyPackageStash,
+    signing: &ed25519_dalek::SigningKey, dht: &C, tick_interval: Duration,
+    cancel: CancellationToken,
+) {
+    loop {
+        let now_ms = now_ms();
+        match crate::mls::scheduler::run_once(provider, stash, signing, dht, now_ms).await {
+            Ok(crate::mls::scheduler::SchedulerOutcome::NoOp) => {},
+            Ok(other) => {
+                debug!("MLS scheduler: {other:?}");
+            },
+            Err(e) => {
+                warn!("MLS scheduler tick failed: {e}");
+            },
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                debug!("MLS scheduler: cancelled, exiting");
+                return;
+            }
+            _ = tokio::time::sleep(tick_interval) => {}
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-
     use common::proto::mls_wire::KP_SCHEDULED_ROTATION_MS;
     use common::proto::mls_wire::KP_STASH_TARGET;
-    use ed25519_dalek::SigningKey;
-    use parking_lot::Mutex;
-    use rusqlite::Connection;
-    use rusqlite::params;
 
     use super::*;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::quic::dht_client::tests::FakeDhtClient;
+    use crate::test_support::mls::Party;
 
-    fn fresh_conn() -> Arc<Mutex<Connection>> {
-        let mut conn = Connection::open_in_memory().expect("in-memory db");
-        apply_mls_migrations(&mut conn);
-        Arc::new(Mutex::new(conn))
-    }
-
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    /// Empty stash → scheduler mints `KP_STASH_TARGET` records and
-    /// publishes them via the fake dialer.
-    #[tokio::test(flavor = "current_thread")]
-    async fn empty_stash_triggers_refill_and_publish() {
-        let conn = fresh_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn);
-        let signer = SigningKey::from_bytes(&[0x42; 32]);
-        let dht = FakeDhtClient::new_arc();
-
-        // Stash is empty → should_refill true.
-        assert!(stash.should_refill(now_ms()));
-
-        let out = run_once(&provider, &stash, &signer, dht.as_ref(), now_ms())
-            .await
-            .expect("run_once");
-        match out {
-            SchedulerOutcome::Refilled { count } => assert_eq!(count, KP_STASH_TARGET),
-            other => panic!("expected Refilled, got {other:?}"),
-        }
-
-        // The fake recorded one batch of size `KP_STASH_TARGET`.
-        let batches = dht.published_kp_batches.lock();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), KP_STASH_TARGET);
-    }
-
-    /// Healthy stash → NoOp; no fan-out to the dialer.
-    #[tokio::test(flavor = "current_thread")]
-    async fn healthy_stash_is_noop() {
-        let conn = fresh_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn);
-        let signer = SigningKey::from_bytes(&[0x55; 32]);
-        let dht = FakeDhtClient::new_arc();
-
-        // Pre-fill the stash to target.
-        let _ = stash.ensure_stash_full(&provider, &signer).expect("seed");
-
-        let out = run_once(&provider, &stash, &signer, dht.as_ref(), now_ms())
-            .await
-            .expect("run_once");
-        assert_eq!(out, SchedulerOutcome::NoOp);
-        // Dialer was untouched.
-        assert_eq!(dht.published_kp_batches.lock().len(), 0);
-    }
-
-    /// `should_rotate` triggers when the oldest unconsumed KP is
-    /// older than `KP_SCHEDULED_ROTATION_MS`. We fake the clock by
-    /// directly aging the row in the SQLite, then verify the
-    /// scheduler mints + dialer-publishes.
-    #[tokio::test(flavor = "current_thread")]
-    async fn aged_stash_triggers_rotation() {
-        let conn = fresh_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn.clone());
-        let signer = SigningKey::from_bytes(&[0xAA; 32]);
-        let dht = FakeDhtClient::new_arc();
-
-        // Seed the stash, then age every row to the past.
-        let _ = stash.ensure_stash_full(&provider, &signer).expect("seed");
-        {
-            let c = conn.lock();
-            c.execute(
-                "UPDATE mls_keypackage_stash SET generated_at_ms = ?1",
-                params![100i64],
-            )
-            .expect("age");
-        }
-
-        // "Now" past rotation cadence.
-        let now = 100 + KP_SCHEDULED_ROTATION_MS;
-
-        // should_rotate true; should_refill false (count >= low water).
-        assert!(stash.should_rotate(now));
-        assert!(!stash.should_refill(now));
-
-        let out = run_once(&provider, &stash, &signer, dht.as_ref(), now)
-            .await
-            .expect("run_once");
-        match out {
-            SchedulerOutcome::Rotated { count } => assert_eq!(count, KP_STASH_TARGET),
-            other => panic!("expected Rotated, got {other:?}"),
-        }
-
-        {
-            let batches = dht.published_kp_batches.lock();
-            assert_eq!(batches.len(), 1);
-            assert_eq!(batches[0].len(), KP_STASH_TARGET);
-        }
-
-        // Rotation swept the generation that armed it, so the next tick is quiet
-        // — the 60s scheduler must not re-mint a batch every tick forever.
-        assert!(!stash.should_rotate(now), "rotation must clear its own trigger");
-        assert_eq!(
-            run_once(&provider, &stash, &signer, dht.as_ref(), now).await.expect("run_once"),
-            SchedulerOutcome::NoOp,
-        );
-        assert_eq!(dht.published_kp_batches.lock().len(), 1, "no second publish");
-    }
-
-    /// **Fake clock determinism**: scheduler with `now_ms_fn` pinned
-    /// at boundary - 1 → NoOp; pinned at boundary → rotation. Same
-    /// row state.
-    #[tokio::test(flavor = "current_thread")]
-    async fn rotation_boundary_is_inclusive() {
-        let conn = fresh_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn.clone());
-        let signer = SigningKey::from_bytes(&[0xCC; 32]);
-        let dht = FakeDhtClient::new_arc();
-
-        let _ = stash.ensure_stash_full(&provider, &signer).expect("seed");
-        {
-            let c = conn.lock();
-            c.execute(
-                "UPDATE mls_keypackage_stash SET generated_at_ms = ?1",
-                params![100i64],
-            )
-            .expect("age");
-        }
-
-        // Just *before* the boundary → NoOp.
-        let just_before = 100 + KP_SCHEDULED_ROTATION_MS - 1;
-        let out = run_once(&provider, &stash, &signer, dht.as_ref(), just_before)
-            .await
-            .expect("run_once");
-        assert_eq!(out, SchedulerOutcome::NoOp);
-
-        // *At* the boundary → Rotated.
-        let at_boundary = 100 + KP_SCHEDULED_ROTATION_MS;
-        let out = run_once(&provider, &stash, &signer, dht.as_ref(), at_boundary)
-            .await
-            .expect("run_once");
-        match out {
-            SchedulerOutcome::Rotated { count } => assert_eq!(count, KP_STASH_TARGET),
-            other => panic!("expected Rotated, got {other:?}"),
-        }
-    }
-
-    /// Tight loop bound check: `run_once` returns within 2s on a
-    /// fresh stash.
-    #[tokio::test(flavor = "current_thread")]
-    async fn run_once_completes_within_test_budget() {
-        let conn = fresh_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn);
-        let signer = SigningKey::from_bytes(&[0xDD; 32]);
-        let dht = FakeDhtClient::new_arc();
-
-        let start = std::time::Instant::now();
-        let _ = run_once(&provider, &stash, &signer, dht.as_ref(), now_ms())
-            .await
-            .expect("run_once");
-        // Generous bound: 1s. In practice this is well under 200ms
-        // for `KP_STASH_TARGET = 100` records on a development host.
-        assert!(start.elapsed() < Duration::from_secs(1));
+    /// An aged stash rotates once, and the next tick finds the new generation fresh: the minute
+    /// scheduler once minted a full batch on every tick.
+    #[test]
+    fn aged_stash_triggers_rotation() {
+        let party = Party::new(0xAA);
+        let stash = KeyPackageStash::new(party.db.clone());
+        stash.ensure_stash_full(&party.provider, &party.identity).unwrap();
+        // The stash as it stands a week after minting at time 100.
+        let sql = "UPDATE mls_keypackage_stash SET generated_at_ms = 100";
+        party.db.lock().execute(sql, []).unwrap();
+        let due = 100 + KP_SCHEDULED_ROTATION_MS;
+        let at = |now| {
+            let (outcome, records) = tick(&party.provider, &stash, &party.identity, now).unwrap();
+            (outcome, records.len())
+        };
+        assert_eq!(at(due - 1), (SchedulerOutcome::NoOp, 0));
+        let rotated = SchedulerOutcome::Rotated { count: KP_STASH_TARGET };
+        assert_eq!(at(due), (rotated, KP_STASH_TARGET));
+        assert_eq!(at(due), (SchedulerOutcome::NoOp, 0), "the new generation is not due");
     }
 }

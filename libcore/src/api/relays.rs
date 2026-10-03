@@ -1,15 +1,13 @@
-//! Relay diagnostics exports: read the stored relay set + health/latency,
-//! and the three dev actions (reset circuit, forget, reconnect).
+//! Relay diagnostics: the stored relay set with health and latency, plus dev actions.
 
 use std::collections::HashMap;
 
 use rusqlite::params;
 
 use crate::db::network::CircuitState;
-use crate::db::network::NETWORK_DB;
 use crate::platform::CoreError;
+use crate::state::core;
 
-/// Circuit-breaker state, projected for the client.
 #[derive(uniffi::Enum)]
 pub enum RelayCircuit {
     Closed,
@@ -27,7 +25,6 @@ impl From<CircuitState> for RelayCircuit {
     }
 }
 
-/// A stored relay with its health/latency, projected for the client.
 #[derive(uniffi::Record)]
 pub struct RelayStat {
     pub id:                   String,
@@ -43,20 +40,17 @@ pub struct RelayStat {
     pub last_connect:         Option<u64>,
     /// When the open circuit next admits a probe (ms epoch), if backing off.
     pub backoff_until:        Option<u64>,
-    /// True for the one relay currently serving as the live home connection.
     pub is_connected:         bool,
-    /// RTT history (ms), oldest→newest, for the latency graph.
+    /// RTT history in ms, oldest first.
     pub latency_samples:      Vec<u64>,
 }
 
-/// All stored relays with health + latency history. Read-only snapshot;
-/// the client polls this for a live view (there is no relay event stream).
+/// A snapshot; there is no relay event stream, so the client polls.
 #[uniffi::export]
 pub fn get_relays() -> Result<Vec<RelayStat>, CoreError> {
-    let conn = NETWORK_DB.lock();
-    let connected_id = crate::state::RELAY.read().as_ref().map(|r| r.id.to_string());
+    let conn = core().db.network().lock();
+    let connected_id = core().session().map(|s| s.relay.id.to_string());
 
-    // One grouped read of the sample buffer, keyed by relay.
     let mut samples: HashMap<String, Vec<u64>> = HashMap::new();
     {
         let mut stmt = conn
@@ -111,10 +105,9 @@ pub fn get_relays() -> Result<Vec<RelayStat>, CoreError> {
     Ok(relays)
 }
 
-/// Un-trip a relay's circuit breaker so relay selection reconsiders it now.
 #[uniffi::export]
 pub fn reset_relay_circuit(id: String) -> Result<(), CoreError> {
-    let conn = NETWORK_DB.lock();
+    let conn = core().db.network().lock();
     conn.execute(
         "UPDATE relays SET circuit_state = 'closed', backoff_until = NULL, consecutive_failures = 0
          WHERE id = ?1",
@@ -124,26 +117,21 @@ pub fn reset_relay_circuit(id: String) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Delete a relay + its latency samples. The resolver re-adds it on the
-/// next fetch, so this is a local reset, not a permanent block.
+/// A local reset, not a block: the resolver re-adds the relay on the next fetch.
 #[uniffi::export]
 pub fn forget_relay(id: String) -> Result<(), CoreError> {
-    let conn = NETWORK_DB.lock();
+    let conn = core().db.network().lock();
     // relay_latency_samples cascade via the FK (foreign_keys = ON).
     conn.execute("DELETE FROM relays WHERE id = ?1", params![id]).map_err(db_err)?;
     Ok(())
 }
 
-/// Connect (or reconnect) to a specific relay by id. Queues it as the relay
-/// loop's next pick and drops the current connection so the switch happens
-/// promptly; if nothing is connected, the loop picks it up on its next cycle.
+/// Closes the current connection so the relay loop switches to `id` on its next pick.
 #[uniffi::export]
 pub fn connect_relay(id: String) -> Result<(), CoreError> {
-    crate::state::set_preferred_relay(id);
-    if let Some(relay) = crate::state::RELAY.read().as_ref() {
-        if let Some(conn) = &relay.connection {
-            conn.close(quinn::VarInt::from_u32(0), b"user switch relay");
-        }
+    core().set_preferred_relay(id);
+    if let Some(session) = core().session() {
+        session.conn.close(quinn::VarInt::from_u32(0), b"user switch relay");
     }
     Ok(())
 }

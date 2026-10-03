@@ -1,5 +1,3 @@
-//! Client to Relay Proto
-
 use std::net::SocketAddr;
 
 use serde::Deserialize;
@@ -10,66 +8,35 @@ use crate::proto::Sender;
 use crate::types::bytes::ByteVec;
 use crate::types::bytes::Bytes;
 
-/// Domain separator for the dispatch signature. Bumping the suffix is a
-/// breaking protocol change; both client and relay must agree exactly.
+/// Signing domain; every domain string in the protocol is distinct.
 pub const DISPATCH_SIG_DOMAIN: &[u8] = b"promtuz-dispatch-v1";
 
-/// Build the canonical bytes signed/verified for a `DispatchP`.
-///
-/// The label both ends export TLS keying material under to tie a client's
-/// auth proof to the connection it was made on.
+/// Keying material exported under this label ties a client's auth proof to its connection.
 pub const CLIENT_AUTH_EXPORTER_LABEL: &[u8] = b"promtuz client auth v1";
 
-/// Canonical bytes a client signs to prove possession of its identity key.
-///
-/// `binding` is 32 bytes of TLS keying material exported by both ends under
-/// [`CLIENT_AUTH_EXPORTER_LABEL`], so the proof is good for this one TLS
-/// session: a relay that forwards another relay's challenge gets a signature
-/// that verifies nowhere but on the connection the client actually made.
+/// `binding` is exported under [`CLIENT_AUTH_EXPORTER_LABEL`], so a relay that forwards another
+/// relay's challenge gets a proof that verifies only on the client's own connection.
 pub fn client_auth_message(nonce: &[u8; 32], binding: &[u8; 32]) -> Vec<u8> {
     [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), nonce, binding].concat()
 }
 
-/// Layout: `DISPATCH_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || id || payload`
 pub fn dispatch_sig_message(
     to: &[u8; 32], from: &[u8; 32], id: &[u8; 16], payload: &[u8],
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        DISPATCH_SIG_DOMAIN.len() + 2 + to.len() + from.len() + id.len() + payload.len(),
-    );
-    buf.extend_from_slice(DISPATCH_SIG_DOMAIN);
-    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
-    buf.extend_from_slice(to);
-    buf.extend_from_slice(from);
-    buf.extend_from_slice(id);
-    buf.extend_from_slice(payload);
-    buf
+    [DISPATCH_SIG_DOMAIN, &PROTOCOL_VERSION.to_be_bytes(), to, from, id, payload].concat()
 }
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:==: HANDSHAKE :==:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ServerHandshakeResultP {
     Accept {
         timestamp:     u64,
-        /// This relay's DHT NodeId (`BLAKE3(NodeKey)`),
-        /// or `None` when the relay has DHT disabled. The phone binds it
-        /// as `requester_relay_id` when signing the
-        /// `FetchWelcomes` / `AckWelcomes` wrappers (the inner Tier-2
-        /// `welcome_fetch/ack_signing_input` transcript names the
-        /// requesting relay). Absent ⇒ welcome fetch/ack can't be
-        /// signed for this home, which is fine because a DHT-disabled
-        /// relay replies `DhtUnavailable` to those RPCs anyway.
+        /// This relay's DHT NodeId, or `None` with DHT disabled. The phone binds it as
+        /// `requester_relay_id` when signing welcome fetches and acks.
         relay_node_id: Option<Bytes<32>>,
-        /// Whether this relay answers STUN echoes and bridges TURN datagrams
-        /// on its QUIC port. A client only aims a bridge at a relay that
-        /// said yes here; dialing one that did not is a silent black hole.
+        /// Whether this relay answers STUN echoes and bridges TURN on its QUIC port. A bridge
+        /// aimed at a relay without it is a silent black hole.
         assist:        bool,
-        /// UDP port of this relay's TURN server for calls, on the host the
-        /// client dialed, or `None` when it runs none. Credentials come from
-        /// [`CRelayPacket::TurnCredentials`].
+        /// UDP port of this relay's call TURN server, on the host the client dialed.
         turn_port:     Option<u16>,
     },
     Reject {
@@ -77,40 +44,25 @@ pub enum ServerHandshakeResultP {
     },
 }
 
-/// Client Handshake Packet
-///
-/// Handshake initiates from Client
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum CHandshakePacket {
     Hello { ipk: Bytes<32> },
     Proof { sig: Bytes<64> },
 }
 
-/// Server Handshake Packet
-///
-/// Server's response to client handshake
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum SHandshakePacket {
     Challenge { nonce: Bytes<32> },
     HandshakeResult(ServerHandshakeResultP),
 }
 
-#[cfg(feature = "client")]
 impl Sender for CHandshakePacket {}
 
-#[cfg(feature = "server")]
 impl Sender for SHandshakePacket {}
-
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===: QUERIES :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum QueryP {
     PubAddress,
-    // room to grow
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -120,61 +72,41 @@ pub enum QueryResultP {
     Error { reason: String },
 }
 
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===: FORWARD :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-
-/// Client → Relay
-///
-/// `sig` covers (in order, no separators):
-///   `b"promtuz-dispatch-v1"`
-///   || `PROTOCOL_VERSION.to_be_bytes()` (u16, big-endian)
-///   || `to`      (32 bytes)
-///   || `from`    (32 bytes)
-///   || `id`      (16 bytes — UUIDv7 minted by the *sender*)
-///   || `payload` (ciphertext bytes)
-///
-/// The relay verifies that `from == authenticated session identity` AND that
-/// the signature above validates under `from`. The `id` is signed by the
-/// client, never minted by the relay, so it survives forward-and-store as
-/// authenticated metadata.
+/// `sig` covers [`dispatch_sig_message`]. The relay checks `from` against the session identity,
+/// and `id` is minted and signed by the sender, never by the relay.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DispatchP {
     pub to:             Bytes<32>,
     pub from:           Bytes<32>,
-    /// Sender-authoritative dispatch_id (monotonic 16B, from the sender's
-    /// `messages.dispatch_id`); promoted to `DeliverP::id` unchanged. The
-    /// recipient dedups on it, so a retry re-sends the same id.
+    /// The recipient dedups on it, so a retry re-sends the same id.
     pub id:             Bytes<16>,
     pub payload:        ByteVec,
     pub sig:            Bytes<64>,
-    /// Unix milliseconds stamped by the first relay that accepts this dispatch.
-    /// Clients send zero; the authenticated ingress relay overwrites it after
-    /// verifying `sig`. It deliberately stays outside the sender signature.
+    /// Stamped by the first relay that accepts the dispatch (clients send zero); outside `sig`.
     pub accepted_at_ms: u64,
-    /// Plaintext push hint the relay reads (outside `sig`): whether, and how
-    /// urgently, to push-wake an offline peer for this.
+    /// Plaintext hint outside `sig`: whether and how urgently to wake an offline recipient.
     pub wake: Wake,
-    /// Plaintext queue hint the relay reads (outside `sig`): how long past
-    /// `accepted_at_ms` this dispatch is still worth delivering, in
-    /// milliseconds. Zero means the relay's default retention. A P2P offer
-    /// names addresses and secrets that are dead within a minute, so it sets
-    /// a short life and a drain skips and drops it once that has passed.
+    /// Plaintext hint outside `sig`: milliseconds past `accepted_at_ms` the dispatch stays worth
+    /// delivering. Zero means the relay's default retention.
     pub ttl_ms: u64,
 }
 
-/// How a dispatch may wake an offline recipient. The ordinals are the wire:
-/// `No` and `Message` encode as the `false` and `true` the flag used to be.
+impl DispatchP {
+    /// Past its sender-declared life at `now_ms`. Zero never expires here;
+    /// the store's retention sweep still bounds it.
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
+    }
+}
+
+/// Ordinals are wire format: `No` and `Message` encode exactly as the bool `false` and `true`.
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum Wake {
     /// Queued silently: receipts, edits, reactions, pair acks.
     No,
     /// New content the recipient should see soon.
     Message,
-    /// A ringing call: the highest push priority a platform offers, and
-    /// worthless once the offer's life is over.
+    /// A ringing call: the platform's highest push priority, worthless once the offer expires.
     Call,
 }
 
@@ -184,9 +116,6 @@ impl Wake {
     }
 }
 
-/// Short-lived credentials for the relay's own TURN server, minted for the
-/// authenticated client that asked. The server is on the host the client
-/// dialed, at the port the handshake named.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct TurnCredentialsP {
     pub username:      String,
@@ -195,11 +124,9 @@ pub struct TurnCredentialsP {
     pub expires_at_ms: u64,
 }
 
-/// Relay → Client (relay-verified delivery)
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct DeliverP {
-    /// Sender's dispatch_id, copied verbatim from `DispatchP::id`. The
-    /// recipient dedups on `(from, id)`.
+    /// Copied from [`DispatchP::id`]; the recipient dedups on `(from, id)`.
     pub id:             Bytes<16>,
     pub from:           Bytes<32>,
     pub payload:        ByteVec,
@@ -212,15 +139,12 @@ pub struct DeliverP {
 }
 
 impl DeliverP {
-    /// Past its sender-declared life at `now_ms`. Zero never expires here;
-    /// the store's retention sweep still bounds it.
     pub fn is_expired(&self, now_ms: u64) -> bool {
         self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
     }
 }
 
-/// Activity bits for [`ActivityP::activity`]. OR them for "several at once".
-/// `0` = present-but-idle (a bare presence heartbeat).
+/// Bits OR'd into [`ActivityP::activity`]; zero is a bare presence heartbeat.
 pub const ACTIVITY_TYPING: u16 = 1 << 0;
 /// Can be used for both emoji and sticker
 pub const ACTIVITY_CHOOSING_STICKER: u16 = 1 << 1;
@@ -228,51 +152,39 @@ pub const ACTIVITY_UPLOADING_MEDIA: u16 = 1 << 2;
 pub const ACTIVITY_UPLOADING_DOCUMENT: u16 = 1 << 3;
 pub const ACTIVITY_RECORDING_VN: u16 = 1 << 4;
 
-/// Domain separator for the activity-signal signature.
 pub const ACTIVITY_SIG_DOMAIN: &[u8] = b"promtuz-activity-v1";
 
-/// Activity peer signal (presence heartbeat / typing / recording / …).
-/// Cleartext and relay-routed (NOT MLS): the relay delivers it only if the
-/// recipient is online and DROPS it otherwise — never queued. Authenticated by
-/// `sig` under `from`, so the recipient (and relay) can reject a forged signal.
+/// Cleartext and relay-routed, not MLS: delivered only to an online recipient, never queued.
+/// `sig` under `from` lets the recipient and relay reject a forged signal.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ActivityP {
     pub to:           Bytes<32>,
     pub from:         Bytes<32>,
-    /// Shared MLS group identity, resolved to a device's local conversation
-    /// on receipt. Local conversation IDs are independently minted on each
-    /// device and must never be used as wire addresses.
-    /// Signed so a relay cannot move activity between chats.
+    /// The shared MLS group, never a device-local conversation id; signed so a relay cannot move
+    /// activity between chats.
     pub group_id:     Bytes<32>,
-    /// OR of `ACTIVITY_*` bits; `0` = present-but-idle.
     pub activity:     u16,
     pub timestamp:    u64,
     pub sig:          Bytes<64>,
 }
 
-/// Canonical bytes signed/verified for an [`ActivityP`].
-/// Layout: `ACTIVITY_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from ||
-/// group_id || activity_be || timestamp_be`
 pub fn activity_sig_message(
     to: &[u8; 32], from: &[u8; 32], group_id: &[u8; 32], activity: u16, timestamp: u64,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(ACTIVITY_SIG_DOMAIN.len() + 2 + 32 + 32 + 32 + 2 + 8);
-    buf.extend_from_slice(ACTIVITY_SIG_DOMAIN);
-    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
-    buf.extend_from_slice(to);
-    buf.extend_from_slice(from);
-    buf.extend_from_slice(group_id);
-    buf.extend_from_slice(&activity.to_be_bytes());
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf
+    [
+        ACTIVITY_SIG_DOMAIN,
+        &PROTOCOL_VERSION.to_be_bytes(),
+        to,
+        from,
+        group_id,
+        &activity.to_be_bytes(),
+        &timestamp.to_be_bytes(),
+    ]
+    .concat()
 }
 
-/// Client → relay: "push me presence for these contacts." Replaces the
-/// caller's whole interest set each time (idempotent). Unsigned — the relay
-/// acts on the connection-authenticated IPK, exactly like `DrainQueue`.
-///
-/// Authorization is **mutual**: the relay reveals A's presence to B only when
-/// A subscribed to B *and* B subscribed to A. Interest is consent.
+/// Replaces the caller's whole interest set; every contact needs a granted, signed consent.
+/// Presence flows only between mutual subscribers.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SubscribePresenceP {
     pub contacts: Vec<Bytes<32>>,
@@ -280,38 +192,25 @@ pub struct SubscribePresenceP {
     pub lease:    crate::proto::dht_p2p::PresenceLease,
 }
 
-/// A contact's presence, one state that can't self-contradict (no separate
-/// online bool alongside a timestamp). `Idle` is client-asserted (a
-/// backgrounded app sends `SetPresence(Idle)` as its last packet before
-/// freezing); `Online`/`Offline` the relay derives from the connection.
-///
-/// A frozen app can keep its connection until the QUIC idle timeout, so
-/// "connected" does not always mean "actively here".
+/// `Online` needs the client's `SetPresence(Active)`; `Idle` is asserted on backgrounding. A
+/// frozen app can hold its connection until the idle timeout, so connected is not online.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PresenceState {
-    /// Connected and active.
     Online,
     /// Connected but backgrounded since this unix-ms.
     Idle { since: u64 },
-    /// Not connected. `last_seen` unix-ms; `0` = unknown (e.g. relay restart).
+    /// `last_seen` is unix ms; `0` = unknown (e.g. relay restart).
     Offline { last_seen: u64 },
 }
 
-/// Relay → client: one contact's presence state.
-///
-/// Relay-asserted, not peer-signed: the relay inherently knows who is
-/// connected, so it is the authority here (unlike `ActivityP`, peer content the
-/// relay merely forwards). The semi-trusted relay already sees connection
-/// metadata; presence exposes nothing new to it.
+/// Relay-asserted, not peer-signed: the relay already sees connection metadata.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct PresenceP {
     pub who:   Bytes<32>,
     pub state: PresenceState,
 }
 
-/// Client → relay: my activity mode. Fire-and-forget, connection-authenticated
-/// (no sig — same trust as `SubscribePresence`). `Idle` on backgrounding,
-/// `Active` on return to the foreground.
+/// `Idle` on backgrounding, `Active` on returning to the foreground.
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PresenceMode {
     Active,
@@ -328,20 +227,10 @@ pub enum DispatchAckP {
     },
     NotFound,
     InvalidSig,
-    /// Recipient's per-user RocksDB queue is at capacity. Sender should back
-    /// off; the message was *not* stored. See
-    /// `relay::storage::MAX_QUEUED_PER_RECIPIENT`.
+    /// The recipient's queue is full and the message was not stored; back off.
     QueueFull,
-    /// Recipient was offline locally and the dispatch was successfully
-    /// queued at the required number of the recipient's closest "home" relays via
-    /// the sticky-home DHT-forward path. Distinct from [`Self::Queued`]
-    /// (which is the local-only fallback) so the sender knows the
-    /// dispatch is held by a deterministic K-relay set keyed off the
-    /// recipient's IPK rather than only on the originating relay.
-    ///
-    /// The dispatch is queued at two homes (one in a single-home topology);
-    /// delivery depends on the recipient draining one of those homes on reconnect. Sender
-    /// has no further proof of delivery — read receipts are out of scope.
+    /// Queued at the required number of the recipient's DHT homes, unlike the local-only
+    /// [`Self::Queued`].
     Forwarded {
         accepted_at_ms: u64,
     },
@@ -350,110 +239,37 @@ pub enum DispatchAckP {
     },
 }
 
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===: RELAY-P :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-
-/// Client Relay Packet
-///
-/// Packets sent from Client to Server
-///
-/// CLIENT --> SERVER
-// ponytail: wire enum — always heap-packed into a Vec before send and
-// dropped right after dispatch, so the inline size gap doesn't matter.
-// Boxing the large `PublishWelcome` field would thread `.into()`/deref
-// through every construct/match site for no wire-format change.
+/// Variant ordinals are wire format: append only.
 #[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum CRelayPacket {
     Query(QueryP),
     Dispatch(DispatchP),
 
-    /// Fire-and-forget ephemeral signal (presence/typing). The relay routes it
-    /// to the recipient if online and drops it otherwise; no reply.
     Activity(ActivityP),
 
-    /// User acknowledges receiving valid delivery of messages
     DeliverAck,
 
-    /// Drains Queue, user requesting for all incoming messages
     DrainQueue,
-    /// User confirms storing messages hence queue can be cleared from server
+    /// The client has durably stored the drained messages, so the relay may clear its queue.
     AckDrain,
 
-    /// Sticky-home — user-signed authorisation for the relay
-    /// to drain the user's queues from K-closest "home" relays on the
-    /// user's behalf.
-    ///
-    /// The relay R_r the user just authenticated to is *not always* in
-    /// the user's K-closest set; in that case R_r must impersonate the
-    /// user when issuing `QueueFetch` against the K homes. The home relay
-    /// only ships queued dispatches when the user has signed the request —
-    /// `sig` is that user signature, sized so a single sign-on serves all K
-    /// homes in the recipient's set (the transcript binds the user, the
-    /// requesting relay, and a freshness timestamp; it does **not**
-    /// bind the home being addressed, so one signature works for every
-    /// home in that set).
-    ///
-    /// Transcript: [`crate::proto::dht_p2p::queue_fetch_signing_input`]
-    /// over `(self_ipk, current_relay_id, timestamp)`. The relay buffers
-    /// `(timestamp, sig)` on its `ClientContext` and presents them as
-    /// `QueueFetch.user_sig` when fanning out to homes.
-    ///
-    /// This packet is sent at the *fetch* end of the recipient flow.
-    /// The companion `QueueFetchAck` deletion path (proving the user
-    /// received specific dispatch ids) is handled separately by
-    /// [`Self::AckAuth`] — a transcript over `delivered_ids` requires
-    /// the relay to know the id list before it can ask libcore to sign,
-    /// which is impossible before fetching has happened.
+    /// The user's [`crate::proto::dht_p2p::queue_fetch_signing_input`] signature, which this
+    /// relay presents as `QueueFetch.user_sig` to every home in the user's set.
     DrainAuth {
         timestamp: u64,
         sig:       Bytes<64>,
     },
 
-    /// Sticky-home — user-signed authorisation for the K
-    /// home relays to GC the listed dispatch ids from their
-    /// `cf_dht_queue` after the relay successfully delivered them to
-    /// this client.
-    ///
-    /// Sent in response to [`SRelayPacket::AckAuthRequest`] (the relay
-    /// asks libcore to sign the union of delivered ids drawn from all
-    /// K homes). The transcript is
-    /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
-    /// `(self_ipk, requester_relay_id, delivered_ids, timestamp)` —
-    /// the same signature serves all K homes (the homes verify the
-    /// transcript byte-for-byte and only delete the ids they actually
-    /// hold from the union list), but each home additionally rejects
-    /// the RPC at the handler layer if `requester_relay_id` does not
-    /// match the connection's authenticated `DhtHello` peer id. This
-    /// is the cross-relay replay defense (an ack the user signed for
-    /// relay R_a is no longer redirectable to a different home via a
-    /// different relay R_b).
-    ///
-    /// **Why the user signs (not the relay)**: a malicious relay could
-    /// otherwise forge an ack and force every home to drop a user's
-    /// queued messages without delivery. Routing the ack through the
-    /// user's IPK signature mirrors the existing `DrainAuth` design
-    /// for the fetch direction.
+    /// Reply to [`SRelayPacket::AckAuthRequest`]: the user's signature over
+    /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`], so a relay cannot forge deletion.
     AckAuth {
         sig:       Bytes<64>,
         timestamp: u64,
     },
 
-    /// Libcore wrapper around `KeyPackagePublish` (when `mode = Publish`)
-    /// or `KeyPackageRefill` (when `mode = Refill`). **User-signed RPC**:
-    /// `sig` is the phone's signature over the *inner* Tier-2 transcript
-    /// ([`crate::proto::mls_wire::kp_publish_signing_input`] /
-    /// [`crate::proto::mls_wire::kp_refill_signing_input`], selected by
-    /// `mode`), bound to `(ipk, records-digest, timestamp)`. The home
-    /// verifies it against the connection-authenticated IPK (its gate)
-    /// and forwards the *same* signature inside the
-    /// `KeyPackagePublishReq`/`RefillReq` to the K=3 DHT homes, which
-    /// re-verify it — the home is a forwarder, never a trust root.
-    /// Reply: [`SRelayPacket::KeyPackagePublished`] or
-    /// [`SRelayPacket::DhtUnavailable`].
+    /// User-signed: `sig` covers the inner publish or refill transcript (per `mode`), and the home
+    /// checks it, then forwards it unchanged to the storage homes, which check it again.
     PublishKeyPackage {
         records:   Vec<crate::proto::mls_wire::KeyPackageRecord>,
         timestamp: u64,
@@ -461,428 +277,135 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// Libcore wrapper around `KeyPackageFetch`. **Gate-only RPC**: the
-    /// inner `KeyPackageFetchReq` carries no user sig (it's
-    /// DhtHello-authenticated relay-to-relay), so `sig` is a wrapper-gate
-    /// signature over
-    /// [`crate::proto::mls_wire::kp_fetch_wrap_signing_input`] that the
-    /// home verifies locally for freshness + attribution and does not
-    /// propagate. Reply: [`SRelayPacket::KeyPackageFetched`] or
-    /// [`SRelayPacket::DhtUnavailable`].
+    /// Gate-only: the home checks `sig` over
+    /// [`crate::proto::mls_wire::kp_fetch_wrap_signing_input`] and does not forward it.
     FetchKeyPackage {
         target_ipk: Bytes<32>,
         timestamp:  u64,
         sig:        Bytes<64>,
     },
 
-    /// Libcore wrapper around Welcome publish to the recipient's K=3
-    /// homes. **Gate-only RPC**: the user authorization rides inside
-    /// `envelope.sender_sig` (forwarded intact); `sig` is a wrapper-gate
-    /// signature over
-    /// [`crate::proto::mls_wire::welcome_publish_wrap_signing_input`]
-    /// proving this authenticated phone asked to publish now. Reply:
-    /// [`SRelayPacket::WelcomePublished`] or
-    /// [`SRelayPacket::DhtUnavailable`].
+    /// Gate-only: the user's authority rides in `envelope.sender_sig`; `sig` covers
+    /// [`crate::proto::mls_wire::welcome_publish_wrap_signing_input`] and stays at the home.
     PublishWelcome {
         envelope:  crate::proto::mls_wire::WelcomeEnvelopeP,
         timestamp: u64,
         sig:       Bytes<64>,
     },
 
-    /// Libcore wrapper around Welcome drain of the *calling IPK's own*
-    /// queue from its K=3 homes. **User-signed RPC**: `sig` is the
-    /// phone's signature over the inner
-    /// [`crate::proto::mls_wire::welcome_fetch_signing_input`], bound to
-    /// `(user_ipk, requester_relay_id = home NodeId, timestamp)` — the
-    /// phone learns its home's NodeId from the client/5 handshake. The
-    /// home verifies, then forwards the same sig (with its own NodeId as
-    /// `requester_relay_id`) to the K homes. Reply:
-    /// [`SRelayPacket::WelcomesFetched`] or
-    /// [`SRelayPacket::DhtUnavailable`].
+    /// User-signed over [`crate::proto::mls_wire::welcome_fetch_signing_input`] with this home's
+    /// NodeId as `requester_relay_id`; the home forwards the same signature to the storage homes.
     FetchWelcomes {
         timestamp: u64,
         sig:       Bytes<64>,
     },
 
-    /// Libcore wrapper around Welcome ack; the K homes GC the listed
-    /// `welcome_ids`. **User-signed RPC**: `sig` is the phone's signature
-    /// over the inner
-    /// [`crate::proto::mls_wire::welcome_ack_signing_input`], bound to
-    /// `(user_ipk, requester_relay_id = home NodeId, welcome_ids,
-    /// timestamp)`, forwarded by the home to the K homes. Reply:
-    /// [`SRelayPacket::WelcomesAcked`] or
-    /// [`SRelayPacket::DhtUnavailable`].
+    /// User-signed over [`crate::proto::mls_wire::welcome_ack_signing_input`]; forwarded like
+    /// [`Self::FetchWelcomes`], and the storage homes delete the listed welcomes.
     AckWelcomes {
         welcome_ids: Vec<Bytes<8>>,
         timestamp:   u64,
         sig:         Bytes<64>,
     },
 
-    /// Subscribe (or re-subscribe) to presence for a set of contacts. No reply
-    /// on this stream — the relay pushes a snapshot + later deltas as
-    /// [`SRelayPacket::Presence`] on its own streams.
-    ///
-    /// Appended last on purpose: postcard keys enum variants by declaration
-    /// order, so new variants must go at the end to stay wire-compatible with
-    /// an already-deployed relay (which drops this via its `_` catch-all).
+    /// No reply on this stream; presence arrives as [`SRelayPacket::Presence`] on the relay's own
+    /// streams.
     SubscribePresence(SubscribePresenceP),
 
-    /// Set our activity mode (Active/Idle). Fire-and-forget; the relay updates
-    /// the state it reports to our mutual contacts. Appended last (postcard).
     SetPresence(PresenceMode),
 
-    /// Tell this home relay our push-pseudonym `P`, so it can trigger a
-    /// background wake for our offline queue without ever learning the device
-    /// token. Bound to the connection-authenticated IPK — no separate
-    /// signature. Fire-and-forget; no reply. Appended last (postcard).
+    /// Our push pseudonym `P`, so this home can wake our offline queue without the device token.
+    /// `sig` covers [`crate::proto::dht_p2p::push_pseudonym_signing_input`]. No reply.
     RegisterPush {
         pseudonym: Bytes<32>,
         timestamp: u64,
         sig:       Bytes<64>,
     },
 
-    /// Ask for TURN credentials on this relay's call server, minted for the
-    /// connection-authenticated IPK. Reply: [`SRelayPacket::TurnCredentials`].
-    /// Appended last (postcard).
+    /// Minted for the connection-authenticated IPK.
     TurnCredentials,
+
+    /// Service guarantees on this connection. Silence from an old relay proves nothing.
+    ServiceCapabilities,
+    /// Bounded owner-signed services::key_inventory::Request.
+    KeyPackageInventory { request: ByteVec },
 }
 
-/// Server Relay Packet
-///
-/// Packets sent from Server to Client
-///
-/// SERVER --> CLIENT
+/// Variant ordinals are wire format: append only.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum SRelayPacket {
     QueryResult(QueryResultP),
     DispatchAck(DispatchAckP),
     Deliver(DeliverP),
 
-    /// Relay → recipient: an ephemeral signal from a contact (presence/typing).
     Activity(ActivityP),
-    // /// All the pending deliveries for user in chronological order
-    // /// TODO: might need debouncing in future if TOO MANY messages were queued at once
-    // QueueDrain(Vec<DeliverP>),
-    /// Sticky-home — relay-side request for the user to sign a
-    /// `QueueFetchAck` transcript over the union of dispatch ids the
-    /// recipient relay just drained from the K home relays.
-    ///
-    /// The relay sends this **after** the client's `AckDrain` arrives
-    /// (i.e. once the client has durably stored the delivered set).
-    /// Libcore signs
-    /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
-    /// `(self_ipk, requester_relay_id, delivered_ids, timestamp)` and
-    /// replies with [`CRelayPacket::AckAuth`]. The relay then fans
-    /// out a `QueueFetchAck` to each of the K homes with the same
-    /// signed `(timestamp, sig)` pair — the transcript binds the
-    /// requesting relay so a captured ack can't be redirected to a
-    /// different home via a different relay (cross-relay replay
-    /// defense), but it does NOT bind a target-home identity, so one
-    /// signature still works across the K homes within R_r's set.
-    ///
-    /// `requester_relay_id` is this relay's `BLAKE3(NodeKey)` identity
-    /// — the same id the relay would supply on `peer/5` `DhtHello`s.
-    /// Libcore signs the field's value verbatim into the transcript;
-    /// the home cross-checks `requester_relay_id ==
-    /// authenticated_peer_id` at the handler layer.
-    ///
-    /// `suggested_timestamp` is the relay's wall-clock at the moment
-    /// of the request; libcore is free to substitute its own
-    /// `systime()` (drift is allowed within ±60s) but echoing the
-    /// suggested value avoids forcing libcore to query its clock.
-    ///
-    /// `delivered_ids` is bounded by
-    /// [`crate::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS`] (= 64) — the
-    /// same ceiling the home-side verifier enforces on
-    /// [`crate::proto::dht_p2p::QueueFetchAck::delivered_ids`].
+    /// Sent after `AckDrain`: the client signs `queue_fetch_ack_signing_input` over these ids and
+    /// replies with [`CRelayPacket::AckAuth`]; it may use its own clock for the timestamp.
     AckAuthRequest {
-        requester_relay_id:  crate::quic::id::NodeId,
+        requester_relay_id:  crate::types::id::NodeId,
         delivered_ids:       Vec<[u8; 16]>,
         suggested_timestamp: u64,
     },
 
-    /// Reply to [`CRelayPacket::PublishKeyPackage`].
-    /// `homes_succeeded` is the count of K=3 DHT homes that returned a
-    /// success outcome (Stored for Publish, Appended for Refill).
-    /// `quorum_met` requires one success for a sole selected home, otherwise two.
+    /// `quorum_met` needs one success with a sole selected home, otherwise two.
     KeyPackagePublished {
         homes_succeeded: u8,
         quorum_met:      bool,
     },
 
-    /// Reply to [`CRelayPacket::FetchKeyPackage`].
-    /// `record = None` collapses the Tier-2 `NoStash` and `NotOwner`
-    /// outcomes (libcore can't act on the distinction). `static_hash`
-    /// is the cross-replica hash from `KeyPackageFetchFound`
-    /// (zeros if `record = None`).
+    /// `None` covers both `NoStash` and `NotOwner`; `static_hash` is then zero.
     KeyPackageFetched {
         record:      Option<crate::proto::mls_wire::KeyPackageRecord>,
         remaining:   u32,
         static_hash: Bytes<32>,
     },
 
-    /// Reply to [`CRelayPacket::PublishWelcome`].
-    /// `quorum_met` requires one stored copy for a sole selected home, otherwise two.
+    /// `quorum_met` needs one stored copy with a sole selected home, otherwise two.
     WelcomePublished {
         quorum_met: bool,
     },
 
-    /// Reply to [`CRelayPacket::FetchWelcomes`]. The home merges
-    /// welcomes from the K=3 home replicas, deduplicates by
-    /// `(group_id, kp_ref_used)`, and returns the union.
+    /// The union from the storage homes, deduplicated by `(group_id, kp_ref_used)`.
     WelcomesFetched {
         entries: Vec<crate::proto::mls_wire::WelcomeEntry>,
     },
 
-    /// Reply to [`CRelayPacket::AckWelcomes`].
     WelcomesAcked,
 
-    /// Generic "your home's DHT is disabled" reply, returned for any of
-    /// the five wrapper RPCs when `relay.dht.is_none()`. Libcore surfaces
-    /// this as a clean per-RPC error rather than retrying — operator must
-    /// enable DHT on the home (`relay/config.toml [dht] enabled = true`)
-    /// for MLS to function.
+    /// The home runs without DHT; any of the five MLS wrapper RPCs can get this.
     DhtUnavailable,
 
-    /// Relay → subscriber: presence for one or more contacts. A snapshot
-    /// (several entries) right after `SubscribePresence`, then single-entry
-    /// deltas as contacts connect/disconnect. Appended last for postcard
-    /// wire-compat (see [`CRelayPacket::SubscribePresence`]).
+    /// A snapshot right after `SubscribePresence`, then single-entry deltas.
     Presence(Vec<PresenceP>),
 
-    /// Reply to [`CRelayPacket::TurnCredentials`]: `None` when this relay
-    /// runs no TURN server. Appended last (postcard).
+    /// `None` when this relay runs no TURN server.
     TurnCredentials(Option<TurnCredentialsP>),
+
+    /// Canonical bounded contracts::Support in the service namespace.
+    ServiceCapabilities { supported: ByteVec },
+    /// Bounded services::key_inventory::Inventory, including unavailable homes.
+    KeyPackageInventory { inventory: ByteVec },
 }
 
-#[cfg(feature = "client")]
 impl Sender for CRelayPacket {}
 
-#[cfg(feature = "server")]
 impl Sender for SRelayPacket {}
-
-// // // // // // // // // // // // // // // // // //
 
 #[cfg(test)]
 mod tests {
-    //! Wire-format round-trip + transcript-stability tests for the
-    //! sticky-home [`CRelayPacket::DrainAuth`] variant.
-    //!
-    //! At the wire level this is just a postcard round-trip plus a
-    //! byte-stability check that the transcript libcore signs is exactly
-    //! what `queue_fetch_signing_input` produces, so any drift between
-    //! the signing-input helper and the relay's verifier surfaces here.
-    use super::Bytes;
-    use crate::proto::pack::Packer;
-    use crate::proto::pack::Unpacker;
-
-    /// The conversation is inside the transcript, not merely beside it — so a
-    /// relay cannot take a signal from one of the recipient's chats and present
-    /// it as another. Two otherwise-identical signals must sign differently.
-    #[test]
-    fn the_activity_transcript_binds_the_conversation() {
-        use super::activity_sig_message;
-
-        let to = [1u8; 32];
-        let from = [2u8; 32];
-        let dm = [3u8; 32];
-        let group = [4u8; 32];
-
-        let a = activity_sig_message(&to, &from, &dm, 1, 1_700_000_000_000);
-        let b = activity_sig_message(&to, &from, &group, 1, 1_700_000_000_000);
-        assert_ne!(a, b, "moving a signal between chats must invalidate its signature");
-    }
-
-    /// A sender-declared life counts from relay acceptance; zero is the
-    /// relay's own retention and never expires here.
-    /// The class replaced a bool in place: relays and clients that only ever
-    /// wrote `false`/`true` produce `No`/`Message` byte for byte.
-    #[test]
-    fn wake_class_encodes_like_the_flag_it_replaced() {
-        use super::Wake;
-        assert_eq!(Wake::No.ser().unwrap(), false.ser().unwrap());
-        assert_eq!(Wake::Message.ser().unwrap(), true.ser().unwrap());
-        assert_eq!(Wake::deser(&Wake::Call.ser().unwrap()).unwrap(), Wake::Call);
-        assert!(!Wake::No.wakes());
-        assert!(Wake::Call.wakes());
-    }
+    use super::*;
 
     #[test]
-    fn turn_credentials_round_trip() {
-        use super::CRelayPacket;
-        use super::SRelayPacket;
-        use super::TurnCredentialsP;
-        let req = CRelayPacket::TurnCredentials;
-        assert_eq!(CRelayPacket::deser(&req.ser().unwrap()).unwrap(), req);
-        let resp = SRelayPacket::TurnCredentials(Some(TurnCredentialsP {
-            username:      "1700000000:abcd".into(),
-            password:      "c2VjcmV0".into(),
-            expires_at_ms: 1_700_000_000_000,
-        }));
-        assert_eq!(SRelayPacket::deser(&resp.ser().unwrap()).unwrap(), resp);
-        let none = SRelayPacket::TurnCredentials(None);
-        assert_eq!(SRelayPacket::deser(&none.ser().unwrap()).unwrap(), none);
-    }
-
-    #[test]
-    fn delivery_expires_by_its_own_life_only() {
-        use super::DeliverP;
-        let mut d = DeliverP {
-            id:             [1u8; 16].into(),
-            from:           [2u8; 32].into(),
-            payload:        vec![3u8].into(),
-            sig:            [4u8; 64].into(),
-            accepted_at_ms: 1_000,
-            ttl_ms:         30_000,
-        };
-        assert!(!d.is_expired(31_000), "still within its life");
-        assert!(d.is_expired(31_001), "one ms past it");
-        assert!(!d.is_expired(0), "a clock behind acceptance is not expiry");
-        d.ttl_ms = 0;
-        assert!(!d.is_expired(u64::MAX), "default retention never expires here");
-    }
-
-    #[test]
-    fn activity_round_trips_the_shared_group_address() {
-        use super::ActivityP;
-        use super::CRelayPacket;
-        use super::SRelayPacket;
-        let activity = ActivityP {
-            to:        [1u8; 32].into(),
-            from:      [2u8; 32].into(),
-            group_id:  [3u8; 32].into(),
-            activity:  1,
-            timestamp: 1_700_000_000_000,
-            sig:       [4u8; 64].into(),
-        };
-        let client = CRelayPacket::Activity(activity.clone());
-        assert_eq!(CRelayPacket::deser(&client.ser().unwrap()).unwrap(), client);
-        let relay = SRelayPacket::Activity(activity);
-        assert_eq!(SRelayPacket::deser(&relay.ser().unwrap()).unwrap(), relay);
-    }
-
-    /// Postcard round-trip every Tier-1 wrapper request variant plus the
-    /// sticky-home auth packets (`DrainAuth`, `AckAuth`). One catch-all
-    /// test: a missing serde derive on any of these variants surfaces here.
-    #[test]
-    fn phase9_wrapper_request_variants_round_trip() {
-        use super::CRelayPacket;
-        use crate::proto::mls_wire::KeyPackageRecord;
-        use crate::proto::mls_wire::KpPublishMode;
-        use crate::proto::mls_wire::WelcomeEnvelopeP;
-        use crate::types::bytes::ByteVec;
-
-        let kp_record = KeyPackageRecord {
-            ipk:           Bytes([0x11; 32]),
-            kp_ref:        ByteVec(vec![0x22; 32]),
-            kp_bytes:      ByteVec(vec![0x33; 16]),
-            expires_at_ms: 1_700_000_000_000,
-            owner_sig:     Bytes([0x44; 64]),
-        };
-        let envelope = WelcomeEnvelopeP {
-            version:       1,
-            group_id:      Bytes([0x55; 32]),
-            sender_ipk:    Bytes([0x66; 32]),
-            recipient_ipk: Bytes([0x77; 32]),
-            welcome_blob:  ByteVec(vec![0x88; 64]),
-            kp_ref_used:   Bytes([0x99; 32]),
-            sender_sig:    Bytes([0xAA; 64]),
-            pairing:       None,
-        };
-
-        for pkt in [
-            CRelayPacket::PublishKeyPackage {
-                records:   vec![kp_record.clone()],
-                timestamp: 1_700_000_000_001,
-                mode:      KpPublishMode::Publish,
-                sig:       Bytes([0xBB; 64]),
-            },
-            CRelayPacket::FetchKeyPackage {
-                target_ipk: Bytes([0xCC; 32]),
-                timestamp:  1_700_000_000_002,
-                sig:        Bytes([0xDD; 64]),
-            },
-            CRelayPacket::PublishWelcome {
-                envelope:  envelope.clone(),
-                timestamp: 1_700_000_000_003,
-                sig:       Bytes([0xEE; 64]),
-            },
-            CRelayPacket::FetchWelcomes {
-                timestamp: 1_700_000_000_004,
-                sig:       Bytes([0xFF; 64]),
-            },
-            CRelayPacket::AckWelcomes {
-                welcome_ids: vec![Bytes([0x01; 8]), Bytes([0x02; 8])],
-                timestamp:   1_700_000_000_005,
-                sig:         Bytes([0x10; 64]),
-            },
-            CRelayPacket::DrainAuth { timestamp: 1_700_000_000_001, sig: Bytes([0xAB; 64]) },
-            CRelayPacket::AckAuth { sig: Bytes([0xCD; 64]), timestamp: 1_700_000_000_002 },
-        ] {
-            let bytes = pkt.ser().expect("postcard ser");
-            let decoded = CRelayPacket::deser(&bytes).expect("postcard deser");
-            assert_eq!(decoded, pkt);
-        }
-    }
-
-    /// Postcard round-trip every Tier-1 wrapper reply variant + the
-    /// shared `DhtUnavailable` error reply + the sticky-home
-    /// `AckAuthRequest`.
-    #[test]
-    fn phase9_wrapper_reply_variants_round_trip() {
-        use super::SRelayPacket;
-        use crate::proto::mls_wire::KeyPackageRecord;
-        use crate::proto::mls_wire::WelcomeEntry;
-        use crate::proto::mls_wire::WelcomeEnvelopeP;
-        use crate::quic::id::NodeId;
-        use crate::types::bytes::ByteVec;
-
-        let kp_record = KeyPackageRecord {
-            ipk:           Bytes([0x11; 32]),
-            kp_ref:        ByteVec(vec![0x22; 32]),
-            kp_bytes:      ByteVec(vec![0x33; 16]),
-            expires_at_ms: 1_700_000_000_000,
-            owner_sig:     Bytes([0x44; 64]),
-        };
-        let entry = WelcomeEntry {
-            welcome_id: Bytes([0x55; 8]),
-            envelope:   WelcomeEnvelopeP {
-                version:       1,
-                group_id:      Bytes([0x66; 32]),
-                sender_ipk:    Bytes([0x77; 32]),
-                recipient_ipk: Bytes([0x88; 32]),
-                welcome_blob:  ByteVec(vec![0x99; 32]),
-                kp_ref_used:   Bytes([0xAA; 32]),
-                sender_sig:    Bytes([0xBB; 64]),
-                pairing:       None,
-            },
-        };
-
-        for pkt in [
-            SRelayPacket::KeyPackagePublished { homes_succeeded: 2, quorum_met: true },
-            SRelayPacket::KeyPackageFetched {
-                record:      Some(kp_record.clone()),
-                remaining:   17,
-                static_hash: Bytes([0xCC; 32]),
-            },
-            SRelayPacket::KeyPackageFetched {
-                record:      None,
-                remaining:   0,
-                static_hash: Bytes([0; 32]),
-            },
-            SRelayPacket::WelcomePublished { quorum_met: true },
-            SRelayPacket::WelcomesFetched { entries: vec![entry.clone()] },
-            SRelayPacket::WelcomesAcked,
-            SRelayPacket::AckAuthRequest {
-                requester_relay_id:  NodeId::new([0x42u8; 32]),
-                delivered_ids:       vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
-                suggested_timestamp: 1_700_000_000_003,
-            },
-            SRelayPacket::DhtUnavailable,
-        ] {
-            let bytes = pkt.ser().expect("postcard ser");
-            let decoded = SRelayPacket::deser(&bytes).expect("postcard deser");
-            assert_eq!(decoded, pkt);
-        }
+    fn transcripts() {
+        crate::proto::golden(
+            &[
+                client_auth_message(&[1; 32], &[2; 32]),
+                dispatch_sig_message(&[1; 32], &[2; 32], &[3; 16], b"payload"),
+                activity_sig_message(&[1; 32], &[2; 32], &[3; 32], 0x0102, 0x0304),
+            ],
+            "1b9a992eafdc6e9e7c6a31cf3c8cc7bc93f1990d21bcdf45abea25fdf6a91469
+             fbd2606c5c83fd5c6ddf544fab3a1b442c3ed582fee254833e0c8c4207266ce6
+             28e6d33826ac34a648c6b541de63850fdd8596f8670e75140b79c3da747f05ed",
+        );
     }
 }

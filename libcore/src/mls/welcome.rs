@@ -1,53 +1,13 @@
-//! Welcome envelope construction and processing.
-//!
-//! # Outbound (`make_welcome_envelope`)
-//!
-//! Called by an inviter after `MlsGroupHandle::add_members` returns
-//! its `(commit, welcome)` pair. We:
-//! 1. TLS-serialise the openmls `Welcome` (carried inside the returned `MlsMessageOut`).
-//! 2. Compute the outer signing transcript via `welcome_envelope_signing_input`.
-//! 3. Sign with the inviter's IPK long-term key.
-//! 4. Pack into [`WelcomeEnvelopeP`].
-//!
-//! The outer envelope sig binds `(group_id, sender_ipk,
-//! recipient_ipk, kp_ref_used, BLAKE3(welcome_blob))` so a captured
-//! Welcome cannot be re-targeted at a different recipient or
-//! re-paired with a different KeyPackage.
-//!
-//! # Inbound (`process_welcome`)
-//!
-//! 1. Verify outer sig under `sender_ipk`. Reject on failure.
-//! 2. TLS-deserialise the inner `MlsMessageIn`, ensure it carries a `Welcome` body.
-//! 3. Hand to `StagedWelcome::new_from_welcome` — openmls looks up the matching KeyPackageBundle
-//!    via its storage provider (`mls_storage.key_tag = KEY_PACKAGE`); on success, decrypts and
-//!    gives us a `StagedWelcome`.
-//! 4. Promote into a real group via `into_group`.
-//! 5. Wrap in [`MlsGroupHandle`].
-//!
-//! # KeyPackage consumption marking
-//!
-//! Openmls itself deletes the consumed KP from its storage during
-//! `into_group` (the default is *not* a "last-resort" KP, so the
-//! storage trait's `delete_key_package` is invoked). That handles the
-//! openmls-internal side. For our stash tracking (which lives in a
-//! separate table), the caller invokes `KeyPackageStash::on_consumed`
-//! after `process_welcome` returns.
+//! Welcome envelopes: sealing a Welcome for its recipient, and joining a group from one.
 
-// Public surface here (`make_welcome_envelope` / `process_welcome`)
-// is consumed by `messaging.rs`; the cdylib compiler can't see across
-// the JNI boundary so flags it as dead. Mirrors the `provider.rs`
-// pattern.
-#![allow(dead_code)]
-
+use common::crypto::verify_ed25519;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::welcome_envelope_signing_input;
-use ed25519_dalek::Signature;
 use ed25519_dalek::Signer as DalekSigner;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use openmls::prelude::MlsGroupJoinConfig;
 use openmls::prelude::MlsMessageBodyIn;
 use openmls::prelude::MlsMessageIn;
@@ -64,39 +24,10 @@ use super::types::MlsGroupError;
 
 type Result<T> = std::result::Result<T, MlsGroupError>;
 
-/// Build a [`WelcomeEnvelopeP`] from an openmls `MlsMessageOut`
-/// produced by [`MlsGroupHandle::add_members`].
-///
-/// `welcome_msg` must carry an `Welcome` body (the second member of
-/// the `(commit, welcome)` tuple from `add_members`); we surface a
-/// `MlsGroupError::Internal` if it doesn't, matching the spec
-/// invariant that Add commits always emit a Welcome.
-///
-/// `signer` is the inviter's IPK long-term `SigningKey`. We ask for
-/// the concrete dalek type rather than a trait because the IPK is
-/// already stored that way in promtuz (`Identity::secret_key_with_manager`
-/// returns a `Zeroizing<SecretKey>` which the caller upgrades to
-/// `SigningKey`); abstracting via a trait would force callers to
-/// thread an extra bound across the FFI boundary.
-///
-/// `kp_ref_used` is the SHA-256 KeyPackageRef of the recipient's
-/// KP this Welcome consumes — opaque to promtuz; the recipient
-/// echoes it for diagnostic / dedup purposes.
 pub fn make_welcome_envelope(
     welcome_msg: MlsMessageOut, group_id: [u8; 32], sender_ipk: [u8; 32],
     recipient_ipk: [u8; 32], kp_ref_used: [u8; 32], signer: &SigningKey,
 ) -> Result<WelcomeEnvelopeP> {
-    // **Implementation note (openmls 0.8 deviation from spec)**:
-    // `MlsMessageOut::into_welcome()` is gated by
-    // `#[cfg(any(test, feature = "test-utils"))]` in openmls 0.8 —
-    // we cannot extract the inner `Welcome` value in production
-    // code. Instead we TLS-serialise the **entire `MlsMessageOut`**
-    // (which carries `wire_format = welcome` plus the body). The
-    // recipient TLS-deserialises as `MlsMessageIn` and pattern-
-    // matches on `MlsMessageBodyIn::Welcome`. Functionally
-    // equivalent to "TLS-encoded Welcome"; the only difference is the
-    // outer 1-byte `version` field that prefixes the message body.
-    // Documented in the [`process_welcome`] doc comment.
     seal_welcome_blob(
         encode_welcome(&welcome_msg)?,
         group_id,
@@ -107,14 +38,13 @@ pub fn make_welcome_envelope(
     )
 }
 
-/// The bytes a Welcome envelope carries.
+/// The whole `MlsMessageOut`, since openmls 0.8 only exposes `into_welcome` under `test-utils`.
 pub fn encode_welcome(welcome_msg: &MlsMessageOut) -> Result<Vec<u8>> {
     welcome_msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)
 }
 
-/// Seal an already-encoded Welcome as `sender_ipk`'s envelope. A group member
-/// delivers the founder's Welcome this way to someone who knows them but not
-/// the founder.
+/// Seals an already-encoded Welcome as `sender_ipk`'s envelope, so a member can pass the founder's
+/// Welcome to someone who knows them but not the founder.
 pub fn seal_welcome_blob(
     welcome_blob: Vec<u8>, group_id: [u8; 32], sender_ipk: [u8; 32],
     recipient_ipk: [u8; 32], kp_ref_used: [u8; 32], signer: &SigningKey,
@@ -127,7 +57,6 @@ pub fn seal_welcome_blob(
         )));
     }
 
-    // 2. Compute the signing transcript.
     let transcript = welcome_envelope_signing_input(
         MLS_WIRE_VERSION,
         &group_id,
@@ -137,7 +66,6 @@ pub fn seal_welcome_blob(
         &welcome_blob,
     );
 
-    // 3. Sign under the IPK.
     let sig = signer.sign(&transcript);
 
     Ok(WelcomeEnvelopeP {
@@ -152,26 +80,11 @@ pub fn seal_welcome_blob(
     })
 }
 
-/// Verify and process an inbound [`WelcomeEnvelopeP`].
-///
-/// Returns a fully-loaded [`MlsGroupHandle`] for the new group on
-/// success, or an [`MlsGroupError`] on:
-///
-/// - `MlsGroupError::BadSignature` — outer envelope sig failed verification under `sender_ipk`.
-/// - `MlsGroupError::BadCipherSuite` — the embedded `Welcome`'s cipher suite is not `0x0003`.
-/// - `MlsGroupError::Codec` — the `welcome_blob` bytes don't parse as a TLS-encoded `Welcome`.
-/// - `MlsGroupError::OpenMls(...)` — openmls rejected the welcome (no matching KP, joiner secret
-///   invalid, …).
-///
-/// **Out-of-band gating** (the "is sender_ipk a contact?" check)
-/// is *not* in this function — it's the caller's responsibility to
-/// surface a UI prompt before invoking `process_welcome`.
+/// Verifies the envelope and joins the group. Whether to accept the sender at all is the caller's
+/// decision.
 pub fn process_welcome(
     provider: &PromtuzMlsProvider, envelope: &WelcomeEnvelopeP,
 ) -> Result<MlsGroupHandle> {
-    // ---------------------------------------------------------
-    // 1. Verify outer sig.
-    // ---------------------------------------------------------
     let transcript = welcome_envelope_signing_input(
         MLS_WIRE_VERSION,
         &envelope.group_id.0,
@@ -180,30 +93,9 @@ pub fn process_welcome(
         &envelope.kp_ref_used.0,
         &envelope.welcome_blob.0,
     );
-    let verifying_key =
-        VerifyingKey::from_bytes(&envelope.sender_ipk.0).map_err(|e| {
-            MlsGroupError::Internal(format!("sender_ipk is not a valid Ed25519 key: {e}"))
-        })?;
-    let sig = Signature::from_bytes(&envelope.sender_sig.0);
-    // Use `verify_strict` to reject non-canonical signatures and
-    // small-order R values. Mirrors the discipline already in place on
-    // the relay side (`relay/src/dht/mls_*`).
-    verifying_key
-        .verify_strict(&transcript, &sig)
+    verify_ed25519(&envelope.sender_ipk.0, &transcript, &envelope.sender_sig.0)
         .map_err(|_| MlsGroupError::BadSignature)?;
 
-    // ---------------------------------------------------------
-    // 2. Deserialise as `MlsMessageIn` (the openmls 0.8 outer framing) and extract the inner
-    //    `Welcome` body.
-    //
-    //    The bytes here are the full `MlsMessage` framing
-    //    (`MlsMessageOut`/`MlsMessageIn`), which prefixes a version byte
-    //    to the Welcome body. This is forced by openmls 0.8 gating
-    //    `MlsMessageOut::into_welcome` behind
-    //    `#[cfg(any(test, feature = "test-utils"))]` — production code
-    //    cannot extract the naked Welcome at encode time. Functionally
-    //    identical for security purposes.
-    // ---------------------------------------------------------
     let mls_msg = MlsMessageIn::tls_deserialize_exact(&envelope.welcome_blob.0)
         .map_err(MlsGroupError::from_codec)?;
     let welcome = match mls_msg.extract() {
@@ -215,405 +107,209 @@ pub fn process_welcome(
         },
     };
 
-    // ---------------------------------------------------------
-    // 3. Hand to openmls — it'll look up the matching KP bundle by its hash_ref and decrypt the
-    //    joiner secret.
-    // ---------------------------------------------------------
     let join_config = MlsGroupJoinConfig::builder()
         .use_ratchet_tree_extension(true)
         .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
         .padding_size(super::MLS_PADDING_SIZE)
         .build();
-    let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
-        .map_err(MlsGroupError::from_openmls)?;
+    provider.storage().atomic(|| {
+        let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
+            .map_err(MlsGroupError::from_openmls)?;
 
-    // Checked before `into_group` so an oversized roster never reaches storage.
-    let roster = staged.members().count();
-    if roster > MAX_GROUP_MEMBERS {
-        return Err(MlsGroupError::Internal(format!(
-            "Welcome roster is {roster} members, limit is {MAX_GROUP_MEMBERS}"
-        )));
-    }
+        // Everything below runs before `into_group`, so a refused Welcome writes no state.
+        let roster = staged.members().count();
+        if roster > MAX_GROUP_MEMBERS {
+            return Err(MlsGroupError::Internal(format!(
+                "Welcome roster is {roster} members, limit is {MAX_GROUP_MEMBERS}"
+            )));
+        }
 
-    // The envelope's `group_id` is signed by the sender but says nothing about
-    // the state inside the Welcome, so a paired contact can make the two
-    // disagree. `home_for_group` reads the real id off the group while every
-    // other path takes the envelope's word, and both must mean one group.
-    // Checked before `into_group`, like the roster, so a mismatch writes no
-    // state to then have to clean up.
-    let inner_gid = staged.group_context().group_id().as_slice();
-    if inner_gid != envelope.group_id.0 {
-        return Err(MlsGroupError::Internal(format!(
-            "Welcome carries group {} but the envelope claims {}",
-            hex::encode(inner_gid),
-            hex::encode(envelope.group_id.0)
-        )));
-    }
+        // The sender signs the envelope's group id, not the Welcome inside it. `home_for_group`
+        // reads the group's real id while every other path trusts the envelope.
+        let inner_gid = staged.group_context().group_id().as_slice();
+        if inner_gid != envelope.group_id.0 {
+            return Err(MlsGroupError::Internal(format!(
+                "Welcome carries group {} but the envelope claims {}",
+                hex::encode(inner_gid),
+                hex::encode(envelope.group_id.0)
+            )));
+        }
 
-    let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
-    let handle = MlsGroupHandle::wrap(mls_group);
-    if handle.is_group_chat() && handle.group_meta().is_none() {
-        return Err(MlsGroupError::Internal("Welcome carries unsupported group rules".into()));
-    }
+        let context = staged.group_context().extensions();
+        let is_group_chat = super::group::declares_group_meta(context);
+        if is_group_chat && super::group::GroupMeta::from_extensions(context).is_none() {
+            return Err(MlsGroupError::Internal("Welcome carries unsupported group rules".into()));
+        }
 
-    // Cross-check the inner credential identities against the wire
-    // envelope.
-    //
-    // The inner openmls `BasicCredential::identity` of the sender's
-    // and recipient's leaves in the new group MUST match the wire
-    // envelope's claimed IPKs. A credential-identity smuggling
-    // attack would otherwise let a malicious sender publish a KP
-    // claiming `record.ipk = Bob` but internally addressing the
-    // openmls credential to `Alice`; the local Contact-store would
-    // end up paired with a group whose MLS-layer membership
-    // disagrees on who's at the other end.
-    //
-    // We require: at least one member's identity matches
-    // `envelope.sender_ipk` AND at least one matches
-    // `envelope.recipient_ipk`.
-    //
-    // Sender-/recipient-IPK address checks are done by the caller
-    // (`process_welcome_inbound` in `api::messaging`) which knows the
-    // `self_ipk` global.
-    let recipient_ipk: [u8; 32] = envelope.recipient_ipk.0;
-    let sender_ipk: [u8; 32] = envelope.sender_ipk.0;
-    let mut saw_recipient = false;
-    let mut saw_sender = false;
-    for m in handle.members() {
-        // Every leaf must be somebody. In a group chat that means bound to
-        // an identity by its own signature — a founder who planted a leaf
-        // claiming someone else is caught here, before the group is joined.
-        let Some(id) = handle.member_ipk(&m) else {
+        // Every leaf must be somebody, and the envelope's sender and recipient must
+        // both hold a seat; a pair seats exactly those two.
+        let recipient_ipk: [u8; 32] = envelope.recipient_ipk.0;
+        let sender_ipk: [u8; 32] = envelope.sender_ipk.0;
+        let mut saw_recipient = false;
+        let mut saw_sender = false;
+        for m in staged.members() {
+            let Some(id) = super::credential::member_ipk(&m, is_group_chat) else {
+                return Err(MlsGroupError::Internal(
+                    "Welcome seats a leaf bound to no identity".into(),
+                ));
+            };
+            saw_recipient |= id == recipient_ipk;
+            saw_sender |= id == sender_ipk;
+        }
+        if !saw_recipient {
             return Err(MlsGroupError::Internal(
-                "Welcome seats a leaf bound to no identity".into(),
+                "Welcome's inner credentials lack recipient_ipk identity (smuggling?)".into(),
             ));
-        };
-        saw_recipient |= id == recipient_ipk;
-        saw_sender |= id == sender_ipk;
-    }
-    if !saw_recipient {
-        return Err(MlsGroupError::Internal(
-            "Welcome's inner credentials lack recipient_ipk identity (smuggling?)".into(),
-        ));
-    }
-    if !saw_sender {
-        return Err(MlsGroupError::Internal(
-            "Welcome's inner credentials lack sender_ipk identity (smuggling?)".into(),
-        ));
-    }
+        }
+        if !saw_sender {
+            return Err(MlsGroupError::Internal(
+                "Welcome's inner credentials lack sender_ipk identity (smuggling?)".into(),
+            ));
+        }
+        if !is_group_chat && (roster != 2 || sender_ipk == recipient_ipk) {
+            return Err(MlsGroupError::Internal(
+                "a pair Welcome must seat exactly the sender and the recipient".into(),
+            ));
+        }
 
-    Ok(handle)
+        let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
+        Ok(MlsGroupHandle::wrap(mls_group))
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    // Note: deliberately avoid `use super::*` to skip pulling in
-    // ed25519_dalek's `Signature` type at module scope — openmls's
-    // prelude also exports a `Signature` (an MLS sig) and the two
-    // would conflict.
-    use std::sync::Arc;
-
-    use ed25519_dalek::SigningKey;
+    use openmls::prelude::BasicCredential;
     use openmls::prelude::Capabilities;
     use openmls::prelude::CredentialWithKey;
+    use openmls::prelude::Extension;
+    use openmls::prelude::Extensions;
+    use openmls::prelude::GroupId;
     use openmls::prelude::KeyPackage;
-    use openmls::prelude::ProcessedMessageContent;
-    use openmls::prelude::SignatureScheme;
-    use parking_lot::Mutex;
-    use rusqlite::Connection;
+    use openmls::prelude::MlsGroup;
+    use openmls::prelude::MlsGroupCreateConfig;
+    use openmls::prelude::RequiredCapabilitiesExtension;
+    use openmls::prelude::UnknownExtension;
 
-    use super::WelcomeEnvelopeP;
-    use super::make_welcome_envelope;
-    use super::process_welcome;
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::group::MlsGroupHandle;
-    use crate::mls::group::PROMTUZ_CIPHERSUITE;
-    use crate::mls::group::mls_message_from_bytes;
-    use crate::mls::group::mls_message_to_bytes;
-    use crate::mls::provider::PromtuzMlsProvider;
-    use crate::mls::types::MlsGroupError;
+    use super::*;
+    use crate::mls::GROUP_META_EXTENSION;
+    use crate::mls::GroupMeta;
+    use crate::mls::PROMTUZ_CIPHERSUITE;
+    use crate::test_support::mls::*;
 
-    fn build_provider() -> PromtuzMlsProvider {
-        let mut conn = Connection::open_in_memory().expect("in-memory db");
-        apply_mls_migrations(&mut conn);
-        PromtuzMlsProvider::new(Arc::new(Mutex::new(conn)))
+    /// `founder`, seated under `credential`, founds `gid` with `leaves` and returns the Welcome.
+    fn welcome(
+        founder: &Party, credential: CredentialWithKey, gid: [u8; 32], meta: Option<&GroupMeta>,
+        leaves: &[KeyPackage],
+    ) -> MlsMessageOut {
+        let (provider, leaf) = (&founder.provider, &founder.leaf);
+        let mut group = MlsGroupHandle::create(provider, leaf, credential, &gid, meta).unwrap();
+        group.add_members(provider, leaf, leaves).unwrap().1
     }
 
-    /// Minimal party fixture: deterministic IPK key + a fresh
-    /// openmls `SignatureKeyPair` (the leaf signer). Mirrors
-    /// `group::tests::Party` but exposes the IPK SigningKey so we
-    /// can sign welcome envelopes with it.
-    struct Party {
-        ipk_sk: SigningKey,
-        ipk: [u8; 32],
-        sig_kp: openmls_basic_credential::SignatureKeyPair,
-    }
-
-    impl Party {
-        fn new(provider: &PromtuzMlsProvider, seed: u8) -> Self {
-            let ipk_sk = SigningKey::from_bytes(&[seed; 32]);
-            let ipk = ipk_sk.verifying_key().to_bytes();
-            let sig_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
-                .expect("sig kp");
-            sig_kp.store(provider.storage()).expect("store sig kp");
-            Self { ipk_sk, ipk, sig_kp }
-        }
-
-        /// The leaf key under a credential its identity signed for.
-        fn cwk(&self) -> CredentialWithKey {
-            CredentialWithKey {
-                credential:    crate::mls::credential::bound_credential(
-                    &self.ipk_sk,
-                    self.sig_kp.public(),
-                )
-                .into(),
-                signature_key: self.sig_kp.public().into(),
-            }
-        }
-    }
-
-    /// Build a fresh KP for `party` and persist its bundle locally.
-    fn make_kp(provider: &PromtuzMlsProvider, party: &Party) -> KeyPackage {
-        let cwk = party.cwk();
-        let bundle = KeyPackage::builder()
-            .leaf_node_capabilities(Capabilities::new(
+    /// A Welcome for a group chat whose metadata this version cannot read.
+    fn unreadable_rules(founder: &Party, gid: [u8; 32], leaves: &[KeyPackage]) -> MlsMessageOut {
+        let extensions = Extensions::from_vec(vec![
+            Extension::Unknown(u16::from(GROUP_META_EXTENSION), UnknownExtension(vec![0xFF; 4])),
+            Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+                &[GROUP_META_EXTENSION],
+                &[],
+                &[],
+            )),
+        ])
+        .unwrap();
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(PROMTUZ_CIPHERSUITE)
+            .use_ratchet_tree_extension(true)
+            .with_group_context_extensions(extensions)
+            .capabilities(Capabilities::new(
                 None,
                 Some(&[PROMTUZ_CIPHERSUITE]),
-                Some(&[crate::mls::GROUP_META_EXTENSION]),
+                Some(&[GROUP_META_EXTENSION]),
                 None,
                 None,
             ))
-            .build(PROMTUZ_CIPHERSUITE, provider, &party.sig_kp, cwk)
-            .expect("build kp");
-        bundle.key_package().clone()
+            .build();
+        let (provider, leaf) = (&founder.provider, &founder.leaf);
+        let id = GroupId::from_slice(&gid);
+        let group = MlsGroup::new_with_group_id(provider, leaf, &config, id, founder.credential());
+        let mut group = MlsGroupHandle::wrap(group.unwrap());
+        group.add_members(provider, leaf, leaves).unwrap().1
     }
 
-    /// Walk Alice → adds Bob → returns the `(welcome_envelope,
-    /// alice_group)` for the test to reuse.
-    fn alice_invites_bob(
-        provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
-        bob: &Party, gid: [u8; 32],
-    ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
-        alice_invites_bob_with(provider_a, alice, provider_b, bob, gid, None)
+    /// Every refused Welcome leaves the recipient's database as it was: no group, no size, and the
+    /// KeyPackage still there, since a refusal rolls back its use.
+    #[test]
+    fn a_refused_welcome_stores_nothing() {
+        let (alice, bob, carol, dave) =
+            (Party::new(1), Party::new(2), Party::new(3), Party::new(4));
+        let kp = bob.kp();
+        let room = GroupMeta::founded("room".into(), alice.ipk);
+        let claiming = |ipk: [u8; 32], holder: &Party| CredentialWithKey {
+            credential:    BasicCredential::new(ipk.to_vec()).into(),
+            signature_key: holder.leaf.public().into(),
+        };
+        let pair = |gid| welcome(&alice, alice.credential(), gid, None, &[kp.clone()]);
+        let sealed = |w, gid, from: &Party, to: [u8; 32]| {
+            make_welcome_envelope(w, gid, from.ipk, to, kp_ref(&kp), &from.identity).unwrap()
+        };
+        let three = welcome(&alice, alice.credential(), [1; 32], None, &[kp.clone(), carol.kp()]);
+        let impostor = welcome(&carol, claiming(dave.ipk, &carol), [2; 32], None, &[kp.clone()]);
+        let forged = [kp.clone(), dave.key_package(claiming(carol.ipk, &dave))];
+        let forged = welcome(&alice, alice.credential(), [3; 32], Some(&room), &forged);
+        let daves = welcome(&dave, dave.credential(), [4; 32], None, &[kp.clone()]);
+        let unreadable = unreadable_rules(&alice, [5; 32], &[kp.clone()]);
+        let mut flipped = sealed(pair([8; 32]), [8; 32], &alice, bob.ipk);
+        flipped.sender_sig.0[0] ^= 0xFF;
+        let mut redirected = sealed(pair([9; 32]), [9; 32], &alice, bob.ipk);
+        redirected.recipient_ipk = carol.ipk.into();
+        // The case, the envelope, and whether its signature is what fails.
+        let rows = [
+            ("a pair seating a third person", sealed(three, [1; 32], &alice, bob.ipk), false),
+            (
+                "a pair's bare leaf claiming another",
+                sealed(impostor, [2; 32], &carol, bob.ipk),
+                false,
+            ),
+            ("a group leaf claiming another", sealed(forged, [3; 32], &alice, bob.ipk), false),
+            ("a sender holding no seat", sealed(daves, [4; 32], &carol, bob.ipk), false),
+            ("rules this version cannot read", sealed(unreadable, [5; 32], &alice, bob.ipk), false),
+            (
+                "a recipient holding no seat",
+                sealed(pair([6; 32]), [6; 32], &alice, carol.ipk),
+                false,
+            ),
+            (
+                "an envelope naming another group",
+                sealed(pair([7; 32]), [0; 32], &alice, bob.ipk),
+                false,
+            ),
+            ("a flipped signature", flipped, true),
+            ("a relay redirecting it", redirected, true),
+        ];
+        for (case, envelope, bad_signature) in rows {
+            let before = dump(&bob.db);
+            let refused = process_welcome(&bob.provider, &envelope).map(|_| ()).expect_err(case);
+            assert_eq!(matches!(refused, MlsGroupError::BadSignature), bad_signature, "{case}");
+            assert!(MlsGroupHandle::load(&bob.provider, &envelope.group_id.0).unwrap().is_none());
+            assert_eq!(dump(&bob.db), before, "{case}");
+        }
+        let proper = sealed(pair([10; 32]), [10; 32], &alice, bob.ipk);
+        assert!(process_welcome(&bob.provider, &proper).is_ok(), "the KeyPackage still joins");
     }
 
-    fn alice_invites_bob_with(
-        provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
-        bob: &Party, gid: [u8; 32], meta: Option<&crate::mls::GroupMeta>,
-    ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
-        let mut alice_group =
-            MlsGroupHandle::create(provider_a, &alice.sig_kp, alice.cwk(), &gid, meta)
-                .expect("create");
-        let bob_kp = make_kp(provider_b, bob);
-        // Save the kp_ref before consuming the kp into add_members.
-        // The provider's `crypto()` is reached via the
-        // `OpenMlsProvider` trait method, not the inherent method
-        // (which is private).
-        use openmls_traits::OpenMlsProvider;
-        let kp_ref = bob_kp
-            .hash_ref(provider_b.crypto())
-            .expect("kp_ref")
-            .as_slice()
-            .to_vec();
-        let (_commit, welcome) = alice_group
-            .add_members(provider_a, &alice.sig_kp, &[bob_kp])
-            .expect("add bob");
-        alice_group.merge_pending_commit(provider_a).expect("merge");
-
-        let mut kp_ref_arr = [0u8; 32];
-        let copy = kp_ref.len().min(32);
-        kp_ref_arr[..copy].copy_from_slice(&kp_ref[..copy]);
-
-        let env =
-            make_welcome_envelope(welcome, gid, alice.ipk, bob.ipk, kp_ref_arr, &alice.ipk_sk)
-                .expect("make welcome");
-        (env, alice_group)
-    }
-
-    /// The joiner has to learn a group is a *group* from the Welcome itself.
-    /// A two-person group is indistinguishable from a 1:1 by roster, epoch or
-    /// envelope, so the founder's [`GroupMeta`] riding the group context is the
-    /// only thing that tells them apart — and it must survive the join.
+    /// GroupMeta is all that tells a group of two from a pair: the joiner reads it from the
+    /// Welcome, and a pair carries none.
     #[test]
     fn group_meta_reaches_the_joiner_through_the_welcome() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-
-        let meta = crate::mls::GroupMeta::founded("book club".into(), alice.ipk);
-        let (env, alice_group) =
-            alice_invites_bob_with(&provider_a, &alice, &provider_b, &bob, [7u8; 32], Some(&meta));
-        let bob_group = process_welcome(&provider_b, &env).expect("process");
-
-        assert_eq!(bob_group.group_meta(), Some(meta.clone()), "the joiner reads the founder's meta");
-        assert_eq!(alice_group.group_meta(), Some(meta), "and so does the founder");
-        assert_eq!(bob_group.member_count(), 2, "a group of two — the case a roster count gets wrong");
-    }
-
-    /// A founder who seats a leaf that merely *says* it is Carol — made with
-    /// keys Carol never signed for — is seating nobody, and the joiner must
-    /// refuse the whole Welcome rather than read that leaf as Carol.
-    #[test]
-    fn a_group_welcome_seating_a_leaf_that_claims_someone_else_is_refused() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let provider_m = build_provider();
-        let mallory = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        // A leaf key Mallory holds, under a bare credential naming Carol.
-        let fake_carol = Party::new(&provider_m, 3);
-        let carol_ipk = fake_carol.ipk;
-        let cwk = CredentialWithKey {
-            credential:    openmls::prelude::BasicCredential::new(carol_ipk.to_vec()).into(),
-            signature_key: fake_carol.sig_kp.public().into(),
-        };
-        let forged_kp = KeyPackage::builder()
-            .leaf_node_capabilities(Capabilities::new(
-                None,
-                Some(&[PROMTUZ_CIPHERSUITE]),
-                Some(&[crate::mls::GROUP_META_EXTENSION]),
-                None,
-                None,
-            ))
-            .build(PROMTUZ_CIPHERSUITE, &provider_m, &fake_carol.sig_kp, cwk)
-            .expect("build kp")
-            .key_package()
-            .clone();
-
-        let meta = crate::mls::GroupMeta::founded("trap".into(), mallory.ipk);
-        let gid = [9u8; 32];
-        let mut group =
-            MlsGroupHandle::create(&provider_a, &mallory.sig_kp, mallory.cwk(), &gid, Some(&meta))
-                .expect("create");
-        let bob_kp = make_kp(&provider_b, &bob);
-        use openmls_traits::OpenMlsProvider;
-        let kp_ref: [u8; 32] = bob_kp.hash_ref(provider_b.crypto()).unwrap().as_slice().try_into().unwrap();
-        let (_c, welcome) = group
-            .add_members(&provider_a, &mallory.sig_kp, &[bob_kp, forged_kp])
-            .expect("add");
-        group.merge_pending_commit(&provider_a).expect("merge");
-        let env = make_welcome_envelope(welcome, gid, mallory.ipk, bob.ipk, kp_ref, &mallory.ipk_sk)
-            .expect("envelope");
-
-        let err = process_welcome(&provider_b, &env).expect_err("bob refuses");
-        assert!(err.to_string().contains("bound to no identity"), "{err}");
-    }
-
-    /// The absence of meta is what marks a pair, so a pairing Welcome must
-    /// carry none. Otherwise every 1:1 would open as a group chat.
-    #[test]
-    fn a_pairing_welcome_carries_no_group_meta() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-
-        let (env, _alice_group) =
-            alice_invites_bob(&provider_a, &alice, &provider_b, &bob, [8u8; 32]);
-        let bob_group = process_welcome(&provider_b, &env).expect("process");
-
-        assert_eq!(bob_group.group_meta(), None);
-    }
-
-    // -------------------------------------------------------------
-    // Test 2: Welcome envelope with bad sig is rejected.
-    // -------------------------------------------------------------
-    #[test]
-    fn welcome_envelope_bad_sig_is_rejected() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let (mut env, _) = alice_invites_bob(&provider_a, &alice, &provider_b, &bob, [0xAA; 32]);
-
-        // Flip a bit in the sig.
-        let mut sig_bytes = env.sender_sig.0;
-        sig_bytes[0] ^= 0xFF;
-        env.sender_sig = sig_bytes.into();
-
-        let r = process_welcome(&provider_b, &env);
-        assert!(matches!(r, Err(MlsGroupError::BadSignature)));
-    }
-
-    // -------------------------------------------------------------
-    // Test 3: Wrong recipient_ipk is rejected (sig won't verify
-    // because recipient_ipk is bound).
-    // -------------------------------------------------------------
-    #[test]
-    fn welcome_addressed_to_wrong_recipient_is_rejected() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let (mut env, _) = alice_invites_bob(&provider_a, &alice, &provider_b, &bob, [0xAA; 32]);
-
-        // Overwrite recipient_ipk; sig was bound to the original
-        // value, so it must fail verification.
-        let mallory_ipk = SigningKey::from_bytes(&[3u8; 32])
-            .verifying_key()
-            .to_bytes();
-        env.recipient_ipk = mallory_ipk.into();
-
-        let r = process_welcome(&provider_b, &env);
-        assert!(matches!(r, Err(MlsGroupError::BadSignature)));
-    }
-
-    // -------------------------------------------------------------
-    // Test 4: After process_welcome, founder + joiner can exchange
-    // application messages.
-    // -------------------------------------------------------------
-    #[test]
-    fn after_process_welcome_application_messages_round_trip() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let gid = [0xBB; 32];
-        let (env, mut alice_group) =
-            alice_invites_bob(&provider_a, &alice, &provider_b, &bob, gid);
-
-        let mut bob_group = process_welcome(&provider_b, &env).expect("process");
-        assert_eq!(bob_group.group_id(), gid);
-        assert_eq!(bob_group.epoch(), alice_group.epoch());
-        assert_eq!(bob_group.member_count(), alice_group.member_count());
-
-        // Alice → Bob.
-        let plaintext = b"welcome bob, can you read me?";
-        let alice_msg = alice_group
-            .create_application_message(&provider_a, &alice.sig_kp, plaintext)
-            .expect("encrypt");
-        let bytes = mls_message_to_bytes(&alice_msg).expect("ser");
-        let in_msg = mls_message_from_bytes(&bytes).expect("deser");
-        let proto = in_msg.try_into_protocol_message().expect("proto");
-        let content = bob_group
-            .process_incoming(&provider_b, proto)
-            .expect("process app")
-            .content;
-        match content {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                assert_eq!(app.into_bytes(), plaintext);
-            },
-            other => panic!("expected app msg, got {other:?}"),
-        }
-
-        // Bob → Alice.
-        let plaintext_b = b"yes alice, loud and clear";
-        let bob_msg = bob_group
-            .create_application_message(&provider_b, &bob.sig_kp, plaintext_b)
-            .expect("bob encrypt");
-        let bytes = mls_message_to_bytes(&bob_msg).expect("ser");
-        let in_msg = mls_message_from_bytes(&bytes).expect("deser");
-        let proto = in_msg.try_into_protocol_message().expect("proto");
-        let content = alice_group
-            .process_incoming(&provider_a, proto)
-            .expect("alice process")
-            .content;
-        match content {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                assert_eq!(app.into_bytes(), plaintext_b);
-            },
-            other => panic!("expected app msg, got {other:?}"),
+        let (alice, bob) = (Party::new(1), Party::new(2));
+        let room = GroupMeta::founded("book club".into(), alice.ipk);
+        for (gid, meta) in [([7; 32], Some(room)), ([8; 32], None)] {
+            let kp = bob.kp();
+            let w = welcome(&alice, alice.credential(), gid, meta.as_ref(), &[kp.clone()]);
+            let joined =
+                process_welcome(&bob.provider, &alice.envelope(&bob, gid, w, &kp)).unwrap();
+            assert_eq!((joined.group_meta(), joined.member_count()), (meta, 2));
         }
     }
 }

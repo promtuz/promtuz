@@ -68,11 +68,6 @@ impl Ledger {
         self.count("SELECT count(*) FROM packs WHERE creator = ?1", [creator])
     }
 
-    #[cfg(test)]
-    pub fn blob_count(&self, pack: &[u8; 16]) -> Result<usize> {
-        self.count("SELECT count(*) FROM blobs WHERE pack = ?1", [pack])
-    }
-
     pub fn named_keys(&self, pack: &[u8; 16]) -> Result<Vec<[u8; 32]>> {
         Ok(self
             .0
@@ -81,7 +76,6 @@ impl Ledger {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Blobs no manifest has named yet.
     pub fn unnamed_count(&self, pack: &[u8; 16]) -> Result<usize> {
         self.count("SELECT count(*) FROM blobs WHERE pack = ?1 AND named = 0", [pack])
     }
@@ -98,7 +92,6 @@ impl Ledger {
             .is_some())
     }
 
-    /// Bind a pack to its creator at `version`; a known pack is left as is.
     pub fn claim(&self, pack: &[u8; 16], creator: &[u8; 32], version: u32, now: u64) -> Result<()> {
         self.0.execute(
             "INSERT OR IGNORE INTO packs (pack, creator, version, claimed_at) VALUES (?1, ?2, ?3, ?4)",
@@ -155,14 +148,11 @@ impl Ledger {
         Ok(())
     }
 
-    /// Remove an unpublished pack once all its blobs have been deleted.
     pub fn drop_pack(&self, pack: &[u8; 16]) -> Result<()> {
         self.0.execute("DELETE FROM packs WHERE pack = ?1 AND version = 0 AND NOT EXISTS (SELECT 1 FROM blobs WHERE pack = ?1)", [pack])?;
         Ok(())
     }
 
-    /// Packs that never got a manifest, and blobs no manifest named, from
-    /// before `before`.
     pub fn expired(&self, before: u64) -> Result<(Vec<[u8; 16]>, Vec<([u8; 16], [u8; 32])>)> {
         let packs = self
             .0

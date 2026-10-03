@@ -1,22 +1,5 @@
-//! Tier-1 MLS wrapper handlers (libcore → home over `client/5`).
-//! Each handler:
-//!
-//! 1. resolves the home's DHT (replies [`SRelayPacket::DhtUnavailable`]
-//!    if this relay has DHT disabled);
-//! 2. verifies the wrapper signature + ±60s skew against the
-//!    connection-authenticated IPK (`ctx.ipk`) — for the three
-//!    user-signed RPCs this *is* the inner Tier-2 user sig that the K
-//!    storage homes will re-verify; for the two gate-only RPCs it's a
-//!    local freshness/attribution gate;
-//! 3. originates the real `peer/5` fan-out via `dht::mls_kp_originate` /
-//!    `dht::mls_welcome_originate`;
-//! 4. replies with the matching [`SRelayPacket`].
-//!
-//! On a failed verification we drop the stream (return `Ok(())` without
-//! a reply); the phone's awaiting RPC surfaces a clean stream-closed
-//! error. A correctly-behaving phone always signs validly, so this path
-//! is only hit by a buggy or malicious client — we deliberately don't
-//! leak a distinct "bad sig" reply.
+//! MLS KeyPackage and Welcome RPCs: each is checked against the connection IPK, then originated
+//! to the homes. A failed check gets no reply, so a bad signature has no distinct answer.
 
 use anyhow::Result;
 use common::proto::Sender;
@@ -35,28 +18,23 @@ use common::proto::mls_wire::welcome_fetch_signing_input;
 use common::proto::mls_wire::welcome_publish_wrap_signing_input;
 use common::proto::client_rel::SRelayPacket;
 use common::crypto::PublicKey;
+use common::crypto::verify_ed25519;
 use common::quic::id::NodeId;
 use common::trace;
 use common::types::bytes::Bytes;
-use ed25519_dalek::Signature;
+use common::utils::now_ms;
 use quinn::SendStream;
 
 use crate::dht::mls::kp_originate;
 use crate::dht::mls::welcome_originate;
 use crate::quic::handler::client::ClientCtxHandle;
-use crate::util::systime;
 
-/// Shared skew + Ed25519-strict check against the connection IPK.
 fn fresh_and_valid(ipk: &PublicKey, msg: &[u8], sig: &[u8; 64], now_ms: u64, timestamp: u64) -> bool {
     if now_ms.abs_diff(timestamp) > MAX_KP_SKEW_MS {
         return false;
     }
-    ipk.verify_strict(msg, &Signature::from_bytes(sig)).is_ok()
+    verify_ed25519(ipk.as_bytes(), msg, sig).is_ok()
 }
-
-// ---------------------------------------------------------------------------
-// PublishKeyPackage (user-signed: inner kp_publish / kp_refill sig)
-// ---------------------------------------------------------------------------
 
 fn verify_publish_keypackage(
     ipk: &PublicKey, now_ms: u64, records: &[KeyPackageRecord], mode: KpPublishMode,
@@ -86,7 +64,7 @@ pub(crate) async fn handle_publish_keypackage(
         trace!("MLS publish-kp: batch over KP_STASH_TARGET rejected");
         return Ok(());
     }
-    let now_ms = systime().as_millis() as u64;
+    let now_ms = now_ms();
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -95,10 +73,9 @@ pub(crate) async fn handle_publish_keypackage(
         trace!("MLS publish-kp: wrapper sig/skew rejected");
         return Ok(());
     }
-    let q = kp_originate::originate_publish(
-        &dht, ctx.ipk.to_bytes(), records, mode, timestamp, sig, now_ms,
-    )
-    .await;
+    let q =
+        kp_originate::originate_publish(&dht, ctx.ipk.to_bytes(), records, mode, timestamp, sig)
+            .await;
     SRelayPacket::KeyPackagePublished {
         homes_succeeded: q.homes_succeeded,
         quorum_met: q.quorum_met,
@@ -108,9 +85,25 @@ pub(crate) async fn handle_publish_keypackage(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// FetchKeyPackage (gate-only: kp_fetch_wrap sig)
-// ---------------------------------------------------------------------------
+/// This request may only inspect the connection owner's stash. The owner proof
+/// is forwarded intact, bound to this relay's authenticated peer identity.
+pub(crate) async fn handle_keypackage_inventory(
+    ctx: ClientCtxHandle, bytes: &[u8], tx: &mut SendStream,
+) -> Result<()> {
+    use common::contracts::services::key_inventory::Request;
+    let Ok(request) = Request::decode(bytes) else { return Ok(()); };
+    if request.owner != ctx.ipk.to_bytes() { return Ok(()); }
+    let Some(dht) = ctx.relay.dht.as_ref() else {
+        SRelayPacket::DhtUnavailable.send(tx).await?;
+        return Ok(());
+    };
+    let now = now_ms();
+    let Some(inventory) = crate::dht::mls::inventory::originate(dht, &request, now).await else {
+        return Ok(());
+    };
+    SRelayPacket::KeyPackageInventory { inventory: inventory.encode()?.into() }.send(tx).await?;
+    Ok(())
+}
 
 fn verify_fetch_keypackage(
     ipk: &PublicKey, now_ms: u64, target_ipk: &[u8; 32], timestamp: u64, sig: &[u8; 64],
@@ -123,7 +116,7 @@ pub(crate) async fn handle_fetch_keypackage(
     ctx: ClientCtxHandle, target_ipk: [u8; 32], timestamp: u64, sig: [u8; 64],
     tx: &mut SendStream,
 ) -> Result<()> {
-    let now_ms = systime().as_millis() as u64;
+    let now_ms = now_ms();
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -139,6 +132,10 @@ pub(crate) async fn handle_fetch_keypackage(
         return Ok(());
     }
     let r = kp_originate::originate_fetch(&dht, target_ipk, now_ms).await;
+    if r.unavailable {
+        SRelayPacket::DhtUnavailable.send(tx).await?;
+        return Ok(());
+    }
     SRelayPacket::KeyPackageFetched {
         record: r.record,
         remaining: r.remaining,
@@ -148,10 +145,6 @@ pub(crate) async fn handle_fetch_keypackage(
     .await?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// PublishWelcome (gate-only: welcome_publish_wrap sig; auth in envelope)
-// ---------------------------------------------------------------------------
 
 fn verify_publish_welcome(
     ipk: &PublicKey, now_ms: u64, envelope: &WelcomeEnvelopeP, timestamp: u64, sig: &[u8; 64],
@@ -166,14 +159,13 @@ pub(crate) async fn handle_publish_welcome(
     ctx: ClientCtxHandle, envelope: WelcomeEnvelopeP, timestamp: u64, sig: [u8; 64],
     tx: &mut SendStream,
 ) -> Result<()> {
-    // The wrapper sig proves "some authenticated client asked to publish this";
-    // this binding is what makes it "this client authored it", so a captured
-    // envelope cannot be replayed to fill the recipient's welcome queue.
+    // The wrapper sig shows only that some client asked; this binding makes it the author, so a
+    // captured envelope cannot be replayed to fill the recipient's welcome queue.
     if envelope.sender_ipk.0 != ctx.ipk.to_bytes() {
         trace!("MLS publish-welcome: envelope sender is not the publishing client");
         return Ok(());
     }
-    let now_ms = systime().as_millis() as u64;
+    let now_ms = now_ms();
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -182,15 +174,10 @@ pub(crate) async fn handle_publish_welcome(
         trace!("MLS publish-welcome: wrapper sig/skew rejected");
         return Ok(());
     }
-    let quorum_met =
-        welcome_originate::originate_welcome_publish(&dht, envelope, timestamp, now_ms).await;
+    let quorum_met = welcome_originate::originate_welcome_publish(&dht, envelope, timestamp).await;
     SRelayPacket::WelcomePublished { quorum_met }.send(tx).await?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// FetchWelcomes (user-signed: inner welcome_fetch sig bound to our NodeId)
-// ---------------------------------------------------------------------------
 
 fn verify_fetch_welcomes(
     ipk: &PublicKey, node_id: &NodeId, now_ms: u64, timestamp: u64, sig: &[u8; 64],
@@ -202,7 +189,7 @@ fn verify_fetch_welcomes(
 pub(crate) async fn handle_fetch_welcomes(
     ctx: ClientCtxHandle, timestamp: u64, sig: [u8; 64], tx: &mut SendStream,
 ) -> Result<()> {
-    let now_ms = systime().as_millis() as u64;
+    let now_ms = now_ms();
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -212,15 +199,10 @@ pub(crate) async fn handle_fetch_welcomes(
         return Ok(());
     }
     let entries =
-        welcome_originate::originate_welcome_fetch(&dht, ctx.ipk.to_bytes(), timestamp, sig, now_ms)
-            .await;
+        welcome_originate::originate_welcome_fetch(&dht, ctx.ipk.to_bytes(), timestamp, sig).await;
     SRelayPacket::WelcomesFetched { entries }.send(tx).await?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// AckWelcomes (user-signed: inner welcome_ack sig bound to our NodeId)
-// ---------------------------------------------------------------------------
 
 fn verify_ack_welcomes(
     ipk: &PublicKey, node_id: &NodeId, now_ms: u64, ids: &[[u8; 8]], timestamp: u64,
@@ -234,7 +216,7 @@ pub(crate) async fn handle_ack_welcomes(
     ctx: ClientCtxHandle, welcome_ids: Vec<Bytes<8>>, timestamp: u64, sig: [u8; 64],
     tx: &mut SendStream,
 ) -> Result<()> {
-    let now_ms = systime().as_millis() as u64;
+    let now_ms = now_ms();
     let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -244,8 +226,7 @@ pub(crate) async fn handle_ack_welcomes(
         trace!("MLS ack-welcomes: wrapper sig/skew rejected");
         return Ok(());
     }
-    welcome_originate::originate_welcome_ack(&dht, ctx.ipk.to_bytes(), ids, timestamp, sig, now_ms)
-        .await;
+    welcome_originate::originate_welcome_ack(&dht, ctx.ipk.to_bytes(), ids, timestamp, sig).await;
     SRelayPacket::WelcomesAcked.send(tx).await?;
     Ok(())
 }

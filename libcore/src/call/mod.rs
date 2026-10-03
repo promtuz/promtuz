@@ -1,12 +1,5 @@
-//! Calls (CALLS.md). One call per device, driven by a state machine that
-//! owns every timer; the media runs in a [`rtc`] session on str0m, the
-//! audio crosses the FFI through [`audio`]. Signaling rides the MLS channel
-//! as [`CallMsg`], so it is end-to-end and needs no key exchange of its own.
-//!
-//! Roles are fixed at the offer: the caller controls ICE and answers DTLS
-//! passively, the callee the reverse. When both tap call at once, the lower
-//! identity key's offer wins and the other side answers it instead of
-//! ringing, the tie-break the P2P dial already uses.
+//! One call per device, driven by a state machine that owns every timer. Signaling rides MLS as
+//! [`CallMsg`]; when offers cross, the lower identity key's offer wins and the other side answers.
 
 pub(crate) mod audio;
 pub mod ffi;
@@ -28,6 +21,8 @@ use common::proto::mls_wire::CallEnd;
 use common::proto::mls_wire::CallMsg;
 use common::proto::pack::Unpacker;
 use common::proto::Sender as _;
+use common::utils::now_ms;
+use common::utils::now_secs;
 use log::debug;
 use log::info;
 use log::warn;
@@ -35,7 +30,6 @@ use parking_lot::Mutex;
 use str0m::crypto::dtls::DtlsCert;
 use tokio::sync::mpsc;
 
-use crate::RUNTIME;
 use crate::data::contact::Contact;
 use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
@@ -43,19 +37,15 @@ use crate::data::message::Message;
 use crate::db::messages::SYSTEM_CALL;
 use crate::platform::CallEndReason;
 use crate::platform::CallEvent;
-use crate::state::RELAY;
+use crate::state::core;
 use audio::AudioPath;
 
-/// Life of every call signal at the relay. An offer is worth nothing after
-/// the ring, and the rest of a call is worth nothing after the offer.
+/// How long the relay holds a call signal before dropping it unread.
 pub(crate) const SIGNAL_TTL_MS: u64 = 40_000;
 /// The offer's own expiry, on the caller's clock.
 const OFFER_LIFE: Duration = Duration::from_secs(40);
-/// Tolerated clock difference between the two phones judging an expiry.
 const CLOCK_SKEW_MS: u64 = 5_000;
-/// How long a call rings before the caller gives up and the callee misses it.
 const RING_TIMEOUT: Duration = Duration::from_secs(45);
-/// From answer to media, and from a dropped path to a recovered one.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Asking the relay for TURN credentials must not hold up the ring.
@@ -63,18 +53,14 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
-    /// We rang them and wait for an answer.
     Offering,
-    /// They rang us and wait for ours.
+    /// An incoming call rings here.
     Ringing,
-    /// Answered; ICE and DTLS under way.
     Connecting,
     Connected,
-    /// The path dropped; a restart is under way.
     Reconnecting,
 }
 
-/// The peer's half of the session parameters.
 #[derive(Clone)]
 struct Remote {
     ufrag:       String,
@@ -95,18 +81,15 @@ struct Call {
     connected_at: Option<Instant>,
     peer_muted:   bool,
     audio:        Arc<AudioPath>,
-    /// Kept for the call's life so a restarted session keeps its fingerprint.
     cert:         DtlsCert,
     session:      Option<mpsc::UnboundedSender<rtc::Cmd>>,
-    /// The peer's parameters, held until a session exists to take them.
     remote:       Option<Remote>,
     /// Candidates that arrived before the session did.
     early:        Vec<CallCandidate>,
-    /// Restarts so far, ours or theirs; see [`CallMsg::Restart`].
+    /// The latest restart round, ours or theirs.
     restart_gen:  u32,
 }
 
-/// A read-only view for the platform.
 pub struct Snapshot {
     pub id:           [u8; 16],
     pub peer:         [u8; 32],
@@ -121,8 +104,69 @@ pub struct Snapshot {
 
 static CURRENT: Mutex<Option<Call>> = parking_lot::const_mutex(None);
 
-fn now_ms() -> u64 {
-    crate::utils::systime().as_millis() as u64
+/// A new call's DTLS certificate and audio path.
+type Media = (DtlsCert, Arc<AudioPath>);
+
+/// Everything that moves the call.
+enum Input {
+    /// Our outgoing call, already built in [`Phase::Offering`].
+    Start(Call),
+    Accept,
+    Reject,
+    Hangup,
+    Muted(bool),
+    Camera(bool),
+    NetworkChanged,
+    Offer(Offer),
+    /// Any signal but an offer.
+    Signal(CallMsg),
+    /// A timer armed by [`Effect::Arm`] fired.
+    Expired([u8; 16], Phase, Expiry),
+    /// A media-session event; `now_ms` dates an offer it completes.
+    Session { id: [u8; 16], event: rtc::Event, now_ms: u64 },
+    /// Sending this call's offer failed.
+    OfferLost([u8; 16]),
+}
+
+/// An offer and what deciding on it needs from outside the call.
+struct Offer {
+    from:          [u8; 32],
+    conversation:  [u8; 16],
+    call:          [u8; 16],
+    expires_at_ms: u64,
+    video:         bool,
+    remote:        Remote,
+    /// Only a paired contact may ring us.
+    paired:        bool,
+    /// Our identity key, for the crossed-offer tie-break.
+    me:            [u8; 32],
+    now_ms:        u64,
+    /// Builds the media for a call that will ring; `None` drops the offer.
+    media:         fn() -> Option<Media>,
+}
+
+/// What a transition asks for, run in order once `CURRENT` is unlocked.
+enum Effect {
+    Signal([u8; 16], CallMsg),
+    Emit(CallEvent),
+    /// Feeds [`Input::Expired`] back after the delay.
+    Arm(Duration, [u8; 16], Phase, Expiry),
+    StartSession([u8; 16], rtc::Role, bool),
+    Record { conversation: [u8; 16], peer: [u8; 32], id: [u8; 16], outcome: String, outgoing: bool },
+    Video(Vec<u8>, bool),
+    Keyframe,
+    Bitrate(u32),
+}
+
+/// What a timer does if the call is still where it left it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Expiry {
+    /// Nobody picked up our call: tell them, and end it.
+    Unanswered,
+    /// Media did not come up or back in time: tell them, and end it.
+    Failed,
+    /// We did not pick up theirs.
+    Missed,
 }
 
 fn rand_id() -> [u8; 16] {
@@ -134,7 +178,7 @@ fn rand_id() -> [u8; 16] {
 }
 
 fn emit(event: CallEvent) {
-    if let Some(events) = crate::platform::EVENTS.get() {
+    if let Some(events) = core().events.get() {
         events.on_call(event);
     }
 }
@@ -143,8 +187,160 @@ fn short(id: &[u8]) -> String {
     hex::encode(&id[..4])
 }
 
-/// Ring `peer`, as a video call when `video`. Returns the call id; the rest
-/// arrives as events.
+/// Applies `input` to the current call, then runs what it asked for.
+fn apply(input: Input) -> Result<()> {
+    let effects = step(&mut CURRENT.lock(), input)?;
+    for effect in effects {
+        run(effect);
+    }
+    Ok(())
+}
+
+fn run(effect: Effect) {
+    match effect {
+        Effect::Signal(conversation, msg) => signal(conversation, msg),
+        Effect::Emit(event) => emit(event),
+        Effect::Arm(delay, id, phase, expiry) => {
+            core().spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = apply(Input::Expired(id, phase, expiry));
+            });
+        },
+        Effect::StartSession(id, role, video) => {
+            core().spawn(spawn_session(id, role, video));
+        },
+        Effect::Record { conversation, peer, id, outcome, outgoing } => {
+            let caller = if outgoing { Identity::local_ipk().unwrap_or(peer) } else { peer };
+            record(conversation, caller, &id, &outcome, outgoing);
+        },
+        Effect::Video(frame, keyframe) => {
+            if let Some(events) = core().events.get() {
+                events.on_call_video(frame, keyframe);
+            }
+        },
+        Effect::Keyframe => {
+            if let Some(events) = core().events.get() {
+                events.on_call_video_keyframe();
+            }
+        },
+        Effect::Bitrate(kbps) => {
+            if let Some(events) = core().events.get() {
+                events.on_call_video_bitrate(kbps);
+            }
+        },
+    }
+}
+
+/// Session commands go straight to the call's session channel; every other effect is returned for
+/// [`run`]. An error refuses a user action and changes nothing.
+fn step(state: &mut Option<Call>, input: Input) -> Result<Vec<Effect>> {
+    let mut fx = Vec::new();
+    match input {
+        Input::Start(call) => {
+            if state.is_some() {
+                bail!("already in a call");
+            }
+            let (id, peer, conversation, video) = (call.id, call.peer, call.conversation, call.video);
+            *state = Some(call);
+            info!("CALL[{}]: calling {} ({})", short(&id), short(&peer), if video { "video" } else { "audio" });
+            fx.push(Effect::Emit(CallEvent::Outgoing {
+                call: id.to_vec(),
+                peer: peer.to_vec(),
+                conversation: conversation.to_vec(),
+            }));
+            fx.push(Effect::StartSession(id, rtc::Role::Caller, video));
+            fx.push(Effect::Arm(RING_TIMEOUT, id, Phase::Offering, Expiry::Unanswered));
+        },
+        Input::Accept => {
+            let call = state.as_mut().ok_or_else(|| anyhow!("no call"))?;
+            if call.phase != Phase::Ringing {
+                bail!("nothing to accept");
+            }
+            call.phase = Phase::Connecting;
+            let (id, video) = (call.id, call.video);
+            info!("CALL[{}]: accepted", short(&id));
+            fx.push(Effect::Emit(CallEvent::Connecting { call: id.to_vec() }));
+            fx.push(Effect::StartSession(id, rtc::Role::Callee, video));
+            fx.push(Effect::Arm(CONNECT_TIMEOUT, id, Phase::Connecting, Expiry::Failed));
+        },
+        Input::Reject => {
+            if let Some(call) = state.as_ref().filter(|c| c.phase == Phase::Ringing) {
+                fx.push(Effect::Signal(call.conversation, CallMsg::End {
+                    call: call.id,
+                    reason: CallEnd::Declined,
+                }));
+                finish(state, CallEndReason::Declined, &mut fx);
+            }
+        },
+        Input::Hangup => {
+            if let Some(call) = state.as_ref() {
+                let (wire, reason) = match call.phase {
+                    Phase::Offering => (CallEnd::Hangup, CallEndReason::Cancelled),
+                    Phase::Ringing => (CallEnd::Declined, CallEndReason::Declined),
+                    _ => (CallEnd::Hangup, CallEndReason::Hangup),
+                };
+                fx.push(Effect::Signal(call.conversation, CallMsg::End { call: call.id, reason: wire }));
+                finish(state, reason, &mut fx);
+            }
+        },
+        Input::Muted(muted) => {
+            if let Some(call) = state.as_mut() {
+                call.audio.set_muted(muted);
+                if matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
+                    fx.push(Effect::Signal(call.conversation, CallMsg::Media { call: call.id, muted }));
+                }
+            }
+        },
+        Input::Camera(on) => {
+            if let Some(call) = state.as_ref()
+                && call.video
+                && matches!(call.phase, Phase::Connected | Phase::Reconnecting)
+            {
+                fx.push(Effect::Signal(call.conversation, CallMsg::Camera { call: call.id, on }));
+            }
+        },
+        Input::NetworkChanged => {
+            if let Some(call) = state.as_mut()
+                && matches!(call.phase, Phase::Connected | Phase::Reconnecting)
+            {
+                begin_restart(call, None, &mut fx);
+            }
+        },
+        Input::Offer(offer) => on_offer(state, offer, &mut fx),
+        Input::Signal(msg) => on_signal_step(state, msg, &mut fx),
+        Input::Expired(id, phase, expiry) => {
+            if let Some(call) = state.as_ref().filter(|c| c.id == id && c.phase == phase) {
+                let reason = match expiry {
+                    Expiry::Unanswered => {
+                        info!("CALL[{}]: no answer", short(&call.id));
+                        fx.push(Effect::Signal(call.conversation, CallMsg::End {
+                            call: call.id,
+                            reason: CallEnd::Unanswered,
+                        }));
+                        CallEndReason::Unanswered
+                    },
+                    Expiry::Failed => {
+                        fx.push(Effect::Signal(call.conversation, CallMsg::End {
+                            call: call.id,
+                            reason: CallEnd::Failed,
+                        }));
+                        CallEndReason::Failed
+                    },
+                    Expiry::Missed => CallEndReason::Missed,
+                };
+                finish(state, reason, &mut fx);
+            }
+        },
+        Input::Session { id, event, now_ms } => on_session_event(state, id, event, now_ms, &mut fx),
+        Input::OfferLost(id) => {
+            if state.as_ref().is_some_and(|c| c.id == id) {
+                finish(state, CallEndReason::Failed, &mut fx);
+            }
+        },
+    }
+    Ok(fx)
+}
+
 pub fn start(peer: [u8; 32], video: bool) -> Result<[u8; 16]> {
     if !Contact::is_paired(&peer) {
         bail!("not a paired contact");
@@ -152,117 +348,47 @@ pub fn start(peer: [u8; 32], video: bool) -> Result<[u8; 16]> {
     let conversation = Conversation::for_peer(&peer)?;
     let cert = new_cert()?;
     let id = rand_id();
-    {
-        let mut current = CURRENT.lock();
-        if current.is_some() {
-            bail!("already in a call");
-        }
-        *current = Some(Call {
-            id,
-            peer,
-            conversation,
-            outgoing: true,
-            video,
-            phase: Phase::Offering,
-            connected_at: None,
-            peer_muted: false,
-            audio: Arc::new(AudioPath::new()?),
-            cert,
-            session: None,
-            remote: None,
-            early: Vec::new(),
-            restart_gen: 0,
-        });
+    if CURRENT.lock().is_some() {
+        bail!("already in a call");
     }
-    info!("CALL[{}]: calling {} ({})", short(&id), short(&peer), if video { "video" } else { "audio" });
-    emit(CallEvent::Outgoing { call: id.to_vec(), peer: peer.to_vec(), conversation: conversation.to_vec() });
-    RUNTIME.spawn(spawn_session(id, rtc::Role::Caller, video));
-    arm(RING_TIMEOUT, id, Phase::Offering, |call| {
-        info!("CALL[{}]: no answer", short(&call.id));
-        signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Unanswered });
-        Some(CallEndReason::Unanswered)
-    });
+    let call = Call {
+        id,
+        peer,
+        conversation,
+        outgoing: true,
+        video,
+        phase: Phase::Offering,
+        connected_at: None,
+        peer_muted: false,
+        audio: Arc::new(AudioPath::new()?),
+        cert,
+        session: None,
+        remote: None,
+        early: Vec::new(),
+        restart_gen: 0,
+    };
+    apply(Input::Start(call))?;
     Ok(id)
 }
 
-/// Pick up the call that is ringing.
 pub fn accept() -> Result<()> {
-    let (id, video) = {
-        let mut current = CURRENT.lock();
-        let call = current.as_mut().ok_or_else(|| anyhow!("no call"))?;
-        if call.phase != Phase::Ringing {
-            bail!("nothing to accept");
-        }
-        call.phase = Phase::Connecting;
-        (call.id, call.video)
-    };
-    info!("CALL[{}]: accepted", short(&id));
-    emit(CallEvent::Connecting { call: id.to_vec() });
-    RUNTIME.spawn(spawn_session(id, rtc::Role::Callee, video));
-    arm(CONNECT_TIMEOUT, id, Phase::Connecting, |call| {
-        signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Failed });
-        Some(CallEndReason::Failed)
-    });
-    Ok(())
+    apply(Input::Accept)
 }
 
-/// Refuse the call that is ringing.
 pub fn reject() {
-    let ended = with_call(|call| {
-        if call.phase != Phase::Ringing {
-            return None;
-        }
-        signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
-        Some(CallEndReason::Declined)
-    });
-    if let Some(reason) = ended {
-        end(reason);
-    }
+    let _ = apply(Input::Reject);
 }
 
-/// Hang up whatever is going on: cancel a ring, refuse a ring, or end a call.
 pub fn hangup() {
-    let ended = with_call(|call| {
-        let reason = match call.phase {
-            Phase::Offering => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
-                CallEndReason::Cancelled
-            },
-            Phase::Ringing => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Declined });
-                CallEndReason::Declined
-            },
-            _ => {
-                signal(call.conversation, CallMsg::End { call: call.id, reason: CallEnd::Hangup });
-                CallEndReason::Hangup
-            },
-        };
-        Some(reason)
-    });
-    if let Some(reason) = ended {
-        end(reason);
-    }
+    let _ = apply(Input::Hangup);
 }
 
 pub fn set_muted(muted: bool) {
-    with_call(|call| {
-        call.audio.set_muted(muted);
-        if matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
-            signal(call.conversation, CallMsg::Media { call: call.id, muted });
-        }
-        None
-    });
+    let _ = apply(Input::Muted(muted));
 }
 
-/// The platform's default network moved (wifi to cellular, or back). Start
-/// over on the new addresses now instead of waiting for ICE to notice.
 pub fn network_changed() {
-    with_call(|call| {
-        if matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
-            begin_restart(call, None);
-        }
-        None
-    });
+    let _ = apply(Input::NetworkChanged);
 }
 
 pub fn current() -> Option<Snapshot> {
@@ -279,21 +405,11 @@ pub fn current() -> Option<Snapshot> {
     })
 }
 
-/// Turn our camera on or off in a video call. The camera device is the
-/// platform's; core only tells the peer, so their screen shows our video or
-/// our avatar.
 pub fn set_camera(on: bool) {
-    with_call(|call| {
-        if call.video && matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
-            signal(call.conversation, CallMsg::Camera { call: call.id, on });
-        }
-        None
-    });
+    let _ = apply(Input::Camera(on));
 }
 
-/// One encoded H.264 access unit (Annex-B) from the platform's video encoder.
-/// The keyframe flag is the platform's to know; str0m re-derives it, so it is
-/// not threaded through.
+/// str0m derives keyframes from the NAL types, so the flag goes unused.
 pub fn video_capture(frame: Vec<u8>, _keyframe: bool) {
     let session = CURRENT.lock().as_ref().and_then(|c| c.session.clone());
     if let Some(session) = session {
@@ -301,7 +417,6 @@ pub fn video_capture(frame: Vec<u8>, _keyframe: bool) {
     }
 }
 
-/// One captured 20 ms frame of 48 kHz mono PCM, little-endian.
 pub fn audio_capture(pcm: &[u8]) {
     let target = {
         let current = CURRENT.lock();
@@ -314,7 +429,6 @@ pub fn audio_capture(pcm: &[u8]) {
     }
 }
 
-/// The next `frames` of playback, or silence outside a call.
 pub fn audio_playback(frames: usize) -> Vec<u8> {
     let audio = CURRENT.lock().as_ref().map(|c| c.audio.clone());
     match audio {
@@ -323,144 +437,151 @@ pub fn audio_playback(frames: usize) -> Vec<u8> {
     }
 }
 
-/// Inbound call signaling, from the direct chat with `from`.
 pub(crate) fn on_signal(from: [u8; 32], conversation: [u8; 16], msg: CallMsg) {
-    match msg {
+    let input = match msg {
         CallMsg::Offer { call, expires_at_ms, video, ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates } => {
-            let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
-            on_offer(from, conversation, call, expires_at_ms, video, remote);
+            let paired = Contact::is_paired(&from);
+            Input::Offer(Offer {
+                from,
+                conversation,
+                call,
+                expires_at_ms,
+                video,
+                remote: Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates },
+                paired,
+                me: if paired { Identity::local_ipk().unwrap_or([0xff; 32]) } else { [0xff; 32] },
+                now_ms: now_ms(),
+                media: fresh_media,
+            })
         },
+        other => Input::Signal(other),
+    };
+    let _ = apply(input);
+}
+
+fn fresh_media() -> Option<Media> {
+    let cert = new_cert().ok()?;
+    let audio = AudioPath::new().ok()?;
+    Some((cert, Arc::new(audio)))
+}
+
+fn on_signal_step(state: &mut Option<Call>, msg: CallMsg, fx: &mut Vec<Effect>) {
+    match msg {
+        // Offers arrive as `Input::Offer`.
+        CallMsg::Offer { .. } => {},
         CallMsg::Ringing { call } => {
-            with_call(|c| {
-                if c.id == call && c.phase == Phase::Offering {
-                    emit(CallEvent::Ringing { call: call.to_vec() });
-                }
-                None
-            });
+            if let Some(c) = state.as_ref()
+                && c.id == call
+                && c.phase == Phase::Offering
+            {
+                fx.push(Effect::Emit(CallEvent::Ringing { call: call.to_vec() }));
+            }
         },
         CallMsg::Answer { call, ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates } => {
-            with_call(|c| {
-                if c.id != call || c.phase != Phase::Offering {
-                    return None;
-                }
+            if let Some(c) = state.as_mut()
+                && c.id == call
+                && c.phase == Phase::Offering
+            {
                 info!("CALL[{}]: answered", short(&call));
                 c.phase = Phase::Connecting;
                 let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
                 offer_remote(c, remote);
-                emit(CallEvent::Connecting { call: call.to_vec() });
-                None
-            });
-            arm(CONNECT_TIMEOUT, call, Phase::Connecting, |c| {
-                signal(c.conversation, CallMsg::End { call: c.id, reason: CallEnd::Failed });
-                Some(CallEndReason::Failed)
-            });
+                fx.push(Effect::Emit(CallEvent::Connecting { call: call.to_vec() }));
+            }
+            fx.push(Effect::Arm(CONNECT_TIMEOUT, call, Phase::Connecting, Expiry::Failed));
         },
         CallMsg::Candidate { call, candidate } => {
-            with_call(|c| {
-                if c.id == call {
-                    match &c.session {
-                        Some(s) => {
-                            let _ = s.send(rtc::Cmd::Candidate(candidate));
-                        },
-                        None => c.early.push(candidate),
-                    }
+            if let Some(c) = state.as_mut()
+                && c.id == call
+            {
+                match &c.session {
+                    Some(s) => {
+                        let _ = s.send(rtc::Cmd::Candidate(candidate));
+                    },
+                    None => c.early.push(candidate),
                 }
-                None
-            });
+            }
         },
         CallMsg::Media { call, muted } => {
-            with_call(|c| {
-                if c.id == call {
-                    c.peer_muted = muted;
-                    emit(CallEvent::PeerMuted { call: call.to_vec(), muted });
-                }
-                None
-            });
+            if let Some(c) = state.as_mut()
+                && c.id == call
+            {
+                c.peer_muted = muted;
+                fx.push(Effect::Emit(CallEvent::PeerMuted { call: call.to_vec(), muted }));
+            }
         },
         CallMsg::Camera { call, on } => {
-            with_call(|c| {
-                if c.id == call {
-                    emit(CallEvent::PeerCamera { call: call.to_vec(), on });
-                }
-                None
-            });
+            if state.as_ref().is_some_and(|c| c.id == call) {
+                fx.push(Effect::Emit(CallEvent::PeerCamera { call: call.to_vec(), on }));
+            }
         },
         CallMsg::Restart { call, generation, ufrag, pwd, candidates } => {
-            with_call(|c| {
-                if c.id != call || !matches!(c.phase, Phase::Connected | Phase::Reconnecting) {
-                    return None;
-                }
+            if let Some(c) = state.as_mut()
+                && c.id == call
+                && matches!(c.phase, Phase::Connected | Phase::Reconnecting)
+            {
                 let fingerprint = c.remote.as_ref().map(|r| r.fingerprint).unwrap_or_default();
                 let ssrc = c.remote.as_ref().map(|r| r.ssrc).unwrap_or_default();
                 let video_ssrc = c.remote.as_ref().map(|r| r.video_ssrc).unwrap_or_default();
                 let remote = Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates };
                 if generation > c.restart_gen {
-                    // They lost the path first; start over on our side too and
-                    // answer with fresh credentials once we have them.
+                    // They restarted first: restart here too, and answer once gathered.
                     c.restart_gen = generation;
-                    begin_restart(c, Some(remote));
+                    begin_restart(c, Some(remote), fx);
                 } else {
-                    // Their answer to our restart, or the same round of a
-                    // shared drop: the fresh session takes their side now.
+                    // Their answer to our restart, or the same round of a shared drop.
                     offer_remote(c, remote);
                 }
-                None
-            });
+            }
         },
         CallMsg::End { call, reason } => {
-            let ended = with_call(|c| {
-                if c.id != call {
-                    return None;
-                }
-                let ours = match (reason, c.phase) {
-                    (CallEnd::Busy, _) => CallEndReason::Busy,
-                    (CallEnd::Declined, _) => CallEndReason::Declined,
-                    (CallEnd::Failed, _) => CallEndReason::Failed,
-                    // Before we picked up, their hangup or timeout is our miss.
-                    (CallEnd::Hangup | CallEnd::Unanswered, Phase::Ringing) => CallEndReason::Missed,
-                    (CallEnd::Unanswered, _) => CallEndReason::Unanswered,
-                    (CallEnd::Hangup, Phase::Offering | Phase::Connecting) => CallEndReason::Cancelled,
-                    (CallEnd::Hangup, _) => CallEndReason::Hangup,
-                };
-                Some(ours)
-            });
-            if let Some(reason) = ended {
-                info!("CALL[{}]: ended by peer: {reason:?}", short(&call));
-                end(reason);
-            }
+            let Some(c) = state.as_ref().filter(|c| c.id == call) else { return };
+            let ours = match (reason, c.phase) {
+                (CallEnd::Busy, _) => CallEndReason::Busy,
+                (CallEnd::Declined, _) => CallEndReason::Declined,
+                (CallEnd::Failed, _) => CallEndReason::Failed,
+                // Before we picked up, their hangup or timeout is our miss.
+                (CallEnd::Hangup | CallEnd::Unanswered, Phase::Ringing) => CallEndReason::Missed,
+                (CallEnd::Unanswered, _) => CallEndReason::Unanswered,
+                (CallEnd::Hangup, Phase::Offering | Phase::Connecting) => CallEndReason::Cancelled,
+                (CallEnd::Hangup, _) => CallEndReason::Hangup,
+            };
+            info!("CALL[{}]: ended by peer: {ours:?}", short(&call));
+            finish(state, ours, fx);
         },
     }
 }
 
-fn on_offer(
-    from: [u8; 32], conversation: [u8; 16], call: [u8; 16], expires_at_ms: u64, video: bool,
-    remote: Remote,
-) {
-    if !Contact::is_paired(&from) {
+fn on_offer(state: &mut Option<Call>, offer: Offer, fx: &mut Vec<Effect>) {
+    let Offer { from, conversation, call, expires_at_ms, video, remote, paired, me, now_ms, media } =
+        offer;
+    if !paired {
         debug!("CALL[{}]: offer from a stranger ignored", short(&call));
         return;
     }
-    if now_ms() > expires_at_ms.saturating_add(CLOCK_SKEW_MS) {
-        // Reached us after it stopped ringing anywhere: a missed call, not a
-        // ring. The caller has already recorded no answer.
+    if now_ms > expires_at_ms.saturating_add(CLOCK_SKEW_MS) {
+        // It stopped ringing before it reached us: a missed call, not a ring.
         info!("CALL[{}]: offer from {} expired in transit", short(&call), short(&from));
-        record(conversation, from, &call, "missed", false);
-        emit(CallEvent::Ended {
+        fx.push(Effect::Record {
+            conversation,
+            peer: from,
+            id: call,
+            outcome: "missed".into(),
+            outgoing: false,
+        });
+        fx.push(Effect::Emit(CallEvent::Ended {
             call: call.to_vec(),
             peer: from.to_vec(),
             conversation: conversation.to_vec(),
             reason: CallEndReason::Missed,
             duration_ms: 0,
-        });
+        }));
         return;
     }
-    let me = Identity::get().map(|i| i.ipk()).unwrap_or([0xff; 32]);
-    let mut current = CURRENT.lock();
-    match current.as_mut() {
+    match state.as_mut() {
         None => {},
         Some(c) if c.id == call => return,
-        // Both tapped call at once. The lower key's offer is the call; the
-        // other side treats it as the answer to its own and picks up.
+        // Crossed offers: the lower key's offer is the call, and the other side answers it.
         Some(c) if c.phase == Phase::Offering && c.peer == from => {
             if from < me {
                 info!("CALL[{}]: crossed offers, taking theirs", short(&call));
@@ -485,26 +606,20 @@ fn on_offer(
                     early: Vec::new(),
                     restart_gen: 0,
                 };
-                drop(current);
-                emit(CallEvent::Connecting { call: call.to_vec() });
-                RUNTIME.spawn(spawn_session(call, rtc::Role::Callee, video));
-                arm(CONNECT_TIMEOUT, call, Phase::Connecting, |c| {
-                    signal(c.conversation, CallMsg::End { call: c.id, reason: CallEnd::Failed });
-                    Some(CallEndReason::Failed)
-                });
+                fx.push(Effect::Emit(CallEvent::Connecting { call: call.to_vec() }));
+                fx.push(Effect::StartSession(call, rtc::Role::Callee, video));
+                fx.push(Effect::Arm(CONNECT_TIMEOUT, call, Phase::Connecting, Expiry::Failed));
             }
             return;
         },
         Some(_) => {
             info!("CALL[{}]: busy, refusing {}", short(&call), short(&from));
-            drop(current);
-            signal(conversation, CallMsg::End { call, reason: CallEnd::Busy });
+            fx.push(Effect::Signal(conversation, CallMsg::End { call, reason: CallEnd::Busy }));
             return;
         },
     }
-    let Ok(cert) = new_cert() else { return };
-    let Ok(audio) = AudioPath::new() else { return };
-    *current = Some(Call {
+    let Some((cert, audio)) = media() else { return };
+    *state = Some(Call {
         id: call,
         peer: from,
         conversation,
@@ -513,48 +628,25 @@ fn on_offer(
         phase: Phase::Ringing,
         connected_at: None,
         peer_muted: false,
-        audio: Arc::new(audio),
+        audio,
         cert,
         session: None,
         remote: Some(remote),
         early: Vec::new(),
         restart_gen: 0,
     });
-    drop(current);
     info!("CALL[{}]: ringing, from {}", short(&call), short(&from));
-    signal(conversation, CallMsg::Ringing { call });
-    emit(CallEvent::Incoming {
+    fx.push(Effect::Signal(conversation, CallMsg::Ringing { call }));
+    fx.push(Effect::Emit(CallEvent::Incoming {
         call: call.to_vec(),
         peer: from.to_vec(),
         conversation: conversation.to_vec(),
         video,
-    });
-    // Stop ringing when the offer dies on the caller's clock, or at the ring
-    // timeout, whichever is sooner.
-    let left = Duration::from_millis(expires_at_ms.saturating_sub(now_ms()).min(RING_TIMEOUT.as_millis() as u64));
-    arm(left, call, Phase::Ringing, |_| Some(CallEndReason::Missed));
-}
-
-/// Run `f` on the current call, if any; a `Some` reason ends the call.
-fn with_call(f: impl FnOnce(&mut Call) -> Option<CallEndReason>) -> Option<CallEndReason> {
-    let mut current = CURRENT.lock();
-    let call = current.as_mut()?;
-    f(call)
-}
-
-/// After `delay`, if the call is still `id` in `phase`, run `f`; a `Some`
-/// reason ends the call.
-fn arm(
-    delay: Duration, id: [u8; 16], phase: Phase,
-    f: impl FnOnce(&mut Call) -> Option<CallEndReason> + Send + 'static,
-) {
-    RUNTIME.spawn(async move {
-        tokio::time::sleep(delay).await;
-        let ended = with_call(|call| if call.id == id && call.phase == phase { f(call) } else { None });
-        if let Some(reason) = ended {
-            end(reason);
-        }
-    });
+    }));
+    let left = Duration::from_millis(
+        expires_at_ms.saturating_sub(now_ms).min(RING_TIMEOUT.as_millis() as u64),
+    );
+    fx.push(Effect::Arm(left, call, Phase::Ringing, Expiry::Missed));
 }
 
 fn new_cert() -> Result<DtlsCert> {
@@ -564,7 +656,6 @@ fn new_cert() -> Result<DtlsCert> {
         .ok_or_else(|| anyhow!("no DTLS certificate"))
 }
 
-/// Hand the peer's parameters to the session, or hold them until it exists.
 fn offer_remote(call: &mut Call, remote: Remote) {
     match &call.session {
         Some(s) => {
@@ -585,33 +676,29 @@ fn offer_remote(call: &mut Call, remote: Remote) {
     call.remote = Some(remote);
 }
 
-/// Start over on fresh sockets and credentials. `theirs` is the peer's
-/// restart when they moved first; it is applied once our session is back.
-fn begin_restart(call: &mut Call, theirs: Option<Remote>) {
+/// `theirs` is the peer's restart when they moved first.
+fn begin_restart(call: &mut Call, theirs: Option<Remote>, fx: &mut Vec<Effect>) {
     if call.phase == Phase::Connected {
         call.phase = Phase::Reconnecting;
-        emit(CallEvent::Reconnecting { call: call.id.to_vec() });
-        arm(RECONNECT_TIMEOUT, call.id, Phase::Reconnecting, |c| {
-            signal(c.conversation, CallMsg::End { call: c.id, reason: CallEnd::Failed });
-            Some(CallEndReason::Failed)
-        });
-    }
-    if theirs.is_none() {
-        call.restart_gen += 1;
+        fx.push(Effect::Emit(CallEvent::Reconnecting { call: call.id.to_vec() }));
+        fx.push(Effect::Arm(RECONNECT_TIMEOUT, call.id, Phase::Reconnecting, Expiry::Failed));
     }
     call.early.clear();
-    if let Some(theirs) = theirs {
-        // Only the credentials change on a restart; keep their fingerprint.
-        call.remote = Some(theirs);
-    } else if let Some(r) = call.remote.as_mut() {
-        r.candidates.clear();
-    }
     if let Some(s) = &call.session {
         let _ = s.send(rtc::Cmd::Restart);
     }
+    match theirs {
+        // Queued behind the restart, so their candidates pair with our new sockets.
+        Some(theirs) => offer_remote(call, theirs),
+        None => {
+            call.restart_gen += 1;
+            if let Some(r) = call.remote.as_mut() {
+                r.candidates.clear();
+            }
+        },
+    }
 }
 
-/// Fetch TURN credentials and start the media session for call `id`.
 async fn spawn_session(id: [u8; 16], role: rtc::Role, video: bool) {
     let relay = match tokio::time::timeout(TURN_TIMEOUT, relay_turn()).await {
         Ok(Ok(r)) => r,
@@ -625,116 +712,87 @@ async fn spawn_session(id: [u8; 16], role: rtc::Role, video: bool) {
         },
     };
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-    let started = with_call(|call| {
-        if call.id != id {
-            return None;
-        }
+    {
+        let mut current = CURRENT.lock();
+        let Some(call) = current.as_mut().filter(|c| c.id == id) else { return };
         let session = rtc::spawn(role, call.cert.clone(), relay, video, call.audio.clone(), ev_tx);
         call.session = Some(session);
-        // A callee already holds the caller's parameters; a caller waits for
-        // the answer. On a restart both hold what the last round left.
+        // A callee already holds the caller's parameters; a caller waits for the answer.
         if let Some(remote) = call.remote.clone() {
             offer_remote(call, remote);
         }
-        Some(CallEndReason::Hangup)
-    });
-    if started.is_none() {
-        return;
     }
-    while let Some(ev) = ev_rx.recv().await {
-        on_session_event(id, ev);
+    while let Some(event) = ev_rx.recv().await {
+        let _ = apply(Input::Session { id, event, now_ms: now_ms() });
     }
 }
 
-fn on_session_event(id: [u8; 16], ev: rtc::Event) {
-    let ended = with_call(|call| {
-        if call.id != id {
-            return None;
-        }
-        match ev {
-            rtc::Event::Local { params, candidates } => {
-                let msg = match call.phase {
-                    Phase::Offering => CallMsg::Offer {
-                        call: id,
-                        expires_at_ms: now_ms() + OFFER_LIFE.as_millis() as u64,
-                        video: call.video,
-                        ufrag: params.ufrag,
-                        pwd: params.pwd,
-                        fingerprint: params.fingerprint,
-                        ssrc: params.ssrc,
-                        video_ssrc: params.video_ssrc,
-                        candidates,
-                    },
-                    Phase::Connecting if !call.outgoing => CallMsg::Answer {
-                        call: id,
-                        ufrag: params.ufrag,
-                        pwd: params.pwd,
-                        fingerprint: params.fingerprint,
-                        ssrc: params.ssrc,
-                        video_ssrc: params.video_ssrc,
-                        candidates,
-                    },
-                    Phase::Reconnecting | Phase::Connected => CallMsg::Restart {
-                        call: id,
-                        generation: call.restart_gen,
-                        ufrag: params.ufrag,
-                        pwd: params.pwd,
-                        candidates,
-                    },
-                    _ => return None,
-                };
-                signal(call.conversation, msg);
-                None
-            },
-            rtc::Event::Connected => {
-                if matches!(call.phase, Phase::Connecting | Phase::Reconnecting) {
-                    info!("CALL[{}]: connected", short(&id));
-                    call.phase = Phase::Connected;
-                    call.connected_at.get_or_insert_with(Instant::now);
-                    emit(CallEvent::Connected { call: id.to_vec() });
-                }
-                None
-            },
-            rtc::Event::Disconnected => {
-                if call.phase == Phase::Connected {
-                    warn!("CALL[{}]: path lost, restarting", short(&id));
-                    begin_restart(call, None);
-                }
-                None
-            },
-            rtc::Event::Video { frame, keyframe } => {
-                if let Some(events) = crate::platform::EVENTS.get() {
-                    events.on_call_video(frame, keyframe);
-                }
-                None
-            },
-            rtc::Event::KeyframeNeeded => {
-                if let Some(events) = crate::platform::EVENTS.get() {
-                    events.on_call_video_keyframe();
-                }
-                None
-            },
-            rtc::Event::Bitrate(kbps) => {
-                if let Some(events) = crate::platform::EVENTS.get() {
-                    events.on_call_video_bitrate(kbps);
-                }
-                None
-            },
-            rtc::Event::Failed(e) => {
-                warn!("CALL[{}]: session failed: {e}", short(&id));
-                signal(call.conversation, CallMsg::End { call: id, reason: CallEnd::Failed });
-                Some(CallEndReason::Failed)
-            },
-        }
-    });
-    if let Some(reason) = ended {
-        end(reason);
+fn on_session_event(
+    state: &mut Option<Call>, id: [u8; 16], ev: rtc::Event, now_ms: u64, fx: &mut Vec<Effect>,
+) {
+    let Some(call) = state.as_mut().filter(|c| c.id == id) else { return };
+    match ev {
+        rtc::Event::Local { params, candidates } => {
+            let msg = match call.phase {
+                Phase::Offering => CallMsg::Offer {
+                    call: id,
+                    expires_at_ms: now_ms + OFFER_LIFE.as_millis() as u64,
+                    video: call.video,
+                    ufrag: params.ufrag,
+                    pwd: params.pwd,
+                    fingerprint: params.fingerprint,
+                    ssrc: params.ssrc,
+                    video_ssrc: params.video_ssrc,
+                    candidates,
+                },
+                Phase::Connecting if !call.outgoing => CallMsg::Answer {
+                    call: id,
+                    ufrag: params.ufrag,
+                    pwd: params.pwd,
+                    fingerprint: params.fingerprint,
+                    ssrc: params.ssrc,
+                    video_ssrc: params.video_ssrc,
+                    candidates,
+                },
+                Phase::Reconnecting | Phase::Connected => CallMsg::Restart {
+                    call: id,
+                    generation: call.restart_gen,
+                    ufrag: params.ufrag,
+                    pwd: params.pwd,
+                    candidates,
+                },
+                _ => return,
+            };
+            fx.push(Effect::Signal(call.conversation, msg));
+        },
+        rtc::Event::Connected => {
+            if matches!(call.phase, Phase::Connecting | Phase::Reconnecting) {
+                info!("CALL[{}]: connected", short(&id));
+                call.phase = Phase::Connected;
+                call.connected_at.get_or_insert_with(Instant::now);
+                fx.push(Effect::Emit(CallEvent::Connected { call: id.to_vec() }));
+            }
+        },
+        rtc::Event::Disconnected => {
+            if call.phase == Phase::Connected {
+                warn!("CALL[{}]: path lost, restarting", short(&id));
+                begin_restart(call, None, fx);
+            }
+        },
+        rtc::Event::Video { frame, keyframe } => fx.push(Effect::Video(frame, keyframe)),
+        rtc::Event::KeyframeNeeded => fx.push(Effect::Keyframe),
+        rtc::Event::Bitrate(kbps) => fx.push(Effect::Bitrate(kbps)),
+        rtc::Event::Failed(e) => {
+            warn!("CALL[{}]: session failed: {e}", short(&id));
+            fx.push(Effect::Signal(call.conversation, CallMsg::End { call: id, reason: CallEnd::Failed }));
+            finish(state, CallEndReason::Failed, fx);
+        },
     }
 }
 
-/// Tear the call down, record it, and tell the platform.
-fn end(reason: CallEndReason) {
-    let Some(call) = CURRENT.lock().take() else { return };
+/// Ends the current call: its session stops, and the row and the platform learn how it went.
+fn finish(state: &mut Option<Call>, reason: CallEndReason, fx: &mut Vec<Effect>) {
+    let Some(call) = state.take() else { return };
     if let Some(s) = &call.session {
         let _ = s.send(rtc::Cmd::Stop);
     }
@@ -751,27 +809,30 @@ fn end(reason: CallEndReason) {
         CallEndReason::Failed => "failed".to_string(),
     };
     info!("CALL[{}]: over, {outcome}", short(&call.id));
-    let caller = if call.outgoing { Identity::get().map(|i| i.ipk()).unwrap_or(call.peer) } else { call.peer };
-    record(call.conversation, caller, &call.id, &outcome, call.outgoing);
-    emit(CallEvent::Ended {
+    fx.push(Effect::Record {
+        conversation: call.conversation,
+        peer: call.peer,
+        id: call.id,
+        outcome,
+        outgoing: call.outgoing,
+    });
+    fx.push(Effect::Emit(CallEvent::Ended {
         call: call.id.to_vec(),
         peer: call.peer.to_vec(),
         conversation: call.conversation.to_vec(),
         reason,
         duration_ms,
-    });
+    }));
 }
 
-/// The call's row in the chat, keyed by the call id so it lands once.
+/// Keyed by the call id, so the row lands once.
 fn record(conversation: [u8; 16], caller: [u8; 32], id: &[u8; 16], outcome: &str, outgoing: bool) {
-    let ts = crate::utils::systime().as_secs();
+    let ts = now_secs();
     if let Err(e) = Message::save_system(conversation, caller, id, SYSTEM_CALL, outcome, ts, outgoing) {
         warn!("CALL[{}]: could not record the call: {e}", short(id));
     }
 }
 
-/// Send one signal. Fire-and-forget: an offer that cannot leave ends the
-/// call, anything else is best effort.
 fn signal(conversation: [u8; 16], msg: CallMsg) {
     let wake = if matches!(msg, CallMsg::Offer { .. }) { Wake::Call } else { Wake::No };
     let is_offer = wake == Wake::Call;
@@ -785,27 +846,21 @@ fn signal(conversation: [u8; 16], msg: CallMsg) {
         | CallMsg::Restart { call, .. }
         | CallMsg::End { call, .. } => *call,
     };
-    RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = crate::messaging::send_control_class(conversation, AppPayload::Call(msg), wake).await {
             warn!("CALL[{}]: signal not sent: {e:#}", short(&id));
             if is_offer {
-                let ended = with_call(|c| (c.id == id).then_some(CallEndReason::Failed));
-                if let Some(reason) = ended {
-                    end(reason);
-                }
+                let _ = apply(Input::OfferLost(id));
             }
         }
     });
 }
 
-/// TURN on the relay we are connected to, if it runs one.
 async fn relay_turn() -> Result<Option<rtc::Relay>> {
     let (host, port, conn) = {
-        let relay = RELAY.read();
-        let Some(r) = relay.as_ref() else { return Ok(None) };
-        let Some(port) = r.turn_port else { return Ok(None) };
-        let Some(conn) = r.connection.clone() else { return Ok(None) };
-        (r.host.to_string(), port, conn)
+        let Some(session) = core().session() else { return Ok(None) };
+        let Some(port) = session.turn_port else { return Ok(None) };
+        (session.relay.host.to_string(), port, session.conn.clone())
     };
     let (mut tx, mut rx) = conn.open_bi().await?;
     CRelayPacket::TurnCredentials.send(&mut tx).await?;
@@ -825,36 +880,225 @@ async fn relay_turn() -> Result<Option<rtc::Relay>> {
 mod tests {
     use super::*;
 
-    /// The peer's end reason is read from where we stood: a hangup before we
-    /// picked up is a missed call, a hangup before they picked up a cancel.
-    #[test]
-    fn peer_end_reasons_depend_on_our_phase() {
-        let map = |reason, phase| match (reason, phase) {
-            (CallEnd::Busy, _) => CallEndReason::Busy,
-            (CallEnd::Declined, _) => CallEndReason::Declined,
-            (CallEnd::Failed, _) => CallEndReason::Failed,
-            (CallEnd::Hangup | CallEnd::Unanswered, Phase::Ringing) => CallEndReason::Missed,
-            (CallEnd::Unanswered, _) => CallEndReason::Unanswered,
-            (CallEnd::Hangup, Phase::Offering | Phase::Connecting) => CallEndReason::Cancelled,
-            (CallEnd::Hangup, _) => CallEndReason::Hangup,
+    const ME: [u8; 32] = [5; 32];
+    /// Lower than ours, so their crossed offer wins.
+    const LOWER: [u8; 32] = [3; 32];
+    const HIGHER: [u8; 32] = [7; 32];
+    const NOW: u64 = 1_000_000;
+
+    fn remote(ufrag: &str) -> Remote {
+        let (pwd, fingerprint) = ("pwd".into(), [4; 32]);
+        Remote {
+            ufrag: ufrag.into(),
+            pwd,
+            fingerprint,
+            ssrc: 11,
+            video_ssrc: 0,
+            candidates: vec![],
+        }
+    }
+
+    fn call(id: u8, peer: [u8; 32], phase: Phase) -> Call {
+        let (cert, audio) = fresh_media().unwrap();
+        let answered = matches!(phase, Phase::Connecting | Phase::Connected | Phase::Reconnecting);
+        Call {
+            id: [id; 16],
+            peer,
+            conversation: [9; 16],
+            outgoing: phase == Phase::Offering,
+            video: false,
+            phase,
+            connected_at: (phase == Phase::Connected).then(Instant::now),
+            peer_muted: false,
+            audio,
+            cert,
+            session: None,
+            remote: answered.then(|| remote("first")),
+            early: Vec::new(),
+            restart_gen: 0,
+        }
+    }
+
+    fn offer(from: [u8; 32], id: u8, expires_at_ms: u64, paired: bool) -> Input {
+        Input::Offer(Offer {
+            from,
+            conversation: [9; 16],
+            call: [id; 16],
+            expires_at_ms,
+            video: false,
+            remote: remote("offer"),
+            paired,
+            me: ME,
+            now_ms: NOW,
+            media: fresh_media,
+        })
+    }
+
+    /// Where the call stands after `input`, then every effect it asked for, in order.
+    fn check(state: &mut Option<Call>, input: Input) -> String {
+        let effects = match step(state, input) {
+            Ok(effects) => effects.iter().map(describe).collect::<Vec<_>>().join(", "),
+            Err(e) => format!("error: {e}"),
         };
-        assert_eq!(map(CallEnd::Hangup, Phase::Ringing), CallEndReason::Missed);
-        assert_eq!(map(CallEnd::Hangup, Phase::Connected), CallEndReason::Hangup);
-        assert_eq!(map(CallEnd::Hangup, Phase::Offering), CallEndReason::Cancelled);
-        assert_eq!(map(CallEnd::Busy, Phase::Offering), CallEndReason::Busy);
+        let at = state.as_ref().map_or("idle".into(), |c| format!("{:?} {}", c.phase, c.id[0]));
+        format!("{at}: {effects}")
+    }
+
+    fn describe(effect: &Effect) -> String {
+        let name = |debug: String| debug.split([' ', '{', '(']).next().unwrap().to_owned();
+        match effect {
+            Effect::Signal(_, CallMsg::End { reason, .. }) => format!("send End {reason:?}"),
+            Effect::Signal(_, msg) => format!("send {}", name(format!("{msg:?}"))),
+            Effect::Emit(CallEvent::Ended { reason, .. }) => format!("emit Ended {reason:?}"),
+            Effect::Emit(event) => format!("emit {}", name(format!("{event:?}"))),
+            Effect::Arm(delay, _, phase, expiry) => {
+                format!("arm {}s {phase:?} {expiry:?}", delay.as_secs())
+            },
+            Effect::StartSession(_, role, _) => {
+                format!("start {}", if *role == rtc::Role::Caller { "caller" } else { "callee" })
+            },
+            Effect::Record { outcome, .. } => format!("record {outcome}"),
+            Effect::Video(..) | Effect::Keyframe | Effect::Bitrate(_) => "video".into(),
+        }
+    }
+
+    fn commands(rx: &mut mpsc::UnboundedReceiver<rtc::Cmd>) -> String {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            out.push(match cmd {
+                rtc::Cmd::Restart => "restart".into(),
+                rtc::Cmd::Stop => "stop".into(),
+                rtc::Cmd::Remote { ufrag, fingerprint, ssrc, .. } => {
+                    assert_eq!((fingerprint, ssrc), ([4; 32], 11), "kept from the first answer");
+                    format!("remote {ufrag}")
+                },
+                rtc::Cmd::Candidate(_) => "candidate".into(),
+                rtc::Cmd::Audio(_) | rtc::Cmd::Video(_) => "media".into(),
+            });
+        }
+        out.join(", ")
+    }
+
+    fn with_session(mut call: Call) -> (Option<Call>, mpsc::UnboundedReceiver<rtc::Cmd>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        call.session = Some(tx);
+        (Some(call), rx)
     }
 
     #[test]
-    fn nothing_to_do_without_a_call() {
-        assert!(current().is_none());
-        assert!(accept().is_err());
-        reject();
-        hangup();
-        set_muted(true);
-        network_changed();
-        let silence = audio_playback(2);
-        assert_eq!(silence.len(), 2 * audio::FRAME_SAMPLES * 2);
-        assert!(silence.iter().all(|b| *b == 0));
-        audio_capture(&[0u8; 4]);
+    fn an_offer_rings_once_refuses_a_second_caller_and_is_answered_once() {
+        let mut state = None;
+        let ring = NOW + 30_000;
+        let stale = NOW - CLOCK_SKEW_MS - 1;
+        for (input, expected) in [
+            (offer(LOWER, 1, ring, false), "idle: "),
+            (offer(LOWER, 1, stale, true), "idle: record missed, emit Ended Missed"),
+            (
+                offer(LOWER, 1, ring, true),
+                "Ringing 1: send Ringing, emit Incoming, arm 30s Ringing Missed",
+            ),
+            (offer(LOWER, 1, ring, true), "Ringing 1: "),
+            (offer(HIGHER, 2, ring, true), "Ringing 1: send End Busy"),
+            (
+                Input::Accept,
+                "Connecting 1: emit Connecting, start callee, arm 20s Connecting Failed",
+            ),
+            (Input::Accept, "Connecting 1: error: nothing to accept"),
+            (Input::Expired([1; 16], Phase::Ringing, Expiry::Missed), "Connecting 1: "),
+        ] {
+            assert_eq!(check(&mut state, input), expected);
+        }
+    }
+
+    #[test]
+    fn crossed_offers_go_to_the_lower_identity_on_both_sides() {
+        let (mut state, mut session) = with_session(call(1, LOWER, Phase::Offering));
+        assert_eq!(
+            check(&mut state, offer(LOWER, 2, NOW + 30_000, true)),
+            "Connecting 2: emit Connecting, start callee, arm 20s Connecting Failed",
+            "theirs wins, and we answer it"
+        );
+        assert_eq!(commands(&mut session), "stop");
+        let mut state = Some(call(1, HIGHER, Phase::Offering));
+        assert_eq!(
+            check(&mut state, offer(HIGHER, 2, NOW + 30_000, true)),
+            "Offering 1: ",
+            "ours wins"
+        );
+    }
+
+    #[test]
+    fn timers_and_peer_hangups_end_a_call_by_where_it_stood() {
+        let unanswered = Input::Expired([1; 16], Phase::Offering, Expiry::Unanswered);
+        let missed = Input::Expired([1; 16], Phase::Ringing, Expiry::Missed);
+        let end = |reason| Input::Signal(CallMsg::End { call: [1; 16], reason });
+        for (phase, input, expected) in [
+            (
+                Phase::Offering,
+                Input::Expired([2; 16], Phase::Offering, Expiry::Unanswered),
+                "Offering 1: ",
+            ),
+            (
+                Phase::Offering,
+                unanswered,
+                "idle: send End Unanswered, record unanswered, emit Ended Unanswered",
+            ),
+            (Phase::Ringing, missed, "idle: record missed, emit Ended Missed"),
+            (
+                Phase::Connected,
+                Input::Expired([1; 16], Phase::Connecting, Expiry::Failed),
+                "Connected 1: ",
+            ),
+            (
+                Phase::Offering,
+                Input::Hangup,
+                "idle: send End Hangup, record cancelled, emit Ended Cancelled",
+            ),
+            (
+                Phase::Ringing,
+                Input::Hangup,
+                "idle: send End Declined, record declined, emit Ended Declined",
+            ),
+            (
+                Phase::Connected,
+                Input::Hangup,
+                "idle: send End Hangup, record answered:0, emit Ended Hangup",
+            ),
+            (Phase::Ringing, end(CallEnd::Hangup), "idle: record missed, emit Ended Missed"),
+            (Phase::Offering, end(CallEnd::Hangup), "idle: record cancelled, emit Ended Cancelled"),
+            (Phase::Offering, end(CallEnd::Busy), "idle: record busy, emit Ended Busy"),
+            (Phase::Connected, end(CallEnd::Hangup), "idle: record answered:0, emit Ended Hangup"),
+        ] {
+            let mut state = Some(call(1, LOWER, phase));
+            assert_eq!(check(&mut state, input), expected, "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn a_restart_hands_the_peers_new_parameters_to_the_restarted_session() {
+        let (mut state, mut session) = with_session(call(1, LOWER, Phase::Connected));
+        let restart = |generation, ufrag: &str| {
+            let (ufrag, pwd) = (ufrag.into(), "p".into());
+            Input::Signal(CallMsg::Restart {
+                call: [1; 16],
+                generation,
+                ufrag,
+                pwd,
+                candidates: vec![],
+            })
+        };
+        assert_eq!(
+            check(&mut state, restart(1, "theirs")),
+            "Reconnecting 1: emit Reconnecting, arm 20s Reconnecting Failed",
+            "they moved first"
+        );
+        assert_eq!(commands(&mut session), "restart, remote theirs");
+        assert_eq!(check(&mut state, Input::NetworkChanged), "Reconnecting 1: ");
+        assert_eq!(commands(&mut session), "restart", "our own round");
+        assert_eq!(check(&mut state, restart(2, "answer")), "Reconnecting 1: ");
+        assert_eq!(commands(&mut session), "remote answer", "their answer does not restart again");
+        let connected =
+            Input::Session { id: [1; 16], event: rtc::Event::Connected, now_ms: NOW };
+        assert_eq!(check(&mut state, connected), "Connected 1: emit Connected");
     }
 }

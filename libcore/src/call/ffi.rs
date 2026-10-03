@@ -1,92 +1,80 @@
-//! The call surface the platform calls. Control is small and synchronous;
-//! the audio device pushes and pulls PCM per 20 ms tick. Everything else
-//! about a call arrives on `CoreEvents::on_call`.
+//! The platform's call surface. Call events arrive on `CoreEvents::on_call`.
+
+use common::types::bytes::fixed;
 
 use crate::platform::CoreError;
 
-/// Start a call to `peer` (a 32-byte IPK), as video when `video`. Returns the
-/// 16-byte call id; the ringing screen and the rest come as events.
+/// Returns the 16-byte call id.
 #[uniffi::export]
 pub fn call_start(peer: Vec<u8>, video: bool) -> Result<Vec<u8>, CoreError> {
-    let peer = crate::api::messaging::to_ipk32(&peer)?;
+    let peer = fixed::<32>(&peer, "ipk")?;
     Ok(super::start(peer, video).map_err(anyhow_to_core)?.to_vec())
 }
 
-/// Pick up the ringing call.
 #[uniffi::export]
 pub fn call_accept() -> Result<(), CoreError> {
     super::accept().map_err(anyhow_to_core)
 }
 
-/// Refuse the ringing call.
 #[uniffi::export]
 pub fn call_reject() {
     super::reject();
 }
 
-/// Hang up, cancel, or refuse, whatever the current call is doing.
+/// Hangs up, cancels or refuses, whatever the current call is doing.
 #[uniffi::export]
 pub fn call_hangup() {
     super::hangup();
 }
 
-/// Mute or unmute our microphone.
 #[uniffi::export]
 pub fn call_set_muted(muted: bool) {
     super::set_muted(muted);
 }
 
-/// Turn our camera on or off in a video call. The camera device is the
-/// platform's; this tells the peer to show our video or our avatar.
+/// Only tells the peer to show our video or our avatar; the platform owns the camera.
 #[uniffi::export]
 pub fn call_set_camera(on: bool) {
     super::set_camera(on);
 }
 
-/// Push one encoded H.264 access unit (Annex-B) from the platform's video
-/// encoder. Called from the encoder thread in a video call.
+/// One encoded H.264 access unit in Annex-B format.
 #[uniffi::export]
 pub fn call_push_video(frame: Vec<u8>, keyframe: bool) {
     super::video_capture(frame, keyframe);
 }
 
-/// Tell the engine the default network moved, so it restarts ICE at once.
+/// Restarts ICE at once when the default network moves.
 #[uniffi::export]
 pub fn call_network_changed() {
     super::network_changed();
 }
 
-/// The name to show for a peer (a 32-byte IPK): the address-book name, else
-/// what they call themselves, else a short hex. For the call screen.
 #[uniffi::export]
 pub fn contact_name(ipk: Vec<u8>) -> String {
-    match crate::api::messaging::to_ipk32(&ipk) {
+    match fixed::<32>(&ipk, "ipk") {
         Ok(ipk) => crate::data::peer_name::resolve(&ipk),
         Err(_) => String::new(),
     }
 }
 
-/// The current call for the UI, or `None` when there is none.
 #[uniffi::export]
 pub fn call_current() -> Option<CallState> {
     super::current().map(Into::into)
 }
 
-/// One captured frame: 20 ms of 48 kHz mono PCM, 960 little-endian i16
-/// samples (1920 bytes). Called from the audio capture thread.
+/// One captured frame: 20 ms of 48 kHz mono PCM as 960 little-endian i16 samples.
 #[uniffi::export]
 pub fn call_push_audio(pcm: Vec<u8>) {
     super::audio_capture(&pcm);
 }
 
-/// The next `frames` of playback as little-endian PCM, silence outside a
-/// call. Called from the audio playback thread; one frame is 20 ms.
+/// The next `frames` 20 ms frames of little-endian playback PCM, silence outside a call.
 #[uniffi::export]
 pub fn call_pull_audio(frames: u32) -> Vec<u8> {
     super::audio_playback(frames as usize)
 }
 
-/// A call as the UI reads it.
 #[derive(uniffi::Record)]
 pub struct CallState {
     pub call:         Vec<u8>,

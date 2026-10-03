@@ -1,10 +1,8 @@
-//! Message requests. A stranger's first message opens a direct chat we have not
-//! agreed to. Their messages arrive in full, but until the request is accepted
-//! nothing of ours reaches them: no receipts, typing, profile, reactions or
-//! replies. See misc/specs/MESSAGE_REQUESTS.md.
+//! Message requests: a stranger's first message opens a direct chat we have not agreed to. Until
+//! it is accepted nothing of ours reaches them: no receipts, typing, profile, reactions or replies.
 use anyhow::{Result, anyhow, ensure};
+use common::types::bytes::fixed;
 
-use crate::api::messaging::to_ipk32;
 use crate::data::app_prefs;
 use crate::data::contact::{Contact, PAIR_STATUS_REQUEST};
 use crate::data::conversation::{Conversation, KIND_DIRECT};
@@ -21,18 +19,15 @@ pub(crate) fn is_blocked(ipk: &[u8; 32]) -> bool {
     app_prefs::get(&blocked_key(ipk)).is_some()
 }
 
-/// An unaccepted request from `ipk`.
 pub(crate) fn is_request(ipk: &[u8; 32]) -> bool {
     Contact::status(ipk) == Some(PAIR_STATUS_REQUEST)
 }
 
-/// The direct chat of an unaccepted request.
 pub(crate) fn is_request_chat(conversation: &[u8; 16]) -> bool {
     Conversation::get(conversation).is_some_and(|c| c.kind == KIND_DIRECT)
         && Conversation::peer_of(conversation).is_some_and(|p| is_request(&p))
 }
 
-/// Whether a stranger's Welcome may open a new request.
 pub(crate) fn admits_stranger() -> bool {
     message_requests_enabled() && Contact::count_requests() < MAX_PENDING
 }
@@ -48,15 +43,14 @@ pub fn set_message_requests_enabled(enabled: bool) -> Result<(), CoreError> {
     Ok(app_prefs::set(SETTING, if enabled { "on" } else { "off" })?)
 }
 
-/// Make the requester a contact and tell them: the pair ack confirms it on
-/// their side, then our profile and every receipt we held back follow.
+/// The pair ack confirms it on their side, then our profile and the held-back receipts follow.
 #[uniffi::export]
 pub fn accept_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
-    let peer = to_ipk32(&ipk)?;
+    let peer = fixed::<32>(&ipk, "ipk")?;
     if !Contact::accept_request(&peer)? {
         return Err(anyhow!("This request is no longer available").into());
     }
-    crate::messaging::confirm_pair(peer);
+    crate::messaging::welcome::confirm_pair(peer);
     crate::data::receipts::schedule();
     Ok(())
 }
@@ -64,7 +58,7 @@ pub fn accept_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
 /// Remove the request and its chat. The requester is not told.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn delete_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
-    let peer = to_ipk32(&ipk)?;
+    let peer = fixed::<32>(&ipk, "ipk")?;
     ensure_request(&peer)?;
     crate::api::messaging::forget_contact(ipk).await
 }
@@ -72,7 +66,7 @@ pub async fn delete_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
 /// Delete the request and drop anything they send us directly from now on.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn block_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
-    let peer = to_ipk32(&ipk)?;
+    let peer = fixed::<32>(&ipk, "ipk")?;
     ensure_request(&peer)?;
     app_prefs::set(&blocked_key(&peer), &crate::data::peer_name::resolve(&peer))?;
     crate::api::messaging::forget_contact(ipk).await
@@ -80,7 +74,7 @@ pub async fn block_message_request(ipk: Vec<u8>) -> Result<(), CoreError> {
 
 #[uniffi::export]
 pub fn unblock(ipk: Vec<u8>) -> Result<(), CoreError> {
-    Ok(app_prefs::remove(&blocked_key(&to_ipk32(&ipk)?))?)
+    Ok(app_prefs::remove(&blocked_key(&fixed::<32>(&ipk, "ipk")?))?)
 }
 
 #[derive(uniffi::Record)]

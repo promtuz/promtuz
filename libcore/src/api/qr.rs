@@ -1,10 +1,7 @@
-//! Pure QR rendering helper — client-facing, reusable beyond identity.
+//! QR rendering helper for the client.
 
-/// Compute a per-cell rounded-corner mask for a QR `grid` (`size`×`size`,
-/// row-major, non-zero = dark module). Each output byte packs 4 corner
-/// bits (TL/TR/BR/BL) the renderer uses to round outer corners. Finder
-/// patterns are skipped. Returns an all-zero mask if `grid` isn't
-/// exactly `size`×`size`.
+/// Per-cell mask of outer corners to round for a row-major `size`×`size` grid, non-zero meaning
+/// dark. Finder patterns are skipped; a mis-sized grid gets an all-zero mask.
 #[uniffi::export]
 pub fn compute_qr_mask(grid: Vec<u8>, size: u32) -> Vec<u8> {
     let n = size as usize;

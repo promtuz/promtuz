@@ -1,22 +1,13 @@
-//! What ties an MLS leaf to a promtuz identity.
+//! What ties an MLS leaf to a promtuz identity. A leaf signs with its own key, so a leaf compromise
+//! is not an identity compromise, and its credential `ipk ‖ Sig_ipk(DOMAIN ‖ leaf signature key)`
+//! proves which identity chose that key. Without the proof any member could claim any IPK.
 //!
-//! A leaf signs with a key of its own (see `signer.rs`: a leaf compromise
-//! must not be an identity compromise), so the credential has to say which
-//! identity chose that key — and prove it, or any member could put any IPK
-//! on their leaf and speak as that person. The credential is therefore
-//! `ipk ‖ Sig_ipk(DOMAIN ‖ leaf signature key)`, checked wherever a leaf is
-//! read as a person: the sender of a message, the roster of a Welcome, the
-//! leaves a commit adds, a fetched KeyPackage.
-//!
-//! Leaves minted before this binding carry the bare 32-byte IPK. A pair
-//! group still takes those — there is nobody in it to impersonate but the
-//! one peer, whose identity the pairing already established — so existing
-//! direct chats keep working. A group chat does not.
+//! Leaves minted before the binding carry the bare 32-byte IPK. Only a pair group accepts them,
+//! and a pair Welcome must seat exactly its signed sender and recipient.
 
-use ed25519_dalek::Signature;
+use common::crypto::verify_ed25519;
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use openmls::prelude::BasicCredential;
 use openmls::prelude::Credential;
 use openmls::prelude::LeafNode;
@@ -29,8 +20,6 @@ fn binding_input(leaf_signature_key: &[u8]) -> Vec<u8> {
     [DOMAIN, leaf_signature_key].concat()
 }
 
-/// A credential naming the signer's identity and proving it chose
-/// `leaf_signature_key`.
 pub fn bound_credential(ipk_signer: &SigningKey, leaf_signature_key: &[u8]) -> BasicCredential {
     let sig = ipk_signer.sign(&binding_input(leaf_signature_key));
     let mut bytes = Vec::with_capacity(BOUND_LEN);
@@ -39,7 +28,6 @@ pub fn bound_credential(ipk_signer: &SigningKey, leaf_signature_key: &[u8]) -> B
     BasicCredential::new(bytes)
 }
 
-/// The identity a leaf belongs to, and how well it proved it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeafIdentity {
     /// Signed over the leaf's own signature key.
@@ -65,17 +53,15 @@ impl LeafIdentity {
     }
 }
 
-/// Read a credential against the signature key of the leaf it sits on.
-/// `None` for anything that is neither a valid binding nor the legacy form.
+/// `None` unless the credential is a valid binding for this leaf key or the bare legacy form.
 pub fn leaf_identity(credential: &Credential, leaf_signature_key: &[u8]) -> Option<LeafIdentity> {
     let bytes = credential.serialized_content();
     match bytes.len() {
         32 => Some(LeafIdentity::Legacy(bytes.try_into().ok()?)),
         BOUND_LEN => {
             let ipk: [u8; 32] = bytes[..32].try_into().ok()?;
-            let vk = VerifyingKey::from_bytes(&ipk).ok()?;
-            let sig = Signature::from_slice(&bytes[32..]).ok()?;
-            vk.verify_strict(&binding_input(leaf_signature_key), &sig).ok()?;
+            let sig = bytes[32..].try_into().ok()?;
+            verify_ed25519(&ipk, &binding_input(leaf_signature_key), sig).ok()?;
             Some(LeafIdentity::Bound(ipk))
         },
         _ => None,
@@ -94,37 +80,23 @@ pub fn leaf_node_ipk(leaf: &LeafNode, strict: bool) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
 
-    fn signer(seed: u8) -> SigningKey {
-        SigningKey::from_bytes(&[seed; 32])
-    }
-
-    #[test]
-    fn a_bound_credential_names_its_signer_for_that_leaf_only() {
-        let alice = signer(1);
-        let leaf = [7u8; 32];
-        let cred: Credential = bound_credential(&alice, &leaf).into();
-        assert_eq!(
-            leaf_identity(&cred, &leaf),
-            Some(LeafIdentity::Bound(alice.verifying_key().to_bytes()))
-        );
-        assert_eq!(leaf_identity(&cred, &[8u8; 32]), None, "another leaf key: not hers");
-    }
-
-    /// What the binding is for: a credential that merely *says* Alice, made
-    /// by someone who is not Alice, is nobody in a group chat.
+    /// A credential naming Alice without her signature over that leaf key is nobody; her bare
+    /// legacy form is nobody in a group but still the peer in a pair.
     #[test]
     fn a_claimed_ipk_without_her_signature_is_nobody() {
-        let alice = signer(1);
-        let mallory = signer(2);
-        let leaf = [7u8; 32];
-        let mut forged = alice.verifying_key().to_bytes().to_vec();
-        forged.extend_from_slice(&mallory.sign(&binding_input(&leaf)).to_bytes());
-        let cred: Credential = BasicCredential::new(forged).into();
-        assert_eq!(leaf_identity(&cred, &leaf), None);
+        let alice = SigningKey::from_bytes(&[1; 32]);
+        let mallory = SigningKey::from_bytes(&[2; 32]);
+        let ipk = alice.verifying_key().to_bytes();
+        let leaf = [7; 32];
+        let bound: Credential = bound_credential(&alice, &leaf).into();
+        assert_eq!(leaf_identity(&bound, &leaf), Some(LeafIdentity::Bound(ipk)));
+        assert_eq!(leaf_identity(&bound, &[8; 32]), None, "another leaf key is not hers");
 
-        let bare: Credential = BasicCredential::new(alice.verifying_key().to_bytes().to_vec()).into();
-        let legacy = leaf_identity(&bare, &leaf).expect("legacy form parses");
-        assert_eq!(legacy.ipk_if(true), None, "and the bare form is nobody in a group");
-        assert_eq!(legacy.ipk_if(false), Some(alice.verifying_key().to_bytes()), "but still the peer in a pair");
+        let mut claimed = ipk.to_vec();
+        claimed.extend_from_slice(&mallory.sign(&binding_input(&leaf)).to_bytes());
+        assert_eq!(leaf_identity(&BasicCredential::new(claimed).into(), &leaf), None);
+
+        let bare = leaf_identity(&BasicCredential::new(ipk.to_vec()).into(), &leaf).unwrap();
+        assert_eq!((bare.ipk_if(true), bare.ipk_if(false)), (None, Some(ipk)));
     }
 }

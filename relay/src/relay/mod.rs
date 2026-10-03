@@ -2,22 +2,16 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::Result;
 use common::graceful;
 use common::info;
 use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg_with_alpn_split;
 use common::quic::config::load_root_ca;
-use common::quic::config::setup_crypto_provider;
-use common::quic::id::NodeKey;
-use common::quic::p256::secret_from_key_or_create;
+use common::quic::id::NodeId;
 use common::quic::protorole::ProtoRole;
-use common::warn;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
 use quinn::EndpointConfig;
@@ -27,120 +21,46 @@ use crate::dht::Dht;
 use crate::storage::db::Store;
 use crate::util::config::AppConfig;
 
-/// The relay's single Ed25519 keypair: identity **and** TLS.
-///
-/// One key signs application-layer messages (`RelayHello` to the resolver),
-/// derives the public-facing `relay_id`, backs the in-memory `peer/5`
-/// self-signed cert, and is the key the CA-issued cert certifies. Loaded
-/// from `key_path`; auto-created `0o600` on first boot if absent.
-#[derive(Debug)]
-pub struct RelayKeys {
-    pub signing: SigningKey,
-    pub public: VerifyingKey,
-}
-
-impl RelayKeys {
-    fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
-        let secret = secret_from_key_or_create(&cfg.network.key_path)?;
-        let public = secret.verifying_key();
-
-        Ok(Self { signing: secret, public })
-    }
-}
-
 pub type RelayRef = Arc<Relay>;
 
-/// Represents a single relay node running in the network.
-///
-/// It's *local identity* of the relay process,
-/// not a message exchanged over the wire.
-///
-/// It's apparently like a core process handler
 #[derive(Debug)]
 pub struct Relay {
-    pub key: NodeKey,
-
-    /// Long-lived Ed25519 identity keypair. Held here so things that need to
-    /// sign on this relay's behalf (e.g. `RelayHello` to the resolver) don't
-    /// have to re-read the on-disk PKCS#8 file every time.
-    pub keys: RelayKeys,
-    /// SystemTime in ms since EPOCH when relay is started first
-    // pub start_ms: u128,
     pub endpoint: Endpoint,
 
-    /// Peeled STUN/TURN assist datagrams + a socket handle for the assist
-    /// task. `main` takes it once to spawn `stunturn::serve`; `None` unless
-    /// `cfg.assist.enabled`.
+    /// Peeled STUN/TURN datagrams, taken once by `main` for `stunturn::serve`.
     pub assist: Mutex<Option<crate::stunturn::AssistInbox>>,
-    /// Advertised to every client at handshake so it aims bridges only at
-    /// relays that will answer. Read from config; `assist` above is taken
-    /// once at startup and says nothing afterwards.
     pub assist_enabled: bool,
 
-    /// The call TURN server, bound at startup and served by `main`; `None`
-    /// unless `[turn] enabled`. Its port rides the client handshake and it
-    /// mints the credentials clients ask for.
     pub turn: Option<Arc<crate::turn::Turn>>,
 
     pub cfg: AppConfig,
 
-    pub client_cfg: Arc<ClientConfig>,
-
     pub store: Arc<Store>,
 
-    /// Shared DHT runtime state. `None` when `cfg.dht.enabled = false`;
-    /// every code path that would touch the DHT checks the option first
-    /// and falls through to the pre-DHT behaviour.
     pub dht: Option<Arc<Dht>>,
 
-    /// Connected + authenticated clients, keyed by IPK.
-    ///
-    /// `Arc<RwLock<...>>` (rather than a bare `RwLock`) so the inner
-    /// map can be shared with the DHT's `Dht::clients` reference for
-    /// the home-side `Forward` handler. The relay-side
-    /// per-client handler in `quic/handler/client/mod.rs` and the DHT
-    /// home-side handler in `dht/forward.rs::handle_forward_rpc` both
-    /// observe the same map; cloning the `Arc` is cheap and avoids a
-    /// back-pointer from `Dht` → `Relay`.
+    /// Authenticated clients by IPK, shared with `Dht` for home-side delivery.
     pub clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>,
 
-    /// Presence subscriptions of currently-connected clients: subscriber IPK ->
-    /// the set of contact IPKs it wants presence for. Populated by
-    /// `SubscribePresence`, dropped on disconnect. Authorization is mutual —
-    /// A sees B's presence only when `subs[A] ∋ B` and `subs[B] ∋ A` — so this
-    /// one map is both the interest list and the consent list.
+    /// Subscriber IPK to its contact set, removed on disconnect. While subscribed, the set is
+    /// also the subscriber's presence consent.
     pub presence_subs: RwLock<HashMap<[u8; 32], HashSet<[u8; 32]>>>,
     pub presence_leases: Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>,
     pub presence_versions: RwLock<HashMap<[u8; 32], u64>>,
 
-    /// Clients that asserted foreground-active → the unix-ms they did. Absence
-    /// = backgrounded (reads Offline; connection alone is not presence).
-    /// Populated by `SetPresence(Active)`, cleared on Idle or disconnect.
+    /// Foreground-active clients and when they asserted it; connection alone is not presence.
     pub active_clients: RwLock<HashMap<[u8; 32], u64>>,
-
-    /// `IPK → push-pseudonym P` for offline-wake. Populated by
-    /// `CRelayPacket::RegisterPush`; read by the DHT enqueue path to trigger a
-    /// gateway wake. Deliberately **not** cleared on disconnect — the whole
-    /// point is to wake a device whose app is *not* connected. `Arc` so the
-    /// DHT enqueue path (`dht/forward.rs`) sees the same map.
-    pub push_pseudonyms: Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>,
 }
 
 impl Relay {
-    /// Build the relay's QUIC endpoint with an ALPN-split server config:
-    /// the peer/5 ALPN gets a NodeKey-bound self-signed Ed25519 cert
-    /// (so libcore can pin SPKI against `RelayDescriptor.pubkey`),
-    /// every other ALPN keeps the operator's CA-issued cert for the
-    /// existing trust chain.
-    fn endpoint(
+    /// The peer ALPN serves a self-signed NodeKey cert that libcore pins against
+    /// `RelayDescriptor.pubkey`; every other ALPN serves the CA-issued cert.
+    pub fn bind(
         cfg: &AppConfig, node_signing: &SigningKey,
     ) -> (Endpoint, Option<crate::stunturn::AssistInbox>) {
         use ProtoRole as PR;
 
-        graceful!(setup_crypto_provider(), "installing the crypto provider");
-
-        // Only roles `Handler::handle` actually serves — rustls then rejects
-        // anything else at ALPN negotiation.
+        // Only roles `Handler::handle` serves; rustls rejects any other ALPN.
         let server_cfg = graceful!(
             build_server_cfg_with_alpn_split(
                 &cfg.network.cert_path,
@@ -154,8 +74,7 @@ impl Relay {
         let std_sock =
             graceful!(std::net::UdpSocket::bind(cfg.network.bind_addr()), "binding the QUIC socket");
 
-        // With assist on, quinn gets a wrapper that peels off P2P hole-punch
-        // datagrams (STUN/TURN) so the one open UDP port carries both.
+        // With assist on, a socket wrapper peels STUN/TURN datagrams off the QUIC port.
         let (endpoint, assist) = if cfg.assist.enabled {
             let (socket, assist) =
                 graceful!(crate::stunturn::wrap_socket(std_sock), "wrapping the QUIC socket");
@@ -188,86 +107,47 @@ impl Relay {
         (endpoint, assist)
     }
 
-    pub fn new(cfg: AppConfig) -> Self {
-        let keys = RelayKeys::from_cfg(&cfg).expect("config failed");
-        let key = NodeKey::new(keys.public).expect("invalid public key length");
-
-        info!("initializing Relay with ID({key})");
-
-        let (mut endpoint, assist) = Self::endpoint(&cfg, &keys.signing);
-
+    /// `signing` is the node key: both the relay's identity and its TLS key. The endpoint and the
+    /// assist inbox come from [`Relay::bind`].
+    pub fn new(
+        cfg: AppConfig, signing: &SigningKey,
+        (mut endpoint, assist): (Endpoint, Option<crate::stunturn::AssistInbox>), store: Arc<Store>,
+    ) -> Self {
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
 
-        let client_cfg = Arc::new(graceful!(
+        let client_cfg = graceful!(
             build_client_cfg(ProtoRole::Relay, &roots),
             "building the QUIC client config"
-        ));
-        // peer/5 is the key-as-identity trust domain (self-signed NodeKey
-        // certs, pinned to the dialed NodeId post-handshake), not the CA
-        // hierarchy — so it gets its own verifier, not build_client_cfg.
+        );
+        // The peer ALPN trusts self-signed NodeKey certs pinned to the dialed NodeId, not the CA.
         let peer_client_cfg = Arc::new(graceful!(
             crate::dht::peer_dial::build_peer_client_cfg(),
             "building the peer/5 client config"
         ));
 
-        endpoint.set_default_client_config((*client_cfg).clone());
+        endpoint.set_default_client_config(client_cfg);
 
-        // Single shared `Arc<Store>` so the DHT replica and the message
-        // queue point at the same on-disk store but live in separate
-        // keyspaces.
-        let store = Arc::new(graceful!(Store::open("db"), "opening the fjall store"));
-        // `clients` is `Arc<RwLock<...>>` (not a bare `RwLock`) so the
-        // inner map can be cloned-by-Arc into `Dht.clients` for the
-        // home-side `Forward` handler.
         let clients = Arc::new(RwLock::new(HashMap::new()));
         let presence_leases = Arc::new(RwLock::new(HashMap::new()));
-        // Shared `IPK → P` map: the per-client handler writes it, the DHT
-        // enqueue path reads it to wake offline recipients.
-        let push_pseudonyms = Arc::new(RwLock::new(HashMap::new()));
 
-        // DHT construction is gated on `cfg.dht.enabled`. When disabled,
-        // the field stays `None` and every consumer falls through to
-        // the legacy code path.
         let dht = if cfg.dht.enabled {
-            let node_id = key.id();
-            match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), store.clone()) {
-                Ok(mut d) => {
-                    // Wire the outbound-dial machinery so the lookup
-                    // module can open `peer/5` connections to other
-                    // relays.
-                    d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
-                    // Share the connected-clients map so the home-side
-                    // `Forward` handler can deliver locally when the
-                    // recipient is online here.
-                    d.attach_clients(clients.clone());
-                    d.attach_presence_leases(presence_leases.clone());
-                    d.attach_push(push_pseudonyms.clone());
-                    // Wire the offline-wake path: the shared IPK→P map. The
-                    // gateway list is filled from the resolver (see main.rs).
-                    info!("DHT enabled (node_id = {node_id})");
-                    Some(Arc::new(d))
-                },
-                Err(err) => {
-                    // Don't kill the process on DHT-init failure — the
-                    // relay can still serve clients without it. Log
-                    // loudly so an operator knows the DHT is dark.
-                    warn!("DHT init failed, continuing without DHT: {err}");
-                    None
-                },
-            }
+            let node_id = NodeId::new(signing.verifying_key());
+            let mut d = Dht::new(node_id, signing.clone(), cfg.dht.clone(), store.clone());
+            d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
+            d.attach_clients(clients.clone());
+            d.attach_presence_leases(presence_leases.clone());
+            info!("DHT enabled (node_id = {node_id})");
+            Some(Arc::new(d))
         } else {
             None
         };
 
         let assist_enabled = cfg.assist.enabled;
         let turn = cfg.turn.enabled.then(|| {
-            Arc::new(graceful!(crate::turn::Turn::bind(&cfg.turn, &keys.signing), "starting TURN"))
+            Arc::new(graceful!(crate::turn::Turn::bind(&cfg.turn, signing), "starting TURN"))
         });
         Self {
-            key,
-            keys,
             cfg,
-            client_cfg,
             store,
             dht,
             endpoint,
@@ -279,7 +159,6 @@ impl Relay {
             presence_leases,
             presence_versions: RwLock::new(HashMap::new()),
             active_clients: RwLock::new(HashMap::new()),
-            push_pseudonyms,
         }
     }
 }

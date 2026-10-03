@@ -1,10 +1,7 @@
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
 
-use super::macros::PRAGMA;
 use super::macros::from_row;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,8 +10,8 @@ pub enum OpType {
     Message = 0,
     Welcome = 1,
     KpPublish = 2,
-    /// MLS control payload (receipt, edit, delete, reaction, pair ack) or a
-    /// PairDecline. Carries no message row — retries are pure side-effect.
+    /// An MLS control payload (receipt, edit, delete, reaction, pair ack) or a PairDecline, with no
+    /// message row behind it.
     Control = 3,
 }
 
@@ -34,8 +31,7 @@ impl OpType {
 pub struct OutboxRow {
     pub id: Vec<u8>,
     pub op_type: u8,
-    // Nullable: Welcome/KpPublish ops may carry no target, and rusqlite
-    // errors decoding a NULL blob into a non-Option `Vec<u8>`.
+    // Welcome and KpPublish ops may have no target.
     pub target_ipk: Option<Vec<u8>>,
     pub payload: Vec<u8>,
     pub created_at: u64,
@@ -60,12 +56,8 @@ const MIGRATION_ARRAY: &[M] = &[
         );
     "#,
     ),
-    // Per-member delivery rows. One logical send fans out to every member of a
-    // conversation, and each copy carries the SAME dispatch id — that id is the
-    // message's identity on the receiving side, so replies, edits and reactions
-    // across the group all name the same thing. The row key therefore has to be
-    // (id, target): keyed on id alone, the second member's copy would collide
-    // with the first and a partially-acked fan-out could never retry the rest.
+    // Every member's copy of a send carries the same dispatch id, the message's identity for its
+    // receivers, so rows key on (id, target) and a partly acked fan-out can retry the rest.
     M::up(
         r#"--sql
         CREATE TABLE outbox_new (
@@ -87,12 +79,10 @@ const MIGRATION_ARRAY: &[M] = &[
         CREATE UNIQUE INDEX idx_outbox_key ON outbox(id, COALESCE(target_ipk, X''));
     "#,
     ),
+    M::up("CREATE INDEX idx_outbox_due ON outbox(state, next_attempt);"),
 ];
-const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
-pub static OUTBOX_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let mut conn = Connection::open(super::db("outbox")).expect("db open failed");
-    PRAGMA!(conn, MIGRATIONS);
-
-    Mutex::new(conn)
-});
+pub fn migrate(conn: &mut Connection) {
+    super::prepare(conn, &MIGRATIONS);
+}

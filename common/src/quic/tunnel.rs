@@ -1,9 +1,5 @@
-//! Bounded opaque datagrams over server-authenticated TLS/TCP.
-//!
-//! Control keeps the existing inner QUIC authentication and does not disclose
-//! a client identity here. Attachment bridge admission separately proves IPK
-//! ownership against the fresh outer TLS exporter and expected peer identity.
-//! This is a reachability fallback, not a replacement for QUIC or a UDP proxy.
+//! Bounded opaque datagrams over server-authenticated TLS/TCP. Control discloses no identity here
+//! (inner QUIC authenticates); assist proves IPK ownership against the fresh TLS exporter.
 
 use anyhow::{Result, anyhow};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -18,6 +14,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use tokio::task::JoinHandle;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -79,21 +76,25 @@ pub fn server_config(cert: &Path, key: &Path) -> Result<Arc<rustls::ServerConfig
     let certs = rustls_pemfile::certs(&mut certs).collect::<std::result::Result<Vec<_>, _>>()?;
     let mut key = io::BufReader::new(std::fs::File::open(key)?);
     let key = rustls_pemfile::private_key(&mut key)?.ok_or_else(|| anyhow!("missing TLS key"))?;
-    let mut config =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
     config.alpn_protocols = vec![ALPN.to_vec()];
     Ok(Arc::new(config))
 }
 
-fn client_config(roots: &RootCertStore) -> Arc<rustls::ClientConfig> {
-    let mut config =
-        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_root_certificates(roots.clone())
-            .with_no_client_auth();
+fn client_config(roots: &RootCertStore) -> Result<Arc<rustls::ClientConfig>> {
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])?
+    .with_root_certificates(roots.clone())
+    .with_no_client_auth();
     config.alpn_protocols = vec![ALPN.to_vec()];
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 fn check_alpn(alpn: Option<&[u8]>) -> Result<()> {
@@ -123,13 +124,7 @@ fn parse_ready(bytes: &[u8]) -> Result<u64> {
 fn assist_message(
     exporter: &[u8; 32], features: u64, token: &[u8; 16], ipk: &[u8; 32], peer: &[u8; 32],
 ) -> Vec<u8> {
-    let mut out = SIGNING_PREFIX.to_vec();
-    out.extend_from_slice(exporter);
-    out.extend_from_slice(&ready(features));
-    out.extend_from_slice(token);
-    out.extend_from_slice(ipk);
-    out.extend_from_slice(peer);
-    out
+    [SIGNING_PREFIX, exporter, &ready(features), token, ipk, peer].concat()
 }
 
 fn encode_request(request: Request, exporter: &[u8; 32], features: u64) -> Result<Vec<u8>> {
@@ -208,7 +203,7 @@ pub async fn connect(
         let remote = stream.peer_addr()?;
         let name = ServerName::try_from(server_name.to_owned())
             .map_err(|_| invalid("invalid tunnel server name"))?;
-        let mut tls = TlsConnector::from(client_config(roots))
+        let mut tls = TlsConnector::from(client_config(roots)?)
             .connect(name, stream)
             .await
             .map_err(tls_error)?;
@@ -262,7 +257,7 @@ pub async fn accept(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS tunnel setup timed out"))?
 }
 
-/// A single-reader bounded datagram pipe. The driver owns no Arc<Channel>, so
+/// A single-reader bounded datagram pipe. The driver owns no `Arc<Channel>`, so
 /// dropping the last route/socket owner cancels both I/O halves immediately.
 pub struct Channel {
     tx: mpsc::Sender<Vec<u8>>,
@@ -271,6 +266,8 @@ pub struct Channel {
     local: SocketAddr,
     remote: SocketAddr,
     features: u64,
+    driver: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    finished: CancellationToken,
 }
 
 impl fmt::Debug for Channel {
@@ -294,7 +291,16 @@ impl Channel {
         let (incoming, rx) = mpsc::channel(QUEUE_PACKETS);
         let closed = CancellationToken::new();
         let cancel = closed.clone();
-        tokio::spawn(async move {
+        let finished = CancellationToken::new();
+        let done = finished.clone();
+        let driver = tokio::spawn(async move {
+            struct Finished(CancellationToken);
+            impl Drop for Finished {
+                fn drop(&mut self) {
+                    self.0.cancel();
+                }
+            }
+            let _finished = Finished(done);
             let (mut reader, mut writer) = tokio::io::split(stream);
             let read = async {
                 loop {
@@ -323,7 +329,16 @@ impl Channel {
             }
             cancel.cancel();
         });
-        Arc::new(Self { tx, rx: Mutex::new(rx), closed, local, remote, features })
+        Arc::new(Self {
+            tx,
+            rx: Mutex::new(rx),
+            closed,
+            local,
+            remote,
+            features,
+            driver: tokio::sync::Mutex::new(Some(driver)),
+            finished,
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -340,6 +355,25 @@ impl Channel {
     }
     pub async fn closed(&self) {
         self.closed.cancelled().await;
+    }
+    /// Close and join the owned IO driver. Concurrent shutdown callers all
+    /// wait for completion; signalling cancellation alone is not a join.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.close();
+        let mut driver = self.driver.lock().await;
+        if let Some(task) = driver.as_mut() {
+            // Keep the handle stored while awaiting: dropping this future
+            // must not detach ownership from a later shutdown caller.
+            let result = task.await;
+            driver.take();
+            // An aborted task might never have been polled, before its guard
+            // was constructed. Join completion is authoritative in that case.
+            self.finished.cancel();
+            result?;
+        } else {
+            self.finished.cancelled().await;
+        }
+        Ok(())
     }
     pub fn is_closed(&self) -> bool {
         self.closed.is_cancelled()
@@ -468,247 +502,12 @@ impl AsyncUdpSocket for TunnelSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-    use tokio::net::TcpListener;
-
-    fn config() -> (Arc<rustls::ServerConfig>, RootCertStore) {
-        let _ = super::super::config::setup_crypto_provider();
-        let rcgen::CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
-        let mut tls =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.der().clone()], key.into())
-                .unwrap();
-        tls.alpn_protocols = vec![ALPN.to_vec()];
-        let mut roots = RootCertStore::empty();
-        roots.add(cert.der().clone()).unwrap();
-        (Arc::new(tls), roots)
-    }
-
-    async fn pair(request: Request, features: u64) -> (Arc<Channel>, Accepted) {
-        let (tls, roots) = config();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (client, server) = tokio::join!(connect(addr, "localhost", &roots, request), async {
-            accept(listener.accept().await.unwrap().0, tls, features).await
-        },);
-        (client.unwrap(), server.unwrap())
-    }
-
-    fn signed(ipk: SigningKey, token: [u8; 16], peer: [u8; 32]) -> Request {
-        Request::Assist {
-            token,
-            ipk: ipk.verifying_key().to_bytes(),
-            peer,
-            sign: Arc::new(move |bytes| Ok(ipk.sign(bytes).to_bytes())),
-        }
-    }
-
-    #[tokio::test]
-    async fn tls_control_and_identity_bound_assist_carry_exact_packets() {
-        for mode in
-            [Request::Control, signed(SigningKey::from_bytes(&[0x21; 32]), [0x22; 16], [0x23; 32])]
-        {
-            let (client, server) = pair(mode, FEATURE_CONTROL | FEATURE_ASSIST).await;
-            assert!(matches!(server.mode, AcceptedMode::Control | AcceptedMode::Assist { .. }));
-            for len in [1, 1200, MAX_PACKET] {
-                let packet = vec![0x5a; len];
-                client.try_send(&packet).unwrap();
-                assert_eq!(
-                    timeout(Duration::from_secs(2), server.channel.recv()).await.unwrap().unwrap(),
-                    packet
-                );
-                server.channel.try_send(&packet).unwrap();
-                assert_eq!(
-                    timeout(Duration::from_secs(2), client.recv()).await.unwrap().unwrap(),
-                    packet
-                );
-            }
-            client.close();
-            timeout(Duration::from_secs(2), server.channel.closed()).await.unwrap();
-        }
-    }
 
     #[test]
-    fn assist_proof_binds_session_capabilities_token_and_both_identities() {
-        let key = SigningKey::from_bytes(&[0x31; 32]);
-        let exporter = [0x32; 32];
-        let features = FEATURE_CONTROL | FEATURE_ASSIST;
-        let proof =
-            encode_request(signed(key.clone(), [0x33; 16], [0x34; 32]), &exporter, features)
-                .unwrap();
-        assert!(decode_request(&proof, &exporter, features).is_ok());
-        assert!(
-            decode_request(&proof, &[0x35; 32], features).unwrap_err().is::<SecurityError>(),
-            "TLS replay"
+    fn transcripts() {
+        crate::proto::golden(
+            &[assist_message(&[1; 32], 0x0102, &[2; 16], &[3; 32], &[4; 32])],
+            "525a288d37a9b4011c8ae4828725990e06e3498911699c6f1adc794e92fb9f65",
         );
-        assert!(decode_request(&proof, &exporter, FEATURE_ASSIST).is_err(), "changed Ready");
-        for offset in [1, 17, 49, 81] {
-            let mut changed = proof.clone();
-            changed[offset] ^= 1;
-            assert!(
-                decode_request(&changed, &exporter, features).is_err(),
-                "changed signed field {offset}"
-            );
-        }
-        assert!(decode_request(&proof, &exporter, FEATURE_CONTROL).is_err());
-        for len in 0..proof.len() {
-            assert!(decode_request(&proof[..len], &exporter, features).is_err());
-        }
-        let mut extra = proof;
-        extra.push(0);
-        assert!(decode_request(&extra, &exporter, features).is_err());
-        assert!(
-            encode_request(
-                signed(key.clone(), [1; 16], key.verifying_key().to_bytes()),
-                &exporter,
-                features
-            )
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_identity_proof_is_explicitly_terminal_to_the_client() {
-        let (tls, roots) = config();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let request = Request::Assist {
-            token: [1; 16],
-            ipk: SigningKey::from_bytes(&[2; 32]).verifying_key().to_bytes(),
-            peer: [3; 32],
-            sign: Arc::new(|_| Ok([0; 64])),
-        };
-        let (client, server) = tokio::join!(connect(addr, "localhost", &roots, request), async {
-            accept(listener.accept().await.unwrap().0, tls, FEATURE_ASSIST).await
-        });
-        assert!(client.err().unwrap().is::<SecurityError>());
-        assert!(server.err().unwrap().is::<SecurityError>());
-    }
-
-    #[tokio::test]
-    async fn wrong_server_identity_or_alpn_never_opens_a_channel() {
-        for bad_name in [true, false] {
-            let (mut tls, roots) = config();
-            if !bad_name {
-                Arc::get_mut(&mut tls).unwrap().alpn_protocols = vec![b"unknown/99".to_vec()];
-            }
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let (client, server) = tokio::join!(
-                connect(
-                    addr,
-                    if bad_name { "wrong.invalid" } else { "localhost" },
-                    &roots,
-                    Request::Control
-                ),
-                async { accept(listener.accept().await.unwrap().0, tls, FEATURE_CONTROL).await }
-            );
-            assert!(client.err().unwrap().is::<SecurityError>());
-            assert!(server.is_err());
-        }
-    }
-
-    #[tokio::test]
-    async fn frame_limits_reject_before_reading_body_and_partial_data_never_delivers() {
-        for len in [0u16, MAX_PACKET as u16 + 1, u16::MAX] {
-            let mut header = &len.to_be_bytes()[..];
-            assert!(read_frame(&mut header, MAX_PACKET).await.unwrap_err().is::<SecurityError>());
-        }
-        let mut oversized_registration = &146u16.to_be_bytes()[..];
-        assert!(
-            read_frame(&mut oversized_registration, 145).await.unwrap_err().is::<SecurityError>()
-        );
-        let (stream, mut peer) = tokio::io::duplex(4096);
-        let addr = "127.0.0.1:1".parse().unwrap();
-        let channel = Channel::start(stream, addr, addr, FEATURE_CONTROL);
-        peer.write_all(&[0, 4, 1, 2]).await.unwrap();
-        drop(peer);
-        assert!(channel.recv().await.is_err());
-        timeout(Duration::from_secs(1), channel.closed()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bounded_queue_wakes_sender_when_capacity_returns_and_on_close() {
-        // Keep the physical writer blocked so the app queue fills; readiness
-        // must sleep, wake as the driver takes a packet, and remain reusable.
-        let (stream, mut peer) = tokio::io::duplex(8);
-        let addr = "127.0.0.1:1".parse().unwrap();
-        let channel = Channel::start(stream, addr, addr, FEATURE_CONTROL);
-        let packet = vec![7; MAX_PACKET];
-        for _ in 0..QUEUE_PACKETS {
-            channel.try_send(&packet).unwrap();
-        }
-        assert_eq!(channel.try_send(&packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        let mut poller = channel.clone().create_io_poller();
-        // Driver removes first packet but can't finish it until peer reads.
-        timeout(
-            Duration::from_secs(1),
-            std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx)),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        channel.try_send(&packet).unwrap();
-        assert!(
-            timeout(
-                Duration::from_millis(10),
-                std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx))
-            )
-            .await
-            .is_err()
-        );
-        let mut raw = vec![0; MAX_PACKET + 2];
-        peer.read_exact(&mut raw).await.unwrap();
-        assert_eq!(&raw[2..], &packet);
-        timeout(
-            Duration::from_secs(1),
-            std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx)),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        channel.close();
-        assert!(std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx)).await.is_err());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_writes_and_idle_reads_release_the_pipe() {
-        let addr = "127.0.0.1:1".parse().unwrap();
-        let (stream, _peer) = tokio::io::duplex(1);
-        let writer = Channel::start(stream, addr, addr, FEATURE_CONTROL);
-        writer.try_send(&[1; 32]).unwrap();
-        tokio::task::yield_now().await;
-        tokio::time::advance(WRITE_TIMEOUT + Duration::from_millis(1)).await;
-        writer.closed().await;
-        let (stream, _peer) = tokio::io::duplex(1);
-        let reader = Channel::start(stream, addr, addr, FEATURE_CONTROL);
-        tokio::task::yield_now().await;
-        tokio::time::advance(READ_TIMEOUT + Duration::from_millis(1)).await;
-        reader.closed().await;
-    }
-
-    #[tokio::test]
-    async fn last_owner_drop_stops_io_and_socket_cannot_choose_another_destination() {
-        let (client, server) = pair(Request::Control, FEATURE_CONTROL).await;
-        let socket = client.clone().socket(client.local_addr(), client.peer_addr());
-        assert_eq!(
-            socket
-                .try_send(&udp::Transmit {
-                    destination: "203.0.113.1:9".parse().unwrap(),
-                    ecn: None,
-                    contents: &[1; 1200],
-                    segment_size: None,
-                    src_ip: None
-                })
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        drop(socket);
-        drop(client);
-        timeout(Duration::from_secs(2), server.channel.closed()).await.unwrap();
     }
 }

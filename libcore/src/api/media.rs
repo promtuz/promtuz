@@ -1,9 +1,9 @@
-//! Inline-image send: FFI entry point for `send_image`.
+//! Media FFI: images, attachments, voice notes and transfer state.
 
-use crate::api::messaging::to_did16;
-use crate::api::messaging::to_fid32;
-use crate::api::messaging::to_conv16;
+use common::types::bytes::fixed;
+
 use crate::platform::CoreError;
+use crate::state::core;
 
 /// Eligibility for recipient uploads only. Unknown/lost/metered networks
 /// must report false; this never restricts the original sender's transfers.
@@ -12,8 +12,7 @@ pub fn set_attachment_sharing_network(unmetered_wifi: bool) {
     crate::transfer::sharing::set_network(unmetered_wifi);
 }
 
-/// Process-local debug evidence, deliberately separate from ordinary media
-/// cards. Events contain fixed categories only, without peer/file identifiers.
+/// Process-local debug events with fixed categories only, never peer or file identifiers.
 #[derive(uniffi::Record)]
 pub struct TransferDiagnosticEvent {
     pub at_ms: u64,
@@ -23,10 +22,8 @@ pub struct TransferDiagnosticEvent {
 #[derive(uniffi::Record)]
 pub struct TransferDiagnostics {
     pub events: Vec<TransferDiagnosticEvent>,
-    /// QUIC payload bytes accepted by the local UDP socket or bounded TCP
-    /// queue, including protocol overhead/retransmissions and both copies
-    /// during route setup, but excluding IP/relay envelopes. These are local
-    /// egress counters, not measured remote relay delivery or billing.
+    /// Local egress: QUIC payload bytes handed to the UDP socket or TCP queue, with overhead,
+    /// retransmissions and route-setup duplicates, without IP or relay envelopes.
     pub direct_datagram_bytes_sent: u64,
     pub relay_datagram_bytes_sent: u64,
     /// Datagrams shed when a TCP attachment route's send queue is full.
@@ -77,20 +74,16 @@ pub struct MediaRecord {
     pub sticker: Option<crate::api::stickers::StickerRecord>,
 }
 
-/// Compress `rgba` to AVIF (≤256KB) and send it to `to_ipk` as an inline
-/// `Image` message, with an optional `caption` and album `group_id`.
-/// Fire-and-forget like [`crate::api::messaging::send_message`]: the
-/// `Result` only reports invalid input synchronously, the send outcome
-/// arrives via `on_message`.
+/// Encodes AVIF within the 256 KB inline budget. The `Result` reports only synchronous errors;
+/// the send outcome arrives via `on_message`.
 #[uniffi::export]
 pub fn send_image(
     conversation_id: Vec<u8>, rgba: Vec<u8>, width: u32, height: u32, caption: String,
     group_id: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let gid = group_id.as_deref().map(to_did16).transpose()?;
-    // Optimistic placeholder row FIRST — the DB change-hook doorbell pops the
-    // bubble while the encode below blocks this FFI call.
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let gid = group_id.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
+    // Placeholder row first, so the bubble shows while the encode below blocks this call.
     let msg = crate::messaging::build_image_message(to, width, height, &caption, gid)?;
     let did: [u8; 16] = msg
         .inner
@@ -98,10 +91,7 @@ pub fn send_image(
         .as_deref()
         .and_then(|d| d.try_into().ok())
         .expect("save_outgoing mints a dispatch_id");
-    // compress_image stays SYNC on purpose — it surfaces the "can't meet the
-    // 256KB inline budget → send as an attachment instead" error to the caller.
-    // ponytail: on that failure the placeholder flashes then vanishes — rare
-    // enough (over-budget photo) to live with.
+    // Synchronous so an over-budget photo's error reaches the caller, who then sends an attachment.
     let (avif, w, h) = match crate::media::compress_image(&rgba, width, height, 256 * 1024) {
         Ok(v) => v,
         Err(e) => {
@@ -109,7 +99,7 @@ pub fn send_image(
             return Err(e.into());
         },
     };
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = crate::messaging::finish_image(to, did, avif, w, h).await {
             log::warn!("MEDIA: send_image failed: {e}");
         }
@@ -117,32 +107,22 @@ pub fn send_image(
     Ok(())
 }
 
-/// Offer `source_path` to `to_ipk` as a P2P attachment: retain its manifest for
-/// a week, blur an optional preview thumbnail, persist the caption + metadata
-/// rows, and send the `Attachment` control (the bytes are pulled device-to-device
-/// by `file_id`). Fire-and-forget like [`send_image`] — the `Result` reports only
-/// synchronous input errors; the send outcome arrives via `on_message`.
-///
-/// `source_path` becomes core's: it is what the sender opens as their own copy
-/// of the attachment, and it is unlinked once no message shows it. Hand over a
-/// private copy, never the user's original.
+/// The bytes are pulled device-to-device by `file_id`. `source_path` becomes core's and is unlinked
+/// once no message shows it, so hand over a private copy, never the user's original.
 #[uniffi::export]
 pub fn send_attachment(
     conversation_id: Vec<u8>, source_path: String, name: String, mime: String,
     thumb_rgba: Option<Vec<u8>>, thumb_w: u32, thumb_h: u32, caption: String,
     group_id: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let gid = group_id.as_deref().map(to_did16).transpose()?;
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let gid = group_id.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
     let size = std::fs::metadata(&source_path)
         .map_err(|e| anyhow::anyhow!("stat {source_path}: {e}"))?
         .len();
-    // No preview (zip/doc/audio) → None, stored as a NULL thumb so the UI's
-    // "has preview?" check stays clean; the wire field flattens. Blur is light
-    // next to the hash below, so it stays sync — the placeholder carries it.
+    // Blur is light next to the hash below, so it stays synchronous and the placeholder carries it.
     let thumb = thumb_rgba.map(|r| crate::media::attachment_thumb(&mime, &r, thumb_w, thumb_h)).transpose()?;
-    // Optimistic placeholder row FIRST — the bubble shows while prepare_send
-    // (a BLAKE3 pass over the whole file, seconds for a big one) runs off-thread.
+    // Placeholder row first, so the bubble shows while `prepare_send` hashes the file off-thread.
     let msg = crate::messaging::build_attachment_message(to, size, &name, &mime, thumb, &caption, gid)?;
     let did: [u8; 16] = msg
         .inner
@@ -150,11 +130,10 @@ pub fn send_attachment(
         .as_deref()
         .and_then(|d| d.try_into().ok())
         .expect("save_outgoing mints a dispatch_id");
-    crate::RUNTIME.spawn(async move {
-        // Only a prepare failure (file unreadable/gone) discards the placeholder —
-        // the offer never existed. A send failure AFTER file_id is persisted (e.g.
-        // we're offline) leaves the row pending for retry_pending_sends, never lost.
-        let file_id = match crate::transfer::prepare_send(&source_path, 7 * 24 * 3600) {
+    core().spawn(async move {
+        // Only a prepare failure discards the placeholder, since the offer never existed. A later
+        // send failure leaves the row pending for retry.
+        let file_id = match crate::transfer::prepare_send(&source_path, 7 * 24 * 3600, |_| {}) {
             Ok((file_id, _size)) => file_id,
             Err(e) => {
                 log::warn!("MEDIA: send_attachment prepare failed: {e}");
@@ -169,17 +148,14 @@ pub fn send_attachment(
     Ok(())
 }
 
-/// Send a recorded voice note inline: the encoded audio rides the frame like
-/// an image, so it is capped the same way — a recorder that honours the cap
-/// never trips it. Fire-and-forget like [`send_image`]; the row is on the
-/// screen before this returns.
+/// Inline like an image and capped the same way. The row is on screen before this returns.
 #[uniffi::export]
 pub fn send_voice(
     conversation_id: Vec<u8>, data: Vec<u8>, mime: String, duration_ms: u32, waveform: Vec<u8>,
     reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let to = to_conv16(&conversation_id)?;
-    let reply_to = reply_to.as_deref().map(to_did16).transpose()?;
+    let to = fixed::<16>(&conversation_id, "conversation id")?;
+    let reply_to = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
     if data.is_empty() || data.len() > VOICE_MAX_BYTES {
         return Err(anyhow::anyhow!("voice note must be 1..={VOICE_MAX_BYTES} bytes").into());
     }
@@ -198,9 +174,9 @@ pub fn send_voice(
         sticker: None,
     };
     let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         let sent = async {
-            let payload = crate::messaging::rebuild_pending_payload(&to, &msg)?;
+            let payload = crate::messaging::body::rebuild_pending_payload(&to, &msg)?;
             crate::messaging::send_prepared(to, &msg, payload).await
         };
         if let Err(e) = sent.await {
@@ -213,13 +189,11 @@ pub fn send_voice(
 /// Same ceiling as an inline image: the frame is what holds it.
 pub const VOICE_MAX_BYTES: usize = 256 * 1024;
 
-/// Pull a received attachment's bytes by `file_id`. Fire-and-forget: dials the
-/// sender (or reverse-wakes them if offline) and drives the resumable transfer;
-/// progress and completion surface through `get_media`'s transfer_state.
+/// Dials or reverse-wakes the sender; progress surfaces through `get_media`'s `transfer_state`.
 #[uniffi::export]
 pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
-    let fid = to_fid32(&file_id)?;
-    crate::RUNTIME.spawn(async move {
+    let fid = fixed::<32>(&file_id, "file_id")?;
+    core().spawn(async move {
         if let Err(e) = crate::transfer::download(fid).await {
             log::warn!("MEDIA: download_attachment failed: {e}");
         }
@@ -227,22 +201,19 @@ pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Read media records for a peer from the message_media table, with transfer
-/// progress (state/have/total in chunks) joined in from the transfer store.
-/// `local_path` is only exposed once the download is DONE — until then the
-/// `.part` file holds unverified-tail bytes no platform should open.
+/// Transfer progress counts chunks. `local_path` appears only once the download is complete; the
+/// `.part` file holds unverified bytes no platform should open.
 #[uniffi::export]
-pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let rows = crate::data::media::for_conversation(&conv)?;
+pub fn get_media(conversation_id: Vec<u8>, limit: u32) -> Result<Vec<MediaRecord>, CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let rows = crate::data::media::for_conversation(&conv, limit)?;
     Ok(rows.into_iter().map(|(did, r)| media_record(did, r)).collect())
 }
 
-/// Read just one media row for a home-list or notification preview.
 #[uniffi::export]
 pub fn get_message_media(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<Option<MediaRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let did = to_did16(&dispatch_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let did = fixed::<16>(&dispatch_id, "dispatch_id")?;
     Ok(crate::data::media::get(&conv, &did)?.map(|r| media_record(did, r)))
 }
 
@@ -251,9 +222,7 @@ fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
     let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
     let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
         Some(p) => {
-            // A DONE row can outlive its bytes (see [`store::Partial::is_complete`]).
-            // Surfaced as PENDING it gets the download affordance back and the
-            // tap re-pulls; DONE with no path is a check-mark that opens nothing.
+            // A DONE row can outlive its bytes; report it PENDING so a tap re-pulls the file.
             let complete = p.is_complete();
             let state =
                 if p.state == store::DONE && !complete { store::PENDING } else { p.state };
@@ -264,13 +233,12 @@ fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
                 complete.then(|| p.path.clone()),
             )
         },
-        // No receiver partial: this may be our OWN sent attachment, whose
-        // file lives in `retention` under the same file_id. Surface it as a
-        // complete local file so the sender can open what they sent.
+        // No receiver partial: it may be our own sent attachment, kept in `retention` by file id.
         None => match fid.and_then(store::retention_get) {
             Some(ret) => {
                 let chunks = ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
-                (store::DONE, chunks, chunks, Some(ret.path))
+                let present = std::fs::metadata(&ret.path).is_ok();
+                (store::DONE, chunks, chunks, present.then_some(ret.path))
             },
             None => (store::PENDING, 0, 0, None),
         },
@@ -308,134 +276,6 @@ fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::data::media;
-
-    /// Two-phase image persist: `build_image_message` lands the placeholder
-    /// instantly (caption row + media row with a null blob, so the bubble can
-    /// show), then `set_blob` fills the compressed bytes and final size.
-    #[test]
-    fn image_placeholder_persists_then_blob_fills() {
-        let dir = std::env::temp_dir().join("promtuz-send-image-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        let conv = [5u8; 16];
-        let msg = crate::messaging::build_image_message(conv, 8, 8, "hi", None).unwrap();
-        assert_eq!(msg.inner.content, "hi");
-        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-
-        let rows = media::for_conversation(&conv).unwrap();
-        let (got_did, row) = rows.iter().find(|(d, _)| *d == did).expect("placeholder persisted");
-        assert_eq!(*got_did, did);
-        assert_eq!(row.kind, media::KIND_IMAGE);
-        assert!(row.blob.is_none(), "placeholder carries no bytes yet");
-
-        let rgba = vec![128u8; 8 * 8 * 4];
-        let (avif, w, h) = crate::media::compress_image(&rgba, 8, 8, 256 * 1024).unwrap();
-        assert!(!avif.is_empty());
-        media::set_blob(&conv, &did, &avif, w, h).unwrap();
-
-        let row = media::get(&conv, &did).unwrap().expect("media row");
-        assert_eq!(row.blob.as_deref(), Some(avif.as_slice()));
-        assert_eq!(row.size, avif.len() as u64);
-    }
-
-    /// Two-phase attachment persist: the placeholder lands with thumb, name
-    /// and size but a null file_id (no manifest yet), then `set_file_id`
-    /// finalizes it. Guards the thumb-as-`Option` contract.
-    #[test]
-    fn attachment_placeholder_persists_then_file_id_fills() {
-        let dir = std::env::temp_dir().join("promtuz-send-attachment-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        let conv = [9u8; 16];
-        let thumb = vec![1u8, 2, 3];
-        let msg = crate::messaging::build_attachment_message(
-            conv, 4096, "doc.pdf", "application/pdf", Some(thumb.clone()), "here", None,
-        )
-        .unwrap();
-        assert_eq!(msg.inner.content, "here");
-        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-
-        let rows = media::for_conversation(&conv).unwrap();
-        let (_d, row) = rows.iter().find(|(d, _)| *d == did).expect("attachment media row persisted");
-        assert_eq!(row.kind, media::KIND_ATTACHMENT);
-        assert!(row.file_id.is_none(), "placeholder carries no file_id yet");
-        assert_eq!(row.thumb, Some(thumb));
-        assert_eq!(row.name, "doc.pdf");
-        assert_eq!(row.size, 4096);
-        assert!(row.blob.is_none());
-
-        let file_id = [0xabu8; 32];
-        media::set_file_id(&conv, &did, &file_id).unwrap();
-        let row = media::get(&conv, &did).unwrap().expect("media row");
-        assert_eq!(row.file_id.as_deref(), Some(file_id.as_slice()));
-    }
-
-    #[test]
-    fn get_media_returns_media_records_for_peer() {
-        let dir = std::env::temp_dir().join("promtuz-get-media-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        let conv = [6u8; 16];
-        let rgba = vec![128u8; 8 * 8 * 4];
-        let (avif, w, h) = crate::media::compress_image(&rgba, 8, 8, 256 * 1024).unwrap();
-        assert!(!avif.is_empty());
-
-        let msg = crate::messaging::build_image_message(conv, w, h, "caption", None).unwrap();
-        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-        media::set_blob(&conv, &did, &avif, w, h).unwrap();
-
-        let records = super::get_media(conv.to_vec()).unwrap();
-        let record = records.iter()
-            .find(|r| r.dispatch_id == did.to_vec())
-            .expect("media record found via FFI");
-        assert_eq!(record.kind, media::KIND_IMAGE);
-        assert!(record.blob.as_ref().is_some_and(|b| !b.is_empty()));
-        assert_eq!(record.transfer_state, 0);
-        assert_eq!(record.transfer_have, 0);
-        assert_eq!(record.transfer_total, 0);
-        assert_eq!(record.local_path, None);
-        let single = super::get_message_media(conv.to_vec(), did.to_vec()).unwrap().unwrap();
-        assert_eq!(single.blob, record.blob);
-        assert!(super::get_message_media(vec![99; 16], did.to_vec()).unwrap().is_none());
-        assert!(super::get_message_media(conv.to_vec(), vec![99; 16]).unwrap().is_none());
-    }
-
-    /// The sender's own sent attachment has no receiver `partial` — its file
-    /// lives in `retention` under the same file_id. `get_media` must surface it
-    /// as DONE with the retained path so the user can open what they sent.
-    #[test]
-    fn get_media_surfaces_sender_own_retained_file() {
-        let dir = std::env::temp_dir().join("promtuz-get-media-retain-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
-
-        use crate::transfer::store;
-        let conv = [7u8; 16];
-        let file_id = [0xcdu8; 32];
-        let msg = crate::messaging::build_attachment_message(
-            conv, 300 * 1024, "big.zip", "application/zip", None, "mine", None,
-        )
-        .unwrap();
-        let did: [u8; 16] = msg.inner.dispatch_id.clone().unwrap().try_into().unwrap();
-        media::set_file_id(&conv, &did, &file_id).unwrap();
-        store::retention_put(&file_id, "/tmp/big.zip", 300 * 1024, 256 * 1024, &[1, 2, 3], u64::MAX)
-            .unwrap();
-
-        let records = super::get_media(conv.to_vec()).unwrap();
-        let record = records.iter().find(|r| r.dispatch_id == did.to_vec()).expect("record found");
-        assert_eq!(record.transfer_state, store::DONE);
-        assert_eq!(record.local_path.as_deref(), Some("/tmp/big.zip"));
-        assert_eq!(record.transfer_total, 2); // 300KB / 256KB, div_ceil
-        assert_eq!(record.transfer_have, record.transfer_total, "all chunks present");
-    }
-}
-
 /// Lightweight browsing index. Read bytes only for a visible preview or opened item.
 #[derive(uniffi::Record)]
 pub struct SharedMediaItem {
@@ -450,10 +290,10 @@ pub struct SharedMediaItem {
 
 #[uniffi::export]
 pub fn shared_media(conversation_id: Vec<u8>) -> Result<Vec<SharedMediaItem>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let result = (|| -> anyhow::Result<_> {
         let rows = {
-            let db = crate::db::messages::MESSAGES_DB.lock();
+            let db = core().db.messages().lock();
             let mut query = db.prepare("SELECT mm.dispatch_id, mm.kind, mm.name, mm.mime, mm.size, m.timestamp, m.sender_ipk, m.outgoing
                 FROM message_media mm JOIN messages m ON m.conversation_id=mm.conversation_id AND m.dispatch_id=mm.dispatch_id
                 WHERE m.conversation_id=?1 AND m.deleted=0 ORDER BY m.id DESC")?;

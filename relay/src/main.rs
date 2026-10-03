@@ -1,20 +1,22 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use common::info;
-use common::quic::CloseReason;
+use anyhow::anyhow;
+use clap::Parser as _;
+use common::server::accept;
+use common::server::daemon;
+use common::server::resolver_link;
 use tokio_util::sync::CancellationToken;
 
+use crate::cli::Command;
 use crate::dht::bootstrap;
 use crate::dht::sync;
-use crate::quic::acceptor::Acceptor;
-use crate::quic::resolver_link::ResolverLink;
+use crate::quic::resolver_link::ResolverLinkHandle;
 use crate::relay::Relay;
+use crate::storage::db::Store;
 use crate::util::config::AppConfig;
 
 mod cli;
-mod cmd;
 mod control;
 mod dht;
 mod quic;
@@ -24,43 +26,42 @@ mod stunturn;
 mod tcpassist;
 #[cfg(test)]
 mod tcp_control_tests;
+#[cfg(test)]
+mod test_support;
 mod turn;
 mod util;
 
+/// Per source, and loose on purpose: a whole carrier NAT shares one address and reconnects at
+/// once after an outage. `max_live` is what bounds concurrency.
+const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 8192 };
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = cli::Cli::get();
-    // Clear the screen only for the daemon; a subcommand must not wipe the
-    // user's terminal before printing its CSR / reply.
-    let cfg = AppConfig::load(&cli.config, cli.command.is_none());
+    let cli = cli::Cli::parse();
+    let cfg: AppConfig = daemon::load(&cli.config);
 
-    // Utility subcommands run instead of the daemon (no endpoint, no wait).
     match cli.command {
-        Some(cli::Command::ClearDb) => return control::clear_db_client(&cfg.control_socket).await,
-        Some(cli::Command::Enroll) => return cmd::enroll(&cfg),
+        Some(Command::ClearDb) => return control::clear_db_client(&cfg.control_socket).await,
+        Some(Command::Enroll) => return common::node::enroll::interactive(&cfg.network),
         None => {},
     }
 
-    common::server::log::init(cfg.log.level.as_deref());
     crate::util::dht_log::DHT_LOG.store(cfg.log.dht, std::sync::atomic::Ordering::Relaxed);
-    info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
+    let key = daemon::start::<AppConfig>(
+        "relay",
+        cli::VERSION,
+        &cfg.network,
+        &cli.config,
+        cfg.log.level.as_deref(),
+    )
+    .await?;
 
-    // Block until we hold a valid cert (writes a CSR + waits if unenrolled), so
-    // the endpoint is only built with usable TLS material.
-    let csr_path = cfg.network.key_path.with_extension("csr");
-    common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "relay").await?;
-    if cfg.network.watch_reload {
-        common::node::enroll::spawn_config_reload(cli.config.clone());
-    }
-
-    // `shutdown` (watch) feeds `ResolverLink`; `cancel` (token) fires every
-    // `Acceptor` per-connection task. Both trip together on Ctrl-C.
-    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(());
     let cancel = CancellationToken::new();
 
     let control_sock = cfg.control_socket.clone();
-    let relay = Arc::new(Relay::new(cfg));
-    let acceptor = Acceptor::new(relay.endpoint.clone());
+    let bound = Relay::bind(&cfg, &key);
+    let store = Arc::new(common::graceful!(Store::open("db"), "opening the fjall store"));
+    let relay = Arc::new(Relay::new(cfg, &key, bound, store));
 
     let tunnel_features = common::quic::tunnel::FEATURE_CONTROL
         | if relay.cfg.assist.tcp_enabled { common::quic::tunnel::FEATURE_ASSIST } else { 0 };
@@ -83,55 +84,52 @@ async fn main() -> Result<()> {
             )
         });
 
-    let acceptor_handle = tokio::spawn({
+    let mut acceptor = tokio::spawn(accept::serve(relay.endpoint.clone(), ACCEPT, {
         let relay = relay.clone();
         let cancel = cancel.clone();
-        async move { acceptor.run(relay, cancel).await }
-    });
+        move |connection| quic::handler::Handler::handle(connection, relay.clone(), cancel.clone())
+    }));
 
-    // Control socket for `pzrelay clear-db` (and future subcommands).
     tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
 
-    // STUN echo + TURN bridge for P2P hole-punch assist, sharing the QUIC
-    // socket (peeled off by the wrapper in `Relay::endpoint`). Present only
-    // when `[assist] enabled = true`.
     if let Some(assist) = relay.assist.lock().take() {
         tokio::spawn(stunturn::serve(assist, cancel.clone()));
     }
 
-    // TURN for calls on its own UDP port. Present only when `[turn] enabled`.
     if let Some(turn) = relay.turn.clone() {
         tokio::spawn(turn.serve(cancel.clone()));
     }
 
-    // Capture `client_handle` (Arc-shared, survives reconnects) before
-    // `attach()` consumes the link — the DHT bootstrap RPCs need it.
-    let resolver_link = ResolverLink::new(relay.clone(), shutdown_rx);
-    let resolver_handle = resolver_link.client_handle();
-    let resolver_attach_handle = resolver_link.attach();
+    let (session, mut link) = resolver_link::spawn(
+        relay.endpoint.clone(),
+        relay.cfg.resolver.seed.clone(),
+        key,
+        resolver_link::Hello::Relay,
+    );
+    let resolver_handle = ResolverLinkHandle(session);
 
     if let Some(dht) = relay.dht.clone()
         && dht.cfg.enabled {
-            // Stash the resolver handle so the scheduler's retry branch and the
-            // cold-start bootstrap below share one live session.
             dht.attach_resolver(resolver_handle.clone());
 
-            // Keep the cached push-gateway directory fresh so `trigger_wake`
-            // has targets. Detached; degrades to no-wakes when empty.
-            tokio::spawn(crate::dht::push_wake::refresh_gateways(
-                dht.clone(),
-                resolver_handle.clone(),
-            ));
+            // Both startup calls wait for a registered session. Called earlier they fail, and the
+            // gateway list would stay empty for a whole refresh period.
+            tokio::spawn({
+                let (dht, resolver) = (dht.clone(), resolver_handle.clone());
+                async move {
+                    resolver.ready().await;
+                    crate::dht::push_wake::refresh_gateways(dht, resolver).await
+                }
+            });
 
-            // Detached so a slow/absent resolver can't delay QUIC accept; on
-            // failure the relay serves with an empty table until a retry wins.
+            // Detached so a slow resolver cannot delay accepting; the sync scheduler retries a
+            // failed bootstrap.
             let resolver_handle_for_bootstrap = resolver_handle.clone();
             let dht_for_bootstrap = dht.clone();
             tokio::spawn(async move {
+                resolver_handle_for_bootstrap.ready().await;
                 match bootstrap::bootstrap(dht_for_bootstrap, resolver_handle_for_bootstrap).await {
-                    Ok(state) => crate::dht_log!("DHT bootstrap reached state {state:?}"),
-                    // Brand-new network is legitimate — info, not warn, so the
-                    // first-relay operator isn't alarmed.
+                    Ok(()) => crate::dht_log!("DHT bootstrap complete"),
                     Err(bootstrap::BootstrapError::EmptyRegistry) => {
                         crate::dht_log!("DHT bootstrap: resolver returned no peers (new network?)")
                     },
@@ -139,8 +137,6 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Anti-entropy scheduler — runs even if bootstrap failed; degrades
-            // gracefully on an empty table and retries bootstrap itself.
             let dht_for_sched = dht.clone();
             let cancel_for_sched = cancel.clone();
             tokio::spawn(async move {
@@ -148,38 +144,23 @@ async fn main() -> Result<()> {
             });
         }
 
-    tokio::select! {
-        _ = acceptor_handle => {}
-        _ = resolver_attach_handle => {}
-        _ = tokio::signal::ctrl_c() => {
-            println!();
+    let result = tokio::select! {
+        _ = &mut acceptor => Err(anyhow!("acceptor stopped")),
+        _ = &mut link => Err(anyhow!("resolver link stopped")),
+        _ = daemon::shutdown_signal() => Ok(()),
+    };
 
-            // Cancel FIRST so per-connection tasks stop reading and can finish
-            // in-flight fjall writes before the endpoint goes away.
-            cancel.cancel();
-            shutdown.send(()).ok();
+    // Cancel first so connection tasks stop reading and finish in-flight fjall writes before the
+    // endpoint goes away.
+    cancel.cancel();
+    // Otherwise the link redials the closing endpoint.
+    link.abort();
 
-            // Close DHT peers before the endpoint so in-flight `peer/5` RPCs
-            // see a clean close-reason, not a transport error.
-            if let Some(dht) = relay.dht.clone() {
-                dht.shutdown().await;
-            }
-
-            relay.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
-
-            // Bounded flush window for in-flight frames (close, DispatchAcks,
-            // Deliver) — a misbehaving peer can't stall shutdown past this.
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                relay.endpoint.wait_idle(),
-            )
-            .await;
-
-            info!("closing relay!");
-        }
+    // Close DHT peers before the endpoint so in-flight peer RPCs see a clean close reason.
+    if let Some(dht) = relay.dht.clone() {
+        dht.shutdown().await;
     }
 
-    cancel.cancel();
-    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
-    Ok(())
+    daemon::stop(&relay.endpoint, tunnel).await;
+    result
 }

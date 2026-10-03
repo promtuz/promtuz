@@ -7,24 +7,26 @@ use common::proto::mls_wire::GroupMigrationApproval;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::pack::Packer;
+use common::utils::now_secs;
 use rusqlite::params;
 
 use crate::data::conversation::Conversation;
 use crate::mls::MlsGroupHandle;
 use crate::mls::PromtuzMlsProvider;
 use crate::mls::migration;
+use crate::state::core;
 
-static RETRIES: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashSet<[u8; 16]>>> =
-    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+static RETRIES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<[u8; 16]>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
 
 fn retry_later(conversation: [u8; 16]) {
     if !RETRIES.lock().insert(conversation) {
         return;
     }
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         RETRIES.lock().remove(&conversation);
-        if crate::state::RELAY.read().is_some() {
+        if core().session().is_some() {
             super::resume(conversation);
         }
     });
@@ -67,9 +69,9 @@ pub fn finish(provider: &PromtuzMlsProvider, old: [u8; 32]) -> Result<()> {
         history[0].branch.0,
     )?;
     if row.mls_group_id.as_deref() == Some(old.as_slice())
-        && let Some(client) = crate::state::RELAY.read().as_ref().and_then(|r| r.dht_client.clone())
+        && let Some(client) = core().session().map(|s| s.dht.clone())
     {
-        crate::RUNTIME.spawn(crate::quic::server::retry_pending_sends_once(client));
+        core().spawn(crate::quic::server::retry_pending_sends_once(client));
     }
     Ok(())
 }
@@ -159,7 +161,7 @@ pub async fn follow_up(conversation: [u8; 16]) -> Result<bool> {
     let approval = source.approve(&group, &signer)?;
     migration::remember(&provider, &source, &approval)?;
     if source.founder != me {
-        let now = crate::utils::systime().as_secs();
+        let now = now_secs();
         let last: u64 = provider.storage().connection().lock().query_row(
             "SELECT last_sent FROM mls_migration_consents WHERE group_id=?1 AND who=?2",
             params![old, me],
@@ -180,7 +182,7 @@ pub async fn follow_up(conversation: [u8; 16]) -> Result<bool> {
             approval,
         }
         .ser()?;
-        let frame = crate::messaging::prepare_dispatch(
+        let frame = crate::delivery::prepare_dispatch(
             &source.founder,
             &me,
             &signer,
@@ -203,11 +205,11 @@ pub async fn follow_up(conversation: [u8; 16]) -> Result<bool> {
     }
     source.verify_all(&approvals)?;
     let _one = super::MEMBERSHIP.lock().await;
-    let client = crate::state::RELAY.read().as_ref().and_then(|r| r.dht_client.clone());
+    let client = core().session().map(|s| s.dht.clone());
     let Some(client) = client else { return Ok(true) };
     let stash = crate::mls::KeyPackageStash::new(provider.storage().connection());
     let buffer = crate::mls::EpochCatchupBuffer::new(provider.storage().connection());
-    let ctx = crate::messaging::MlsContext {
+    let ctx = crate::messaging::session::MlsContext {
         provider: &provider,
         stash:    &stash,
         buffer:   &buffer,
@@ -215,7 +217,7 @@ pub async fn follow_up(conversation: [u8; 16]) -> Result<bool> {
     };
     let mut packages = Vec::new();
     for who in source.members.iter().filter(|m| **m != me) {
-        let (kp, reference) = crate::messaging::fetch_verified_keypackage(&ctx, who, true).await?;
+        let (kp, reference) = crate::messaging::session::fetch_verified_keypackage(&ctx, who, true).await?;
         packages.push((*who, kp, reference));
     }
     // Re-read in the isolated publication operation after the network await.

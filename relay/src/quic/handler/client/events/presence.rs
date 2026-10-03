@@ -1,18 +1,5 @@
-//! Presence + last-seen + idle (same-relay MVP).
-//!
-//! The relay holds the connected-client map, but connection alone is NOT
-//! presence — a background wake-drain is connected too. Online requires an
-//! explicit foreground assertion (`SetPresence(Active)`); a connected client
-//! that hasn't asserted reads as `Offline{last_seen}`. A client
-//! `SubscribePresence`s with its contact set; the relay replies with a snapshot
-//! and thereafter pushes single-entry deltas as contacts assert / background /
-//! disconnect.
-//!
-//! Authorization is **mutual**: A learns B's presence only when A subscribed to
-//! B *and* B subscribed to A. `Relay::presence_subs` is both lists at once.
-//!
-//! MVP scope: same-relay + plaintext. Cross-relay fan-out and the encrypted
-//! privacy pass (beacons + blinded tokens) are follow-ups — see `PRESENCE.md`.
+//! Presence subscriptions and announcements. Authorization is mutual: A sees B only when B has
+//! also subscribed to, or consented to, A.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -27,6 +14,7 @@ use common::proto::client_rel::SubscribePresenceP;
 use common::proto::dht_p2p::RelayPresenceState;
 use common::proto::dht_p2p::presence_state_signing_input;
 use common::types::bytes::Bytes;
+use common::utils::now_ms;
 use quinn::Connection;
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +23,6 @@ use crate::quic::handler::client::events::STREAM_OPEN_TIMEOUT;
 use crate::quic::handler::client::events::bounded_fanout;
 use crate::quic::handler::client::events::spawn_tied;
 use crate::relay::RelayRef;
-use crate::util::systime;
 
 const MAX_PRESENCE_CONTACTS: usize = 256;
 const MAX_PRESENCE_CONSENTS: usize = 256;
@@ -44,9 +31,6 @@ const PRESENCE_FANOUT_CONCURRENCY: usize = 8;
 /// contact count. Both are amplifiers driven by a single client packet.
 const PRESENCE_FANOUT_BUDGET: Duration = Duration::from_secs(5);
 
-/// Handle a `SubscribePresence`: record interest, snapshot the caller's mutual
-/// contacts back to it, and announce the caller (now Online) to those of them
-/// connected here.
 pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHandle) -> Result<()> {
     if sub.contacts.len() > MAX_PRESENCE_CONTACTS || sub.consents.len() > MAX_PRESENCE_CONSENTS {
         return Ok(());
@@ -57,7 +41,7 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
 
     let me = ctx.ipk.to_bytes();
     let relay = &ctx.relay;
-    let now = systime().as_millis() as u64;
+    let now = now_ms();
     let Some(dht) = relay.dht.as_ref().cloned() else { return Ok(()) };
 
     if sub.lease.user.0 != me || sub.lease.relay_id != dht.node_id || !sub.lease.verify(now) {
@@ -133,31 +117,27 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
         push(&ctx.conn, snapshot).await;
     }
 
-    // Announce our ACTUAL state: connection alone is not presence, so a
-    // background wake-drain re-subscribe reads Offline until it asserts Active.
+    // Connection alone is not presence: a background wake-drain re-subscribe reads Offline until
+    // it asserts Active.
     let state = match relay.active_clients.read().get(&me) {
         Some(_) => PresenceState::Online,
         None => PresenceState::Offline { last_seen: relay.store.get_last_seen(&me).unwrap_or(0) },
     };
-    announce(relay, &contacts, &me, state, systime().as_millis() as u64, &ctx.cancel).await;
+    announce(relay, &contacts, &me, state, now_ms(), &ctx.cancel).await;
     Ok(())
 }
 
-/// Handle a `SetPresence`: update our foreground-active flag and push the new
-/// state to our mutual online contacts.
 pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle) -> Result<()> {
     let me = ctx.ipk.to_bytes();
     let relay = &ctx.relay;
-    let now = systime().as_millis() as u64;
+    let now = now_ms();
     let state = match mode {
         PresenceMode::Active => {
             relay.active_clients.write().insert(me, now);
             PresenceState::Online
         },
-        // Idle = backgrounded / not foreground. Only a device that was actually
-        // foreground-Active counts as "seen now": a background wake (reverse-wake,
-        // push-drain, reconnect) asserts Idle without ever going Active, so it
-        // reports its real prior last-seen instead of stamping now.
+        // Only a device that was foreground-Active counts as seen now. A background wake asserts
+        // Idle without going Active, so it keeps its prior last-seen.
         PresenceMode::Idle => {
             let was_active = relay.active_clients.write().remove(&me).is_some();
             let last_seen = if was_active {
@@ -169,24 +149,19 @@ pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle
             PresenceState::Offline { last_seen }
         },
     };
-    // The local flag above is O(1) and always applied; only the fan-out that a
-    // toggle triggers is rate-limited.
+    // The flag above always applies; only the fan-out is rate-limited.
     if ctx.limits.set_presence.check().is_err() {
         return Ok(());
     }
     let contacts = relay.presence_subs.read().get(&me).cloned().unwrap_or_default();
-    announce(relay, &contacts, &me, state, systime().as_millis() as u64, &ctx.cancel).await;
+    announce(relay, &contacts, &me, state, now_ms(), &ctx.cancel).await;
     Ok(())
 }
 
-/// On disconnect: drop the active flag, stamp last-seen only if we were
-/// foreground-active (a background connection keeps its real prior last-seen),
-/// and tell mutual online contacts we're gone. Called after the clients-map
-/// eviction, so we no longer read as online to ourselves.
 pub(crate) async fn on_disconnect(
     relay: &RelayRef, me: &[u8; 32], cancel: &CancellationToken,
 ) {
-    let now = systime().as_millis() as u64;
+    let now = now_ms();
     let was_active = relay.active_clients.write().remove(me).is_some();
     let last_seen = if was_active {
         let _ = relay.store.put_last_seen(me, now);
@@ -196,11 +171,19 @@ pub(crate) async fn on_disconnect(
     };
 
     let my_contacts = relay.presence_subs.read().get(me).cloned().unwrap_or_default();
+    let lease = relay.presence_leases.read().get(me).cloned();
     let state = PresenceState::Offline { last_seen };
     announce(relay, &my_contacts, me, state, now, cancel).await;
+
+    relay.presence_versions.write().remove(me);
+    // A session that subscribed during the announce holds a newer lease.
+    let mut leases = relay.presence_leases.write();
+    if leases.get(me) == lease.as_ref() {
+        leases.remove(me);
+        relay.presence_subs.write().remove(me);
+    }
 }
 
-/// Push our `state` (as `who = me`) to every mutual contact online here.
 async fn announce(
     relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32], state: PresenceState,
     observed_at_ms: u64, cancel: &CancellationToken,
@@ -281,9 +264,8 @@ fn forward_to_homes(
     });
 }
 
-/// Contacts that also subscribed to `me`. Connected contacts are answered from
-/// `presence_subs`; the rest fall back to stored consent, which is a disk read
-/// and so runs only after the map guard is released.
+/// Contacts that also subscribed to `me`. Subscribers answer from `presence_subs`; the rest fall
+/// back to stored consent, a disk read that runs after the map guard is released.
 fn mutual_contacts(
     relay: &RelayRef, contacts: &HashSet<[u8; 32]>, me: &[u8; 32],
 ) -> Vec<[u8; 32]> {
@@ -306,15 +288,12 @@ fn mutual_contacts(
     mutual
 }
 
-/// A contact's last durable state, `Offline{last_seen}` (0 = unknown) when we
-/// have never recorded one.
 fn stored_state(relay: &RelayRef, viewer: &[u8; 32], contact: &[u8; 32]) -> PresenceState {
     relay.store.get_presence_state(viewer, contact).unwrap_or(PresenceState::Offline {
         last_seen: relay.store.get_last_seen(contact).unwrap_or(0),
     })
 }
 
-/// Fire a presence push on a fresh bi-stream (no reply expected).
 async fn push(conn: &Connection, entries: Vec<PresenceP>) {
     let _ = tokio::time::timeout(STREAM_OPEN_TIMEOUT, async {
         let (mut tx, _rx) = conn.open_bi().await.ok()?;

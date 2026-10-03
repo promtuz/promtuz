@@ -4,49 +4,35 @@ use common::crypto::PublicKey;
 use common::crypto::SecretKey;
 use common::crypto::get_signing_key;
 use common::crypto::sign::derive_p2p_tls_key;
+use common::crypto::verify_ed25519;
 use common::proto::mls_wire::Invite;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::WELCOME_LIFETIME_MS;
 use common::proto::mls_wire::invite_signing_input;
+use common::utils::now_ms;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::VerifyingKey;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use parking_lot::RwLock;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
-use crate::platform::SECURE_STORE;
-use crate::db::identity::IDENTITY_DB;
 use crate::db::identity::IdentityRow;
-use crate::utils::systime;
+use crate::state::core;
 
-/// Pairing invites live ~10 minutes — long enough to cover async Welcome
-/// delivery + a reconnect, short enough to bound a shoulder-surfed QR.
+/// Covers async Welcome delivery and a reconnect while bounding a shoulder-surfed QR.
 const INVITE_TTL_MS: u64 = 10 * 60 * 1000;
 
-/// Opened identity secret, cached for the process lifetime so a StrongBox
-/// `open()` (~1s on real hardware) runs once per launch instead of once per
-/// signature. Keyed by the current IPK: an identity switch (recovery/restore)
-/// changes the IPK, the key stops matching, and the next call re-opens — the
-/// cache is self-busting, no explicit invalidation needed.
-///
-/// Holds one long-lived copy of the raw secret. Accepted exposure:
-/// `IDENTITY_RECOVERY.md` §8 already treats the isk as a bearer secret held
-/// raw in platform escrow and as a BIP39 phrase; a process-lifetime RAM copy
-/// is strictly less exposed. `Zeroizing` clears it on eviction/replacement.
+/// Keyed by IPK, so a restore misses; the ~1s StrongBox open runs once per launch. Accepted
+/// exposure: the isk already exists raw in platform escrow and as a phrase.
 struct CachedIsk {
     ipk:    [u8; 32],
     secret: Zeroizing<[u8; 32]>,
 }
 
-static ISK_CACHE: Lazy<RwLock<Option<CachedIsk>>> = Lazy::new(|| RwLock::new(None));
+static ISK_CACHE: LazyLock<RwLock<Option<CachedIsk>>> = LazyLock::new(|| RwLock::new(None));
 
-/// Cache lookup + double-checked open. Pure w.r.t. its inputs so the
-/// hit / miss / identity-switch logic is unit-testable without StrongBox or
-/// the identity DB: `current_ipk` is read cheaply by the caller, `open`
-/// performs the StrongBox decrypt only on a miss.
 fn cached_or_open(
     cache: &RwLock<Option<CachedIsk>>,
     current_ipk: [u8; 32],
@@ -57,8 +43,6 @@ fn cached_or_open(
     {
         return Ok(Zeroizing::new(SecretKey::from(*c.secret)));
     }
-    // Miss, or the identity changed. Take the write lock and re-check —
-    // another thread may have opened while we waited on the lock.
     let mut guard = cache.write();
     if let Some(c) = guard.as_ref()
         && c.ipk == current_ipk
@@ -84,14 +68,22 @@ impl Identity {
     }
 
     pub fn get() -> Option<Self> {
-        let conn = IDENTITY_DB.lock();
+        let conn = core().db.identity().lock();
         conn.query_row("SELECT * FROM identity WHERE id = 0", [], IdentityRow::from_row)
             .ok()
             .map(|ir| Self { inner: ir })
     }
 
+    pub fn local_ipk() -> Option<[u8; 32]> {
+        Self::local_ipk_tx(&core().db.identity().lock())
+    }
+
+    pub(crate) fn local_ipk_tx(conn: &rusqlite::Connection) -> Option<[u8; 32]> {
+        conn.query_row("SELECT ipk FROM identity WHERE id = 0", [], |r| r.get(0)).ok()
+    }
+
     pub fn save(identity: IdentityRow) -> rusqlite::Result<Self> {
-        let conn = IDENTITY_DB.lock();
+        let conn = core().db.identity().lock();
 
         conn.execute(
             "INSERT INTO identity (
@@ -113,12 +105,9 @@ impl Identity {
         Ok(Identity { inner: identity })
     }
 
-    /// Create + persist a fresh identity: validate the nickname, generate
-    /// the long-term Ed25519 secret, seal it via the platform key store,
-    /// and store the row. Entry point for `api::identity::enroll`.
     pub fn create(name: &str) -> Result<()> {
         let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
-        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
+        let store = core().secure_store.get().ok_or(anyhow!("API is not initialized"))?;
 
         let isk = get_signing_key();
         let ipk = isk.verifying_key();
@@ -129,20 +118,11 @@ impl Identity {
             id: 0,
             ipk: ipk.to_bytes(),
             enc_isk,
-            created_at: systime().as_millis() as u64,
+            created_at: now_ms(),
             name,
             avatar: None,
             avatar_revision: 0, bio: String::new(), profile_revision: 0,
         })?;
-        Ok(())
-    }
-
-    /// Replace the display name (backup import restores the backed-up one
-    /// over the restore-flow placeholder).
-    pub fn set_name(name: &str) -> Result<()> {
-        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
-        let conn = IDENTITY_DB.lock();
-        conn.execute("UPDATE identity SET name = ?1 WHERE id = 0", [name])?;
         Ok(())
     }
 
@@ -154,24 +134,15 @@ impl Identity {
     }
 
     pub fn set_details(name: &str, bio: &str) -> Result<()> {
-        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
-        anyhow::ensure!(bio.chars().count() <= 160, "Bio is limited to 160 characters");
-        let conn = IDENTITY_DB.lock();
-        let old: u64 = conn.query_row("SELECT profile_revision FROM identity WHERE id = 0", [], |r| r.get(0))?;
-        let revision = old.max(systime().as_millis() as u64).checked_add(1).ok_or_else(|| anyhow!("revision overflow"))?;
-        conn.execute("UPDATE identity SET name = ?1, bio = ?2, profile_revision = ?3 WHERE id = 0",
-            (name, bio.trim(), revision))?;
-        drop(conn);
+        set_details_tx(&core().db.identity().lock(), name, bio, now_ms())?;
         crate::data::peer_avatar::notify_changed();
         Ok(())
     }
 
-    /// Our profile picture as AVIF bytes, if we set one.
     pub fn avatar(&self) -> Option<Vec<u8>> {
         self.inner.avatar.clone()
     }
 
-    /// A snapshot of both bytes and revision from the same identity row.
     pub fn avatar_update(&self) -> crate::data::peer_avatar::AvatarUpdate {
         crate::data::peer_avatar::AvatarUpdate {
             revision: self.inner.avatar_revision,
@@ -179,27 +150,22 @@ impl Identity {
         }
     }
 
-    /// Store a new picture or removal, allocating its revision under the same
-    /// DB lock. The caller broadcasts this exact revision with these bytes.
+    /// Allocates the revision under the same lock; the caller broadcasts exactly this revision.
     pub fn set_avatar(avif: Option<&[u8]>) -> Result<u64> {
         let revision = {
-            let conn = IDENTITY_DB.lock();
-            set_avatar_tx(&conn, avif, systime().as_millis() as u64)?
+            let conn = core().db.identity().lock();
+            set_avatar_tx(&conn, avif, now_ms())?
         };
         crate::data::peer_avatar::notify_changed();
         Ok(revision)
     }
 
-    /// Restore a previously-created identity from its raw secret — the shared
-    /// tail of both recovery channels (escrow bytes or decoded BIP39 phrase).
-    /// Refuses when an identity already exists: restore is a fresh-install
-    /// flow and must never clobber a live identity.
     pub(super) fn restore(isk: &[u8; 32], name: &str) -> Result<()> {
         if Identity::get().is_some() {
             return Err(anyhow!("an identity already exists; restore requires a fresh install"));
         }
         let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
-        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
+        let store = core().secure_store.get().ok_or(anyhow!("API is not initialized"))?;
 
         let ipk = SigningKey::from_bytes(isk).verifying_key();
         let enc_isk = store.seal(isk.to_vec()).map_err(|e| anyhow!("seal failed: {e}"))?;
@@ -208,7 +174,7 @@ impl Identity {
             id: 0,
             ipk: ipk.to_bytes(),
             enc_isk,
-            created_at: systime().as_millis() as u64,
+            created_at: now_ms(),
             name,
             avatar: None,
             avatar_revision: 0, bio: String::new(), profile_revision: 0,
@@ -216,16 +182,14 @@ impl Identity {
         Ok(())
     }
 
-    /// Mint a bearer pairing invite valid for ~10 minutes. Signed by our
-    /// long-term IPK; whoever holds it may add us until it expires. Used
-    /// by `api::identity::make_invite_qr`.
+    /// A bearer invite: whoever holds it may add us until it expires.
     pub fn mint_invite() -> Result<Invite> {
         use ed25519_dalek::ed25519::signature::rand_core::OsRng;
         use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 
         let mut id = [0u8; 16];
         OsRng.fill_bytes(&mut id);
-        let expiry_ms = systime().as_millis() as u64 + INVITE_TTL_MS;
+        let expiry_ms = now_ms() + INVITE_TTL_MS;
 
         let msg = invite_signing_input(MLS_WIRE_VERSION, &id, expiry_ms);
         let sig = IdentitySigner::sign(&msg)?;
@@ -233,49 +197,37 @@ impl Identity {
         Ok(Invite { id: id.into(), expiry_ms, sig: sig.to_bytes().into() })
     }
 
-    /// Verify an inbound invite was minted by *us*, is still redeemable, and
-    /// has not been spent. This is the whole anti-spam gate — no server is
-    /// trusted. Used by the welcome gate in `messaging`.
-    ///
-    /// Callers must [`Self::spend_invite`] on a successful pairing; until then
-    /// the invite stays redeemable, so a failed accept does not burn it.
+    /// The whole anti-spam gate for pairing; no server is trusted. Callers spend the invite only on
+    /// success, so a failed accept does not burn it.
     pub fn verify_invite(invite: &Invite) -> bool {
-        let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else {
+        let Some(our_ipk) = Identity::local_ipk() else {
             return false;
         };
-        // `expiry_ms` is scan-time freshness UX (surfaced by `preview_invite`);
-        // the accept gate must additionally tolerate the delivery channel's
-        // latency, since a pairing Welcome can sit in the home stash for
-        // WELCOME_LIFETIME_MS before we reconnect and fetch it.
-        if systime().as_millis() as u64 >= Self::invite_unusable_at(invite) {
+        // `expiry_ms` is scan-time freshness. Accepting also allows for a pairing Welcome that sat
+        // in the home stash for up to WELCOME_LIFETIME_MS.
+        if now_ms() >= Self::invite_unusable_at(invite) {
             return false;
         }
         if Self::invite_is_spent(&invite.id.0) {
             return false;
         }
-        let Ok(vk) = VerifyingKey::from_bytes(&our_ipk) else {
-            return false;
-        };
         let msg = invite_signing_input(MLS_WIRE_VERSION, &invite.id.0, invite.expiry_ms);
-        vk.verify_strict(&msg, &Signature::from_bytes(&invite.sig.0)).is_ok()
+        verify_ed25519(&our_ipk, &msg, &invite.sig.0).is_ok()
     }
 
-    /// The instant past which an invite can no longer be presented at all.
     fn invite_unusable_at(invite: &Invite) -> u64 {
         invite.expiry_ms.saturating_add(WELCOME_LIFETIME_MS)
     }
 
     fn invite_is_spent(id: &[u8; 16]) -> bool {
-        let conn = IDENTITY_DB.lock();
+        let conn = core().db.identity().lock();
         conn.query_row("SELECT 1 FROM spent_invite WHERE id = ?1", [&id[..]], |_| Ok(()))
             .is_ok()
     }
 
-    /// Burn an invite so it cannot pair a second stranger, and drop rows that
-    /// are past redemption.
     pub fn spend_invite(invite: &Invite) {
-        let conn = IDENTITY_DB.lock();
-        let now = systime().as_millis() as u64;
+        let conn = core().db.identity().lock();
+        let now = now_ms();
         let _ = conn.execute("DELETE FROM spent_invite WHERE unusable_at_ms <= ?1", [now]);
         let _ = conn.execute(
             "INSERT OR IGNORE INTO spent_invite(id, unusable_at_ms) VALUES (?1, ?2)",
@@ -283,29 +235,20 @@ impl Identity {
         );
     }
 
-    /// Fetches identity public key
     pub fn public_key() -> rusqlite::Result<PublicKey> {
-        let conn = IDENTITY_DB.lock();
+        let conn = core().db.identity().lock();
         conn.query_one("SELECT ipk FROM identity WHERE id = 0", [], |row| {
             row.get("ipk")
                 .map(|k: [u8; 32]| PublicKey::from_bytes(&k).expect("not a ed25519 public key"))
         })
     }
 
-    /// Decrypts and returns the identity secret key wrapped in `Zeroizing`.
-    ///
-    /// Visibility is intentionally `pub(super)` (module-private to `data`):
-    /// callers outside the data layer must go through [`IdentitySigner`] so
-    /// raw key material never leaves this module. Returning the bare
-    /// `[u8; 32]` (the previous `secret_key_bytes`) defeated the
-    /// `Zeroizing` wrapper and let the secret persist on caller stacks.
+    /// `pub(super)`, so the raw secret bytes never leave `data`.
     pub(super) fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
-        // Cheap sqlite read (no StrongBox) — the cache key. A recovery/restore
-        // that swaps the identity changes this and self-busts the cache.
         let current_ipk = Identity::public_key()?.to_bytes();
         cached_or_open(&ISK_CACHE, current_ipk, || {
-            let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
-            let conn = IDENTITY_DB.lock();
+            let store = core().secure_store.get().ok_or(anyhow!("API is not initialized"))?;
+            let conn = core().db.identity().lock();
             conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {
                 let eisk: Vec<u8> = row.get("enc_isk")?;
                 let secret = store.open(eisk).map_err(|_| rusqlite::Error::UnwindingPanic)?;
@@ -322,43 +265,19 @@ impl Identity {
 pub struct IdentitySigner;
 
 impl IdentitySigner {
-    /// Signs message using the identity key.
-    /// The secret key is decrypted on-demand and immediately dropped.
     pub fn sign(message: &[u8]) -> Result<Signature> {
         let secret = Identity::secret_key_with_manager()?;
         let key = SigningKey::from_bytes(&secret);
         Ok(key.sign(message))
     }
 
-    /// Derive the per-identity Ed25519 sub-key dedicated to TLS-layer signing
-    /// in peer-to-peer QUIC handshakes.
-    ///
-    /// The derivation is HKDF-SHA256 over the long-term identity secret with
-    /// the IPK as salt — deterministic, so callers may safely re-derive the
-    /// same key (the cert SPKI binds the connection to it). See
-    /// [`common::crypto::sign::derive_p2p_tls_key`] for the rationale; in
-    /// short, we never want one Ed25519 key to be the signer for both the
-    /// rustls TLS 1.3 transcript *and* application-layer messages
-    /// (`DispatchP`, IPK<->TLS sub-key bindings, …).
-    ///
-    /// `SigningKey` self-zeroizes on drop (the workspace enables the
-    /// `zeroize` feature on `ed25519-dalek`); callers should still hold it
-    /// behind an `Arc` for the lifetime of a `rustls::sign::SigningKey`
-    /// (one per peer connection) rather than re-deriving per signature.
+    /// Deterministic sub-key, so TLS transcripts and application messages never share a signer.
     pub fn tls_subkey() -> Result<SigningKey> {
         let secret = Identity::secret_key_with_manager()?;
         let public = SigningKey::from_bytes(&secret).verifying_key();
         Ok(derive_p2p_tls_key(&secret, public.as_bytes()))
     }
 
-    /// Sign a message with the long-term identity key, returning both the
-    /// signature and the long-term IPK pubkey.
-    ///
-    /// Used by the peer-to-peer identity-exchange flow to bind the TLS
-    /// sub-key (carried as the cert SPKI) back to the user's true IPK: the
-    /// scanner/sharer signs the peer's TLS sub-key pubkey with their IPK,
-    /// the receiver verifies, and only then is the contact saved against
-    /// the IPK rather than the TLS sub-key.
     pub fn sign_with_ipk(message: &[u8]) -> Result<(Signature, [u8; 32])> {
         let secret = Identity::secret_key_with_manager()?;
         let key = SigningKey::from_bytes(&secret);
@@ -367,20 +286,8 @@ impl IdentitySigner {
     }
 }
 
-/// Helper for the MLS messaging path: hand the caller a `SigningKey`
-/// clone of the long-term IPK secret. The MLS layer needs
-/// to perform multiple signing operations across an async send (the
-/// outer envelope sig + welcome envelope sig + KP record sigs) and
-/// each call to `IdentitySigner::sign` re-decrypts via the Keystore
-/// — too costly. This helper decrypts once and returns the
-/// `SigningKey`; it is the *only* path outside the data layer that
-/// holds a bare `SigningKey`, and the caller is expected to drop it
-/// promptly (the workspace `zeroize` feature on `ed25519-dalek` clears
-/// the bytes on drop).
-///
-/// `expected_ipk` is checked against the verifying half so a caller
-/// that has stale identity state can't accidentally sign with a
-/// different secret.
+/// The only bare `SigningKey` outside `data`, for sends that sign many times; drop it promptly.
+/// `expected_ipk` stops a caller with stale identity state from signing with another secret.
 pub(crate) fn secret_key_signing(expected_ipk: &[u8; 32]) -> Result<SigningKey> {
     let secret = Identity::secret_key_with_manager()?;
     let key = SigningKey::from_bytes(&secret);
@@ -390,9 +297,6 @@ pub(crate) fn secret_key_signing(expected_ipk: &[u8; 32]) -> Result<SigningKey> 
     Ok(key)
 }
 
-/// Normalize + validate a user-chosen nickname (NFC, trimmed, ≤32 chars,
-/// no control/zero-width characters). Returns the cleaned name or a
-/// user-facing error message.
 fn validate_nickname(name: &str) -> std::result::Result<String, String> {
     let normalized: String = name.nfc().collect();
     let trimmed = normalized.trim();
@@ -410,9 +314,26 @@ fn validate_nickname(name: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+pub(super) fn set_details_tx(
+    conn: &rusqlite::Connection, name: &str, bio: &str, now_ms: u64,
+) -> Result<()> {
+    let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
+    anyhow::ensure!(bio.chars().count() <= 160, "Bio is limited to 160 characters");
+    let old: u64 =
+        conn.query_row("SELECT profile_revision FROM identity WHERE id = 0", [], |r| r.get(0))?;
+    let revision = old.max(now_ms).checked_add(1).ok_or_else(|| anyhow!("revision overflow"))?;
+    conn.execute(
+        "UPDATE identity SET name = ?1, bio = ?2, profile_revision = ?3 WHERE id = 0",
+        (name, bio.trim(), revision),
+    )?;
+    Ok(())
+}
+
 /// Wall time lets a fresh restore supersede its old profile; the persisted
 /// counter also advances when changes share a millisecond or the clock recedes.
-fn set_avatar_tx(conn: &rusqlite::Connection, avif: Option<&[u8]>, now_ms: u64) -> Result<u64> {
+pub(super) fn set_avatar_tx(
+    conn: &rusqlite::Connection, avif: Option<&[u8]>, now_ms: u64,
+) -> Result<u64> {
     if let Some(bytes) = avif {
         crate::data::peer_avatar::check_avif(bytes)?;
     }
@@ -430,67 +351,20 @@ fn set_avatar_tx(conn: &rusqlite::Connection, avif: Option<&[u8]>, now_ms: u64) 
 }
 
 #[cfg(test)]
-mod cache_tests {
-    use super::{CachedIsk, cached_or_open};
-    use parking_lot::RwLock;
-    use std::cell::Cell;
+mod tests {
+    use super::*;
+    use crate::test_support::data::identity;
+    use crate::test_support::data::open;
 
-    #[test]
-    fn opens_once_then_serves_from_cache() {
-        let cache: RwLock<Option<CachedIsk>> = RwLock::new(None);
-        let ipk = [1u8; 32];
-        let opens = Cell::new(0);
-
-        let a = cached_or_open(&cache, ipk, || {
-            opens.set(opens.get() + 1);
-            Ok([9u8; 32])
-        })
-        .unwrap();
-        let b = cached_or_open(&cache, ipk, || {
-            opens.set(opens.get() + 1);
-            Ok([9u8; 32])
-        })
-        .unwrap();
-
-        assert_eq!(opens.get(), 1, "second call must hit the cache, not re-open");
-        assert_eq!(&a[..], &b[..]);
-    }
-
-    #[test]
-    fn ipk_switch_busts_cache() {
-        let cache: RwLock<Option<CachedIsk>> = RwLock::new(None);
-        let opens = Cell::new(0);
-
-        let _a = cached_or_open(&cache, [1u8; 32], || {
-            opens.set(opens.get() + 1);
-            Ok([9u8; 32])
-        })
-        .unwrap();
-        let b = cached_or_open(&cache, [2u8; 32], || {
-            opens.set(opens.get() + 1);
-            Ok([7u8; 32])
-        })
-        .unwrap();
-
-        assert_eq!(opens.get(), 2, "identity switch must re-open");
-        assert_eq!(&b[..], &[7u8; 32][..], "must serve the new identity's secret");
-    }
-}
-
-#[cfg(test)]
-mod avatar_tests {
     #[test]
     fn revisions_advance_with_equal_or_backwards_clocks() {
-        let conn = crate::db::identity::open_in_memory();
-        conn.execute(
-            "INSERT INTO identity (id, ipk, enc_isk, created_at, name) VALUES (0, ?1, X'01', 0, 'me')",
-            [[1u8; 32].as_slice()],
-        ).unwrap();
+        let conn = open(crate::db::identity::migrate);
+        identity(&conn, 1);
         let image = b"\0\0\0\x0cftypavif";
-        assert_eq!(super::set_avatar_tx(&conn, Some(image), 100).unwrap(), 100);
-        assert_eq!(super::set_avatar_tx(&conn, None, 100).unwrap(), 101);
-        assert_eq!(super::set_avatar_tx(&conn, Some(image), 90).unwrap(), 102);
-        let row = conn.query_row("SELECT * FROM identity", [], crate::db::identity::IdentityRow::from_row).unwrap();
+        assert_eq!(set_avatar_tx(&conn, Some(image), 100).unwrap(), 100);
+        assert_eq!(set_avatar_tx(&conn, None, 100).unwrap(), 101);
+        assert_eq!(set_avatar_tx(&conn, Some(image), 90).unwrap(), 102);
+        let row = conn.query_row("SELECT * FROM identity", [], IdentityRow::from_row).unwrap();
         assert_eq!(row.avatar_revision, 102);
         assert_eq!(row.avatar.as_deref(), Some(image.as_slice()));
     }

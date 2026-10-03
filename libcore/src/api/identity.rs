@@ -3,34 +3,29 @@
 use common::proto::mls_wire::PairingP;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
+use common::utils::now_ms;
 
 use crate::data::contact::Contact;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::messaging;
 use crate::platform::CoreError;
+use crate::state::core;
 
-/// Enroll — create the long-term identity. The client calls this from the
-/// enrollment screen (shown when `should_launch_app()` is false).
 #[uniffi::export]
 pub fn enroll(name: String) -> Result<(), CoreError> {
     Identity::create(&name)?;
     Ok(())
 }
 
-/// Whether we're discoverable — our KeyPackage is published to a quorum of
-/// homes. The share screen gates the QR on this so a brand-new user waits
-/// ("getting you discoverable…") instead of minting a link nobody can pair
-/// with. Published automatically on every relay connect.
+/// True once our KeyPackage is on a quorum of homes, so a QR shared now can be paired with.
 #[uniffi::export]
 pub fn kp_publish_ready() -> bool {
     crate::mls::scheduler::kp_publish_ready()
 }
 
-/// Mint a fresh pairing invite and return the QR payload bytes to render.
-/// Whoever scans it may add us until the invite expires (~10 min). Needs
-/// no relay connection — built from our identity alone. The same QR works
-/// for multiple scanners within the window (no per-scan refresh).
+/// Whoever scans it may add us until the invite expires after 10 minutes. Several scanners can use
+/// one QR, and minting needs no relay.
 #[uniffi::export]
 pub fn make_invite_qr() -> Result<Vec<u8>, CoreError> {
     let identity =
@@ -40,11 +35,7 @@ pub fn make_invite_qr() -> Result<Vec<u8>, CoreError> {
     qr.ser().map_err(|e| CoreError::Internal { msg: format!("qr encode: {e}") })
 }
 
-/// Pair from a scanned identity QR: save the sharer as a contact, then
-/// (eagerly, in the background) create the 1:1 MLS group and publish a
-/// Welcome carrying their invite + our name, so their device accepts us.
-/// The synchronous `Result` only reports a malformed QR or missing
-/// identity; the pairing outcome surfaces via the contact list / events.
+/// Pairs in the background; the `Result` only reports a malformed QR or a missing identity.
 #[uniffi::export]
 pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     let qr = IdentityQr::deser(&qr_bytes)
@@ -55,44 +46,32 @@ pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     }
     let pairing = PairingP { invite: qr.invite, sender_name: me.name() };
 
-    // Do NOT save eagerly — pair() saves the contact as PENDING only after the
-    // welcome is published (PAIRING.md), so an unreachable peer never leaves a
-    // bricked row. The contact surfaces via the reactive doorbell on success.
+    // `pair` saves the contact only once the Welcome is out, so an unreachable peer leaves no row.
     let (to, peer_name) = (qr.ipk, qr.name);
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = messaging::pair(to, peer_name, pairing).await {
+    core().spawn(async move {
+        if let Err(e) = messaging::welcome::pair(to, peer_name, pairing).await {
             log::error!("PAIR: {e}");
         }
     });
     Ok(())
 }
 
-/// What a scanned/opened invite contains, for the confirmation UI.
 #[derive(uniffi::Record)]
 pub struct InvitePreview {
-    /// The sharer's 32-byte identity key.
     pub ipk: Vec<u8>,
-    /// The sharer's display name (length-capped).
     pub name: String,
-    /// We already have this person as a contact.
     pub already_contact: bool,
-    /// The invite's ~10-min window has elapsed.
     pub expired: bool,
-    /// Unix-ms the invite window closes — the UI renders a live countdown
-    /// rather than a bare expired flag (PAIRING.md).
+    /// Unix ms, for a live countdown.
     pub expiry_ms: u64,
 }
 
-/// Decode-only preview of a scanned/opened invite so the client can show an
-/// "Add <name>?" confirmation before committing. Does NOT pair — that's
-/// [`pair_from_qr`]. A malformed payload is an `Err`; `already_contact` /
-/// `expired` let the sheet tailor the prompt (open chat / ask for a fresh
-/// link) instead of blindly attempting to pair.
+/// Decodes an invite for the confirmation sheet without pairing.
 #[uniffi::export]
 pub fn preview_invite(qr_bytes: Vec<u8>) -> Result<InvitePreview, CoreError> {
     let qr = IdentityQr::deser(&qr_bytes)
         .map_err(|e| CoreError::Internal { msg: format!("bad invite: {e}") })?;
-    let now_ms = crate::utils::systime().as_millis() as u64;
+    let now_ms = now_ms();
     Ok(InvitePreview {
         ipk: qr.ipk.to_vec(),
         name: qr.name.chars().take(32).collect(),

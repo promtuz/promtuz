@@ -1,12 +1,6 @@
-use std::sync::atomic::Ordering;
-
-use serde::Serialize;
-
-use crate::state::CONNECTION_STATE;
 use crate::events::Emittable;
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, uniffi::Enum)]
-#[allow(unused)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 #[repr(i32)]
 pub enum ConnectionState {
     Disconnected,
@@ -18,18 +12,14 @@ pub enum ConnectionState {
     Reconnecting,
     Failed,
     NoInternet,
-    /// Link + auth are up, but we're still pulling the offline backlog
-    /// (welcomes, deferred sends, queued messages) into the local DB.
-    /// Appended last to keep every prior ordinal stable (the client maps by
-    /// ordinal).
+    /// Link and auth are up while the offline backlog is still being pulled into the local DB.
+    /// Appended last because the client maps variants by ordinal.
     Syncing,
 }
 
 impl Emittable for ConnectionState {
     fn emit(self) {
-        CONNECTION_STATE.store(self.clone() as i32, Ordering::Relaxed);
-
-        if let Some(events) = crate::platform::EVENTS.get() {
+        if let Some(events) = crate::state::core().events.get() {
             events.on_connection(self);
         }
     }

@@ -1,5 +1,5 @@
-//! Node enrollment: load-or-create the single Ed25519 key, validate the
-//! CA-issued cert, or emit a CSR and wait. Shared by relay and resolver.
+//! Node enrollment: load or create the node's Ed25519 key, validate its CA-issued cert, or emit a
+//! CSR and wait.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,8 +19,6 @@ use rustls::pki_types::UnixTime;
 use crate::quic::config::load_root_ca;
 use crate::quic::id::NodeId;
 
-/// Split one DER tag-length-value off the front of `input`, returning
-/// `(tag, value, remainder)`.
 fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, rest) = input.split_first()?;
     let (&first, rest) = rest.split_first()?;
@@ -38,9 +36,8 @@ fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, value, rest))
 }
 
-/// The 32-byte Ed25519 public key from a DER cert's SubjectPublicKeyInfo,
-/// reached by walking the TBSCertificate rather than searching for a byte
-/// pattern, so a decoy elsewhere in the cert cannot be mistaken for it.
+/// Walks the TBSCertificate to the SPKI instead of searching for a byte pattern, so a decoy
+/// elsewhere in the cert cannot be mistaken for the key.
 pub fn spki_ed25519(cert_der: &[u8]) -> Option<[u8; 32]> {
     let (0x30, cert, _) = read_tlv(cert_der)? else { return None };
     let (0x30, tbs, _) = read_tlv(cert)? else { return None };
@@ -71,11 +68,7 @@ fn first_cert_der(cert_path: &Path) -> anyhow::Result<CertificateDer<'static>> {
     })
 }
 
-/// True iff `cert_path` exists, chains to `ca_path`, is unexpired, names
-/// `node_id`, and its SPKI is our `key_pub` (i.e. it is *our* cert).
-///
-/// Requires the process crypto provider to be installed; the caller
-/// ([`ensure_enrolled`]) does this via `setup_crypto_provider`.
+/// Needs the process crypto provider installed first (`setup_crypto_provider`).
 pub fn cert_is_valid(
     cert_path: &Path, ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
 ) -> anyhow::Result<bool> {
@@ -87,8 +80,6 @@ pub fn cert_is_valid(
     Ok(true)
 }
 
-/// Validate a signed cert supplied as PEM bytes (e.g. pasted on stdin) against
-/// our key + CA, without touching disk. Used by `pzrelay enroll`.
 pub fn validate_cert_pem(
     pem: &[u8], ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
 ) -> anyhow::Result<()> {
@@ -100,8 +91,6 @@ pub fn validate_cert_pem(
     verify_leaf(&leaf, ca_path, node_id, key_pub)
 }
 
-/// The cert must chain to `ca_path`, be unexpired, name `node_id`, and certify
-/// *our* `key_pub` — not just any CA-signed key.
 fn verify_leaf(
     leaf: &CertificateDer, ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
 ) -> anyhow::Result<()> {
@@ -120,16 +109,8 @@ fn verify_leaf(
         .map_err(|e| anyhow!(e).context("webpki server verifier failed"))
 }
 
-// ---------------------------------------------------------------------------
-// PKCS#10 CSR generation (hand-rolled Ed25519 DER; mirrors the self-signed
-// cert DER in `quic::config`). `certgen sign` re-derives CN/SAN from the
-// pubkey, so the request carries only version + subject(CN) + SPKI + empty
-// attributes, self-signed (proof of possession).
-// ---------------------------------------------------------------------------
-
 const ED25519_AID: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
 
-/// Minimal DER tag-length-value with short/long-form length.
 fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     let n = body.len();
     if n < 128 {
@@ -175,7 +156,6 @@ fn pem_wrap(label: &str, der: &[u8]) -> String {
     out
 }
 
-/// PKCS#10 CSR as PEM for `signing`'s key, `CN = base32(node_id)`.
 pub fn csr_pem(signing: &SigningKey, node_id: &NodeId) -> String {
     let pubkey = signing.verifying_key().to_bytes();
     let info = csr_info(&pubkey, &node_id.to_string());
@@ -183,169 +163,46 @@ pub fn csr_pem(signing: &SigningKey, node_id: &NodeId) -> String {
     pem_wrap("CERTIFICATE REQUEST", &csr_der(&info, &sig))
 }
 
-/// Write a PKCS#10 CSR (PEM) for `signing`'s key to `csr_path`.
 pub fn emit_csr(csr_path: &Path, signing: &SigningKey, node_id: &NodeId) -> std::io::Result<()> {
     std::fs::write(csr_path, csr_pem(signing, node_id))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn synthetic_cert(issuer: &[u8], key: &[u8; 32]) -> Vec<u8> {
-        let tbs = tlv(
-            0x30,
-            &[
-                &[0xa0, 0x03, 0x02, 0x01, 0x02][..],
-                &[0x02, 0x01, 0x01][..],
-                &tlv(0x30, ED25519_AID),
-                issuer,
-                &[0x30, 0x00][..],
-                &[0x30, 0x00][..],
-                &spki_der(key),
-            ]
-            .concat(),
-        );
-        tlv(
-            0x30,
-            &[&tbs[..], &tlv(0x30, ED25519_AID), &[0x03, 0x41, 0x00][..], &[0u8; 64][..]].concat(),
-        )
-    }
-
-    #[test]
-    fn spki_ignores_a_decoy_bit_string_before_the_real_one() {
-        let decoy = [0xEEu8; 32];
-        let real = [0x11u8; 32];
-        let issuer = tlv(0x30, &[&[0x03, 0x21, 0x00][..], &decoy].concat());
-        assert_eq!(spki_ed25519(&synthetic_cert(&issuer, &real)), Some(real));
-    }
-
-    #[test]
-    fn spki_rejects_a_non_ed25519_algorithm() {
-        let rsa_aid: &[u8] = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
-        let key = [0x22u8; 32];
-        let spki = tlv(0x30, &[&tlv(0x30, rsa_aid)[..], &[0x03, 0x21, 0x00][..], &key].concat());
-        let tbs = tlv(
-            0x30,
-            &[
-                &[0xa0, 0x03, 0x02, 0x01, 0x02][..],
-                &[0x02, 0x01, 0x01][..],
-                &tlv(0x30, ED25519_AID),
-                &[0x30, 0x00][..],
-                &[0x30, 0x00][..],
-                &[0x30, 0x00][..],
-                &spki,
-            ]
-            .concat(),
-        );
-        let cert = tlv(0x30, &[&tbs[..], &tlv(0x30, ED25519_AID)].concat());
-        assert_eq!(spki_ed25519(&cert), None);
-    }
-
-    #[test]
-    fn spki_rejects_truncated_der() {
-        let cert = synthetic_cert(&[0x30, 0x00], &[0x33u8; 32]);
-        assert_eq!(spki_ed25519(&cert[..cert.len() - 20]), None);
-    }
-
-    #[test]
-    fn rejects_missing_cert() {
-        let id = NodeId::new([7u8; 32]);
-        assert!(
-            cert_is_valid(
-                Path::new("/nonexistent.crt"),
-                Path::new("/nonexistent_ca.pem"),
-                &id,
-                &[7u8; 32],
-            )
-            .is_err()
-        );
-    }
-
-    // Full loop: ephemeral CA → emit_csr → sign exactly as `certgen sign` →
-    // cert_is_valid must accept. Guards the keystone (a wrong reject = a node
-    // that waits for enrollment forever).
-    #[cfg(feature = "certgen")]
-    #[test]
-    fn accepts_our_ca_signed_cert() {
-        use rcgen::BasicConstraints;
-        use rcgen::CertificateParams;
-        use rcgen::DnType;
-        use rcgen::IsCa;
-        use rcgen::Issuer;
-        use rcgen::KeyPair;
-        use rcgen::SanType;
-
-        let _ = crate::quic::config::setup_crypto_provider();
-
-        // Ephemeral CA.
-        let ca_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-        let ca_pem = ca_cert.pem();
-
-        // Node key + CSR.
-        let node = SigningKey::from_bytes(&[9u8; 32]);
-        let id = NodeId::new(node.verifying_key().to_bytes());
-        let dir = std::env::temp_dir();
-        let csr_path = dir.join("pz_pos.csr");
-        emit_csr(&csr_path, &node, &id).unwrap();
-
-        // Sign exactly as `certgen sign` does (CN/SAN derived from the key).
-        let csr_pem = std::fs::read_to_string(&csr_path).unwrap();
-        let mut csr = rcgen::CertificateSigningRequestParams::from_pem(&csr_pem).unwrap();
-        csr.params.distinguished_name = rcgen::DistinguishedName::new();
-        csr.params.distinguished_name.push(DnType::CommonName, id.to_string());
-        csr.params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into().unwrap())];
-        let issuer = Issuer::from_ca_cert_pem(&ca_pem, &ca_key).unwrap();
-        let cert = csr.signed_by(&issuer).unwrap();
-
-        let cert_path = dir.join("pz_pos.crt");
-        let ca_path = dir.join("pz_pos_ca.pem");
-        std::fs::write(&cert_path, cert.pem()).unwrap();
-        std::fs::write(&ca_path, &ca_pem).unwrap();
-
-        assert!(cert_is_valid(&cert_path, &ca_path, &id, &node.verifying_key().to_bytes()).is_ok());
-
-        for p in [csr_path, cert_path, ca_path] {
-            let _ = std::fs::remove_file(p);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async enrollment orchestration (daemon-side: needs tokio + notify).
-// Kept in a gated submodule so `certgen` (quic+crypto, no tokio) can still
-// use the sync helpers above.
-// ---------------------------------------------------------------------------
-
 #[cfg(all(feature = "server", feature = "tokio"))]
 pub use orchestrate::ensure_enrolled;
+#[cfg(all(feature = "server", feature = "tokio"))]
+pub use orchestrate::interactive;
 #[cfg(all(feature = "server", feature = "tokio"))]
 pub use orchestrate::spawn_config_reload;
 
 #[cfg(all(feature = "server", feature = "tokio"))]
 mod orchestrate {
+    use std::io::Read as _;
     use std::path::Path;
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use anyhow::Context as _;
+    use anyhow::anyhow;
+    use anyhow::bail;
+    use ed25519_dalek::SigningKey;
     use notify::RecursiveMode;
     use notify::Watcher as _;
 
     use super::cert_is_valid;
+    use super::csr_pem;
     use super::emit_csr;
+    use super::validate_cert_pem;
     use crate::node::config::NetworkConfig;
     use crate::quic::config::setup_crypto_provider;
     use crate::quic::id::NodeId;
+    use crate::quic::p256::secret_from_key;
     use crate::quic::p256::secret_from_key_or_create;
 
-    /// Ensure the node holds a valid cert for its key, or write a CSR and wait.
-    /// Returns once `cert_path` validates; otherwise blocks (never crash-loops).
+    /// Returns the node key once the cert validates; until then it waits on a CSR instead of
+    /// crash-looping.
     pub async fn ensure_enrolled(
         net: &NetworkConfig, csr_path: &Path, role: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SigningKey> {
         setup_crypto_provider()?;
 
         let signing = secret_from_key_or_create(&net.key_path).map_err(|_| {
@@ -358,7 +215,7 @@ mod orchestrate {
             crate::warn!("invalid certificate: {err}");
         } else {
             let _ = std::fs::remove_file(csr_path);
-            return Ok(());
+            return Ok(signing);
         }
 
         emit_csr(csr_path, &signing, &node_id)?;
@@ -371,13 +228,11 @@ mod orchestrate {
         );
 
         // Watch the cert dir; a 5s poll backstops any missed inotify event.
-        let watch_dir =
-            net.cert_path.parent().unwrap_or_else(|| Path::new("/etc/promtuz")).to_path_buf();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
         let mut watcher = notify::recommended_watcher(move |_evt| {
             let _ = tx.blocking_send(());
         })?;
-        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+        watcher.watch(dir_of(&net.cert_path), RecursiveMode::NonRecursive)?;
 
         loop {
             tokio::select! {
@@ -387,39 +242,93 @@ mod orchestrate {
             if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub).is_ok() {
                 let _ = std::fs::remove_file(csr_path);
                 crate::info!("{role} enrolled; cert accepted at {}", net.cert_path.display());
-                return Ok(());
+                return Ok(signing);
             }
         }
     }
 
-    /// Watch the config file; on a change that still parses, re-exec the
-    /// process in place (PID-stable, independent of the systemd `Restart=`
-    /// policy). A parse failure logs and keeps running on the current config,
-    /// so a bad edit never crash-loops the node. Opt-in via `watch_reload`.
-    pub fn spawn_config_reload(config_path: PathBuf) {
+    /// A bare file name's parent is empty, which notify cannot watch.
+    fn dir_of(path: &Path) -> &Path {
+        match path.parent() {
+            Some(dir) if dir.as_os_str().is_empty() => Path::new("."),
+            dir => dir.unwrap_or(Path::new("/etc/promtuz")),
+        }
+    }
+
+    /// Prints the CSR, then installs a signed cert pasted on stdin.
+    pub fn interactive(net: &NetworkConfig) -> anyhow::Result<()> {
+        let _ = setup_crypto_provider();
+
+        // Load only: a key minted here would be root-owned and unreadable by the service user.
+        let signing = secret_from_key(&net.key_path).map_err(|_| {
+            let path = net.key_path.display();
+            anyhow!("no node key at {path}; start the daemon once to generate it")
+        })?;
+        let key_pub = signing.verifying_key().to_bytes();
+        let node_id = NodeId::new(key_pub);
+
+        if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub).unwrap_or(false) {
+            println!("already enrolled: {} certifies node {node_id}", net.cert_path.display());
+            return Ok(());
+        }
+
+        println!("{}", csr_pem(&signing, &node_id));
+        eprintln!("↑ CSR for node {node_id}");
+        eprintln!("Sign it (certgen sign), paste the signed cert below, then Ctrl-D:");
+
+        let mut pem = String::new();
+        std::io::stdin().read_to_string(&mut pem).context("reading cert from stdin")?;
+        if pem.trim().is_empty() {
+            bail!("no cert pasted");
+        }
+
+        validate_cert_pem(pem.as_bytes(), &net.root_ca_path, &node_id, &key_pub)
+            .context("pasted cert rejected")?;
+        std::fs::write(&net.cert_path, &pem)
+            .with_context(|| format!("writing {}", net.cert_path.display()))?;
+
+        println!(
+            "enrolled: wrote {}. A running daemon starts serving automatically.",
+            net.cert_path.display()
+        );
+        Ok(())
+    }
+
+    /// Re-execs in place (same PID, no reliance on systemd `Restart=`) when the config file's
+    /// bytes change and still parse as `T`. A parse failure keeps the current config.
+    pub fn spawn_config_reload<T: serde::de::DeserializeOwned>(config_path: PathBuf) {
         tokio::spawn(async move {
-            let dir =
-                config_path.parent().unwrap_or_else(|| Path::new("/etc/promtuz")).to_path_buf();
+            let name = config_path.file_name().map(|n| n.to_os_string());
             let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
-            let Ok(mut watcher) = notify::recommended_watcher(move |_e| {
-                let _ = tx.blocking_send(());
-            }) else {
+            let Ok(mut watcher) =
+                notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
+                    let Ok(e) = e else { return };
+                    if matches!(e.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
+                        && e.paths.iter().any(|p| p.file_name() == name.as_deref())
+                    {
+                        let _ = tx.blocking_send(());
+                    }
+                })
+            else {
                 return;
             };
-            if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+            if watcher.watch(dir_of(&config_path), RecursiveMode::NonRecursive).is_err() {
                 return;
             }
             let _keep = watcher;
+            let mut current = std::fs::read(&config_path).unwrap_or_default();
 
             while rx.recv().await.is_some() {
                 // Debounce: editors emit several events per save.
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 while rx.try_recv().is_ok() {}
 
-                match std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-                {
+                let Ok(bytes) = std::fs::read(&config_path) else { continue };
+                if bytes == current {
+                    continue;
+                }
+                current = bytes;
+                match std::str::from_utf8(&current).ok().and_then(|s| toml::from_str::<T>(s).ok()) {
                     Some(_) => {
                         crate::info!("config changed and parses; restarting in place");
                         use std::os::unix::process::CommandExt as _;

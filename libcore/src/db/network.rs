@@ -1,13 +1,10 @@
 use anyhow::Result;
 use anyhow::bail;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite_migration::M;
 use rusqlite_migration::Migrations;
 use serde::Serialize;
 
-use super::macros::PRAGMA;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,11 +63,8 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "CREATE INDEX idx_latency_samples_relay ON relay_latency_samples(relay_id, measured_at DESC);",
     ),
-    // Persist `RelayDescriptor.pubkey` (resolver-vended, authenticated
-    // via each relay's signed `RelayHello`). Unread today — nothing in libcore
-    // pins a peer cert. TODO: drop with the resolver wire field.
-    //
-    // Nullable: rows pre-dating this migration carry NULL.
+    // The resolver's `RelayDescriptor.pubkey`, NULL on older rows. Nothing pins a relay cert to
+    // it. TODO: drop it with the resolver wire field.
     M::up(
         r#"--sql
             ALTER TABLE relays ADD COLUMN pubkey BLOB
@@ -116,11 +110,8 @@ const MIGRATION_ARRAY: &[M] = &[
     // Unknown until we have connected to it once, which reads as "no".
     M::up("ALTER TABLE relays ADD COLUMN assist INTEGER NOT NULL DEFAULT 0;"),
 ];
-const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
-pub static NETWORK_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let mut conn = Connection::open(super::db("network")).expect("db open failed");
-    PRAGMA!(conn, MIGRATIONS);
-
-    Mutex::new(conn)
-});
+pub fn migrate(conn: &mut Connection) {
+    super::prepare(conn, &MIGRATIONS);
+}

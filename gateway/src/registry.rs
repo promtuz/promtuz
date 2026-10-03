@@ -1,7 +1,5 @@
 use std::path::Path;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use anyhow::bail;
@@ -9,13 +7,13 @@ use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::proto::push::PushProvider;
 use common::proto::push::RegisterToken;
+use common::utils::now_secs;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 
 const MAX_REGISTRATIONS: usize = 100_000;
 const REGISTRATION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const EVICT_BATCH: usize = MAX_REGISTRATIONS / 10;
 
 #[derive(Debug, Clone)]
 pub struct TokenEntry {
@@ -62,7 +60,7 @@ impl PushRegistry {
     }
 
     pub fn register(&self, reg: &RegisterToken) -> Result<()> {
-        self.register_at(reg, now())
+        self.register_at(reg, now_secs())
     }
 
     fn register_at(&self, reg: &RegisterToken, now: u64) -> Result<()> {
@@ -88,11 +86,7 @@ impl PushRegistry {
                 let count: usize =
                     tx.query_row("SELECT COUNT(*) FROM push_tokens", [], |r| r.get(0))?;
                 if count >= MAX_REGISTRATIONS {
-                    tx.execute(
-                        "DELETE FROM push_tokens WHERE pseudonym IN
-                         (SELECT pseudonym FROM push_tokens ORDER BY refreshed_at LIMIT ?1)",
-                        [EVICT_BATCH],
-                    )?;
+                    bail!("push registry full");
                 }
             }
         }
@@ -107,7 +101,7 @@ impl PushRegistry {
     }
 
     pub fn resolve(&self, pseudonym: &[u8; 32]) -> Result<Option<TokenEntry>> {
-        self.resolve_at(pseudonym, now())
+        self.resolve_at(pseudonym, now_secs())
     }
 
     fn resolve_at(&self, pseudonym: &[u8; 32], now: u64) -> Result<Option<TokenEntry>> {
@@ -129,7 +123,7 @@ impl PushRegistry {
     }
 
     pub fn sweep(&self) -> Result<()> {
-        self.sweep_at(now())
+        self.sweep_at(now_secs())
     }
 
     fn sweep_at(&self, now: u64) -> Result<()> {
@@ -141,75 +135,86 @@ impl PushRegistry {
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
-}
-
 #[cfg(test)]
 mod tests {
+    use common::crypto::SigningKey;
+
     use super::*;
-    use ed25519_dalek::SigningKey;
 
-    fn registration(token: &[u8]) -> RegisterToken {
-        RegisterToken::signed(&SigningKey::from_bytes(&[7; 32]), PushProvider::Fcm, token.to_vec())
+    const TTL: u64 = REGISTRATION_TTL.as_secs();
+
+    fn signed(device: u8, token: &[u8]) -> RegisterToken {
+        let key = SigningKey::from_bytes(&[device; 32]);
+        RegisterToken::signed(&key, PushProvider::Fcm, token.to_vec())
+    }
+
+    fn token(registry: &PushRegistry, reg: &RegisterToken, now: u64) -> Option<Vec<u8>> {
+        registry.resolve_at(&reg.pseudonym.0, now).unwrap().map(|entry| entry.token)
+    }
+
+    fn rows(registry: &PushRegistry) -> usize {
+        registry.db.lock().query_row("SELECT COUNT(*) FROM push_tokens", [], |r| r.get(0)).unwrap()
     }
 
     #[test]
-    fn registrations_and_token_rotation_survive_restart() {
-        let path = std::env::temp_dir().join(format!("pz-push-{}.db", rand_suffix()));
-        let first = registration(b"first");
-        {
-            let registry = PushRegistry::open(&path).unwrap();
-            registry.register(&first).unwrap();
-        }
-        {
-            let registry = PushRegistry::open(&path).unwrap();
-            assert_eq!(registry.resolve(&first.pseudonym.0).unwrap().unwrap().token, b"first");
-            registry.register(&registration(b"rotated")).unwrap();
-        }
-        {
-            let registry = PushRegistry::open(&path).unwrap();
-            assert_eq!(registry.resolve(&first.pseudonym.0).unwrap().unwrap().token, b"rotated");
-            let mut forged = registration(b"forged");
-            forged.token = b"tampered".to_vec();
-            assert!(registry.register(&forged).is_err());
-            assert_eq!(registry.resolve(&first.pseudonym.0).unwrap().unwrap().token, b"rotated");
-        }
-        std::fs::remove_file(path).unwrap();
+    fn a_registration_survives_restarts_until_its_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push.db");
+        let device = signed(1, b"first");
+        let t0 = 1_800_000_000;
+        PushRegistry::open(&path).unwrap().register_at(&device, t0).unwrap();
+
+        let registry = PushRegistry::open(&path).unwrap();
+        assert_eq!(token(&registry, &device, t0), Some(b"first".to_vec()));
+        registry.register_at(&signed(1, b"rotated"), t0 + 10).unwrap();
+        let mut forged = signed(1, b"forged");
+        forged.token = b"tampered".to_vec();
+        assert!(registry.register_at(&forged, t0 + 20).is_err());
+
+        let registry = PushRegistry::open(&path).unwrap();
+        let expiry = t0 + 10 + TTL;
+        assert_eq!(token(&registry, &device, expiry - 1), Some(b"rotated".to_vec()));
+        assert_eq!(token(&registry, &device, expiry), None);
+        registry.sweep_at(expiry - 1).unwrap();
+        assert_eq!(rows(&registry), 1);
+        registry.sweep_at(expiry).unwrap();
+        assert_eq!(rows(&registry), 0);
     }
 
     #[test]
-    fn expiry_is_preserved_across_restart() {
-        let path = std::env::temp_dir().join(format!("pz-push-{}.db", rand_suffix()));
-        let reg = registration(b"token");
-        let start = 100;
-        {
-            let registry = PushRegistry::open(&path).unwrap();
-            registry.register_at(&reg, start).unwrap();
-        }
-        {
-            let registry = PushRegistry::open(&path).unwrap();
-            let expiry = start + REGISTRATION_TTL.as_secs();
-            assert!(registry.resolve_at(&reg.pseudonym.0, expiry - 1).unwrap().is_some());
-            assert!(registry.resolve_at(&reg.pseudonym.0, expiry).unwrap().is_none());
-            registry.sweep_at(expiry).unwrap();
-            assert_eq!(
-                registry
-                    .db
-                    .lock()
-                    .query_row("SELECT COUNT(*) FROM push_tokens", [], |r| r.get::<_, usize>(0))
-                    .unwrap(),
-                0
-            );
-        }
-        std::fs::remove_file(path).unwrap();
-    }
+    fn a_full_registry_refuses_newcomers_without_evicting_live_devices() {
+        let registry =
+            PushRegistry::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let now = 1_800_000_000;
+        let device = signed(1, b"device");
+        registry.register_at(&device, now).unwrap();
+        registry
+            .db
+            .lock()
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+                 INSERT INTO push_tokens (pseudonym, registration, refreshed_at)
+                 SELECT CAST(printf('%032d', i) AS BLOB), x'00', ?2 FROM n",
+                (MAX_REGISTRATIONS - 1, now),
+            )
+            .unwrap();
 
-    fn rand_suffix() -> String {
-        format!(
-            "{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        )
+        assert!(registry.register_at(&signed(2, b"newcomer"), now).is_err());
+        assert_eq!(rows(&registry), MAX_REGISTRATIONS);
+        registry.register_at(&signed(1, b"rotated"), now + 1).unwrap();
+        assert_eq!(token(&registry, &device, now + 1), Some(b"rotated".to_vec()));
+
+        registry
+            .db
+            .lock()
+            .execute(
+                "UPDATE push_tokens SET refreshed_at = ?1
+                 WHERE pseudonym = CAST(printf('%032d', 1) AS BLOB)",
+                [now - TTL],
+            )
+            .unwrap();
+        registry.register_at(&signed(2, b"newcomer"), now).unwrap();
+        assert_eq!(rows(&registry), MAX_REGISTRATIONS);
+        assert_eq!(token(&registry, &device, now + 1), Some(b"rotated".to_vec()));
     }
 }

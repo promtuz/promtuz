@@ -1,7 +1,5 @@
-//! Negotiated attachment frames. This grammar is used only after TLS selects
-//! attachment/2 and the existing mutual identity authentication succeeds.
-//! Frame bounds are checked before allocation; optional extensions have a
-//! separate, small budget and share the enclosing progress deadline.
+//! The attachment/2 frame grammar, used only after mutual identity authentication. Frame bounds
+//! are checked before allocation; optional extensions get a separate small budget.
 
 use std::time::Duration;
 
@@ -40,9 +38,7 @@ impl Hello {
         }
     }
 
-    /// Optional capabilities do not affect this version. A peer must support
-    /// our required range grammar, and every capability it requires must be
-    /// supported both by that peer and by us.
+    /// Every required capability, ours or the peer's, must be supported by both sides.
     pub(crate) fn negotiate(self) -> Result<Limits> {
         let local = Self::local();
         if self.required & !self.supported != 0
@@ -112,9 +108,8 @@ pub(crate) enum Frame {
     PullShared { file_id: [u8; 32], grant: [u8; 32], ranges: Vec<ChunkRange> },
 }
 
-/// Constrain allocations to frames meaningful at the current protocol step.
-/// In particular, the serving side never allocates a manifest supplied where
-/// only a small Hello or request could be valid.
+/// Limits each read to the frames valid at this protocol step, so a server never allocates a
+/// manifest where only a small Hello or request is valid.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReadPhase {
     Hello,
@@ -141,8 +136,8 @@ fn invalid(message: impl Into<String>) -> anyhow::Error {
     InvalidFrame(message.into()).into()
 }
 
-/// Check the untrusted header before allocating or consuming its body. Known
-/// kinds cannot be made optional, and currently undefined flag bits are fatal.
+/// Checks the untrusted header before its body is allocated or read. Known kinds cannot be
+/// optional, and undefined flag bits are fatal.
 fn validate_header(kind: u16, flags: u8, len: usize) -> Result<()> {
     if flags & !REQUIRED != 0 {
         return Err(invalid("unknown attachment frame flags"));
@@ -408,11 +403,6 @@ impl Progress {
     }
 }
 
-#[cfg(test)]
-async fn read_frame_from<R: AsyncRead + Unpin>(r: &mut R, progress: Progress) -> Result<Frame> {
-    read_frame_with_phase_from(r, progress, None).await
-}
-
 async fn read_frame_with_phase_from<R: AsyncRead + Unpin>(
     r: &mut R, progress: Progress, phase: Option<ReadPhase>,
 ) -> Result<Frame> {
@@ -454,11 +444,6 @@ async fn write_frame_to<W: AsyncWrite + Unpin>(
     progress.write_all(w, &body).await
 }
 
-#[cfg(test)]
-pub(crate) async fn read_frame(r: &mut quinn::RecvStream) -> Result<Frame> {
-    read_frame_from(r, Progress::new(super::CHUNK_TIMEOUT, super::CHUNK_DEADLINE)).await
-}
-
 pub(crate) async fn read_frame_for(r: &mut quinn::RecvStream, phase: ReadPhase) -> Result<Frame> {
     read_frame_with_phase_from(
         r,
@@ -472,8 +457,7 @@ pub(crate) async fn write_frame(w: &mut quinn::SendStream, frame: &Frame) -> Res
     write_frame_to(w, frame, Progress::new(super::CHUNK_TIMEOUT, super::CHUNK_DEADLINE)).await
 }
 
-/// Both peers write their bounded Hello first. Callers retain the existing
-/// shorter control deadline around this exchange and must authenticate first.
+/// Callers authenticate first and keep their shorter control deadline around this exchange.
 pub(crate) async fn exchange_hello(
     s: &mut quinn::SendStream, r: &mut quinn::RecvStream,
 ) -> Result<Limits> {
@@ -487,266 +471,140 @@ pub(crate) async fn exchange_hello(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use expect_test::expect;
+
     use super::*;
 
     fn progress() -> Progress {
         Progress::new(Duration::from_secs(1), Duration::from_secs(5))
     }
 
-    fn header(kind: u16, flags: u8, len: u32) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(HEADER_LEN);
-        bytes.extend_from_slice(&kind.to_le_bytes());
-        bytes.push(flags);
-        bytes.extend_from_slice(&len.to_le_bytes());
-        bytes
-    }
-
-    fn encoded(frame: &Frame) -> Vec<u8> {
-        let (kind, body) = encode_body(frame).unwrap();
-        let mut bytes = header(kind, REQUIRED, body.len() as u32);
-        bytes.extend_from_slice(&body);
-        bytes
-    }
-
-    async fn parsed(bytes: &[u8]) -> Result<Frame> {
-        read_frame_from(&mut &bytes[..], progress()).await
-    }
-
-    fn assert_invalid<T: std::fmt::Debug>(result: Result<T>) {
-        let error = result.unwrap_err();
-        assert!(error.is::<InvalidFrame>(), "expected terminal protocol error, got {error:?}");
-    }
-
-    fn manifest(chunks: usize) -> Manifest {
-        Manifest { total_size: chunks as u64, chunk_size: 1, chunks: vec![[0x71; 32]; chunks] }
+    fn ranges(spans: &[(u32, u32)]) -> Vec<ChunkRange> {
+        spans.iter().map(|&(start, end)| ChunkRange { start, end }).collect()
     }
 
     #[tokio::test]
-    async fn grammar_is_fixed_little_endian_and_preserves_manifest_commitment() {
-        let hello = Frame::Hello(Hello::local());
-        let bytes = encoded(&hello);
-        assert_eq!(&bytes[..HEADER_LEN], &[1, 0, 1, 20, 0, 0, 0]);
-        assert_eq!(
-            &bytes[HEADER_LEN..],
-            &[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 64, 0]
-        );
-        assert_eq!(parsed(&bytes).await.unwrap(), hello);
-        let manifest = Manifest {
-            total_size: CHUNK_SIZE as u64 + 7,
-            chunk_size: CHUNK_SIZE as u32,
-            chunks: vec![[0x61; 32], [0x62; 32]],
-        };
+    async fn every_frame_round_trips_and_keeps_its_wire_bytes() {
+        let manifest =
+            Manifest { total_size: 9, chunk_size: 8, chunks: vec![[0x61; 32], [0x62; 32]] };
         let frames = [
-            Frame::Describe { file_id: manifest.file_id() },
-            Frame::DescribeShared { file_id: manifest.file_id(), grant: [7; 32] },
-            Frame::PullShared { file_id: manifest.file_id(), grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 2 }] },
+            Frame::Hello(Hello::local()),
+            Frame::Describe { file_id: [1; 32] },
+            Frame::DescribeShared { file_id: [1; 32], grant: [7; 32] },
             Frame::Manifest(manifest.clone()),
             Frame::Manifest(Manifest {
                 total_size: 0,
                 chunk_size: CHUNK_SIZE as u32,
-                chunks: vec![],
+                chunks:     vec![],
             }),
-            Frame::Pull {
-                file_id: manifest.file_id(),
-                ranges: vec![ChunkRange { start: 0, end: 2 }],
-            },
-            Frame::Chunk { index: 0x12345678, bytes: vec![9; CHUNK_SIZE] },
+            Frame::Pull { file_id: [1; 32], ranges: ranges(&[(0, 2), (5, 7)]) },
+            Frame::PullShared { file_id: [1; 32], grant: [7; 32], ranges: ranges(&[(3, 4)]) },
+            Frame::Chunk { index: 0x12345678, bytes: vec![9, 8, 7] },
             Frame::Complete { chunks_sent: 0x12345678 },
-        ];
-        for frame in frames {
-            let got = parsed(&encoded(&frame)).await.unwrap();
-            assert_eq!(got, frame);
-            if let Frame::Manifest(decoded) = got {
-                if decoded.total_size != 0 {
-                    assert_eq!(decoded.file_id(), manifest.file_id());
-                }
-            }
-        }
-        let complete = encoded(&Frame::Complete { chunks_sent: 0x12345678 });
-        assert_eq!(&complete[HEADER_LEN..], &[0x78, 0x56, 0x34, 0x12]);
-    }
-
-    #[tokio::test]
-    async fn hostile_headers_fail_without_consuming_or_allocating_the_body() {
-        for kind in 1..=9 {
-            assert_invalid(parsed(&header(kind, REQUIRED, u32::MAX)).await);
-            assert_invalid(parsed(&header(kind, 0, 20)).await);
-        }
-        assert_invalid(parsed(&header(0xff01, REQUIRED, 0)).await);
-        assert_invalid(parsed(&header(0xff01, 0, (MAX_OPTIONAL_BODY + 1) as u32)).await);
-        for flags in [2, 3, 128, 255] {
-            assert_invalid(parsed(&header(1, flags, 20)).await);
-            assert_invalid(parsed(&header(0xff01, flags, 0)).await);
-        }
-        // For fixed-width frames, even one trailing byte is not an extension.
-        for (kind, exact) in [(1, 20), (2, 32), (6, 4), (7, 2)] {
-            assert_invalid(parsed(&header(kind, REQUIRED, exact + 1)).await);
-            assert_invalid(parsed(&header(kind, REQUIRED, exact - 1)).await);
-        }
-        assert_invalid(parsed(&header(3, REQUIRED, (MAX_MANIFEST + 16) as u32)).await);
-        assert_invalid(parsed(&header(3, REQUIRED, 17)).await);
-        assert_invalid(parsed(&header(4, REQUIRED, 34)).await);
-        assert_invalid(parsed(&header(4, REQUIRED, 43)).await);
-        assert_invalid(parsed(&header(5, REQUIRED, 3)).await);
-        assert_invalid(parsed(&header(5, REQUIRED, (CHUNK_SIZE + 5) as u32)).await);
-    }
-
-    #[tokio::test]
-    async fn phase_rejects_large_unexpected_manifest_before_reading_its_body() {
-        struct HeaderOnly([u8; HEADER_LEN], bool);
-        impl AsyncRead for HeaderOnly {
-            fn poll_read(
-                mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>,
-                buf: &mut tokio::io::ReadBuf<'_>,
-            ) -> std::task::Poll<std::io::Result<()>> {
-                assert!(!self.1, "phase mismatch must fail before requesting the frame body");
-                assert!(buf.remaining() >= HEADER_LEN);
-                buf.put_slice(&self.0);
-                self.1 = true;
-                std::task::Poll::Ready(Ok(()))
-            }
-        }
-        // The length is valid for a Manifest, so global frame limits alone
-        // would allocate several MiB and attempt to consume its body.
-        let manifest_header: [u8; HEADER_LEN] =
-            header(3, REQUIRED, 16 + 32 * 100_000).try_into().unwrap();
-        for phase in [ReadPhase::Hello, ReadPhase::Request, ReadPhase::Chunk, ReadPhase::Complete] {
-            let mut source = HeaderOnly(manifest_header, false);
-            let error =
-                read_frame_with_phase_from(&mut source, progress(), Some(phase)).await.unwrap_err();
-            assert!(error.is::<InvalidFrame>());
-            assert!(error.to_string().contains("current phase"));
-        }
-    }
-
-    #[tokio::test]
-    async fn phase_accepts_its_frames_errors_and_bounded_optional_extensions() {
-        let frames = [
-            (ReadPhase::Hello, Frame::Hello(Hello::local())),
-            (ReadPhase::Request, Frame::Describe { file_id: [1; 32] }),
-            (
-                ReadPhase::Request,
-                Frame::Pull { file_id: [1; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
-            ),
-            (ReadPhase::Request, Frame::DescribeShared { file_id: [1; 32], grant: [7; 32] }),
-            (ReadPhase::Request, Frame::PullShared { file_id: [1; 32], grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] }),
-            (ReadPhase::Manifest, Frame::Manifest(manifest(1))),
-            (ReadPhase::Chunk, Frame::Chunk { index: 0, bytes: vec![1] }),
-            (ReadPhase::Complete, Frame::Complete { chunks_sent: 1 }),
-        ];
-        for (phase, expected) in frames {
-            let mut bytes = header(0xff01, 0, 1);
-            bytes.push(0xab);
-            bytes.extend_from_slice(&encoded(&expected));
-            assert_eq!(
-                read_frame_with_phase_from(&mut &bytes[..], progress(), Some(phase)).await.unwrap(),
-                expected
-            );
-            let bytes = encoded(&Frame::Error(ErrorCode::Unavailable));
-            assert_eq!(
-                read_frame_with_phase_from(&mut &bytes[..], progress(), Some(phase)).await.unwrap(),
-                Frame::Error(ErrorCode::Unavailable)
-            );
-        }
-
-        let mut bytes = Vec::new();
-        for _ in 0..=MAX_OPTIONAL_FRAMES {
-            bytes.extend_from_slice(&header(0xff01, 0, 0));
-        }
-        bytes.extend_from_slice(&encoded(&Frame::Hello(Hello::local())));
-        assert_invalid(
-            read_frame_with_phase_from(&mut &bytes[..], progress(), Some(ReadPhase::Hello)).await,
-        );
-    }
-
-    #[tokio::test]
-    async fn optional_extensions_have_a_per_known_frame_count_and_byte_budget() {
-        let hello = encoded(&Frame::Hello(Hello::local()));
-        let mut bytes = Vec::new();
-        for _ in 0..MAX_OPTIONAL_FRAMES {
-            bytes.extend_from_slice(&header(0x0100, 0, MAX_OPTIONAL_BODY as u32));
-            bytes.extend_from_slice(&[0xab; MAX_OPTIONAL_BODY]);
-        }
-        bytes.extend_from_slice(&hello);
-        // Each later known frame gets its own extension budget.
-        let mut two_frames = bytes.clone();
-        two_frames.extend_from_slice(&bytes);
-        let mut input = &two_frames[..];
-        assert_eq!(
-            read_frame_from(&mut input, progress()).await.unwrap(),
-            Frame::Hello(Hello::local())
-        );
-        assert_eq!(
-            read_frame_from(&mut input, progress()).await.unwrap(),
-            Frame::Hello(Hello::local())
-        );
-        assert!(input.is_empty());
-
-        bytes.truncate(bytes.len() - hello.len());
-        bytes.extend_from_slice(&header(0x0100, 0, 0));
-        bytes.extend_from_slice(&hello);
-        assert_invalid(parsed(&bytes).await);
-        let zero_length = [header(0x0100, 0, 0), hello].concat();
-        assert_eq!(parsed(&zero_length).await.unwrap(), Frame::Hello(Hello::local()));
-    }
-
-    #[tokio::test]
-    async fn clean_eof_in_any_header_or_body_is_a_terminal_protocol_error() {
-        for frame in [
-            Frame::Hello(Hello::local()),
-            Frame::Manifest(manifest(2)),
-            Frame::Pull { file_id: [1; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
-            Frame::DescribeShared { file_id: [1; 32], grant: [7; 32] },
-            Frame::PullShared { file_id: [1; 32], grant: [7; 32], ranges: vec![ChunkRange { start: 0, end: 1 }] },
-            Frame::Chunk { index: 0, bytes: vec![4; 16] },
-            Frame::Complete { chunks_sent: 0 },
             Frame::Error(ErrorCode::Unavailable),
-        ] {
-            let bytes = encoded(&frame);
-            for truncated in 0..bytes.len() {
-                assert_invalid(parsed(&bytes[..truncated]).await);
-            }
+            Frame::Error(ErrorCode::InvalidRequest),
+            Frame::Error(ErrorCode::Unsupported),
+            Frame::Error(ErrorCode::Busy),
+            Frame::Error(ErrorCode::Storage),
+        ];
+        let (mut tx, mut rx) = tokio::io::duplex(1024);
+        let mut wire = String::new();
+        for frame in &frames {
+            let mut bytes = Vec::new();
+            write_frame_to(&mut bytes, frame, progress()).await.unwrap();
+            writeln!(wire, "{}", hex::encode(&bytes)).unwrap();
+            write_frame_to(&mut tx, frame, progress()).await.unwrap();
+            assert_eq!(
+                &read_frame_with_phase_from(&mut rx, progress(), None).await.unwrap(),
+                frame
+            );
         }
-        // An optional extension is not a substitute for the expected frame.
-        assert_invalid(parsed(&header(999, 0, 0)).await);
-        let mut optional = header(999, 0, 10);
-        optional.extend_from_slice(&[0; 9]);
-        assert_invalid(parsed(&optional).await);
+        expect![[r#"
+            010001140000000300000000000000010000000000000010004000
+            020001200000000101010101010101010101010101010101010101010101010101010101010101
+            0800014000000001010101010101010101010101010101010101010101010101010101010101010707070707070707070707070707070707070707070707070707070707070707
+            030001500000000900000000000000080000000200000061616161616161616161616161616161616161616161616161616161616161616262626262626262626262626262626262626262626262626262626262626262
+            0300011000000000000000000000000000040000000000
+            040001320000000101010101010101010101010101010101010101010101010101010101010101020000000000020000000500000007000000
+            0900014a0000000101010101010101010101010101010101010101010101010101010101010101070707070707070707070707070707070707070707070707070707070707070701000300000004000000
+            0500010700000078563412090807
+            0600010400000078563412
+            070001020000000100
+            070001020000000200
+            070001020000000300
+            070001020000000400
+            070001020000000500
+        "#]].assert_eq(&wire);
+        for code in [0u16, 6, u16::MAX] {
+            assert!(
+                decode_body(7, &code.to_le_bytes()).unwrap_err().is::<InvalidFrame>(),
+                "{code}"
+            );
+        }
     }
 
-    #[test]
-    fn manifest_counts_and_sizes_are_checked_before_hash_list_construction() {
-        let (_, valid) = encode_body(&Frame::Manifest(manifest(1))).unwrap();
-        for count in [0, 2, u32::MAX] {
-            let mut body = valid.clone();
-            body[12..16].copy_from_slice(&count.to_le_bytes());
-            assert_invalid(decode_body(3, &body));
+    /// A body source that fails the test if anything reads it.
+    struct Unread;
+
+    impl AsyncRead for Unread {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("the body was read")))
         }
-        for chunk_size in [0, CHUNK_SIZE as u32 + 1, u32::MAX] {
-            let mut body = valid.clone();
-            body[8..12].copy_from_slice(&chunk_size.to_le_bytes());
-            assert_invalid(decode_body(3, &body));
+    }
+
+    #[tokio::test]
+    async fn hostile_headers_fail_before_their_body_is_read() {
+        let mut rows: Vec<(u16, u8, usize, Option<ReadPhase>)> = Vec::new();
+        for kind in 1..=9 {
+            rows.push((kind, REQUIRED, u32::MAX as usize, None));
+            rows.push((kind, 0, 20, None));
         }
-        for total_size in [0u64, 2, u64::MAX] {
-            let mut body = valid.clone();
-            body[..8].copy_from_slice(&total_size.to_le_bytes());
-            assert_invalid(decode_body(3, &body));
+        for flags in [2, 3, 128, 255] {
+            rows.extend([(1, flags, 20, None), (0xff01, flags, 0, None)]);
         }
-        let too_many = MAX_MANIFEST / 32;
-        assert_invalid(encode_body(&Frame::Manifest(manifest(too_many))));
-        assert_invalid(encode_body(&Frame::Chunk { index: 0, bytes: vec![0; CHUNK_SIZE + 1] }));
+        for (kind, exact) in [(1, 20), (2, 32), (6, 4), (7, 2), (8, 64)] {
+            rows.extend([(kind, REQUIRED, exact + 1, None), (kind, REQUIRED, exact - 1, None)]);
+        }
+        rows.extend([
+            (0xff01, REQUIRED, 0, None),
+            (0xff01, 0, MAX_OPTIONAL_BODY + 1, None),
+            (3, REQUIRED, MAX_MANIFEST + 16, None),
+            (3, REQUIRED, 17, None),
+            (4, REQUIRED, 34, None),
+            (4, REQUIRED, 43, None),
+            (5, REQUIRED, 3, None),
+            (5, REQUIRED, CHUNK_SIZE + 5, None),
+        ]);
+        for phase in [ReadPhase::Hello, ReadPhase::Request, ReadPhase::Chunk, ReadPhase::Complete] {
+            rows.push((3, REQUIRED, 16 + 32 * 100_000, Some(phase)));
+        }
+        for (kind, flags, len, phase) in rows {
+            let mut header = kind.to_le_bytes().to_vec();
+            header.push(flags);
+            header.extend((len as u32).to_le_bytes());
+            let mut source = tokio::io::AsyncReadExt::chain(&header[..], Unread);
+            let error =
+                read_frame_with_phase_from(&mut source, progress(), phase).await.unwrap_err();
+            assert!(error.is::<InvalidFrame>(), "{kind} {flags} {len} {phase:?}: {error}");
+        }
     }
 
     #[test]
     fn capabilities_negotiate_minima_without_downgrading_required_features() {
-        assert!(!Hello { supported: 1, required: 1, ..Hello::local() }.negotiate().unwrap().sharing,
-            "old v2 remains range-only");
+        let old = Hello { supported: 1, required: 1, ..Hello::local() };
+        assert!(!old.negotiate().unwrap().sharing, "an older v2 peer stays range-only");
         assert!(Hello { supported: 3, required: 3, ..Hello::local() }.negotiate().unwrap().sharing);
         let mut peer = Hello::local();
         peer.supported |= 1 << 63;
         peer.max_ranges = 3;
         peer.max_chunks = 9;
-        assert_eq!(peer.negotiate().unwrap(), Limits { sharing: true, max_ranges: 3, max_chunks: 9 });
+        let limits = Limits { sharing: true, max_ranges: 3, max_chunks: 9 };
+        assert_eq!(peer.negotiate().unwrap(), limits, "unknown bits are ignored and minima win");
         peer.required = 0;
         peer.max_ranges = u16::MAX;
         peer.max_chunks = u16::MAX;
@@ -759,151 +617,7 @@ mod tests {
             Hello { max_ranges: 0, ..Hello::local() },
             Hello { max_chunks: 0, ..Hello::local() },
         ] {
-            assert_invalid(peer.negotiate());
+            assert!(peer.negotiate().unwrap_err().is::<InvalidFrame>(), "{peer:?}");
         }
-    }
-
-    #[test]
-    fn ranges_reject_overlap_overflow_unsorted_and_negotiated_limit_violations() {
-        let mf = manifest(100);
-        let valid = [ChunkRange { start: 1, end: 3 }, ChunkRange { start: 5, end: 8 }];
-        assert_eq!(validate_ranges(&valid, &mf, max_limits()).unwrap(), 5);
-        let adjacent = [ChunkRange { start: 0, end: 1 }, ChunkRange { start: 1, end: 2 }];
-        assert_eq!(validate_ranges(&adjacent, &mf, max_limits()).unwrap(), 2);
-        let invalid_ranges = [
-            vec![],
-            vec![ChunkRange { start: 1, end: 1 }],
-            vec![ChunkRange { start: 2, end: 1 }],
-            vec![ChunkRange { start: 1, end: 4 }, ChunkRange { start: 3, end: 5 }],
-            vec![ChunkRange { start: 4, end: 5 }, ChunkRange { start: 0, end: 1 }],
-            vec![ChunkRange { start: 0, end: 65 }],
-            vec![ChunkRange { start: 0, end: u32::MAX }],
-            vec![
-                ChunkRange { start: 0, end: u32::MAX / 2 },
-                ChunkRange { start: u32::MAX / 2, end: u32::MAX },
-            ],
-            (0..17).map(|i| ChunkRange { start: i, end: i + 1 }).collect(),
-        ];
-        for ranges in invalid_ranges {
-            assert_invalid(validate_ranges(&ranges, &mf, max_limits()));
-        }
-        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 1, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 16, max_chunks: 4 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 0, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 17, max_chunks: 64 }));
-        assert_invalid(validate_ranges(&valid, &mf, Limits { sharing: false, max_ranges: 16, max_chunks: 65 }));
-        assert_invalid(validate_ranges(&[ChunkRange { start: 99, end: 101 }], &mf, max_limits()));
-        assert_invalid(validate_ranges(
-            &[ChunkRange { start: 0, end: 1 }],
-            &manifest(0),
-            max_limits(),
-        ));
-        let (_, mut body) =
-            encode_body(&Frame::Pull { file_id: [0; 32], ranges: valid.to_vec() }).unwrap();
-        body[32..34].copy_from_slice(&u16::MAX.to_le_bytes());
-        assert_invalid(decode_body(4, &body));
-    }
-
-    #[tokio::test]
-    async fn remote_errors_remain_typed_and_unknown_codes_are_protocol_errors() {
-        for code in [
-            ErrorCode::Unavailable,
-            ErrorCode::InvalidRequest,
-            ErrorCode::Unsupported,
-            ErrorCode::Busy,
-            ErrorCode::Storage,
-        ] {
-            assert_eq!(parsed(&encoded(&Frame::Error(code))).await.unwrap(), Frame::Error(code));
-            let error: anyhow::Error = code.into();
-            assert_eq!(error.downcast_ref::<ErrorCode>(), Some(&code));
-        }
-        for code in [0u16, 6, u16::MAX] {
-            assert_invalid(decode_body(7, &code.to_le_bytes()));
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_resets_idle_timeout_but_not_total_deadline() {
-        let bytes = encoded(&Frame::Chunk { index: 0, bytes: vec![5; 100] });
-        let (mut sender, mut receiver) = tokio::io::duplex(1024);
-        let writer = tokio::spawn(async move {
-            for part in bytes.chunks(20) {
-                sender.write_all(part).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        });
-        let started = Instant::now();
-        let got = read_frame_from(
-            &mut receiver,
-            Progress::new(Duration::from_millis(10), Duration::from_millis(100)),
-        )
-        .await
-        .unwrap();
-        assert!(started.elapsed() > Duration::from_millis(10));
-        assert_eq!(got, Frame::Chunk { index: 0, bytes: vec![5; 100] });
-        writer.await.unwrap();
-
-        // Every optional extension advances bytes often enough for the idle
-        // budget, but cannot keep the same frame read alive past its total.
-        let (mut sender, mut receiver) = tokio::io::duplex(1024);
-        let writer = tokio::spawn(async move {
-            for _ in 0..MAX_OPTIONAL_FRAMES {
-                if sender.write_all(&header(999, 0, 0)).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        });
-        let started = Instant::now();
-        let error = read_frame_from(
-            &mut receiver,
-            Progress::new(Duration::from_millis(10), Duration::from_millis(22)),
-        )
-        .await
-        .unwrap_err();
-        assert!(!error.is::<InvalidFrame>(), "deadline is a recoverable transport failure");
-        assert_eq!(started.elapsed(), Duration::from_millis(22));
-        writer.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn idle_stalls_and_transport_resets_remain_transport_failures() {
-        let (_sender, mut receiver) = tokio::io::duplex(64);
-        let started = Instant::now();
-        let error = read_frame_from(
-            &mut receiver,
-            Progress::new(Duration::from_millis(7), Duration::from_millis(30)),
-        )
-        .await
-        .unwrap_err();
-        assert!(!error.is::<InvalidFrame>());
-        assert_eq!(started.elapsed(), Duration::from_millis(7));
-
-        struct Reset;
-        impl AsyncRead for Reset {
-            fn poll_read(
-                self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>,
-                _buf: &mut tokio::io::ReadBuf<'_>,
-            ) -> std::task::Poll<std::io::Result<()>> {
-                std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
-            }
-        }
-        let error = read_frame_from(&mut Reset, progress()).await.unwrap_err();
-        assert!(!error.is::<InvalidFrame>());
-        assert_eq!(
-            error.downcast_ref::<std::io::Error>().unwrap().kind(),
-            std::io::ErrorKind::ConnectionReset
-        );
-
-        // A blocked writer uses the same finite idle budget.
-        let (mut sender, _receiver) = tokio::io::duplex(1);
-        let error = write_frame_to(
-            &mut sender,
-            &Frame::Hello(Hello::local()),
-            Progress::new(Duration::from_millis(7), Duration::from_millis(30)),
-        )
-        .await
-        .unwrap_err();
-        assert!(!error.is::<InvalidFrame>());
     }
 }

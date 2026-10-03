@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use anyhow::anyhow;
 use common::PROTOCOL_VERSION;
 use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
@@ -9,34 +8,27 @@ use common::proto::client_res::RelayDescriptor;
 use common::proto::pack::Packer;
 use common::proto::pack::UnpackError;
 use common::proto::pack::Unpacker;
+use common::utils::now_ms;
 use log::info;
-use quinn::Connection;
+use rusqlite::Connection;
 use rusqlite::params;
-use serde::Serialize;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 use crate::data::ResolverSeed;
-use crate::db::network::CircuitState;
-use crate::db::network::NETWORK_DB;
+use crate::db::all;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::quic::dialer::DialerError;
 use crate::quic::dialer::connect_to_any_seed;
 use crate::quic::dialer::quinn_err;
-use crate::utils::systime;
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===:  CONST  :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
+use crate::state::core;
 
 const FAILURE_THRESHOLD: u32 = 3;
 const BACKOFF_BASE_MS: u64 = 5_000;
 const BACKOFF_MAX_MS: u64 = 30 * 60 * 1_000;
-/// Cert/auth failures sideline a relay for this long. Shorter than
-/// [`BACKOFF_MAX_MS`] because the cause is as likely to be something on the
-/// path answering for the relay as the relay's own cert, and a re-resolve to a
-/// new address clears it outright ([`Relay::refresh`]).
+/// Shorter than [`BACKOFF_MAX_MS`]: the fault may be on the path rather than the relay's cert, and
+/// a re-resolve to a new address clears it.
 const BACKOFF_TERMINAL_MS: u64 = 2 * 60 * 1_000;
 const WINDOW_DURATION_MS: u64 = 10 * 60 * 1_000;
 const LATENCY_SAMPLE_LIMIT: i64 = 50;
@@ -45,9 +37,8 @@ const SCORE_WEIGHT_LATENCY: f64 = 0.4;
 const EXPLORE_PROBABILITY: f64 = 0.2;
 const TOP_N: usize = 3;
 
-/// Resolver upsert behind [`Relay::refresh`]. The `CASE` arms read the stored
-/// row (SQL evaluates every assignment's right side against the pre-update
-/// values), so a relay that moved starts from a clean circuit.
+/// The `CASE` arms read the pre-update values, so a relay whose address changed starts from a clean
+/// circuit: its failures were recorded against the old address.
 const REFRESH_UPSERT: &str = "\
     INSERT INTO relays (id, host, port, last_seen, protocol_version, window_start, pubkey)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -64,64 +55,16 @@ const REFRESH_UPSERT: &str = "\
       protocol_version     = excluded.protocol_version,
       pubkey               = excluded.pubkey";
 
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===: STRUCTS :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-
-/// Shareable statistical data
-#[derive(Debug, Serialize)]
-pub struct RelayInfo {
-    pub id:                   String,
-    pub host:                 String,
-    pub port:                 u16,
-    pub circuit_state:        CircuitState,
-    pub consecutive_failures: u32,
-    pub window_attempts:      u32,
-    pub window_successes:     u32,
-    pub last_latency:         Option<u64>,
-    pub last_seen:            u64,
-    pub last_connect:         Option<u64>,
-}
-
-/// Relay instance
+/// A relay row. The live connection to it is a [`crate::quic::server::Session`].
 #[derive(Clone)]
 pub struct Relay {
-    pub id:         Arc<str>,
-    pub host:       Arc<str>,
-    pub port:       u16,
-    /// Contains quinn connection IF connected
-    pub connection: Option<Connection>,
-    /// Production [`RelayDhtClient`] dialer riding this relay's
-    /// `relay/5` connection. Built once per `connect()` after the
-    /// handshake succeeds; lives for the connection's lifetime. `None` if
-    /// the connection isn't established — callers in
-    /// `api::messaging::sendMessage` surface a clean error rather than
-    /// silently no-oping.
-    ///
-    /// [`RelayDhtClient`]: crate::quic::relay_dht_client::RelayDhtClient
-    pub dht_client: Option<Arc<crate::quic::relay_dht_client::RelayDhtClient>>,
-    /// Relay's NodeKey pubkey as vended by the resolver in
-    /// `RelayDescriptor.pubkey`. Persisted on `Relay::refresh`. Unread —
-    /// nothing in libcore pins a peer cert. TODO: drop with the DB column and
-    /// the resolver wire field.
-    pub pubkey:     Option<[u8; 32]>,
-    /// The home relay's DHT NodeId, learned from the
-    /// `ServerHandshakeResultP::Accept` reply. Connection-scoped (set in
-    /// `connect()` after handshake, `None` on DB-loaded rows). The
-    /// `RelayDhtClient` binds it as `requester_relay_id` when signing
-    /// the welcome fetch/ack wrappers. `None` when the home has DHT
-    /// disabled — those wrappers can't be signed and the home would
-    /// reply `DhtUnavailable` regardless.
-    pub home_node_id: Option<[u8; 32]>,
-    /// Whether this relay bridges hole-punch assist on its QUIC port. Learned
-    /// from its handshake `Accept` and kept on the row, so a P2P session can
-    /// pick a relay that will actually answer, connected to it or not.
+    pub id:     Arc<str>,
+    pub host:   Arc<str>,
+    pub port:   u16,
+    /// Unread: nothing pins a relay cert. TODO: drop it with the DB column and the resolver field.
+    pub pubkey: Option<[u8; 32]>,
+    /// Kept on the row, so a P2P session can pick an assist bridge it is not connected to.
     pub assist: bool,
-    /// UDP port of this relay's call TURN server, from its handshake
-    /// `Accept`. Connection-scoped: a call asks the relay it is connected to.
-    pub turn_port: Option<u16>,
 }
 
 impl std::fmt::Debug for Relay {
@@ -130,19 +73,10 @@ impl std::fmt::Debug for Relay {
             .field("id", &self.id)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("connection", &self.connection)
-            .field("dht_client", &self.dht_client.as_ref().map(|_| "<RelayDhtClient>"))
             .field("pubkey", &self.pubkey.as_ref().map(|pk| hex::encode(&pk[..4])))
-            .field("home_node_id", &self.home_node_id.as_ref().map(|id| hex::encode(&id[..4])))
             .finish()
     }
 }
-
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===:  ERROR  :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
 
 #[derive(Error, Debug)]
 pub enum RelayError {
@@ -168,110 +102,27 @@ pub enum ResolveError {
     RelayError(#[from] RelayError),
 }
 
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===:  IMPLE  :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-
-/// # Working Model
-///
-/// ## Score model
-///
-/// Instead of a linear count, each relay should have a composite score built from weighted factors.
-/// Something like:
-///
-/// - Latency (measured, not assumed) - lower is better, normalized against the known range
-/// - Success rate - successes / total attempts over a rolling window, not a lifetime counter
-/// - Consecutive failures - separate from success rate, used for circuit breaking
-/// - Last seen - how recently did it work at all
-///
-/// Weight them however the use case demands. If it's latency-sensitive, weight that heavily. If
-/// reliability matters more, weight success rate.
-///
-/// ## Rolling window, not lifetime
-///
-/// A relay that was bad 3 months ago and great for the last week should rank well.
-/// Use a time-windowed sliding window (e.g. last N attempts or last T seconds).
-/// Forget ancient history.
-///
-/// ## Circuit breaker pattern
-/// This is the key thing it's missing. A relay shouldn't just "lose points" on failure - it
-/// should be removed from consideration temporarily. The states are:
-///
-/// - Closed (healthy, use it)
-/// - Open (failed too many times recently, don't even try, back off)
-/// - Half-open (backoff expired, send one probe request to test it)
-///
-/// The backoff when open should be exponential - first failure: wait 5s, then 30s, then 2min, etc.,
-/// capped at something like 30min. This prevents hammering dead relays.
-///
-/// ## Selection strategy
-///
-/// Don't always pick the top-scored relay. That causes all traffic to pile onto one relay and you
-/// never discover if lower-ranked ones have improved. Use a weighted random selection - higher
-/// score = higher probability, but not guaranteed. Or split it: 80% go to top-3 by score, 20% are
-/// exploratory probes to re-evaluate others.
-///
-/// ## What to Track (Relay)
-///
-/// - url / address
-/// - current circuit state (closed / open / half-open)
-/// - backoff_until: timestamp
-/// - latency_samples: rolling buffer of last N latency values
-/// - attempts: count in current window
-/// - successes: count in current window
-/// - consecutive_failures: reset on any success
-/// - last_success: timestamp
-/// - last_attempt: timestamp
-///
-/// ## Flow on connection attempt
-///
-/// 1. Filter out relays where circuit is open and backoff_until is in the future
-/// 2. Promote open relays to half-open if their backoff has expired
-/// 3. Score remaining relays, select by weighted random
-/// 4. Attempt connection, measure latency
-/// 5. On success: record latency, increment success, reset consecutive failures, set circuit to
-///    closed
-/// 6. On failure: increment consecutive failures, if threshold exceeded open the circuit and set
-///    exponential backoff
 impl Relay {
-    pub fn info(&self) -> Result<RelayInfo> {
-        let conn = NETWORK_DB.lock();
-
-        conn.query_row("SELECT * FROM relays WHERE id = ?1", params![self.id.as_ref()], |row| {
-            Ok(RelayInfo {
-                id:                   row.get("id")?,
-                host:                 row.get("host")?,
-                port:                 row.get::<_, i64>("port")? as u16,
-                circuit_state:        {
-                    let s: String = row.get("circuit_state")?;
-                    CircuitState::try_from(s)
-                        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?
-                },
-                consecutive_failures: row.get::<_, i64>("consecutive_failures")? as u32,
-                window_attempts:      row.get::<_, i64>("window_attempts")? as u32,
-                window_successes:     row.get::<_, i64>("window_successes")? as u32,
-                last_latency:         row.get::<_, Option<i64>>("last_latency")?.map(|v| v as u64),
-                last_seen:            row.get::<_, i64>("last_seen")? as u64,
-                last_connect:         row.get::<_, Option<i64>>("last_connect")?.map(|v| v as u64),
-            })
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id:     row.get("id")?,
+            host:   row.get("host")?,
+            port:   row.get("port")?,
+            pubkey: row.get("pubkey")?,
+            assist: row.get("assist")?,
         })
-        .map_err(|e| anyhow!(e))
     }
 
-    /// Selects a relay via weighted random selection.
-    ///
-    /// Eligible: closed, half_open, or open with expired backoff (promoted to half_open).
-    /// Score: weighted composite of success rate and normalized latency.
-    /// Selection: 80% weighted random from top-3, 20% uniform exploratory from the rest.
     pub fn fetch_best() -> Result<Self, RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as i64;
+        Self::fetch_best_tx(&core().db.network().lock())
+    }
 
-        conn.execute("BEGIN", [])?;
+    pub(crate) fn fetch_best_tx(conn: &Connection) -> Result<Self, RelayError> {
+        let now = now_ms() as i64;
 
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
             "UPDATE relays SET circuit_state = 'half_open'
              WHERE circuit_state = 'open'
                AND backoff_until IS NOT NULL
@@ -280,62 +131,33 @@ impl Relay {
         )?;
 
         struct Candidate {
-            id:           String,
-            host:         String,
-            port:         u16,
+            relay:        Relay,
             latency:      Option<i64>,
             success_rate: f64,
-            pubkey:       Option<[u8; 32]>,
-            assist:       bool,
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT id, host, port,
-                    last_latency,
-                    CAST(window_successes AS REAL) / MAX(window_attempts, 1) AS success_rate,
-                    pubkey,
-                    MIN(last_latency) OVER () AS min_lat,
-                    MAX(last_latency) OVER () AS max_lat,
-                    assist
+        let rows: Vec<Candidate> = all(
+            &tx,
+            "SELECT *, CAST(window_successes AS REAL) / MAX(window_attempts, 1) AS success_rate
              FROM relays
              WHERE protocol_version = ?1
                AND circuit_state IN ('closed', 'half_open')",
+            params![PROTOCOL_VERSION],
+            |row| {
+                Ok(Candidate {
+                    relay:        Self::from_row(row)?,
+                    latency:      row.get("last_latency")?,
+                    success_rate: row.get("success_rate")?,
+                })
+            },
         )?;
 
-        let rows: Vec<Candidate> = stmt
-            .query_map(params![PROTOCOL_VERSION], |row| {
-                let latency: Option<i64> = row.get(3)?;
-                let success_rate: f64 = row.get(4)?;
-                let pubkey_bytes: Option<Vec<u8>> = row.get(5)?;
-                let pubkey = pubkey_bytes.and_then(|v| {
-                    if v.len() == 32 {
-                        let mut a = [0u8; 32];
-                        a.copy_from_slice(&v);
-                        Some(a)
-                    } else {
-                        None
-                    }
-                });
-
-                Ok(Candidate {
-                    id: row.get(0)?,
-                    host: row.get(1)?,
-                    port: row.get::<_, i64>(2)? as u16,
-                    latency,
-                    success_rate,
-                    pubkey,
-                    assist: row.get::<_, i64>(8)? != 0,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-
-        conn.execute("COMMIT", [])?;
+        tx.commit()?;
 
         if rows.is_empty() {
             return Err(RelayError::NoneAvailable);
         }
 
-        // Compute composite score for each candidate
         let mut scored: Vec<(f64, &Candidate)> = {
             let min_lat = rows.iter().filter_map(|c| c.latency).min().unwrap_or(0);
             let max_lat = rows.iter().filter_map(|c| c.latency).max().unwrap_or(0);
@@ -357,12 +179,10 @@ impl Relay {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let chosen = if scored.len() > TOP_N && rand::random::<f64>() < EXPLORE_PROBABILITY {
-            // Exploratory: uniform random from outside top-N
             let tail = &scored[TOP_N..];
             let idx = (rand::random::<f64>() * tail.len() as f64) as usize;
             tail[idx.min(tail.len() - 1)].1
         } else {
-            // Exploitation: weighted random from top-N
             let pool: &[(f64, &Candidate)] = &scored[..TOP_N.min(scored.len())];
             let total: f64 = pool.iter().map(|(s, _)| s).sum();
             let mut pick = rand::random::<f64>() * total;
@@ -377,99 +197,91 @@ impl Relay {
             chosen
         };
 
-        Ok(Self {
-            id:         Arc::from(chosen.id.as_str()),
-            host:       Arc::from(chosen.host.as_str()),
-            port:       chosen.port,
-            connection: None,
-            dht_client: None,
-            pubkey:     chosen.pubkey,
-            home_node_id: None,
-            assist:     chosen.assist,
-            turn_port:  None,
-        })
+        Ok(chosen.relay.clone())
     }
 
-    /// The best-known relay that bridges hole-punch assist, by latency, or
-    /// `None` if no relay has ever said it does. Bypasses scoring: a bridge
-    /// that answers beats a faster one that silently drops the datagrams.
+    /// Bypasses scoring: a bridge that answers beats a faster one that drops the datagrams.
     pub fn fetch_assist_capable() -> Option<Self> {
-        let conn = NETWORK_DB.lock();
+        Self::fetch_assist_capable_tx(&core().db.network().lock())
+    }
+
+    pub(crate) fn fetch_assist_capable_tx(conn: &Connection) -> Option<Self> {
         conn.query_row(
-            "SELECT id, host, port, pubkey FROM relays
+            "SELECT * FROM relays
               WHERE assist = 1 AND circuit_state IN ('closed', 'half_open')
               ORDER BY last_latency IS NULL, last_latency ASC
               LIMIT 1",
             [],
-            |row| {
-                let pubkey: Option<[u8; 32]> =
-                    row.get::<_, Option<Vec<u8>>>(3)?.and_then(|v| v.try_into().ok());
-                Ok(Self {
-                    id:           Arc::from(row.get::<_, String>(0)?.as_str()),
-                    host:         Arc::from(row.get::<_, String>(1)?.as_str()),
-                    port:         row.get::<_, i64>(2)? as u16,
-                    connection:   None,
-                    dht_client:   None,
-                    pubkey,
-                    home_node_id: None,
-                    assist:       true,
-                    turn_port:    None,
-                })
-            },
+            Self::from_row,
         )
         .ok()
     }
 
-    /// Remember what the relay said about assist at handshake.
     pub fn record_assist(&self, assist: bool) -> Result<(), RelayError> {
-        NETWORK_DB.lock().execute(
+        self.record_assist_tx(&core().db.network().lock(), assist)
+    }
+
+    pub(crate) fn record_assist_tx(&self, conn: &Connection, assist: bool) -> Result<(), RelayError> {
+        conn.execute(
             "UPDATE relays SET assist = ?1 WHERE id = ?2",
             params![assist as i64, self.id.as_ref()],
         )?;
         Ok(())
     }
 
-    /// Loads one relay by id, bypassing scoring and circuit state — for a
-    /// user-requested manual connect. `NoneAvailable` if the id is unknown.
-    pub fn fetch_by_id(id: &str) -> Result<Self, RelayError> {
-        let conn = NETWORK_DB.lock();
-        conn.query_row(
-            "SELECT id, host, port, pubkey, assist FROM relays WHERE id = ?1",
-            params![id],
-            |row| {
-                let pubkey: Option<[u8; 32]> = row
-                    .get::<_, Option<Vec<u8>>>(3)?
-                    .and_then(|v| v.try_into().ok());
-                Ok(Self {
-                    id:           Arc::from(row.get::<_, String>(0)?.as_str()),
-                    host:         Arc::from(row.get::<_, String>(1)?.as_str()),
-                    port:         row.get::<_, i64>(2)? as u16,
-                    connection:   None,
-                    dht_client:   None,
-                    pubkey,
-                    home_node_id: None,
-                    assist:       row.get::<_, i64>(4)? != 0,
-                    turn_port:    None,
-                })
-            },
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => RelayError::NoneAvailable,
-            other => RelayError::Db(other),
-        })
+    /// The relay whose backoff ends first, so an all-open table is still probed.
+    pub fn fetch_backoff_candidate() -> Result<Self, RelayError> {
+        Self::fetch_backoff_candidate_tx(&core().db.network().lock())
     }
 
-    /// Upserts relays from a resolver response.
-    ///
-    /// Updates addressing and version, and clears the circuit for a relay that
-    /// moved: the failures were recorded against the old address, so they say
-    /// nothing about the new one. Window stats are left alone.
-    pub fn refresh(relays: &[RelayDescriptor]) -> Result<(), RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as u64;
+    pub(crate) fn fetch_backoff_candidate_tx(conn: &Connection) -> Result<Self, RelayError> {
+        let id: String = conn
+            .query_row(
+                "SELECT id FROM relays WHERE protocol_version = ?1 ORDER BY backoff_until LIMIT 1",
+                params![PROTOCOL_VERSION],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => RelayError::NoneAvailable,
+                other => RelayError::Db(other),
+            })?;
+        Self::fetch_by_id_tx(conn, &id)
+    }
 
-        // Persist `RelayDescriptor.pubkey` so libcore can pin the
-        // relay's TLS-cert SPKI on peer/5 dials.
+    /// A new network invalidates every open circuit.
+    pub fn reset_circuits() -> Result<(), RelayError> {
+        Self::reset_circuits_tx(&core().db.network().lock())
+    }
+
+    pub(crate) fn reset_circuits_tx(conn: &Connection) -> Result<(), RelayError> {
+        conn.execute(
+            "UPDATE relays SET circuit_state = 'closed', backoff_until = NULL, consecutive_failures = 0
+             WHERE circuit_state != 'closed'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn fetch_by_id(id: &str) -> Result<Self, RelayError> {
+        Self::fetch_by_id_tx(&core().db.network().lock(), id)
+    }
+
+    pub(crate) fn fetch_by_id_tx(conn: &Connection, id: &str) -> Result<Self, RelayError> {
+        conn.query_row("SELECT * FROM relays WHERE id = ?1", params![id], Self::from_row).map_err(
+            |e| match e {
+                rusqlite::Error::QueryReturnedNoRows => RelayError::NoneAvailable,
+                other => RelayError::Db(other),
+            },
+        )
+    }
+
+    pub fn refresh(relays: &[RelayDescriptor]) -> Result<(), RelayError> {
+        Self::refresh_tx(&core().db.network().lock(), relays)
+    }
+
+    pub(crate) fn refresh_tx(conn: &Connection, relays: &[RelayDescriptor]) -> Result<(), RelayError> {
+        let now = now_ms();
+
         let mut stmt = conn.prepare(REFRESH_UPSERT)?;
 
         for r in relays {
@@ -487,15 +299,13 @@ impl Relay {
         Ok(())
     }
 
-    /// Records a successful connection: closes the circuit, resets the
-    /// failure streak, stamps `last_connect`, and rolls the stats window.
-    /// Latency is NOT recorded here — that's live RTT via [`record_rtt`],
-    /// not the one-shot handshake time.
-    ///
-    /// [`record_rtt`]: Relay::record_rtt
+    /// Latency comes from live RTT via [`Relay::record_rtt`], not the handshake time.
     pub fn record_success(&self) -> Result<(), RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as i64;
+        self.record_success_tx(&core().db.network().lock())
+    }
+
+    pub(crate) fn record_success_tx(&self, conn: &Connection) -> Result<(), RelayError> {
+        let now = now_ms() as i64;
         let window_threshold = now - WINDOW_DURATION_MS as i64;
 
         conn.execute(
@@ -514,28 +324,25 @@ impl Relay {
         Ok(())
     }
 
-    /// Records a live RTT sample (quinn's smoothed `Connection::rtt`) — the
-    /// real round-trip "ping" shown on the relays page and scored by
-    /// `fetch_best`. Updates `last_latency`, appends to the sample buffer,
-    /// and trims to the last `LATENCY_SAMPLE_LIMIT`.
     pub fn record_rtt(&self, rtt_ms: u64) -> Result<(), RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as i64;
+        self.record_rtt_tx(&core().db.network().lock(), rtt_ms)
+    }
+
+    pub(crate) fn record_rtt_tx(&self, conn: &Connection, rtt_ms: u64) -> Result<(), RelayError> {
+        let now = now_ms() as i64;
 
         conn.execute(
             "UPDATE relays SET last_latency = ?1 WHERE id = ?2",
             params![rtt_ms as i64, self.id.as_ref()],
         )?;
 
-        // OR IGNORE: two samples in the same millisecond would collide on the
-        // (relay_id, measured_at) PK — harmless to drop the duplicate.
+        // A second sample in the same millisecond collides on the key and is harmlessly dropped.
         conn.execute(
             "INSERT OR IGNORE INTO relay_latency_samples (relay_id, measured_at, latency)
              VALUES (?1, ?2, ?3)",
             params![self.id.as_ref(), now, rtt_ms as i64],
         )?;
 
-        // Trim to last LATENCY_SAMPLE_LIMIT samples (rowid handles dup timestamps).
         conn.execute(
             "DELETE FROM relay_latency_samples
             WHERE relay_id = ?1
@@ -551,15 +358,13 @@ impl Relay {
         Ok(())
     }
 
-    /// Records a TLS / cert / auth failure as **terminal** for this relay.
-    ///
-    /// Cert errors don't resolve themselves within a retry loop — the relay's
-    /// cert is broken, our verifier rejects it, or someone is MitM-ing. Open
-    /// the circuit immediately for [`BACKOFF_TERMINAL_MS`] so `fetch_best`
-    /// skips this relay meanwhile.
+    /// Cert and auth failures do not clear within a retry loop, so the circuit opens at once.
     pub fn record_terminal_failure(&self) -> Result<(), RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as i64;
+        self.record_terminal_failure_tx(&core().db.network().lock())
+    }
+
+    pub(crate) fn record_terminal_failure_tx(&self, conn: &Connection) -> Result<(), RelayError> {
+        let now = now_ms() as i64;
         let backoff = BACKOFF_TERMINAL_MS as i64;
 
         conn.execute(
@@ -581,13 +386,12 @@ impl Relay {
         Ok(())
     }
 
-    /// Records a failed connection attempt.
-    ///
-    /// After FAILURE_THRESHOLD consecutive failures the circuit opens with
-    /// exponential backoff: 3 → 5s, 4 → 10s, 5 → 20s, … capped at 30m.
     pub fn record_failure(&self) -> Result<(), RelayError> {
-        let conn = NETWORK_DB.lock();
-        let now = systime().as_millis() as i64;
+        self.record_failure_tx(&core().db.network().lock())
+    }
+
+    pub(crate) fn record_failure_tx(&self, conn: &Connection) -> Result<(), RelayError> {
+        let now = now_ms() as i64;
         let window_threshold = now - WINDOW_DURATION_MS as i64;
 
         let consecutive_failures: u32 = conn.query_row(
@@ -598,7 +402,7 @@ impl Relay {
                    window_start         = CASE WHEN window_start < ?3 THEN ?1 ELSE window_start END
                  WHERE id = ?2
                  RETURNING consecutive_failures",
-            params![now, self.id.as_ref(), now, window_threshold],
+            params![now, self.id.as_ref(), window_threshold],
             |r| r.get::<_, i64>(0).map(|v| v as u32),
         )?;
 
@@ -621,14 +425,7 @@ impl Relay {
     }
 }
 
-// // // // // // // // // // // // // // // // // //
-
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-//===:===:===:===:===: RESOLVE :===:===:===:===:===||
-//===:===:===:===:===:===:=:===:===:===:===:===:===||
-
 impl Relay {
-    /// Resolves relays by connecting to one of the resolver seeds provided.
     pub async fn resolve(seeds: &[ResolverSeed]) -> Result<(), ResolveError> {
         use ConnectionState as CS;
 
@@ -661,80 +458,81 @@ impl Relay {
     }
 }
 
-// // // // // // // // // // // // // // // // // //
-
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use common::types::bytes::Bytes;
+    use common::types::id::NodeId;
 
     use super::*;
+    use crate::test_support::data::open;
+    use crate::test_support::data::with_failing_trigger;
 
-    /// The `relays` columns [`REFRESH_UPSERT`] touches, against a scratch
-    /// connection — `NETWORK_DB` is a process-global pointed at a real file.
-    fn relays_table() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE relays (
-               id TEXT PRIMARY KEY,
-               host TEXT NOT NULL,
-               port INTEGER NOT NULL,
-               protocol_version INTEGER NOT NULL,
-               circuit_state TEXT NOT NULL DEFAULT 'closed',
-               backoff_until INTEGER,
-               consecutive_failures INTEGER NOT NULL DEFAULT 0,
-               window_start INTEGER NOT NULL,
-               last_seen INTEGER NOT NULL,
-               pubkey BLOB
-             );",
-        )
-        .unwrap();
-        conn
+    fn descriptor(addr: &str) -> RelayDescriptor {
+        RelayDescriptor {
+            id:     NodeId::from_bytes([1; 32]),
+            addr:   addr.parse().unwrap(),
+            pubkey: Bytes([2; 32]),
+        }
     }
 
-    fn upsert(conn: &Connection, host: &str, port: u16) {
-        conn.execute(REFRESH_UPSERT, params!["r1", host, port, 1, PROTOCOL_VERSION, 1, [0u8; 32]])
-            .unwrap();
-    }
-
-    fn circuit(conn: &Connection) -> (String, Option<i64>, i64) {
+    /// State, backoff length in ms, consecutive failures.
+    fn circuit(conn: &Connection) -> (String, Option<i64>, u32) {
         conn.query_row(
-            "SELECT circuit_state, backoff_until, consecutive_failures FROM relays WHERE id='r1'",
+            "SELECT circuit_state, backoff_until - last_failure, consecutive_failures FROM relays",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap()
     }
 
-    fn open_the_circuit(conn: &Connection) {
-        conn.execute(
-            "UPDATE relays SET circuit_state='open', backoff_until=999, consecutive_failures=4
-             WHERE id='r1'",
-            [],
-        )
-        .unwrap();
-    }
-
     #[test]
-    fn refresh_clears_the_circuit_for_a_relay_that_moved() {
-        let conn = relays_table();
-        upsert(&conn, "1.1.1.1", 443);
-        open_the_circuit(&conn);
+    fn failures_open_the_circuit_with_backoff_and_a_success_closes_it() {
+        let conn = open(crate::db::network::migrate);
+        Relay::refresh_tx(&conn, &[descriptor("10.0.0.1:443")]).unwrap();
+        let relay = Relay::fetch_best_tx(&conn).unwrap();
+        for n in 1..FAILURE_THRESHOLD {
+            relay.record_failure_tx(&conn).unwrap();
+            assert_eq!(circuit(&conn), ("closed".into(), None, n));
+        }
+        relay.record_failure_tx(&conn).unwrap();
+        let base = BACKOFF_BASE_MS as i64;
+        assert_eq!(circuit(&conn), ("open".into(), Some(base), FAILURE_THRESHOLD));
+        relay.record_failure_tx(&conn).unwrap();
+        assert_eq!(circuit(&conn), ("open".into(), Some(2 * base), FAILURE_THRESHOLD + 1));
+        assert!(matches!(Relay::fetch_best_tx(&conn), Err(RelayError::NoneAvailable)));
+        assert_eq!(
+            Relay::fetch_backoff_candidate_tx(&conn).unwrap().id,
+            relay.id,
+            "a lone relay is still probed"
+        );
 
-        upsert(&conn, "2.2.2.2", 443);
+        Relay::refresh_tx(&conn, &[descriptor("10.0.0.1:443")]).unwrap();
+        assert_eq!(circuit(&conn).0, "open", "a refresh at the same address keeps the circuit");
+        Relay::refresh_tx(&conn, &[descriptor("10.0.0.1:8443")]).unwrap();
+        assert_eq!(circuit(&conn), ("closed".into(), None, 0), "a relay that moved starts clean");
+
+        relay.record_terminal_failure_tx(&conn).unwrap();
+        assert_eq!(circuit(&conn), ("open".into(), Some(BACKOFF_TERMINAL_MS as i64), 1));
+        conn.execute("UPDATE relays SET backoff_until = 1", []).unwrap();
+        assert_eq!(
+            Relay::fetch_best_tx(&conn).unwrap().id,
+            relay.id,
+            "an expired backoff is retried"
+        );
+        assert_eq!(circuit(&conn).0, "half_open");
+        relay.record_success_tx(&conn).unwrap();
         assert_eq!(circuit(&conn), ("closed".into(), None, 0));
     }
 
     #[test]
-    fn refresh_keeps_the_circuit_when_the_address_is_unchanged() {
-        let conn = relays_table();
-        upsert(&conn, "1.1.1.1", 443);
-        open_the_circuit(&conn);
-
-        upsert(&conn, "1.1.1.1", 443);
-        assert_eq!(circuit(&conn), ("open".into(), Some(999), 4));
-
-        // A port change is a move too.
-        upsert(&conn, "1.1.1.1", 8443);
-        assert_eq!(circuit(&conn), ("closed".into(), None, 0));
+    fn an_error_inside_fetch_best_leaves_no_transaction_open() {
+        let mut conn = open(crate::db::network::migrate);
+        Relay::refresh_tx(&conn, &[descriptor("10.0.0.1:443")]).unwrap();
+        conn.execute("UPDATE relays SET circuit_state = 'open', backoff_until = 1", []).unwrap();
+        with_failing_trigger(&mut conn, "relays", "UPDATE", |conn| {
+            assert!(Relay::fetch_best_tx(conn).is_err());
+            assert!(conn.is_autocommit(), "the failed pass rolled back");
+        });
+        assert!(Relay::fetch_best_tx(&conn).is_ok(), "the next pass runs as usual");
     }
 }

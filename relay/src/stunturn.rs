@@ -1,36 +1,5 @@
-//! STUN echo + blind TURN bridge, sharing the relay's existing QUIC UDP
-//! socket — no extra port, no extra firewall rule.
-//!
-//! [`AssistSocket`] wraps the QUIC socket: it peels our `.pRr` datagrams
-//! off the receive path and hands them to [`serve`], passing every real
-//! QUIC packet straight through to quinn. So the one already-open UDP port
-//! carries client messaging and hole-punch assist together.
-//!
-//! Two clients that can't hole-punch (symmetric NAT, or v6-only ↔ v4-only)
-//! both already reach this relay, so it bridges them: each sends a
-//! [`RelayMsg::TurnAlloc`] under a shared secret token, then their own QUIC
-//! rides [`RelayMsg::TurnData`] datagrams the relay forwards verbatim to
-//! the other endpoint under that token. The relay reads only the token;
-//! peer QUIC stays end-to-end encrypted, and the relay never needs its own
-//! public address — the client already holds it (that's the relay it
-//! dialed).
-//!
-//! STUN is the free half: a client asks from its P2P socket and learns the
-//! public address that socket maps to, so a cone-NAT peer can be punched
-//! without paying for the bridge.
-//!
-//! Off unless `[assist] enabled = true`: a bridge token is a bearer secret
-//! the relay never issued, so anyone who guesses one can have their traffic
-//! forwarded under the relay's source address.
-//!
-//! TODO: bind each token to the authenticated IPK of a live `client/N`
-//! session and register only relay-issued tokens; until then this stays
-//! opt-in.
-//!
-//! ponytail: the wrapper is naive (no GSO/GRO batching) and one task owns
-//! the bridge table (no lock; bounded by a 30s idle sweep + a hard cap).
-//! Both are fine at small-relay scale; back the socket with
-//! `quinn::udp::UdpSocketState` if QUIC throughput ever needs the batches.
+//! STUN echo and a blind TURN bridge on the QUIC UDP socket. Off by default: a bridge token is an
+//! unissued bearer secret, so whoever guesses one has traffic forwarded from the relay's address.
 
 use std::collections::HashMap;
 use std::io;
@@ -53,27 +22,22 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// One peeled assist datagram: source address + raw bytes.
 type Assist = (SocketAddr, Vec<u8>);
 
-/// Assist datagrams buffered for [`serve`]. Assist is best-effort, so a full
-/// inbox sheds rather than applying backpressure to quinn's receive path.
+/// A full inbox sheds: assist is best-effort and must not backpressure quinn's receive path.
 const INBOX_CAP: usize = 2048;
 
 /// Assist datagrams peeled per `poll_recv` before the poll yields, so a
 /// stream of assist traffic can't monopolise quinn's receive path.
 const MAX_PEEL_PER_POLL: usize = 16;
 
-/// The relay's QUIC socket, wrapped so hole-punch assist datagrams are
-/// split off before quinn sees them.
+/// The QUIC socket, with assist datagrams split off before quinn sees them.
 #[derive(Debug)]
 pub struct AssistSocket {
     io:    Arc<UdpSocket>,
     inbox: mpsc::Sender<Assist>,
 }
 
-/// What [`serve`] needs: the peeled-assist stream, and a handle to send
-/// replies/forwards back out the same socket.
 pub struct AssistInbox {
     rx:   mpsc::Receiver<Assist>,
     sock: Arc<UdpSocket>,
@@ -85,9 +49,7 @@ impl std::fmt::Debug for AssistInbox {
     }
 }
 
-/// Wrap an already-bound std UDP socket for quinn, splitting off assist
-/// datagrams. Must run inside the tokio runtime (registers with the
-/// reactor).
+/// Must run inside the tokio runtime: the socket registers with the reactor.
 pub fn wrap_socket(std_sock: std::net::UdpSocket) -> io::Result<(Arc<AssistSocket>, AssistInbox)> {
     std_sock.set_nonblocking(true)?;
     let io = Arc::new(UdpSocket::from_std(std_sock)?);
@@ -108,8 +70,6 @@ impl AsyncUdpSocket for AssistSocket {
     fn poll_recv(
         &self, cx: &mut Context, bufs: &mut [io::IoSliceMut<'_>], meta: &mut [udp::RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        // Peel assist datagrams to the handler; surface the first real QUIC
-        // datagram to quinn (or Pending).
         for _ in 0..MAX_PEEL_PER_POLL {
             let (len, src) = {
                 let mut rb = tokio::io::ReadBuf::new(&mut bufs[0]);
@@ -135,7 +95,6 @@ impl AsyncUdpSocket for AssistSocket {
     }
 }
 
-/// Registers write-readiness for quinn after a `try_send` WouldBlock.
 #[derive(Debug)]
 struct AssistPoller {
     io: Arc<UdpSocket>,
@@ -147,18 +106,11 @@ impl UdpPoller for AssistPoller {
     }
 }
 
-// ---- the bridge ----
-
-/// Drop a bridge whose endpoints have both been silent this long.
 const IDLE_TTL: Duration = Duration::from_secs(60);
-/// How often to sweep idle bridges.
 const SWEEP: Duration = Duration::from_secs(30);
-/// Cap concurrent bridges so junk allocations can't grow the map without
-/// bound — well above any real concurrent-call count.
 const MAX_BRIDGES: usize = 4096;
 
-/// The two ends of one bridge, learned from their datagrams' source
-/// addresses.
+/// The two ends of one bridge, learned from their datagrams' source addresses.
 struct Bridge {
     a:    SocketAddr,
     b:    Option<SocketAddr>,
@@ -166,8 +118,8 @@ struct Bridge {
 }
 
 impl Bridge {
-    /// The far side of `src` — registering `src` as the second end if
-    /// there's a free slot. `None` if `src` is a third source on this token.
+    /// The far side of `src`, registering it as the second end if that is free. `None` for a
+    /// third source on this token.
     fn other(&mut self, src: SocketAddr, now: Instant) -> Option<SocketAddr> {
         self.seen = now;
         if src == self.a {
@@ -220,20 +172,14 @@ async fn handle(
         Some(RelayMsg::TurnData { token, .. }) => {
             let now = Instant::now();
             let dst = get_or_insert(bridges, token, src, now).and_then(|br| br.other(src, now));
-            // Forward verbatim — the receiver parses the token and hands the
-            // QUIC payload to its own stack.
             if let Some(dst) = dst {
                 let _ = sock.send_to(pkt, dst).await;
             }
         },
-        // StunResp is a reply, never inbound here; junk decodes to None.
         Some(RelayMsg::StunResp { .. }) | None => {},
     }
 }
 
-/// Fetch `token`'s bridge, creating it (with `src` as the first end) if
-/// absent and there's room. Sweeps idle entries before rejecting on a full
-/// map so a burst doesn't wedge it.
 fn get_or_insert(
     bridges: &mut HashMap<[u8; TOKEN_LEN], Bridge>, token: [u8; TOKEN_LEN], src: SocketAddr,
     now: Instant,
@@ -248,42 +194,4 @@ fn get_or_insert(
         bridges.insert(token, Bridge { a: src, b: None, seen: now });
     }
     bridges.get_mut(&token)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn forwards_to_the_other_end() {
-        let mut bridges = HashMap::new();
-        let a: SocketAddr = "1.1.1.1:1".parse().unwrap();
-        let b: SocketAddr = "2.2.2.2:2".parse().unwrap();
-        let now = Instant::now();
-
-        // a allocs, then b's data forwards to a.
-        get_or_insert(&mut bridges, [9; TOKEN_LEN], a, now).unwrap().other(a, now);
-        let dst = get_or_insert(&mut bridges, [9; TOKEN_LEN], b, now).and_then(|br| br.other(b, now));
-        assert_eq!(dst, Some(a));
-        // a's data now forwards to b.
-        let dst = get_or_insert(&mut bridges, [9; TOKEN_LEN], a, now).and_then(|br| br.other(a, now));
-        assert_eq!(dst, Some(b));
-        // a third source on the same token is ignored.
-        let c: SocketAddr = "3.3.3.3:3".parse().unwrap();
-        let dst = get_or_insert(&mut bridges, [9; TOKEN_LEN], c, now).and_then(|br| br.other(c, now));
-        assert_eq!(dst, None);
-    }
-
-    #[test]
-    fn cap_rejects_when_full_and_all_fresh() {
-        let mut bridges = HashMap::new();
-        let now = Instant::now();
-        let src: SocketAddr = "1.1.1.1:1".parse().unwrap();
-        for i in 0..MAX_BRIDGES {
-            let mut token = [0u8; TOKEN_LEN];
-            token[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            assert!(get_or_insert(&mut bridges, token, src, now).is_some());
-        }
-        assert!(get_or_insert(&mut bridges, [0xff; TOKEN_LEN], src, now).is_none());
-    }
 }

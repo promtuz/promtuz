@@ -2,40 +2,46 @@
 #![warn(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
-// mod proto;
 mod cli;
 mod quic;
 mod resolver;
 mod util;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use common::quic::CloseReason;
+use anyhow::anyhow;
+use clap::Parser as _;
+use common::quic::protorole::ProtoRole;
+use common::server::accept;
+use common::server::daemon;
 
-use crate::quic::acceptor::Acceptor;
 use crate::resolver::Resolver;
 use crate::util::config::AppConfig;
 
+/// Sized for a carrier NAT: phones open a fresh connection per lookup, and the per-connection RPC
+/// budget bounds what each connection costs.
+const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 4096 };
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = cli::Cli::get();
-
-    let cfg = AppConfig::load(&cli.config, true);
-    common::server::log::init(cfg.log.level.as_deref());
-    common::info!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
-
-    // Hold here until we have a valid cert for our key (writes a CSR + waits
-    // if not enrolled), so the endpoint is only built with usable TLS material.
-    let csr_path = cfg.network.key_path.with_extension("csr");
-    common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "resolver").await?;
-    if cfg.network.watch_reload {
-        common::node::enroll::spawn_config_reload(cli.config.clone());
+    let cli = cli::Cli::parse();
+    let cfg: AppConfig = daemon::load(&cli.config);
+    if let Some(cli::Command::Enroll) = cli.command {
+        return common::node::enroll::interactive(&cfg.network);
     }
+    daemon::start::<AppConfig>(
+        "resolver",
+        cli::VERSION,
+        &cfg.network,
+        &cli.config,
+        cfg.log.level.as_deref(),
+    )
+    .await?;
 
-    let resolver = Arc::new(Resolver::new(cfg));
-    let acceptor = Acceptor::new(resolver.endpoint.clone());
+    let roles = &[ProtoRole::Resolver, ProtoRole::Relay, ProtoRole::Client];
+    let endpoint = daemon::bind(&cfg.network, roles, "resolver");
+    let resolver = Arc::new(Resolver::new(cfg, endpoint));
     let tunnel = common::quic::tunnel_listener::NodeTunnel::bind(
         &resolver.cfg.network, common::quic::tunnel::FEATURE_CONTROL,
     ).await?.map(|listener| {
@@ -49,36 +55,19 @@ async fn main() -> Result<()> {
         )
     });
 
-    let acceptor_handle = tokio::spawn({
+    let mut acceptor = tokio::spawn(accept::serve(resolver.endpoint.clone(), ACCEPT, {
         let resolver = resolver.clone();
-        async move { acceptor.run(resolver.clone()).await }
-    });
+        move |connection| quic::handler::Handler::handle(connection, resolver.clone())
+    }));
 
-    tokio::select! {
-        _ = acceptor_handle => {}
-        _ = tokio::signal::ctrl_c() => {
-            println!();
+    let result = tokio::select! {
+        _ = &mut acceptor => Err(anyhow!("acceptor stopped")),
+        _ = daemon::shutdown_signal() => Ok(()),
+    };
 
-            // Kick registered relays *before* tearing down the endpoint so
-            // they observe a clean close reason rather than a transport
-            // timeout.
-            resolver.close();
-            resolver
-                .endpoint
-                .close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
-
-            // Give in-flight closes a brief window to flush before exit.
-            // Bounded so a misbehaving peer can't stall shutdown forever.
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                resolver.endpoint.wait_idle(),
-            )
-            .await;
-
-            common::info!("CLOSING RESOLVER");
-        }
-    }
-
-    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
-    Ok(())
+    // Kick registered relays and gateways before closing the endpoint, so they see a clean close
+    // reason rather than a transport timeout.
+    resolver.close();
+    daemon::stop(&resolver.endpoint, tunnel).await;
+    result
 }

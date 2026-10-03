@@ -1,9 +1,11 @@
 //! Recipient-scoped delivery history. A relay acknowledgement is sent, never
 //! delivered/read. Original audiences survive roster changes and partial failure.
 use super::message::{STATUS_DELIVERED, STATUS_FAILED, STATUS_PENDING, STATUS_READ, STATUS_SENT};
-use crate::db::messages::MESSAGES_DB;
+use crate::db::all;
+use crate::state::core;
 use anyhow::{Result, ensure};
 use common::proto::mls_wire::{AppPayload, ReceiptDetails, ReceiptEntry, ReceiptKind};
+use common::utils::now_secs;
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -52,33 +54,31 @@ pub(super) fn snapshot_tx(
 }
 
 pub(crate) fn audience(id: &str, fallback: &[[u8; 32]]) -> Result<Vec<[u8; 32]>> {
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    // An older message has no provable full audience. Preserve that limitation.
-    snapshot_tx(&tx, id, fallback, false)?;
-    let peers = tx
-        .prepare("SELECT member FROM message_recipients WHERE message_id=?1")?
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let peers = audience_tx(&tx, id, fallback)?;
     tx.commit()?;
     Ok(peers)
 }
 
+pub(crate) fn audience_tx(conn: &Connection, id: &str, fallback: &[[u8; 32]]) -> Result<Vec<[u8; 32]>> {
+    // An older message has no provable full audience. Preserve that limitation.
+    snapshot_tx(conn, id, fallback, false)?;
+    Ok(all(conn, "SELECT member FROM message_recipients WHERE message_id=?1", [id], |r| r.get(0))?)
+}
+
 fn rows_tx(conn: &Connection, id: &str) -> Result<Vec<RecipientReceipt>> {
-    Ok(conn
-        .prepare(ROWS)?
-        .query_map([id], |r| {
-            Ok(RecipientReceipt {
-                member: r.get(0)?,
-                name: String::new(),
-                sent_at: r.get(1)?,
-                delivered_at: r.get(2)?,
-                read_at: r.get(3)?,
-                status: r.get(4)?,
-                active: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+    Ok(all(conn, ROWS, [id], |r| {
+        Ok(RecipientReceipt {
+            member: r.get(0)?,
+            name: String::new(),
+            sent_at: r.get(1)?,
+            delivered_at: r.get(2)?,
+            read_at: r.get(3)?,
+            status: r.get(4)?,
+            active: r.get(5)?,
+        })
+    })?)
 }
 
 /// Combined bubble/album progress. Failure does not erase a successful copy.
@@ -122,7 +122,7 @@ pub(crate) fn send_result(
     let Some(member) = member else { return Ok(()) };
     let dispatch = crate::mls::recovery::logical_dispatch(dispatch)?;
     let at = at.filter(|time| *time > 0 && *time <= i64::MAX as u64);
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
     send_result_tx(&tx, &dispatch, &member, status, at)?;
     tx.commit()?;
@@ -157,37 +157,33 @@ fn send_result_tx(
 }
 
 pub(crate) fn fail_pending(id: &str) -> Result<()> {
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE message_recipients SET send_status=2 WHERE message_id=?1 AND send_status=0",
-        [id],
-    )?;
-    if tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM message_recipients WHERE message_id=?1)",
-        [id],
-        |r| r.get::<_, bool>(0),
-    )? {
-        aggregate_tx(&tx, id)?;
-    } else {
-        tx.execute("UPDATE messages SET status=2 WHERE id=?1 AND status<3", [id])?;
-    }
+    fail_pending_tx(&tx, id)?;
     tx.commit()?;
     Ok(())
 }
 
+pub(crate) fn fail_pending_tx(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE message_recipients SET send_status=2 WHERE message_id=?1 AND send_status=0",
+        [id],
+    )?;
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM message_recipients WHERE message_id=?1)",
+        [id],
+        |r| r.get::<_, bool>(0),
+    )? {
+        aggregate_tx(conn, id)?;
+    } else {
+        conn.execute("UPDATE messages SET status=2 WHERE id=?1 AND status<3", [id])?;
+    }
+    Ok(())
+}
+
 pub fn info(conv: &[u8; 16], dispatch: &[u8; 16]) -> Result<MessageReceiptInfo> {
-    let (complete, mut recipients) = {
-        let conn = MESSAGES_DB.lock();
-        let id:String=conn.query_row("SELECT id FROM messages WHERE conversation_id=?1 AND dispatch_id=?2 AND outgoing=1 AND deleted=0",(conv.as_slice(),dispatch.as_slice()),|r|r.get(0))?;
-        let complete = conn
-            .query_row("SELECT complete FROM message_audiences WHERE message_id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .unwrap_or(false);
-        (complete, rows_tx(&conn, &id)?)
-    };
+    let MessageReceiptInfo { complete, mut recipients } =
+        info_tx(&core().db.messages().lock(), conv, dispatch)?;
     for row in &mut recipients {
         row.name = super::peer_name::resolve(&row.member.as_slice().try_into()?);
     }
@@ -200,8 +196,22 @@ pub fn info(conv: &[u8; 16], dispatch: &[u8; 16]) -> Result<MessageReceiptInfo> 
     Ok(MessageReceiptInfo { complete, recipients })
 }
 
+/// Unnamed and unsorted: names come from a lookup that takes this connection's lock.
+pub(crate) fn info_tx(
+    conn: &Connection, conv: &[u8; 16], dispatch: &[u8; 16],
+) -> Result<MessageReceiptInfo> {
+    let id:String=conn.query_row("SELECT id FROM messages WHERE conversation_id=?1 AND dispatch_id=?2 AND outgoing=1 AND deleted=0",(conv.as_slice(),dispatch.as_slice()),|r|r.get(0))?;
+    let complete = conn
+        .query_row("SELECT complete FROM message_audiences WHERE message_id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(false);
+    Ok(MessageReceiptInfo { complete, recipients: rows_tx(conn, &id)? })
+}
+
 pub(crate) fn receive(conv: &[u8; 16], member: &[u8; 32], payload: AppPayload) -> Result<()> {
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
     receive_tx(&tx, conv, member, payload)?;
     tx.commit()?;
@@ -237,10 +247,10 @@ fn receive_tx(
             if !eligible {
                 return Ok(());
             }
-            conn.execute(
+            let activated = conn.execute(
                 "INSERT OR IGNORE INTO receipt_peers VALUES (?1,?2)",
                 (conv.as_slice(), member.as_slice()),
-            )?;
+            )? == 1;
             for entry in details.entries {
                 let id:Option<String>=conn.query_row("SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id=r.message_id
                     WHERE m.conversation_id=?1 AND m.dispatch_id=?2 AND m.outgoing=1 AND r.member=?3",
@@ -251,13 +261,20 @@ fn receive_tx(
                 conn.execute("UPDATE message_recipients SET delivered_at=CASE WHEN delivered_at IS NULL THEN ?3 WHEN ?3 IS NULL THEN delivered_at ELSE MIN(delivered_at,?3) END,
                     read_at=CASE WHEN read_at IS NULL THEN ?4 WHEN ?4 IS NULL THEN read_at ELSE MIN(read_at,?4) END
                     WHERE message_id=?1 AND member=?2",params![id,member.as_slice(),entry.delivered_at,entry.read_at])?;
+                changed.push(id);
             }
-            // Activating exact receipts also retires provisional legacy inferences
-            // for other messages to this upgraded member, including skipped IDs.
-            changed=conn.prepare("SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id=r.message_id WHERE m.conversation_id=?1 AND r.member=?2")?
-                .query_map((conv.as_slice(),member.as_slice()),|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            // The first exact receipt from a member retires every provisional
+            // legacy inference for them, skipped IDs included.
+            if activated {
+                changed=all(conn,"SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id=r.message_id WHERE m.conversation_id=?1 AND r.member=?2",
+                    (conv.as_slice(),member.as_slice()),|r|r.get(0))?;
+            }
         },
         AppPayload::Receipt { kind, upto } => {
+            // A member that sends exact receipts has no use for watermarks.
+            if detailed_tx(conn, conv, member)? {
+                return Ok(());
+            }
             // Old clients broadcast watermarks for every author's IDs. Require
             // the named target to be OUR post sent to this reporting member.
             let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM messages m JOIN message_recipients r ON r.message_id=m.id
@@ -266,13 +283,13 @@ fn receive_tx(
             if !known {
                 return Ok(());
             }
-            changed=conn.prepare("SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id=r.message_id
-                WHERE m.conversation_id=?1 AND m.dispatch_id<=?2 AND m.outgoing=1 AND r.member=?3")?
-                .query_map((conv.as_slice(),upto.as_slice(),member.as_slice()),|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
             let status = match kind {
                 ReceiptKind::Delivered => STATUS_DELIVERED,
                 ReceiptKind::Read => STATUS_READ,
             };
+            changed=all(conn,"SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id=r.message_id
+                WHERE m.conversation_id=?1 AND m.dispatch_id<=?2 AND m.outgoing=1 AND r.member=?3 AND r.legacy_status<?4",
+                (conv.as_slice(),upto.as_slice(),member.as_slice(),status),|r|r.get(0))?;
             for id in &changed {
                 conn.execute("UPDATE message_recipients SET legacy_status=MAX(legacy_status,?3) WHERE message_id=?1 AND member=?2",(id,member.as_slice(),status))?;
             }
@@ -285,6 +302,27 @@ fn receive_tx(
     Ok(())
 }
 
+/// Whether `member` has sent exact receipts in `conv`.
+fn detailed_tx(conn: &Connection, conv: &[u8; 16], member: &[u8; 32]) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM receipt_peers WHERE conversation_id=?1 AND member=?2)",
+        (conv.as_slice(), member.as_slice()),
+        |r| r.get(0),
+    )?)
+}
+
+/// Every incoming message gets its receipt row, read according to the legacy
+/// watermark where it still has to stand in for one. Idempotent.
+pub(crate) fn backfill_tx(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO incoming_receipts(message_id,is_read)
+        SELECT m.id, CASE WHEN r.upto_dispatch_id IS NOT NULL AND m.dispatch_id<=r.upto_dispatch_id THEN 1 ELSE 0 END
+        FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
+        WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL",
+    )?;
+    Ok(())
+}
+
 pub(super) fn arrived_tx(conn: &Connection, id: &str, now: u64) -> Result<()> {
     conn.execute(
         "INSERT INTO incoming_receipts(message_id,delivered_at,pending) VALUES (?1,?2,1)",
@@ -294,9 +332,9 @@ pub(super) fn arrived_tx(conn: &Connection, id: &str, now: u64) -> Result<()> {
 }
 
 pub(crate) fn read(conv: &[u8; 16], upto: &[u8; 16]) -> Result<()> {
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    read_tx(&tx, conv, upto, crate::utils::systime().as_secs())?;
+    read_tx(&tx, conv, upto, now_secs())?;
     tx.commit()?;
     Ok(())
 }
@@ -304,10 +342,6 @@ pub(crate) fn read(conv: &[u8; 16], upto: &[u8; 16]) -> Result<()> {
 pub(super) fn read_tx(conn: &Connection, conv: &[u8; 16], upto: &[u8; 16], now: u64) -> Result<()> {
     // The UI anchor is arrival order, not a comparison between different
     // authors' clocks. Only messages actually present on this device are read.
-    conn.execute("INSERT OR IGNORE INTO incoming_receipts(message_id,is_read)
-        SELECT m.id,CASE WHEN r.upto_dispatch_id IS NOT NULL AND m.dispatch_id<=r.upto_dispatch_id THEN 1 ELSE 0 END
-        FROM messages m LEFT JOIN read_state r ON r.conversation_id=m.conversation_id
-        WHERE m.conversation_id=?1 AND m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL",[conv.as_slice()])?;
     conn.execute("UPDATE incoming_receipts SET is_read=1,read_at=?3,pending=1 WHERE is_read=0 AND message_id IN
         (SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=0 AND deleted=0 AND system=0
          AND id<=(SELECT id FROM messages WHERE conversation_id=?1 AND dispatch_id=?2 AND outgoing=0))",(conv.as_slice(),upto.as_slice(),now))?;
@@ -326,21 +360,27 @@ struct Pending {
     entry: ReceiptEntry,
 }
 fn pending(skip: &std::collections::HashSet<([u8; 16], [u8; 32])>) -> Result<Vec<Pending>> {
-    let conn = MESSAGES_DB.lock();
-    let groups: Vec<([u8; 16], [u8; 32])> = conn.prepare("SELECT m.conversation_id,m.sender_ipk FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
-        JOIN conversations c ON c.id=m.conversation_id WHERE r.pending=1 AND m.deleted=0 AND c.mls_group_id IS NOT NULL
-        AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.member_ipk=m.sender_ipk AND cm.active=1)
-        GROUP BY m.conversation_id,m.sender_ipk ORDER BY MIN(m.id)")?
-        .query_map([],|r|Ok((r.get::<_,[u8;16]>(0)?,r.get::<_,[u8;32]>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(conn);
+    let groups = pending_groups_tx(&core().db.messages().lock())?;
     // A request's receipts wait until it is accepted.
     let first = groups.into_iter().find(|group| !skip.contains(group) && !crate::requests::is_request_chat(&group.0));
     let Some((conv, author)) = first else { return Ok(Vec::new()) };
-    let conn = MESSAGES_DB.lock();
-    Ok(conn.prepare("SELECT m.id,m.dispatch_id,r.delivered_at,r.read_at FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
-        WHERE r.pending=1 AND m.deleted=0 AND m.conversation_id=?1 AND m.sender_ipk=?2 ORDER BY m.id LIMIT 128")?
-        .query_map((conv.as_slice(),author.as_slice()),|r|Ok(Pending {id:r.get(0)?,conv,author,
-            entry:ReceiptEntry {message_id:r.get(1)?,delivered_at:r.get(2)?,read_at:r.get(3)?}}))?.collect::<rusqlite::Result<_>>()?)
+    pending_rows_tx(&core().db.messages().lock(), conv, author)
+}
+
+/// Each (conversation, author) with receipts waiting, oldest first.
+fn pending_groups_tx(conn: &Connection) -> Result<Vec<([u8; 16], [u8; 32])>> {
+    Ok(all(conn, "SELECT m.conversation_id,m.sender_ipk FROM incoming_receipts r CROSS JOIN messages m ON m.id=r.message_id
+        JOIN conversations c ON c.id=m.conversation_id WHERE r.pending=1 AND m.deleted=0 AND c.mls_group_id IS NOT NULL
+        AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.member_ipk=m.sender_ipk AND cm.active=1)
+        GROUP BY m.conversation_id,m.sender_ipk ORDER BY MIN(m.id)",
+        [],|r|Ok((r.get(0)?,r.get(1)?)))?)
+}
+
+fn pending_rows_tx(conn: &Connection, conv: [u8; 16], author: [u8; 32]) -> Result<Vec<Pending>> {
+    Ok(all(conn, "SELECT m.id,m.dispatch_id,r.delivered_at,r.read_at FROM incoming_receipts r CROSS JOIN messages m ON m.id=r.message_id
+        WHERE r.pending=1 AND m.deleted=0 AND m.conversation_id=?1 AND m.sender_ipk=?2 ORDER BY m.id LIMIT 128",
+        (conv.as_slice(),author.as_slice()),|r|Ok(Pending {id:r.get(0)?,conv,author,
+            entry:ReceiptEntry {message_id:r.get(1)?,delivered_at:r.get(2)?,read_at:r.get(3)?}}))?)
 }
 
 static FLUSH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -352,7 +392,7 @@ pub(crate) fn schedule() {
     if RUNNING.swap(true, SeqCst) {
         return;
     }
-    crate::RUNTIME.spawn(async {
+    core().spawn(async {
         while REQUESTED.swap(false, SeqCst) {
             if let Err(e) = flush().await {
                 log::debug!("RECEIPTS: deferred: {e}");
@@ -376,13 +416,14 @@ pub(crate) async fn flush() -> Result<()> {
             failed.insert((first.conv, first.author));
             continue;
         }
-        let mut conn = MESSAGES_DB.lock();
+        let mut conn = core().db.messages().lock();
         let tx = conn.transaction()?;
         finish_batch_tx(&tx, &rows)?;
         tx.commit()?;
     }
 }
 
+/// Clears only rows unchanged since the batch was loaded, so a newer event still goes out.
 fn finish_batch_tx(conn: &Connection, rows: &[Pending]) -> Result<()> {
     for row in rows {
         conn.execute("UPDATE incoming_receipts SET pending=0 WHERE message_id=?1 AND delivered_at IS ?2 AND read_at IS ?3",
@@ -403,8 +444,11 @@ async fn send_batch(rows: &[Pending]) -> Result<()> {
         first.author,
     )
     .await?;
-    // Compatibility is targeted to that author, never the whole group.
-    // New peers prefer exact entries over these time-less watermarks.
+    // Watermarks only for an author that has never sent exact receipts, and
+    // only to them, never the whole group.
+    if detailed_tx(&core().db.messages().lock(), &first.conv, &first.author)? {
+        return Ok(());
+    }
     for kind in [ReceiptKind::Delivered, ReceiptKind::Read] {
         let upto = rows
             .iter()
@@ -468,21 +512,6 @@ pub fn info_many(conv: &[u8; 16], dispatches: &[[u8; 16]]) -> Result<MessageRece
     Ok(MessageReceiptInfo { complete, recipients })
 }
 
-pub(crate) fn seen_count(conv: &[u8; 16], did: &[u8; 16]) -> u32 {
-    let conn = MESSAGES_DB.lock();
-    let id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM messages WHERE conversation_id=?1 AND dispatch_id=?2 AND outgoing=1",
-            (conv.as_slice(), did.as_slice()),
-            |r| r.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten();
-    id.and_then(|id| rows_tx(&conn, &id).ok())
-        .map_or(0, |rows| rows.iter().filter(|r| r.status == STATUS_READ).count() as u32)
-}
-
 type SavedRecipient = (String, [u8; 32], u8, Option<u64>, Option<u64>, Option<u64>, u8);
 type SavedIncoming = (String, Option<u64>, Option<u64>, bool, bool);
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -493,28 +522,18 @@ pub(crate) struct Backup {
     peers: Vec<([u8; 16], [u8; 32])>,
 }
 
-pub(crate) fn dump() -> Result<Backup> {
-    dump_tx(&MESSAGES_DB.lock())
-}
-fn dump_tx(conn: &Connection) -> Result<Backup> {
+pub(crate) fn dump_tx(conn: &Connection) -> Result<Backup> {
     Ok(Backup {
-        audiences:conn.prepare("SELECT message_id,complete FROM message_audiences")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?,
-        recipients:conn.prepare("SELECT message_id,member,send_status,sent_at,delivered_at,read_at,legacy_status FROM message_recipients")?
-            .query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?.collect::<rusqlite::Result<_>>()?,
-        incoming:conn.prepare("SELECT message_id,delivered_at,read_at,is_read,pending FROM incoming_receipts")?
-            .query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?.collect::<rusqlite::Result<_>>()?,
-        peers:conn.prepare("SELECT conversation_id,member FROM receipt_peers")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?,
+        audiences:all(conn,"SELECT message_id,complete FROM message_audiences",[],|r|Ok((r.get(0)?,r.get(1)?)))?,
+        recipients:all(conn,"SELECT message_id,member,send_status,sent_at,delivered_at,read_at,legacy_status FROM message_recipients",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?,
+        incoming:all(conn,"SELECT message_id,delivered_at,read_at,is_read,pending FROM incoming_receipts",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?,
+        peers:all(conn,"SELECT conversation_id,member FROM receipt_peers",[],|r|Ok((r.get(0)?,r.get(1)?)))?,
     })
 }
 
-pub(crate) fn restore(backup: &Backup) -> Result<()> {
-    let mut conn = MESSAGES_DB.lock();
-    let tx = conn.transaction()?;
-    restore_tx(&tx, backup)?;
-    tx.commit()?;
-    Ok(())
-}
-fn restore_tx(conn: &Connection, backup: &Backup) -> Result<()> {
+pub(crate) fn restore_tx(conn: &Connection, backup: &Backup) -> Result<()> {
     let mut new = std::collections::HashSet::new();
     for (id, complete) in &backup.audiences {
         if conn.execute(
@@ -553,321 +572,247 @@ fn restore_tx(conn: &Connection, backup: &Backup) -> Result<()> {
 }
 
 pub(crate) fn reject_conversation(conv: &[u8; 16]) -> Result<()> {
-    let mut conn = MESSAGES_DB.lock();
+    let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    let ids = tx
-        .prepare("SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=1 AND status<3")?
-        .query_map([conv.as_slice()], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for id in ids {
-        tx.execute("UPDATE message_recipients SET send_status=2 WHERE message_id=?1", [&id])?;
-        tx.execute("UPDATE messages SET status=2 WHERE id=?1", [&id])?;
-        aggregate_tx(&tx, &id)?;
-    }
+    reject_conversation_tx(&tx, conv)?;
     tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn reject_conversation_tx(conn: &Connection, conv: &[u8; 16]) -> Result<()> {
+    let ids: Vec<String> = all(
+        conn,
+        "SELECT id FROM messages WHERE conversation_id=?1 AND outgoing=1 AND status<3",
+        [conv.as_slice()],
+        |r| r.get(0),
+    )?;
+    for id in ids {
+        conn.execute("UPDATE message_recipients SET send_status=2 WHERE message_id=?1", [&id])?;
+        conn.execute("UPDATE messages SET status=2 WHERE id=?1", [&id])?;
+        aggregate_tx(conn, &id)?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    const CONV: [u8; 16] = [9; 16];
+    use crate::data::conversation::Conversation;
+    use crate::data::conversation::ROLE_MEMBER;
+    use crate::data::message::Message;
+    use crate::test_support::data::open;
+    use crate::test_support::data::ulid;
+    use crate::test_support::data::with_failing_trigger;
+
     const A: [u8; 32] = [2; 32];
     const B: [u8; 32] = [3; 32];
-    fn db() -> Connection {
-        let conn = crate::db::messages::open_in_memory();
-        conn.execute(
-            "INSERT INTO conversations(id,kind,created_at) VALUES (?1,1,1)",
-            [CONV.as_slice()],
-        )
-        .unwrap();
-        for peer in [A, B] {
-            conn.execute(
-                "INSERT INTO conversation_members(conversation_id,member_ipk) VALUES (?1,?2)",
-                (CONV.as_slice(), peer.as_slice()),
-            )
-            .unwrap();
-        }
-        conn
+
+    /// A chat of A and B on a device of ours that is not in the roster.
+    fn db() -> (Connection, [u8; 16]) {
+        let conn = open(crate::db::messages::migrate);
+        let conv = Conversation::join_group_tx(&conn, &A, &[A, B]).unwrap();
+        (conn, conv)
     }
-    fn post(conn: &Connection, n: u8) -> (String, [u8; 16]) {
-        let id = format!("{n:026}");
-        let did = [n; 16];
-        conn.execute("INSERT INTO messages(id,conversation_id,content,outgoing,timestamp,status,dispatch_id) VALUES (?1,?2,'hello',1,1,0,?3)",
-            (&id,CONV.as_slice(),did.as_slice())).unwrap();
-        snapshot_tx(conn, &id, &[A, B], true).unwrap();
-        (id, did)
+
+    /// Our post, its audience frozen at A and B.
+    fn post(conn: &Connection, conv: [u8; 16]) -> (String, [u8; 16]) {
+        let m = Message::save_outgoing_tx(conn, conv, "hello", None, None).unwrap().inner;
+        (m.id.to_string(), m.dispatch_id.unwrap().try_into().unwrap())
     }
+
     fn state(conn: &Connection, id: &str) -> u8 {
-        conn.query_row("SELECT status FROM messages WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        conn.query_row("SELECT status FROM messages WHERE id = ?1", [id], |r| r.get(0)).unwrap()
     }
-    fn exact(conn: &Connection, peer: &[u8; 32], did: [u8; 16], d: Option<u64>, r: Option<u64>) {
-        receive_tx(
-            conn,
-            &CONV,
-            peer,
-            AppPayload::ReceiptDetails(ReceiptDetails {
-                entries: vec![ReceiptEntry { message_id: did, delivered_at: d, read_at: r }],
-            }),
-        )
-        .unwrap();
+
+    fn details(did: [u8; 16], delivered_at: Option<u64>, read_at: Option<u64>) -> AppPayload {
+        AppPayload::ReceiptDetails(ReceiptDetails {
+            entries: vec![ReceiptEntry { message_id: did, delivered_at, read_at }],
+        })
     }
+
+    fn exact(
+        conn: &Connection, conv: [u8; 16], peer: &[u8; 32], did: [u8; 16], d: Option<u64>,
+        r: Option<u64>,
+    ) {
+        receive_tx(conn, &conv, peer, details(did, d, r)).unwrap();
+    }
+
     #[test]
     fn mixed_send_results_are_order_independent_and_do_not_downgrade_receipts() {
         for reversed in [false, true] {
-            let conn = db();
-            let (id, did) = post(&conn, 1);
+            let (conn, conv) = db();
+            let (id, did) = post(&conn, conv);
             let mut results = [(A, STATUS_SENT, Some(10)), (B, STATUS_FAILED, None)];
             if reversed {
-                results.reverse()
+                results.reverse();
             }
             for (peer, status, at) in results {
                 send_result_tx(&conn, &did, &peer, status, at).unwrap();
             }
             assert_eq!(state(&conn, &id), STATUS_SENT);
-            assert_eq!(
-                rows_tx(&conn, &id).unwrap().iter().filter(|r| r.status == STATUS_FAILED).count(),
-                1
-            );
-            exact(&conn, &A, did, Some(11), Some(12));
-            exact(&conn, &B, did, Some(13), None);
+            let failed =
+                rows_tx(&conn, &id).unwrap().iter().filter(|r| r.status == STATUS_FAILED).count();
+            assert_eq!(failed, 1);
+            exact(&conn, conv, &A, did, Some(11), Some(12));
+            exact(&conn, conv, &B, did, Some(13), None);
             assert_eq!(
                 state(&conn, &id),
                 STATUS_DELIVERED,
-                "one delivered + one read is not all read"
+                "one read and one delivered is not all read"
             );
-            exact(&conn, &B, did, None, Some(14));
+            exact(&conn, conv, &B, did, None, Some(14));
             send_result_tx(&conn, &did, &A, STATUS_FAILED, None).unwrap();
             send_result_tx(&conn, &did, &B, STATUS_SENT, Some(20)).unwrap();
-            assert_eq!(state(&conn, &id), STATUS_READ);
-            exact(&conn, &B, did, Some(19), Some(21));
+            assert_eq!(state(&conn, &id), STATUS_READ, "a late send result never undoes a read");
+            exact(&conn, conv, &B, did, Some(19), Some(21));
             let rows = rows_tx(&conn, &id).unwrap();
             let b = rows.iter().find(|r| r.member == B).unwrap();
-            assert_eq!(b.delivered_at, Some(13));
-            assert_eq!(b.read_at, Some(14));
+            assert_eq!(
+                (b.delivered_at, b.read_at),
+                (Some(13), Some(14)),
+                "the first report stands"
+            );
         }
-        let conn = db();
-        let (id, did) = post(&conn, 1);
+        let (conn, conv) = db();
+        let (id, did) = post(&conn, conv);
         send_result_tx(&conn, &did, &A, STATUS_FAILED, None).unwrap();
         assert_eq!(state(&conn, &id), STATUS_PENDING);
         send_result_tx(&conn, &did, &B, STATUS_FAILED, None).unwrap();
         assert_eq!(state(&conn, &id), STATUS_FAILED);
     }
+
     #[test]
     fn exact_ids_ignore_legacy_holes_and_watermarks_from_another_author() {
-        let conn = db();
-        let (first, a) = post(&conn, 1);
-        let (second, b) = post(&conn, 2);
+        let (conn, conv) = db();
+        let (first, a) = post(&conn, conv);
+        let (second, b) = post(&conn, conv);
         for did in [a, b] {
             for peer in [A, B] {
                 send_result_tx(&conn, &did, &peer, STATUS_SENT, Some(10)).unwrap();
             }
         }
-        // Reordered old compatibility receipt can precede exact support. Once
-        // exact evidence arrives it must not retain an inferred skipped post.
-        receive_tx(&conn, &CONV, &A, AppPayload::Receipt { kind: ReceiptKind::Read, upto: b })
-            .unwrap();
-        exact(&conn, &A, b, Some(11), Some(12));
+        let legacy = |peer: &[u8; 32], kind, upto| {
+            receive_tx(&conn, &conv, peer, AppPayload::Receipt { kind, upto }).unwrap();
+        };
+        // A reordered legacy watermark can precede exact support; once exact evidence arrives,
+        // the post it skipped is no longer inferred read.
+        legacy(&A, ReceiptKind::Read, b);
+        exact(&conn, conv, &A, b, Some(11), Some(12));
         assert_eq!(rows_tx(&conn, &first).unwrap()[0].status, STATUS_SENT);
         assert_eq!(rows_tx(&conn, &second).unwrap()[0].status, STATUS_READ);
-        receive_tx(&conn, &CONV, &A, AppPayload::Receipt { kind: ReceiptKind::Read, upto: b })
-            .unwrap();
+        legacy(&A, ReceiptKind::Read, b);
         assert_eq!(rows_tx(&conn, &first).unwrap()[0].status, STATUS_SENT);
-        receive_tx(
-            &conn,
-            &CONV,
-            &B,
-            AppPayload::Receipt { kind: ReceiptKind::Read, upto: [9; 16] },
-        )
-        .unwrap();
+        legacy(&B, ReceiptKind::Read, [0xFF; 16]);
         assert_eq!(
             rows_tx(&conn, &second).unwrap()[1].status,
             STATUS_SENT,
-            "foreign author's watermark cannot mark our messages"
+            "a watermark naming another author's post cannot mark ours"
         );
-        receive_tx(&conn, &CONV, &B, AppPayload::Receipt { kind: ReceiptKind::Delivered, upto: b })
-            .unwrap();
+        legacy(&B, ReceiptKind::Delivered, b);
         assert_eq!(state(&conn, &second), STATUS_DELIVERED);
-        let rows = rows_tx(&conn, &second).unwrap();
-        assert_eq!(rows[1].delivered_at, None, "old peers have no event time");
-    }
-    #[test]
-    fn original_audience_survives_joins_leaves_and_foreign_receipts() {
-        let conn = db();
-        let (id, did) = post(&conn, 1);
-        let c = [4; 32];
-        conn.execute(
-            "INSERT INTO conversation_members(conversation_id,member_ipk) VALUES (?1,?2)",
-            (CONV.as_slice(), c.as_slice()),
-        )
-        .unwrap();
-        snapshot_tx(&conn, &id, &[A, B, c], true).unwrap();
-        exact(&conn, &c, did, Some(11), Some(12));
-        assert_eq!(rows_tx(&conn, &id).unwrap().len(), 2);
-        conn.execute(
-            "UPDATE conversation_members SET active=0 WHERE member_ipk=?1",
-            [B.as_slice()],
-        )
-        .unwrap();
-        exact(&conn, &A, did, Some(11), Some(12));
-        assert_eq!(state(&conn, &id), STATUS_SENT);
-        assert!(!rows_tx(&conn, &id).unwrap()[1].active);
-        exact(&conn, &B, did, Some(13), Some(14));
         assert_eq!(
-            state(&conn, &id),
-            STATUS_READ,
-            "a delayed receipt from an original recipient still counts"
-        );
-        let before = rows_tx(&conn, &id).unwrap()[0].read_at;
-        receive_tx(
-            &conn,
-            &[8; 16],
-            &A,
-            AppPayload::ReceiptDetails(ReceiptDetails {
-                entries: vec![ReceiptEntry {
-                    message_id: did,
-                    delivered_at: None,
-                    read_at: Some(1),
-                }],
-            }),
-        )
-        .unwrap();
-        assert_eq!(rows_tx(&conn, &id).unwrap()[0].read_at, before);
-    }
-    #[test]
-    fn receipt_transaction_failure_cannot_publish_half_an_update() {
-        let mut conn = db();
-        let (id, did) = post(&conn, 1);
-        conn.execute_batch("CREATE TRIGGER reject_receipt BEFORE UPDATE ON message_recipients BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-        {
-            let tx = conn.transaction().unwrap();
-            assert!(
-                receive_tx(
-                    &tx,
-                    &CONV,
-                    &A,
-                    AppPayload::ReceiptDetails(ReceiptDetails {
-                        entries: vec![ReceiptEntry {
-                            message_id: did,
-                            delivered_at: Some(11),
-                            read_at: None
-                        }]
-                    })
-                )
-                .is_err()
-            );
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM receipt_peers", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(state(&conn, &id), STATUS_PENDING);
-        conn.execute_batch("DROP TRIGGER reject_receipt;").unwrap();
-        {
-            let tx = conn.transaction().unwrap();
-            exact(&tx, &A, did, Some(11), None);
-            tx.commit().unwrap();
-        }
-        let path =
-            std::env::temp_dir().join(format!("promtuz-receipt-{}.sqlite", uuid::Uuid::now_v7()));
-        conn.execute("VACUUM INTO ?1", [path.to_str().unwrap()]).unwrap();
-        drop(conn);
-        let conn = Connection::open(&path).unwrap();
-        assert_eq!(rows_tx(&conn, &id).unwrap()[0].delivered_at, Some(11));
-        drop(conn);
-        std::fs::remove_file(path).unwrap();
-    }
-    #[test]
-    fn backup_preserves_times_without_broadening_live_audiences() {
-        let source = db();
-        let (id, did) = post(&source, 1);
-        exact(&source, &A, did, Some(10), Some(12));
-        send_result_tx(&source, &did, &B, STATUS_FAILED, None).unwrap();
-        let bytes = postcard::to_allocvec(&dump_tx(&source).unwrap()).unwrap();
-        let backup: Backup = postcard::from_bytes(&bytes).unwrap();
-        let restored = db();
-        post(&restored, 1);
-        restored.execute("DELETE FROM message_recipients", []).unwrap();
-        restored.execute("DELETE FROM message_audiences", []).unwrap();
-        restore_tx(&restored, &backup).unwrap();
-        restore_tx(&restored, &backup).unwrap();
-        assert_eq!(rows_tx(&restored, &id).unwrap()[0].read_at, Some(12));
-        assert_eq!(rows_tx(&restored, &id).unwrap()[1].status, STATUS_FAILED);
-        restored.execute("DELETE FROM message_recipients WHERE member=?1", [B.as_slice()]).unwrap();
-        restore_tx(&restored, &backup).unwrap();
-        assert_eq!(
-            rows_tx(&restored, &id).unwrap().len(),
-            1,
-            "existing audience remains authoritative"
-        );
-        restored.execute("DELETE FROM messages", []).unwrap();
-        assert_eq!(
-            restored
-                .query_row("SELECT COUNT(*) FROM message_recipients", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-            0
+            rows_tx(&conn, &second).unwrap()[1].delivered_at,
+            None,
+            "legacy receipts carry no time"
         );
     }
 
     #[test]
-    fn local_read_times_follow_arrival_order_and_preserve_in_flight_updates() {
-        let conn = db();
-        let insert = |id: &str, did: [u8; 16], author: [u8; 32], now: u64| {
-            conn.execute("INSERT INTO messages(id,conversation_id,sender_ipk,content,outgoing,timestamp,status,dispatch_id) VALUES (?1,?2,?3,'hi',0,1,1,?4)",
-                (id,CONV.as_slice(),author.as_slice(),did.as_slice())).unwrap();
-            arrived_tx(&conn, id, now).unwrap();
-        };
-        insert("00000000000000000000000001", [9; 16], A, 100);
-        insert("00000000000000000000000002", [2; 16], B, 101);
-        read_tx(&conn, &CONV, &[2; 16], 110).unwrap();
+    fn original_audience_survives_joins_leaves_and_foreign_receipts() {
+        let (conn, conv) = db();
+        let (id, did) = post(&conn, conv);
+        let joiner = [4; 32];
+        Conversation::put_member(&conn, &conv, &joiner, ROLE_MEMBER).unwrap();
+        snapshot_tx(&conn, &id, &[A, B, joiner], true).unwrap();
+        exact(&conn, conv, &joiner, did, Some(11), Some(12));
+        assert_eq!(rows_tx(&conn, &id).unwrap().len(), 2, "a joiner never enters the audience");
+
+        Conversation::deactivate_member_tx(&conn, &conv, &B).unwrap();
+        exact(&conn, conv, &A, did, Some(11), Some(12));
+        assert_eq!(state(&conn, &id), STATUS_SENT);
+        assert!(!rows_tx(&conn, &id).unwrap()[1].active);
+        exact(&conn, conv, &B, did, Some(13), Some(14));
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM incoming_receipts WHERE read_at=110", [], |r| r
-                .get::<_, u32>(
-                0
-            ))
-            .unwrap(),
-            2
+            state(&conn, &id),
+            STATUS_READ,
+            "a departed recipient's late receipt still counts"
         );
-        insert("00000000000000000000000003", [1; 16], A, 120);
-        assert_eq!(conn.query_row("SELECT is_read FROM incoming_receipts WHERE message_id='00000000000000000000000003'",[],|r|r.get::<_,bool>(0)).unwrap(),false);
-        read_tx(&conn, &CONV, &[1; 16], 130).unwrap();
-        // A delivery flush that raced the read must not clear its newer work.
-        let mut flushed = Pending {
-            id: "00000000000000000000000003".into(),
-            conv: CONV,
-            author: A,
-            entry: ReceiptEntry { message_id: [1; 16], delivered_at: Some(120), read_at: None },
+
+        let before = rows_tx(&conn, &id).unwrap()[0].read_at;
+        receive_tx(&conn, &[8; 16], &A, details(did, None, Some(1))).unwrap();
+        assert_eq!(
+            rows_tx(&conn, &id).unwrap()[0].read_at,
+            before,
+            "a receipt from another chat is ignored"
+        );
+    }
+
+    #[test]
+    fn a_failed_receipt_transaction_publishes_nothing() {
+        let (mut conn, conv) = db();
+        let (id, did) = post(&conn, conv);
+        with_failing_trigger(&mut conn, "message_recipients", "UPDATE", |conn| {
+            let tx = conn.transaction().unwrap();
+            assert!(receive_tx(&tx, &conv, &A, details(did, Some(11), None)).is_err());
+        });
+        let peers: u32 =
+            conn.query_row("SELECT COUNT(*) FROM receipt_peers", [], |r| r.get(0)).unwrap();
+        assert_eq!(peers, 0, "the member was not marked as sending exact receipts");
+        assert_eq!(state(&conn, &id), STATUS_PENDING);
+
+        let tx = conn.transaction().unwrap();
+        exact(&tx, conv, &A, did, Some(11), None);
+        tx.commit().unwrap();
+        assert_eq!(rows_tx(&conn, &id).unwrap()[0].delivered_at, Some(11));
+    }
+
+    /// A delivery flush that raced a local read must not clear the newer read, and the read time
+    /// is the first one.
+    #[test]
+    fn local_read_times_follow_arrival_order_and_preserve_in_flight_updates() {
+        let (conn, conv) = db();
+        let arrive = |n: u8, did: [u8; 16], author: [u8; 32], now: u64| {
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, \
+                 status, dispatch_id) VALUES (?1, ?2, ?3, 'hi', 0, 1, 1, ?4)",
+                (ulid(n), conv.as_slice(), author.as_slice(), did.as_slice()),
+            )
+            .unwrap();
+            arrived_tx(&conn, &ulid(n), now).unwrap();
         };
-        finish_batch_tx(&conn, &[flushed.clone()]).unwrap();
-        assert!(
+        let read_at = |n: u8| -> (bool, Option<u64>, bool) {
             conn.query_row(
-                "SELECT pending FROM incoming_receipts WHERE delivered_at=120",
-                [],
-                |r| r.get::<_, bool>(0)
+                "SELECT is_read, read_at, pending FROM incoming_receipts WHERE message_id = ?1",
+                [ulid(n)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap()
-        );
+        };
+        // Arrival order, not each author's dispatch-id clock, decides what a read covers.
+        arrive(1, [9; 16], A, 100);
+        arrive(2, [2; 16], B, 101);
+        read_tx(&conn, &conv, &[2; 16], 110).unwrap();
+        assert_eq!((read_at(1).1, read_at(2).1), (Some(110), Some(110)));
+        arrive(3, [1; 16], A, 120);
+        assert!(!read_at(3).0, "a later arrival is unread");
+        read_tx(&conn, &conv, &[1; 16], 130).unwrap();
+
+        let mut flushed = Pending {
+            id: ulid(3),
+            conv,
+            author: A,
+            entry: ReceiptEntry {
+                message_id:   [1; 16],
+                delivered_at: Some(120),
+                read_at:      None,
+            },
+        };
+        finish_batch_tx(&conn, &[flushed.clone()]).unwrap();
+        assert!(read_at(3).2, "the read that landed during the flush still goes out");
         flushed.entry.read_at = Some(130);
         finish_batch_tx(&conn, &[flushed]).unwrap();
-        assert!(
-            !conn
-                .query_row(
-                    "SELECT pending FROM incoming_receipts WHERE delivered_at=120",
-                    [],
-                    |r| r.get::<_, bool>(0)
-                )
-                .unwrap()
-        );
-        read_tx(&conn, &CONV, &[1; 16], 150).unwrap();
-        assert_eq!(
-            conn.query_row(
-                "SELECT read_at FROM incoming_receipts WHERE delivered_at=120",
-                [],
-                |r| r.get::<_, u64>(0)
-            )
-            .unwrap(),
-            130
-        );
+        assert!(!read_at(3).2);
+        read_tx(&conn, &conv, &[1; 16], 150).unwrap();
+        assert_eq!(read_at(3).1, Some(130));
     }
 }

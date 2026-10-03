@@ -18,9 +18,8 @@ pub use xor::xor32;
 /// Heartbeat interval in seconds
 pub static RESOLVER_RELAY_HEARTBEAT_INTERVAL: u64 = 20;
 
-/// Keying material unique to this TLS session, as both ends of `conn` compute
-/// it under `label` — what a proof of identity is bound to, so that it
-/// verifies on this connection and no other.
+/// TLS exporter output both ends compute under `label`. A proof bound to it verifies on this
+/// connection and no other.
 pub fn session_binding(conn: &Connection, label: &[u8]) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     conn.export_keying_material(&mut out, label, &[])
@@ -28,23 +27,9 @@ pub fn session_binding(conn: &Connection, label: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-/// [`session_binding`] under the client-auth label — see
-/// [`crate::proto::client_rel::client_auth_message`].
-///
-/// Gated on `proto`: the label it applies lives there, while `quic` alone is
-/// what `certgen` builds against. Without the gate that binary cannot compile
-/// on its own, and only feature unification across the workspace hides it.
 #[cfg(feature = "proto")]
 pub fn client_auth_binding(conn: &Connection) -> Result<[u8; 32]> {
     session_binding(conn, crate::proto::client_rel::CLIENT_AUTH_EXPORTER_LABEL)
-}
-
-pub async fn send_uni(conn: &Connection, data: &[u8]) -> Result<()> {
-    let mut send = conn.open_uni().await?;
-    send.write_all(data).await?;
-    send.finish()?;
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,90 +40,23 @@ pub enum CloseReason {
     ShuttingDown,
     Reconnecting,
     PacketMismatch,
-    /// Resolver: incoming `RelayHello` failed signature/identity validation
-    /// (id-to-key mismatch, malformed pubkey, or bad Ed25519 sig).
     BadSignature,
-    /// Resolver: `RelayHello.timestamp` is outside the accepted clock window.
     StaleTimestamp,
-    /// Resolver: registry is at capacity, no more relays can be admitted
-    /// until existing ones disconnect.
     RegistryFull,
-    /// Peer ALPN-negotiated a protocol role (e.g. `resolver/5`) for which
-    /// this side has no implementation. Closing politely is preferable to
-    /// panicking the spawned per-connection task.
     UnsupportedRole,
-    /// Source address has exceeded its accept-side rate-limit quota.
-    /// Returned at the acceptor before any per-connection state is created.
     RateLimited,
-    /// DHT (`peer/5`): a record's `user_sig` or `relay_sig` failed to
-    /// verify.
     DhtBadSignature,
-    /// DHT (`peer/5`): a record's `not_before` is more than
-    /// `PRESENCE_MAX_FUTURE_SKEW_MS` in the future, or `not_after` has
-    /// already elapsed at the time of receipt.
     DhtClockSkew,
-    /// DHT (`peer/5`): peer asked us to hold a record outside our
-    /// k-closest ownership window and we declined.
     DhtNotOwner,
-    /// DHT (`peer/5`): per-peer or aggregate inbound-RPC rate limit
-    /// tripped (see `dht::rate_limit`).
     DhtFlood,
-    /// DHT (`peer/5`): a wire field violated its declared length bound
-    /// (see `dht_p2p`'s `MAX_*` consts).
+    /// Any malformed DHT frame or key.
     DhtMalformedKey,
-    /// DHT (`peer/5`): sticky-home `Forward` / `QueueFetch` /
-    /// `QueueFetchAck` RPC was rejected for a hard protocol violation
-    /// the wire-format validator surfaced (e.g. bad outer signature on
-    /// `Forward`, ack-id list overflow on `QueueFetchAck`). The
-    /// soft-reject outcomes (`QueueFull`, `NotOwner`, `RateLimited`)
-    /// are returned in the response body and do **not** close the
-    /// connection.
     DhtForwardRejected,
-    /// MLS — `KeyPackagePublish` / `KeyPackageRefill` /
-    /// `KeyPackageFetch` RPC failed because some piece of the payload
-    /// was structurally malformed: the publisher's outer `sig` did not
-    /// verify, a per-record `owner_sig` did not verify, the embedded
-    /// openmls `KeyPackage` rejected validation, the batch exceeded
-    /// `KP_STASH_TARGET`, or a static-fields conflict was detected.
-    /// Maps from
-    /// [`crate::proto::mls_wire::KeyPackagePublishOutcome::BadSig`] /
-    /// `TooMany` / `StaticFieldsConflict` and the analogous Refill
-    /// variants.
     KeyPackageMalformed,
-    /// MLS — record's `expires_at_ms` had already elapsed at store
-    /// time, or the publisher's `timestamp` is outside the
-    /// ±`MAX_KP_SKEW_MS` skew window. Distinct from
-    /// [`Self::KeyPackageMalformed`] so operators can attribute
-    /// clock-drift problems separately from forged-signature problems.
     KeyPackageExpired,
-    /// MLS — per-`(target_ipk, requester_relay_id)` rate limit on
-    /// KeyPackage fetches tripped (`MAX_KP_FETCH_PER_HOUR = 60`).
-    /// Distinct from [`Self::DhtFlood`] (the general per-peer
-    /// per-RPC-class limiter) because the KP fetch limiter is keyed
-    /// on the (target, requester) *pair*, not the requester alone —
-    /// a peer hammering a single target trips this code, while a peer
-    /// hammering many targets at the per-peer rate trips `DhtFlood`.
     KeyPackageRateLimited,
-    /// MLS — `WelcomePublish` / `WelcomeFetch` / `WelcomeAck`
-    /// rejected for a hard protocol violation: bad envelope sig, bad
-    /// user-fetch sig, requester binding mismatch, oversize blob,
-    /// recipient_ipk mismatch in the embedded welcome envelope, or
-    /// any other structural malformation. Distinct from
-    /// [`Self::KeyPackageMalformed`] so operators can attribute
-    /// welcome-flow failures separately from KP-flow failures.
-    /// Per the welcome-queue spec.
     WelcomeMalformed,
-    /// MLS — `WelcomePublish` was rejected because the
-    /// recipient's welcome queue is at
-    /// [`crate::proto::mls_wire::MAX_WELCOMES_PER_RECIPIENT`]. Soft
-    /// outcome; surfaces in the response body, not on the close
-    /// channel — this variant exists so the *forwarding* relay can
-    /// optionally treat repeated `QueueFull`s as a "stop trying this
-    /// home" signal in a future hardening pass.
     WelcomeQueueFull,
-    /// MLS — per-relay rate limit on welcome RPCs tripped.
-    /// Distinct from [`Self::DhtFlood`] for the same reason
-    /// [`Self::KeyPackageRateLimited`] is.
     WelcomeRateLimited,
 }
 

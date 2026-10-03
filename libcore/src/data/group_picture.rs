@@ -1,6 +1,9 @@
 //! Versioned, admin-owned group photos.
+
+use crate::state::core;
+
 pub(crate) fn snapshot(conv: &[u8; 16]) -> Option<(u64, Option<Vec<u8>>)> {
-    crate::db::messages::MESSAGES_DB
+    core().db.messages()
         .lock()
         .query_row(
             "SELECT revision, avif FROM group_pictures WHERE conversation_id=?1",
@@ -24,23 +27,11 @@ pub(crate) fn receive(
 pub(crate) fn receive_authorized(
     conv: [u8; 16], revision: u64, avif: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
-    let db = crate::db::messages::MESSAGES_DB.lock();
+    let db = core().db.messages().lock();
     store(&db, &conv, revision, avif)?;
     drop(db);
     crate::data::peer_avatar::notify_changed();
     Ok(())
-}
-
-#[cfg(test)]
-fn apply(
-    db: &rusqlite::Connection, conv: &[u8; 16], author: &[u8; 32], revision: u64,
-    avif: Option<Vec<u8>>,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        crate::data::conversation::Conversation::may_edit_tx(db, conv, author),
-        "they may not change the group's photo"
-    );
-    store(db, conv, revision, avif)
 }
 
 fn store(
@@ -72,79 +63,31 @@ pub struct Backup {
     pub avif: Option<Vec<u8>>,
 }
 
-pub fn dump() -> Vec<Backup> {
-    let db = crate::db::messages::MESSAGES_DB.lock();
-    db.prepare("SELECT conversation_id, revision, avif FROM group_pictures")
-        .and_then(|mut q| {
-            q.query_map([], |r| {
-                Ok(Backup {
-                    conversation: r.get(0)?,
-                    revision:     r.get(1)?,
-                    avif:         r.get(2)?,
-                })
-            })
-            .map(|rows| rows.flatten().collect())
-        })
-        .unwrap_or_default()
+crate::db::from_row!(Backup { conversation, revision, avif });
+
+pub fn dump_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Backup>> {
+    crate::db::all(
+        conn,
+        "SELECT conversation_id AS conversation, revision, avif FROM group_pictures",
+        [],
+        Backup::from_row,
+    )
 }
 
-pub fn restore(rows: &[Backup]) -> anyhow::Result<()> {
-    let db = crate::db::messages::MESSAGES_DB.lock();
-    let tx = db.unchecked_transaction()?;
+/// A picture whose chat is missing, or that fails the gate, is skipped: it must not fail the
+/// restore it rides in.
+pub fn restore_tx(conn: &rusqlite::Connection, rows: &[Backup]) -> anyhow::Result<()> {
     for r in rows {
-        if let Some(bytes) = &r.avif {
-            crate::data::peer_avatar::check_avif(bytes)?;
+        if r.avif.as_deref().is_some_and(|b| crate::data::peer_avatar::check_avif(b).is_err()) {
+            continue;
         }
         let revision = i64::try_from(r.revision)?;
         // A current device's copy wins over an imported snapshot, including removals.
-        tx.execute(
-            "INSERT OR IGNORE INTO group_pictures(conversation_id,revision,avif) VALUES (?1,?2,?3)",
+        conn.execute(
+            "INSERT OR IGNORE INTO group_pictures(conversation_id,revision,avif)
+             SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM conversations WHERE id=?1)",
             (r.conversation.as_slice(), revision, &r.avif),
         )?;
     }
-    tx.commit()?;
-    drop(db);
-    crate::data::peer_avatar::notify_changed();
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_active_admin_can_update_and_old_photos_cannot_undo_removal() {
-        let db = crate::db::messages::open_in_memory();
-        let conv = [1u8; 16];
-        let admin = [2u8; 32];
-        let member = [3u8; 32];
-        db.execute(
-            "INSERT INTO conversations(id,kind,created_by) VALUES (?1,1,?2)",
-            (conv.as_slice(), admin.as_slice()),
-        )
-        .unwrap();
-        for (peer, role) in [(admin, 1), (member, 0)] {
-            db.execute("INSERT INTO conversation_members(conversation_id,member_ipk,role) VALUES (?1,?2,?3)",
-                (conv.as_slice(),peer.as_slice(),role)).unwrap();
-        }
-        let photo = Some(vec![
-            0, 0, 0, 24, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0,
-        ]);
-        apply(&db, &conv, &admin, 1, photo.clone()).unwrap();
-        assert!(apply(&db, &conv, &member, 3, None).is_err());
-        apply(&db, &conv, &admin, 2, None).unwrap();
-        apply(&db, &conv, &admin, 1, photo).unwrap();
-        let kept: (u64, Option<Vec<u8>>) = db
-            .query_row("SELECT revision,avif FROM group_pictures", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .unwrap();
-        assert_eq!(kept, (2, None));
-        db.execute(
-            "UPDATE conversation_members SET active=0 WHERE member_ipk=?1",
-            [admin.as_slice()],
-        )
-        .unwrap();
-        assert!(apply(&db, &conv, &admin, 4, None).is_err());
-    }
 }

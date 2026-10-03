@@ -1,26 +1,25 @@
-//! One owner of a receiver file and its durable verified chunk ranges.
-//!
-//! Network workers do not write shared files or publish progress themselves.
-//! The owner verifies bytes, writes their exact offset, syncs them, then commits
-//! the bitmap and the legacy contiguous prefix in one database transaction.
+//! The single owner of a receiver file and its verified chunk ranges. It verifies, writes and syncs
+//! each chunk, then commits the bitmap and the contiguous prefix in one transaction.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+use common::utils::now_secs;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::{store, wire};
 
-/// The manifest frame is capped at 8 MiB, so it cannot name more chunk hashes
-/// than this. A bitmap for that maximum is 32 KiB, independently of file size.
+use crate::db::Stores;
+use crate::state::Core;
+
+/// An 8 MiB manifest frame names at most this many chunk hashes.
 const MAX_CHUNKS: usize = 8 * 1024 * 1024 / 32;
-// Recovery may read GiB of saved chunks. Keep it off Tokio's async workers
-// and bound simultaneous disk scans independently of network download slots.
-static RECOVERY_SCANS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(2)));
+// Recovery scans can read GiB, so they run blocking and are bounded apart from download slots.
+static RECOVERY_SCANS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 struct StopScanOnDrop(Option<CancellationToken>);
 
@@ -33,7 +32,7 @@ impl Drop for StopScanOnDrop {
 }
 
 async fn blocking_scan<T: Send + 'static>(
-    lease: store::ReceiverLease, slots: Arc<Semaphore>,
+    c: &Core, lease: store::ReceiverLease, slots: Arc<Semaphore>,
     scan: impl FnOnce(&store::ReceiverLease, &CancellationToken) -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let permit = tokio::select! {
@@ -43,11 +42,9 @@ async fn blocking_scan<T: Send + 'static>(
     };
     let stop = CancellationToken::new();
     let mut guard = StopScanOnDrop(Some(stop.clone()));
-    let receiver = tokio::task::spawn_blocking(move || {
+    let receiver = c.spawn_blocking(move || {
         let _permit = permit;
-        // `lease` owns the registration until this closure actually exits,
-        // even if its JoinHandle is dropped. Cancellation is checked between
-        // chunks; an in-progress filesystem call must return first.
+        // `lease` holds the registration until this closure exits, even if the JoinHandle drops.
         scan(&lease, &stop)
     })
     .await??;
@@ -62,6 +59,7 @@ pub(crate) struct ChunkRange {
 }
 
 pub(crate) struct Receiver {
+    db: &'static Stores,
     file: File,
     manifest: wire::Manifest,
     partial: store::Partial,
@@ -113,30 +111,20 @@ fn prefix(bits: &[u8], chunks: usize) -> u32 {
 }
 
 impl Receiver {
-    /// Reopen the exact persisted path, then recheck candidate chunks. NULL
-    /// range metadata means the old prefix is the candidate set. Neither a
-    /// bitmap nor a prefix can make missing or corrupt bytes count as present.
-    #[cfg(test)]
-    pub(crate) fn open(
-        file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest, offered_size: u64,
-        lease: &store::ReceiverLease,
-    ) -> Result<Self> {
-        Self::open_inner(file_id, peer, manifest, offered_size, lease, None)
-    }
 
     pub(crate) async fn open_async(
-        file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest, offered_size: u64,
-        lease: &store::ReceiverLease,
+        c: &'static Core, file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest,
+        offered_size: u64, lease: &store::ReceiverLease,
     ) -> Result<Self> {
-        blocking_scan(lease.clone(), RECOVERY_SCANS.clone(), move |lease, stop| {
-            Self::open_inner(file_id, peer, manifest, offered_size, lease, Some(stop))
+        blocking_scan(c, lease.clone(), RECOVERY_SCANS.clone(), move |lease, stop| {
+            Self::open_inner(&c.db, file_id, peer, manifest, offered_size, lease, Some(stop))
         })
         .await
     }
 
     fn open_inner(
-        file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest, offered_size: u64,
-        lease: &store::ReceiverLease, stop: Option<&CancellationToken>,
+        db: &'static Stores, file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest,
+        offered_size: u64, lease: &store::ReceiverLease, stop: Option<&CancellationToken>,
     ) -> Result<Self> {
         let check_cancelled = || {
             if lease.cancel.is_cancelled() || stop.is_some_and(CancellationToken::is_cancelled) {
@@ -147,21 +135,20 @@ impl Receiver {
         };
         check_cancelled()?;
         validate_manifest(&manifest, &file_id, offered_size)?;
-        let previous = store::partial_get(&file_id);
+        let previous = store::partial_get_tx(&db.transfers().lock(), &file_id);
         let (path, saved_file_exists) = match previous.as_ref() {
             Some(p) => match std::fs::metadata(&p.path) {
                 Ok(_) => (p.path.clone(), true),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    (store::partial_path(&file_id), false)
+                    (store::partial_path(db, &file_id), false)
                 },
                 Err(e) => return Err(e.into()),
             },
-            None => (store::partial_path(&file_id), false),
+            None => (store::partial_path(db, &file_id), false),
         };
         let chunks = manifest.chunks.len();
         let mut verified = vec![0; chunks.div_ceil(8)];
-        // An authenticated fresh manifest does not retroactively validate old
-        // metadata describing a different file or chunk geometry.
+        // A fresh manifest does not vouch for old metadata of a different file or chunk geometry.
         if let Some(p) = previous.as_ref().filter(|p| {
             saved_file_exists
                 && p.total == manifest.total_size
@@ -175,15 +162,14 @@ impl Receiver {
                             && saved == manifest
                     })
         }) {
-            match store::verified_bitmap(&file_id)? {
+            let saved = store::verified_bitmap_tx(&db.transfers().lock(), &file_id)?;
+            match saved {
                 Some(bits) => {
                     if validate_bitmap(&bits, chunks).is_ok() {
                         verified = bits;
                     }
-                    // Corrupt local metadata is repairable. Keep its file
-                    // intact, but trust no chunks until they are downloaded
-                    // and verified again. Publishing the empty bitmap below
-                    // prevents every explicit retry failing on the same blob.
+                    // A corrupt bitmap trusts no chunks; publishing the empty one below keeps
+                    // every retry from failing on the same blob.
                 },
                 None => {
                     for idx in 0..(p.have as usize).min(chunks) {
@@ -192,7 +178,7 @@ impl Receiver {
                 },
             }
         }
-        let mut file = store::open_partial(lease, &path)?;
+        let mut file = store::open_partial(db, lease, &path)?;
         let mut buf = vec![0; manifest.chunk_size as usize];
         for idx in 0..chunks {
             if !bit(&verified, idx) {
@@ -220,16 +206,17 @@ impl Receiver {
             have: prefix(&verified, chunks),
             state: store::ACTIVE,
             path,
-            updated_at: crate::utils::systime().as_secs(),
+            updated_at: now_secs(),
         };
-        // Recovery may promote a legacy prefix into the range schema. Ensure
-        // those checked bytes are durable before its first bitmap publication,
-        // just as commit() does for freshly received chunks.
+        // A promoted legacy prefix must be durable before its first bitmap publication, as in
+        // commit().
         check_cancelled()?;
         file.sync_data()?;
         check_cancelled()?;
-        store::partial_put_verified_live(&partial, &verified, lease)?;
-        Ok(Self { file, manifest, partial, verified, cancel: lease.cancel.clone() })
+        let mut conn = db.transfers().lock();
+        store::partial_put_verified_live_tx(&mut conn, &partial, &verified, lease)?;
+        drop(conn);
+        Ok(Self { db, file, manifest, partial, verified, cancel: lease.cancel.clone() })
     }
 
     pub(crate) fn prefix(&self) -> u32 {
@@ -240,8 +227,7 @@ impl Receiver {
         (index as usize) < self.manifest.chunks.len() && bit(&self.verified, index as usize)
     }
 
-    /// Sorted disjoint missing runs. Both limits bound the whole assignment,
-    /// including the sum of the chunks across several separated ranges.
+    /// Sorted disjoint missing runs; `max_chunks` bounds the sum across all of them.
     pub(crate) fn missing(&self, max_ranges: usize, max_chunks: u32) -> Vec<ChunkRange> {
         let mut ranges = Vec::new();
         let mut remaining = max_chunks;
@@ -269,8 +255,7 @@ impl Receiver {
         Ok(())
     }
 
-    /// Accept one chunk, independently of arrival order. Valid duplicates are
-    /// idempotent for legacy suffix pulls: no extra progress or disk write.
+    /// Any arrival order; a valid duplicate is a no-op.
     pub(crate) fn commit(
         &mut self, index: u32, bytes: &[u8], lease: &store::ReceiverLease,
     ) -> Result<()> {
@@ -292,19 +277,19 @@ impl Receiver {
         self.file.write_all(bytes)?;
         self.file.flush()?;
         self.file.sync_data()?;
-        // Only adopt this candidate state in memory after the DB transaction
-        // commits. A DB failure may leave extra valid bytes on disk, but must
-        // not make the next assignment skip uncommitted progress.
+        // Adopt this state in memory only after the DB commit, so a DB failure cannot make the
+        // next assignment skip uncommitted progress.
         let mut verified = self.verified.clone();
         set_bit(&mut verified, idx, true);
-        // Begin at the previous first missing chunk: rescanning an ever-longer
-        // complete prefix on each commit would make sequential pulls quadratic.
+        // Resume from the previous prefix; rescanning it on each commit makes sequential pulls
+        // quadratic.
         let have = self.partial.have
             + (self.partial.have as usize..self.manifest.chunks.len())
                 .take_while(|idx| bit(&verified, *idx))
                 .count() as u32;
-        let updated_at = crate::utils::systime().as_secs();
-        store::partial_progress_verified_live(
+        let updated_at = now_secs();
+        store::partial_progress_verified_live_tx(
+            &self.db.transfers().lock(),
             &self.partial.file_id,
             have,
             self.partial.state,
@@ -325,8 +310,9 @@ impl Receiver {
         }
         self.file.set_len(self.manifest.total_size)?;
         self.file.sync_data()?;
-        let updated_at = crate::utils::systime().as_secs();
-        store::partial_progress_verified_live(
+        let updated_at = now_secs();
+        store::partial_progress_verified_live_tx(
+            &self.db.transfers().lock(),
             &self.partial.file_id,
             self.partial.have,
             store::DONE,
@@ -342,397 +328,207 @@ impl Receiver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
+    use crate::test_support::transfer::Device;
+    use crate::test_support::transfer::device;
+    use crate::test_support::transfer::manifest;
 
-    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
-
+    /// A 35-byte file in 8-byte chunks, its partial saved at a path the receiver must reuse.
     struct Fixture {
-        file_id: [u8; 32],
+        dev:      Device,
+        file_id:  [u8; 32],
         manifest: wire::Manifest,
-        bytes: Vec<u8>,
-        path: String,
-        lease: store::ReceiverLease,
+        bytes:    Vec<u8>,
+        path:     String,
+        lease:    store::ReceiverLease,
+    }
+
+    fn fixture(seed: u8) -> Fixture {
+        let dev = device();
+        let bytes: Vec<u8> = (0..35).map(|n| seed.wrapping_add(n)).collect();
+        let manifest = manifest(&bytes, 8);
+        let file_id = manifest.file_id();
+        let path = dev.dir.path().join("saved.part").display().to_string();
+        std::fs::write(&path, []).unwrap();
+        let lease = store::receiver_lease(&dev.core.db, file_id);
+        let partial = store::Partial {
+            file_id,
+            source_ipk: [seed; 32],
+            total: manifest.total_size,
+            chunk_size: manifest.chunk_size,
+            manifest: Some(postcard::to_allocvec(&manifest).unwrap()),
+            have: 0,
+            state: store::HELD,
+            path: path.clone(),
+            updated_at: 0,
+        };
+        store::partial_put_live_tx(&dev.core.db.transfers().lock(), &partial, &lease).unwrap();
+        Fixture { dev, file_id, manifest, bytes, path, lease }
     }
 
     impl Fixture {
-        fn new(seed: u8, len: usize) -> Self {
-            let serial = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir()
-                .join(format!("promtuz-range-receiver-{}-{serial}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            // Respect the suite's isolated DB root. Setting one only when
-            // absent also allows a focused ranges-only invocation.
-            if std::env::var_os("PROMTUZ_DATA_DIR").is_none() {
-                unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
-            }
-            let bytes: Vec<u8> = (0..len).map(|n| seed.wrapping_add(n as u8)).collect();
-            let manifest = wire::Manifest {
-                total_size: len as u64,
-                chunk_size: 8,
-                chunks: bytes.chunks(8).map(|c| *blake3::hash(c).as_bytes()).collect(),
-            };
-            let file_id = manifest.file_id();
-            store::forget_partial(&file_id);
-            let path = dir.join("persisted-noncanonical.part").to_str().unwrap().to_owned();
-            std::fs::write(&path, []).unwrap();
-            let partial = store::Partial {
-                file_id,
-                source_ipk: [seed; 32],
-                total: manifest.total_size,
-                chunk_size: manifest.chunk_size,
-                manifest: Some(postcard::to_allocvec(&manifest).unwrap()),
-                have: 0,
-                state: store::HELD,
-                path: path.clone(),
-                updated_at: crate::utils::systime().as_secs(),
-            };
-            store::partial_put(&partial).unwrap();
-            let lease = store::receiver_lease(file_id);
-            Self { file_id, manifest, bytes, path, lease }
-        }
-
         fn open(&self) -> Receiver {
-            Receiver::open(
+            let (m, size) = (self.manifest.clone(), self.manifest.total_size);
+            Receiver::open_inner(
+                &self.dev.core.db,
                 self.file_id,
                 [0xe1; 32],
-                self.manifest.clone(),
-                self.manifest.total_size,
+                m,
+                size,
                 &self.lease,
+                None,
             )
             .unwrap()
         }
 
-        fn chunk(&self, index: usize) -> &[u8] {
-            let start = index * self.manifest.chunk_size as usize;
-            &self.bytes[start..(start + self.manifest.chunk_size as usize).min(self.bytes.len())]
+        fn chunk(&self, index: u32) -> &[u8] {
+            let start = index as usize * 8;
+            &self.bytes[start..(start + 8).min(self.bytes.len())]
         }
 
-        fn bitmap(&self, bytes: &[u8]) {
-            store::TRANSFERS_DB
-                .lock()
-                .execute(
-                    "UPDATE partials SET verified=?2 WHERE file_id=?1",
-                    rusqlite::params![self.file_id, bytes],
-                )
-                .unwrap();
+        fn bitmap(&self) -> Option<Vec<u8>> {
+            store::verified_bitmap_tx(&self.dev.core.db.transfers().lock(), &self.file_id).unwrap()
         }
-    }
 
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            store::forget_partial(&self.file_id);
-            let _ = std::fs::remove_dir(std::path::Path::new(&self.path).parent().unwrap());
+        fn forget(&self) {
+            let db = &self.dev.core.db;
+            let canonical = store::partial_path(db, &self.file_id);
+            store::forget_row_tx(
+                &db.transfers().lock(),
+                "partials",
+                &self.file_id,
+                Some(canonical),
+            );
         }
     }
 
-    #[test]
-    fn legacy_prefix_is_rehashed_and_only_bad_chunks_are_lost() {
-        let fixture = Fixture::new(0x11, 35);
-        let mut bytes = fixture.bytes[..24].to_vec();
-        bytes[8] ^= 0xff;
-        std::fs::write(&fixture.path, bytes).unwrap();
-        let mut partial = store::partial_get(&fixture.file_id).unwrap();
-        partial.have = 3;
-        store::partial_put(&partial).unwrap();
-        assert!(store::verified_bitmap(&fixture.file_id).unwrap().is_none());
-
-        let mut receiver = fixture.open();
-        assert_eq!(receiver.prefix(), 1);
-        assert!(receiver.contains(2), "a hole does not discard a later verified chunk");
-        assert_eq!(
-            receiver.missing(2, 2),
-            vec![ChunkRange { start: 1, end: 2 }, ChunkRange { start: 3, end: 4 }]
-        );
-        assert!(receiver.missing(0, 100).is_empty());
-        assert!(receiver.missing(3, 0).is_empty());
-        assert_eq!(store::verified_count(&store::partial_get(&fixture.file_id).unwrap()), 2);
-        assert!(receiver.finish(&fixture.lease).unwrap_err().is::<wire::InvalidFrame>());
-        receiver.commit(4, fixture.chunk(4), &fixture.lease).unwrap();
-        receiver.commit(1, fixture.chunk(1), &fixture.lease).unwrap();
-        assert_eq!(receiver.prefix(), 3);
-        receiver.commit(3, fixture.chunk(3), &fixture.lease).unwrap();
-        receiver.finish(&fixture.lease).unwrap();
-        let done = store::partial_get(&fixture.file_id).unwrap();
+    /// Saves (`have`, `bitmap`, `saved` manifest) over `disk` and reopens it. Returns what the
+    /// receiver still trusts, then fetches what it lacks and checks the result is byte-exact.
+    fn reopen(
+        seed: u8, disk: impl FnOnce(&mut Vec<u8>), have: u32, bitmap: Option<&[u8]>,
+        saved: impl FnOnce(&mut wire::Manifest),
+    ) -> (u32, Vec<ChunkRange>, u32) {
+        let f = fixture(seed);
+        let mut bytes = f.bytes.clone();
+        disk(&mut bytes);
+        std::fs::write(&f.path, bytes).unwrap();
+        let mut manifest = f.manifest.clone();
+        saved(&mut manifest);
+        let mut p = f.dev.partial(&f.file_id).unwrap();
+        p.have = have;
+        p.manifest = Some(postcard::to_allocvec(&manifest).unwrap());
+        let mut db = f.dev.core.db.transfers().lock();
+        match bitmap {
+            Some(bits) => store::partial_put_verified_live_tx(&mut db, &p, bits, &f.lease).unwrap(),
+            None => store::partial_put_live_tx(&db, &p, &f.lease).unwrap(),
+        }
+        drop(db);
+        let mut receiver = f.open();
+        let trusted = (receiver.prefix(), receiver.missing(16, 16), f.dev.verified(&f.file_id));
+        for range in receiver.missing(16, 16) {
+            for index in range.start..range.end {
+                receiver.commit(index, f.chunk(index), &f.lease).unwrap();
+            }
+        }
+        receiver.finish(&f.lease).unwrap();
+        let done = f.dev.partial(&f.file_id).unwrap();
         assert!(done.is_complete());
-        assert_eq!(done.have, 5, "legacy prefix reaches the partial trailing chunk");
-        assert_eq!(done.path, fixture.path, "reuse the exact persisted file");
-        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.bytes);
+        assert_eq!(done.path, f.path, "the saved file is reused");
+        assert_eq!(std::fs::read(&f.path).unwrap(), f.bytes);
+        trusted
     }
 
-    #[test]
-    fn sparse_reopen_clears_truncation_and_corruption_without_trusting_holes() {
-        let fixture = Fixture::new(0x31, 35);
-        let mut receiver = fixture.open();
-        for index in [0, 2, 4] {
-            receiver.commit(index, fixture.chunk(index as usize), &fixture.lease).unwrap();
-        }
-        assert_eq!(receiver.prefix(), 1);
-        drop(receiver);
-        let mut bytes = std::fs::read(&fixture.path).unwrap();
-        bytes[16] ^= 0x80;
-        bytes.truncate(34); // Last chunk is no longer complete.
-        std::fs::write(&fixture.path, bytes).unwrap();
-
-        let receiver = fixture.open();
-        assert!(receiver.contains(0));
-        assert!(!receiver.contains(1));
-        assert!(!receiver.contains(2));
-        assert!(!receiver.contains(4));
-        assert_eq!(receiver.missing(16, 16), vec![ChunkRange { start: 1, end: 5 }]);
-        assert_eq!(store::verified_count(&store::partial_get(&fixture.file_id).unwrap()), 1);
+    fn missing(runs: &[(u32, u32)]) -> Vec<ChunkRange> {
+        runs.iter().map(|&(start, end)| ChunkRange { start, end }).collect()
     }
 
-    #[test]
-    fn duplicates_do_not_inflate_progress_and_invalid_chunks_do_not_publish() {
-        let fixture = Fixture::new(0x51, 19);
-        let mut receiver = fixture.open();
-        receiver.commit(2, fixture.chunk(2), &fixture.lease).unwrap();
-        receiver.commit(2, fixture.chunk(2), &fixture.lease).unwrap();
-        assert_eq!(receiver.prefix(), 0);
-        assert_eq!(store::verified_count(&store::partial_get(&fixture.file_id).unwrap()), 1);
-        for (index, bytes) in [(3, vec![]), (0, vec![0; 8]), (1, vec![0; 9]), (2, vec![0; 3])] {
-            assert!(
-                receiver
-                    .commit(index, &bytes, &fixture.lease)
-                    .unwrap_err()
-                    .is::<wire::InvalidFrame>()
-            );
-        }
-        assert_eq!(store::verified_bitmap(&fixture.file_id).unwrap().unwrap(), vec![0b100]);
-        receiver.commit(1, fixture.chunk(1), &fixture.lease).unwrap();
-        receiver.commit(0, fixture.chunk(0), &fixture.lease).unwrap();
-        receiver.finish(&fixture.lease).unwrap();
-        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.bytes);
-    }
-
-    #[test]
-    fn invalid_saved_manifest_cannot_promote_prefix_or_bitmap() {
-        let fixture = Fixture::new(0x71, 19);
-        std::fs::write(&fixture.path, &fixture.bytes).unwrap();
-        let mut partial = store::partial_get(&fixture.file_id).unwrap();
-        partial.have = 3;
-        let mut invalid_manifest = fixture.manifest.clone();
-        invalid_manifest.chunks[0][0] ^= 1;
-        partial.manifest = Some(postcard::to_allocvec(&invalid_manifest).unwrap());
-        store::partial_put(&partial).unwrap();
-        fixture.bitmap(&[0b111]);
-        let receiver = fixture.open();
-        assert_eq!(receiver.prefix(), 0);
-        assert_eq!(receiver.missing(2, 10), vec![ChunkRange { start: 0, end: 3 }]);
-    }
-
-    #[test]
-    fn malformed_local_bitmaps_repair_without_deleting_bytes_or_inflating_progress() {
-        let fixture = Fixture::new(0x91, 19);
-        std::fs::write(&fixture.path, &fixture.bytes).unwrap();
-        for bitmap in [vec![], vec![0, 0], vec![0b1000], vec![0xff; 32 * 1024 + 1]] {
-            fixture.bitmap(&bitmap);
-            let mut partial = store::partial_get(&fixture.file_id).unwrap();
-            partial.have = 3;
-            store::partial_put(&partial).unwrap();
-            assert_eq!(store::verified_count(&partial), 0, "corrupt bitmap overrides old prefix");
-            let receiver = fixture.open();
-            assert_eq!(receiver.prefix(), 0);
-            assert_eq!(store::verified_bitmap(&fixture.file_id).unwrap().unwrap(), vec![0]);
-            assert_eq!(store::verified_count(&store::partial_get(&fixture.file_id).unwrap()), 0);
-            assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.bytes);
-        }
-        let mut receiver = fixture.open();
-        for index in 0..3 {
-            receiver.commit(index, fixture.chunk(index as usize), &fixture.lease).unwrap();
-        }
-        receiver.finish(&fixture.lease).unwrap();
-        assert!(store::partial_get(&fixture.file_id).unwrap().is_complete());
-
-        // The separate, peer-provided manifest is still a hard protocol
-        // failure. Repairing local metadata must not relax its validation.
-        for chunk_size in [0, wire::CHUNK_SIZE as u32 + 1] {
-            let mut manifest = fixture.manifest.clone();
-            manifest.chunk_size = chunk_size;
-            assert!(
-                validate_manifest(&manifest, &fixture.file_id, 19)
-                    .unwrap_err()
-                    .is::<wire::InvalidFrame>()
-            );
-        }
-        assert!(validate_manifest(&fixture.manifest, &fixture.file_id, 18).is_err());
-        assert!(validate_bitmap(&vec![0; MAX_CHUNKS.div_ceil(8) + 1], MAX_CHUNKS + 1).is_err());
-    }
-
-    #[test]
-    fn deletion_cancels_publication_and_does_not_modify_a_new_generation() {
-        let fixture = Fixture::new(0xb1, 19);
-        let mut receiver = fixture.open();
-        receiver.commit(2, fixture.chunk(2), &fixture.lease).unwrap();
-        store::forget_partial(&fixture.file_id);
-        assert!(
-            receiver
-                .commit(0, fixture.chunk(0), &fixture.lease)
-                .unwrap_err()
-                .is::<store::Cancelled>()
+    #[tokio::test]
+    async fn reopening_rechecks_every_saved_chunk_and_refetches_only_what_fails() {
+        let corrupt = |b: &mut Vec<u8>, at: usize| b[at] ^= 0xff;
+        let keep = |_: &mut wire::Manifest| {};
+        assert_eq!(
+            reopen(
+                0x11,
+                |b| {
+                    b.truncate(24);
+                    corrupt(b, 8)
+                },
+                3,
+                None,
+                keep
+            ),
+            (1, missing(&[(1, 2), (3, 5)]), 2),
+            "an old prefix is only a candidate, and a hole keeps the chunks after it"
         );
-        assert!(receiver.finish(&fixture.lease).unwrap_err().is::<store::Cancelled>());
-        assert!(store::partial_get(&fixture.file_id).is_none());
-        assert!(!std::path::Path::new(&fixture.path).exists());
-
-        let next = store::receiver_lease(fixture.file_id);
-        std::fs::write(&fixture.path, [0xef]).unwrap();
-        assert!(receiver.commit(0, fixture.chunk(0), &next).unwrap_err().is::<store::Cancelled>());
-        assert_eq!(std::fs::read(&fixture.path).unwrap(), vec![0xef]);
-        std::fs::remove_file(&fixture.path).unwrap();
+        assert_eq!(
+            reopen(
+                0x31,
+                |b| {
+                    corrupt(b, 16);
+                    b.truncate(34)
+                },
+                1,
+                Some(&[0b10101]),
+                keep
+            ),
+            (1, missing(&[(1, 5)]), 1),
+            "a corrupt or truncated chunk loses its bit"
+        );
+        assert_eq!(
+            reopen(0x51, |_| {}, 3, Some(&[0b111]), |m| m.chunks[0][0] ^= 1),
+            (0, missing(&[(0, 5)]), 0),
+            "a saved manifest that differs vouches for nothing"
+        );
+        assert_eq!(
+            reopen(0x71, |_| {}, 3, Some(&[0, 0]), keep),
+            (0, missing(&[(0, 5)]), 0),
+            "a malformed bitmap trusts nothing and keeps the bytes"
+        );
     }
 
-    #[test]
-    fn failed_progress_transaction_retains_prior_database_and_memory_state() {
-        let fixture = Fixture::new(0xd1, 19);
-        let mut receiver = fixture.open();
-        receiver.commit(2, fixture.chunk(2), &fixture.lease).unwrap();
-        let trigger = format!("range_reject_{}", hex::encode(fixture.file_id));
-        store::TRANSFERS_DB
-            .lock()
-            .execute_batch(&format!(
-                "CREATE TEMP TRIGGER {trigger} BEFORE UPDATE OF verified ON partials
-                 WHEN NEW.file_id=x'{}' BEGIN SELECT RAISE(ABORT, 'range progress fixture'); END;",
-                hex::encode(fixture.file_id),
-            ))
-            .unwrap();
-        let error = receiver.commit(0, fixture.chunk(0), &fixture.lease).unwrap_err();
-        store::TRANSFERS_DB.lock().execute_batch(&format!("DROP TRIGGER {trigger}")).unwrap();
+    #[tokio::test]
+    async fn forgetting_a_file_during_a_live_receiver_cannot_resurrect_its_row_or_bytes() {
+        let f = fixture(0xb1);
+        let mut receiver = f.open();
+        receiver.commit(2, f.chunk(2), &f.lease).unwrap();
+        f.forget();
+        assert!(f.lease.cancel.is_cancelled());
+        assert!(receiver.commit(0, f.chunk(0), &f.lease).unwrap_err().is::<store::Cancelled>());
+        assert!(receiver.finish(&f.lease).unwrap_err().is::<store::Cancelled>());
+        let state =
+            super::super::pull::set_state(f.dev.core, &f.file_id, [1; 32], store::ACTIVE, &f.lease);
+        assert!(state.unwrap_err().is::<store::Cancelled>());
+        assert!(f.dev.partial(&f.file_id).is_none());
+        assert!(!std::path::Path::new(&f.path).exists());
+
+        let next = store::receiver_lease(&f.dev.core.db, f.file_id);
+        std::fs::write(&f.path, [0xef]).unwrap();
+        let stale = receiver.commit(0, f.chunk(0), &next).unwrap_err();
+        assert!(stale.is::<store::Cancelled>(), "the old receiver cannot touch a new download");
+        assert_eq!(std::fs::read(&f.path).unwrap(), vec![0xef]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_or_progress_commit_leaves_progress_where_it_was() {
+        let f = fixture(0xd1);
+        let mut receiver = f.open();
+        receiver.commit(2, f.chunk(2), &f.lease).unwrap();
+        let reject = "CREATE TEMP TRIGGER reject BEFORE UPDATE OF verified ON partials
+            BEGIN SELECT RAISE(ABORT, 'disk full'); END;";
+        f.dev.core.db.transfers().lock().execute_batch(reject).unwrap();
+        let error = receiver.commit(0, f.chunk(0), &f.lease).unwrap_err();
+        f.dev.core.db.transfers().lock().execute_batch("DROP TRIGGER temp.reject").unwrap();
         assert!(error.is::<rusqlite::Error>());
         assert!(!receiver.contains(0));
         assert_eq!(receiver.prefix(), 0);
-        assert_eq!(store::partial_get(&fixture.file_id).unwrap().have, 0);
-        assert_eq!(store::verified_bitmap(&fixture.file_id).unwrap().unwrap(), vec![0b100]);
-        assert_eq!(store::verified_count(&store::partial_get(&fixture.file_id).unwrap()), 1);
-        // The synced bytes left by the failed transaction are harmless: the
-        // assignment remains missing and an ordinary retry commits it once.
-        receiver.commit(0, fixture.chunk(0), &fixture.lease).unwrap();
-        assert_eq!(receiver.prefix(), 1);
-    }
+        assert_eq!(f.dev.partial(&f.file_id).unwrap().have, 0);
+        assert_eq!(f.bitmap(), Some(vec![0b100]));
+        receiver.commit(0, f.chunk(0), &f.lease).unwrap();
+        assert_eq!((receiver.prefix(), f.bitmap()), (1, Some(vec![0b101])), "a retry commits once");
 
-    #[test]
-    fn local_write_failure_cannot_advance_verified_progress() {
-        let fixture = Fixture::new(0xf1, 19);
-        let mut receiver = fixture.open();
-        receiver.file = File::open(&fixture.path).unwrap(); // Deliberately read-only fd.
-        let error = receiver.commit(0, fixture.chunk(0), &fixture.lease).unwrap_err();
-        assert!(error.is::<std::io::Error>());
-        assert_eq!(receiver.prefix(), 0);
-        assert!(!receiver.contains(0));
-        assert_eq!(store::verified_bitmap(&fixture.file_id).unwrap().unwrap(), vec![0]);
-    }
-
-    #[tokio::test]
-    async fn queued_scan_cancellation_never_starts_blocking_work() {
-        use std::sync::atomic::AtomicBool;
-        use std::time::Duration;
-
-        let fixture = Fixture::new(0x21, 27);
-        let lease = store::receiver_lease(fixture.file_id);
-        let slots = Arc::new(Semaphore::new(1));
-        let occupied = slots.clone().acquire_owned().await.unwrap();
-        let started = Arc::new(AtomicBool::new(false));
-        let observed = started.clone();
-        let worker_lease = lease.clone();
-        let work = tokio::spawn(blocking_scan(worker_lease, slots, move |_, _| {
-            observed.store(true, Ordering::SeqCst);
-            Ok(())
-        }));
-        tokio::task::yield_now().await;
-        lease.cancel.cancel();
-        let result = tokio::time::timeout(Duration::from_secs(5), work).await.unwrap().unwrap();
-        assert!(result.unwrap_err().is::<store::Cancelled>());
-        assert!(!started.load(Ordering::SeqCst));
-        drop(occupied);
-        drop(lease);
-        assert!(!store::receiver_registered(&fixture.file_id));
-    }
-
-    #[tokio::test]
-    async fn aborted_scan_keeps_ownership_until_its_blocking_work_stops() {
-        use std::time::Duration;
-
-        let fixture = Fixture::new(0x41, 27);
-        let lease = store::receiver_lease(fixture.file_id);
-        let worker_lease = lease.clone();
-        let (started, entered) = tokio::sync::oneshot::channel();
-        let (release, wait) = std::sync::mpsc::channel();
-        let (finished, cancelled) = tokio::sync::oneshot::channel();
-        let file_id = fixture.file_id;
-        let manifest = fixture.manifest.clone();
-        let work = tokio::spawn(blocking_scan(
-            worker_lease,
-            Arc::new(Semaphore::new(1)),
-            move |lease, stop| {
-                let _ = started.send(());
-                wait.recv_timeout(Duration::from_secs(5))?;
-                let result =
-                    Receiver::open_inner(file_id, [1; 32], manifest, 27, lease, Some(stop));
-                let _ = finished.send(result.as_ref().is_err_and(|e| e.is::<store::Cancelled>()));
-                result
-            },
-        ));
-        tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
-        work.abort();
-        assert!(work.await.err().unwrap().is_cancelled());
-        // Dropping the async caller must stop only this scan. The caller's
-        // generation remains valid until it or deletion explicitly cancels it.
-        assert!(!lease.cancel.is_cancelled());
-        drop(lease);
-        assert!(store::receiver_registered(&file_id), "background owner protects recovery");
-        release.send(()).unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(5), cancelled).await.unwrap().unwrap());
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while store::receiver_registered(&file_id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(
-            store::verified_bitmap(&file_id).unwrap().is_none(),
-            "aborted scan published nothing"
-        );
-        assert_eq!(store::partial_get(&file_id).unwrap().state, store::HELD);
-    }
-
-    #[tokio::test]
-    async fn replacement_generation_blocks_old_scan_publication_and_survives_its_drop() {
-        use std::time::Duration;
-
-        let fixture = Fixture::new(0x61, 27);
-        let old = store::receiver_lease(fixture.file_id);
-        let worker_lease = old.clone();
-        let (started, entered) = tokio::sync::oneshot::channel();
-        let (release, wait) = std::sync::mpsc::channel();
-        let file_id = fixture.file_id;
-        let manifest = fixture.manifest.clone();
-        let work = tokio::spawn(blocking_scan(
-            worker_lease,
-            Arc::new(Semaphore::new(1)),
-            move |lease, stop| {
-                let _ = started.send(());
-                wait.recv_timeout(Duration::from_secs(5))?;
-                Receiver::open_inner(file_id, [1; 32], manifest, 27, lease, Some(stop))
-            },
-        ));
-        tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
-        let new = store::receiver_lease(file_id);
-        assert!(old.cancel.is_cancelled());
-        drop(old);
-        let mut partial = store::partial_get(&file_id).unwrap();
-        partial.state = store::CONNECTING;
-        store::partial_put_live(&partial, &new).unwrap();
-        release.send(()).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), work).await.unwrap().unwrap();
-        assert!(result.err().unwrap().is::<store::Cancelled>());
-        assert!(store::receiver_registered(&file_id), "old owner's drop preserves its successor");
-        assert!(!new.cancel.is_cancelled());
-        assert!(store::verified_bitmap(&file_id).unwrap().is_none());
-        assert_eq!(store::partial_get(&file_id).unwrap().state, store::CONNECTING);
-        drop(new);
-        assert!(!store::receiver_registered(&file_id));
+        receiver.file = File::open(&f.path).unwrap();
+        assert!(receiver.commit(1, f.chunk(1), &f.lease).unwrap_err().is::<std::io::Error>());
+        assert!(!receiver.contains(1));
+        assert_eq!(f.bitmap(), Some(vec![0b101]));
     }
 }

@@ -1,7 +1,4 @@
-//! Build using
-//! ```
-//! cargo build --release --bin certgen --all-features
-//! ```
+//! Build with `cargo build --release --bin certgen --all-features`.
 
 use std::error::Error;
 use std::fs;
@@ -35,11 +32,8 @@ use time::OffsetDateTime;
 
 static OUT_DIR: &str = "out";
 
-/// will try to find CA.{KEY,PEM} in current directory
 static CA: &str = "RootCA";
 
-/// A CA-attestable capability, mapped to its [`NodeCapabilities`] bit. The CA
-/// operator asserts these at sign time — a node can never self-assert one.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Capability {
     Relay,
@@ -77,8 +71,6 @@ fn fold_caps(caps: &[Capability]) -> NodeCapabilities {
     caps.iter().fold(NodeCapabilities::empty(), |acc, c| acc | c.flag())
 }
 
-/// The CA-signed capability extension for a cert (empty caps → no extension;
-/// the caller guards on that).
 fn capability_extension(caps: NodeCapabilities) -> CustomExtension {
     CustomExtension::from_oid_content(CAPABILITY_OID, caps.encode())
 }
@@ -93,7 +85,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Mint a fresh self-signed root CA as `RootCA.{key,pem}` in the current
-    /// directory — the trust anchor every other subcommand issues under.
+    /// directory: the trust anchor every other subcommand issues under.
     Init {
         /// Subject/issuer CN. Leave it at the default so the result is a
         /// drop-in for the `RootCA.pem` that libcore bakes in and the relay
@@ -134,11 +126,8 @@ enum Command {
     },
 }
 
-/// Mint the root of trust as `RootCA.{key,pem}` in the current directory.
-///
-/// The shape must stay a drop-in for the CA it replaces — libcore
-/// `include_bytes!`es the cert and the relay .deb ships it as
-/// `/etc/promtuz/ca.pem`, so changing it means an app rebuild and a redeploy.
+/// The result must stay a drop-in for the current CA: libcore bakes the cert in and the relay
+/// .deb ships it as `/etc/promtuz/ca.pem`.
 fn init_ca(key_path: &str, cert_path: &str, cn: &str, days: i64) -> Result<(), Box<dyn Error>> {
     let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
 
@@ -153,8 +142,8 @@ fn init_ca(key_path: &str, cert_path: &str, cn: &str, days: i64) -> Result<(), B
 
     let cert = params.self_signed(&key)?;
 
-    // `create_new` so the filesystem, not a racy exists() check, arbitrates the
-    // overwrite — this is the one file whose loss orphans every issued cert.
+    // `create_new` makes the filesystem, not a racy exists() check, refuse an overwrite. Losing
+    // this key orphans every issued cert.
     let mut key_file = private_file().create_new(true).open(key_path).map_err(|e| {
         format!(
             "could not create {key_path} in {:?}: {e}\n\
@@ -190,8 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ca_secret_key = format!("{}.key", CA);
     let ca_certificate = format!("{}.pem", CA);
 
-    // `init` mints the very pair the guard below insists on, so it runs ahead
-    // of it — and never reaches the `match` further down.
+    // `init` mints the pair the guard below requires, so it runs first.
     if let Command::Init { cn, days } = &cli.command {
         return init_ca(&ca_secret_key, &ca_certificate, cn, *days);
     }
@@ -234,10 +222,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             use rcgen::PublicKeyData as _;
             let csr = rcgen::CertificateSigningRequestParams::from_pem(&csr_pem)?;
 
-            // Nothing from `csr.params` reaches the certificate, so this is
-            // belt-and-braces — but a CSR asking for CA:TRUE is someone trying
-            // to become an issuer under this root, and downgrading it silently
-            // would hand them a working cert and leave no trace.
+            // Nothing from `csr.params` reaches the cert, but a CSR asking for CA:TRUE is someone
+            // trying to become an issuer: refuse it loudly instead of downgrading it silently.
             if !matches!(csr.params.is_ca, IsCa::NoCa | IsCa::ExplicitNoCa) {
                 // stderr rather than Err: `main` prints `Box<dyn Error>` with
                 // Debug, which escapes the newlines into one unreadable line.
@@ -255,10 +241,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 process::exit(1);
             }
 
-            // Identity comes only from `public_key` — the key rcgen verified PoP
-            // against and the one `signed_by` embeds as the SPKI. Byte-scanning
-            // the raw CSR would let a requester smuggle a second SPKI past the
-            // scan and get a cert whose CN is a victim's NodeId.
+            // Identity comes only from `public_key`, the key rcgen checked possession of and
+            // `signed_by` embeds. Byte-scanning the raw CSR could pick up a smuggled second SPKI.
             if csr.public_key.algorithm() != &rcgen::PKCS_ED25519 {
                 return Err("CSR is not Ed25519".into());
             }
@@ -269,12 +253,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map_err(|_| "CSR public key is not a 32-byte Ed25519 key")?;
             let id = NodeId::new(pubkey);
 
-            // Built from scratch, never from `csr.params`: rcgen parses the
-            // requester's basicConstraints/keyUsage/extendedKeyUsage into those,
-            // so signing them would let a requester choose what the certificate
-            // authorises. Allowlist rather than overwrite — anything rcgen learns
-            // to parse next (`name_constraints` is next) would otherwise flow
-            // through silently.
+            // Built from scratch, never from `csr.params`, which carries the requester's
+            // constraints and usages. An allowlist also stops whatever rcgen learns to parse next.
             let mut params = CertificateParams::default();
             params.is_ca = IsCa::ExplicitNoCa;
             params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -282,8 +262,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth,
             ];
-            // Default is generous because nothing in the tree renews a cert; drop
-            // it once enrollment can re-run unattended.
+            // The default validity is generous because nothing renews a cert.
             params.not_before = OffsetDateTime::now_utc();
             params.not_after = params.not_before + Duration::days(days);
             params.distinguished_name = rcgen::DistinguishedName::new();

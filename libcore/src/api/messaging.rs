@@ -1,53 +1,46 @@
-//! Messaging exports: send + typed read paths (no CBOR).
+//! Messaging exports: sends and typed read paths.
+
+use common::types::bytes::fixed;
 
 use crate::data::contact::Contact;
 use crate::data::conversation::Conversation;
 use crate::data::message::Message;
 use crate::db::messages::MessageRow;
 use crate::platform::CoreError;
+use crate::state::core;
 
-/// A stored message, projected for the client (`ULID` → String, IPK → bytes).
 #[derive(uniffi::Record)]
 pub struct MessageRecord {
     pub id: String,
-    /// The chat this belongs to — 16 bytes, stable for the conversation's life.
+    /// 16 bytes, stable for the conversation's life.
     pub conversation_id: Vec<u8>,
-    /// Who wrote it. `None` means us, which is how every outgoing row reads.
+    /// `None` means us, as on every outgoing row.
     pub sender_ipk: Option<Vec<u8>>,
     pub content: String,
     pub outgoing: bool,
     pub timestamp: u64,
     /// 0 = pending, 1 = sent, 2 = failed, 3 = delivered, 4 = read.
     pub status: u8,
-    /// 16-byte shared id — the target for edit/delete. None on legacy rows.
+    /// 16-byte shared id that edits and deletes target; `None` on legacy rows.
     pub dispatch_id: Option<Vec<u8>>,
-    /// Sender edited this message's text.
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
     /// dispatch_id of the quoted message, when this is a reply.
     pub reply_to: Option<Vec<u8>>,
-    /// 0 for an ordinary message; otherwise a membership/title change, where
-    /// `sender_ipk` is who acted and `content` names the target — a hex IPK
-    /// for the membership events, the new title for a rename.
+    /// 0 for an ordinary message; otherwise a membership or title change where `sender_ipk` acted
+    /// and `content` is the target: a hex IPK, or the new title for a rename.
     pub system: u8,
-    /// When this row heads an album, the dispatch ids it collapses — itself
-    /// first. Empty otherwise.
-    ///
-    /// Grouping consecutive pictures sent together is a rule about messages,
-    /// not about a platform, so core applies it once instead of Android and
-    /// iOS each walking the rows with their own copy.
+    /// When this row heads an album, the dispatch ids it collapses, itself first; empty otherwise.
     pub album_items: Vec<Vec<u8>>,
-    /// This row was folded into the album above it — clients skip it.
+    /// Folded into the album above it; clients skip it.
     pub in_album: bool,
-    /// The media side-row's kind (1 image, 2 attachment, 3 voice), 0 for none.
-    /// Filled where a row stands in for itself as one line — the home list and
-    /// a notification — so a captionless picture doesn't read as no message.
+    /// Media kind (1 image, 2 attachment, 3 voice), 0 for none. Filled only where the row stands
+    /// alone as one line: the home list and notifications.
     pub media_kind: u8,
 }
 
-/// One emoji reaction, projected for the client. `mine` is `reactor == self`
-/// (precomputed so the UI needn't hold its own IPK to render).
+/// `mine` is `reactor == self`, precomputed so the UI need not hold its own IPK.
 #[derive(uniffi::Record)]
 pub struct ReactionRecord {
     pub dispatch_id: Vec<u8>,
@@ -57,49 +50,37 @@ pub struct ReactionRecord {
     pub mine: bool,
 }
 
-/// Unread incoming count for one conversation — the home-list badge source.
 #[derive(uniffi::Record)]
 pub struct UnreadCount {
     pub conversation_id: Vec<u8>,
     pub count: u32,
 }
 
-/// A conversation, projected for the client — the home list's row source.
 #[derive(uniffi::Record)]
 pub struct ConversationRecord {
     pub id: Vec<u8>,
     /// 0 = direct (a 1:1 chat), 1 = group.
     pub kind: u8,
-    /// Group name as it was actually set — empty until someone names it, and
-    /// empty for a direct chat. This is what a rename field edits.
+    /// The group name as set: empty until named, and for a direct chat. What a rename field edits.
     pub title: String,
-    /// What to call this chat on screen. Falls back to the members' names for
-    /// an unnamed group, so a group whose name never arrived still reads as
-    /// the people in it rather than as "Group".
+    /// What to call the chat on screen; an unnamed group falls back to its members' names.
     pub display_name: String,
     /// Active roster, us included. Two entries for a direct chat.
     pub members: Vec<Vec<u8>>,
-    /// The other party of a direct chat, resolved core-side so the client
-    /// never needs to hold its own IPK to work out which member isn't it.
-    /// `None` for a group, which has no single counterpart.
+    /// The other party of a direct chat; `None` for a group.
     pub peer: Option<Vec<u8>>,
-    /// The active roster minus ourselves — exactly who a send fans out to.
-    /// Same list the client needs for presence and typing, which are
-    /// per-person and so can never key off the conversation.
+    /// The active roster minus us: who a send fans out to, and whose presence and typing to show.
     pub others:         Vec<Vec<u8>>,
-    /// We are an admin or an owner: we may remove members and change the
-    /// group's rules. Resolved here because only core knows our own IPK.
+    /// We are an admin or owner: we may remove members and change the group's rules.
     pub can_manage:     bool,
     /// Our role in a group: 0 member, 1 admin, 2 owner.
     pub role:           u8,
-    /// What members who aren't admins may do. `None` for a direct chat, and for
-    /// a group from before rules were signed, which its founder alone runs.
+    /// `None` for a direct chat, and for a group from before signed rules, which its founder runs.
     pub rules:          Option<GroupRulesRecord>,
-    /// We may add people.
     pub can_add:        bool,
     /// We may rename the group and change its photo.
     pub can_edit:       bool,
-    /// We may post. False in a group where only admins send, and once we left.
+    /// False in a group where only admins send, and once we left.
     pub can_send:       bool,
     /// Whose phone makes the group's changes. What anyone else asks for waits
     /// until it's online.
@@ -107,23 +88,17 @@ pub struct ConversationRecord {
     /// Ours does, and others are in the group: deleting the chat has to leave
     /// it first, which hands that on.
     pub commits:        bool,
-    /// True once an MLS group backs this conversation — i.e. it can send.
+    /// An MLS group backs this conversation, so it can send.
     pub has_group: bool,
-    /// We are still an active member. False for a group we left or were
-    /// removed from, which keeps its history but can no longer send.
+    /// False for a group we left or were removed from, which keeps its history.
     pub am_member: bool,
-    /// Leaving is offered. False for a direct chat, which has no membership,
-    /// and for a group we already left — and see [`Self::owner_is_stuck`].
+    /// False for a direct chat and for a group we already left; see [`Self::owner_is_stuck`].
     pub can_leave:      bool,
-    /// We founded a group from before rules were signed and other people are
-    /// still in it, so both leaving and deleting are refused: the group would
-    /// be left with nobody able to manage it. Lifted by removing everyone
-    /// first, or once the group converts. Carried so the UI can say *why*.
+    /// We founded a group from before signed rules that others are still in, so leaving and
+    /// deleting are refused until everyone else is removed or the group converts.
     pub owner_is_stuck: bool,
-    /// Kept at the top of the home list. Core sorts by it, so the client
-    /// doesn't re-sort.
+    /// Core already sorts pinned chats first.
     pub pinned: bool,
-    /// No notifications from this chat.
     pub muted: bool,
     /// Newest message already alerted for, unix seconds.
     pub alerted_at: u64,
@@ -142,7 +117,6 @@ pub struct GroupRulesRecord {
     pub admins_appoint: bool,
 }
 
-/// One member's standing in a conversation.
 #[derive(uniffi::Record)]
 pub struct MemberRecord {
     pub ipk:             Vec<u8>,
@@ -151,42 +125,31 @@ pub struct MemberRecord {
     pub joined_at:       u64,
     /// False once they left or were removed; their old messages still attribute.
     pub active: bool,
-    /// This row is us. Resolved here for the same reason as `ReactionRecord.mine`:
-    /// the client would otherwise hold its own IPK just to compare against.
     pub me: bool,
-    /// What to call them: the address book first, then what they call
-    /// themselves, then their key's head. Resolved here so every screen agrees
-    /// on the order rather than each re-deriving it.
     pub name: String,
-    /// The name came from them, not from the address book — worth marking, the
-    /// way a messenger marks a name it cannot vouch for.
+    /// The name came from them, not the address book, so we cannot vouch for it.
     pub name_is_claimed: bool,
 }
 
-/// An address-book entry, projected for the client.
 #[derive(uniffi::Record)]
 pub struct ContactInfo {
     pub ipk: Vec<u8>,
     pub name: String,
     pub added_at: u64,
-    /// Pairing state: 0 = pending, 1 = paired, 2 = rejected (PAIRING.md).
+    /// 0 = pending, 1 = paired, 2 = rejected.
     pub status: u8,
     /// Why rejected (a DECLINE_* code), when status = 2.
     pub reject_reason: Option<u8>,
 }
 
-/// Send `content` to `to_ipk`, optionally quoting a prior message by its
-/// 16-byte `reply_to` dispatch_id. Fire-and-forget: the outcome arrives via
-/// `CoreEvents::on_message` (Sent / Failed), matching the engine's
-/// event-driven model. The `Result` only reports invalid input (a bad
-/// IPK length) synchronously.
+/// The outcome arrives via `CoreEvents::on_message`; the `Result` only reports invalid input.
 #[uniffi::export]
 pub fn send_message(
     conversation_id: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let reply = reply_to.as_deref().map(to_did16).transpose()?;
-    crate::RUNTIME.spawn(async move {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let reply = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
+    core().spawn(async move {
         if let Err(e) = crate::messaging::send(conv, content, reply).await {
             log::error!("MESSAGE: send failed: {e}");
         }
@@ -200,14 +163,14 @@ pub fn send_message(
 pub fn edit_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, content: String,
 ) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let target = to_did16(&dispatch_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
     let body = crate::messaging::text_edit_body(&conv, &target, content)?;
-    let applied = crate::messaging::apply_revise_body(&conv, &target, body.clone(), true, None)?;
+    let applied = crate::messaging::body::apply_revise_body(&conv, &target, body.clone(), true, None)?;
     let (row, content) = applied.ok_or_else(|| anyhow::anyhow!("message cannot be edited"))?;
     use crate::events::Emittable;
     crate::events::messaging::MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
-    crate::RUNTIME.spawn(async move {
+    core().spawn(async move {
         if let Err(e) = crate::messaging::send_control(
             conv,
             common::proto::mls_wire::AppPayload::Revise { target, body },
@@ -220,30 +183,27 @@ pub fn edit_message(
     Ok(())
 }
 
-/// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
-/// (0 = present-idle). Fire-and-forget; dropped if we or the peer are offline.
-/// The peer sees it via `on_activity`. Call on typing start/stop (throttled).
+/// `activity` is an OR of `ACTIVITY_*` bits, `0` meaning idle. Dropped if either side is offline.
 #[uniffi::export]
 pub fn set_activity(conversation_id: Vec<u8>, activity: u16) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::set_activity(conv, activity).await {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    core().spawn(async move {
+        let session = core().session();
+        if let Err(e) = crate::presence::set_activity(session.as_deref(), conv, activity).await {
             log::debug!("MESSAGE: set_activity failed: {e}");
         }
     });
     Ok(())
 }
 
-/// Add (`add = true`) or remove our own `emoji` reaction on a message
-/// (targeted by 16-byte `dispatch_id`). Fire-and-forget; surfaces via
-/// `on_reaction`. A person may stack several distinct emoji on one message.
+/// One person may stack several distinct emoji on a message. Surfaces via `on_reaction`.
 #[uniffi::export]
 pub fn react_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, emoji: String, add: bool,
 ) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let target = to_did16(&dispatch_id)?;
-    crate::RUNTIME.spawn(async move {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
+    core().spawn(async move {
         if let Err(e) = crate::messaging::react(conv, target, emoji, add).await {
             log::error!("MESSAGE: react failed: {e}");
         }
@@ -251,12 +211,11 @@ pub fn react_message(
     Ok(())
 }
 
-/// All reactions in a conversation, oldest first. The UI groups by
-/// `dispatch_id`; `mine` marks the caller's own.
+/// All reactions in a conversation, oldest first.
 #[uniffi::export]
 pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let me = crate::data::identity::Identity::local_ipk();
     Ok(crate::data::reaction::Reaction::for_conversation(&conv)
         .into_iter()
         .map(|r| ReactionRecord {
@@ -273,14 +232,15 @@ pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, Co
 /// times before asynchronous encrypted receipt dispatch.
 #[uniffi::export]
 pub fn mark_read(conversation_id: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
-    crate::data::receipts::read(&to_conv16(&conversation_id)?, &to_did16(&upto_dispatch_id)?)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::data::receipts::read(&conv, &fixed::<16>(&upto_dispatch_id, "dispatch_id")?)?;
     crate::data::receipts::schedule();
     Ok(())
 }
 
 #[uniffi::export]
 pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     if let Some(upto) = Message::newest_incoming_dispatch(&conv) {
         crate::data::receipts::read(&conv, &upto)?;
         crate::data::receipts::schedule();
@@ -292,11 +252,15 @@ pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError>
 pub fn message_receipt_info(
     conversation_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>,
 ) -> Result<crate::data::receipts::MessageReceiptInfo, CoreError> {
-    let ids = dispatch_ids.iter().map(|id| to_did16(id)).collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::data::receipts::info_many(&to_conv16(&conversation_id)?, &ids)?)
+    let ids = dispatch_ids
+        .iter()
+        .map(|id| fixed::<16>(id, "dispatch_id"))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    Ok(crate::data::receipts::info_many(&conv, &ids)?)
 }
 
-/// Unread incoming count per peer (only peers with unread > 0). Home-list badges.
+/// Only conversations with unread incoming messages.
 #[uniffi::export]
 pub fn unread_counts() -> Vec<UnreadCount> {
     Message::unread_counts()
@@ -305,28 +269,27 @@ pub fn unread_counts() -> Vec<UnreadCount> {
         .collect()
 }
 
-/// Subscribe to presence for `contacts` (replaces the prior interest set).
-/// Fire-and-forget; a contact's presence surfaces via `on_presence` only when
-/// they've also subscribed to us. Call on connect and when contacts change.
+/// Replaces the prior interest set; presence arrives only from contacts subscribed to us too.
 #[uniffi::export]
 pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
-    let list = contacts.iter().map(|c| to_ipk32(c)).collect::<Result<Vec<_>, _>>()?;
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::subscribe_presence(list).await {
+    let list = contacts.iter().map(|c| fixed::<32>(c, "ipk")).collect::<Result<Vec<_>, _>>()?;
+    core().spawn(async move {
+        let session = core().session();
+        if let Err(e) = crate::presence::subscribe_presence(session.as_deref(), list).await {
             log::debug!("PRESENCE: subscribe failed: {e}");
         }
     });
     Ok(())
 }
 
-/// Set our activity mode: `idle = true` on backgrounding, `false` on
-/// foreground. Fire-and-forget; contacts see us go idle/active (PRESENCE.md).
+/// `idle` is true on backgrounding and false on foregrounding.
 #[uniffi::export]
 pub fn set_presence(idle: bool) {
     // Apply the local upload policy synchronously, before any relay work.
     crate::transfer::sharing::set_foreground(!idle);
-    crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::set_presence(idle).await {
+    core().spawn(async move {
+        let session = core().session();
+        if let Err(e) = crate::presence::set_presence(session.as_deref(), idle).await {
             log::debug!("PRESENCE: set_presence failed: {e}");
         }
     });
@@ -337,18 +300,15 @@ pub fn set_presence(idle: bool) {
 pub async fn sync_messages() -> Result<(), CoreError> {
     crate::api::init::on_foreground();
     let ipk = crate::data::identity::Identity::public_key().map_err(anyhow::Error::from)?;
-    // Replacing an Android wake job must not cancel a message halfway through
-    // decryption/storage. Core owns this bounded sync; the next job joins the
-    // same serialized drain path.
-    crate::RUNTIME
+    // Replacing an Android wake job must not cancel a message mid-decryption, so core runs this
+    // bounded sync on its own task.
+    core()
         .spawn(async move {
             tokio::time::timeout(std::time::Duration::from_secs(45), async {
                 loop {
-                    let relay = crate::state::RELAY.read().clone();
-                    if let Some(relay) = relay.filter(|r| {
-                        r.connection.as_ref().is_some_and(|c| c.close_reason().is_none())
-                    }) {
-                        return relay.sync_incoming(ipk).await;
+                    let session = core().session();
+                    if let Some(session) = session.filter(|s| s.conn.close_reason().is_none()) {
+                        return session.sync_incoming(ipk).await;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
@@ -363,7 +323,7 @@ pub async fn sync_messages() -> Result<(), CoreError> {
 
 #[uniffi::export]
 pub fn pending_notification_ids(conversation_id: Vec<u8>) -> Result<Vec<String>, CoreError> {
-    Ok(Message::pending_notification_ids(&to_conv16(&conversation_id)?)?)
+    Ok(Message::pending_notification_ids(&fixed::<16>(&conversation_id, "conversation id")?)?)
 }
 
 #[uniffi::export]
@@ -371,34 +331,30 @@ pub fn mark_notified(ids: Vec<String>) -> Result<(), CoreError> {
     Ok(Message::mark_notified(&ids)?)
 }
 
-/// (Re)register our push-pseudonym with the connected home relay so it can
-/// wake us on offline delivery. Fire-and-forget; also runs automatically on
-/// each connect. Call after obtaining/refreshing the platform push token.
+/// Registers our push pseudonym with the home relay; this also runs on every connect.
 #[uniffi::export]
 pub fn register_push() {
-    crate::RUNTIME.spawn(async {
+    core().spawn(async {
         if let Err(e) = crate::push::register_push().await {
             log::debug!("PUSH: register failed: {e}");
         }
     });
 }
 
-/// Register the platform push token. Returns after a gateway acknowledges
-/// persistence, so the platform can retry failed setup as background work.
+/// Returns after a gateway acknowledges the token, so the platform can retry a failed setup later.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn register_push_token(token: Vec<u8>) -> Result<(), CoreError> {
     Ok(crate::push::set_push_token(token).await?)
 }
 
-/// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
-/// a local-only removal. Surfaces via `on_message(Deleted)`.
+/// `for_everyone` tombstones it everywhere; otherwise it is removed locally.
 #[uniffi::export]
 pub fn delete_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, for_everyone: bool,
 ) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let target = to_did16(&dispatch_id)?;
-    crate::RUNTIME.spawn(async move {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
+    core().spawn(async move {
         if let Err(e) = crate::messaging::delete(conv, target, for_everyone).await {
             log::error!("MESSAGE: delete failed: {e}");
         }
@@ -406,7 +362,6 @@ pub fn delete_message(
     Ok(())
 }
 
-/// One message search hit.
 #[derive(uniffi::Record)]
 pub struct SearchHit {
     pub dispatch_id: Vec<u8>,
@@ -419,7 +374,7 @@ pub struct SearchHit {
 pub fn search_messages(
     conversation_id: Vec<u8>, query: String, limit: u32,
 ) -> Result<Vec<SearchHit>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     Ok(Message::search(&conv, &query, limit)
         .into_iter()
         .map(|(did, newer)| SearchHit { dispatch_id: did.to_vec(), newer })
@@ -439,7 +394,7 @@ pub struct MessagePosition {
 pub fn message_at_time(
     conversation_id: Vec<u8>, timestamp: u64,
 ) -> Result<Option<MessagePosition>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     Ok(Message::position_at_time(&conv, timestamp)?.map(|(id, dispatch_id, newer)| MessagePosition { id, dispatch_id, newer }))
 }
 
@@ -449,26 +404,17 @@ pub fn message_at_time(
 pub fn get_messages(
     conversation_id: Vec<u8>, limit: u32, before_id: String,
 ) -> Result<Vec<MessageRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let mut rows: Vec<MessageRecord> =
         Message::get_messages(&conv, limit, &before_id).into_iter().map(Into::into).collect();
     mark_albums(&conv, &mut rows);
     Ok(rows)
 }
 
-/// Fold runs of pictures sent together into one album, in place.
-///
-/// A run is consecutive rows sharing a media `group_id`; the first keeps the
-/// run's dispatch ids and the rest are marked to skip. Consecutive because that
-/// is what "sent together" looks like once the rows are in order — two albums
-/// from the same batch separated by a reply are two albums.
+/// Folds consecutive rows sharing a media `group_id` into one album; a reply between them splits it
+/// into two.
 fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
-    let groups: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-        crate::data::media::for_conversation(conversation)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(did, m)| m.group_id.map(|g| (did.to_vec(), g)))
-            .collect();
+    let groups = crate::data::media::groups_for(conversation).unwrap_or_default();
     if groups.is_empty() {
         return;
     }
@@ -495,7 +441,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
     }
 }
 
-/// Every conversation, most recently active first — the home list.
+/// Every conversation, most recently active first.
 #[uniffi::export]
 pub fn list_conversations() -> Vec<ConversationRecord> {
     Conversation::list()
@@ -505,10 +451,9 @@ pub fn list_conversations() -> Vec<ConversationRecord> {
         .collect()
 }
 
-/// Shared projection so the list and single-fetch reads can't drift.
 fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationRecord {
     let others = Conversation::recipients(&c.id);
-    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let me = crate::data::identity::Identity::local_ipk();
     let roster = Conversation::members(&c.id);
     let is_group = c.kind == crate::data::conversation::KIND_GROUP;
     let am_member = me.is_some_and(|k| roster.iter().any(|m| m.active && m.member_ipk == k))
@@ -555,12 +500,7 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
     }
 }
 
-/// What to call a conversation on screen.
-///
-/// A group's name can legitimately be missing — we were Welcomed into it before
-/// anyone told us what it's called, or that message was lost — so fall back to
-/// the people in it. That reads as the chat it is instead of as "Group", and it
-/// needs nothing to arrive over the network to be right.
+/// A group's name can be missing when the rename never reached us, so fall back to its members.
 fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -> String {
     if !c.title.is_empty() {
         return c.title.clone();
@@ -576,34 +516,17 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
     }
 }
 
-/// Drop a conversation, its history and its keys from this device.
-///
-/// Local and silent, but not harmless: the group's MLS state goes with the
-/// row, so nothing posted in that group can ever reach this device again and
-/// the chat does not come back. Nobody else is told and no membership changes
-/// — everyone left in it keeps encrypting to a member who will never read
-/// another word. Leaving is the separate, polite act that tells them.
-///
-/// A direct chat differs only in that the contact outlives it: the pair
-/// re-establishes and a fresh chat opens on their next message.
-///
-/// Refused for a group you founded while others are still in it — see
-/// [`crate::groups::require_not_stranding_the_group`] — unless `force`.
-///
-/// `force` is for the founder of a group too broken to manage or to leave:
-/// wrecked MLS state fails every removal and every leave, and the guard then
-/// only seals them in. Nothing here can tell that group from a healthy one, so
-/// `force` is taken on the caller's word — spend it on a working group and
-/// everyone left behind holds one nobody can add to, remove from or rename.
+/// Local and silent: the group's keys go too, so nothing from it reaches this device again. `force`
+/// skips the founder's stranding guard, for a group too broken to manage or leave.
 #[uniffi::export]
 pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let Some(row) = Conversation::get(&conv) else { return Ok(()) };
     if crate::groups::is_leaving(&conv) {
         crate::groups::delete_after_leave(&conv)?;
         return Ok(());
     }
-    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let me = crate::data::identity::Identity::local_ipk();
 
     if let Some(me) = me
         && !force
@@ -623,105 +546,63 @@ pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), 
     Ok(())
 }
 
-/// Drop every trace of an MLS group from this device: openmls's own state, the
-/// storage rows it leaves behind (including the size sidecar), and anything
-/// buffered for a future epoch.
-///
-/// Best-effort throughout. Each half is logged and stepped over rather than
-/// returned, because a caller holding a group it can't open has nothing better
-/// to do than keep clearing the rest.
-///
-/// The two tables key the same group on different encodings and each is right
-/// for itself: `forget_group` matches `mls_storage` on the CBOR `GroupId`
-/// openmls hands the provider, while `purge_group` matches `mls_epoch_ahead`
-/// on the raw 32 bytes promtuz stores there. Making one look like the other
-/// makes it match nothing.
 pub(crate) fn purge_mls_group(gid: &[u8; 32]) {
-    let provider = crate::mls::PromtuzMlsProvider::shared();
-    match crate::mls::MlsGroupHandle::load(&provider, gid) {
-        Ok(Some(mut g)) => {
-            if let Err(e) = g.delete(&provider) {
-                log::warn!("MLS: dropping group state failed: {e}");
-            }
-        },
-        // No loadable group, which is the ordinary case for state so damaged
-        // it can't be opened. `forget_group` below is what clears that.
-        Ok(None) => {},
-        Err(e) => log::warn!("MLS: loading group state failed: {e}"),
-    }
-    if let Err(e) = provider.storage().forget_group(gid) {
+    if let Err(e) = crate::mls::PromtuzMlsProvider::shared().storage().forget_group(gid) {
         log::warn!("MLS: clearing group storage rows failed: {e}");
     }
-    let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
-    if let Err(e) = buffer.purge_group(gid) {
-        log::warn!("MLS: epoch buffer purge failed: {e}");
-    }
 }
 
-/// Empty a chat of its messages, keeping the chat itself.
-///
-/// Local only, like [`delete_conversation`], and always allowed: throwing away
-/// our own copy of the history strands nobody and changes no membership, so a
-/// group we founded can be cleared while everyone is still in it.
+/// Local only, and allowed even for a founder since it changes no membership.
 #[uniffi::export]
 pub fn clear_conversation_history(conversation_id: Vec<u8>) -> Result<(), CoreError> {
-    Ok(Conversation::clear_history(&to_conv16(&conversation_id)?)?)
+    Ok(Conversation::clear_history(&fixed::<16>(&conversation_id, "conversation id")?)?)
 }
 
-/// Pin a conversation to the top of the home list, or unpin it.
 #[uniffi::export]
 pub fn set_conversation_pinned(conversation_id: Vec<u8>, pinned: bool) -> Result<(), CoreError> {
-    Ok(Conversation::set_pinned(&to_conv16(&conversation_id)?, pinned)?)
+    Ok(Conversation::set_pinned(&fixed::<16>(&conversation_id, "conversation id")?, pinned)?)
 }
 
-/// Silence a conversation's notifications, or unsilence it.
 #[uniffi::export]
 pub fn set_conversation_muted(conversation_id: Vec<u8>, muted: bool) -> Result<(), CoreError> {
-    Ok(Conversation::set_muted(&to_conv16(&conversation_id)?, muted)?)
+    Ok(Conversation::set_muted(&fixed::<16>(&conversation_id, "conversation id")?, muted)?)
 }
 
-/// Record the newest message this chat has already alerted for.
 #[uniffi::export]
 pub fn set_alerted_at(conversation_id: Vec<u8>, ts_secs: u64) -> Result<(), CoreError> {
-    Ok(Conversation::set_alerted_at(&to_conv16(&conversation_id)?, ts_secs)?)
+    Ok(Conversation::set_alerted_at(&fixed::<16>(&conversation_id, "conversation id")?, ts_secs)?)
 }
 
-/// An app-wide setting, or `None` if never set. See [`set_pref`].
 #[uniffi::export]
 pub fn get_pref(key: String) -> Option<String> {
     crate::data::app_prefs::get(&key)
 }
 
-/// Store an app-wide setting. Kept in core rather than platform preferences so
-/// it survives a reinstall — the backup blob carries it.
+/// Kept in core rather than platform preferences so the backup carries it across a reinstall.
 #[uniffi::export]
 pub fn set_pref(key: String, value: String) -> Result<(), CoreError> {
     Ok(crate::data::app_prefs::set(&key, &value)?)
 }
 
-/// The last `limit` incoming, undeleted messages in a conversation, oldest
-/// first — what a notification summarises. The selection rule lives here so
-/// each platform's shade code doesn't re-derive it.
+/// The last `limit` incoming, undeleted messages, oldest first: what a notification summarises.
 #[uniffi::export]
 pub fn recent_incoming(
     conversation_id: Vec<u8>, limit: u32,
 ) -> Result<Vec<MessageRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     Ok(Message::recent_incoming(&conv, limit).into_iter().map(with_media_kind).collect())
 }
 
-/// The direct conversation with `peer_ipk`, created if this is the first time
-/// it's been opened. How the contacts list turns a person into a chat.
+/// The direct conversation with `peer_ipk`, created on first open.
 #[uniffi::export]
 pub fn conversation_with(peer_ipk: Vec<u8>) -> Result<Vec<u8>, CoreError> {
-    let peer = to_ipk32(&peer_ipk)?;
+    let peer = fixed::<32>(&peer_ipk, "ipk")?;
     Ok(Conversation::for_peer(&peer)?.to_vec())
 }
 
-/// One conversation by id, or `None` if it's gone.
 #[uniffi::export]
 pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     Ok(Conversation::get(&conv).map(conversation_record))
 }
 
@@ -729,46 +610,39 @@ pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationR
 /// attribute to a name.
 #[uniffi::export]
 pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord>, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let me = crate::data::identity::Identity::get().map(|i| i.ipk());
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let me = crate::data::identity::Identity::local_ipk();
     Ok(Conversation::members(&conv)
         .into_iter()
-        .map(|m| MemberRecord {
-            me:              me.is_some_and(|k| k == m.member_ipk),
-            name:            crate::data::peer_name::resolve(&m.member_ipk),
-            name_is_claimed: crate::data::peer_name::is_self_asserted(&m.member_ipk),
-            ipk:             m.member_ipk.to_vec(),
-            role:            m.role,
-            joined_at:       m.joined_at,
-            active:          m.active,
+        .map(|m| {
+            let (name, name_is_claimed) = crate::data::peer_name::resolve_claimed(&m.member_ipk);
+            MemberRecord {
+                me: me.is_some_and(|k| k == m.member_ipk),
+                name,
+                name_is_claimed,
+                ipk: m.member_ipk.to_vec(),
+                role: m.role,
+                joined_at: m.joined_at,
+                active: m.active,
+            }
         })
         .collect())
 }
 
-/// How many members have read up to `dispatch_id` — the "seen by N" figure.
-#[uniffi::export]
-pub fn seen_by_count(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<u32, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let did = to_did16(&dispatch_id)?;
-    Ok(Message::seen_by_count(&conv, &did))
-}
-
-/// Rename a conversation. Applied locally at once so the UI doesn't wait on
-/// the network; a group's new name is then narrated to its members, who apply
-/// it on receipt. A direct chat's title is ours alone, so it stays local.
+/// Applied locally at once, then announced to a group's members. A direct chat's title stays local.
 #[uniffi::export]
 pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let is_group =
         Conversation::get(&conv).is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
-    let me = crate::data::identity::Identity::get().map(|i| i.ipk()).unwrap_or_default();
+    let me = crate::data::identity::Identity::local_ipk().unwrap_or_default();
     if is_group && !Conversation::may_edit(&conv, &me) {
         return Err(anyhow::anyhow!("only admins can rename this group").into());
     }
     Conversation::set_title(&conv, &title)?;
     if is_group {
-        crate::RUNTIME.spawn(async move {
-            crate::messaging::announce(
+        core().spawn(async move {
+            crate::groups::announce(
                 conv,
                 common::proto::mls_wire::SystemEvent::Titled { title },
             )
@@ -778,7 +652,7 @@ pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result
     Ok(())
 }
 
-/// One entry per conversation (latest message per peer).
+/// The latest message of each conversation.
 #[uniffi::export]
 pub fn get_conversations() -> Vec<MessageRecord> {
     Message::get_conversations().into_iter().map(with_media_kind).collect()
@@ -787,9 +661,9 @@ pub fn get_conversations() -> Vec<MessageRecord> {
 fn with_media_kind(row: MessageRow) -> MessageRecord {
     let mut rec = MessageRecord::from(row);
     if let Some(did) = rec.dispatch_id.as_deref().and_then(|d| <[u8; 16]>::try_from(d).ok())
-        && let Ok(conv) = to_conv16(&rec.conversation_id)
+        && let Ok(conv) = fixed::<16>(&rec.conversation_id, "conversation id")
     {
-        rec.media_kind = crate::data::media::get(&conv, &did).ok().flatten().map_or(0, |m| m.kind);
+        rec.media_kind = crate::data::media::kind(&conv, &did).unwrap_or(0);
     }
     rec
 }
@@ -815,31 +689,26 @@ pub fn get_contacts() -> Vec<ContactInfo> {
 pub struct ContactDiag {
     pub ipk: Vec<u8>,
     pub name: String,
-    /// True once an MLS group id is bound (first send has happened).
+    /// True once an MLS group id is bound.
     pub paired: bool,
     /// Current MLS epoch, `None` if unpaired or the group can't load.
     pub epoch: Option<u64>,
     pub message_count: u32,
-    /// Newest message status (0 pending / 1 sent / 2 failed), `None` if none.
+    /// Newest message status, coded as in [`MessageRecord::status`].
     pub last_status: Option<u8>,
     /// Pending (undelivered) outbox ops for this peer.
     pub pending_ops: u32,
 }
 
-/// Cascade-delete ALL per-contact state so re-scanning this peer's QR is a
-/// clean first-time add: MLS group storage, epoch-ahead buffer, messages,
-/// queued outbox ops, then the address-book row (last, after its group id
-/// is consumed). Best-effort — a failing store is logged and the cascade
-/// continues; partial cleanup beats aborting on stale state. Idempotent:
-/// forgetting an absent contact is success.
+/// Deletes all per-contact state so re-scanning their QR is a clean first-time add. Best-effort and
+/// idempotent: a failing store is logged and the rest still goes.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
-    let ipk = to_ipk32(&ipk)?;
+    let ipk = fixed::<32>(&ipk, "ipk")?;
     let Some(contact) = Contact::get(&ipk) else { return Ok(()) };
 
-    // Their copies still queued for this pair are moot, and dropping them first
-    // keeps the notice below: sealed into the group before it goes, it tells a
-    // paired contact to start fresh, so their next message arrives as a request.
+    // Queued copies are moot; dropping them before the `Unpaired` notice keeps the notice. It
+    // tells a paired contact to start fresh, so their next message arrives as a request.
     crate::delivery::forget_target(&ipk);
     if contact.inner.status == crate::data::contact::PAIR_STATUS_PAIRED && contact.inner.mls_group_id.is_some()
         && let Ok(conv) = Conversation::for_peer(&ipk)
@@ -848,10 +717,7 @@ pub async fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
         log::debug!("FORGET: could not tell them the pair ended: {e}");
     }
 
-    // Read off the contact row before anything below drops it, and cleared to
-    // the same depth as a conversation delete — a re-scan of this peer's QR is
-    // only a first-time add if nothing of the old group is left to charge
-    // against the per-group budget.
+    // Read before the contact row goes, and cleared as deeply as a conversation delete.
     if let Some(gid) = contact.inner.mls_group_id {
         purge_mls_group(&gid);
     }
@@ -870,7 +736,6 @@ pub async fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Contacts list enriched with per-contact diagnostics for a debug UI.
 #[uniffi::export]
 pub fn list_contacts_diag() -> Vec<ContactDiag> {
     let provider = crate::mls::PromtuzMlsProvider::shared();
@@ -919,93 +784,57 @@ impl From<MessageRow> for MessageRecord {
     }
 }
 
-/// Validate a client-supplied IPK is exactly 32 bytes.
-pub(crate) fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
-    bytes.try_into().map_err(|_| CoreError::Internal { msg: "ipk must be 32 bytes".into() })
-}
-
-/// Validate a client-supplied conversation id is exactly 16 bytes.
-pub(crate) fn to_conv16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
-    bytes
-        .try_into()
-        .map_err(|_| CoreError::Internal { msg: "conversation id must be 16 bytes".into() })
-}
-
-/// Validate a client-supplied dispatch_id is exactly 16 bytes.
-pub(crate) fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
-    bytes.try_into().map_err(|_| CoreError::Internal { msg: "dispatch_id must be 16 bytes".into() })
-}
-
-/// Validate a client-supplied file_id is exactly 32 bytes.
-pub(crate) fn to_fid32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
-    bytes.try_into().map_err(|_| CoreError::Internal { msg: "file_id must be 32 bytes".into() })
-}
-
-// ── Group membership ──────────────────────────────────────────────────────
-//
-// All four need a live relay (a KeyPackage fetch and a Welcome), so unlike a
-// message they report their outcome synchronously rather than outboxing.
-//
-// These are the only `async` exports on the surface, and uniffi polls them on
-// its own executor — no Tokio reactor in scope, so QUIC I/O inside would fail
-// with "there is no reactor running". [`on_runtime`] moves the work onto the
-// global runtime; the JoinHandle we await back is a plain future the runtime
-// wakes, so uniffi's executor is fine holding it.
-
-/// Run `fut` on [`crate::RUNTIME`] and await its result.
+/// uniffi polls plain async exports on its own executor, where QUIC I/O has no Tokio reactor.
 pub(crate) async fn on_runtime<T, F>(fut: F) -> Result<T, CoreError>
 where
     T: Send + 'static,
     F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
 {
-    crate::RUNTIME
+    core()
         .spawn(fut)
         .await
         .map_err(|e| CoreError::Internal { msg: format!("core task did not finish: {e}") })?
         .map_err(CoreError::from)
 }
 
-/// Create a group with `members` and us as its admin. Returns the new
-/// conversation id, ready to send in.
+/// Returns the new conversation id, ready to send in.
 #[uniffi::export]
 pub async fn create_group(title: String, members: Vec<Vec<u8>>) -> Result<Vec<u8>, CoreError> {
-    let list = members.iter().map(|m| to_ipk32(m)).collect::<Result<Vec<_>, _>>()?;
+    let list = members.iter().map(|m| fixed::<32>(m, "ipk")).collect::<Result<Vec<_>, _>>()?;
     let id = on_runtime(crate::groups::create_group(title, list)).await?;
     Ok(id.to_vec())
 }
 
-// Every change below returns whether it's done. Only one member's phone, the
-// committer's, changes a group; `false` means we asked it to, and the change
-// lands once it has.
+// The changes below return whether they are done. Only the committer's phone changes a group;
+// `false` means we asked it to.
 
-/// Add people to a group, in one change; they get no pre-join history.
+/// One change; the new members get no pre-join history.
 #[uniffi::export]
 pub async fn add_group_members(
     conversation_id: Vec<u8>, members: Vec<Vec<u8>>,
 ) -> Result<bool, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let who = members.iter().map(|m| to_ipk32(m)).collect::<Result<Vec<_>, _>>()?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let who = members.iter().map(|m| fixed::<32>(m, "ipk")).collect::<Result<Vec<_>, _>>()?;
     on_runtime(crate::groups::add_members(conv, who)).await
 }
 
-/// Remove someone from a group. The commit that removes them refreshes the
-/// group's keys, so their device can't read what follows.
+/// The removing commit refreshes the group's keys, so their device cannot read what follows.
 #[uniffi::export]
 pub async fn remove_group_member(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>,
 ) -> Result<bool, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let who = to_ipk32(&member_ipk)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let who = fixed::<32>(&member_ipk, "ipk")?;
     on_runtime(crate::groups::remove_member(conv, who)).await
 }
 
-/// Make a member a member (0), an admin (1) or an owner (2).
+/// `role` is 0 member, 1 admin or 2 owner.
 #[uniffi::export]
 pub async fn set_group_role(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>, role: u8,
 ) -> Result<bool, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
-    let who = to_ipk32(&member_ipk)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let who = fixed::<32>(&member_ipk, "ipk")?;
     on_runtime(crate::groups::set_role(conv, who, role)).await
 }
 
@@ -1013,7 +842,7 @@ pub async fn set_group_role(
 pub async fn set_group_rules(
     conversation_id: Vec<u8>, rules: GroupRulesRecord,
 ) -> Result<bool, CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let rules = common::proto::mls_wire::GroupRules {
         members_add:    rules.members_add,
         members_edit:   rules.members_edit,
@@ -1023,9 +852,9 @@ pub async fn set_group_rules(
     on_runtime(crate::groups::set_rules(conv, rules)).await
 }
 
-/// Leave a group. The conversation and its history stay; it just can't send.
+/// The conversation and its history stay; it just can no longer send.
 #[uniffi::export]
 pub async fn leave_group(conversation_id: Vec<u8>) -> Result<(), CoreError> {
-    let conv = to_conv16(&conversation_id)?;
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
     on_runtime(crate::groups::leave(conv)).await
 }

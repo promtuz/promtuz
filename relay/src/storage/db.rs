@@ -1,16 +1,5 @@
-//! The relay's on-disk store: one fjall `Database`, several keyspaces.
-//!
-//! Keyspaces (fjall's column-family equivalent — each its own LSM-tree):
-//! - `messages`       sender-relay local fallback queue (`MessageKey` -> DeliverP).
-//! - `dht_queue`      home-replica offline queue (`MessageKey`, per-recipient prefix).
-//! - `dht_keypackage` MLS KeyPackage stash (per-IPK prefix).
-//! - `dht_welcome`    MLS Welcome stash (per-recipient prefix).
-//!
-//! fjall does exact prefix scans natively, so no prefix-extractor config is
-//! needed (unlike RocksDB). Durability-critical writes go through
-//! [`Store::put_sync`], which hands the journal fsync to the store's
-//! maintenance thread; everything else is journal-buffered. That thread also
-//! runs the bounded expiry sweep over the presence/identity keyspaces.
+//! The relay's fjall store. Durable writes go through [`Store::put_sync`], which leaves the fsync
+//! to a maintenance thread that also runs the bounded expiry sweep.
 
 use std::ops::Bound;
 use std::path::Path;
@@ -22,12 +11,11 @@ use std::sync::PoisonError;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use common::utils::now_ms;
 use fjall::Database;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
@@ -37,7 +25,6 @@ use fjall::UserValue;
 
 pub const KS_MESSAGES: &str = "messages";
 pub const KS_DHT_QUEUE: &str = "dht_queue";
-pub const KS_DHT_KEYPACKAGE: &str = "dht_keypackage";
 pub const KS_DHT_WELCOME: &str = "dht_welcome";
 pub const KS_LAST_SEEN: &str = "last_seen";
 pub const KS_PRESENCE_CONSENT: &str = "presence_consent";
@@ -46,26 +33,21 @@ pub const KS_PRESENCE_LEASE: &str = "presence_lease";
 pub const KS_DHT_PUSH_PSEUDONYM: &str = "dht_push_pseudonym";
 pub const KS_DHT_PUSH_PENDING: &str = "dht_push_pending";
 
-/// Mirrors `dht::config::PRESENCE_TTL_MS`; duplicated because the `ldb` lib
-/// target compiles `storage` without the DHT module.
 const PRESENCE_STATE_TTL_MS: u64 = 600_000;
 
-/// How far a presence version may lead its own `observed_at_ms`. Honest relays
-/// derive the version from wall-clock milliseconds and only step ahead of it by
-/// one per update within the same millisecond.
+/// How far a presence version may lead its `observed_at_ms`. Honest relays use wall-clock ms and
+/// step ahead by one only for updates within the same millisecond.
 const PRESENCE_VERSION_MAX_LEAD_MS: u64 = 60_000;
 
 /// Consent grants, last-seen stamps and push pseudonyms are all rewritten when
 /// the identity next connects, so this expires quiet identities, not records.
 const IDLE_IDENTITY_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 
-/// How long an undelivered message is held before the sweep drops it. Matches
-/// the Welcome retention window, so a recipient offline past it loses both.
+/// Matches the Welcome retention window, so a recipient offline past it loses both.
 const QUEUED_MESSAGE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
-/// Ceiling on `presence_consent` rows. The keyspace takes writes for any
-/// `(owner, recipient)` pair a DHT peer can sign for, so its size is not a
-/// function of this relay's own user count.
+/// `presence_consent` takes writes for any `(owner, recipient)` pair a DHT peer can sign for,
+/// so its size does not follow this relay's own user count.
 const MAX_PRESENCE_CONSENT_ROWS: usize = 1_000_000;
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -75,16 +57,13 @@ const MAX_SWEEP_REMOVALS: usize = 4_096;
 #[cfg(unix)]
 const STORE_DIR_MODE: u32 = 0o700;
 
-/// Owns the relay's fjall `Database` and its keyspace handles. Shared as
-/// `Arc<Store>` between the `Relay` (message queue) and the `Dht` (home
-/// queue, MLS stashes) — both point at the same on-disk store.
 pub struct Store {
     db:                   Database,
     pub messages:         Keyspace,
     pub queue:            Keyspace,
-    pub keypackage:       Keyspace,
+    pub key_packages:     super::key_packages::KeyPackages,
     pub welcome:          Keyspace,
-    /// IPK (32B) -> last-disconnect unix-ms (u64 BE). Powers presence last-seen.
+    /// IPK -> unix ms (u64 BE) when the client last left foreground-active.
     pub last_seen:        Keyspace,
     /// `(owner, recipient)` -> newest signed consent or revocation tombstone.
     pub presence_consent: Keyspace,
@@ -92,20 +71,19 @@ pub struct Store {
     pub presence_lease:   Keyspace,
     pub push_pseudonym:   Keyspace,
     pub push_pending:     Keyspace,
+    /// Striped by recipient, so a queue's cap and id checks see every earlier insert.
+    admission:            [parking_lot::Mutex<()>; 64],
     maintenance:          Arc<Maintenance>,
     worker:               Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Store {
-    // fjall's `Database` / `Keyspace` handles aren't `Debug`; `Dht` and
-    // `Relay` derive `Debug` and hold an `Arc<Store>`, so give them a stub.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store").finish_non_exhaustive()
     }
 }
 
 impl Store {
-    /// Open (creating if absent) the relay's fjall store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).context("create store directory")?;
@@ -117,38 +95,24 @@ impl Store {
         }
 
         let db = Database::builder(path).open().context("open fjall database")?;
-        let messages =
-            db.keyspace(KS_MESSAGES, KeyspaceCreateOptions::default).context("open `messages`")?;
-        let queue = db
-            .keyspace(KS_DHT_QUEUE, KeyspaceCreateOptions::default)
-            .context("open `dht_queue`")?;
-        let keypackage = db
-            .keyspace(KS_DHT_KEYPACKAGE, KeyspaceCreateOptions::default)
-            .context("open `dht_keypackage`")?;
-        let welcome = db
-            .keyspace(KS_DHT_WELCOME, KeyspaceCreateOptions::default)
-            .context("open `dht_welcome`")?;
-        let last_seen = db
-            .keyspace(KS_LAST_SEEN, KeyspaceCreateOptions::default)
-            .context("open `last_seen`")?;
-        let presence_consent = db
-            .keyspace(KS_PRESENCE_CONSENT, KeyspaceCreateOptions::default)
-            .context("open `presence_consent`")?;
-        let presence_state = db
-            .keyspace(KS_PRESENCE_STATE, KeyspaceCreateOptions::default)
-            .context("open `presence_state`")?;
-        let presence_lease = db
-            .keyspace(KS_PRESENCE_LEASE, KeyspaceCreateOptions::default)
-            .context("open `presence_lease`")?;
-        let push_pseudonym = db
-            .keyspace(KS_DHT_PUSH_PSEUDONYM, KeyspaceCreateOptions::default)
-            .context("open `dht_push_pseudonym`")?;
-        let push_pending = db
-            .keyspace(KS_DHT_PUSH_PENDING, KeyspaceCreateOptions::default)
-            .context("open `dht_push_pending`")?;
+        let open = |name: &str| {
+            db.keyspace(name, KeyspaceCreateOptions::default)
+                .with_context(|| format!("open `{name}`"))
+        };
+        let messages = open(KS_MESSAGES)?;
+        let queue = open(KS_DHT_QUEUE)?;
+        let key_packages = super::key_packages::KeyPackages::open(&db)?;
+        let welcome = open(KS_DHT_WELCOME)?;
+        let last_seen = open(KS_LAST_SEEN)?;
+        let presence_consent = open(KS_PRESENCE_CONSENT)?;
+        let presence_state = open(KS_PRESENCE_STATE)?;
+        let presence_lease = open(KS_PRESENCE_LEASE)?;
+        let push_pseudonym = open(KS_DHT_PUSH_PSEUDONYM)?;
+        let push_pending = open(KS_DHT_PUSH_PENDING)?;
 
         let maintenance = Arc::new(Maintenance::default());
         let targets = vec![
+            SweepTarget::new(&key_packages.spent, super::key_packages::spent_expired),
             SweepTarget::new(&messages, queued_message_expired),
             SweepTarget::new(&queue, queued_message_expired),
             SweepTarget::new(&last_seen, last_seen_expired),
@@ -170,7 +134,7 @@ impl Store {
             db,
             messages,
             queue,
-            keypackage,
+            key_packages,
             welcome,
             last_seen,
             presence_consent,
@@ -178,20 +142,22 @@ impl Store {
             presence_lease,
             push_pseudonym,
             push_pending,
+            admission: std::array::from_fn(|_| parking_lot::Mutex::new(())),
             maintenance,
             worker: Some(worker),
         })
     }
 
-    /// Record when a peer was last foreground-active (unix-ms) — stamped only on
-    /// leaving an Active state, never on a background connect/disconnect, so a
-    /// wake doesn't read as "seen now". Buffered, not fsynced — a lost stamp on
-    /// crash just degrades to "last-seen unknown".
+    /// Held from a queue's admission scan through its insert.
+    pub fn admission(&self, recipient: &[u8; 32]) -> parking_lot::MutexGuard<'_, ()> {
+        self.admission[usize::from(recipient[0]) % self.admission.len()].lock()
+    }
+
+    /// Not fsynced: a stamp lost in a crash only degrades last-seen.
     pub fn put_last_seen(&self, ipk: &[u8; 32], ts_ms: u64) -> fjall::Result<()> {
         self.last_seen.insert(ipk, ts_ms.to_be_bytes())
     }
 
-    /// Read a peer's last-disconnect time, `None` if never recorded.
     pub fn get_last_seen(&self, ipk: &[u8; 32]) -> Option<u64> {
         let v = self.last_seen.get(ipk).ok().flatten()?;
         Some(u64::from_be_bytes(v.as_ref().try_into().ok()?))
@@ -227,16 +193,8 @@ impl Store {
         self.presence_consent.get(key).ok().flatten().is_some_and(|v| v.get(16) == Some(&1))
     }
 
-    /// Value layout:
-    /// `version (u64 BE) || observed_at_ms (u64 BE) || tag (u8) || timestamp (u64 BE)`.
-    ///
-    /// `observed_at_ms` is verified within `PRESENCE_STATE_MAX_SKEW_MS` of real
-    /// time by `RelayPresenceState::verify`, so it doubles as the clock for the
-    /// staleness comparison against the stored row.
-    /// `lease_expires_at_ms` is the publisher's declared deadline for this
-    /// claim. It is clamped to our own ceiling, so a lease may only ever
-    /// shorten the window — a relay cannot pin a user online by declaring a
-    /// distant expiry.
+    /// Value: `version || observed_at_ms || tag (u8) || timestamp || expires_at_ms`, u64s BE.
+    /// `RelayPresenceState::verify` skew-checks `observed_at_ms`, so it is the staleness clock.
     pub fn put_presence_state(
         &self, recipient: &[u8; 32], contact: &[u8; 32],
         state: &common::proto::client_rel::PresenceState, version: u64, observed_at_ms: u64,
@@ -260,6 +218,7 @@ impl Store {
             common::proto::client_rel::PresenceState::Idle { since } => (1, *since),
             common::proto::client_rel::PresenceState::Offline { last_seen } => (2, *last_seen),
         };
+        // Clamped so a relay cannot pin a user online with a distant lease.
         let expires_at_ms = lease_expires_at_ms
             .min(observed_at_ms.saturating_add(PRESENCE_STATE_TTL_MS));
         let mut value = Vec::with_capacity(33);
@@ -318,9 +277,8 @@ impl Store {
             .ok()
     }
 
-    /// Durable home-side `IPK -> P` mapping. `P` is opaque to the relay and
-    /// cannot reveal a platform token without the push gateway's database.
-    /// Value layout: `pseudonym (32B) || refreshed_at_ms (u64 BE)`.
+    /// Value: `pseudonym (32) || refreshed_at_ms (u64 BE)`. The pseudonym reveals no platform
+    /// token without the push gateway's database.
     pub fn put_push_pseudonym(&self, ipk: &[u8; 32], pseudonym: &[u8; 32]) -> fjall::Result<()> {
         let mut value = Vec::with_capacity(40);
         value.extend_from_slice(pseudonym);
@@ -361,11 +319,8 @@ impl Store {
             .collect()
     }
 
-    /// Insert, then hand the journal fsync to the maintenance thread, which
-    /// coalesces concurrent requests into one `SyncAll`. The value is in the
-    /// journal buffer on return; the group commit closes the machine-crash
-    /// window. A failed fsync poisons the fjall database, so the next write on
-    /// any keyspace surfaces it as `Error::Poisoned`.
+    /// The fsync is left to the maintenance thread's group commit. A failed fsync poisons the
+    /// fjall database, so the next write on any keyspace surfaces it as `Error::Poisoned`.
     pub fn put_sync(
         &self, ks: &Keyspace, key: impl Into<UserKey>, val: impl Into<UserValue>,
     ) -> fjall::Result<()> {
@@ -384,29 +339,25 @@ impl Store {
         requested
     }
 
-    /// Take a barrier covering every write issued so far. Awaiting it is the
-    /// durability point: a caller that acknowledges a write to a peer must not
-    /// reply before the barrier resolves.
+    /// Covers every write issued so far. Awaiting it is the durability point: never acknowledge a
+    /// write to a peer before it resolves.
     pub fn persist_barrier(&self) -> PersistBarrier {
         PersistBarrier { maintenance: self.maintenance.clone(), target: self.request_persist() }
     }
 
-    /// A buffered, atomic multi-op batch (used for drain GC). Not fsynced — a
-    /// crash re-delivers, and the client dedupes by id.
+    /// Not fsynced: a crash only re-delivers, and the client dedupes by id.
     pub fn batch(&self) -> fjall::OwnedWriteBatch {
         self.db.batch()
     }
 
-    /// Truncate every keyspace and fsync, returning the number of entries that
-    /// were live. Live-safe: the relay owns the fjall writer, so no lock fight
-    /// — the `pzrelay clear-db` reset path. Leaves the daemon's in-memory
-    /// routing/connections intact.
+    /// Clears every keyspace on disk; in-memory routing and connections stay.
     pub fn clear_all(&self) -> Result<usize> {
         let mut n = 0usize;
         for ks in [
             &self.messages,
             &self.queue,
-            &self.keypackage,
+            &self.key_packages.records,
+            &self.key_packages.spent,
             &self.welcome,
             &self.last_seen,
             &self.presence_consent,
@@ -420,6 +371,45 @@ impl Store {
         }
         self.db.persist(PersistMode::SyncAll).context("persist after clear")?;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    /// A new empty store at `path`. Creating fjall keyspaces syncs each one to disk, most of a
+    /// second on macOS, so they are created once per test process and their files copied.
+    pub(crate) fn open_empty(path: &Path) -> Self {
+        type Entry = (std::path::PathBuf, Option<Vec<u8>>);
+        static LAYOUT: std::sync::LazyLock<Vec<Entry>> = std::sync::LazyLock::new(|| {
+            let dir = tempfile::tempdir().unwrap();
+            drop(Store::open(dir.path()).unwrap());
+            let mut entries = Vec::new();
+            let mut folders = vec![dir.path().to_path_buf()];
+            while let Some(folder) = folders.pop() {
+                for entry in std::fs::read_dir(folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    let relative = path.strip_prefix(dir.path()).unwrap().to_path_buf();
+                    if path.is_dir() {
+                        entries.push((relative, None));
+                        folders.push(path);
+                    } else {
+                        entries.push((relative, Some(std::fs::read(&path).unwrap())));
+                    }
+                }
+            }
+            entries
+        });
+        for (relative, contents) in LAYOUT.iter() {
+            let target = path.join(relative);
+            match contents {
+                None => std::fs::create_dir_all(target).unwrap(),
+                Some(bytes) => {
+                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                    std::fs::write(target, bytes).unwrap();
+                },
+            }
+        }
+        Self::open(path).unwrap()
     }
 }
 
@@ -437,7 +427,6 @@ impl Drop for Store {
 struct Maintenance {
     state: Mutex<MaintenanceState>,
     wake:  Condvar,
-    /// Signalled after each group commit, for [`PersistBarrier`] waiters.
     done:  Condvar,
 }
 
@@ -458,14 +447,12 @@ impl Maintenance {
     }
 }
 
-/// Resolves once the group commit covering the writes behind it has hit disk.
 pub struct PersistBarrier {
     maintenance: Arc<Maintenance>,
     target:      u64,
 }
 
 impl PersistBarrier {
-    /// Waits on the blocking pool, so a tokio worker is never parked on fsync.
     pub async fn wait(self) -> Result<()> {
         tokio::task::spawn_blocking(move || self.wait_blocking())
             .await
@@ -502,8 +489,7 @@ impl SweepTarget {
     }
 }
 
-/// Group-commit fsync plus the periodic expiry sweep, on a thread of its own so
-/// neither ever runs on a tokio worker.
+/// Group-commit fsync and the expiry sweep, on a dedicated thread off the tokio workers.
 fn run_maintenance(db: Database, mut targets: Vec<SweepTarget>, maintenance: Arc<Maintenance>) {
     let mut next_sweep = Instant::now() + SWEEP_INTERVAL;
     loop {
@@ -596,9 +582,8 @@ fn presence_consent_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 8).is_none_or(|issued_at| now_ms.saturating_sub(issued_at) > IDLE_IDENTITY_TTL_MS)
 }
 
-/// Presence is a lease: it dies at its stored deadline unless renewed. Rows
-/// written before the deadline was recorded carry only the first 25 bytes, so
-/// they fall back to the fixed ceiling.
+/// Presence dies at its stored deadline. Older 25-byte rows carry no deadline and fall back to
+/// the fixed ceiling.
 fn presence_state_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 25)
         .or_else(|| be_u64(value, 8).map(|at| at.saturating_add(PRESENCE_STATE_TTL_MS)))
@@ -623,218 +608,104 @@ fn be_u64(value: &[u8], offset: usize) -> Option<u64> {
     value.get(offset..offset + 8).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes)
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
-
     use common::proto::client_rel::PresenceState;
     use common::proto::dht_p2p::PresenceConsent;
 
     use super::*;
 
-    fn fresh_store() -> Store {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, Ordering::SeqCst);
-        let path =
-            std::env::temp_dir().join(format!("pz-cleardb-test-{}-{id}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        Store::open(&path).expect("open store")
-    }
-
-    fn consent(version: u64, issued_at_ms: u64, granted: bool) -> PresenceConsent {
-        PresenceConsent {
-            owner: [1u8; 32].into(),
-            recipient: [2u8; 32].into(),
-            version,
-            issued_at_ms,
-            granted,
-            user_sig: [0u8; 64].into(),
+    /// The barrier is the custody point every `Stored` and `Queued` waits on: it resolves after
+    /// the commit covering the writes before it, and a store shutting down still releases it.
+    #[tokio::test]
+    async fn barriers_resolve_after_their_commit_even_when_the_store_shuts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_empty(dir.path());
+        for n in 0..8u8 {
+            store.put_sync(&store.messages, [n], [n]).unwrap();
         }
+        let barrier = store.persist_barrier();
+        let covers = barrier.target;
+        tokio::time::timeout(Duration::from_secs(5), barrier.wait()).await.unwrap().unwrap();
+        assert!(store.maintenance.lock().persisted_gen >= covers);
+
+        store.put_sync(&store.messages, [8], [8]).unwrap();
+        let pending = store.persist_barrier();
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(5), pending.wait()).await.unwrap().unwrap();
+        assert_eq!(Store::open(dir.path()).unwrap().messages.len().unwrap(), 9);
     }
 
+    /// Expiry removes only expired rows, and a keyspace larger than one pass's budget drains
+    /// over passes that resume where the last one stopped.
     #[test]
-    fn clear_all_empties_every_keyspace() {
-        let store = fresh_store();
-        store.messages.insert("a".as_bytes(), "1".as_bytes()).unwrap();
-        store.queue.insert("b".as_bytes(), "2".as_bytes()).unwrap();
-        store.keypackage.insert("c".as_bytes(), "3".as_bytes()).unwrap();
-        store.welcome.insert("d".as_bytes(), "4".as_bytes()).unwrap();
-        store.last_seen.insert("e".as_bytes(), "5".as_bytes()).unwrap();
-
-        let n = store.clear_all().expect("clear");
-        assert_eq!(n, 5, "must report every deleted entry");
-        for ks in
-            [&store.messages, &store.queue, &store.keypackage, &store.welcome, &store.last_seen]
-        {
-            assert_eq!(ks.iter().count(), 0, "keyspace must be empty after clear");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn store_directory_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = std::env::temp_dir().join(format!("pz-mode-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        let _store = Store::open(&path).expect("open store");
-
-        let mode = std::fs::metadata(&path).expect("stat store").permissions().mode();
-        assert_eq!(mode & 0o777, STORE_DIR_MODE);
-    }
-
-    #[test]
-    fn last_seen_roundtrips_and_defaults_to_none() {
-        let store = fresh_store();
-        let ipk = [7u8; 32];
-        assert_eq!(store.get_last_seen(&ipk), None, "unrecorded IPK is None");
-        store.put_last_seen(&ipk, 1_700_000_000_000).unwrap();
-        assert_eq!(store.get_last_seen(&ipk), Some(1_700_000_000_000));
-    }
-
-    #[test]
-    fn push_pseudonym_roundtrips() {
-        let store = fresh_store();
-        let ipk = [3u8; 32];
-        assert_eq!(store.get_push_pseudonym(&ipk), None);
-        store.put_push_pseudonym(&ipk, &[9u8; 32]).unwrap();
-        assert_eq!(store.get_push_pseudonym(&ipk), Some([9u8; 32]));
-    }
-
-    #[test]
-    fn presence_consent_rejects_replayed_version() {
-        let store = fresh_store();
-        let now = now_ms();
-        assert!(store.put_presence_consent(&consent(7, now, true)).unwrap());
-        assert!(store.has_presence_consent(&[1u8; 32], &[2u8; 32]));
-
-        assert!(!store.put_presence_consent(&consent(6, now, true)).unwrap());
-        assert!(!store.put_presence_consent(&consent(7, now, true)).unwrap());
-        assert!(store.put_presence_consent(&consent(8, now, false)).unwrap());
-        assert!(!store.has_presence_consent(&[1u8; 32], &[2u8; 32]));
-        assert!(!store.put_presence_consent(&consent(8, now, true)).unwrap());
-        assert!(!store.has_presence_consent(&[1u8; 32], &[2u8; 32]));
-    }
-
-    #[test]
-    fn presence_expires_at_the_lease_deadline() {
-        let store = fresh_store();
-        let t0 = 1_700_000_000_000;
-        let short = t0 + 60_000;
-        assert!(
-            store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, t0, t0, short)
-                .unwrap()
-        );
-        let value = store.presence_state.get([[1u8; 32], [2u8; 32]].concat()).unwrap().unwrap();
-        assert!(!presence_state_expired(b"", &value, short - 1), "live before the deadline");
-        assert!(presence_state_expired(b"", &value, short), "dead at the deadline");
-    }
-
-    #[test]
-    fn a_lease_cannot_outlast_our_own_ceiling() {
-        let store = fresh_store();
-        let t0 = 1_700_000_000_000;
-        assert!(
-            store
-                .put_presence_state(
-                    &[1u8; 32], &[2u8; 32], &PresenceState::Online, t0, t0, u64::MAX
-                )
-                .unwrap()
-        );
-        let value = store.presence_state.get([[1u8; 32], [2u8; 32]].concat()).unwrap().unwrap();
-        assert!(presence_state_expired(b"", &value, t0 + PRESENCE_STATE_TTL_MS));
-    }
-
-    /// Rows predating the stored deadline carry 25 bytes and must still expire.
-    #[test]
-    fn legacy_presence_rows_fall_back_to_the_fixed_ceiling() {
-        let mut legacy = Vec::new();
-        legacy.extend_from_slice(&1u64.to_be_bytes());
-        legacy.extend_from_slice(&1_000u64.to_be_bytes());
-        legacy.push(0);
-        legacy.extend_from_slice(&0u64.to_be_bytes());
-        assert_eq!(legacy.len(), 25);
-        assert!(!presence_state_expired(b"", &legacy, 1_000 + PRESENCE_STATE_TTL_MS - 1));
-        assert!(presence_state_expired(b"", &legacy, 1_000 + PRESENCE_STATE_TTL_MS));
-    }
-
-    #[test]
-    fn presence_state_rejects_version_beyond_observed_lead() {
-        let store = fresh_store();
-        let now = now_ms();
-        assert!(
-            !store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, u64::MAX, now, now + PRESENCE_STATE_TTL_MS)
-                .unwrap()
-        );
-        assert_eq!(store.get_presence_state(&[1u8; 32], &[2u8; 32]), None);
-    }
-
-    #[test]
-    fn presence_state_row_is_replaceable_once_stale() {
-        let store = fresh_store();
-        let t0 = 1_700_000_000_000;
-        let high = t0 + PRESENCE_VERSION_MAX_LEAD_MS;
-        assert!(
-            store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0, t0 + PRESENCE_STATE_TTL_MS)
-                .unwrap()
-        );
-        assert!(
-            !store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, high, t0 + 1, t0 + 1 + PRESENCE_STATE_TTL_MS)
-                .unwrap(),
-            "a fresh row still wins on version"
-        );
-
-        let later = t0 + PRESENCE_STATE_TTL_MS + 1;
-        assert!(
-            store
-                .put_presence_state(&[1u8; 32], &[2u8; 32], &PresenceState::Online, 1, later, later + PRESENCE_STATE_TTL_MS)
-                .unwrap(),
-            "a stale row is treated as absent"
-        );
-    }
-
-    #[test]
-    fn sweep_removes_only_expired_rows() {
-        let store = fresh_store();
+    fn the_sweep_removes_only_expired_rows_and_resumes_from_its_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_empty(dir.path());
         let now = 10 * IDLE_IDENTITY_TTL_MS;
-        store.put_last_seen(&[1u8; 32], now).unwrap();
-        store.put_last_seen(&[2u8; 32], now - IDLE_IDENTITY_TTL_MS - 1).unwrap();
-
+        store.put_last_seen(&[0xFF; 32], now).unwrap();
+        for n in 0..MAX_SWEEP_REMOVALS as u64 + 32 {
+            let mut ipk = [0; 32];
+            ipk[..8].copy_from_slice(&n.to_be_bytes());
+            store.put_last_seen(&ipk, now - IDLE_IDENTITY_TTL_MS - 1).unwrap();
+        }
         let mut target = SweepTarget::new(&store.last_seen, last_seen_expired);
         sweep(&mut target, now);
-
-        assert_eq!(store.get_last_seen(&[1u8; 32]), Some(now));
-        assert_eq!(store.get_last_seen(&[2u8; 32]), None);
-    }
-
-    #[test]
-    fn sweep_resumes_from_cursor_until_keyspace_is_drained() {
-        let store = fresh_store();
-        let now = 10 * IDLE_IDENTITY_TTL_MS;
-        let stale = now - IDLE_IDENTITY_TTL_MS - 1;
-        let rows = MAX_SWEEP_REMOVALS + 32;
-        for i in 0..rows {
-            let mut ipk = [0u8; 32];
-            ipk[..8].copy_from_slice(&(i as u64).to_be_bytes());
-            store.put_last_seen(&ipk, stale).unwrap();
-        }
-
-        let mut target = SweepTarget::new(&store.last_seen, last_seen_expired);
-        sweep(&mut target, now);
-        assert!(target.cursor.is_some(), "budget exhausted mid-keyspace");
-        assert_eq!(store.last_seen.iter().count(), rows - MAX_SWEEP_REMOVALS);
-
+        assert!(target.cursor.is_some(), "the budget ran out mid-keyspace");
+        assert_eq!(store.last_seen.len().unwrap(), 33);
         sweep(&mut target, now);
         assert!(target.cursor.is_none());
-        assert_eq!(store.last_seen.iter().count(), 0);
+        assert_eq!(store.last_seen.len().unwrap(), 1);
+        assert_eq!(store.get_last_seen(&[0xFF; 32]), Some(now));
+    }
+
+    /// A replayed consent cannot undo a revocation, a version far ahead of its observation
+    /// cannot pin a presence row, and a stale row counts as absent.
+    #[test]
+    fn presence_rows_refuse_replays_and_versions_that_run_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_empty(dir.path());
+        let consent = |version, granted| PresenceConsent {
+            owner: [1; 32].into(),
+            recipient: [2; 32].into(),
+            version,
+            issued_at_ms: 1,
+            granted,
+            user_sig: [0; 64].into(),
+        };
+        for (label, sent, stored, granted) in [
+            ("grant", consent(7, true), true, true),
+            ("older replay", consent(6, true), false, true),
+            ("same version", consent(7, true), false, true),
+            ("revocation", consent(8, false), true, false),
+            ("replayed grant", consent(8, true), false, false),
+        ] {
+            assert_eq!(store.put_presence_consent(&sent).unwrap(), stored, "{label}");
+            assert_eq!(store.has_presence_consent(&[1; 32], &[2; 32]), granted, "{label}");
+        }
+
+        let put = |version, observed_at: u64| {
+            let deadline = observed_at + PRESENCE_STATE_TTL_MS;
+            store
+                .put_presence_state(
+                    &[1; 32],
+                    &[2; 32],
+                    &PresenceState::Online,
+                    version,
+                    observed_at,
+                    deadline,
+                )
+                .unwrap()
+        };
+        let now = now_ms();
+        assert!(!put(u64::MAX, now), "a far-future version is refused");
+        assert_eq!(store.get_presence_state(&[1; 32], &[2; 32]), None);
+        let t0 = 1_700_000_000_000;
+        assert!(put(t0 + PRESENCE_VERSION_MAX_LEAD_MS, t0));
+        assert!(
+            !put(t0 + PRESENCE_VERSION_MAX_LEAD_MS, t0 + 1),
+            "a live row still wins on version"
+        );
+        assert!(put(1, t0 + PRESENCE_STATE_TTL_MS + 1), "a stale row counts as absent");
     }
 }

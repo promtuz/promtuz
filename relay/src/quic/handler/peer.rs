@@ -6,12 +6,6 @@ use crate::dht::handler::handle_peer_connection;
 use crate::quic::handler::Handler;
 use crate::relay::RelayRef;
 
-/// Inbound `peer/5` handler — the relay-to-relay surface.
-///
-/// When the DHT is enabled, hand the connection off to the DHT's per-
-/// connection driver (`dht::handler::handle_peer_connection`). When it
-/// is disabled, close the connection with `UnsupportedRole` so the
-/// dialer can stop retrying.
 impl Handler {
     pub async fn handle_peer(self, relay: RelayRef) {
         let conn = self.conn.clone();

@@ -6,40 +6,47 @@ mod fcm;
 mod gateway;
 mod quic;
 mod registry;
-mod resolver_link;
 mod store;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use common::quic::CloseReason;
+use anyhow::anyhow;
+use clap::Parser as _;
+use common::server::accept;
+use common::server::daemon;
+use common::server::resolver_link;
 
 use crate::config::AppConfig;
 use crate::gateway::Gateway;
-use crate::quic::acceptor::Acceptor;
+
+/// Sized for a carrier NAT and for a relay that dials once per wake; the per-connection request
+/// budget bounds what each connection costs.
+const ACCEPT: accept::Policy = accept::Policy { per_minute: 600, burst: 300, max_live: 4096 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = cli::Cli::get();
-
-    let cfg = AppConfig::load(&cli.config, true);
-    common::server::log::init(cfg.log.level.as_deref());
-    common::info!("pzgateway {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
-
-    // Hold until we have a valid cert for our key (writes a CSR + waits if not
-    // enrolled). The CA must sign it with the PUSH_GATEWAY capability — the
-    // gateway does not enforce that on itself; peers verify it on connect.
-    let csr_path = cfg.network.key_path.with_extension("csr");
-    common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "gateway").await?;
-    if cfg.network.watch_reload {
-        common::node::enroll::spawn_config_reload(cli.config.clone());
+    let cli = cli::Cli::parse();
+    let cfg: AppConfig = daemon::load(&cli.config);
+    if let Some(cli::Command::Enroll) = cli.command {
+        return common::node::enroll::interactive(&cfg.network);
     }
+    // Peers verify the cert's PUSH_GATEWAY capability on connect; the gateway does not check its
+    // own.
+    let key = daemon::start::<AppConfig>(
+        "gateway",
+        cli::VERSION,
+        &cfg.network,
+        &cli.config,
+        cfg.log.level.as_deref(),
+    )
+    .await?;
 
-    // Bind before cfg is consumed; disabled on existing operator configs.
     let tunnel_listener = common::quic::tunnel_listener::NodeTunnel::bind(
         &cfg.network, common::quic::tunnel::FEATURE_CONTROL,
     ).await?;
+    let seeds = cfg.resolver.as_ref().map(|r| r.seed.clone()).unwrap_or_default();
     let gateway = Arc::new(Gateway::new(cfg));
     let tunnel = tunnel_listener.map(|listener| {
         let gateway = gateway.clone();
@@ -54,7 +61,7 @@ async fn main() -> Result<()> {
     if gateway.store.is_some() {
         let gateway = gateway.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
             loop {
                 tick.tick().await;
                 if let Some(store) = &gateway.store {
@@ -63,21 +70,41 @@ async fn main() -> Result<()> {
             }
         });
     }
-    let acceptor = Acceptor::new(gateway.clone());
-
-    tokio::select! {
-        _ = acceptor.run() => {}
-        _ = tokio::signal::ctrl_c() => {
-            println!();
-            gateway
-                .endpoint
-                .close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
-            let _ =
-                tokio::time::timeout(Duration::from_secs(5), gateway.endpoint.wait_idle()).await;
-            common::info!("CLOSING GATEWAY");
+    tokio::spawn({
+        let gateway = gateway.clone();
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                gateway.wakes.retain_recent();
+                gateway.wakes.shrink_to_fit();
+                if let Err(e) = gateway.registry.sweep() {
+                    common::warn!("gateway: push registry cleanup failed: {e:#}");
+                }
+            }
         }
-    }
+    });
 
-    if let Some(tunnel) = tunnel { tunnel.shutdown().await; }
-    Ok(())
+    let (_, mut link) = resolver_link::spawn(
+        gateway.endpoint.clone(),
+        seeds,
+        key,
+        resolver_link::Hello::Gateway,
+    );
+    let mut acceptor = tokio::spawn(accept::serve(gateway.endpoint.clone(), ACCEPT, {
+        let gateway = gateway.clone();
+        move |connection| quic::handler::Handler::handle(connection, gateway.clone())
+    }));
+
+    let result = tokio::select! {
+        _ = &mut acceptor => Err(anyhow!("acceptor stopped")),
+        _ = &mut link => Err(anyhow!("resolver link stopped")),
+        _ = daemon::shutdown_signal() => Ok(()),
+    };
+
+    // Otherwise the link redials the closing endpoint.
+    link.abort();
+    daemon::stop(&gateway.endpoint, tunnel).await;
+    result
 }

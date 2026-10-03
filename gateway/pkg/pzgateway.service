@@ -12,6 +12,7 @@ ExecStart=/usr/bin/pzgateway --config /etc/promtuz/gateway.toml
 WorkingDirectory=/etc/promtuz
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=65536
 
 # Writes keys and CSRs under /etc/promtuz and databases under /var/lib/pzgateway.
 # Network access is required for QUIC and HTTPS to FCM and object storage.

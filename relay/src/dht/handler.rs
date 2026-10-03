@@ -1,69 +1,8 @@
-//! Inbound `peer/5` connection dispatcher.
-//!
-//! Replaces the old `relay/src/quic/handler/peer.rs` no-op stub with a
-//! single funnel into the DHT's RPC handlers. One QUIC connection ⇒ one
-//! task spawned in `handle_peer_connection`; that task waits for an
-//! application-layer signed handshake, then accepts bi-streams in a
-//! loop and dispatches each to a per-RPC handler.
-//!
-//! ## Signed `DhtHello` first, then RPCs
-//!
-//! Before any RPC is accepted, the dialer must send a [`DhtHello`]
-//! (Ed25519-signed transcript binding `node_id` to `pubkey` and a
-//! fresh timestamp) on the **first uni-stream** of the connection.
-//! The receiver:
-//!
-//! 1. Awaits `accept_uni()` with a 5-second timeout ( [`HELLO_RECV_TIMEOUT`]). A peer that connects
-//!    but never sends a hello gets dropped — see [`HELLO_RECV_TIMEOUT`] doc-comment for the
-//!    rationale on the value.
-//! 2. Decodes via `DhtHello::unpack` and validates with `DhtHello::verify(now_ms())` — same checks
-//!    the resolver does for `RelayHello` (id-binding, signature, ±60s skew window).
-//! 3. On any failure, closes with the appropriate `CloseReason::Dht*` and bumps
-//!    `metrics.dht_hello_rejected`. On success, the authenticated `NodeId` is bound to the
-//!    connection for its full lifetime.
-//!
-//! Authenticated identity then **replaces** the synthetic-stable_id
-//! and `[0u8; 32]` placeholders that would otherwise be needed because
-//! the TLS server config uses `with_no_client_auth()` (clients also
-//! reuse the same endpoint, so we can't enable mTLS without splitting
-//! the endpoint — see `relay/src/dht/tls_extract.rs` for that gap).
-//!
-//! ## Per-stream dispatch
-//!
-//! Every DHT RPC is one bi-stream: open_bi → write request → finish()
-//! send → read response → done. The acceptor side mirrors that:
-//! accept_bi → read request → write response → finish.
-//!
-//! ## Concurrency cap
-//!
-//! Per-peer concurrent in-flight RPC streams are capped via a
-//! `tokio::sync::Semaphore` (the same idiom as `client/mod.rs`'s
-//! 16-stream limiter). Per-RPC-kind rate limits harden this further.
-//!
-//! ## Routing-table feedback
-//!
-//! Every successful inbound RPC is observable as a "this peer is
-//! alive" signal — we touch the routing table by calling
-//! `RoutingTable::insert` with the dialer's authenticated NodeId,
-//! `addr`, and verified pubkey. The pubkey comes from the verified
-//! `DhtHello` (`BLAKE3(pubkey) == node_id` was checked at hello time),
-//! not a `[0u8; 32]` placeholder.
-//!
-//! ## Per-peer rate limiting
-//!
-//! Every inbound RPC is also passed through the per-peer keyed rate
-//! limiter on `Dht::rate_limiters` before being dispatched. The limiter
-//! key is the authenticated `NodeId` for *every* inbound RPC, including
-//! the ones that don't carry an in-payload `requester` field (`Forward`,
-//! the MLS stash RPCs). A reconnecting attacker therefore can't reset
-//! their quota — the NodeId is identity-bound.
-//! Tripping the limiter closes the whole connection with
-//! `CloseReason::DhtFlood` (and bumps `metrics.rate_limit_rejections`).
+//! Inbound `peer/5` connections. A signed `DhtHello` on the first uni-stream authenticates the
+//! dialer, then each bi-stream carries one RPC.
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use common::proto::dht_p2p::DhtHello;
 use common::proto::dht_p2p::DhtHelloVerifyError;
@@ -73,119 +12,37 @@ use common::proto::dht_p2p::DhtResponse;
 use common::proto::dht_p2p::FindNodeResp;
 use common::proto::dht_p2p::MAX_FIND_NODE_RESULTS;
 use common::proto::dht_p2p::NodeDescriptor;
+use common::proto::mls_wire::KeyPackageFetchResp;
+use common::proto::mls_wire::KeyPackagePublishResp;
+use common::proto::mls_wire::KeyPackageRefillResp;
+use common::proto::mls_wire::KpPublishMode;
+use common::proto::mls_wire::WelcomeFetchResp;
+use common::proto::mls_wire::WelcomePublishResp;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::CloseReason;
 use common::quic::id::NodeId;
+use common::utils::now_ms;
 use quinn::Connection;
 use quinn::SendStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use super::Dht;
+use super::mls::kp;
+use super::mls::welcome;
 use super::rate_limit::RpcClass;
 use super::routing::RoutingTable;
-use super::tls_extract;
 
-/// Maximum concurrent in-flight inbound DHT streams per peer connection.
-///
-/// 16 matches the existing per-client limiter in
-/// `quic/handler/client/mod.rs`. Past this, additional
-/// streams are dropped at `try_acquire_owned` rather than queued — the
-/// peer is misbehaving (DHT RPCs have bounded sizes and shouldn't pile up).
 const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 
-/// Maximum time the receiver waits for the dialer's first uni-stream
-/// carrying a [`DhtHello`]. A peer that connects but never sends a
-/// hello is dropped at this point.
-///
-/// 5 s is several orders of magnitude above the round-trip needed to
-/// open a uni-stream and ship a 130-byte signed packet, but well below
-/// the QUIC idle timeout (`common/src/quic/config.rs`, 30 s) so
-/// a stalled hello doesn't get caught only by the idle path. Matches
-/// the order of magnitude of `LOOKUP_RPC_TIMEOUT_MS` (1500 ms in
-/// `dht/config.rs`), with extra slack for the *first* packet on a
-/// freshly-handshaked connection where TLS warmup can dominate.
 const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Drive a single inbound `peer/5` connection through its full lifetime.
-///
-/// 1. Best-effort TLS leaf-cert pubkey extraction via
-///    [`tls_extract::extract_pubkey_from_leaf_der`]. Under the relay's current
-///    `with_no_client_auth()` server config this typically yields no cert chain at all; preserved
-///    as a forward-looking cross-check that *if* a cert chain ever lands (e.g. once mTLS is enabled
-///    on `peer/5` per the gap doc'd in `tls_extract.rs`), the cert SPKI agrees with the
-///    application-layer hello below.
-/// 2. **Application-layer signed handshake:** wait up to [`HELLO_RECV_TIMEOUT`] for the dialer's
-///    first uni-stream and decode it as a [`DhtHello`]. Verify with `DhtHello::verify` — on any
-///    failure close the connection with the appropriate `CloseReason::Dht*` and bump
-///    `metrics.dht_hello_rejected`. On success the `(authenticated_id, authenticated_pubkey)` pair
-///    is bound to this connection for its full lifetime, and the routing table / `peer_conns` cache
-///    is populated immediately so anti-entropy and bucket-refresh can find this peer even before it
-///    sends any RPC.
-/// 3. Wait for bi-streams in a loop.
-/// 4. Spawn a per-stream task that reads one DhtRequest, checks the per-peer rate limiter
-///    ([`crate::dht::rate_limit`]) keyed on the *authenticated* NodeId from step 2, dispatches via
-///    `handle_dht_request`, writes the matching DhtResponse, and `finish()`es the send side.
-/// 5. On `Connection::closed()` (peer rebooted, network failed), evict the routing-table entry only
-///    if it still points at this exact `Connection` — same race-guard as `remove_client_if_same`.
 pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
-    // Forward-compatible TLS pubkey extraction. Under the current
-    // `with_no_client_auth()` server config this returns `None`
-    // (clients don't present certs); preserved as defense-in-depth
-    // for the day mTLS lands on `peer/5`. If a cert chain *is* present
-    // and cleanly parses we cross-check it against the application-
-    // layer hello below: any mismatch is a hard close.
-    let extracted_pubkey: Option<[u8; 32]> = {
-        match conn.peer_identity().and_then(|id| {
-            id.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-                .and_then(|chain| chain.first().cloned())
-        }) {
-            Some(leaf) => match tls_extract::extract_pubkey_from_leaf_der(leaf.as_ref()) {
-                Ok(pk) => Some(pk),
-                Err(e) => {
-                    dht.metrics.inc_cert_pubkey_extraction_failures();
-                    common::warn!(
-                        "DHT inbound peer connection: cert chain present but pubkey extraction failed: {e}"
-                    );
-                    CloseReason::DhtMalformedKey.close(&conn);
-                    return;
-                },
-            },
-            None => None,
-        }
-    };
+    // A failed hello has already closed the connection with the matching reason.
+    let Ok(auth) = recv_and_verify_hello(&conn).await else { return };
 
-    // Wait for, decode, and verify the dialer's signed `DhtHello`. The
-    // bound NodeId is the connection's authenticated identity for the
-    // rest of its lifetime.
-    let auth = match recv_and_verify_hello(&dht, &conn).await {
-        Ok(a) => a,
-        Err(()) => {
-            // recv_and_verify_hello already mapped the failure to a
-            // close-reason and bumped metrics; nothing more to do.
-            return;
-        },
-    };
-
-    // Optional cross-check: if mTLS *did* yield a cert SPKI and the
-    // hello-claimed pubkey disagrees, the connection is malicious or
-    // misconfigured. Same reasoning as the outbound-side post-handshake
-    // check at `lookup::connect_to_peer`.
-    if let Some(cert_pk) = extracted_pubkey
-        && cert_pk != auth.pubkey
-    {
-        dht.metrics.inc_dht_hello_rejected();
-        common::warn!("DHT inbound: cert SPKI != DhtHello.pubkey for {}; closing", auth.node_id);
-        CloseReason::DhtBadSignature.close(&conn);
-        return;
-    }
-
-    // Populate routing-table + peer_conns cache *now*, before any RPC
-    // arrives. We do it once at this natural boundary — the
-    // authenticated identity from the `DhtHello` is already in hand —
-    // which also means RPCs that don't carry a `requester` field (Ping,
-    // Store, Tombstone, etc.) still get routing-table coverage.
+    // Routable from now on, before the peer sends any RPC.
     {
         let desc = NodeDescriptor {
             id: auth.node_id,
@@ -197,30 +54,15 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     }
     {
         let mut map = dht.peer_conns.write();
-        // Race: another task may have raced ahead via outbound dial
-        // (`lookup::connect_to_peer`) to the same peer; drop the loser.
-        // We arbitrarily keep the first-cached entry so reconnection
-        // storms don't churn the cached `Connection` across a workload.
+        // The first cached connection wins, so reconnect storms do not churn the cache.
         map.entry(auth.node_id).or_insert_with(|| (conn.clone(), auth.pubkey));
     }
-    dht.metrics.inc_dht_hello_accepted();
 
-    // Serve RPCs on this connection. Both inbound (accepted here) and
-    // outbound (dialed by `lookup::connect_to_peer`) connections serve, so a
-    // peer can reuse a single cached connection to call us in EITHER
-    // direction — hence the accept loop lives in a shared helper.
     serve_peer_streams(dht, conn, auth).await;
 }
 
-/// Serve inbound DHT-RPC bi-streams on `conn` until it closes, attributing
-/// every request to the pre-authenticated `auth`. Shared by the inbound
-/// acceptor ([`handle_peer_connection`], where `auth` comes from the
-/// `DhtHello`) and the outbound dialer
-/// ([`crate::dht::lookup::connect_to_peer`], where `auth` comes from the
-/// dial's cert NodeId-binding) so `peer/5` connections are **bidirectional**:
-/// the `peer_conns` cache then correctly reuses one connection per pair in
-/// both directions, instead of handing back a connection that only serves
-/// the way it was opened.
+/// Serves accepted and dialed connections alike, so the one cached connection per peer works in
+/// both directions.
 pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: AuthenticatedPeer) {
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
     let conn_id = conn.stable_id();
@@ -228,17 +70,12 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
     loop {
         let stream = match conn.accept_bi().await {
             Ok(s) => s,
-            Err(_) => break, // connection closed or errored
+            Err(_) => break,
         };
         let (send, recv) = stream;
 
         let permit = match limiter.clone().try_acquire_owned() {
             Ok(p) => p,
-            // Peer over-streamed; close the new stream politely and
-            // continue the accept loop. The per-RPC-kind rate limits
-            // applied inside `handle_one_stream` are the second-stage
-            // defence; this concurrency cap is a coarse first-line
-            // bulkhead.
             Err(_) => continue,
         };
 
@@ -251,8 +88,7 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
         });
     }
 
-    // Connection closed — evict the cached entry if it still points at this
-    // exact connection (race-guard against a reconnect that replaced it).
+    // Evict only if the cache still holds this connection; a reconnect may have replaced it.
     let peer_id_to_remove: Option<NodeId> = {
         let map = dht.peer_conns.read();
         map.iter().find_map(
@@ -267,19 +103,12 @@ pub(crate) async fn serve_peer_streams(dht: Arc<Dht>, conn: Connection, auth: Au
             && c.stable_id() == conn_id
         {
             map.remove(&id);
-            dht.metrics.inc_peer_conns_closed();
         }
     }
 }
 
-/// Per-connection authenticated identity established by the [`DhtHello`]
-/// handshake. Once set, never re-verified for the connection's lifetime —
-/// the QUIC connection itself binds the peer to its peer-identifier
-/// (`stable_id`), and rotating the bound NodeId mid-connection has no
-/// known threat-model justification.
-///
-/// `Copy` because every field is plain bytes; cheap to pass-by-value
-/// into the per-stream task.
+/// The connection's peer identity, from the `DhtHello` or the dial's pin. Fixed for the
+/// connection's lifetime.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AuthenticatedPeer {
     node_id: NodeId,
@@ -287,42 +116,17 @@ pub(crate) struct AuthenticatedPeer {
 }
 
 impl AuthenticatedPeer {
-    /// Construct from an outbound dial's already-verified identity — the
-    /// cert SPKI's NodeId-binding established by
-    /// [`crate::dht::tls_extract::extract_and_verify_pubkey`]. No `DhtHello`
-    /// is exchanged on the dialer's serve side: the dial already
-    /// authenticated the peer.
+    /// For a dialed connection, already authenticated by the cert pin; no `DhtHello` comes back.
     pub(crate) fn new(node_id: NodeId, pubkey: [u8; 32]) -> Self {
         Self { node_id, pubkey }
     }
 }
 
-/// Read the dialer's first uni-stream, decode as [`DhtHello`], verify,
-/// and on success return the authenticated `(node_id, pubkey)` pair.
-///
-/// Failure modes are exhaustively mapped to `CloseReason::Dht*` variants:
-///
-/// | Cause | CloseReason |
-/// |---|---|
-/// | No uni-stream within `HELLO_RECV_TIMEOUT` | `DhtClockSkew` (re-used: peer "missed its window") |
-/// | Connection died before any frame | (connection already closed; no close-reason) |
-/// | Frame failed to decode as `DhtHello` | `DhtMalformedKey` |
-/// | `DhtHello::verify`: `IdMismatch` or `MalformedPubkey` | `DhtMalformedKey` |
-/// | `DhtHello::verify`: `BadSignature` | `DhtBadSignature` |
-/// | `DhtHello::verify`: `ClockSkew` | `DhtClockSkew` |
-///
-/// All paths bump `metrics.dht_hello_rejected` exactly once on failure,
-/// `metrics.dht_hello_accepted` once on success.
-async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<AuthenticatedPeer, ()> {
-    // Wait for the first uni-stream within HELLO_RECV_TIMEOUT.
+async fn recv_and_verify_hello(conn: &Connection) -> Result<AuthenticatedPeer, ()> {
     let mut recv = match timeout(HELLO_RECV_TIMEOUT, conn.accept_uni()).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            // Connection died before any frame arrived. The connection
-            // is already closed — nothing for us to close. We still
-            // bump the rejection counter so operators see this in
-            // metrics rather than diagnosing it via QUIC logs.
-            dht.metrics.inc_dht_hello_rejected();
+            // Connection died before any frame arrived; nothing is left to close.
             common::debug!(
                 "DHT inbound from {}: connection ended before DhtHello: {e}",
                 conn.remote_address()
@@ -330,8 +134,7 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
             return Err(());
         },
         Err(_) => {
-            // Timeout. Peer connected but never sent a hello.
-            dht.metrics.inc_dht_hello_rejected();
+            // No hello in time. `DhtClockSkew` is reused: the peer missed its window.
             common::warn!(
                 "DHT inbound from {}: no DhtHello within {:?}; closing",
                 conn.remote_address(),
@@ -342,12 +145,9 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
         },
     };
 
-    // Decode the framed DhtHello. `unpack` reads the u16 length prefix
-    // and the body, applying `DhtHello`'s `Deserialize` impl.
     let hello: DhtHello = match DhtHello::unpack(&mut recv).await {
         Ok(h) => h,
         Err(e) => {
-            dht.metrics.inc_dht_hello_rejected();
             common::warn!(
                 "DHT inbound from {}: malformed DhtHello frame: {e}",
                 conn.remote_address()
@@ -362,14 +162,12 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
     let Ok(binding) =
         common::quic::session_binding(conn, common::proto::dht_p2p::DHT_HELLO_EXPORTER_LABEL)
     else {
-        dht.metrics.inc_dht_hello_rejected();
         CloseReason::DhtBadSignature.close(conn);
         return Err(());
     };
     match verify_hello_with_close_reason(&hello, now, &binding) {
         Ok(()) => Ok(AuthenticatedPeer { node_id: hello.node_id, pubkey: hello.pubkey.0 }),
         Err(reason) => {
-            dht.metrics.inc_dht_hello_rejected();
             common::warn!(
                 "DHT inbound from {} failed DhtHello verification; closing with {:?}",
                 conn.remote_address(),
@@ -381,19 +179,6 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
     }
 }
 
-/// Pure helper: verify `hello` against `now_ms`, mapping any
-/// [`DhtHelloVerifyError`] to the `CloseReason::Dht*` we'd send on the
-/// wire. Extracted from [`recv_and_verify_hello`] so the close-reason
-/// mapping can be unit-tested without spinning up QUIC.
-///
-/// The mapping table — same as the doc on
-/// [`recv_and_verify_hello`] — is:
-///
-/// | Verify error | CloseReason |
-/// |---|---|
-/// | `IdMismatch` / `MalformedPubkey` | `DhtMalformedKey` |
-/// | `BadSignature` | `DhtBadSignature` |
-/// | `ClockSkew` | `DhtClockSkew` |
 fn verify_hello_with_close_reason(
     hello: &DhtHello, now_ms: u64, binding: &[u8; 32],
 ) -> Result<(), CloseReason> {
@@ -406,27 +191,10 @@ fn verify_hello_with_close_reason(
     })
 }
 
-/// Read one request frame, dispatch, write one response frame.
-///
-/// `auth` is the connection-bound [`AuthenticatedPeer`] established by
-/// `recv_and_verify_hello` at connection accept time. **Every** stream
-/// on the connection — regardless of which RPC it carries — keys the
-/// rate limiter and refreshes the routing table against this same
-/// authenticated NodeId. RPCs without an in-payload `requester`
-/// (`FindNode`, the Welcome family) are covered the same way, rather
-/// than falling back to a per-connection synthetic id and a `[0u8; 32]`
-/// placeholder pubkey.
-///
-/// The per-peer rate-limit check happens **after** the request is
-/// fully parsed — parse-then-check is the
-/// safer pattern because a malformed wire payload also gets caught
-/// here (parse failure → `DhtMalformedKey` close), and a misbehaving
-/// peer can't avoid the bookkeeping cost of one parse per RPC.
 async fn handle_one_stream(
     dht: Arc<Dht>, conn: Connection, mut send: SendStream, recv: &mut quinn::RecvStream,
     auth: AuthenticatedPeer,
 ) {
-    // Read request packet.
     let pkt = match DhtPacket::unpack(recv).await {
         Ok(p) => p,
         Err(_) => {
@@ -436,21 +204,15 @@ async fn handle_one_stream(
     };
     let req = match pkt {
         DhtPacket::Request(r) => r,
-        // A client side sending a Response on this stream is a protocol
-        // violation — close.
         DhtPacket::Response(_) => {
             CloseReason::PacketMismatch.close(&conn);
             return;
         },
     };
 
-    // Per-peer inbound rate limiting, keyed on the authenticated
-    // NodeId for *every* RPC kind. A reconnecting attacker cannot reset
-    // their quota — the NodeId is identity-bound by the signed
-    // `DhtHello` we admitted at connection time.
+    // Keyed on the authenticated NodeId, so reconnecting does not reset a peer's quota.
     let class = RpcClass::for_request(&req);
     if dht.rate_limiters.check(&auth.node_id, class).is_err() {
-        dht.metrics.inc_rate_limit_rejections();
         common::warn!(
             "DHT inbound rate limit tripped (peer={}, class={class:?}); closing connection",
             auth.node_id
@@ -461,21 +223,17 @@ async fn handle_one_stream(
 
     let resp = handle_dht_request(&dht, req, auth.node_id).await;
 
-    // Routing-table feedback: refresh the peer's last-seen status.
-    // Insertion already happened at connection accept time; this
-    // is the LRU-rotate-to-tail path inside `RoutingTable::insert`.
+    // Usually a refresh: setting up the connection already inserted the peer.
     {
         let desc = NodeDescriptor {
             id: auth.node_id,
             addr: conn.remote_address(),
             pubkey: auth.pubkey.into(),
         };
-        // Scoped write guard, never held across `await`.
         let outcome = dht.routing.write().insert(desc);
         super::lookup::probe_pending_ping(&dht, outcome);
     }
 
-    // Write response.
     let bytes = match DhtPacket::Response(resp).pack() {
         Ok(b) => b,
         Err(_) => {
@@ -489,54 +247,38 @@ async fn handle_one_stream(
     let _ = send.finish();
 }
 
-/// Dispatch one fully-decoded `DhtRequest` to its handler. Lives as a
-/// pure function (no streams, no I/O) so unit tests can call it
-/// directly.
-///
-/// `authenticated_peer_id` is the connection-bound `DhtHello` peer
-/// id from `handle_one_stream`. Most handlers don't consume it — the
-/// per-RPC verify step on each request body already authenticates
-/// the *content*. The exception is
-/// [`super::queue_drain::handle_queue_fetch_ack_rpc`], which uses
-/// the authenticated peer id to enforce the `requester_relay_id`
-/// binding (a captured ack must arrive on the connection of the relay
-/// it was signed for).
 pub(crate) async fn handle_dht_request(
     dht: &Arc<Dht>, req: DhtRequest, authenticated_peer_id: NodeId,
 ) -> DhtResponse {
     match req {
+        DhtRequest::ServiceCapabilities => DhtResponse::ServiceCapabilities { supported: super::mls::service_support().encode().into() },
+        DhtRequest::KeyPackageInventory { request } => DhtResponse::KeyPackageInventory {
+            inventory: super::mls::inventory::handle(dht, &request.0, authenticated_peer_id, now_ms()).await.into(),
+        },
         DhtRequest::FindNode(f) => {
-            dht.metrics.inc_find_node_rpcs();
             let target_id = NodeId::from_bytes(f.target.0);
             let closer = closest_excluding(&dht.routing.read(), &target_id, &f.requester);
             DhtResponse::FindNode(FindNodeResp { closer })
         },
-        // ----- Sticky-home handlers -------------------------------------
-        //
-        // `Forward` arms a deliver-or-queue ladder (online recipient
-        // short-circuit → cf_dht_queue), `QueueFetch` reads a bounded
-        // batch from cf_dht_queue oldest-first, and `QueueFetchAck`
-        // deletes by-id. Per-RPC metrics live inside the per-handler
-        // bodies (`forwards_*` / `dht_queue_*` / `queue_fetches_*`).
         DhtRequest::Forward(fwd) => {
-            DhtResponse::Forward(super::forward::handle_forward_rpc(dht, fwd, now_ms()).await)
+            DhtResponse::Forward(super::home::handle_forward_rpc(dht, fwd, now_ms()).await)
         },
         DhtRequest::ActivityForward(activity) => DhtResponse::ActivityForward(
-            super::forward::handle_activity_forward_rpc(dht, activity, now_ms()).await,
+            super::home::handle_activity_forward_rpc(dht, activity, now_ms()).await,
         ),
         DhtRequest::PresenceConsent(consent) => DhtResponse::PresenceConsent(
-            super::forward::handle_presence_consent_rpc(dht, consent, now_ms()).await,
+            super::home::handle_presence_consent_rpc(dht, consent, now_ms()).await,
         ),
         DhtRequest::PresenceState(state) => DhtResponse::PresenceState(
-            super::forward::handle_presence_state_rpc(dht, state, authenticated_peer_id, now_ms())
+            super::home::handle_presence_state_rpc(dht, state, authenticated_peer_id, now_ms())
                 .await,
         ),
         DhtRequest::PresenceLease(lease) => DhtResponse::PresenceLease(
-            super::forward::handle_presence_lease_rpc(dht, lease, authenticated_peer_id, now_ms())
+            super::home::handle_presence_lease_rpc(dht, lease, authenticated_peer_id, now_ms())
                 .await,
         ),
         DhtRequest::LiveForward(forward) => DhtResponse::LiveForward(
-            super::forward::handle_live_forward_rpc(dht, forward, authenticated_peer_id, now_ms()).await,
+            super::home::handle_live_forward_rpc(dht, forward, authenticated_peer_id, now_ms()).await,
         ),
         DhtRequest::PushPseudonymPublish(publish) => DhtResponse::PushPseudonymPublish(
             super::push_replication::handle_publish(dht, publish, now_ms()),
@@ -554,72 +296,38 @@ pub(crate) async fn handle_dht_request(
             )
             .await,
         ),
-        // ----- MLS KeyPackage RPCs (`mls/kp.rs`) ------------------------
-        //
-        // All three are sync handlers — they touch fjall and the
-        // governor-based per-pair limiter, no `await` inside. Wrapped
-        // in their `wrap_*_outcome` helpers so the dispatch returns
-        // the structured `*Resp` shape.
-        DhtRequest::KeyPackagePublish(req) => DhtResponse::KeyPackagePublish(
-            super::mls::kp::wrap_publish_outcome(super::mls::kp::handle_keypackage_publish(
-                dht,
-                req,
-                authenticated_peer_id,
-                now_ms(),
-            )),
-        ),
-        DhtRequest::KeyPackageFetch(req) => {
-            DhtResponse::KeyPackageFetch(super::mls::kp::wrap_fetch_outcome(
-                super::mls::kp::handle_keypackage_fetch(dht, req, authenticated_peer_id, now_ms()),
-            ))
-        },
-        DhtRequest::KeyPackageRefill(req) => {
-            DhtResponse::KeyPackageRefill(super::mls::kp::wrap_refill_outcome(
-                super::mls::kp::handle_keypackage_refill(dht, req, authenticated_peer_id, now_ms()),
-            ))
-        },
-        // ----- MLS Welcome queue (`mls/welcome.rs`) ---------------------
-        //
-        // Three sync handlers — fjall I/O + verifies, no `await`
-        // inside. Wrapped in their `wrap_*_outcome` helpers; the ack
-        // returns its own concrete `WelcomeAckResp` so no wrapper is
-        // needed.
-        DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(
-            super::mls::welcome::wrap_publish_outcome(super::mls::welcome::handle_welcome_publish(
-                dht,
-                req,
-                authenticated_peer_id,
-                now_ms(),
-            )),
-        ),
-        DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(
-            super::mls::welcome::wrap_fetch_outcome(super::mls::welcome::handle_welcome_fetch(
-                dht,
-                req,
-                authenticated_peer_id,
-                now_ms(),
-            )),
-        ),
-        DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(
-            super::mls::welcome::handle_welcome_ack(dht, req, authenticated_peer_id, now_ms()),
-        ),
+        DhtRequest::KeyPackagePublish(r) => DhtResponse::KeyPackagePublish(KeyPackagePublishResp {
+            outcome: kp::handle_keypackage_publish(
+                dht, &r.ipk.0, &r.records, r.timestamp, &r.sig.0, KpPublishMode::Publish, now_ms(),
+            )
+            .await,
+        }),
+        DhtRequest::KeyPackageFetch(req) => DhtResponse::KeyPackageFetch(KeyPackageFetchResp {
+            outcome: kp::handle_keypackage_fetch(dht, req, authenticated_peer_id, now_ms()).await,
+        }),
+        DhtRequest::KeyPackageRefill(r) => DhtResponse::KeyPackageRefill(KeyPackageRefillResp {
+            outcome: kp::refill_outcome(
+                kp::handle_keypackage_publish(
+                    dht, &r.ipk.0, &r.records, r.timestamp, &r.sig.0, KpPublishMode::Refill, now_ms(),
+                )
+                .await,
+            ),
+        }),
+        DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(WelcomePublishResp {
+            outcome: welcome::handle_welcome_publish(dht, req, authenticated_peer_id, now_ms()).await,
+        }),
+        DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(WelcomeFetchResp {
+            outcome: welcome::handle_welcome_fetch(dht, req, authenticated_peer_id, now_ms()),
+        }),
+        DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(welcome::handle_welcome_ack(
+            dht,
+            req,
+            authenticated_peer_id,
+            now_ms(),
+        )),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Wall-clock now in ms-since-Unix-epoch. Uses the same idiom as
-/// `relay/src/util/mod.rs::systime` but inlined here so the handler
-/// doesn't drag in a `crate::util` dependency for a one-liner.
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
-/// Top-(MAX_FIND_NODE_RESULTS) descriptors closest to `target`, **excluding**
-/// the `exclude` peer. Excluding the requester saves them from receiving
-/// their own descriptor back, which they already know about.
 fn closest_excluding(
     routing: &RoutingTable, target: &NodeId, exclude: &NodeId,
 ) -> Vec<NodeDescriptor> {
@@ -631,667 +339,245 @@ fn closest_excluding(
         .collect()
 }
 
-// `self_in_top_k` lives in `super::routing` — see
-// `routing::self_in_top_k` for the canonical impl shared with
-// `store::store_record`, `mls::kp::self_is_owner_for_stash`, and
-// `mls::welcome::self_is_owner_for_recipient`.
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    use common::proto::dht_p2p::DhtRequest;
-    use common::proto::dht_p2p::DhtResponse;
-    use common::proto::dht_p2p::FindNode;
+    use common::proto::client_rel::ActivityP;
+    use common::proto::client_rel::DispatchP;
+    use common::proto::client_rel::activity_sig_message;
+    use common::proto::dht_p2p::Forward;
+    use common::proto::dht_p2p::ForwardOutcome;
+    use common::proto::dht_p2p::ForwardResp;
+    use common::proto::dht_p2p::MAX_DHT_HELLO_SKEW_MS;
+    use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
+    use common::proto::dht_p2p::QueueFetch;
+    use common::proto::dht_p2p::QueueFetchAck;
+    use common::proto::dht_p2p::QueueFetchAckResp;
+    use common::proto::dht_p2p::QueueFetchResp;
+    use common::proto::dht_p2p::dht_hello_signing_input;
+    use common::proto::dht_p2p::forward_signing_input;
+    use common::proto::dht_p2p::queue_fetch_ack_signing_input;
+    use common::proto::dht_p2p::queue_fetch_signing_input;
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
 
     use super::*;
-    use crate::dht::Dht;
-    use crate::dht::DhtConfig;
+    use crate::dht::forward::activity_is_authentic;
+    use crate::quic::handler::client::events::drain_auth::DrainAuthError;
+    use crate::quic::handler::client::events::drain_auth::verify_drain_auth;
+    use crate::test_support::dht;
+    use crate::test_support::dispatch;
+    use crate::test_support::key;
+    use crate::test_support::put_queued;
+    use crate::test_support::queued;
 
-    fn fresh_signing_key() -> SigningKey {
-        static SEQ: AtomicU64 = AtomicU64::new(1);
-        let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let mut seed = [0u8; 32];
-        seed[..8].copy_from_slice(&n.to_le_bytes());
-        seed[31] = (n & 0xff) as u8;
-        SigningKey::from_bytes(&seed)
-    }
-
-    fn fresh_dht(self_id: NodeId) -> Arc<Dht> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-handler-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = fresh_signing_key();
-        let cfg = DhtConfig::default();
-        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_find_node_returns_closer_excluding_requester() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        // Insert a few peers so the routing table has something to return.
-        for n in 2..=6u8 {
-            let mut seed = [0u8; 32];
-            seed[0] = n;
-            let id = NodeId::new(seed);
-            let desc = NodeDescriptor {
-                id,
-                addr: "127.0.0.1:1".parse().unwrap(),
-                pubkey: [0u8; 32].into(),
-            };
-            dht.routing.write().insert(desc);
-        }
-
-        let mut requester_seed = [0u8; 32];
-        requester_seed[0] = 3;
-        let requester = NodeId::new(requester_seed);
-        let mut target_seed = [0u8; 32];
-        target_seed[0] = 4;
-        let target = NodeId::new(target_seed);
-
-        let req = DhtRequest::FindNode(FindNode { target: (*target.as_bytes()).into(), requester });
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::FindNode(r) => {
-                assert!(r.closer.len() <= MAX_FIND_NODE_RESULTS);
-                // Requester must be filtered out.
-                assert!(r.closer.iter().all(|d| d.id != requester));
-            },
-            other => panic!("expected FindNode, got {other:?}"),
-        }
-    }
-
-    fn wall_clock_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    /// Stand-in authenticated peer id for tests that don't exercise
-    /// the `requester_relay_id` binding (i.e. every test except the
-    /// `QueueFetchAck` ones, which build their own matching pair). The
-    /// byte pattern is deliberately distinctive
-    /// so a debug log surfaces it as "fake_peer" rather than blending
-    /// in with the real test fixtures.
-    fn fake_peer_id() -> NodeId {
-        NodeId::new([0xFAu8; 32])
-    }
-
-    use common::proto::dht_p2p::DhtHello;
-    use common::proto::dht_p2p::dht_hello_signing_input;
-    use common::types::bytes::Bytes;
-
-    /// Build a freshly-signed `DhtHello` for `key` at `timestamp`.
-    /// Mirrors the production dialer in `lookup::send_dht_hello`.
-    const BINDING: [u8; 32] = [0x5Bu8; 32];
-
-    fn make_hello(key: &SigningKey, timestamp: u64) -> DhtHello {
-        let pubkey: [u8; 32] = key.verifying_key().to_bytes();
-        let node_id = NodeId::new(pubkey);
-        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp, &BINDING);
-        let sig = key.sign(&msg).to_bytes();
-        DhtHello { node_id, pubkey: Bytes(pubkey), timestamp, sig: Bytes(sig) }
-    }
-
-    #[test]
-    fn verify_hello_close_reason_maps_clock_skew() {
-        // Stale timestamp → CloseReason::DhtClockSkew.
-        let key = fresh_signing_key();
-        let now: u64 = 1_700_000_000_000;
-        let stale = make_hello(&key, now - 120_000); // 2 min in the past
-        match verify_hello_with_close_reason(&stale, now, &BINDING) {
-            Err(CloseReason::DhtClockSkew) => {},
-            other => panic!("expected DhtClockSkew, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn verify_hello_close_reason_maps_bad_signature() {
-        // Tamper signature → CloseReason::DhtBadSignature.
-        let key = fresh_signing_key();
-        let now: u64 = 1_700_000_000_000;
-        let mut hello = make_hello(&key, now);
-        hello.sig.0[0] ^= 0xFF;
-        match verify_hello_with_close_reason(&hello, now, &BINDING) {
-            Err(CloseReason::DhtBadSignature) => {},
-            other => panic!("expected DhtBadSignature, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn verify_hello_close_reason_maps_id_mismatch_to_malformed_key() {
-        // A pubkey that doesn't hash to the claimed node_id surfaces
-        // as `DhtMalformedKey` per the mapping table — same close
-        // bucket as a malformed-Ed25519-key shape.
-        let key_a = fresh_signing_key();
-        let key_b = fresh_signing_key();
-        let now: u64 = 1_700_000_000_000;
-        let mut hello = make_hello(&key_a, now);
-        // Replace node_id with a different identity's id while keeping
-        // the original (a-derived) pubkey + sig.
-        hello.node_id = NodeId::new(key_b.verifying_key().to_bytes());
-        match verify_hello_with_close_reason(&hello, now, &BINDING) {
-            Err(CloseReason::DhtMalformedKey) => {},
-            other => panic!("expected DhtMalformedKey, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn verify_hello_close_reason_passes_freshly_signed() {
-        let key = fresh_signing_key();
-        let now: u64 = 1_700_000_000_000;
-        let hello = make_hello(&key, now);
-        verify_hello_with_close_reason(&hello, now, &BINDING).expect("valid hello must pass");
-        verify_hello_with_close_reason(&hello, now + 5, &BINDING).expect("inside skew window must pass");
-    }
-
-    // -----------------------------------------------------------------
-    // Sticky-home — home-side handler integration tests
-    // -----------------------------------------------------------------
-
-    use common::proto::client_rel::DispatchP;
-    use common::proto::client_rel::dispatch_sig_message;
-    use common::proto::dht_p2p::Forward;
-    use common::proto::dht_p2p::ForwardOutcome;
-    use common::proto::dht_p2p::QueueFetch;
-    use common::proto::dht_p2p::QueueFetchAck;
-    use common::proto::dht_p2p::forward_signing_input;
-    use common::proto::dht_p2p::queue_fetch_ack_signing_input;
-    use common::proto::dht_p2p::queue_fetch_signing_input;
-    // `Bytes` already imported at the top of `tests` for `make_hello`.
-
-    fn build_dispatch(
-        from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
-    ) -> DispatchP {
-        let from_ipk: [u8; 32] = from_user.verifying_key().to_bytes();
-        let msg = dispatch_sig_message(to_ipk, &from_ipk, &id, payload);
-        let sig = from_user.sign(&msg);
-        DispatchP {
-            to: (*to_ipk).into(),
-            from: from_ipk.into(),
-            id: id.into(),
-            payload: payload.to_vec().into(),
-            sig: sig.to_bytes().into(),
-            accepted_at_ms: 1,
-            wake: common::proto::client_rel::Wake::No,
-            ttl_ms: 0,
-        }
-    }
-
-    /// Build a signed `Forward` from `sender_relay_key` for the given
-    /// `dispatch` at `now_ms`. The home will look up
-    /// `sender_relay_id` in its routing table; the test installs the
-    /// matching descriptor with the verifying pubkey so the outer-sig
-    /// verify passes.
-    fn build_signed_forward(
-        sender_relay_key: &SigningKey, dispatch: DispatchP, now_ms: u64,
-    ) -> Forward {
-        let sender_relay_id = NodeId::new(sender_relay_key.verifying_key().to_bytes());
-        let msg = forward_signing_input(&dispatch.id.0, &sender_relay_id, now_ms);
-        let sig = sender_relay_key.sign(&msg).to_bytes();
-        Forward { dispatch, sender_relay_id, timestamp: now_ms, sig: sig.into() }
-    }
-
-    /// Install a routing-table entry for `sender` so the home-side
-    /// handler can resolve the verifying pubkey during outer-sig
-    /// verification. Mirrors the populate-after-DhtHello path the
-    /// production code uses.
-    fn install_peer_in_routing(dht: &Arc<Dht>, sender_key: &SigningKey) {
-        let sender_id = NodeId::new(sender_key.verifying_key().to_bytes());
-        let pubkey = sender_key.verifying_key().to_bytes();
-        let desc = NodeDescriptor {
-            id: sender_id,
-            addr: "127.0.0.1:1".parse().unwrap(),
-            pubkey: pubkey.into(),
-        };
-        dht.routing.write().insert(desc);
-    }
-
-    /// `handle_forward_rpc` queues offline recipient. Recipient not in
-    /// `dht.clients` (None map) → enqueue in `cf_dht_queue` and return
-    /// `Stored`.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_forward_rpc_queues_when_recipient_offline() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let sender_relay = fresh_signing_key();
-        install_peer_in_routing(&dht, &sender_relay);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [0xAB; 16], b"hi-offline");
-
-        let now = wall_clock_ms();
-        let fwd = build_signed_forward(&sender_relay, dispatch.clone(), now);
-        let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::Stored),
-            other => panic!("expected Forward, got {other:?}"),
-        }
-        // And it landed in cf_dht_queue.
-        let queue = super::super::store::lookup_queue_for_user(&dht, &to_ipk, 8);
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].1.id.0, dispatch.id.0);
-    }
-
-    /// Outer sender-relay sig invalid → BadSig.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_forward_rpc_rejects_bad_sender_sig() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let sender_relay = fresh_signing_key();
-        install_peer_in_routing(&dht, &sender_relay);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [0xAB; 16], b"hi");
-
-        let now = wall_clock_ms();
-        let mut fwd = build_signed_forward(&sender_relay, dispatch, now);
-        // Tamper outer signature.
-        fwd.sig.0[0] ^= 0xFF;
-
-        let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::BadSig),
-            other => panic!("expected Forward, got {other:?}"),
-        }
-    }
-
-    /// Embedded user-layer `dispatch.sig` invalid → BadSig.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_forward_rpc_rejects_bad_dispatch_sig() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let sender_relay = fresh_signing_key();
-        install_peer_in_routing(&dht, &sender_relay);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let mut dispatch = build_dispatch(&from_user, &to_ipk, [0xAB; 16], b"hi");
-        // Tamper the user-layer sig (dispatch.sig).
-        dispatch.sig.0[0] ^= 0xFF;
-
-        let now = wall_clock_ms();
-        let fwd = build_signed_forward(&sender_relay, dispatch, now);
-
-        let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::BadSig),
-            other => panic!("expected Forward, got {other:?}"),
-        }
-    }
-
-    /// `handle_forward_rpc` returns `NotOwner` when self is *not* in
-    /// the recipient's K-closest set. Force the not-in-K case by
-    /// installing K peers strictly closer than self.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_forward_rpc_returns_not_owner_when_self_not_in_k_closest() {
-        // Self_id deliberately far from the target IPK; install K
-        // peers whose ids match the target's leading byte exactly.
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 0xFF; // far from a target whose first byte is 0
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let sender_relay = fresh_signing_key();
-        install_peer_in_routing(&dht, &sender_relay);
-
-        // Target is `[0u8; 32]`; install K=3 peers with leading 0
-        // bytes — they're strictly closer than self.
-        for i in 0..3u8 {
-            let mut s = [0u8; 32];
-            s[31] = i; // tiny distance to all-zeros target
-            let id = NodeId::new(s);
-            let desc = NodeDescriptor {
-                id,
-                addr: "127.0.0.1:1".parse().unwrap(),
-                pubkey: [0u8; 32].into(),
-            };
-            dht.routing.write().insert(desc);
-        }
-
-        let from_user = fresh_signing_key();
-        // Build dispatch *to* the all-zeros IPK so target_id == [0; 32].
-        let to_ipk: [u8; 32] = [0u8; 32];
-        let dispatch = build_dispatch(&from_user, &to_ipk, [0xAB; 16], b"hi");
-
-        let now = wall_clock_ms();
-        let fwd = build_signed_forward(&sender_relay, dispatch, now);
-
-        let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::NotOwner),
-            other => panic!("expected Forward, got {other:?}"),
-        }
-    }
-
-    /// `handle_queue_fetch_rpc` returns the queued messages for an
-    /// owned user.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_rpc_returns_messages_for_owned_user() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-
-        // Pre-populate cf_dht_queue with a few dispatches.
-        let now = wall_clock_ms();
-        for i in 0..3u8 {
-            let mut id = [0u8; 16];
-            id[0] = i;
-            let dispatch = build_dispatch(&from_user, &user_ipk, id, b"qf");
-            let outcome =
-                super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now + i as u64);
-            assert_eq!(outcome, ForwardOutcome::Stored);
-        }
-
-        // Build a signed QueueFetch from the user.
-        let requester_relay_id = self_id;
-        let msg = queue_fetch_signing_input(&user_ipk, &requester_relay_id, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetch(QueueFetch {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id,
+    fn forward(relay: &SigningKey, sent: &DispatchP, now: u64) -> DhtRequest {
+        let sender_relay_id = NodeId::new(relay.verifying_key().to_bytes());
+        let sig = relay.sign(&forward_signing_input(&sent.id.0, &sender_relay_id, now)).to_bytes();
+        DhtRequest::Forward(Forward {
+            dispatch: sent.clone(),
+            sender_relay_id,
             timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        let resp = handle_dht_request(&dht, req, self_id).await;
-        match resp {
-            DhtResponse::QueueFetch(r) => {
-                assert_eq!(r.messages.len(), 3, "all three queued returned");
-                assert!(r.exhausted, "fewer than batch cap → exhausted");
-            },
-            other => panic!("expected QueueFetch, got {other:?}"),
-        }
+            sig: sig.into(),
+        })
     }
 
-    /// Batch-cap boundary: the returned batch is always capped at
-    /// `MAX_FETCH_QUEUE_BATCH`, and `exhausted` reflects whether entries
-    /// remain past the cap. Exactly-cap → exhausted (peek of cap+1
-    /// returns cap); cap+5 → not exhausted (more remain).
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_rpc_caps_at_max_batch() {
-        use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
+    fn fetch(user: &SigningKey, requester: NodeId, now: u64) -> DhtRequest {
+        let user_ipk = user.verifying_key().to_bytes();
+        let sig = user.sign(&queue_fetch_signing_input(&user_ipk, &requester, now)).to_bytes();
+        DhtRequest::QueueFetch(QueueFetch {
+            user_ipk:           user_ipk.into(),
+            requester_relay_id: requester,
+            timestamp:          now,
+            user_sig:           sig.into(),
+        })
+    }
 
-        // (enqueued_count, expected_exhausted)
-        for (enqueued, expected_exhausted) in
-            [(MAX_FETCH_QUEUE_BATCH + 5, false), (MAX_FETCH_QUEUE_BATCH, true)]
+    fn ack(user: &SigningKey, requester: NodeId, ids: Vec<[u8; 16]>, now: u64) -> DhtRequest {
+        let user_ipk = user.verifying_key().to_bytes();
+        let sig =
+            user.sign(&queue_fetch_ack_signing_input(&user_ipk, &requester, &ids, now)).to_bytes();
+        DhtRequest::QueueFetchAck(QueueFetchAck {
+            user_ipk:           user_ipk.into(),
+            requester_relay_id: requester,
+            delivered_ids:      ids,
+            timestamp:          now,
+            user_sig:           sig.into(),
+        })
+    }
+
+    fn stored(outcome: ForwardOutcome) -> DhtResponse {
+        DhtResponse::Forward(ForwardResp { outcome })
+    }
+
+    fn fetched(messages: Vec<DispatchP>, exhausted: bool) -> DhtResponse {
+        DhtResponse::QueueFetch(QueueFetchResp { messages, exhausted })
+    }
+
+    fn acked(ok: bool) -> DhtResponse {
+        DhtResponse::QueueFetchAck(QueueFetchAckResp { ok })
+    }
+
+    /// Home custody at the RPC boundary: both signature layers and ownership guard a store, the
+    /// batch cap reports what is left, and a fetch or ack replayed by another relay leaks and
+    /// deletes nothing. Rows: request, authenticated peer, response, then the queue after it.
+    #[tokio::test]
+    async fn a_home_stores_serves_and_deletes_only_for_signed_owned_requests() {
+        let (_dir, home) = dht(NodeId::from_bytes([0xFF; 32]));
+        let relay = key(1);
+        let relay_id = NodeId::new(relay.verifying_key().to_bytes());
+        home.routing.write().insert(NodeDescriptor {
+            id:     relay_id,
+            addr:   "127.0.0.1:1".parse().unwrap(),
+            pubkey: relay.verifying_key().to_bytes().into(),
+        });
+        let (drainer, replayer) = (NodeId::from_bytes([0x77; 32]), NodeId::from_bytes([0x88; 32]));
+        let (bob, now) = (key(2), now_ms());
+        let bob_ipk = bob.verifying_key().to_bytes();
+        let sent = dispatch(&key(3), bob_ipk, [1; 16], b"offline");
+        let mut forged_relay = forward(&relay, &sent, now);
+        if let DhtRequest::Forward(f) = &mut forged_relay {
+            f.sig.0[0] ^= 1;
+        }
+        let mut forged_user = sent.clone();
+        forged_user.sig.0[0] ^= 1;
+        let mut bad_ack = ack(&bob, drainer, vec![[1; 16]], now);
+        if let DhtRequest::QueueFetchAck(a) = &mut bad_ack {
+            a.user_sig.0[0] ^= 1;
+        }
+
+        let rows = [
+            (forged_relay, relay_id, stored(ForwardOutcome::BadSig), vec![]),
+            (forward(&relay, &forged_user, now), relay_id, stored(ForwardOutcome::BadSig), vec![]),
+            (forward(&key(4), &sent, now), relay_id, stored(ForwardOutcome::BadSig), vec![]),
+            (forward(&relay, &sent, now), relay_id, stored(ForwardOutcome::Stored), vec![[1; 16]]),
+            (fetch(&bob, drainer, now), replayer, fetched(vec![], true), vec![[1; 16]]),
+            (fetch(&bob, drainer, now), drainer, fetched(vec![sent.clone()], true), vec![[1; 16]]),
+            (ack(&bob, drainer, vec![[1; 16]], now), replayer, acked(false), vec![[1; 16]]),
+            (bad_ack, drainer, acked(false), vec![[1; 16]]),
+            (ack(&bob, drainer, vec![[1; 16]], now), drainer, acked(true), vec![]),
+        ];
+        for (n, (request, peer, response, after)) in rows.into_iter().enumerate() {
+            assert_eq!(handle_dht_request(&home, request, peer).await, response, "row {n}");
+            assert_eq!(queued(&home, &bob_ipk), after, "row {n}");
+        }
+
+        // `exhausted` is what tells the drainer to fetch again for the rest.
+        for (seed, rows, exhausted) in
+            [(5, MAX_FETCH_QUEUE_BATCH + 5, false), (6, MAX_FETCH_QUEUE_BATCH, true)]
         {
-            let mut self_seed = [0u8; 32];
-            self_seed[0] = 1;
-            let self_id = NodeId::new(self_seed);
-            let dht = fresh_dht(self_id);
-
-            let user = fresh_signing_key();
-            let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-            let from_user = fresh_signing_key();
-
-            let now = wall_clock_ms();
-            for i in 0..enqueued {
-                let mut id = [0u8; 16];
-                id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-                let dispatch = build_dispatch(&from_user, &user_ipk, id, b"x");
-                super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now + i as u64);
+            let (user, user_ipk) = (key(seed), key(seed).verifying_key().to_bytes());
+            for n in 0..rows {
+                let mut id = [0; 16];
+                id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                put_queued(
+                    &home,
+                    &user_ipk,
+                    now + n as u64,
+                    &dispatch(&key(7), user_ipk, id, b"x"),
+                );
             }
+            let DhtResponse::QueueFetch(batch) =
+                handle_dht_request(&home, fetch(&user, drainer, now), drainer).await
+            else {
+                panic!("not a fetch reply")
+            };
+            assert_eq!((batch.messages.len(), batch.exhausted), (MAX_FETCH_QUEUE_BATCH, exhausted));
+        }
 
-            let msg = queue_fetch_signing_input(&user_ipk, &self_id, now);
-            let sig = user.sign(&msg).to_bytes();
-            let req = DhtRequest::QueueFetch(QueueFetch {
-                user_ipk: Bytes(user_ipk),
-                requester_relay_id: self_id,
-                timestamp: now,
-                user_sig: Bytes(sig),
+        // Three relays closer to this recipient make this one no longer its home.
+        for n in 1..=3 {
+            let mut id = [0; 32];
+            id[31] = n;
+            home.routing.write().insert(NodeDescriptor {
+                id:     NodeId::from_bytes(id),
+                addr:   "127.0.0.1:1".parse().unwrap(),
+                pubkey: [0; 32].into(),
             });
+        }
+        let elsewhere = dispatch(&key(3), [0; 32], [2; 16], b"not mine");
+        let response = handle_dht_request(&home, forward(&relay, &elsewhere, now), relay_id).await;
+        assert_eq!(response, stored(ForwardOutcome::NotOwner));
+        assert!(queued(&home, &[0; 32]).is_empty());
+    }
 
-            let resp = handle_dht_request(&dht, req, self_id).await;
-            match resp {
-                DhtResponse::QueueFetch(r) => {
-                    assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
-                    assert_eq!(
-                        r.exhausted, expected_exhausted,
-                        "enqueued={enqueued}: exhausted must reflect entries past the cap"
-                    );
-                },
-                other => panic!("expected QueueFetch, got {other:?}"),
+    /// The relay's own signature checks refuse what is stale, forged, or bound to another
+    /// session, relay, recipient or group.
+    #[test]
+    fn relay_verifiers_refuse_stale_forged_and_rebound_requests() {
+        let now = 1_700_000_000_000;
+        let session = [0x5B; 32];
+        let peer = key(1);
+        let hello = |timestamp: u64, binding: [u8; 32]| {
+            let pubkey = peer.verifying_key().to_bytes();
+            let node_id = NodeId::new(pubkey);
+            let sig = peer.sign(&dht_hello_signing_input(&node_id, &pubkey, timestamp, &binding));
+            DhtHello { node_id, pubkey: pubkey.into(), timestamp, sig: sig.to_bytes().into() }
+        };
+        let mut forged = hello(now, session);
+        forged.sig.0[0] ^= 1;
+        let mut claimed = hello(now, session);
+        claimed.node_id = NodeId::new(key(2).verifying_key().to_bytes());
+        for (label, sent, refusal) in [
+            ("fresh", hello(now, session), None),
+            ("two minutes old", hello(now - 120_000, session), Some("DhtClockSkew")),
+            ("forged", forged, Some("DhtBadSignature")),
+            ("signed on another session", hello(now, [0x5C; 32]), Some("DhtBadSignature")),
+            ("someone else's id", claimed, Some("DhtMalformedKey")),
+        ] {
+            let result = verify_hello_with_close_reason(&sent, now, &session)
+                .err()
+                .map(|r| format!("{r:?}"));
+            assert_eq!(result.as_deref(), refusal, "hello: {label}");
+        }
+
+        let (user, relay) = (key(3), NodeId::from_bytes([4; 32]));
+        let drain = |signed_for: &NodeId, timestamp: u64| {
+            let ipk = user.verifying_key();
+            let sig = user.sign(&queue_fetch_signing_input(ipk.as_bytes(), signed_for, timestamp));
+            verify_drain_auth(&ipk, &relay, now, timestamp, sig.to_bytes()).map(|_| ())
+        };
+        for (label, result, expected) in [
+            ("fresh", drain(&relay, now), Ok(())),
+            ("at the skew limit", drain(&relay, now - MAX_DHT_HELLO_SKEW_MS), Ok(())),
+            (
+                "past the skew limit",
+                drain(&relay, now - MAX_DHT_HELLO_SKEW_MS - 1),
+                Err(DrainAuthError::StaleTimestamp),
+            ),
+            (
+                "from the future",
+                drain(&relay, now + MAX_DHT_HELLO_SKEW_MS + 1),
+                Err(DrainAuthError::FutureTimestamp),
+            ),
+            (
+                "for another relay",
+                drain(&NodeId::from_bytes([5; 32]), now),
+                Err(DrainAuthError::BadSig),
+            ),
+        ] {
+            assert_eq!(result, expected, "drain auth: {label}");
+        }
+
+        let sender = key(6);
+        let activity = |to: [u8; 32], group: [u8; 32], timestamp: u64| {
+            let from = sender.verifying_key().to_bytes();
+            let sig = sender.sign(&activity_sig_message(&[7; 32], &from, &[8; 32], 1, timestamp));
+            ActivityP {
+                to: to.into(),
+                from: from.into(),
+                group_id: group.into(),
+                activity: 1,
+                timestamp,
+                sig: sig.to_bytes().into(),
             }
+        };
+        for (label, sent, accepted) in [
+            ("fresh", activity([7; 32], [8; 32], now), true),
+            ("stale", activity([7; 32], [8; 32], now - 30_001), false),
+            ("moved to another recipient", activity([9; 32], [8; 32], now), false),
+            ("moved to another group", activity([7; 32], [9; 32], now), false),
+        ] {
+            assert_eq!(activity_is_authentic(&sent, now), accepted, "activity: {label}");
         }
-    }
-
-    /// `handle_queue_fetch_ack_rpc` deletes the listed ids when the
-    /// wire `requester_relay_id` matches the connection's authenticated
-    /// peer id.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_ack_rpc_deletes_listed_ids() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-        let now = wall_clock_ms();
-
-        // Three entries with distinct ids.
-        let ids = [[1u8; 16], [2u8; 16], [3u8; 16]];
-        for &id in &ids {
-            let dispatch = build_dispatch(&from_user, &user_ipk, id, b"ack-test");
-            super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
-        }
-
-        // Ack the first two; the third must remain. Use a synthetic
-        // requester id (the "recipient relay" that drained the user's
-        // queue from this home). The test then passes the same id as
-        // the authenticated peer id so the requester binding check
-        // passes.
-        let mut req_seed = [0u8; 32];
-        req_seed[0] = 0x77;
-        let requester_relay_id = NodeId::new(req_seed);
-        let to_delete = vec![ids[0], ids[1]];
-        let msg = queue_fetch_ack_signing_input(&user_ipk, &requester_relay_id, &to_delete, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetchAck(QueueFetchAck {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id,
-            delivered_ids: to_delete,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        let resp = handle_dht_request(&dht, req, requester_relay_id).await;
-        match resp {
-            DhtResponse::QueueFetchAck(r) => assert!(r.ok),
-            other => panic!("expected QueueFetchAck, got {other:?}"),
-        }
-
-        let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
-        assert_eq!(remaining.len(), 1, "exactly one entry left");
-        assert_eq!(remaining[0].1.id.0, ids[2], "the un-acked id survived");
-    }
-
-    /// When `req.requester_relay_id` does NOT match the connection's
-    /// authenticated peer id (the cross-relay replay scenario), the ack
-    /// is rejected with `ok = false` and the
-    /// queue is untouched. Even though the user signature is valid
-    /// for the *original* requester, the home refuses to honour the
-    /// ack because it arrived on a different connection.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_ack_rpc_rejects_redirected_requester() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-        let now = wall_clock_ms();
-
-        let id = [42u8; 16];
-        let dispatch = build_dispatch(&from_user, &user_ipk, id, b"redirected");
-        super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
-
-        // The user signed the ack for `requester_a` (the legitimate
-        // drainer). A malicious relay then forwards the captured ack
-        // on its OWN connection — its authenticated peer id is
-        // `requester_b`. The handler must reject.
-        let mut a = [0u8; 32];
-        a[0] = 0xAA;
-        let requester_a = NodeId::new(a);
-        let mut b = [0u8; 32];
-        b[0] = 0xBB;
-        let requester_b = NodeId::new(b);
-
-        let to_delete = vec![id];
-        let msg = queue_fetch_ack_signing_input(&user_ipk, &requester_a, &to_delete, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetchAck(QueueFetchAck {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id: requester_a,
-            delivered_ids: to_delete,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        // Authenticated peer is `requester_b` (the redirector), not
-        // `requester_a` (the original drainer). Must reject.
-        let resp = handle_dht_request(&dht, req, requester_b).await;
-        match resp {
-            DhtResponse::QueueFetchAck(r) => {
-                assert!(!r.ok, "redirected ack must be rejected");
-            },
-            other => panic!("expected QueueFetchAck, got {other:?}"),
-        }
-
-        // Queue untouched.
-        let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
-        assert_eq!(remaining.len(), 1, "queue untouched after rejection");
-    }
-
-    /// Same defense for the read path. A malicious relay that captured
-    /// a signed `QueueFetch` cannot replay it on a different connection
-    /// to leak the user's queue, because the home enforces
-    /// `req.requester_relay_id == authenticated_peer_id`.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_rpc_rejects_redirected_requester() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-        let now = wall_clock_ms();
-
-        let dispatch = build_dispatch(&from_user, &user_ipk, [7u8; 16], b"qf-redirect");
-        super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
-
-        let mut a = [0u8; 32];
-        a[0] = 0xAA;
-        let requester_a = NodeId::new(a);
-        let mut b = [0u8; 32];
-        b[0] = 0xBB;
-        let requester_b = NodeId::new(b);
-
-        let msg = queue_fetch_signing_input(&user_ipk, &requester_a, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetch(QueueFetch {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id: requester_a,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        // Authenticated peer is `requester_b`, not `requester_a`. Reject.
-        let resp = handle_dht_request(&dht, req, requester_b).await;
-        match resp {
-            DhtResponse::QueueFetch(r) => {
-                assert!(r.messages.is_empty(), "must not leak queue to redirector");
-                assert!(r.exhausted);
-            },
-            other => panic!("expected QueueFetch, got {other:?}"),
-        }
-    }
-
-    /// Bad ack signature → `ok = false`, queue untouched.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_ack_rpc_rejects_bad_sig() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-        let now = wall_clock_ms();
-
-        let id = [9u8; 16];
-        let dispatch = build_dispatch(&from_user, &user_ipk, id, b"ack-bad");
-        super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
-
-        // Bad sig. Use a matching `requester_relay_id` /
-        // authenticated peer id so the failure is unambiguously
-        // attributed to the signature, not the requester binding.
-        let mut req_seed = [0u8; 32];
-        req_seed[0] = 0x77;
-        let requester_relay_id = NodeId::new(req_seed);
-        let req = DhtRequest::QueueFetchAck(QueueFetchAck {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id,
-            delivered_ids: vec![id],
-            timestamp: now,
-            user_sig: Bytes([0u8; 64]),
-        });
-
-        let resp = handle_dht_request(&dht, req, requester_relay_id).await;
-        match resp {
-            DhtResponse::QueueFetchAck(r) => assert!(!r.ok),
-            other => panic!("expected QueueFetchAck, got {other:?}"),
-        }
-
-        // Queue untouched.
-        let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
-        assert_eq!(remaining.len(), 1);
     }
 }

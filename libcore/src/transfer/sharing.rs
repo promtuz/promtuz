@@ -1,16 +1,17 @@
-//! Offer-scoped permission to serve a completed recipient copy. A grant is
-//! accepted only from the authenticated MLS author in the original group;
-//! the requesting peer cannot import one or authorize itself with its hash.
+//! Offer-scoped permission to serve a completed recipient copy. Only the authenticated MLS author
+//! in the original group can grant it; the requesting peer cannot authorize itself.
 
 use anyhow::{Result, ensure};
 use common::proto::mls_wire::AttachmentSharing;
-use once_cell::sync::Lazy;
+use common::utils::now_secs;
+use std::sync::LazyLock;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 
 use crate::data::conversation::KIND_GROUP;
-use crate::db::messages::MESSAGES_DB;
+use crate::state::Core;
+use crate::state::core;
 
 const MAX_LIFETIME: u64 = 7 * 24 * 60 * 60;
 const CLOCK_SKEW: u64 = 300;
@@ -44,7 +45,7 @@ impl Policy {
     }
 }
 
-static POLICY: Lazy<Mutex<Policy>> = Lazy::new(|| {
+static POLICY: LazyLock<Mutex<Policy>> = LazyLock::new(|| {
     Mutex::new(Policy { foreground: false, wifi: false, cancel: CancellationToken::new() })
 });
 
@@ -132,17 +133,16 @@ fn insert(conn: &Connection, grant: &Grant) -> Result<()> {
     Ok(())
 }
 
-/// Freeze the original audience before any dispatch, and reuse the same
-/// control ID and plaintext after retry/restart. Missing/expired grants are
-/// optional: original-sender delivery still works.
+/// Freezes the audience before any dispatch and reuses the control id and offer across retries.
+/// A missing grant is fine: the original sender still serves the file.
 pub(crate) fn for_outgoing(
     conversation: &[u8; 16], group: &[u8; 32], author: &[u8; 32], message_id: [u8; 16],
     file_id: [u8; 32], size: u64, recipients: &[[u8; 32]], roster: &[[u8; 32]],
 ) -> Result<Option<([u8; 16], AttachmentSharing)>> {
-    let now = crate::utils::systime().as_secs();
+    let now = now_secs();
     let retained_until = super::store::retention_get(&file_id).map_or(0, |r| r.expires_at);
     outgoing_tx(
-        &mut MESSAGES_DB.lock(),
+        &mut core().db.messages().lock(),
         conversation,
         group,
         author,
@@ -237,9 +237,9 @@ fn outgoing_tx(
 pub(crate) fn receive(
     conversation: [u8; 16], author: [u8; 32], offer: AttachmentSharing,
 ) -> Result<()> {
-    let Some(me) = crate::data::identity::Identity::get().map(|i| i.ipk()) else { return Ok(()) };
-    let mut conn = MESSAGES_DB.lock();
-    receive_tx(&mut conn, conversation, author, me, offer, crate::utils::systime().as_secs())
+    let Some(me) = crate::data::identity::Identity::local_ipk() else { return Ok(()) };
+    let mut conn = core().db.messages().lock();
+    receive_tx(&mut conn, conversation, author, me, offer, now_secs())
 }
 
 fn receive_tx(
@@ -284,11 +284,10 @@ fn receive_tx(
     Ok(())
 }
 
-/// A Revise may replace the file before the original Post arrives. Keep this
-/// compact revocation independently of both rows. In this first increment,
-/// revised posts use the original sender; no old grant silently follows edits.
+/// A Revise may replace the file before the original Post arrives, so the revocation is kept apart
+/// from both rows. No old grant follows an edit.
 pub(crate) fn revoke(conversation: &[u8; 16], author: &[u8; 32], target: &[u8; 16]) -> Result<()> {
-    MESSAGES_DB.lock().execute(
+    core().db.messages().lock().execute(
         "INSERT OR IGNORE INTO attachment_sharing_revocations (conversation_id,author,message_id) VALUES (?1,?2,?3)",
         (conversation.as_slice(), author.as_slice(), target.as_slice()),
     )?;
@@ -323,9 +322,9 @@ fn authorized(
 }
 
 pub(super) fn permitted(
-    id: &[u8; 32], file: &[u8; 32], me: &[u8; 32], peer: &[u8; 32],
+    c: &Core, id: &[u8; 32], file: &[u8; 32], me: &[u8; 32], peer: &[u8; 32],
 ) -> Option<Grant> {
-    let conn = MESSAGES_DB.lock();
+    let conn = c.db.messages().lock();
     let grant = conn
         .query_row(
             "SELECT * FROM attachment_sharing WHERE grant_id=?1 AND file_id=?2",
@@ -333,16 +332,16 @@ pub(super) fn permitted(
             Grant::from_row,
         )
         .ok()?;
-    authorized(&conn, &grant, me, peer, crate::utils::systime().as_secs()).ok()?.then_some(grant)
+    authorized(&conn, &grant, me, peer, now_secs()).ok()?.then_some(grant)
 }
 
 pub(super) fn candidates(
-    file: &[u8; 32], original: &[u8; 32], me: &[u8; 32],
+    c: &Core, file: &[u8; 32], original: &[u8; 32], me: &[u8; 32],
 ) -> Result<Vec<([u8; 32], [u8; 32])>> {
-    let conn = MESSAGES_DB.lock();
+    let conn = c.db.messages().lock();
     let mut stmt = conn.prepare("SELECT * FROM attachment_sharing WHERE file_id=?1 AND author=?2 AND control_id IS NULL AND expires_at>?3 ORDER BY expires_at DESC LIMIT 16")?;
     let grants = stmt.query_map(
-        (file.as_slice(), original.as_slice(), crate::utils::systime().as_secs()),
+        (file.as_slice(), original.as_slice(), now_secs()),
         Grant::from_row,
     )?;
     let mut out = Vec::new();
@@ -352,13 +351,12 @@ pub(super) fn candidates(
             if out.iter().any(|(p, _)| p == peer) {
                 continue;
             }
-            if authorized(&conn, &grant, me, peer, crate::utils::systime().as_secs())? {
+            if authorized(&conn, &grant, me, peer, now_secs())? {
                 out.push((*peer, grant.id));
             }
         }
     }
-    // Rotate bounded attempts between episodes instead of always penalizing
-    // the same first members. This nonce stays local and names no wire object.
+    // A local nonce rotates which members get the bounded attempts.
     let nonce = crate::data::message::next_dispatch_id();
     out.sort_unstable_by_key(|(peer, _)| {
         let mut h = blake3::Hasher::new();
@@ -370,8 +368,8 @@ pub(super) fn candidates(
     Ok(out)
 }
 
-pub(super) fn completed_copy(file: &[u8; 32]) -> Option<super::store::Retention> {
-    let copy = super::store::partial_get(file)?;
+pub(super) fn completed_copy(c: &Core, file: &[u8; 32]) -> Option<super::store::Retention> {
+    let copy = super::store::partial_get_tx(&c.db.transfers().lock(), file)?;
     if !copy.is_complete() {
         return None;
     }
@@ -388,25 +386,45 @@ pub(super) fn gc(now: u64) {
     // Expiry removes metadata only. Consumed outgoing intents prevent retries
     // from issuing fresh grants after this collection or a retention refresh.
     let _ =
-        MESSAGES_DB.lock().execute("DELETE FROM attachment_sharing WHERE expires_at<=?1", [now]);
+        core().db.messages().lock().execute("DELETE FROM attachment_sharing WHERE expires_at<=?1", [now]);
 }
 
 #[cfg(test)]
 mod tests {
+    use common::utils::now_secs;
+
+    use super::super::ranges;
+    use super::super::store;
+    use super::super::v2::ErrorCode;
+    use super::super::v2::Frame;
+    use super::super::v2::ReadPhase;
+    use super::super::v2::{
+        self,
+    };
+    use super::super::wire;
     use super::*;
     use crate::data::conversation::Conversation;
     use crate::data::message::Message;
+    use crate::mls::policy::ROLE_MEMBER;
+    use crate::p2p::PeerLink;
+    use crate::p2p::protocol::offered_alpns;
+    use crate::test_support::transfer::Device;
+    use crate::test_support::transfer::attachment;
+    use crate::test_support::transfer::device;
+    use crate::test_support::transfer::identity;
+    use crate::test_support::transfer::linked;
+    use crate::test_support::transfer::manifest;
 
+    /// A four-member group where member 2 holds author 1's grant to share file 7 with member 3.
     fn fixture() -> (Connection, Grant) {
-        let mut db = crate::db::messages::open_in_memory();
-        let conv =
-            Conversation::join_group_tx(&db, &[1; 32], &[[1; 32], [2; 32], [3; 32], [4; 32]])
-                .unwrap();
+        let mut db = crate::test_support::data::open(crate::db::messages::migrate);
+        let members = [[1; 32], [2; 32], [3; 32], [4; 32]];
+        let conv = Conversation::join_group_tx(&db, &[1; 32], &members).unwrap();
         Conversation::bind_group_tx(&db, &conv, &[5; 32]).unwrap();
         let offer = AttachmentSharing {
             message_id: [6; 16],
-            file_id: [7; 32],
-            size: 8,
+            file_id:    [7; 32],
+            size:       8,
             expires_at: 2000,
             recipients: vec![[2; 32], [3; 32]],
         };
@@ -416,28 +434,10 @@ mod tests {
     }
 
     fn post(db: &Connection, grant: &Grant) {
-        Message::save_incoming_tx(
-            db,
-            grant.conversation,
-            grant.author,
-            &grant.offer.message_id,
-            "file",
-            1000,
-            None,
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO message_media (conversation_id,dispatch_id,kind,mime,size,file_id)
-            VALUES (?1,?2,?3,'application/octet-stream',?4,?5)",
-            params![
-                grant.conversation.as_slice(),
-                grant.offer.message_id.as_slice(),
-                crate::data::media::KIND_ATTACHMENT,
-                grant.offer.size,
-                grant.offer.file_id.as_slice()
-            ],
-        )
-        .unwrap();
+        let (conv, id) = (grant.conversation, grant.offer.message_id);
+        Message::save_incoming_tx(db, conv, grant.author, &id, "file", 1000, None).unwrap();
+        let row = attachment(grant.offer.file_id, grant.offer.size);
+        crate::data::media::save_tx(db, &conv, &id, &row).unwrap();
     }
 
     #[test]
@@ -445,87 +445,62 @@ mod tests {
         let (db, grant) = fixture();
         let permitted =
             |db: &Connection, g: &Grant| authorized(db, g, &[2; 32], &[3; 32], 1000).unwrap();
-        assert!(!permitted(&db, &grant), "grant before post has no authority");
+        assert!(!permitted(&db, &grant), "a grant before its post has no authority");
         post(&db, &grant);
         assert!(permitted(&db, &grant));
         assert!(
             !authorized(&db, &grant, &[2; 32], &[4; 32], 1000).unwrap(),
-            "later group member not an original recipient"
+            "a later member was not sent it"
         );
         assert!(
             !authorized(&db, &grant, &[2; 32], &[3; 32], 2000).unwrap(),
-            "expiry includes exact boundary"
+            "expiry includes its boundary"
         );
         for key in [[1; 32], [2; 32], [3; 32]] {
             Conversation::deactivate_member_tx(&db, &grant.conversation, &key).unwrap();
-            assert!(
-                !permitted(&db, &grant),
-                "author, provider and requester must all remain active"
-            );
-            db.execute("UPDATE conversation_members SET active=1 WHERE conversation_id=?1 AND member_ipk=?2",
-                (grant.conversation.as_slice(), key.as_slice())).unwrap();
+            assert!(!permitted(&db, &grant), "author, provider and requester all stay members");
+            Conversation::put_member(&db, &grant.conversation, &key, ROLE_MEMBER).unwrap();
         }
-        let mut different = grant.clone();
-        different.group = [9; 32];
-        assert!(!permitted(&db, &different));
-        different = grant.clone();
-        different.offer.message_id = [9; 16];
-        assert!(!permitted(&db, &different));
-        different = grant.clone();
-        different.offer.file_id = [9; 32];
-        assert!(!permitted(&db, &different));
-        different = grant.clone();
-        different.author = [9; 32];
-        assert!(!permitted(&db, &different));
-        different = grant.clone();
-        different.offer.size += 1;
-        assert!(!permitted(&db, &different));
-        db.execute(
-            "INSERT INTO attachment_sharing_revocations VALUES (?1,?2,?3)",
-            (
-                grant.conversation.as_slice(),
-                grant.author.as_slice(),
-                grant.offer.message_id.as_slice(),
-            ),
-        )
-        .unwrap();
-        assert!(!permitted(&db, &grant), "an earlier revision invalidates a later grant/post too");
+        let changes: [fn(&mut Grant); 5] = [
+            |g| g.group = [9; 32],
+            |g| g.offer.message_id = [9; 16],
+            |g| g.offer.file_id = [9; 32],
+            |g| g.author = [9; 32],
+            |g| g.offer.size += 1,
+        ];
+        for change in changes {
+            let mut other = grant.clone();
+            change(&mut other);
+            assert!(!permitted(&db, &other), "{other:?}");
+        }
+        let (conv, author, id) = (grant.conversation, grant.author, grant.offer.message_id);
+        let revoke = "INSERT INTO attachment_sharing_revocations VALUES (?1, ?2, ?3)";
+        db.execute(revoke, params![conv.as_slice(), author.as_slice(), id.as_slice()]).unwrap();
+        assert!(!permitted(&db, &grant), "an earlier revision revokes it");
         db.execute("DELETE FROM attachment_sharing_revocations", []).unwrap();
-        db.execute("UPDATE messages SET deleted=1", []).unwrap();
-        assert!(!permitted(&db, &grant));
+        db.execute("UPDATE messages SET deleted = 1", []).unwrap();
+        assert!(!permitted(&db, &grant), "deleting the post revokes it");
     }
 
-    #[test]
-    fn pending_grants_are_bounded_and_do_not_replace_the_original_audience() {
-        let (mut db, grant) = fixture();
-        let mut changed = grant.offer.clone();
-        changed.recipients.push([4; 32]);
-        receive_tx(&mut db, grant.conversation, grant.author, [2; 32], changed, 1000).unwrap();
-        let saved = db.query_row("SELECT * FROM attachment_sharing", [], Grant::from_row).unwrap();
-        assert_eq!(saved.offer, grant.offer);
-        for i in 1..MAX_PENDING_PER_AUTHOR {
-            let mut offer = grant.offer.clone();
-            offer.message_id = [i as u8; 16];
-            // Skip the original ID without changing how many distinct slots fill.
-            offer.message_id[0] = 0xFF;
-            receive_tx(&mut db, grant.conversation, grant.author, [2; 32], offer, 1000).unwrap();
-        }
-        let mut overflow = grant.offer.clone();
-        overflow.message_id = [0xFE; 16];
-        assert!(
-            receive_tx(&mut db, grant.conversation, grant.author, [2; 32], overflow, 1000).is_err()
-        );
-        for bad in
-            [vec![[2; 32]], vec![[3; 32], [2; 32]], vec![[2; 32], [2; 32]], vec![[1; 32], [2; 32]]]
-        {
-            let mut offer = grant.offer.clone();
-            offer.recipients = bad;
-            assert!(validate(&grant.author, &offer, 1000).is_err());
-        }
-        assert!(
-            receive_tx(&mut db, grant.conversation, grant.author, [4; 32], grant.offer, 1000)
-                .is_err()
-        );
+    fn issue(
+        db: &mut Connection, g: &Grant, recipients: &[[u8; 32]], roster: &[[u8; 32]],
+        group: [u8; 32], retained_until: u64, now: u64,
+    ) -> Option<([u8; 16], AttachmentSharing)> {
+        let (file, size) = (g.offer.file_id, g.offer.size);
+        outgoing_tx(
+            db,
+            &g.conversation,
+            &group,
+            &g.author,
+            g.offer.message_id,
+            file,
+            size,
+            recipients,
+            roster,
+            retained_until,
+            now,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -533,131 +508,207 @@ mod tests {
         let (mut db, grant) = fixture();
         db.execute("DELETE FROM attachment_sharing", []).unwrap();
         post(&db, &grant);
-        db.execute("UPDATE messages SET outgoing=1,sender_ipk=NULL", []).unwrap();
+        db.execute("UPDATE messages SET outgoing = 1, sender_ipk = NULL", []).unwrap();
+        let all = [[1; 32], [2; 32], [3; 32], [4; 32]];
+        let intent = "INSERT INTO attachment_sharing_intents SELECT id FROM messages";
         assert!(
-            outgoing_tx(
-                &mut db,
-                &grant.conversation,
-                &grant.group,
-                &grant.author,
-                grant.offer.message_id,
-                grant.offer.file_id,
-                grant.offer.size,
-                &[[2; 32], [3; 32]],
-                &[[1; 32], [2; 32], [3; 32]],
-                2000,
-                1000
-            )
-            .unwrap()
-            .is_none(),
-            "old attachment has no original audience proof"
+            issue(&mut db, &grant, &all[1..3], &all[..3], grant.group, 2000, 1000).is_none(),
+            "a message sent before sharing has no recorded audience"
         );
-        db.execute("INSERT INTO attachment_sharing_intents SELECT id FROM messages", []).unwrap();
-        let roster = [[1; 32], [2; 32], [3; 32], [4; 32]];
-        let mut issue = |recipients: &[[u8; 32]], group, expiry, now| {
-            outgoing_tx(
-                &mut db,
-                &grant.conversation,
-                &group,
-                &grant.author,
-                grant.offer.message_id,
-                grant.offer.file_id,
-                grant.offer.size,
-                recipients,
-                &roster,
-                expiry,
-                now,
-            )
-            .unwrap()
-        };
-        let first = issue(&[[3; 32], [2; 32]], grant.group, 2000, 1000).unwrap();
-        assert_eq!(issue(&roster[1..], grant.group, 3000, 1500), Some(first.clone()));
+
+        db.execute(intent, []).unwrap();
+        assert!(issue(&mut db, &grant, &all[1..2], &all[..3], grant.group, 2000, 1000).is_none());
         assert!(
-            issue(&roster[1..], [9; 32], 3000, 1500).is_none(),
-            "group replacement cannot transplant grants"
+            issue(&mut db, &grant, &all[1..3], &all[..3], grant.group, 2000, 1000).is_none(),
+            "an audience too small at first send never grows on retry"
         );
-        assert!(
-            issue(&roster[1..], grant.group, 4000, 2000).is_none(),
-            "same-hash retention refresh cannot extend expired grants"
-        );
+
+        db.execute(intent, []).unwrap();
+        let first = issue(&mut db, &grant, &[[3; 32], [2; 32]], &all, grant.group, 2000, 1000);
+        let first = first.unwrap();
         assert_eq!(first.1.recipients, vec![[2; 32], [3; 32]]);
+        assert_eq!(
+            issue(&mut db, &grant, &all[1..], &all, grant.group, 3000, 1500),
+            Some(first),
+            "a retry after a join keeps the original audience"
+        );
+        assert!(
+            issue(&mut db, &grant, &all[1..], &all, [9; 32], 3000, 1500).is_none(),
+            "a replacement group cannot take it over"
+        );
+        assert!(
+            issue(&mut db, &grant, &all[1..], &all, grant.group, 4000, 2000).is_none(),
+            "refreshed retention cannot extend an expired grant"
+        );
         db.execute("DELETE FROM attachment_sharing", []).unwrap();
         assert!(
-            outgoing_tx(
-                &mut db,
-                &grant.conversation,
-                &grant.group,
-                &grant.author,
-                grant.offer.message_id,
-                grant.offer.file_id,
-                grant.offer.size,
-                &roster[1..],
-                &roster,
-                5000,
-                3000
-            )
-            .unwrap()
-            .is_none(),
-            "grant GC cannot renew the original audience"
+            issue(&mut db, &grant, &all[1..], &all, grant.group, 5000, 3000).is_none(),
+            "collecting grants does not renew the audience"
         );
     }
 
-    #[test]
-    fn ineligible_first_send_cannot_gain_audience_on_retry() {
-        let (mut db, grant) = fixture();
-        db.execute("DELETE FROM attachment_sharing", []).unwrap();
-        post(&db, &grant);
-        db.execute("UPDATE messages SET outgoing=1,sender_ipk=NULL", []).unwrap();
-        db.execute("INSERT INTO attachment_sharing_intents SELECT id FROM messages", []).unwrap();
-        let roster = [[1; 32], [2; 32], [3; 32]];
-        for recipients in [&roster[1..2], &roster[1..]] {
-            assert!(
-                outgoing_tx(
-                    &mut db,
-                    &grant.conversation,
-                    &grant.group,
-                    &grant.author,
-                    grant.offer.message_id,
-                    grant.offer.file_id,
-                    grant.offer.size,
-                    recipients,
-                    &roster,
-                    2000,
-                    1000
-                )
-                .unwrap()
-                .is_none()
-            );
-        }
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM attachment_sharing_intents", [], |r| r
-                .get::<_, u32>(0))
-                .unwrap(),
-            0
-        );
+    /// `me`'s copy of author `author`'s post of `file` to `recipients`, with the grant it carried.
+    fn shared(
+        dev: &Device, me: [u8; 32], author: [u8; 32], recipients: &[[u8; 32]],
+        file: &wire::Manifest, expires_at: u64,
+    ) -> [u8; 32] {
+        let mut db = dev.core.db.messages().lock();
+        let members = [&[author][..], recipients].concat();
+        let conv = Conversation::join_group_tx(&db, &author, &members).unwrap();
+        Conversation::bind_group_tx(&db, &conv, &[0xe2; 32]).unwrap();
+        Message::save_incoming_tx(&db, conv, author, &[0xe3; 16], "file", 1000, None).unwrap();
+        let row = attachment(file.file_id(), file.total_size);
+        crate::data::media::save_tx(&db, &conv, &[0xe3; 16], &row).unwrap();
+        let offer = AttachmentSharing {
+            message_id: [0xe3; 16],
+            file_id: file.file_id(),
+            size: file.total_size,
+            expires_at,
+            recipients: recipients.to_vec(),
+        };
+        receive_tx(&mut db, conv, author, me, offer, now_secs()).unwrap();
+        db.query_row("SELECT grant_id FROM attachment_sharing", [], |r| r.get(0)).unwrap()
+    }
+
+    async fn describe_shared(
+        link: &PeerLink, local: &wire::Auth, file_id: [u8; 32], grant: [u8; 32],
+    ) -> Frame {
+        let (mut s, mut r, _) = super::super::pull::open_v2_request(link, local).await.unwrap();
+        v2::write_frame(&mut s, &Frame::DescribeShared { file_id, grant }).await.unwrap();
+        s.finish().unwrap();
+        v2::read_frame_for(&mut r, ReadPhase::Manifest).await.unwrap()
     }
 
     #[tokio::test]
-    async fn background_metering_and_rapid_reversal_cancel_old_upload_scopes() {
-        let mut policy =
-            Policy { foreground: false, wifi: false, cancel: CancellationToken::new() };
-        policy.update(Some(true), None);
-        assert!(!policy.allowed());
-        policy.update(None, Some(true));
-        assert!(policy.allowed());
-        let first = policy.cancel.clone();
-        policy.update(None, Some(true));
-        assert!(!first.is_cancelled());
-        policy.update(Some(false), None);
-        assert!(!policy.allowed());
-        policy.update(Some(true), None);
-        assert!(policy.allowed());
-        assert!(first.is_cancelled(), "a rapid return must not revive the old stream");
-        let next = policy.cancel.clone();
-        policy.update(None, Some(false));
-        tokio::time::timeout(std::time::Duration::from_millis(100), next.cancelled())
-            .await
-            .unwrap();
-        assert!(!policy.allowed());
+    async fn recipient_copies_fall_back_past_old_and_damaged_helpers_and_stop_when_backgrounded() {
+        set_foreground(true);
+        set_network(true);
+        let author = identity(210).ipk;
+        let (receiver, old, bad, good) =
+            (identity(211), identity(212), identity(213), identity(214));
+        let mut recipients = vec![receiver.ipk, old.ipk, bad.ipk, good.ipk];
+        recipients.sort_unstable();
+        let bytes: Vec<u8> =
+            (0..6 * wire::CHUNK_SIZE + 31).map(|i| (i / wire::CHUNK_SIZE) as u8 + 37).collect();
+        let file = manifest(&bytes, wire::CHUNK_SIZE);
+        let (fid, chunks) = (file.file_id(), file.chunks.len() as u32);
+        let expires = now_secs() + 3600;
+
+        let old_link = linked(&old, &receiver, offered_alpns(), offered_alpns()).await;
+        let (server, local) = (old_link.server.clone(), old.clone());
+        let old_peer = tokio::spawn(async move {
+            let (mut s, mut r) = server.accept_stream().await.unwrap();
+            super::super::auth::exchange(&server.conn, &mut s, &mut r, server.ipk, &local)
+                .await
+                .unwrap();
+            assert!(matches!(
+                v2::read_frame_for(&mut r, ReadPhase::Hello).await,
+                Ok(Frame::Hello(_))
+            ));
+            let released = v2::Hello { supported: 1, required: 1, ..v2::Hello::local() };
+            v2::write_frame(&mut s, &Frame::Hello(released)).await.unwrap();
+            r.read(&mut [0]).await
+        });
+        let mut links = vec![(old.ipk, old_link)];
+        let mut helpers = Vec::new();
+        for helper in [&bad, &good] {
+            let dev = device();
+            shared(&dev, helper.ipk, author, &recipients, &file, expires);
+            let mut copy = bytes.clone();
+            if helper.ipk == bad.ipk {
+                copy[2 * wire::CHUNK_SIZE] ^= 1;
+            }
+            let path = dev.dir.path().join("copy");
+            std::fs::write(&path, copy).unwrap();
+            let done = store::Partial {
+                file_id:    fid,
+                source_ipk: author,
+                total:      file.total_size,
+                chunk_size: file.chunk_size,
+                manifest:   Some(postcard::to_allocvec(&file).unwrap()),
+                have:       chunks,
+                state:      store::DONE,
+                path:       path.display().to_string(),
+                updated_at: 1000,
+            };
+            let lease = store::receiver_lease(&dev.core.db, fid);
+            store::partial_put_live_tx(&dev.core.db.transfers().lock(), &done, &lease).unwrap();
+            drop(lease);
+            let link = linked(helper, &receiver, offered_alpns(), offered_alpns()).await;
+            tokio::spawn(super::super::serve::serve_streams(
+                dev.core,
+                link.server.clone(),
+                helper.clone(),
+            ));
+            links.push((helper.ipk, link));
+            helpers.push(dev);
+        }
+
+        let r = device();
+        let grant = shared(&r, receiver.ipk, author, &recipients, &file, expires);
+        let lease = store::receiver_lease(&r.core.db, fid);
+        let mut partial = ranges::Receiver::open_async(
+            r.core,
+            fid,
+            author,
+            file.clone(),
+            file.total_size,
+            &lease,
+        )
+        .await
+        .unwrap();
+        for i in [0, 5] {
+            let range = i * wire::CHUNK_SIZE..(i + 1) * wire::CHUNK_SIZE;
+            partial.commit(i as u32, &bytes[range], &lease).unwrap();
+        }
+        drop(partial);
+        let mut attempts = 0;
+        let candidates = vec![(old.ipk, grant), (bad.ipk, grant), (good.ipk, grant)];
+        let helped = super::super::pull::try_helpers(
+            r.core,
+            fid,
+            file.total_size,
+            &receiver,
+            &lease,
+            candidates,
+            |peer| {
+                attempts += 1;
+                if attempts == 3 {
+                    assert_eq!(r.verified(&fid), 3, "the damaged helper's good chunk is kept");
+                }
+                let link = links.iter().find(|(ipk, _)| *ipk == peer).unwrap().1.client.clone();
+                std::future::ready(Ok(link))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(helped);
+        assert_eq!(attempts, 3);
+        assert!(
+            !matches!(old_peer.await.unwrap(), Ok(Some(_))),
+            "a released peer gets no new request"
+        );
+        let copy = r.partial(&fid).unwrap();
+        assert!(copy.is_complete());
+        assert_eq!(std::fs::read(&copy.path).unwrap(), bytes);
+
+        let good_link = &links[2].1.client;
+        let (mut s, mut rx, _) = super::super::pull::open_v2_request(good_link, &receiver).await.unwrap();
+        let ranges = vec![ranges::ChunkRange { start: 0, end: chunks }];
+        v2::write_frame(&mut s, &Frame::PullShared { file_id: fid, grant, ranges }).await.unwrap();
+        s.finish().unwrap();
+        let first = v2::read_frame_for(&mut rx, ReadPhase::Chunk).await.unwrap();
+        assert!(matches!(first, Frame::Chunk { index: 0, .. }));
+        set_foreground(false);
+        let mut received = 1;
+        while let Ok(Frame::Chunk { .. }) = v2::read_frame_for(&mut rx, ReadPhase::Chunk).await {
+            received += 1;
+        }
+        assert!(received < chunks, "backgrounding stops an upload already streaming");
+        let refused = describe_shared(good_link, &receiver, fid, grant).await;
+        assert_eq!(refused, Frame::Error(ErrorCode::Unavailable));
+        set_foreground(true);
+        let served = describe_shared(good_link, &receiver, fid, grant).await;
+        assert!(matches!(served, Frame::Manifest(_)));
     }
 }

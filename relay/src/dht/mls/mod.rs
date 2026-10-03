@@ -1,31 +1,58 @@
-//! MLS stash relay — the home-relay side of KeyPackage and Welcome
-//! storage, plus the originate half that fans a phone's `client/5`
-//! wrapper RPC out to the K storage homes over `peer/5`.
-//!
-//! - [`kp`] / [`welcome`]: inbound `peer/5` handlers + fjall storage
-//!   for the two stashes (`dht_keypackage`, `dht_welcome`).
-//! - [`kp_originate`] / [`welcome_originate`]: the home relay acting
-//!   as originator on behalf of an authenticated client.
-//! - [`fanout`]: shared K-closest fan-out primitives.
+//! MLS stash relay: the KeyPackage and Welcome stashes at their homes, and the originating side
+//! that fans a client's request out to them.
 
-pub(crate) mod fanout;
+pub(crate) mod inventory;
 pub(crate) mod kp;
 pub(crate) mod kp_originate;
 pub(crate) mod welcome;
 pub(crate) mod welcome_originate;
 
-use common::quic::id::NodeId;
+use std::num::NonZeroU32;
 
-/// 32-byte stash key for `(domain, ipk)`: `BLAKE3(domain || ipk)`.
-///
-/// The short literal `domain` (`b"kp:"` / `b"welcome:"`) namespaces the
-/// two stashes away from each other inside the unified 32-byte DHT
-/// keyspace, so the routing layer doesn't need to know which
-/// sub-namespace it's serving. Implemented via [`NodeId::new`] (BLAKE3
-/// of the input) so the relay doesn't need a direct `blake3` dep.
-pub fn stash_prefix(domain: &[u8], ipk: &[u8; 32]) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(domain.len() + ipk.len());
-    buf.extend_from_slice(domain);
-    buf.extend_from_slice(ipk);
-    *NodeId::new(&buf).as_bytes()
+use common::proto::mls_wire::MAX_KP_SKEW_MS;
+use common::quic::id::NodeId;
+use governor::Quota;
+
+use crate::dht::Dht;
+
+/// Guarantees implemented by this relay's actual storage owner. Used on both
+/// client and peer connections; delegation checks the target independently.
+pub(crate) fn service_support() -> common::contracts::Support {
+    use common::contracts::{Support,services};
+    Support::new([(services::KEY_PACKAGE_CUSTODY,vec![services::KEY_PACKAGE_CUSTODY_VERSION]), (services::KEY_PACKAGE_INVENTORY,vec![services::KEY_PACKAGE_INVENTORY_VERSION])]).expect("fixed supported service versions")
+}
+
+fn hourly_quota(per_hour: u32) -> Quota {
+    let period = std::time::Duration::from_secs(3600 / per_hour.max(1) as u64);
+    let burst = NonZeroU32::new(per_hour).unwrap_or(NonZeroU32::MIN);
+    Quota::with_period(period).expect("non-zero period per token").allow_burst(burst)
+}
+
+#[derive(Debug)]
+enum Reject {
+    Binding,
+    Skew,
+    RateLimited,
+    NotOwner,
+}
+
+/// The stash RPCs' admission, before any signature or disk work. A named requester must be the
+/// authenticated peer, against cross-relay replay, and `admit` is spent only on a fresh request.
+fn stash_gate(
+    dht: &Dht, peer: NodeId, requester: Option<NodeId>, timestamp: u64, now_ms: u64,
+    stash: [u8; 32], admit: impl FnOnce() -> bool,
+) -> Result<(), Reject> {
+    if requester.is_some_and(|requester| requester != peer) {
+        return Err(Reject::Binding);
+    }
+    if now_ms.abs_diff(timestamp) > MAX_KP_SKEW_MS {
+        return Err(Reject::Skew);
+    }
+    if !admit() {
+        return Err(Reject::RateLimited);
+    }
+    if !crate::dht::routing::homes(dht, &NodeId::from_bytes(stash)).1 {
+        return Err(Reject::NotOwner);
+    }
+    Ok(())
 }

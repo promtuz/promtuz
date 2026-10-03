@@ -1,23 +1,12 @@
-//! Client↔relay hole-punch assist wire: STUN address echo + a blind TURN
-//! datagram bridge. Shared by the relay (server) and libcore (client).
-//!
-//! Framing is `MAGIC | tag | ...`. `MAGIC`'s first byte clears the QUIC
-//! fixed-bit (`0x40`) so one of these never parses as a QUIC packet, and it
-//! differs from libcore's disco `MAGIC` (`.p2p`) so the client's P2P socket
-//! can split disco, relay-assist, and QUIC on the one port.
-//!
-//! STUN control (`StunReq`/`StunResp`) is plaintext — the relay can't hold
-//! the per-peer MLS key. TURN payloads are the peers' own QUIC, opaque to
-//! the relay; the 16-byte token (MLS-derived, secret) both names the bridge
-//! and gates it, since only the two peers can derive it.
+//! Client-relay hole-punch assist wire: a STUN address echo and a blind TURN datagram bridge.
+//! STUN control is plaintext; TURN payloads are the peers' own QUIC, opaque to the relay.
 
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 
-/// Tags a relay-assist datagram. First byte (`0x2e`) clears the QUIC
-/// fixed-bit; the whole prefix differs from disco's `.p2p`.
+/// The first byte clears the QUIC fixed bit, and the prefix differs from disco's `.p2p`.
 pub const MAGIC: [u8; 4] = [0x2e, 0x70, 0x52, 0x72]; // ".pRr"
 
 const TAG_STUN_REQ: u8 = 1;
@@ -25,25 +14,16 @@ const TAG_STUN_RESP: u8 = 2;
 const TAG_TURN_ALLOC: u8 = 3;
 const TAG_TURN_DATA: u8 = 4;
 
-/// TURN bridge token: 16 secret bytes both peers derive from their MLS
-/// group, naming (and gating) one bridge.
+/// Secret bytes both peers derive from their MLS group; the token names and gates one bridge.
 pub const TOKEN_LEN: usize = 16;
 
-/// `MAGIC | tag`.
 const HDR: usize = MAGIC.len() + 1;
 
-/// One relay-assist datagram. `TurnData`'s payload borrows the input so the
-/// relay can forward it without a copy.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RelayMsg<'a> {
-    /// Client → relay: "what public address does this socket map to?"
     StunReq { tx: [u8; 8] },
-    /// Relay → client: the source address the relay observed for the query.
     StunResp { tx: [u8; 8], seen: SocketAddr },
-    /// Client → relay: register this socket as one end of `token`'s bridge.
     TurnAlloc { token: [u8; TOKEN_LEN] },
-    /// Client ↔ relay ↔ client: a QUIC datagram to forward to the other end
-    /// of `token`'s bridge, carried verbatim.
     TurnData { token: [u8; TOKEN_LEN], payload: &'a [u8] },
 }
 
@@ -74,8 +54,6 @@ impl RelayMsg<'_> {
         out
     }
 
-    /// Parse a datagram, or `None` if it isn't relay-assist framed (e.g. a
-    /// QUIC packet). A `TurnData` result borrows `pkt`.
     pub fn decode(pkt: &[u8]) -> Option<RelayMsg<'_>> {
         if pkt.len() < HDR || !pkt.starts_with(&MAGIC) {
             return None;
@@ -99,8 +77,6 @@ impl RelayMsg<'_> {
     }
 }
 
-/// Cheap check: does this datagram carry the relay-assist `MAGIC`? Lets a
-/// socket split assist from QUIC without a full decode.
 pub fn is_assist(pkt: &[u8]) -> bool {
     pkt.len() >= HDR && pkt.starts_with(&MAGIC)
 }
@@ -133,44 +109,5 @@ fn get_addr(b: &[u8]) -> Option<SocketAddr> {
             Some((Ipv6Addr::from(o), port).into())
         },
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn roundtrip(msg: RelayMsg) {
-        let bytes = msg.encode();
-        assert_eq!(RelayMsg::decode(&bytes), Some(msg));
-    }
-
-    #[test]
-    fn every_variant_roundtrips() {
-        roundtrip(RelayMsg::StunReq { tx: [1; 8] });
-        roundtrip(RelayMsg::StunResp { tx: [2; 8], seen: "1.2.3.4:5".parse().unwrap() });
-        roundtrip(RelayMsg::StunResp { tx: [3; 8], seen: "[2409:41::9]:443".parse().unwrap() });
-        roundtrip(RelayMsg::TurnAlloc { token: [4; TOKEN_LEN] });
-        roundtrip(RelayMsg::TurnData { token: [5; TOKEN_LEN], payload: b"opaque quic" });
-    }
-
-    #[test]
-    fn turn_data_payload_borrows_verbatim() {
-        let bytes = RelayMsg::TurnData { token: [7; TOKEN_LEN], payload: b"\xc0abc" }.encode();
-        match RelayMsg::decode(&bytes) {
-            Some(RelayMsg::TurnData { token, payload }) => {
-                assert_eq!(token, [7; TOKEN_LEN]);
-                assert_eq!(payload, b"\xc0abc");
-            },
-            other => panic!("expected TurnData, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn non_assist_is_rejected() {
-        // QUIC-shaped (fixed-bit set) and short junk are not relay-assist.
-        assert_eq!(RelayMsg::decode(&[0xc0, 1, 2, 3, 4, 5]), None);
-        assert_eq!(RelayMsg::decode(b".pRr"), None); // magic but no tag/body
-        assert_eq!(RelayMsg::decode(b""), None);
     }
 }

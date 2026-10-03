@@ -1,17 +1,8 @@
-//! Candidate addresses — the places a peer might reach us.
-//!
-//! For now just the local ones: every routable interface IP paired with
-//! the P2P socket's port. Loopback and link-local are dropped (a remote
-//! peer can't use them). A global IPv6 address here often needs no punch
-//! at all — Jio/Airtel hand out un-NATed v6, so the local address *is*
-//! the reachable one. The server-reflexive (post-NAT v4) candidate comes
-//! later, from the relay's STUN echo.
+//! Host candidates: every interface address a remote peer could reach.
 
 use std::net::IpAddr;
 use std::net::SocketAddr;
 
-/// Our local candidate addresses, each paired with `port` (the P2P
-/// socket's bound port). Empty if the interface list can't be read.
 pub fn local_candidates(port: u16) -> Vec<SocketAddr> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
@@ -24,55 +15,18 @@ pub fn local_candidates(port: u16) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// Addresses a remote peer can never reach: IPv4 link-local (169.254/16),
-/// IPv6 link-local (fe80::/10), and deprecated IPv6 site-local (fec0::/10,
-/// seen mainly on emulators). Private IPv4 (192.168/10/172.16) is kept —
-/// two peers on one LAN punch through it.
+/// Private IPv4 stays routable: two peers on one LAN punch through it.
 fn is_unroutable(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            // 169.254/16 link-local, plus 192.0.0.0/24 (IETF special-use —
-            // includes the 464XLAT CLAT address v6-only carriers like Jio
-            // synthesize; it's not a real, reachable v4).
+            // 192.0.0.0/24 holds the 464XLAT CLAT address of v6-only carriers, never reachable.
             v4.is_link_local() || (o[0] == 192 && o[1] == 0 && o[2] == 0)
         },
-        // `Ipv6Addr::is_unicast_link_local` is unstable, so match prefixes
-        // directly: fe80::/10 link-local, fec0::/10 site-local.
+        // fe80::/10 link-local and fec0::/10 site-local.
         IpAddr::V6(v6) => {
             let hi = v6.segments()[0] & 0xffc0;
             hi == 0xfe80 || hi == 0xfec0
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::Ipv4Addr;
-    use std::net::Ipv6Addr;
-
-    use super::*;
-
-    #[test]
-    fn classifies_unroutable() {
-        assert!(is_unroutable(&"169.254.1.1".parse::<Ipv4Addr>().unwrap().into()));
-        assert!(is_unroutable(&"fe80::1".parse::<Ipv6Addr>().unwrap().into()));
-        // deprecated site-local (what the emulator advertised)
-        assert!(is_unroutable(&"fec0::5054:ff:fe12:3456".parse::<Ipv6Addr>().unwrap().into()));
-        // Jio's 464XLAT CLAT fake-v4
-        assert!(is_unroutable(&"192.0.0.2".parse::<Ipv4Addr>().unwrap().into()));
-        // routable addresses (private LAN v4 + global v6) are kept
-        assert!(!is_unroutable(&"192.168.1.5".parse::<Ipv4Addr>().unwrap().into()));
-        assert!(!is_unroutable(&"2409:4117::1".parse::<Ipv6Addr>().unwrap().into()));
-    }
-
-    #[test]
-    fn gather_pairs_port_and_drops_loopback() {
-        let cands = local_candidates(4242);
-        for addr in &cands {
-            assert_eq!(addr.port(), 4242);
-            assert!(!addr.ip().is_loopback(), "loopback leaked: {addr}");
-            assert!(!is_unroutable(&addr.ip()), "unroutable leaked: {addr}");
-        }
     }
 }

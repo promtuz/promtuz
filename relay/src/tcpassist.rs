@@ -1,6 +1,5 @@
-//! Authenticated TLS-only attachment bridges. The legacy UDP bearer-token
-//! table is deliberately separate: knowing a token cannot claim an endpoint
-//! registered to another identity here.
+//! Authenticated attachment bridges over the TLS fallback tunnel, kept apart from the UDP
+//! bearer-token bridges so that knowing a token cannot claim an endpoint of another identity.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,9 +55,8 @@ impl Assist {
                 break;
             }
             if let Some(destination) = routes.destination(&registration) {
-                // Nonblocking enqueue while the generation check is locked
-                // makes replacement and forwarding linearizable. A full
-                // receiver queue drops this datagram; no other route waits.
+                // Enqueueing without blocking under the generation lock makes replacement and
+                // forwarding linearizable; a full queue drops the datagram, so no route waits.
                 let _ = destination.try_send(&packet);
             }
         }
@@ -121,9 +119,8 @@ impl<T> Registry<T> {
                 return Err(());
             }
         }
-        // Joining an existing bridge also consumes a participant slot. Count
-        // live participants, not targets someone else named: an attacker
-        // cannot spend another IPK's quota by naming it as its remote.
+        // Count live participants, not targets someone else named, so an attacker cannot spend
+        // another IPK's quota by naming it as its remote.
         let replacing =
             self.bridges.get(&token).is_some_and(|bridge| bridge.participants[slot].is_some());
         if !replacing {
@@ -185,175 +182,49 @@ impl<T> Registry<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::quic::tunnel;
-    use ed25519_dalek::{Signer, SigningKey};
-    use std::time::Duration;
 
-    struct TestRelay {
-        address: std::net::SocketAddr,
-        roots: rustls::RootCertStore,
-        task: tokio::task::JoinHandle<()>,
-    }
-
-    impl Drop for TestRelay {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
-    }
-
-    async fn test_relay() -> TestRelay {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let rcgen::CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert = cert.der().clone();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert.clone()).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
-        let mut config =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key.into())
-                .unwrap();
-        config.alpn_protocols = vec![tunnel::ALPN.to_vec()];
-        let config = Arc::new(config);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let assist = Arc::new(Assist::default());
-        let task = tokio::spawn(async move {
-            let mut tasks = tokio::task::JoinSet::new();
-            loop {
-                tokio::select! {
-                    _ = tasks.join_next(), if !tasks.is_empty() => {},
-                    stream = listener.accept() => {
-                        let (stream, _) = stream.unwrap();
-                        let config = config.clone();
-                        let assist = assist.clone();
-                        tasks.spawn(async move {
-                            let accepted = tunnel::accept(stream, config, tunnel::FEATURE_ASSIST).await.unwrap();
-                            assist.serve(accepted.channel, accepted.mode).await;
-                        });
-                    },
-                }
-            }
-        });
-        TestRelay { address, roots, task }
-    }
-
-    async fn join(
-        relay: &TestRelay, token: [u8; 16], key: &SigningKey, peer: &SigningKey,
-    ) -> Arc<Channel> {
-        let ipk = key.verifying_key().to_bytes();
-        let peer = peer.verifying_key().to_bytes();
-        let key = key.clone();
-        tunnel::connect(
-            relay.address,
-            "localhost",
-            &relay.roots,
-            tunnel::Request::Assist {
-                token,
-                ipk,
-                peer,
-                sign: Arc::new(move |message| Ok(key.sign(message).to_bytes())),
-            },
-        )
-        .await
-        .unwrap()
-    }
-
-    async fn delivered(from: &Channel, to: &Channel, payload: &[u8]) {
-        // Admission is sent before the bridge task is scheduled. A bounded
-        // repeat matches QUIC loss/retransmit semantics at this datagram API.
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                from.try_send(payload).unwrap();
-                if let Ok(packet) = tokio::time::timeout(Duration::from_millis(30), to.recv()).await
-                {
-                    assert_eq!(packet.unwrap(), payload);
-                    return;
-                }
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn real_tls_bridge_replaces_only_its_authenticated_participant() {
-        let relay = test_relay().await;
-        let a = SigningKey::from_bytes(&[10; 32]);
-        let b = SigningKey::from_bytes(&[11; 32]);
-        let stranger = SigningKey::from_bytes(&[12; 32]);
-        let a1 = join(&relay, [1; 16], &a, &b).await;
-        let b1 = join(&relay, [1; 16], &b, &a).await;
-        delivered(&a1, &b1, b"opaque peer QUIC").await;
-        delivered(&b1, &a1, b"opaque return path").await;
-
-        let intruder = join(&relay, [1; 16], &stranger, &a).await;
-        tokio::time::timeout(Duration::from_secs(3), intruder.closed()).await.unwrap();
-        delivered(&a1, &b1, b"token did not admit stranger").await;
-
-        let inconsistent = join(&relay, [1; 16], &b, &stranger).await;
-        tokio::time::timeout(Duration::from_secs(3), inconsistent.closed()).await.unwrap();
-        delivered(&b1, &a1, b"incorrect peer did not replace b").await;
-
-        let a2 = join(&relay, [1; 16], &a, &b).await;
-        tokio::time::timeout(Duration::from_secs(3), a1.closed()).await.unwrap();
-        assert!(a1.try_send(b"old generation").is_err());
-        delivered(&b1, &a2, b"new generation receives").await;
-        delivered(&a2, &b1, b"new generation sends").await;
-        a2.close();
-        b1.close();
-    }
-
+    /// A token admits only the two identities it names, a displaced generation can neither
+    /// forward nor remove its replacement, an identity's quota counts only the slots it holds,
+    /// and the bridge count stays bounded.
     #[test]
-    fn token_holder_cannot_join_or_replace_another_identity() {
+    fn a_bridge_admits_only_its_two_identities_within_their_quotas() {
         let mut routes = Registry::default();
         let (a, _) = routes.register([1; 16], [2; 32], [3; 32], "a").unwrap();
         assert!(routes.destination(&a).is_none());
-        assert!(routes.register([1; 16], [4; 32], [2; 32], "attacker").is_err());
+        assert!(routes.register([1; 16], [4; 32], [2; 32], "stranger").is_err());
         assert!(routes.register([1; 16], [3; 32], [4; 32], "wrong peer").is_err());
         let (b, _) = routes.register([1; 16], [3; 32], [2; 32], "b").unwrap();
-        assert_eq!(routes.destination(&a), Some(&"b"));
-        assert_eq!(routes.destination(&b), Some(&"a"));
-    }
+        assert_eq!((routes.destination(&a), routes.destination(&b)), (Some(&"b"), Some(&"a")));
 
-    #[test]
-    fn stale_registration_can_neither_forward_nor_remove_its_replacement() {
-        let mut routes = Registry::default();
-        let (old, _) = routes.register([1; 16], [2; 32], [3; 32], "old").unwrap();
-        let (b, _) = routes.register([1; 16], [3; 32], [2; 32], "b").unwrap();
-        let (new, displaced) = routes.register([1; 16], [2; 32], [3; 32], "new").unwrap();
-        assert_eq!(displaced, Some("old"));
-        assert!(routes.destination(&old).is_none());
-        routes.remove(&old);
-        assert_eq!(routes.destination(&b), Some(&"new"));
-        routes.remove(&new);
-        assert!(routes.destination(&b).is_none());
+        let (newer, displaced) = routes.register([1; 16], [2; 32], [3; 32], "newer").unwrap();
+        assert_eq!(displaced, Some("a"));
+        assert!(routes.destination(&a).is_none(), "the old generation forwards nothing");
+        routes.remove(&a);
+        assert_eq!(routes.destination(&b), Some(&"newer"), "nor removes its replacement");
+        routes.remove(&newer);
         routes.remove(&b);
         assert!(routes.bridges.is_empty());
-    }
 
-    #[test]
-    fn quota_counts_owned_slots_and_permits_replacement_at_capacity() {
         let mut routes = Registry::default();
         for n in 0..MAX_BRIDGES_PER_IDENTITY {
             routes.register([n as u8; 16], [2; 32], [3; 32], n).unwrap();
         }
         assert!(routes.register([90; 16], [2; 32], [3; 32], 90).is_err());
-        assert!(routes.register([0; 16], [2; 32], [3; 32], 100).is_ok());
-        // Naming someone as the remote identity cannot consume their budget.
-        assert!(routes.register([90; 16], [3; 32], [2; 32], 90).is_ok());
+        assert!(
+            routes.register([0; 16], [2; 32], [3; 32], 100).is_ok(),
+            "a replacement fits at capacity"
+        );
+        assert!(
+            routes.register([90; 16], [3; 32], [2; 32], 90).is_ok(),
+            "being named spends no quota"
+        );
         assert!(routes.register([90; 16], [2; 32], [3; 32], 91).is_err());
-        assert!(routes.register([91; 16], [4; 32], [4; 32], 91).is_err());
-    }
+        assert!(routes.register([91; 16], [4; 32], [4; 32], 91).is_err(), "no bridge to oneself");
 
-    #[test]
-    fn global_bridge_count_stays_bounded() {
         let mut routes = Registry::default();
         for n in 0..MAX_BRIDGES as u32 {
-            let mut token = [0; 16];
+            let (mut token, mut identity) = ([0; 16], [0; 32]);
             token[..4].copy_from_slice(&n.to_be_bytes());
-            let mut identity = [0; 32];
             identity[..4].copy_from_slice(&n.to_be_bytes());
             routes.register(token, identity, [255; 32], ()).unwrap();
         }

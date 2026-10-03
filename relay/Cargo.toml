@@ -2,15 +2,13 @@
 name = "relay"
 version.workspace = true
 edition = "2024"
+build = "../common/git_sha.rs"
 description = "Relay server — DHT node, client auth, presence replication"
 license.workspace = true
 repository.workspace = true
 default-run = "relay"
 
-# The relay exposes both a `[lib]` and a `[[bin]]`. The library form lets the
-# e2e harness spin up real `Dht` instances in-process; the binary in
-# `main.rs` is a thin shell over the lib. Module visibility is `pub` only
-# where the shell binary or the harness needs it.
+# The lib target only exports `storage`, for the `ldb` admin binary.
 [lib]
 name = "relay"
 path = "src/lib.rs"
@@ -43,7 +41,7 @@ ed25519-dalek.workspace = true
 rustls-pemfile.workspace = true
 fjall = "3.1.5"
 parking_lot = "0.12.5"
-zerocopy = "0.8.52"
+zerocopy = { version = "0.8.52", features = ["derive"] }
 tokio-util = "0.7.18"
 # Per-peer DHT inbound-RPC rate limiter. Same crate/version as the resolver
 # side; keyed on `NodeId` instead of `IpAddr`.
@@ -56,13 +54,14 @@ x509-parser = "0.18.1"
 # and is already in the tree under `turn`.
 turn = "0.17"
 webrtc-util = "0.17"
+async-trait = "0.1.89"
 ring = "0.17"
 base64.workspace = true
 
 # ---------------------------------------------------------------------------
 # Debian packaging (`cargo deb`) → `pzrelay_<version>_<arch>.deb`.
 # Binary installs as /usr/bin/pzrelay; config + CA + keys + cert under
-# /etc/promtuz; RocksDB under /var/lib/pzrelay (service user `pzrelay`).
+# /etc/promtuz; the fjall store under /var/lib/pzrelay (service user `pzrelay`).
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
 name = "pzrelay"
@@ -87,5 +86,6 @@ conf-files = ["/etc/promtuz/relay.toml", "/etc/apt/apt.conf.d/51pzrelay-unattend
 maintainer-scripts = "pkg/scripts/"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 rcgen = "0.14.8"

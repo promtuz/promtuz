@@ -3,7 +3,6 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -13,21 +12,16 @@ use common::proto::Sender;
 use common::proto::client_rel::CHandshakePacket;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_rel::DeliverP;
-use common::proto::client_rel::QueryP;
-use common::proto::client_rel::QueryResultP;
 use common::proto::client_rel::SHandshakePacket as SHSP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
-use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
-use common::proto::mls_wire::AppPayload;
-use common::proto::mls_wire::Body;
 use common::proto::pack::Unpacker;
-use common::proto::pack::unpack;
 use common::quic::id::NodeId;
 use common::types::bytes::Bytes;
+use common::utils::now_ms;
 use ed25519_dalek::VerifyingKey;
 use log::debug;
 use log::error;
@@ -41,28 +35,22 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
-use crate::data::contact::Contact;
-use crate::data::conversation::Conversation;
 use crate::data::identity::IdentitySigner;
-use crate::data::message::Message;
 use crate::data::relay::Relay;
-use crate::db::mls::stash_db_handle;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
-use crate::events::messaging::MessageEv;
+use crate::messaging::receive::process_deliver;
+use crate::mls::scheduler::run_scheduler_loop;
+use crate::presence::handle_activity;
+use crate::presence::handle_presence;
+use crate::quic::dht_client::DhtClient;
 use crate::quic::relay_dht_client::RelayDhtClient;
-use crate::ret_err;
-use crate::state::CONNECTION_START_TIME;
+use crate::state::Core;
+use crate::state::core;
 use crate::utils::addr_short;
 use crate::utils::node_short;
-use crate::utils::systime;
-
-/// KP rotation scheduler tick cadence. Each tick the libcore checks
-/// [`crate::mls::scheduler::run_once`] for pending refill / rotation
-/// work; the task lives for the lifetime of the relay connection and
-/// is cooperatively cancelled on disconnect.
-const KP_SCHEDULER_TICK_MS: u64 = 60_000;
 
 pub enum RelayConnError {
     Continue,
@@ -80,18 +68,11 @@ where
 
 const MAX_CONCURRENT_STREAMS: usize = 16;
 static INBOX_SYNC: Mutex<()> = Mutex::const_new(());
-/// Cadence for sampling the live connection RTT into the latency graph.
 const RTT_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Below half of `PRESENCE_LEASE_MAX_MS`, so a single missed renewal leaves the
 /// claim standing and only a real departure lets it lapse.
 const PRESENCE_RENEW_INTERVAL: Duration = Duration::from_secs(4 * 60);
-
-// The actual `RELAY` singleton lives in `crate::state` (a leaf module)
-// so `api::messaging` doesn't have to pull in `quic::server` for a
-// global it shares with us. Re-exported here for backwards
-// compatibility with existing call sites in this module.
-pub use crate::state::RELAY;
 
 /// EOF between frames ends a drain; truncation and transport errors do not.
 async fn read_relay_packet<R: AsyncRead + Unpin + Send>(
@@ -152,21 +133,9 @@ impl Relay {
 
         ConnectionState::Handshaking.emit();
 
-        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
-
-        // 0. Open first bi-stream just for handshake
-
         let (mut tx, mut rx) = conn.open_bi().await?;
 
-        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
-
-        // 1. Server is expecting `Hello` from client
-
         CHandshakePacket::Hello { ipk: ipk.to_bytes().into() }.send(&mut tx).await?;
-
-        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
-
-        // 2. Server must respond with challenge
 
         let SHSP::Challenge { nonce } = SHSP::unpack(&mut rx).await? else {
             return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
@@ -181,27 +150,19 @@ impl Relay {
         .send(&mut tx)
         .await?;
 
-        //===:===:===:===:===:===:===:===:===:===:===:===:===:===:===//
-
-        // 3. Server either accepts or rejects
-
         let SHSP::HandshakeResult(result) = SHSP::unpack(&mut rx).await? else {
             return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
         };
 
-        let timestamp = match result {
-            SHSRP::Accept { timestamp, relay_node_id, assist, turn_port } => {
-                // Stash the home's advertised DHT NodeId for the
-                // RelayDhtClient to bind in welcome fetch/ack sigs.
-                self.home_node_id = relay_node_id.map(|b| b.0);
+        let (home_node_id, turn_port) = match result {
+            SHSRP::Accept { relay_node_id, assist, turn_port, .. } => {
                 // Remembered on the row too, so a later session can pick an
                 // assist-capable relay without being connected to it.
                 self.assist = assist;
-                self.turn_port = turn_port;
                 if let Err(e) = self.record_assist(assist) {
                     warn!("relay {} assist flag not recorded: {e}", node_short(&self.id));
                 }
-                timestamp
+                (relay_node_id.map(|b| b.0), turn_port)
             },
             SHSRP::Reject { reason } => {
                 warn!("relay handshake failed : {reason}");
@@ -211,117 +172,132 @@ impl Relay {
         };
 
         info!("authenticated with relay {}", node_short(&self.id));
-        CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
-        // Auth is up but the offline backlog (welcomes, deferred sends, queued
-        // messages) isn't drained yet — surface that as "Syncing…". `handle`
-        // flips to Connected once it's pulled; failures below emit Disconnected,
-        // so we never stick here.
+        // Auth is up but the offline backlog is not drained yet. `handle` emits Connected once it
+        // is, and failures below emit Disconnected, so this state never sticks.
         ConnectionState::Syncing.emit();
 
         self.record_success().map_err(|e| RelayConnError::Error(e.into()))?;
 
-        // Live RTT sampler — quinn's smoothed round-trip estimate, sampled
-        // while the connection lives. This is the "ping" the relays page
-        // graphs and the latency term `fetch_best` scores on; it ends itself
-        // when the connection closes.
-        tokio::spawn({
-            let relay = self.clone();
-            let conn = conn.clone();
-            async move { relay.sample_rtt(&conn).await }
+        let core = core();
+        let session = Arc::new(Session::new(core, self, conn, ipk, home_node_id, turn_port));
+        // Published before `handle` starts, so the work it spawns finds this connection.
+        core.publish(session.clone());
+
+        session.spawn({
+            let session = session.clone();
+            async move { session.sample_rtt().await }
         });
 
-        self.connection = Some(conn.clone());
-
-        // Build the production DHT-RPC dialer once the relay/5 connection
-        // is established. The dialer rides this same connection, stored on
-        // the `Relay` struct so the JNI surface (`sendMessage`,
-        // `handle_deliver`) picks it up via `RELAY.read()`. Failure to
-        // build is logged and `dht_client` stays `None`; the caller
-        // surfaces a clean error rather than silently no-oping.
-        match build_relay_dht_client(&self, ipk) {
-            Ok(c) => self.dht_client = Some(c),
-            Err(e) => {
-                warn!("MLS: DHT dialer not constructed at connect: {e}");
-            },
-        }
-
-        let handle = tokio::spawn({
-            let relay = self.clone();
+        let handle = session.spawn({
+            let session = session.clone();
             async move {
-                let error = relay.handle(ipk).await;
-                relay.handle_err(&error);
+                let error = session.handle(ipk).await;
+                session.handle_err(&error);
                 error
             }
         });
 
-        *RELAY.write() = Some(self);
-
-        // Presence is a lease: it lapses on its own unless renewed, which is
-        // what makes a crash or a killed process read Offline without anyone
-        // having to say so. Renewed below half-life so one lost round is not a
-        // departure, and only while the user is actually in the app — a wake
-        // drain holds no claim to extend.
-        tokio::spawn({
-            let conn = conn.clone();
+        // Presence is a lease, so a crash reads Offline on its own. It is renewed below half-life,
+        // and only while the user is in the app: a wake drain holds no claim to extend.
+        session.spawn({
+            let session = session.clone();
             async move {
                 let mut tick = tokio::time::interval(PRESENCE_RENEW_INTERVAL);
                 tick.tick().await;
-                while conn.close_reason().is_none() {
-                    tick.tick().await;
-                    if !crate::messaging::presence_is_active() {
+                while session.conn.close_reason().is_none() {
+                    tokio::select! {
+                        _ = tick.tick() => {},
+                        _ = session.cancel.cancelled() => return,
+                    }
+                    if !crate::presence::presence_is_active() {
                         continue;
                     }
-                    if let Err(e) = crate::messaging::renew_presence().await {
+                    if let Err(e) = crate::presence::renew_presence(&session).await {
                         debug!("presence renewal failed: {e}");
                     }
                 }
             }
         });
 
-        // Re-assert real fg/bg presence FIRST: a headless push wake-drain
-        // reconnects with no UI alive. The relay now defaults a reconnect to
-        // Offline (connection alone is not presence), so this is what re-asserts
-        // Active on a live-FOREGROUND reconnect. Ahead of the push registrations
-        // (which await network RPCs and can stall) so a UI re-subscribe can't
-        // beat it to the wire. Runs here (after the RELAY.write above) so
-        // set_presence sees the live connection.
-        //
-        // Then register our push-pseudonym so this home can wake us when
-        // offline, and (re)register P→token with a gateway if we hold a token.
-        tokio::spawn(async {
-            if let Err(e) = crate::messaging::reassert_presence().await {
-                debug!("PRESENCE: reassert on connect failed: {e}");
+        // The relay treats a reconnect as Offline, so reassert presence first, ahead of push
+        // registration, which can stall.
+        session.spawn({
+            let session = session.clone();
+            async move {
+                if let Err(e) = crate::presence::reassert_presence(&session).await {
+                    debug!("PRESENCE: reassert on connect failed: {e}");
+                }
+                crate::push::request_registration();
             }
-            crate::push::request_registration();
         });
 
         Ok(handle)
     }
+}
 
-    /// Samples `conn.rtt()` (quinn's smoothed round-trip estimate) every
-    /// [`RTT_SAMPLE_INTERVAL`] and records it, until the connection closes.
-    /// Runs as a detached task spawned at connect; `close_reason()` turning
-    /// `Some` is the exit signal, so it needs no external cancellation.
-    async fn sample_rtt(&self, conn: &quinn::Connection) {
-        while conn.close_reason().is_none() {
-            let rtt_ms = conn.rtt().as_millis() as u64;
-            if let Err(e) = self.record_rtt(rtt_ms) {
-                warn!("relay {} rtt sample failed: {e}", node_short(&self.id));
+/// An authenticated connection to the home relay and the work that belongs to it. Its token is
+/// cancelled once the connection is lost.
+pub struct Session {
+    pub relay:        Relay,
+    pub conn:         quinn::Connection,
+    pub dht:          Arc<RelayDhtClient>,
+    /// The relay's DHT NodeId from the handshake, `None` when its DHT is disabled.
+    pub home_node_id: Option<[u8; 32]>,
+    /// UDP port of the relay's call TURN server.
+    pub turn_port:    Option<u16>,
+    pub cancel:       CancellationToken,
+    pub tasks:        TaskTracker,
+    parent:           TaskTracker,
+    runtime:          tokio::runtime::Handle,
+    /// Held by the outbox pass in progress.
+    pub(crate) reconciling: Mutex<()>,
+}
+
+impl Session {
+    pub fn new(
+        core: &Core, relay: Relay, conn: quinn::Connection, ipk: VerifyingKey,
+        home_node_id: Option<[u8; 32]>, turn_port: Option<u16>,
+    ) -> Self {
+        Self {
+            dht: Arc::new(RelayDhtClient::new(conn.clone(), ipk.to_bytes(), home_node_id)),
+            relay,
+            conn,
+            home_node_id,
+            turn_port,
+            cancel: core.cancel.child_token(),
+            tasks: TaskTracker::new(),
+            parent: core.tasks.clone(),
+            runtime: core.runtime.clone(),
+            reconciling: Mutex::new(()),
+        }
+    }
+
+    /// Runs `task` on the runtime, counted by this session and by its core.
+    pub fn spawn<F>(&self, task: F) -> JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.parent.spawn_on(self.tasks.track_future(task), &self.runtime)
+    }
+
+    /// Feeds the relays page graph and `fetch_best`'s latency term until the connection closes.
+    async fn sample_rtt(&self) {
+        while self.conn.close_reason().is_none() {
+            let rtt_ms = self.conn.rtt().as_millis() as u64;
+            if let Err(e) = self.relay.record_rtt(rtt_ms) {
+                warn!("relay {} rtt sample failed: {e}", node_short(&self.relay.id));
             }
             tokio::time::sleep(RTT_SAMPLE_INTERVAL).await;
         }
     }
 
-    /// Build and send a one-shot `CRelayPacket::DrainAuth` permit so this relay
-    /// can pull our offline-queue from the K-closest DHT homes on our behalf.
-    ///
-    /// The transcript binds (self_ipk, this_relay_id, timestamp); the same
-    /// signature is reusable across all K homes (no per-home identity in the
-    /// transcript) within the ±60s skew window. Part of the sticky-home flow.
+    /// Lets this relay pull our offline queue from the K closest homes. The transcript names no
+    /// home, so one signature serves all K within the ±60 s skew window.
     async fn send_drain_auth(&self, tx: &mut quinn::SendStream, ipk: VerifyingKey) -> Result<()> {
-        let timestamp = systime().as_millis() as u64;
-        let relay_node_id = NodeId::from_str(&self.id)
-            .map_err(|e| anyhow!("relay id {:?} not parseable as NodeId: {e:?}", self.id))?;
+        let timestamp = now_ms();
+        let relay_node_id = NodeId::from_str(&self.relay.id)
+            .map_err(|e| anyhow!("relay id {:?} not parseable as NodeId: {e:?}", self.relay.id))?;
         let self_ipk = ipk.to_bytes();
         let transcript = queue_fetch_signing_input(&self_ipk, &relay_node_id, timestamp);
         let sig = IdentitySigner::sign(&transcript)?;
@@ -331,16 +307,10 @@ impl Relay {
         Ok(())
     }
 
-    /// Batch-acknowledge a completed drain. The relay deletes the queue
-    /// entries it streamed and — when some came from remote homes —
-    /// replies with an `AckAuthRequest` on this stream's response half,
-    /// asking us to sign the home-side GC. The signed `AckAuth` reply
-    /// must go on a FRESH stream: the relay's dispatcher for this
-    /// stream is parked inside `handle_ack_drain` awaiting the parked
-    /// oneshot, so it can't read a reply from the same stream.
-    async fn ack_drain(
-        &self, conn: &quinn::Connection, ipk: VerifyingKey, drained: &HashSet<[u8; 16]>,
-    ) -> Result<()> {
+    /// The relay may answer with an `AckAuthRequest` for remote homes. The signed reply needs a
+    /// fresh stream: the relay's handler for this one is parked and cannot read it.
+    async fn ack_drain(&self, ipk: VerifyingKey, drained: &HashSet<[u8; 16]>) -> Result<()> {
+        let conn = &self.conn;
         let (mut tx, mut rx) = conn.open_bi().await?;
         CRelayPacket::AckDrain.send(&mut tx).await?;
         tx.finish()?;
@@ -364,21 +334,12 @@ impl Relay {
         Ok(())
     }
 
-    // TODO: make custom error type for relay handling and handle it, supporting io errors from
-    // send, unpack etc utils
     fn handle_err(&self, err: &ConnectionError) {
-        if !matches!(err, ConnectionError::LocallyClosed) {
-            _ = self.record_failure();
-        }
-        let mut guard = RELAY.write();
-        let current = guard.as_ref().and_then(|r| r.connection.as_ref()).map(|c| c.stable_id());
-        if current == self.connection.as_ref().map(|c| c.stable_id()) {
-            *guard = None;
-            drop(guard);
+        if core().retire(self) {
             ConnectionState::Disconnected.emit();
         }
 
-        error!("relay {} connection lost: {err}", node_short(&self.id));
+        error!("relay {} connection lost: {err}", node_short(&self.relay.id));
     }
 
     /// Used both on connect and by a platform background job. Draining and
@@ -389,28 +350,19 @@ impl Relay {
 
     async fn sync_incoming_inner(&self, ipk: VerifyingKey) -> Result<()> {
         let _guard = INBOX_SYNC.lock().await;
-        let conn = self.connection.as_ref().ok_or_else(|| anyhow!("no relay connection"))?;
+        let conn = &self.conn;
         let mut sync = InboxSync { connection: conn.clone(), completed: false };
-        if let Some(client) = self.dht_client.as_ref() {
-            // Welcome poll — awaited BEFORE the queue drain so a pairing
-            // Welcome is processed before the first application message
-            // that references its group is drained (a drained message
-            // from a not-yet-known sender would be dropped). Bounded so
-            // a dead DHT can't stall the drain.
-            match tokio::time::timeout(Duration::from_secs(15), poll_welcomes_once(client.clone()))
-                .await
-            {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
-                Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
-            }
+        // Poll Welcomes before the drain: a message for a group we have not joined yet would be
+        // dropped. Bounded so a dead DHT cannot stall the drain.
+        match tokio::time::timeout(Duration::from_secs(15), poll_welcomes_once(self.dht.clone()))
+            .await
+        {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => warn!("MLS: poll_welcomes failed: {e}"),
+            Err(_) => warn!("MLS: poll_welcomes timed out; draining anyway"),
         }
-        // Drain the offline queue. The relay streams every queued
-        // message back as individual `Deliver` frames on this stream's
-        // response half; processing is store-only. Per-message
-        // `DeliverAck` is the live-delivery contract — the drain is
-        // acknowledged as one batch via `AckDrain` once everything is
-        // durably stored.
+        // Queued messages arrive as `Deliver` frames on this stream. Unlike live delivery, the
+        // drain is acked as one batch via `AckDrain` once everything is stored.
         let mut previous = HashSet::new();
         for _ in 0..16 {
             let (mut tx, mut rx) = conn.open_bi().await?;
@@ -419,22 +371,19 @@ impl Relay {
             CRelayPacket::DrainQueue.send(&mut tx).await?;
             tx.finish()?;
 
-            // Every id streamed on this drain. The relay asks us to sign a
-            // deletion authorization over the ids it claims to have delivered;
-            // this is what that claim is checked against.
+            // The relay later asks us to sign deletion of the ids it claims it delivered; this set
+            // is what that claim is checked against.
             let mut drained: HashSet<[u8; 16]> = HashSet::new();
-            let mut failed = false;
             while let Some(packet) = read_relay_packet(&mut rx).await? {
                 match packet {
                     SRelayPacket::Deliver(msg) => {
                         let id = msg.id.0;
-                        match process_deliver(ipk, msg, self.dht_client.clone()).await {
+                        match process_deliver(ipk, msg, self.dht.as_ref()).await {
                             Ok(()) => {
                                 drained.insert(id);
                             },
                             Err(e) => {
-                                failed = true;
-                                warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.id));
+                                warn!("relay {} drain: retaining message for retry: {e}", node_short(&self.relay.id));
                             },
                         }
                     },
@@ -442,138 +391,89 @@ impl Relay {
                 }
             }
 
-            if failed { bail!("some queued messages could not be processed"); }
             if drained.is_empty() {
                 sync.completed = true;
                 return Ok(());
             }
             if drained == previous { bail!("relay did not acknowledge the previous drain"); }
-            info!("relay {}: drained {} queued message(s)", node_short(&self.id), drained.len());
-            self.ack_drain(conn, ipk, &drained).await?;
+            info!("relay {}: drained {} queued message(s)", node_short(&self.relay.id), drained.len());
+            self.ack_drain(ipk, &drained).await?;
             previous = drained;
         }
         bail!("more queued messages remain")
     }
 
-    /// Waits for incoming streams. Runs until the connection is lost.
-    async fn handle(&self, ipk: VerifyingKey) -> ConnectionError {
-        let conn = self.connection.as_ref().expect("handle called without active connection");
+    /// Runs until the connection is lost.
+    async fn handle(self: &Arc<Self>, ipk: VerifyingKey) -> ConnectionError {
+        let conn = &self.conn;
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
+        let _cancel_on_return = self.cancel.drop_guard_ref();
 
-        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
-        // Re-dispatch durably-queued outbox rows (enqueued while offline, or
-        // whose ack was lost) now that a live relay connection exists.
-        // Spawned so it never blocks the welcome-poll / drain / accept loop.
-        tokio::spawn(async { crate::delivery::reconcile().await });
-
-        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
-        // Re-use the production peer/5 dialer that `connect()` built
-        // before storing this Relay on the global `RELAY`. The dialer
-        // is shared (`Arc<RelayDhtClient>`) so the uniffi surface
-        // (`send_message`) and the background tasks below all dispatch
-        // over the same pool.
-        //
-        // The cancellation token is fired when the function returns
-        // (on connection loss) so the scheduler task exits cleanly.
-        // `_mls_cancel_drop_guard` keeps the cancel-on-drop alive
-        // through the rest of `handle()` — see line below.
-        let mls_cancel = CancellationToken::new();
-        let dht_client = self.dht_client.clone();
+        // Spawned so it never blocks the drain or the accept loop.
+        self.spawn({
+            let session = self.clone();
+            async move { crate::delivery::reconcile(&session).await }
+        });
 
         if let Err(e) = self.sync_incoming(ipk).await {
-            warn!("relay {} inbox sync failed: {e:#}", node_short(&self.id));
+            warn!("relay {} inbox sync failed: {e:#}", node_short(&self.relay.id));
             conn.close(0u32.into(), b"inbox-sync-failed");
             return ConnectionError::LocallyClosed;
         }
 
-        if let Some(client) = dht_client.as_ref() {
-            // Durable first-send retry: re-drive first-sends that deferred
-            // (peer had no published KP). Outbound-only, so it needn't gate the
-            // inbound drain or the Connected state — spawned (not awaited) so its
-            // DHT round-trip doesn't stretch the "Syncing…" window. Spawned HERE,
-            // after the welcome poll returned, so a Welcome that just paired us is
-            // still applied before we retry a first-send to that peer (no fork).
-            // ponytail: 15s cap matches poll_welcomes.
-            let client_for_retry = client.clone();
-            tokio::spawn(async move {
-                if tokio::time::timeout(
-                    Duration::from_secs(15),
-                    retry_pending_sends_once(client_for_retry),
-                )
+        // After the Welcome poll, so a Welcome that just paired us applies before the retry.
+        // Not awaited, so it does not stretch the Syncing window.
+        let client = self.dht.clone();
+        self.spawn(async move {
+            if tokio::time::timeout(Duration::from_secs(15), retry_pending_sends_once(client))
                 .await
                 .is_err()
-                {
-                    warn!("MLS: retry_pending_sends timed out");
-                }
-            });
+            {
+                warn!("MLS: retry_pending_sends timed out");
+            }
+        });
 
-            // After the drain, so a commit waiting in the queue is applied
-            // before we ask a committer again or take its place.
-            crate::groups::on_reconnect();
+        // After the drain, so a commit waiting in the queue is applied
+        // before we ask a committer again or take its place.
+        crate::groups::on_reconnect();
 
-            // Receive-side mirror: re-drive incomplete attachment pulls — HELD
-            // (sender may now be reachable) and ACTIVE (a transfer interrupted by
-            // a restart). Spawns per file_id; the DOWNLOADING guard dedups a
-            // racing user tap or a live pull.
-            tokio::spawn(crate::transfer::resume_incomplete_downloads());
-            crate::data::receipts::schedule();
+        self.spawn(crate::transfer::resume_incomplete_downloads());
+        crate::data::receipts::schedule();
 
-            // KP rotation scheduler — long-lived task, ticks every
-            // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
-            // `mls_cancel`.
-            let client_for_sched = client.clone();
-            let cancel_for_sched = mls_cancel.clone();
-            tokio::spawn(async move {
-                run_scheduler_loop(client_for_sched, cancel_for_sched).await;
-            });
-        }
+        self.spawn(run_scheduler_loop(self.dht.clone(), self.cancel.child_token()));
 
-        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
+        // After the drain, so stored profile updates apply first. It never gates inbox readiness.
+        self.spawn(crate::profile_sync::run(self.cancel.child_token()));
 
-        // Reconcile profile state after draining stored updates. The task shares
-        // the connection's cancellation token, and never gates inbox readiness.
-        tokio::spawn(crate::profile_sync::run(mls_cancel.clone()));
-        tokio::spawn(crate::profile_details_sync::run(mls_cancel.clone()));
-
-        // Offline backlog is in the local DB — synced and live. (A drain-setup
-        // failure returns above → Disconnected, so we never stick on Syncing.)
         ConnectionState::Connected.emit();
 
-        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
-
-        let relay_id = self.id.clone();
-
-        // Hold the drop guard for the duration of `handle()`. When
-        // `handle` returns (connection lost), the guard drops →
-        // `mls_cancel` fires → the scheduler task observes
-        // `cancelled().await` and exits cleanly.
-        let _mls_cancel_drop_guard = mls_cancel.drop_guard();
-
         loop {
-            let (mut send, mut recv) = ret_err!(conn.accept_bi().await);
+            let (mut send, mut recv) = tokio::select! {
+                accepted = conn.accept_bi() => match accepted {
+                    Ok(streams) => streams,
+                    Err(e) => return e,
+                },
+                _ = self.cancel.cancelled() => {
+                    conn.close(0u32.into(), b"shutdown");
+                    return ConnectionError::LocallyClosed;
+                },
+            };
 
             let permit = match semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    debug!("relay {} stream limit reached, dropping stream", node_short(&relay_id));
+                    debug!("relay {} stream limit reached, dropping stream", node_short(&self.relay.id));
                     continue;
                 },
             };
 
-            let relay_id = relay_id.clone();
-            // Clone the dialer Arc into the per-stream task so
-            // `handle_deliver` can drive `process_inbound_envelope` over
-            // the production wire (KP fetch on stale-group recreate,
-            // etc.) instead of the stub `NotWiredDhtClient`.
-            let dht_client_for_stream = self.dht_client.clone();
-            tokio::spawn(async move {
-                let _permit = permit; // dropped when stream task ends
+            let session = self.clone();
+            self.spawn(async move {
+                let _permit = permit;
                 while let Ok(packet) = SRelayPacket::unpack(&mut recv).await {
                     if let Err(err) = match packet {
                         SRelayPacket::Deliver(msg) => {
-                            handle_deliver(&mut send, ipk, msg, dht_client_for_stream.clone()).await
+                            handle_deliver(&mut send, ipk, msg, session.dht.as_ref()).await
                         },
                         SRelayPacket::Activity(eph) => {
                             handle_activity(ipk, eph);
@@ -594,647 +494,25 @@ impl Relay {
                             Ok(())
                         },
                     } {
-                        warn!("relay {} handle err: {err}", node_short(&relay_id));
+                        warn!("relay {} handle err: {err}", node_short(&session.relay.id));
                     }
                 }
             });
         }
     }
-
-    /// fetches public address
-    pub async fn public_addr(&self) -> Result<SocketAddr> {
-        let conn = self.connection.as_ref().ok_or(anyhow!("relay not connected"))?;
-        let (mut tx, mut rx) =
-            conn.open_bi().await.map_err(|e| anyhow!("failed to open stream: {e}"))?;
-
-        CRelayPacket::Query(QueryP::PubAddress).send(&mut tx).await?;
-
-        tx.finish()?;
-
-        match unpack(&mut rx).await.map_err(|e| anyhow!("failed to unpack packet: {e}"))? {
-            SRelayPacket::QueryResult(QueryResultP::PubAddress { addr }) => Ok(addr),
-            unknown => Err(anyhow!("got unknown response: {unknown:?}")),
-        }
-    }
 }
 
-/// Live-delivery entry point: process one relay-initiated `Deliver`,
-/// then ack on the stream — the relay's `try_deliver` waits on this
-/// ack before treating the message as delivered.
-async fn handle_deliver(
-    tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
+/// The relay treats the message as delivered only once this ack arrives.
+async fn handle_deliver<C: DhtClient>(
+    tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP, dht: &C,
 ) -> Result<()> {
-    process_deliver(ipk, msg, dht_client).await?;
+    process_deliver(ipk, msg, dht).await?;
     CRelayPacket::DeliverAck.send(tx).await?;
     Ok(())
 }
 
-/// Process an inbound ephemeral signal (presence/typing): verify it's addressed
-/// to us and authentically signed by a known contact, then surface it. Never
-/// stored — a forged or stranger signal is dropped silently.
-fn handle_activity(our_ipk: VerifyingKey, eph: common::proto::client_rel::ActivityP) {
-    if eph.to.as_slice() != our_ipk.as_bytes().as_slice() {
-        return;
-    }
-    let Ok(vk) = VerifyingKey::from_bytes(&eph.from.0) else { return };
-    let transcript = common::proto::client_rel::activity_sig_message(
-        &eph.to.0,
-        &eph.from.0,
-        &eph.group_id.0,
-        eph.activity,
-        eph.timestamp,
-    );
-    if vk.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&eph.sig.0)).is_err() {
-        return;
-    }
-    // Same standing as a message: someone in a group with us may show as
-    // typing in it, address book or not.
-    if !Contact::exists(&eph.from.0) && !Conversation::shares_a_chat_with(&eph.from.0) {
-        return;
-    }
-    // Translate the shared wire identity into our own conversation, and only
-    // accept a signal from an active member of that specific chat.
-    let Some(conversation) = Conversation::for_activity(&eph.group_id.0, &eph.from.0) else {
-        return;
-    };
-    crate::events::messaging::ActivityEv { conversation, peer: eph.from.0, activity: eph.activity }
-        .emit();
-}
-
-/// Surface a relay-asserted presence push (snapshot or delta). Relay-trusted
-/// (no sig — the relay is the presence authority), but we still drop entries
-/// for non-contacts as defense-in-depth.
-fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
-    use common::proto::client_rel::PresenceState;
-
-    use crate::platform::Presence;
-    for e in list {
-        if !Contact::exists(&e.who.0) {
-            continue;
-        }
-        // A contact coming online is the moment a held download can move:
-        // the sender we could not reach is reachable now.
-        if matches!(e.state, PresenceState::Online) {
-            crate::transfer::resume_for_peer(e.who.0);
-        }
-        let presence = match e.state {
-            PresenceState::Online => Presence::Online,
-            PresenceState::Idle { since } => Presence::Idle { since },
-            PresenceState::Offline { last_seen } => Presence::Offline { last_seen },
-        };
-        crate::events::messaging::PresenceEv { peer: e.who.0, presence }.emit();
-    }
-}
-
-/// Decode, decrypt, persist, and surface one delivered message.
-/// Stream-free so both delivery channels share it: the live path
-/// (`handle_deliver`, per-message ack) and the DrainQueue response
-/// stream (batch-acked via `AckDrain`). `Ok(())` means the message
-/// reached a terminal state (stored / buffered / correctly dropped);
-/// `Err` means it was dropped without effect.
-/// True if `payload` is an `MlsEnvelopeP::Welcome`. Pure → gate is testable.
-fn is_welcome_envelope(payload: &[u8]) -> bool {
-    matches!(
-        common::proto::mls_wire::MlsEnvelopeP::deser(payload),
-        Ok(common::proto::mls_wire::MlsEnvelopeP::Welcome(_)
-            | common::proto::mls_wire::MlsEnvelopeP::GroupWelcome { .. })
-    )
-}
-
-/// The dispatch's arrival time in seconds. `accepted_at_ms` is stamped by the
-/// origin relay and sits outside every signature, so it is only ever a hint
-/// bounded by our own clock — a home cannot date a message into the future to
-/// pin it at the top of a conversation.
-pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
-    (accepted_at_ms / 1_000).min(systime().as_secs())
-}
-
-/// The conversation an inbound envelope belongs to.
-///
-/// Resolved from the MLS group it arrived in. When that group isn't bound to a
-/// conversation yet — the peer founded it and we learned of it through their
-/// Welcome — the group's roster decides what to open, so a group whose Welcome
-/// we somehow missed still lands in a group chat instead of a DM.
-fn conversation_for_inbound(group_id: &[u8; 32], from: &[u8; 32]) -> anyhow::Result<[u8; 16]> {
-    if let Some(id) = Conversation::for_group(group_id) {
-        return Ok(id);
-    }
-    let provider = crate::mls::PromtuzMlsProvider::shared();
-    let group = crate::mls::MlsGroupHandle::load(&provider, group_id)
-        .map_err(|e| anyhow!("load group: {e}"))?
-        .ok_or_else(|| anyhow!("no local state for group {}", hex::encode(&group_id[..4])))?;
-    crate::messaging::home_for_group(&group, from)
-}
-
-/// Verify the sender's end-to-end dispatch signature. It covers `to`, `from`,
-/// `id` and the payload, so a relay can neither re-address a captured dispatch
-/// at us nor mint one under a contact's IPK.
-fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
-    let from = VerifyingKey::from_bytes(&msg.from).map_err(|e| anyhow!("bad sender key: {e}"))?;
-    let transcript = dispatch_sig_message(our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload);
-    from.verify_strict(&transcript, &ed25519_dalek::Signature::from_bytes(&msg.sig.0))
-        .map_err(|e| anyhow!("dispatch signature: {e}"))
-}
-
-/// The single application handler for live delivery, catch-up, and recovery.
-/// Call only after MLS has authenticated and authorized the plaintext at its epoch.
-pub(crate) fn receive_application_content(
-    conv: [u8; 16], author: [u8; 32], dispatch_id: [u8; 16], accepted_at_ms: u64, plaintext: &[u8],
-) -> Result<()> {
-    let payload = AppPayload::deser(plaintext);
-    if crate::groups::delete_pending(&conv)
-        && !matches!(
-            &payload,
-            Ok(AppPayload::GroupRequest(_)
-                | AppPayload::GroupWelcome { .. }
-                | AppPayload::GroupInvitation { .. })
-        )
-    {
-        return Ok(());
-    }
-    match payload {
-        Ok(AppPayload::GroupAdmins { .. }) => {},
-        // Content of any wire vintage: Post carries the quote target beside
-        // the body, pre-v12 payloads convert to the same pair. One persist
-        // and one receipt regardless of body kind.
-        Ok(
-            p @ (AppPayload::Post { .. }
-            | AppPayload::Text(..)
-            | AppPayload::Reply { .. }
-            | AppPayload::Image { .. }
-            | AppPayload::Attachment { .. }),
-        ) => {
-            let pair = match p {
-                AppPayload::Post { reply_to, body } => Some((reply_to, body)),
-                other => crate::messaging::legacy_body(other),
-            };
-            let Some((reply_to, body)) = pair else {
-                warn!("MESSAGE: content payload with no body from {}", hex::encode(&author[..4]));
-                bail!("bad content payload");
-            };
-            let did = dispatch_id;
-            let timestamp = accepted_at_secs(accepted_at_ms);
-            // Read off before the body moves into the persist.
-            let auto = match &body {
-                Body::Attachment { size, file_id, .. } => Some((*size, *file_id)),
-                _ => None,
-            };
-            let sticker = match &body {
-                Body::Sticker { pack, id, token, store, .. } => {
-                    Some(common::proto::sticker::StickerRef {
-                        pack:  *pack,
-                        id:    *id,
-                        token: *token,
-                        store: *store,
-                    })
-                },
-                _ => None,
-            };
-            match crate::messaging::save_inbound_body(
-                &conv, &author, &did, timestamp, reply_to, body,
-            ) {
-                Ok(Some((saved, content))) => {
-                    MessageEv::Received {
-                        id: saved.inner.id,
-                        conversation: conv,
-                        sender: author,
-                        content,
-                        timestamp,
-                    }
-                    .emit();
-                    info!("MESSAGE: received from {}", hex::encode(&author[..4]));
-                    // Event time was persisted with the incoming message.
-                    crate::data::receipts::schedule();
-                    let from = author;
-                    // Fetch the bytes without a tap only from a paired contact
-                    // over a trusted network; otherwise the UI drives the pull.
-                    // ponytail: on_wifi is hardcoded false until the platform
-                    // feeds real network state — no-op today, correct and ready.
-                    if let Some((size, file_id)) = auto {
-                        if crate::transfer::should_auto_download(&from, size, false) {
-                            crate::RUNTIME.spawn(async move {
-                                let _ = crate::transfer::download(file_id).await;
-                            });
-                        }
-                    }
-                    // A sticker is small and named by hash: fetch it now so
-                    // the chat opens on the picture, not on a fetch.
-                    if let Some(r) = sticker {
-                        crate::RUNTIME.spawn(async move {
-                            if let Err(e) = crate::stickers::fetch(&r).await {
-                                debug!("STICKERS: prefetch failed: {e:#}");
-                            }
-                        });
-                    }
-                },
-                // Relay redelivered a dispatch_id we already stored: no
-                // re-emit, but still Ok so the caller acks and the relay GCs.
-                Ok(None) => {
-                    debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&author[..4]));
-                },
-                Err(e) => {
-                    warn!("MESSAGE: failed to save incoming: {e}");
-                    bail!("save failed: {e}");
-                },
-            }
-        },
-        Ok(AppPayload::AttachmentSharing(offer)) => {
-            if let Err(e) = crate::transfer::sharing::receive(conv, author, offer) {
-                warn!("TRANSFER: sharing grant rejected: {e}");
-            }
-        },
-        Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
-            crate::data::receipts::receive(&conv, &author, payload)?;
-        },
-        Ok(
-            payload @ (AppPayload::Edit { .. }
-            | AppPayload::Revise { .. }
-            | AppPayload::Delete { .. }),
-        ) => {
-            crate::messaging::receive_message_mutation(&conv, &author, payload)?;
-        },
-        Ok(AppPayload::React { target, emoji, add }) => {
-            // Reactor is the MLS sender (`msg.from`) — attributed to its
-            // own IPK, so this is already group-correct.
-            let ts = accepted_at_secs(accepted_at_ms);
-            if crate::data::reaction::Reaction::apply(&conv, &target, &author, &emoji, add, ts) {
-                crate::events::messaging::ReactionEv {
-                    conversation: conv,
-                    dispatch_id: target,
-                    reactor: author,
-                    emoji,
-                    add,
-                }
-                .emit();
-            }
-        },
-        Ok(AppPayload::System(event)) => {
-            use common::proto::mls_wire::SystemEvent;
-
-            let ts = accepted_at_secs(accepted_at_ms);
-            let (code, actor, target) = crate::messaging::system_row(&event, author);
-            // A rename has no Commit behind it, so the event itself is
-            // the change. Membership events only narrate — the Commit
-            // is what actually moved the roster, and syncing from the
-            // MLS group after merging it is the authoritative path.
-            if let SystemEvent::Titled { title } = &event {
-                // Only a group has a shared name. Renaming a direct
-                // chat from the wire would let a peer relabel a DM,
-                // and did whenever a group was mis-homed into one.
-                let is_group = Conversation::get(&conv)
-                    .is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
-                if !is_group {
-                    warn!("GROUP: ignored a rename aimed at a direct chat");
-                } else {
-                    Conversation::set_title(&conv, title)?;
-                }
-            }
-            // Someone joined after us, so they never heard the
-            // introduction we made on our own way in. Say it again,
-            // to them alone.
-            if let SystemEvent::Added { who } = &event {
-                if who.0
-                    != crate::data::identity::Identity::get().map(|i| i.ipk()).unwrap_or_default()
-                {
-                    crate::messaging::introduce_ourselves_to(conv, who.0);
-                }
-            }
-            match Message::save_system(conv, actor, &dispatch_id, code, &target, ts, false) {
-                Ok(Some(row)) => MessageEv::Received {
-                    id:           row.inner.id,
-                    conversation: conv,
-                    sender:       actor,
-                    content:      target,
-                    timestamp:    ts,
-                }
-                .emit(),
-                Ok(None) => debug!("GROUP: duplicate system event, already stored"),
-                Err(e) => return Err(e),
-            }
-        },
-        Ok(AppPayload::Profile { name }) => {
-            // Their claim about themselves, kept apart from the address
-            // book so it can never overwrite a name we chose. Stored,
-            // never shown as a message — nobody said anything.
-            crate::data::peer_name::put(&author, &name)?;
-        },
-        Ok(
-            payload @ (AppPayload::ProfileDetails { .. }
-            | AppPayload::ProfileDetailsSync { .. }
-            | AppPayload::ProfileDetailsAck { .. }),
-        ) => {
-            crate::profile_details_sync::receive(conv, author, payload);
-        },
-        Ok(AppPayload::GroupPicture { revision, avif }) => {
-            if let Err(e) = crate::data::group_picture::receive_authorized(conv, revision, avif) {
-                log::warn!("GROUP: picture rejected: {e}");
-            }
-        },
-        Ok(
-            payload @ (AppPayload::Avatar { .. }
-            | AppPayload::AvatarSync { .. }
-            | AppPayload::AvatarAck { .. }),
-        ) => {
-            crate::profile_sync::receive(conv, author, payload);
-        },
-        Ok(AppPayload::Unpaired) => crate::messaging::unpaired(conv, author),
-        Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
-        Ok(AppPayload::GroupInvitation { who, kp_ref, welcome, history }) => {
-            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, Some(history))?;
-        },
-        Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
-            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, None)?;
-        },
-        Ok(AppPayload::PairAck) => {
-            // Proof-of-pair — its whole job was the mark_paired above.
-            info!("PAIR: confirmed by {}", hex::encode(&author[..4]));
-            // The pair now works both ways, and they hold our name from
-            // the invite: our picture is the one thing left to show them.
-            crate::messaging::introduce_avatar(conv);
-        },
-        Ok(AppPayload::P2pOffer {
-            session,
-            in_reply_to,
-            expires_at_ms,
-            candidates,
-            relay,
-            token,
-            disco_key,
-        }) => {
-            // Candidate offer for a direct connection — hand to the
-            // P2P layer (routed to the waiting session), never stored.
-            info!(
-                "P2P[{}]: received offer — {} cands",
-                hex::encode(&author[..4]),
-                candidates.len()
-            );
-            crate::p2p::deliver_offer(
-                author,
-                crate::p2p::Offer {
-                    session,
-                    in_reply_to,
-                    expires_at_ms,
-                    candidates,
-                    relay,
-                    token,
-                    disco_key,
-                },
-            );
-        },
-        Ok(AppPayload::P2p { .. }) => {
-            // A sender this old cannot read our answer, so there is
-            // nothing to do with its offer but let it go.
-            debug!("P2P[{}]: legacy offer ignored", hex::encode(&author[..4]));
-        },
-        Ok(AppPayload::FileWant { file_id }) => {
-            // Reverse-wake control message — routed, never stored. The push
-            // wake already revived us; bring the P2P listener up so the
-            // receiver's retry-dial can land (they drive the connect).
-            info!("P2P: FileWant received from {}", hex::encode(&author[..4]));
-            crate::transfer::on_file_want(author, file_id);
-        },
-        Ok(AppPayload::Call(signal)) => {
-            // Call signaling — routed to the call engine, never stored.
-            // Only the person in the direct chat can be on the call.
-            crate::call::on_signal(author, conv, signal);
-        },
-        Err(e) => {
-            warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&author[..4]));
-            // The authenticated ciphertext is already consumed. A newer
-            // app may add a control variant we do not understand yet;
-            // discard it without tearing down the relay connection.
-        },
-    }
-    Ok(())
-}
-
-async fn process_deliver(
-    our_ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
-) -> Result<()> {
-    // Dropped envelopes are acked, not failed: an `Err` here is no ack, which
-    // the relay reads as a dead connection and evicts us on — so one junk
-    // dispatch from any stranger would take us off the live map — and a
-    // queued one would be redelivered forever.
-    if let Err(e) = verify_dispatch_sig(&our_ipk, &msg) {
-        warn!("MESSAGE: rejected unsigned/forged dispatch from {}: {e}", hex::encode(&msg.from[..4]));
-        return Ok(());
-    }
-
-    // Already decrypted on an earlier connection? A different home is
-    // redelivering. Ack (Ok → relay GCs) but NEVER re-decrypt: the ratchet
-    // key is spent and openmls would SecretReuseError. Outer-keyed + pre-
-    // decrypt, so it covers text, control, and welcome alike.
-    if crate::data::seen::Seen::contains(&msg.from, &msg.id.0) {
-        return Ok(());
-    }
-
-    // The wire envelope is `MlsEnvelopeP` (postcard-encoded), so we
-    // hand off to `api::messaging::process_inbound_envelope` rather
-    // than the v2 shared-key decrypt.
-    //
-    // Drop Application envelopes from senders we have no standing with. A
-    // Welcome from a stranger is a legit first-pair — let it reach the invite
-    // gate downstream.
-    //
-    // Sharing a group counts, not just the address book. Otherwise a group of
-    // three where two members have never paired half-works: each can hear
-    // whoever invited them and neither can hear the other, with no error on
-    // either side. Membership changes ride this same path, so the silence
-    // would eventually strand them at an old epoch too.
-    if !is_welcome_envelope(&msg.payload)
-        && !Contact::exists(&msg.from)
-        && !Conversation::shares_a_chat_with(&msg.from)
-    {
-        info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
-        return Ok(());
-    }
-
-    // Use the production peer/5 dialer that the connection-time wiring
-    // in `Relay::connect` attached to the global `RELAY`. The receive
-    // path's MLS handling
-    // (`process_inbound_envelope`) needs a `DhtClient` for completeness
-    // even though today's Welcome / Application receive paths don't
-    // dial back to the DHT — future stale-group recreate or KP-rotation
-    // hooks will. Falling back to `NotWiredDhtClient` only when the
-    // dialer wasn't built (PEER_IDENTITY missing at connect time);
-    // surfaced via existing logging.
-    let provider = crate::mls::PromtuzMlsProvider::shared();
-    let stash_db = stash_db_handle();
-    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
-    let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
-    let result = match dht_client {
-        Some(client) => {
-            let ctx = crate::messaging::MlsContext {
-                provider: &provider,
-                stash:    &stash,
-                buffer:   &buffer,
-                dht:      client.as_ref(),
-            };
-            crate::messaging::process_inbound_envelope(
-                &ctx,
-                *msg.from,
-                &msg.payload,
-                msg.accepted_at_ms,
-                msg.id.0,
-            )
-            .await
-        },
-        None => {
-            let dht = crate::quic::dht_client::NotWiredDhtClient;
-            let ctx = crate::messaging::MlsContext {
-                provider: &provider,
-                stash:    &stash,
-                buffer:   &buffer,
-                dht:      &dht,
-            };
-            crate::messaging::process_inbound_envelope(
-                &ctx,
-                *msg.from,
-                &msg.payload,
-                msg.accepted_at_ms,
-                msg.id.0,
-            )
-            .await
-        },
-    };
-
-    match result {
-        Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id, author })) => {
-            // Which chat this belongs to. The envelope names its MLS group;
-            // the conversation is what history is keyed on, and the two are
-            // deliberately not the same thing — see `data::conversation`.
-            let conv = match conversation_for_inbound(&group_id, &msg.from) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("MESSAGE: cannot resolve conversation for inbound: {e}");
-                    bail!("no conversation for inbound envelope");
-                },
-            };
-            // Decrypt succeeded → ratchet advanced. Record now (before the
-            // payload sub-match) so any redelivery is caught pre-decrypt,
-            // even if a downstream save fails — the ratchet key is spent
-            // either way.
-            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
-            // Proof of pair (PAIRING.md): a decryptable inbound message means
-            // the group works, so a PENDING contact is now confirmed. No-op if
-            // already paired. Fires for PairAck and any real message alike.
-            Contact::mark_paired(&msg.from);
-            receive_application_content(conv, author, msg.id.0, msg.accepted_at_ms, &plaintext)?;
-        },
-        Ok(Some(crate::messaging::InboundDecoded::Welcome)) => {
-            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
-            info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
-            // Accepting the welcome built the group → prove it works back to
-            // the inviter so their contact flips PENDING → PAIRED. A request
-            // waits for the user to accept it.
-            if !crate::requests::is_request(&msg.from) {
-                crate::messaging::confirm_pair(*msg.from);
-            }
-        },
-        Ok(Some(crate::messaging::InboundDecoded::WelcomeDropped)) => {
-            // Permanent gate rejection: dedup and ack so one poisoned Welcome
-            // cannot block the offline drain. Do not reply to the sender.
-            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
-        },
-        Ok(Some(crate::messaging::InboundDecoded::WelcomeRejected { sender_ipk, reason })) => {
-            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
-            warn!("PAIR: could not accept welcome from {}; declining", hex::encode(&msg.from[..4]));
-            crate::RUNTIME.spawn(async move {
-                if let Err(e) = crate::messaging::send_pair_decline(sender_ipk, reason).await {
-                    warn!("PAIR: decline send failed: {e}");
-                }
-            });
-        },
-        Ok(Some(crate::messaging::InboundDecoded::PairDeclined)) => {
-            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
-            // Already applied (contact REJECTED, messages failed) — just ack.
-        },
-        Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {
-            // Buffered for a future epoch / staged commit merged.
-            // Terminal-good: the caller acks so the relay GCs the entry.
-        },
-        Ok(Some(crate::messaging::InboundDecoded::ApplicationNoGroup { .. })) => {
-            // No local group state (post-restore): the ciphertext is
-            // unrecoverable, so ack and let the relay GC it — refusing to
-            // ack meant redelivery forever. messaging already fired the
-            // re-establishment toward the (known-contact) sender.
-            warn!(
-                "MESSAGE: dropped message for dead group from {}; re-establishment fired",
-                hex::encode(&msg.from[..4])
-            );
-        },
-        Ok(Some(crate::messaging::InboundDecoded::ApplicationStale)) => {
-            // Ack stale-epoch envelopes so the relay GCs them.
-            // Previously this `bail`ed without ack which made
-            // the relay redeliver indefinitely (queue grows without
-            // bound, CPU burns on every redelivery decoding the same
-            // doomed envelope). The recipient cannot recover state for
-            // a stale epoch — openmls only retains a small past-epoch
-            // key window — so re-delivery is hopeless, and an explicit
-            // ack is the correct response.
-            warn!("MESSAGE: stale-epoch envelope from {}; dropping", hex::encode(&msg.from[..4]));
-        },
-        Ok(Some(crate::messaging::InboundDecoded::ApplicationUndecryptable)) => {
-            // Sender-ratchet secret is permanently unavailable. Returning Ok
-            // lets live delivery and queue draining acknowledge this envelope.
-        },
-        Ok(None) => {
-            // Currently unreachable — process_inbound_envelope only
-            // returns None for the protocol-mismatch path, which
-            // never fires in production.
-            bail!("no inbound action");
-        },
-        Err(e) => {
-            warn!(
-                "MESSAGE: process_inbound_envelope failed from {}: {e}",
-                hex::encode(&msg.from[..4])
-            );
-            bail!("process failed: {e}");
-        },
-    }
-
-    Ok(())
-}
-
-/// Handle a relay-issued `SRelayPacket::AckAuthRequest`.
-///
-/// The relay asks us (the client) to sign a `QueueFetchAck`
-/// transcript over the union of dispatch ids it just drained from the
-/// K home relays. We sign with the long-term identity key
-/// ([`IdentitySigner::sign`]) over
-/// [`queue_fetch_ack_signing_input`] and reply with a
-/// `CRelayPacket::AckAuth { sig, timestamp }`. The relay then fans the
-/// signed pair out as `QueueFetchAck` to each home so the home-side
-/// `cf_dht_queue` entries get GC'd.
-///
-/// **`requester_relay_id` binding**: the relay supplies its own NodeId
-/// via `requester_relay_id`; we sign that value verbatim into the
-/// transcript. The home cross-checks the field
-/// against the connection's authenticated peer id when handling the
-/// resulting `QueueFetchAck`, so a captured ack can no longer be
-/// redirected to a different home via a different relay (cross-relay
-/// replay defense). Libcore neither validates nor rewrites the
-/// supplied id — we trust the relay we authenticated to to provide
-/// its own identity correctly; the home does the cross-check.
-///
-/// **Why we trust `suggested_timestamp`** rather than reading our own
-/// clock: the relay's clock is what matters for the home-side skew
-/// check (the homes verify against the timestamp embedded in the
-/// signed transcript). Using `suggested_timestamp` saves a `systime()`
-/// call and avoids a redundant clock-drift hazard.
-///
-/// **Length bound**: we silently drop the request if
-/// `delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS`. The home-side
-/// verifier would reject it anyway (`QueueFetchAck::verify` returns
-/// `TooManyIds` past the cap); failing here saves the round trip.
-///
-/// **Scope**: `drained` is the set of ids this connection actually
-/// streamed to us. The signature authorises permanent deletion at every
-/// home, so we only ever produce one for messages we hold — a relay
-/// cannot obtain an authorization for entries it never delivered. The
-/// request is only ever legitimate as the reply to our own `AckDrain`
-/// (`relay/src/quic/handler/client/events/drain.rs`), so an unsolicited
-/// one has an empty `drained` and is refused.
+/// The signature authorises permanent deletion at every home, so it is only given for ids this
+/// connection streamed. An unsolicited request has an empty `drained` and is refused.
 async fn handle_ack_auth_request(
     tx: &mut SendStream, ipk: VerifyingKey, requester_relay_id: NodeId,
     delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64, drained: &HashSet<[u8; 16]>,
@@ -1268,312 +546,35 @@ async fn handle_ack_auth_request(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// MLS / DHT-RPC dialer wiring
-// ---------------------------------------------------------------------------
-
-/// Build the production [`RelayDhtClient`] from the current connection
-/// state. Dials nothing — it rides the already-authenticated home `relay/5`
-/// connection. It needs only the connection, our IPK, and the home's
-/// DHT NodeId (learned from the handshake, for welcome fetch/ack
-/// signatures). Signing goes through the global `IdentitySigner`.
-///
-/// Returns `Err` if the connection isn't established yet; the caller
-/// logs and skips the MLS background work.
-fn build_relay_dht_client(relay: &Relay, ipk: VerifyingKey) -> Result<Arc<RelayDhtClient>> {
-    let conn =
-        relay.connection.clone().ok_or_else(|| anyhow!("relay connection not established"))?;
-    Ok(Arc::new(RelayDhtClient::new(conn, ipk.to_bytes(), relay.home_node_id)))
-}
-
-/// One-shot Welcome poll on reconnect. Builds an `MlsContext` against
-/// fresh DB handles and the supplied dialer; runs
-/// [`crate::messaging::poll_welcomes`] once.
 async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
     let provider = crate::mls::PromtuzMlsProvider::shared();
-    let stash_db = stash_db_handle();
+    let stash_db = core().db.mls();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
     let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
-    let ctx = crate::messaging::MlsContext {
+    let ctx = crate::messaging::session::MlsContext {
         provider: &provider,
         stash:    &stash,
         buffer:   &buffer,
         dht:      client.as_ref(),
     };
-    let count = crate::messaging::poll_welcomes(&ctx).await?;
+    let count = crate::messaging::welcome::poll_welcomes(&ctx).await?;
     if count > 0 {
         info!("MLS: poll_welcomes processed {count} welcome(s)");
     }
     Ok(())
 }
 
-/// Reconnect hook for durable first-send: builds a production
-/// [`crate::messaging::MlsContext`] (fresh DB handles + the connection's
-/// dialer, mirroring `poll_welcomes_once`) and re-drives every still-
-/// pending first-send whose contact has no group yet — the ones deferred
-/// earlier because the peer had no published KeyPackage.
+/// Re-drives pending first-sends deferred because the peer had no published KeyPackage.
 pub(crate) async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
     let provider = crate::mls::PromtuzMlsProvider::shared();
-    let stash_db = stash_db_handle();
+    let stash_db = core().db.mls();
     let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
     let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
-    let ctx = crate::messaging::MlsContext {
+    let ctx = crate::messaging::session::MlsContext {
         provider: &provider,
         stash:    &stash,
         buffer:   &buffer,
         dht:      client.as_ref(),
     };
-    crate::messaging::retry_pending_sends(&ctx).await;
-}
-
-/// KP-rotation scheduler loop — production wiring.
-///
-/// Loads the user's identity + signing key from the libcore globals,
-/// then delegates to [`run_scheduler_inner`]. Errors loading the
-/// identity exit the loop early (logged); the inner loop owns the
-/// cancellation contract.
-async fn run_scheduler_loop(client: Arc<RelayDhtClient>, cancel: CancellationToken) {
-    let provider = crate::mls::PromtuzMlsProvider::shared();
-    let stash_db = stash_db_handle();
-    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
-    let our_ipk_bytes = match crate::data::identity::Identity::get() {
-        Some(i) => i.ipk(),
-        None => {
-            warn!("MLS scheduler: identity unavailable; loop exiting");
-            return;
-        },
-    };
-    let signing = match crate::data::identity::secret_key_signing(&our_ipk_bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("MLS scheduler: signing key unavailable: {e}; loop exiting");
-            return;
-        },
-    };
-    // Republish our KP to this relay on connect (idempotent) — fixes the case where
-    // the relay lost our KP but our local stash is still full so `should_refill` never fires.
-    crate::mls::scheduler::ensure_kp_published(&provider, &stash, &signing, client.as_ref()).await;
-    run_scheduler_inner(
-        &provider,
-        &stash,
-        &signing,
-        client.as_ref(),
-        Duration::from_millis(KP_SCHEDULER_TICK_MS),
-        cancel,
-    )
-    .await;
-}
-
-/// KP-rotation scheduler — tickable inner loop. Runs
-/// [`crate::mls::scheduler::run_once`] immediately, then every
-/// `tick_interval`. Exits cleanly when `cancel` is fired.
-///
-/// Errors from `run_once` are logged at WARN; the loop continues
-/// (transient publish failures shouldn't tear the scheduler down —
-/// the next tick will retry).
-///
-/// Generic over [`crate::quic::dht_client::DhtClient`] so unit tests
-/// can drive it with the in-process `FakeDhtClient`.
-async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
-    provider: &crate::mls::PromtuzMlsProvider, stash: &crate::mls::KeyPackageStash,
-    signing: &ed25519_dalek::SigningKey, dht: &C, tick_interval: Duration,
-    cancel: CancellationToken,
-) {
-    loop {
-        let now_ms = systime().as_millis() as u64;
-        match crate::mls::scheduler::run_once(provider, stash, signing, dht, now_ms).await {
-            Ok(crate::mls::scheduler::SchedulerOutcome::NoOp) => {},
-            Ok(other) => {
-                debug!("MLS scheduler: {other:?}");
-            },
-            Err(e) => {
-                warn!("MLS scheduler tick failed: {e}");
-            },
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                debug!("MLS scheduler: cancelled, exiting");
-                return;
-            }
-            _ = tokio::time::sleep(tick_interval) => {}
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    // ----- KP scheduler tokio task tests -----------------------------
-
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use ed25519_dalek::SigningKey;
-    use parking_lot::Mutex;
-    use rusqlite::Connection;
-    use tokio_util::sync::CancellationToken;
-
-    use crate::db::mls::apply_mls_migrations;
-    use crate::mls::KeyPackageStash;
-    use crate::mls::PromtuzMlsProvider;
-    use crate::quic::dht_client::tests::FakeDhtClient;
-
-    #[tokio::test]
-    async fn drain_only_completes_at_a_frame_boundary() {
-        use common::proto::client_rel::DeliverP;
-        use common::proto::client_rel::SRelayPacket;
-        use common::proto::pack::Packer;
-        let packet = SRelayPacket::Deliver(DeliverP {
-            id: [1; 16].into(), from: [2; 32].into(), payload: vec![3; 16].into(),
-            sig: [0; 64].into(), accepted_at_ms: 100, ttl_ms: 0,
-        });
-        let frame = packet.pack().unwrap();
-        let mut stream = frame.as_slice();
-        assert_eq!(super::read_relay_packet(&mut stream).await.unwrap(), Some(packet));
-        assert!(super::read_relay_packet(&mut stream).await.unwrap().is_none());
-        for length in 1..frame.len() {
-            assert!(super::read_relay_packet(&mut &frame[..length]).await.is_err());
-        }
-    }
-
-    fn fresh_mls_conn() -> Arc<Mutex<Connection>> {
-        let mut conn = Connection::open_in_memory().expect("in-memory db");
-        apply_mls_migrations(&mut conn);
-        Arc::new(Mutex::new(conn))
-    }
-
-    /// Scheduler runs an immediate tick on entry, then ticks at
-    /// `tick_interval`. With a fresh stash, the first tick refills via
-    /// the dialer; we observe the recorded batch and assert the cadence
-    /// drives a second tick after the configured interval.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn scheduler_loop_ticks_at_configured_interval() {
-        let conn = fresh_mls_conn();
-        let provider = PromtuzMlsProvider::new(conn.clone());
-        let stash = KeyPackageStash::new(conn);
-        let signing = SigningKey::from_bytes(&[0xAA; 32]);
-        let dht = FakeDhtClient::new_arc();
-        let cancel = CancellationToken::new();
-
-        let dht_for_loop = dht.clone();
-        let cancel_for_loop = cancel.clone();
-        let join = tokio::spawn(async move {
-            super::run_scheduler_inner(
-                &provider,
-                &stash,
-                &signing,
-                dht_for_loop.as_ref(),
-                Duration::from_millis(60_000),
-                cancel_for_loop,
-            )
-            .await;
-        });
-
-        // First tick refills (empty stash → publishes once).
-        // Yield a few times to let the scheduler's first run_once
-        // resolve.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(dht.published_kp_batches.lock().len(), 1, "first tick publishes");
-
-        // Advance the simulated clock past the cadence; the next
-        // scheduled tick should fire and (because the stash is now
-        // full) be a NoOp — but no additional publish. Verify cadence
-        // by waiting one tick.
-        tokio::time::advance(Duration::from_millis(60_001)).await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        // Stash is full; second tick is NoOp; no new batch published.
-        assert_eq!(dht.published_kp_batches.lock().len(), 1, "healthy-stash tick is NoOp");
-
-        // Cancel and confirm the loop exits.
-        cancel.cancel();
-        // Give it a chance to observe cancel + return.
-        tokio::time::advance(Duration::from_millis(1)).await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), join)
-            .await
-            .expect("scheduler exits within 1s of cancel");
-    }
-}
-
-#[cfg(test)]
-mod gate_tests {
-    use common::proto::mls_wire::MlsEnvelopeP;
-    use common::proto::mls_wire::WelcomeEnvelopeP;
-    use common::proto::pack::Packer;
-    use ed25519_dalek::SigningKey;
-
-    use super::*;
-
-    #[test]
-    fn welcome_envelope_bypasses_contact_gate() {
-        // A garbage / non-Welcome payload must stay gated (returns false).
-        assert!(!is_welcome_envelope(b"not an envelope"), "garbage must stay gated");
-        // A real Welcome envelope must be recognized so it bypasses the gate.
-        let env = WelcomeEnvelopeP {
-            version:       0,
-            group_id:      [0u8; 32].into(),
-            sender_ipk:    [0u8; 32].into(),
-            recipient_ipk: [0u8; 32].into(),
-            welcome_blob:  common::types::bytes::ByteVec(vec![9, 9, 9]),
-            kp_ref_used:   [0u8; 32].into(),
-            sender_sig:    [0u8; 64].into(),
-            pairing:       None,
-        };
-        let bytes = MlsEnvelopeP::Welcome(env).ser().expect("ser");
-        assert!(is_welcome_envelope(&bytes), "a Welcome envelope must bypass the contact gate");
-    }
-
-    fn signed_deliver(sender: &SigningKey, to: &VerifyingKey, payload: &[u8]) -> DeliverP {
-        use ed25519_dalek::Signer;
-        let from = sender.verifying_key().to_bytes();
-        let id = [7u8; 16];
-        let sig = sender
-            .sign(&dispatch_sig_message(to.as_bytes(), &from, &id, payload))
-            .to_bytes();
-        DeliverP {
-            id:             id.into(),
-            from:           from.into(),
-            payload:        payload.to_vec().into(),
-            sig:            sig.into(),
-            accepted_at_ms: 0,
-            ttl_ms:         0,
-        }
-    }
-
-    #[test]
-    fn dispatch_sig_binds_sender_recipient_and_payload() {
-        let sender = SigningKey::from_bytes(&[0x11; 32]);
-        let me = SigningKey::from_bytes(&[0x22; 32]).verifying_key();
-        let someone_else = SigningKey::from_bytes(&[0x33; 32]).verifying_key();
-
-        let msg = signed_deliver(&sender, &me, b"envelope");
-        verify_dispatch_sig(&me, &msg).expect("own dispatch verifies");
-
-        // A dispatch addressed to someone else, replayed at us.
-        assert!(verify_dispatch_sig(&someone_else, &msg).is_err());
-
-        // Relay-rewritten payload.
-        let mut tampered = msg.clone();
-        tampered.payload = b"other".to_vec().into();
-        assert!(verify_dispatch_sig(&me, &tampered).is_err());
-
-        // Relay-minted dispatch attributed to a contact.
-        let mut forged = msg.clone();
-        forged.from = SigningKey::from_bytes(&[0x44; 32]).verifying_key().to_bytes().into();
-        assert!(verify_dispatch_sig(&me, &forged).is_err());
-    }
-
-    #[test]
-    fn accepted_at_is_capped_at_the_local_clock() {
-        let now = systime().as_secs();
-        assert_eq!(accepted_at_secs(1_000_000), 1_000);
-        assert_eq!(accepted_at_secs(u64::MAX), now);
-    }
+    crate::messaging::send::retry_pending_sends(&ctx).await;
 }

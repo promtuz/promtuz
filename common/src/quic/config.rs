@@ -15,28 +15,44 @@ use quinn::ServerConfig as QuinnServerConfig;
 use quinn::TransportConfig;
 use quinn::VarInt;
 use quinn::crypto::rustls::QuicServerConfig;
+#[cfg(feature = "crypto")]
+use rustls::DigitallySignedStruct;
+#[cfg(feature = "crypto")]
+use rustls::DistinguishedName;
 use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
+#[cfg(feature = "crypto")]
+use rustls::SignatureScheme;
+#[cfg(feature = "crypto")]
+use rustls::client::danger::HandshakeSignatureValid;
+#[cfg(feature = "crypto")]
+use rustls::client::danger::ServerCertVerified;
+#[cfg(feature = "crypto")]
+use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto::CryptoProvider;
+#[cfg(feature = "crypto")]
+use rustls::pki_types::CertificateDer;
+#[cfg(feature = "crypto")]
+use rustls::pki_types::ServerName;
+#[cfg(feature = "crypto")]
+use rustls::pki_types::UnixTime;
 #[cfg(feature = "crypto")]
 use rustls::server::ClientHello;
 #[cfg(feature = "crypto")]
 use rustls::server::ResolvesServerCert;
 #[cfg(feature = "crypto")]
+use rustls::server::danger::ClientCertVerified;
+#[cfg(feature = "crypto")]
+use rustls::server::danger::ClientCertVerifier;
+#[cfg(feature = "crypto")]
 use rustls::sign::CertifiedKey;
 
-/// QUIC idle timeout, applied on both ends. Foreground clients send keepalives;
-/// backgrounded mobile apps freeze and stop doing so, so this bounds zombie
-/// presence and pushes delivery onto the offline queue quickly.
+/// Applied on both ends. A backgrounded phone freezes and stops its keepalives, so this bounds
+/// zombie presence and moves delivery to the offline queue quickly.
 pub const IDLE_TIMEOUT_SECS: u64 = 45;
 
-/// Defaults applied to every server-side QUIC connection. Caps connection
-/// lifetime and per-connection stream budget so one misbehaving peer cannot
-/// consume unbounded resources.
-///
-/// Keepalive lives on the client (see `default_client_transport`); a server
-/// pinging every idle Android client would multiply idle traffic and battery
-/// cost without buying anything — the idle timeout already evicts dead peers.
+/// No server keepalive: pinging every idle phone costs battery, and the idle timeout already
+/// evicts dead peers.
 fn default_server_transport() -> TransportConfig {
     let mut tc = TransportConfig::default();
     tc.max_idle_timeout(Some(
@@ -47,9 +63,8 @@ fn default_server_transport() -> TransportConfig {
     tc
 }
 
-/// Outbound-connection defaults. Keepalive every 10 s refreshes the peer's
-/// idle timer (and NAT binding) so a legitimately quiet client is not evicted.
-fn default_client_transport() -> TransportConfig {
+/// The 10 s keepalive refreshes the peer's idle timer and the NAT binding of a quiet client.
+pub fn default_client_transport() -> TransportConfig {
     let mut tc = TransportConfig::default();
     tc.max_idle_timeout(Some(
         IdleTimeout::try_from(Duration::from_secs(IDLE_TIMEOUT_SECS)).expect("valid IdleTimeout"),
@@ -87,60 +102,6 @@ pub fn load_root_ca(path: &PathBuf) -> Result<rustls::RootCertStore> {
     load_root_ca_bytes(&bytes)
 }
 
-/// Builds a QUIC server configuration using a TLS certificate, private key,
-/// and a list of ALPN protocols the server is willing to accept.
-///
-/// This function loads the TLS material from disk, constructs a
-/// `rustls::ServerConfig`, attaches the provided ALPN protocol list,
-/// and converts it into a `quinn::ServerConfig` suitable for creating
-/// a QUIC endpoint.
-///
-/// ## Parameters
-///
-/// * `cert_path`  
-///   Filesystem path to a PEM-encoded X.509 certificate chain.
-///
-/// * `key_path`  
-///   Filesystem path to a PEM-encoded private key corresponding to the certificate.
-///
-/// * `alpn_protocols`  
-///   A static list of application protocols (ALPN) this server is
-///   willing to negotiate.  
-///   Only connections offering one of these protocols will be accepted.
-///
-/// ## Returns
-///
-/// Returns a fully initialized [`quinn::ServerConfig`] wrapped in an
-/// application-specific `QuinnServerConfig` type (or as defined in your
-/// codebase).  
-/// This configuration can be passed to `Endpoint::server` to create a
-/// listening QUIC endpoint.
-///
-/// ## Errors
-///
-/// Returns an error if:
-/// - certificate or key files cannot be read or parsed
-/// - TLS configuration cannot be constructed (e.g., invalid key format)
-/// - ALPN configuration is invalid for the TLS backend
-///
-/// ## Example
-///
-/// ```ignore
-/// let cfg = build_server_cfg(
-///     Path::new("cert/server.crt"),
-///     Path::new("cert/server.key"),
-///     &[ProtoRole::Resolver, ProtoRole::Client],
-/// )?;
-/// let endpoint = quinn::Endpoint::server(cfg, "0.0.0.0:4433".parse()?)?;
-/// ```
-///
-/// ## Notes
-///
-/// * ALPN determines *what roles* this server is willing to accept, but
-///   the **dialer** decides the actual role of a connection by choosing
-///   the ALPN it offers during the handshake.
-/// * Only inbound connections use this configuration. Outbound connections
-///   must use a separate client configuration with a single ALPN.
 pub fn build_server_cfg(
     cert_path: &Path,
     key_path: &Path,
@@ -157,11 +118,8 @@ pub fn build_server_cfg(
 
     let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or(anyhow!("No Private Key"))?;
 
-    // TODO(node-mtls): all inbound is no-client-auth, so node identity is
-    // authenticated app-layer (signed hellos), not transport, and a server
-    // can't read a connecting node's capability cert. mTLS the node ALPNs
-    // (keep client/5 open — phones are pseudonymous) to verify node
-    // certs/capabilities directly. See dht/tls_extract.rs.
+    // TODO(node-mtls): no client auth, so a server cannot read a connecting node's capability
+    // cert. Require client certs on the node ALPNs; phones stay pseudonymous.
     let mut tls = RustlsServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
@@ -178,102 +136,25 @@ pub fn build_server_cfg(
     Ok(server_cfg)
 }
 
-/// Builds a `quinn::ClientConfig` configured for a specific ALPN protocol.
-///
-/// This function is used whenever an outbound QUIC connection is made
-/// (resolver→resolver, node→resolver, node→node, client→resolver, etc).
-///
-/// ## ALPN and roles
-/// The **ALPN string defines the role of this outbound connection**:
-///
-/// - `"relay/5"`     — a relay/node dialing a resolver  
-/// - `"resolver/5"` — a resolver dialing another resolver  
-/// - `"peer/5"`     — a relay/node dialing another relay/node  
-/// - `"client/5"`   — a client dialing a resolver  
-///
-/// Each outbound QUIC connection must advertise **exactly one** ALPN.
-/// The receiving side uses the negotiated ALPN to route the connection
-/// to the correct handler.
-///
-/// ## Root certificates
-/// The caller must supply a `RootCertStore` containing the trusted
-/// certificate authorities (CA roots) for this client.
-/// This is what enables TLS verification of the remote endpoint.
-///
-/// Typically you load this from:
-/// - your custom root CA (`rootCA.pem`)  
-/// - system roots  
-/// - resolver-issued CA (future feature)  
-///
-/// ## Returns
-/// A fully initialized `quinn::ClientConfig`, ready to be:
-/// - passed to `Endpoint::set_default_client_config()`, or  
-/// - used directly when dialing:  
-///   `endpoint.connect(addr, "hostname")?.await?`
-///
-/// ## Example
-/// ```ignore
-/// let roots = load_root_ca("cert/rootCA.pem")?;
-/// let cfg = build_client_cfg(ProtoRole::Relay, &roots)?;
-/// endpoint.set_default_client_config(cfg);
-///
-/// let conn = endpoint
-///     .connect("1.2.3.4:4433".parse().unwrap(), "resolver-host")?
-///     .await?;
-/// ```
 pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn::ClientConfig> {
-    // --- rustls TLS config ---
     let mut tls = rustls::ClientConfig::builder()
-        // .with_safe_defaults()
         .with_root_certificates(roots.clone())
-        .with_no_client_auth(); // no client certificate auth
+        .with_no_client_auth();
 
-    // Set ALPN (only one per outbound role)
     tls.alpn_protocols = vec![role.alpn().into()];
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
 
-    // Wrap TLS config for Quinn
     let mut client = quinn::ClientConfig::new(Arc::new(quic_config));
 
     client.transport_config(Arc::new(default_client_transport()));
 
     Ok(client)
 }
-#[allow(dead_code)]
-fn _phase8_section_marker() {}
-
-// ===========================================================================
-// NodeKey-as-SPKI cert for the peer/5 ALPN
-// ===========================================================================
-//
-// The relay's primary TLS cert is CA-issued (by the project's RootCA) so it
-// can present a chain to clients/resolvers that already trust the root. It
-// certifies the NodeKey, so its SPKI already equals the NodeKey — but it is
-// only usable by a dialer that holds the root and accepts the cert's
-// validity window. A `peer/5` dialer has neither obligation: it pins
-// `BLAKE3(SPKI) == NodeId` and nothing else.
-//
-// Approach: serve a *separate* self-signed Ed25519 cert on the peer/5 ALPN
-// over the same key, so the SPKI a peer pins arrives with no chain to build
-// and no expiry to honour. We attach an ALPN-discriminating
-// `ResolvesServerCert` to the rustls server config; the peer/5 ALPN gets the
-// self-signed cert, every other ALPN keeps the CA-issued one.
-//
-// rustls 0.23's `ClientHello::alpn()` exposes the offered ALPN list during
-// the resolver callback, so this is cleanly supported by quinn 0.11 (which
-// just delegates the cert resolution to rustls).
-//
-// We hand-roll the Ed25519 self-signed DER (mirroring libcore's
-// `peer_config.rs::build_tbs_certificate` / `build_certificate_der` —
-// kept duplicated rather than cross-crate to avoid a feature-flag
-// rats-nest; both copies are <100 LOC and stable RFC 8410 wire format).
 
 #[cfg(feature = "crypto")]
 const ED25519_AID_DER: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
 
-/// Build a hand-rolled DER X.509 TBSCertificate carrying `public_key`
-/// in the SPKI.
 #[cfg(feature = "crypto")]
 fn build_tbs_certificate_for(public_key: &[u8; 32]) -> Vec<u8> {
     let spki = [
@@ -304,7 +185,7 @@ fn build_tbs_certificate_for(public_key: &[u8; 32]) -> Vec<u8> {
     encode_seq(&tbs_content)
 }
 
-/// DER INTEGER: positive, minimally encoded — the RFC 5280 serialNumber form.
+/// Positive, minimally encoded DER INTEGER: the RFC 5280 serialNumber form.
 #[cfg(feature = "crypto")]
 fn der_integer(magnitude: &[u8]) -> Vec<u8> {
     let start = magnitude.iter().position(|b| *b != 0).unwrap_or(magnitude.len());
@@ -332,7 +213,6 @@ fn validity_der() -> Vec<u8> {
     )
 }
 
-/// Wrap signed TBS + sig into the final X.509 Certificate DER.
 #[cfg(feature = "crypto")]
 fn build_certificate_der_for(tbs: &[u8], signature: &[u8; 64]) -> Vec<u8> {
     let sig_alg: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70];
@@ -354,8 +234,6 @@ fn encode_seq(data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// rustls SigningKey impl backed by an Ed25519 SigningKey — used as the
-/// `cert_resolver`'s key half for the NodeKey-bound peer/5 cert.
 #[cfg(feature = "crypto")]
 #[derive(Debug)]
 struct Ed25519SigningKey {
@@ -403,9 +281,6 @@ impl rustls::sign::Signer for Ed25519Signer {
     }
 }
 
-/// Build a `CertifiedKey` carrying a self-signed Ed25519 cert whose SPKI
-/// is `signing.verifying_key()` — what the relay serves on the peer/5
-/// ALPN, where a dialing peer pins `BLAKE3(SPKI) == NodeId`.
 #[cfg(feature = "crypto")]
 pub fn build_self_signed_ed25519_cert(
     signing: ed25519_dalek::SigningKey,
@@ -419,7 +294,7 @@ pub fn build_self_signed_ed25519_cert(
     let sig = signing_arc.sign(&tbs);
     let cert_der = build_certificate_der_for(&tbs, &sig.to_bytes());
 
-    let certs = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+    let certs = vec![CertificateDer::from(cert_der)];
     let signing_key: Arc<dyn rustls::sign::SigningKey> = Arc::new(Ed25519SigningKey {
         public_key,
         signing: signing_arc,
@@ -428,21 +303,100 @@ pub fn build_self_signed_ed25519_cert(
     CertifiedKey::new(certs, signing_key)
 }
 
-/// ALPN-aware `ResolvesServerCert` used by the relay's QUIC server config.
-///
-/// Holds two `CertifiedKey`s over the same NodeKey: a self-signed cert
-/// for the peer/5 ALPN, and the CA-issued cert for everything else
-/// (what resolver/relay/client dialers expect to chain to the root).
-/// A peer dialer validates by SPKI alone, so serving it the chainless,
-/// non-expiring half keeps `peer/5` independent of the PKI's roots and
-/// renewal cycle.
+/// Accepts any cert with an Ed25519 key and checks the TLS 1.3 handshake signature under it. No CA
+/// chain, validity or name check: the caller pins the key after the handshake.
+#[cfg(feature = "crypto")]
+#[derive(Debug)]
+pub struct Ed25519CertVerifier;
+
+#[cfg(feature = "crypto")]
+fn cert_ed25519_key(cert: &CertificateDer<'_>) -> Result<[u8; 32], rustls::Error> {
+    crate::node::enroll::spki_ed25519(cert.as_ref())
+        .ok_or_else(|| rustls::Error::General("peer cert is not an Ed25519 X.509".into()))
+}
+
+#[cfg(feature = "crypto")]
+fn verify_tls13_ed25519(
+    message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, rustls::Error> {
+    if dss.scheme != SignatureScheme::ED25519 {
+        return Err(rustls::Error::General(format!(
+            "unsupported handshake signature scheme: {:?}",
+            dss.scheme
+        )));
+    }
+    let sig: [u8; 64] = dss.signature().try_into().map_err(|_| {
+        rustls::Error::General("Ed25519 handshake signature must be 64 bytes".into())
+    })?;
+    crate::crypto::verify_ed25519(&cert_ed25519_key(cert)?, message, &sig)
+        .map_err(|e| rustls::Error::General(format!("Ed25519 handshake signature failed: {e}")))?;
+    Ok(HandshakeSignatureValid::assertion())
+}
+
+#[cfg(feature = "crypto")]
+impl ServerCertVerifier for Ed25519CertVerifier {
+    fn verify_server_cert(
+        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>, _ocsp_response: &[u8], _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        cert_ed25519_key(end_entity)?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 not supported".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_ed25519(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl ClientCertVerifier for Ed25519CertVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        cert_ed25519_key(end_entity)?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 not supported".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_ed25519(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// Serves the peer ALPN a self-signed, non-expiring cert over the NodeKey, since a peer dialer
+/// pins `BLAKE3(SPKI) == NodeId` and nothing else; every other ALPN gets the CA-issued cert.
 #[cfg(feature = "crypto")]
 #[derive(Debug)]
 pub struct AlpnAwareCertResolver {
-    /// Cert served when ClientHello carries the `peer/5` ALPN.
     pub peer_cert: Arc<CertifiedKey>,
-    /// Cert served for every other ALPN (resolver/5, relay/5, client/5)
-    /// — typically the CA-issued cert from the operator's PKI.
     pub default_cert: Arc<CertifiedKey>,
 }
 
@@ -462,15 +416,7 @@ impl ResolvesServerCert for AlpnAwareCertResolver {
     }
 }
 
-/// Variant of [`build_server_cfg`] that wires an [`AlpnAwareCertResolver`]
-/// so the peer/5 ALPN is served a NodeKey-bound self-signed Ed25519 cert
-/// while every other ALPN is served the operator's CA-issued cert.
-///
-/// `node_signing` is the relay's long-term Ed25519 NodeKey — the key whose
-/// pubkey is derived as `relay_id`/`node_id` and that the resolver vends in
-/// `RelayDescriptor.pubkey`. It is the same key `key_path` holds and the
-/// same key the cert at `cert_path` certifies, so both certs this builds
-/// carry one SPKI.
+/// `node_signing` must be the key at `key_path`, so both certs carry one SPKI.
 #[cfg(feature = "crypto")]
 pub fn build_server_cfg_with_alpn_split(
     cert_path: &Path,
@@ -490,8 +436,6 @@ pub fn build_server_cfg_with_alpn_split(
     let key = rustls_pemfile::private_key(&mut key_reader)?
         .ok_or(anyhow!("No Private Key"))?;
 
-    // Wrap the CA-issued cert+key into a CertifiedKey via rustls's
-    // "any_supported_type" key parser.
     let signing_key = rustls::crypto::CryptoProvider::get_default()
         .ok_or_else(|| anyhow!("crypto provider not installed"))?
         .key_provider
@@ -517,39 +461,3 @@ pub fn build_server_cfg_with_alpn_split(
     server_cfg.transport_config(Arc::new(default_server_transport()));
     Ok(server_cfg)
 }
-
-#[cfg(all(test, feature = "crypto"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn der_integer_pads_a_high_bit_magnitude() {
-        assert_eq!(der_integer(&[0x80, 0x01]), vec![0x02, 0x03, 0x00, 0x80, 0x01]);
-    }
-
-    #[test]
-    fn der_integer_strips_leading_zeros() {
-        assert_eq!(der_integer(&[0x00, 0x00, 0x2a]), vec![0x02, 0x01, 0x2a]);
-    }
-
-    #[test]
-    fn der_integer_encodes_an_all_zero_magnitude_as_one_byte() {
-        assert_eq!(der_integer(&[0x00; 8]), vec![0x02, 0x01, 0x00]);
-    }
-
-    #[test]
-    fn tbs_serial_stays_positive_and_minimal_for_every_key_prefix() {
-        const SEQ_HEADER_AND_VERSION: usize = 2 + 5;
-        for lead in [0x00u8, 0x7f, 0x80, 0xff] {
-            let mut key = [0x11u8; 32];
-            key[0] = lead;
-            let tbs = build_tbs_certificate_for(&key);
-            let serial = &tbs[SEQ_HEADER_AND_VERSION..];
-            assert_eq!(serial[0], 0x02);
-            let body = &serial[2..2 + serial[1] as usize];
-            assert!(body[0] < 0x80, "serial must be positive");
-            assert!(body.len() == 1 || body[0] != 0 || body[1] >= 0x80, "serial must be minimal");
-        }
-    }
-}
-

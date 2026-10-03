@@ -1,115 +1,52 @@
 //! Durable replication of opaque push pseudonyms to recipient DHT homes.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
-use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
 use common::proto::dht_p2p::MAX_DHT_HELLO_SKEW_MS;
 use common::proto::dht_p2p::PushPseudonymPublish;
 use common::proto::dht_p2p::PushPseudonymPublishResp;
 use common::proto::dht_p2p::push_pseudonym_signing_input;
-use common::proto::pack::Packer;
-use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
-use ed25519_dalek::Signature;
-use ed25519_dalek::VerifyingKey;
-use tokio::time::timeout;
 
 use super::Dht;
 use super::config::FORWARD_TIMEOUT_MS;
-use super::config::K;
-use super::config::QUEUE_FETCH_TIMEOUT_MS;
+use super::rpc::fan_out;
 
 /// Distinct users whose registration may be awaiting replication.
 const MAX_PENDING_PUSHES: usize = 4096;
 
-/// Pending records replayed per sweep. [`RETRY_CURSOR`] rotates the window so a
+/// Pending records replayed per sweep. `Dht::push_retry_cursor` rotates the window so a
 /// permanently-failing head cannot starve the tail.
 const MAX_PENDING_RETRIES_PER_SWEEP: usize = 32;
 
-static RETRY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-static RETRY_CURSOR: AtomicUsize = AtomicUsize::new(0);
-
-/// Fan one user-authorized registration to every current home. Client
-/// reconnect repeats this idempotent record; no platform token is present.
-/// A record that no home accepted is persisted and replayed by
-/// [`retry_pending`] for as long as its signed timestamp stays inside
-/// [`MAX_DHT_HELLO_SKEW_MS`] — past that no home will take it, and the client's
-/// next reconnect supplies a freshly-signed one.
+/// A record no home accepts stays pending and [`retry_pending`] replays it until its signed
+/// timestamp leaves [`MAX_DHT_HELLO_SKEW_MS`]; the client's next reconnect signs a fresh one.
 pub(crate) async fn replicate_to_homes(dht: Arc<Dht>, publish: PushPseudonymPublish) {
     if !persist_pending(&dht, &publish) {
         return;
     }
-    let target = NodeId::from_bytes(publish.user_ipk.0);
-    let self_is_home = super::routing::self_in_top_k(&dht, &target);
+    let (homes, self_is_home) =
+        super::routing::homes(&dht, &NodeId::from_bytes(publish.user_ipk.0));
     if self_is_home {
         let _ = dht.store.put_push_pseudonym(&publish.user_ipk.0, &publish.pseudonym.0);
     }
-    let mut homes = dht.routing.read().find_closest(&target, K);
-    // `find_closest` excludes self. Replace farthest remote home with self.
-    if self_is_home && homes.len() == K {
-        homes.pop();
-    }
-    let mut set = tokio::task::JoinSet::new();
-    for home in homes {
-        let dht = dht.clone();
-        let publish = publish.clone();
-        set.spawn(async move {
-            timeout(Duration::from_millis(FORWARD_TIMEOUT_MS), publish_one(dht, home, publish))
-                .await
-                .unwrap_or(false)
+    let req = DhtRequest::PushPseudonymPublish(publish.clone());
+    let replies = fan_out(&dht, &homes, &req, FORWARD_TIMEOUT_MS).await;
+    let accepted = self_is_home
+        || replies.iter().any(|(_, reply)| {
+            matches!(
+                reply,
+                DhtResponse::PushPseudonymPublish(PushPseudonymPublishResp { accepted: true })
+            )
         });
-    }
-
-    let mut accepted = self_is_home;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(QUEUE_FETCH_TIMEOUT_MS);
-    while !set.is_empty() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            set.abort_all();
-            break;
-        }
-        match timeout(remaining, set.join_next()).await {
-            Ok(Some(result)) => accepted |= result.unwrap_or(false),
-            Ok(None) => break,
-            Err(_) => {
-                set.abort_all();
-                break;
-            }
-        }
-    }
     if accepted {
         let _ = dht.store.remove_pending_push(&publish.user_ipk.0);
     }
 }
 
-async fn publish_one(
-    dht: Arc<Dht>, home: common::proto::dht_p2p::NodeDescriptor, publish: PushPseudonymPublish,
-) -> bool {
-    let Ok(conn) = super::lookup::connect_to_peer(&dht, &home).await else { return false };
-    let Ok(bytes) = DhtPacket::Request(DhtRequest::PushPseudonymPublish(publish)).pack() else {
-        return false;
-    };
-    let Ok((mut tx, mut rx)) = conn.open_bi().await else { return false };
-    if tx.write_all(&bytes).await.is_err() || tx.finish().is_err() {
-        return false;
-    }
-    matches!(
-        DhtPacket::unpack(&mut rx).await,
-        Ok(DhtPacket::Response(DhtResponse::PushPseudonymPublish(PushPseudonymPublishResp {
-            accepted: true
-        })))
-    )
-}
-
-/// Store a registration awaiting replication, refusing a new user once the
-/// keyspace is at [`MAX_PENDING_PUSHES`]. Returns whether the caller should
-/// proceed with the fan-out.
 fn persist_pending(dht: &Dht, publish: &PushPseudonymPublish) -> bool {
     let is_new = dht.store.push_pending.get(publish.user_ipk.0).ok().flatten().is_none();
     if is_new
@@ -120,16 +57,15 @@ fn persist_pending(dht: &Dht, publish: &PushPseudonymPublish) -> bool {
     dht.store.put_pending_push(publish).is_ok()
 }
 
-/// Replay a rotating window of pending registrations on its own task. The DHT
-/// scheduler calls this from a `select!` arm and must stay responsive to its
-/// cancel token, so nothing here is awaited inline.
+/// Spawns the replay: the scheduler calls this from a `select!` arm that must stay responsive to
+/// its cancel token.
 pub(crate) async fn retry_pending(dht: Arc<Dht>) {
-    if RETRY_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+    if dht.push_retry_in_flight.swap(true, Ordering::AcqRel) {
         return;
     }
     tokio::spawn(async move {
-        retry_pending_sweep(dht).await;
-        RETRY_IN_FLIGHT.store(false, Ordering::Release);
+        retry_pending_sweep(dht.clone()).await;
+        dht.push_retry_in_flight.store(false, Ordering::Release);
     });
 }
 
@@ -138,8 +74,8 @@ async fn retry_pending_sweep(dht: Arc<Dht>) {
     if pending.is_empty() {
         return;
     }
-    let now_ms = crate::util::systime().as_millis() as u64;
-    let start = RETRY_CURSOR.fetch_add(MAX_PENDING_RETRIES_PER_SWEEP, Ordering::Relaxed);
+    let now_ms = common::utils::now_ms();
+    let start = dht.push_retry_cursor.fetch_add(MAX_PENDING_RETRIES_PER_SWEEP, Ordering::Relaxed);
     for i in 0..pending.len().min(MAX_PENDING_RETRIES_PER_SWEEP) {
         let publish = &pending[start.wrapping_add(i) % pending.len()];
         if now_ms.abs_diff(publish.timestamp) > MAX_DHT_HELLO_SKEW_MS {
@@ -150,13 +86,12 @@ async fn retry_pending_sweep(dht: Arc<Dht>) {
     }
 }
 
-/// Validate owner signature and freshness, require target-home ownership, then
-/// fsync opaque pseudonym. Gateway alone resolves it to a platform token.
+/// The pseudonym is opaque: only the gateway resolves it to a platform token.
 pub(crate) fn handle_publish(
     dht: &Dht, publish: PushPseudonymPublish, now_ms: u64,
 ) -> PushPseudonymPublishResp {
     if !valid_publish(&publish, now_ms)
-        || !super::routing::self_in_top_k(dht, &NodeId::from_bytes(publish.user_ipk.0)) {
+        || !super::routing::homes(dht, &NodeId::from_bytes(publish.user_ipk.0)).1 {
         return PushPseudonymPublishResp { accepted: false };
     }
     PushPseudonymPublishResp {
@@ -168,26 +103,7 @@ pub(crate) fn valid_publish(publish: &PushPseudonymPublish, now_ms: u64) -> bool
     if now_ms.abs_diff(publish.timestamp) > MAX_DHT_HELLO_SKEW_MS {
         return false;
     }
-    valid_publish_signature(publish)
-}
-
-fn valid_publish_signature(publish: &PushPseudonymPublish) -> bool {
-    let Ok(key) = VerifyingKey::from_bytes(&publish.user_ipk.0) else {
-        return false;
-    };
-    let sig = Signature::from_bytes(&publish.user_sig.0);
-    if key
-        .verify_strict(
-            &push_pseudonym_signing_input(
-                &publish.user_ipk.0,
-                &publish.pseudonym.0,
-                publish.timestamp,
-            ),
-            &sig,
-        )
-        .is_err()
-    {
-        return false;
-    }
-    true
+    let msg =
+        push_pseudonym_signing_input(&publish.user_ipk.0, &publish.pseudonym.0, publish.timestamp);
+    common::crypto::verify_ed25519(&publish.user_ipk.0, &msg, &publish.user_sig.0).is_ok()
 }
