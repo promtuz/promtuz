@@ -71,6 +71,8 @@ pub struct Relay {
     pub addr:     SocketAddr,
     pub username: String,
     pub password: String,
+    /// When to move an allocation onto fresh credentials, before the relay stops refreshing it.
+    pub renew_at: Instant,
 }
 
 pub struct Params {
@@ -111,6 +113,8 @@ pub enum Event {
     KeyframeNeeded,
     /// Target video bitrate in kbps.
     Bitrate(u32),
+    /// The allocation's credentials are due for renewal; a restart moves it onto fresh ones.
+    Expiring,
     Failed(String),
 }
 
@@ -132,11 +136,34 @@ struct Transport {
     /// Where str0m sees inbound direct packets arrive, normally the primary host candidate.
     base:    SocketAddr,
     relayed: Option<Relayed>,
+    /// Our candidates on these sockets, retired from ICE when a restart replaces them.
+    locals:  Vec<Candidate>,
 }
 
 struct Relayed {
-    conn: Arc<dyn Conn + Send + Sync>,
-    addr: SocketAddr,
+    conn:  Arc<dyn Conn + Send + Sync>,
+    addr:  SocketAddr,
+    _turn: TurnClient,
+}
+
+/// `listen` leaves a reader task holding the socket until `close`. Dropping this frees the
+/// allocation and then the client, whether allocating succeeded, failed, timed out or was
+/// replaced.
+struct TurnClient {
+    client: Client,
+    conn:   Option<Arc<dyn Conn + Send + Sync>>,
+}
+
+impl Drop for TurnClient {
+    fn drop(&mut self) {
+        let (client, conn) = (self.client.clone(), self.conn.take());
+        core().spawn(async move {
+            if let Some(conn) = conn {
+                let _ = conn.close().await;
+            }
+            let _ = client.close().await;
+        });
+    }
 }
 
 async fn run(
@@ -205,7 +232,9 @@ async fn run(
         rtp_samples: 0,
         video_start: None,
         connected: false,
+        renew_at: None,
     };
+    session.renew_at = session.renewal();
     session.event_loop(&mut cmd_rx).await
 }
 
@@ -223,11 +252,10 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
     // A v6-only carrier behind 464XLAT has no v4 host; the call then rides the relay alone.
     let base = hosts.first().copied().unwrap_or(socket.local_addr()?);
 
+    let mut locals = Vec::new();
     let mut wire = Vec::new();
     for host in &hosts {
-        if let Ok(c) = Candidate::host(*host, "udp") {
-            rtc.add_local_candidate(c);
-        }
+        locals.extend(Candidate::host(*host, "udp").ok());
         wire.push(CallCandidate::Host { addr: *host });
     }
 
@@ -237,9 +265,7 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
     {
         match tokio::time::timeout(SETUP_TIMEOUT, reflexive(&socket, relay.addr)).await {
             Ok(Ok(addr)) if addr != base => {
-                if let Ok(c) = Candidate::server_reflexive(addr, base, "udp") {
-                    rtc.add_local_candidate(c);
-                }
+                locals.extend(Candidate::server_reflexive(addr, base, "udp").ok());
                 wire.push(CallCandidate::ServerReflexive { addr, base });
             },
             Ok(Ok(_)) => {},
@@ -252,9 +278,7 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
     if let Some(relay) = relay {
         match tokio::time::timeout(SETUP_TIMEOUT, allocate(relay)).await {
             Ok(Ok(r)) => {
-                if let Ok(c) = Candidate::relayed(r.addr, r.addr, "udp") {
-                    rtc.add_local_candidate(c);
-                }
+                locals.extend(Candidate::relayed(r.addr, r.addr, "udp").ok());
                 wire.push(CallCandidate::Relayed { addr: r.addr });
                 relayed = Some(r);
             },
@@ -263,7 +287,10 @@ async fn gather(relay: &Option<Relay>, rtc: &mut Rtc) -> Result<(Transport, Vec<
         }
     }
 
-    Ok((Transport { socket, base, relayed }, wire))
+    for c in &locals {
+        rtc.add_local_candidate(c.clone());
+    }
+    Ok((Transport { socket, base, relayed, locals }, wire))
 }
 
 async fn reflexive(socket: &UdpSocket, stun: SocketAddr) -> Result<SocketAddr> {
@@ -307,10 +334,12 @@ async fn allocate(relay: &Relay) -> Result<Relayed> {
         vnet:           None,
     })
     .await?;
-    client.listen().await?;
-    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(client.allocate().await?);
+    let mut turn = TurnClient { client, conn: None };
+    turn.client.listen().await?;
+    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(turn.client.allocate().await?);
+    turn.conn = Some(conn.clone());
     let addr = conn.local_addr()?;
-    Ok(Relayed { conn, addr })
+    Ok(Relayed { conn, addr, _turn: turn })
 }
 
 struct Session {
@@ -330,6 +359,8 @@ struct Session {
     rtp_samples:       u64,
     video_start:       Option<Instant>,
     connected:         bool,
+    /// Fires [`Event::Expiring`] once, then waits for the next restart to arm it again.
+    renew_at:          Option<Instant>,
 }
 
 impl Session {
@@ -353,6 +384,7 @@ impl Session {
             };
 
             let wait = timeout.saturating_duration_since(Instant::now());
+            let renew = self.renew_at.map(|at| at.saturating_duration_since(Instant::now()));
             let socket = self.transport.socket.clone();
             let base = self.transport.base;
             let relayed = self.transport.relayed.as_ref().map(|r| (r.conn.clone(), r.addr));
@@ -367,6 +399,10 @@ impl Session {
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {
                     self.rtc.handle_input(Input::Timeout(Instant::now()))?;
+                },
+                _ = tokio::time::sleep(renew.unwrap_or_default()), if renew.is_some() => {
+                    self.renew_at = None;
+                    let _ = self.events.send(Event::Expiring);
                 },
                 r = socket.recv_from(&mut buf) => {
                     let (n, from) = r?;
@@ -418,6 +454,12 @@ impl Session {
                 if self.connected {
                     let _ = self.events.send(Event::Disconnected);
                 }
+            },
+            // DTLS connects once. After a restart, ICE coming back up is what says media flows.
+            RtcEvent::IceConnectionStateChange(
+                IceConnectionState::Connected | IceConnectionState::Completed,
+            ) if self.connected => {
+                let _ = self.events.send(Event::Connected);
             },
             RtcEvent::MediaData(data) => {
                 if data.mid == self.mid {
@@ -480,10 +522,22 @@ impl Session {
                 // The agent keeps its ICE credentials and DTLS keys, so a new pair forms without a
                 // handshake. str0m goes unpolled during the bounded gather; ICE tolerates that.
                 let creds = self.rtc.direct_api().local_ice_credentials();
-                let relay = self.relay.take();
-                let (transport, candidates) = gather(&relay, &mut self.rtc).await?;
-                self.relay = relay;
+                // Near renewal, take fresh credentials now rather than restart for them again soon.
+                let soon = Instant::now() + super::TURN_RENEW_EARLY;
+                if self.relay.as_ref().is_some_and(|r| r.renew_at <= soon)
+                    && let Some(fresh) = super::turn_credentials().await
+                {
+                    self.relay = Some(fresh);
+                }
+                // The old sockets go with this restart. Retiring their candidates drops the
+                // nominated pair at once, so ICE reports connected again only on a new one.
+                for c in &self.transport.locals {
+                    self.rtc.direct_api().invalidate_candidate(c);
+                }
+                let (transport, candidates) = gather(&self.relay, &mut self.rtc).await?;
+                // The old allocation closes as its transport drops.
                 self.transport = transport;
+                self.renew_at = self.renewal();
                 let _ = self.events.send(Event::Local {
                     params: Params {
                         ufrag: creds.ufrag,
@@ -499,6 +553,12 @@ impl Session {
             Cmd::Stop => {},
         }
         Ok(())
+    }
+
+    /// Only an allocation needs renewing, and credentials already due mean renewing just failed.
+    fn renewal(&self) -> Option<Instant> {
+        let at = self.relay.as_ref()?.renew_at;
+        (self.transport.relayed.is_some() && at > Instant::now()).then_some(at)
     }
 
     fn set_remote(
@@ -575,3 +635,87 @@ const _: () = {
     // The engine assumes 20 ms Opus frames at 48 kHz throughout.
     assert!(FRAME_SAMPLES == (SAMPLE_RATE as usize) / 50);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ScopedCore;
+
+    #[tokio::test(start_paused = true)]
+    async fn an_allocation_that_times_out_leaves_no_reader_holding_its_socket() {
+        let _core = ScopedCore::new();
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay = Relay {
+            addr:     silent.local_addr().unwrap(),
+            username: "u".into(),
+            password: "p".into(),
+            renew_at: Instant::now(),
+        };
+        let alive = || tokio::runtime::Handle::current().metrics().num_alive_tasks();
+        let before = alive();
+        assert!(tokio::time::timeout(SETUP_TIMEOUT, allocate(&relay)).await.is_err());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(alive(), before);
+    }
+
+    /// Both ends restart onto new sockets, as after a network change, and media flows again.
+    #[tokio::test]
+    async fn a_restart_reconnects_and_carries_audio_again() {
+        let _core = ScopedCore::new();
+        if !crate::p2p::candidate::local_candidates(0).iter().any(|a| a.is_ipv4()) {
+            return; // Offline: no interface to make host candidates on.
+        }
+        let session = |role| {
+            let cert = str0m::crypto::from_feature_flags().dtls_provider.generate_certificate();
+            let audio = Arc::new(AudioPath::new().unwrap());
+            let (tx, rx) = mpsc::unbounded_channel();
+            (spawn(role, cert.unwrap(), None, false, audio.clone(), tx), rx, audio)
+        };
+        let (a, mut a_events, _) = session(Role::Caller);
+        let (b, mut b_events, b_audio) = session(Role::Callee);
+        let tone = crate::test_support::transfer::tone_packets(25);
+        for round in ["setup", "restart"] {
+            if round == "restart" {
+                a.send(Cmd::Restart).ok().unwrap();
+                b.send(Cmd::Restart).ok().unwrap();
+            }
+            let (pa, ca) = local(&mut a_events).await;
+            let (pb, cb) = local(&mut b_events).await;
+            a.send(remote(pb, cb)).ok().unwrap();
+            b.send(remote(pa, ca)).ok().unwrap();
+            connected(&mut a_events).await;
+            connected(&mut b_events).await;
+            let _ = b_audio.playback(100);
+            for packet in &tone {
+                a.send(Cmd::Audio(packet.clone())).ok().unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(b_audio.playback(10).iter().any(|s| *s != 0), "after {round}, b hears a");
+        }
+    }
+
+    async fn next(events: &mut mpsc::UnboundedReceiver<Event>) -> Event {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+        match event.expect("an event in time").expect("the session is running") {
+            Event::Failed(e) => panic!("session failed: {e}"),
+            event => event,
+        }
+    }
+
+    async fn local(events: &mut mpsc::UnboundedReceiver<Event>) -> (Params, Vec<CallCandidate>) {
+        loop {
+            if let Event::Local { params, candidates } = next(events).await {
+                return (params, candidates);
+            }
+        }
+    }
+
+    async fn connected(events: &mut mpsc::UnboundedReceiver<Event>) {
+        while !matches!(next(events).await, Event::Connected) {}
+    }
+
+    fn remote(p: Params, candidates: Vec<CallCandidate>) -> Cmd {
+        let Params { ufrag, pwd, fingerprint, ssrc, video_ssrc } = p;
+        Cmd::Remote { ufrag, pwd, fingerprint, ssrc, video_ssrc, candidates }
+    }
+}

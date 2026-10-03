@@ -11,9 +11,11 @@ pub fn call_start(peer: Vec<u8>, video: bool) -> Result<Vec<u8>, CoreError> {
     Ok(super::start(peer, video).map_err(anyhow_to_core)?.to_vec())
 }
 
+/// Refused unless `call` is the one ringing, so a stale Answer cannot pick up its replacement.
 #[uniffi::export]
-pub fn call_accept() -> Result<(), CoreError> {
-    super::accept().map_err(anyhow_to_core)
+pub fn call_accept(call: Vec<u8>) -> Result<(), CoreError> {
+    let call = fixed::<16>(&call, "call id")?;
+    super::accept(call).map_err(anyhow_to_core)
 }
 
 #[uniffi::export]

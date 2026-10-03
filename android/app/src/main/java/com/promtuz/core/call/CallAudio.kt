@@ -2,6 +2,7 @@ package com.promtuz.core.call
 
 import android.annotation.SuppressLint
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -27,6 +28,7 @@ class CallAudio(private val audioManager: AudioManager) {
     private var record: AudioRecord? = null
     private var track: AudioTrack? = null
     private var previousMode = AudioManager.MODE_NORMAL
+    private var devices: AudioDeviceCallback? = null
 
     @Volatile var speaker = false
         set(value) {
@@ -41,6 +43,12 @@ class CallAudio(private val audioManager: AudioManager) {
         previousMode = audioManager.mode
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         applyRoute()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            devices = object : AudioDeviceCallback() {
+                override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = applyRoute()
+                override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = applyRoute()
+            }.also { audioManager.registerAudioDeviceCallback(it, null) }
+        }
 
         val recordBytes = maxOf(
             AudioRecord.getMinBufferSize(
@@ -103,7 +111,11 @@ class CallAudio(private val audioManager: AudioManager) {
         record = null
         track = null
         audioManager.mode = previousMode
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            devices?.let { audioManager.unregisterAudioDeviceCallback(it) }
+            devices = null
+            audioManager.clearCommunicationDevice()
+        } else {
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = false
         }
@@ -136,11 +148,16 @@ class CallAudio(private val audioManager: AudioManager) {
         }
     }
 
+    /** The speaker when it is on, else a connected headset, else the earpiece. */
     private fun applyRoute() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val type = if (speaker) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-            else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-            val device = audioManager.availableCommunicationDevices.firstOrNull { it.type == type }
+            val available = audioManager.availableCommunicationDevices
+            val device = if (speaker) {
+                available.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            } else {
+                available.firstOrNull { it.type in HEADSETS }
+                    ?: available.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            }
             if (device != null) audioManager.setCommunicationDevice(device)
         } else {
             @Suppress("DEPRECATION")
@@ -148,3 +165,12 @@ class CallAudio(private val audioManager: AudioManager) {
         }
     }
 }
+
+private val HEADSETS = setOf(
+    AudioDeviceInfo.TYPE_BLE_HEADSET,
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+    AudioDeviceInfo.TYPE_USB_HEADSET,
+    AudioDeviceInfo.TYPE_HEARING_AID,
+)

@@ -14,7 +14,6 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
 import android.os.Handler
-import android.os.HandlerThread
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import com.promtuz.core.CoreBridge
@@ -22,7 +21,7 @@ import timber.log.Timber
 import java.nio.ByteBuffer
 
 /** One capture request feeds both the encoder surface and the self-view, so there is no GL copy. */
-class CallVideo(private val context: Context) {
+class CallVideo(private val context: Context, private val handler: Handler) {
     private companion object {
         const val WIDTH = 640
         const val HEIGHT = 480
@@ -32,8 +31,6 @@ class CallVideo(private val context: Context) {
     }
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    private val thread = HandlerThread("call-camera").apply { start() }
-    private val handler = Handler(thread.looper)
 
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null

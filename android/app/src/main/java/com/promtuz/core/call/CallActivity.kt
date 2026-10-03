@@ -22,6 +22,7 @@ class CallActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
         enableEdgeToEdge()
+        if (savedInstanceState == null) answerFrom(intent)
 
         lifecycleScope.launch {
             CallController.state.collect { if (it == null) finish() }
@@ -34,6 +35,16 @@ class CallActivity : ComponentActivity() {
                 CallScreen(call)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        answerFrom(intent)
+    }
+
+    private fun answerFrom(intent: Intent) {
+        if (intent.action != ACTION_ANSWER) return
+        intent.getByteArrayExtra(EXTRA_CALL)?.let(CallController::requestAnswer)
     }
 
     override fun onUserLeaveHint() {
@@ -61,6 +72,10 @@ class CallActivity : ComponentActivity() {
     }
 
     companion object {
+        /** The notification's Answer, carrying [EXTRA_CALL] so it can only answer that call. */
+        const val ACTION_ANSWER = "com.promtuz.core.call.ANSWER"
+        const val EXTRA_CALL = "call"
+
         fun launch(context: Context) {
             val intent = Intent(context, CallActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)

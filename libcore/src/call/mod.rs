@@ -50,6 +50,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Asking the relay for TURN credentials must not hold up the ring.
 const TURN_TIMEOUT: Duration = Duration::from_secs(3);
+/// The relay refuses to refresh an allocation once its credentials expire, so a call moves to
+/// fresh ones this long before. It also absorbs clock skew against the relay's expiry.
+const TURN_RENEW_EARLY: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -111,7 +114,8 @@ type Media = (DtlsCert, Arc<AudioPath>);
 enum Input {
     /// Our outgoing call, already built in [`Phase::Offering`].
     Start(Call),
-    Accept,
+    /// Refused unless this call is the one ringing.
+    Accept([u8; 16]),
     Reject,
     Hangup,
     Muted(bool),
@@ -251,13 +255,11 @@ fn step(state: &mut Option<Call>, input: Input) -> Result<Vec<Effect>> {
             fx.push(Effect::StartSession(id, rtc::Role::Caller, video));
             fx.push(Effect::Arm(RING_TIMEOUT, id, Phase::Offering, Expiry::Unanswered));
         },
-        Input::Accept => {
-            let call = state.as_mut().ok_or_else(|| anyhow!("no call"))?;
-            if call.phase != Phase::Ringing {
-                bail!("nothing to accept");
-            }
+        Input::Accept(id) => {
+            let ringing = state.as_mut().filter(|c| c.id == id && c.phase == Phase::Ringing);
+            let call = ringing.ok_or_else(|| anyhow!("nothing to accept"))?;
             call.phase = Phase::Connecting;
-            let (id, video) = (call.id, call.video);
+            let video = call.video;
             info!("CALL[{}]: accepted", short(&id));
             fx.push(Effect::Emit(CallEvent::Connecting { call: id.to_vec() }));
             fx.push(Effect::StartSession(id, rtc::Role::Callee, video));
@@ -371,8 +373,8 @@ pub fn start(peer: [u8; 32], video: bool) -> Result<[u8; 16]> {
     Ok(id)
 }
 
-pub fn accept() -> Result<()> {
-    apply(Input::Accept)
+pub fn accept(id: [u8; 16]) -> Result<()> {
+    apply(Input::Accept(id))
 }
 
 pub fn reject() {
@@ -585,8 +587,7 @@ fn on_offer(state: &mut Option<Call>, offer: Offer, fx: &mut Vec<Effect>) {
         Some(c) if c.phase == Phase::Offering && c.peer == from => {
             if from < me {
                 info!("CALL[{}]: crossed offers, taking theirs", short(&call));
-                let audio = c.audio.clone();
-                let cert = c.cert.clone();
+                let (ours, audio, cert) = (c.id, c.audio.clone(), c.cert.clone());
                 if let Some(s) = c.session.take() {
                     let _ = s.send(rtc::Cmd::Stop);
                 }
@@ -606,6 +607,11 @@ fn on_offer(state: &mut Option<Call>, offer: Offer, fx: &mut Vec<Effect>) {
                     early: Vec::new(),
                     restart_gen: 0,
                 };
+                fx.push(Effect::Emit(CallEvent::Switched {
+                    from: ours.to_vec(),
+                    to: call.to_vec(),
+                    video,
+                }));
                 fx.push(Effect::Emit(CallEvent::Connecting { call: call.to_vec() }));
                 fx.push(Effect::StartSession(call, rtc::Role::Callee, video));
                 fx.push(Effect::Arm(CONNECT_TIMEOUT, call, Phase::Connecting, Expiry::Failed));
@@ -700,17 +706,7 @@ fn begin_restart(call: &mut Call, theirs: Option<Remote>, fx: &mut Vec<Effect>) 
 }
 
 async fn spawn_session(id: [u8; 16], role: rtc::Role, video: bool) {
-    let relay = match tokio::time::timeout(TURN_TIMEOUT, relay_turn()).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            warn!("CALL[{}]: no TURN, direct paths only: {e:#}", short(&id));
-            None
-        },
-        Err(_) => {
-            warn!("CALL[{}]: TURN credentials timed out, direct paths only", short(&id));
-            None
-        },
-    };
+    let relay = turn_credentials().await;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
     {
         let mut current = CURRENT.lock();
@@ -776,6 +772,12 @@ fn on_session_event(
         rtc::Event::Disconnected => {
             if call.phase == Phase::Connected {
                 warn!("CALL[{}]: path lost, restarting", short(&id));
+                begin_restart(call, None, fx);
+            }
+        },
+        rtc::Event::Expiring => {
+            if matches!(call.phase, Phase::Connected | Phase::Reconnecting) {
+                info!("CALL[{}]: TURN credentials expiring, restarting", short(&id));
                 begin_restart(call, None, fx);
             }
         },
@@ -856,6 +858,21 @@ fn signal(conversation: [u8; 16], msg: CallMsg) {
     });
 }
 
+/// `None` leaves the call on direct paths.
+async fn turn_credentials() -> Option<rtc::Relay> {
+    match tokio::time::timeout(TURN_TIMEOUT, relay_turn()).await {
+        Ok(Ok(relay)) => relay,
+        Ok(Err(e)) => {
+            warn!("CALL: no TURN, direct paths only: {e:#}");
+            None
+        },
+        Err(_) => {
+            warn!("CALL: TURN credentials timed out, direct paths only");
+            None
+        },
+    }
+}
+
 async fn relay_turn() -> Result<Option<rtc::Relay>> {
     let (host, port, conn) = {
         let Some(session) = core().session() else { return Ok(None) };
@@ -866,11 +883,17 @@ async fn relay_turn() -> Result<Option<rtc::Relay>> {
     CRelayPacket::TurnCredentials.send(&mut tx).await?;
     let _ = tx.finish();
     match SRelayPacket::unpack(&mut rx).await? {
-        SRelayPacket::TurnCredentials(Some(creds)) => Ok(Some(rtc::Relay {
-            addr:     std::net::SocketAddr::new(host.parse()?, port),
-            username: creds.username,
-            password: creds.password,
-        })),
+        SRelayPacket::TurnCredentials(Some(creds)) => {
+            let left = Duration::from_millis(creds.expires_at_ms.saturating_sub(now_ms()));
+            // The floor keeps a clock skewed past the relay's expiry from renewing in a loop.
+            let renew_in = left.saturating_sub(TURN_RENEW_EARLY).max(TURN_RENEW_EARLY);
+            Ok(Some(rtc::Relay {
+                addr:     std::net::SocketAddr::new(host.parse()?, port),
+                username: creds.username,
+                password: creds.password,
+                renew_at: Instant::now() + renew_in,
+            }))
+        },
         SRelayPacket::TurnCredentials(None) => Ok(None),
         other => bail!("unexpected reply to TurnCredentials: {other:?}"),
     }
@@ -999,11 +1022,12 @@ mod tests {
             ),
             (offer(LOWER, 1, ring, true), "Ringing 1: "),
             (offer(HIGHER, 2, ring, true), "Ringing 1: send End Busy"),
+            (Input::Accept([2; 16]), "Ringing 1: error: nothing to accept"),
             (
-                Input::Accept,
+                Input::Accept([1; 16]),
                 "Connecting 1: emit Connecting, start callee, arm 20s Connecting Failed",
             ),
-            (Input::Accept, "Connecting 1: error: nothing to accept"),
+            (Input::Accept([1; 16]), "Connecting 1: error: nothing to accept"),
             (Input::Expired([1; 16], Phase::Ringing, Expiry::Missed), "Connecting 1: "),
         ] {
             assert_eq!(check(&mut state, input), expected);
@@ -1015,10 +1039,17 @@ mod tests {
         let (mut state, mut session) = with_session(call(1, LOWER, Phase::Offering));
         assert_eq!(
             check(&mut state, offer(LOWER, 2, NOW + 30_000, true)),
-            "Connecting 2: emit Connecting, start callee, arm 20s Connecting Failed",
-            "theirs wins, and we answer it"
+            "Connecting 2: emit Switched, emit Connecting, start callee, arm 20s Connecting Failed",
+            "theirs wins, and we answer it under its id"
         );
         assert_eq!(commands(&mut session), "stop");
+        for stale in [
+            Input::Expired([1; 16], Phase::Offering, Expiry::Unanswered),
+            Input::OfferLost([1; 16]),
+            Input::Signal(CallMsg::End { call: [1; 16], reason: CallEnd::Hangup }),
+        ] {
+            assert_eq!(check(&mut state, stale), "Connecting 2: ", "the abandoned id ends nothing");
+        }
         let mut state = Some(call(1, HIGHER, Phase::Offering));
         assert_eq!(
             check(&mut state, offer(HIGHER, 2, NOW + 30_000, true)),

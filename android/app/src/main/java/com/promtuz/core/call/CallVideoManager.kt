@@ -1,7 +1,12 @@
 package com.promtuz.core.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.HandlerThread
 import android.view.Surface
+import androidx.core.content.ContextCompat
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 object CallVideoManager {
     private lateinit var app: Context
 
+    /** Shared by every capture, so an old camera's close runs before the next one opens. */
+    private val cameraThread by lazy { HandlerThread("call-camera").apply { start() } }
     private var video: CallVideo? = null
     private var decoder: CallVideoDecoder? = null
     private var localSurface: Surface? = null
@@ -23,10 +30,14 @@ object CallVideoManager {
         app = context.applicationContext
     }
 
-    fun start() {
+    /** The peer hears that our camera is off, so they show our avatar instead of a black frame. */
+    fun start(camera: Boolean) {
         if (active) return
         active = true
-        _cameraOn.value = true
+        val on = camera && ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        _cameraOn.value = on
+        if (!on) CoreBridge.callSetCamera(false)
         startEncoder()
         startDecoder()
     }
@@ -86,7 +97,7 @@ object CallVideoManager {
 
     private fun startEncoder() {
         if (!active || !_cameraOn.value || video != null) return
-        video = CallVideo(app).also { it.start(localSurface) }
+        video = CallVideo(app, Handler(cameraThread.looper)).also { it.start(localSurface) }
     }
 
     private fun startDecoder() {

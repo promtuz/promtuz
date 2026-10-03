@@ -51,6 +51,10 @@ pub enum CallEvent {
     Incoming { call: Vec<u8>, peer: Vec<u8>, conversation: Vec<u8>, video: bool },
     /// The peer's phone is ringing, so play ringback.
     Ringing { call: Vec<u8> },
+    /// Our offer crossed the peer's and theirs won: our call `from` is now their call `to`, being
+    /// answered. It comes before any event for `to`. `video` is theirs, not a reason to turn our
+    /// camera on.
+    Switched { from: Vec<u8>, to: Vec<u8>, video: bool },
     /// Answered on both ends; media is being set up.
     Connecting { call: Vec<u8> },
     /// Media flows. Run the audio device from here until `Ended`.

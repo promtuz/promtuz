@@ -17,11 +17,12 @@ import com.promtuz.core.call.CallController.Phase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
-/** Runs from the first call event to the last; the audio device runs only while media flows. */
+/** Runs from placing or answering a call until it ends; the audio device runs only while media flows. */
 class CallService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var audio: CallAudio
@@ -83,6 +84,8 @@ class CallService : Service() {
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     override fun onDestroy() {
+        // A collector left running would start this instance's audio again for the next call.
+        scope.cancel()
         if (audioRunning) audio.stop()
         unwatchNetwork()
         instance = null

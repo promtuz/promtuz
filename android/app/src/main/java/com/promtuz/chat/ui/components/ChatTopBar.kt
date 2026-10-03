@@ -293,16 +293,19 @@ private fun CallButton(peerHex: String, video: Boolean) {
             .onFailure { android.widget.Toast.makeText(context, "Can't start call", android.widget.Toast.LENGTH_SHORT).show() }
         Unit
     }
+    val granted = {
+        needed.all {
+            androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+    // A cancelled prompt returns an empty result, so ask the system again instead of trusting it.
     val permission = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
-    ) { grants -> if (grants.values.all { it }) start() }
+    ) { if (granted()) start() }
     Box(
         Modifier.size(40.dp).clip(CircleShape).clickable {
-            val granted = needed.all {
-                androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-            }
-            if (granted) start() else permission.launch(needed)
+            if (granted()) start() else permission.launch(needed)
         },
         contentAlignment = Alignment.Center,
     ) {

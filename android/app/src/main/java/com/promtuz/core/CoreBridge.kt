@@ -444,7 +444,7 @@ object CoreBridge {
     /** One encoded H.264 access unit (Annex-B) from the video encoder. */
     fun callPushVideo(frame: ByteArray, keyframe: Boolean) = uniffi.core.callPushVideo(frame, keyframe)
 
-    fun callAccept() = uniffi.core.callAccept()
+    fun callAccept(call: ByteArray) = uniffi.core.callAccept(call)
 
     fun callReject() = uniffi.core.callReject()
 

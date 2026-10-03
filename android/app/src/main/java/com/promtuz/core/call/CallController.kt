@@ -29,12 +29,18 @@ object CallController {
         val speaker: Boolean,
         /** SystemClock.elapsedRealtime at the first connect; 0 until then. */
         val connectedAt: Long,
+        /** Whether our camera starts with the video; an audio call that crossed into a video one keeps it off. */
+        val camera: Boolean = video,
     )
 
     enum class Phase { Outgoing, Incoming, Ringing, Connecting, Connected, Reconnecting }
 
     private val _state = MutableStateFlow<Ui?>(null)
     val state: StateFlow<Ui?> = _state.asStateFlow()
+
+    private val _answering = MutableStateFlow<ByteArray?>(null)
+    /** The call an Answer tap picked up; the call screen gets the permissions, then [answer]s it. */
+    val answering: StateFlow<ByteArray?> = _answering.asStateFlow()
 
     private lateinit var app: Context
 
@@ -48,6 +54,9 @@ object CallController {
             is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, video = videoNow(event.call), Phase.Outgoing)
             is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, video = event.video, Phase.Incoming)
             is CallEvent.Ringing -> update(event.call) { it.copy(phase = Phase.Ringing) }
+            is CallEvent.Switched -> update(event.from) {
+                it.copy(callId = event.to, outgoing = false, video = event.video, camera = it.video, phase = Phase.Connecting)
+            }
             is CallEvent.Connecting -> update(event.call) { it.copy(phase = Phase.Connecting) }
             is CallEvent.Connected -> {
                 // A reconnect connects again; the timer keeps its first start.
@@ -55,7 +64,7 @@ object CallController {
                 update(event.call) {
                     it.copy(phase = Phase.Connected, connectedAt = it.connectedAt.takeIf { t -> t != 0L } ?: now)
                 }
-                if (_state.value?.video == true) CallVideoManager.start()
+                _state.value?.takeIf { it.video }?.let { CallVideoManager.start(it.camera) }
             }
             is CallEvent.Reconnecting -> update(event.call) { it.copy(phase = Phase.Reconnecting) }
             is CallEvent.PeerMuted -> update(event.call) { it.copy(peerMuted = event.muted) }
@@ -74,8 +83,8 @@ object CallController {
     ) {
         val name = runCatching { CoreBridge.contactName(peer) }.getOrNull().orEmpty()
         _state.value = Ui(call, peer, conversation, name, outgoing, video, phase, false, false, true, false, 0)
-        startService()
-        if (!outgoing) CallNotifications.ringing(app, _state.value!!)
+        // A ring holds no capture service; answering gets the microphone first, then starts it.
+        if (outgoing) startService() else CallNotifications.ringing(app, _state.value!!)
         CallActivity.launch(app)
     }
 
@@ -100,9 +109,27 @@ object CallController {
         val current = _state.value
         if (current != null && !current.callId.contentEquals(event.call)) return
         _state.value = null
+        _answering.value = null
         CallVideoManager.stop()
         stopService()
         CallNotifications.clearOngoing(app)
+    }
+
+    /** Ignored unless [call] is the current one, so a stale tap cannot prompt for the next call. */
+    fun requestAnswer(call: ByteArray) {
+        _state.value?.callId?.takeIf { it.contentEquals(call) }?.let { _answering.value = it }
+    }
+
+    fun cancelAnswer() {
+        _answering.value = null
+    }
+
+    /** Core refuses unless [call] is still the one ringing, so a stale tap answers nothing. */
+    fun answer(call: ByteArray) {
+        _answering.value = null
+        runCatching { CoreBridge.callAccept(call) }
+            .onSuccess { startService() }
+            .onFailure { Timber.tag("Call").w(it, "answer refused") }
     }
 
     fun toggleMute() {
@@ -123,13 +150,12 @@ object CallController {
         if (_state.value != null) CoreBridge.callNetworkChanged()
     }
 
-    /** A refused start (background on API 31+) leaves the ringing notification to carry the call. */
     private fun startService() {
         val intent = Intent(app, CallService::class.java)
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent)
             else app.startService(intent)
-        }.onFailure { Timber.tag("Call").w(it, "call service refused; ringing by notification only") }
+        }.onFailure { Timber.tag("Call").w(it, "call service refused") }
     }
 
     private fun stopService() {

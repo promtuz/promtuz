@@ -174,7 +174,7 @@
             android:taskAffinity="com.promtuz.chat.call"
             android:theme="@style/Theme.Promtuz" />
 
-        <!-- Answer / hang-up buttons on the call notification. -->
+        <!-- Hang-up and decline on the call notification; Answer opens CallActivity. -->
         <receiver
             android:name="com.promtuz.core.call.CallActionReceiver"
             android:exported="false" />

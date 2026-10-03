@@ -82,9 +82,11 @@ object CallNotifications {
         if (incoming) {
             builder.setStyle(
                 NotificationCompat.CallStyle.forIncomingCall(
-                    person, hangup(context), answer(context),
+                    person, hangup(context), answer(context, ui.callId),
                 ),
             ).setFullScreenIntent(content, true)
+                // Outlives core's 45 s ring, so a ring the process can no longer end still stops.
+                .setTimeoutAfter(50_000)
             // Ring until answered or ended, not once.
             return builder.build().also { it.flags = it.flags or Notification.FLAG_INSISTENT }
         }
@@ -118,15 +120,20 @@ object CallNotifications {
         return PendingIntent.getActivity(context, 0, intent, pendingFlags())
     }
 
-    private fun answer(context: Context) =
-        action(context, CallActionReceiver.ACTION_ANSWER, "Answer")
+    /** Opens the call screen itself, which answers once it has the microphone. Android 12+
+     *  blocks a receiver from starting an activity off a notification tap. */
+    private fun answer(context: Context, call: ByteArray): PendingIntent {
+        val intent = Intent(context, CallActivity::class.java)
+            .setAction(CallActivity.ACTION_ANSWER)
+            .putExtra(CallActivity.EXTRA_CALL, call)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // One PendingIntent per call, so the next call's extras never rewrite this one's.
+        return PendingIntent.getActivity(context, call.contentHashCode(), intent, pendingFlags())
+    }
 
-    private fun hangup(context: Context) =
-        action(context, CallActionReceiver.ACTION_HANGUP, "Hang up")
-
-    private fun action(context: Context, action: String, title: String): PendingIntent {
-        val intent = Intent(context, CallActionReceiver::class.java).setAction(action)
-        return PendingIntent.getBroadcast(context, action.hashCode(), intent, pendingFlags())
+    private fun hangup(context: Context): PendingIntent {
+        val intent = Intent(context, CallActionReceiver::class.java).setAction(CallActionReceiver.ACTION_HANGUP)
+        return PendingIntent.getBroadcast(context, 0, intent, pendingFlags())
     }
 
     private fun pendingFlags() = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

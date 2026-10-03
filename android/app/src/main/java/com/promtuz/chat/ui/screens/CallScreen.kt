@@ -1,5 +1,11 @@
 package com.promtuz.chat.ui.screens
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -30,8 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.DrawableIcon
@@ -46,6 +54,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun CallScreen(call: CallController.Ui?) {
     if (call == null) return
+    Answering(call)
     val colors = MaterialTheme.colorScheme
     val onVideo = call.video && call.phase == Phase.Connected
     Box(
@@ -102,7 +111,7 @@ fun CallScreen(call: CallController.Ui?) {
 
         Box(Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 56.dp)) {
             if (!call.outgoing && (call.phase == Phase.Incoming || call.phase == Phase.Ringing)) {
-                IncomingControls()
+                IncomingControls(call)
             } else {
                 OngoingControls(call)
             }
@@ -130,8 +139,34 @@ private fun statusLine(call: CallController.Ui): String = when (call.phase) {
     }
 }
 
+/** An Answer tap, here or on the notification, lands here. The microphone is required; a refused
+ *  camera answers a video call with ours off. */
 @Composable
-private fun IncomingControls() {
+private fun Answering(call: CallController.Ui) {
+    val context = LocalContext.current
+    val answering by CallController.answering.collectAsState()
+    // Checked again after the prompt, whose result is empty when it was dismissed.
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val id = CallController.answering.value ?: return@rememberLauncherForActivityResult
+        if (context.granted(Manifest.permission.RECORD_AUDIO)) CallController.answer(id)
+        else {
+            CallController.cancelAnswer()
+            Toast.makeText(context, "Calls need the microphone", Toast.LENGTH_SHORT).show()
+        }
+    }
+    LaunchedEffect(answering) {
+        val id = answering ?: return@LaunchedEffect
+        val missing = listOfNotNull(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA.takeIf { call.video })
+            .filterNot(context::granted)
+        if (missing.isEmpty()) CallController.answer(id) else ask.launch(missing.toTypedArray())
+    }
+}
+
+private fun Context.granted(permission: String) =
+    ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+@Composable
+private fun IncomingControls(call: CallController.Ui) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 48.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -140,7 +175,7 @@ private fun IncomingControls() {
             com.promtuz.core.CoreBridge.callReject()
         }
         RoundButton(R.drawable.i_phone, "Answer", Color(0xFF30A46C), Color.White) {
-            runCatching { com.promtuz.core.CoreBridge.callAccept() }
+            CallController.requestAnswer(call.callId)
         }
     }
 }
@@ -148,7 +183,12 @@ private fun IncomingControls() {
 @Composable
 private fun OngoingControls(call: CallController.Ui) {
     val colors = MaterialTheme.colorScheme
+    val context = LocalContext.current
     val cameraOn by CallVideoManager.cameraOn.collectAsState()
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) CallController.toggleCamera()
+        else Toast.makeText(context, "Video needs the camera", Toast.LENGTH_SHORT).show()
+    }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 32.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -164,7 +204,10 @@ private fun OngoingControls(call: CallController.Ui) {
         if (call.video && call.phase == Phase.Connected) {
             val camBg = if (cameraOn) colors.surfaceVariant else colors.onSurface
             val camFg = if (cameraOn) colors.onSurface else colors.surface
-            RoundButton(R.drawable.oi_camera, "Camera", camBg, camFg) { CallController.toggleCamera() }
+            RoundButton(R.drawable.oi_camera, "Camera", camBg, camFg) {
+                if (cameraOn || context.granted(Manifest.permission.CAMERA)) CallController.toggleCamera()
+                else cameraPermission.launch(Manifest.permission.CAMERA)
+            }
             RoundButton(R.drawable.i_refresh, "Flip", colors.surfaceVariant, colors.onSurface) {
                 CallController.switchCamera()
             }
