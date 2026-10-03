@@ -3,8 +3,4 @@
 
 // Frozen: deriving it from PROTOCOL_VERSION would break attachment compatibility on an
 // unrelated version bump.
-const ALPN: &[u8] = b"promtuz-attachment/2";
-
-pub(crate) fn offered_alpns() -> Vec<Vec<u8>> {
-    vec![ALPN.to_vec()]
-}
+pub(crate) const ALPN: &[u8] = b"promtuz-attachment/2";

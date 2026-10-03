@@ -6,9 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use std::sync::LazyLock;
 use common::utils::now_secs;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::{store, wire};
@@ -18,8 +16,6 @@ use crate::state::Core;
 
 /// An 8 MiB manifest frame names at most this many chunk hashes.
 const MAX_CHUNKS: usize = 8 * 1024 * 1024 / 32;
-// Recovery scans can read GiB, so they run blocking and are bounded apart from download slots.
-static RECOVERY_SCANS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 struct StopScanOnDrop(Option<CancellationToken>);
 
@@ -32,13 +28,13 @@ impl Drop for StopScanOnDrop {
 }
 
 async fn blocking_scan<T: Send + 'static>(
-    c: &Core, lease: store::ReceiverLease, slots: Arc<Semaphore>,
+    c: &Core, lease: store::ReceiverLease,
     scan: impl FnOnce(&store::ReceiverLease, &CancellationToken) -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let permit = tokio::select! {
         biased;
         _ = lease.cancel.cancelled() => return Err(store::Cancelled.into()),
-        permit = slots.acquire_owned() => permit?,
+        permit = c.transfers.recovery_scans.clone().acquire_owned() => permit?,
     };
     let stop = CancellationToken::new();
     let mut guard = StopScanOnDrop(Some(stop.clone()));
@@ -116,7 +112,7 @@ impl Receiver {
         c: &'static Core, file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest,
         offered_size: u64, lease: &store::ReceiverLease,
     ) -> Result<Self> {
-        blocking_scan(c, lease.clone(), RECOVERY_SCANS.clone(), move |lease, stop| {
+        blocking_scan(c, lease.clone(), move |lease, stop| {
             Self::open_inner(&c.db, file_id, peer, manifest, offered_size, lease, Some(stop))
         })
         .await
@@ -350,7 +346,7 @@ mod tests {
         let file_id = manifest.file_id();
         let path = dev.dir.path().join("saved.part").display().to_string();
         std::fs::write(&path, []).unwrap();
-        let lease = store::receiver_lease(&dev.core.db, file_id);
+        let lease = store::receiver_lease(dev.core, file_id);
         let partial = store::Partial {
             file_id,
             source_ipk: [seed; 32],
@@ -391,14 +387,7 @@ mod tests {
         }
 
         fn forget(&self) {
-            let db = &self.dev.core.db;
-            let canonical = store::partial_path(db, &self.file_id);
-            store::forget_row_tx(
-                &db.transfers().lock(),
-                "partials",
-                &self.file_id,
-                Some(canonical),
-            );
+            store::forget_file(self.dev.core, &self.file_id);
         }
     }
 
@@ -501,7 +490,7 @@ mod tests {
         assert!(f.dev.partial(&f.file_id).is_none());
         assert!(!std::path::Path::new(&f.path).exists());
 
-        let next = store::receiver_lease(&f.dev.core.db, f.file_id);
+        let next = store::receiver_lease(f.dev.core, f.file_id);
         std::fs::write(&f.path, [0xef]).unwrap();
         let stale = receiver.commit(0, f.chunk(0), &next).unwrap_err();
         assert!(stale.is::<store::Cancelled>(), "the old receiver cannot touch a new download");

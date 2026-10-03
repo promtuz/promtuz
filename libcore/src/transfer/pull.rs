@@ -1,10 +1,6 @@
-use std::collections::HashSet;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use common::utils::now_secs;
-use parking_lot::Mutex;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use super::CHUNK_DEADLINE;
@@ -29,19 +25,15 @@ use crate::state::Core;
 const WAKE_BACKOFF_SECS: u64 = 60;
 pub(super) const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 const RETRY_COOLDOWN_SECS: u64 = 60;
-static PULLING: Semaphore = Semaphore::const_new(4);
 
 fn protocol_failure(message: &'static str) -> Failure {
     Failure::new(FailureKind::InvalidData, wire::InvalidFrame(message.into()))
 }
 
-/// Pulls in flight: two `download`s of one file must not co-write its partial; the loser no-ops.
-pub(super) static DOWNLOADING: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-
-pub(super) struct PullGuard(pub(super) [u8; 32]);
+pub(super) struct PullGuard(pub(super) &'static Core, pub(super) [u8; 32]);
 impl Drop for PullGuard {
     fn drop(&mut self) {
-        DOWNLOADING.lock().remove(&self.0);
+        self.0.transfers.downloading.lock().remove(&self.1);
     }
 }
 
@@ -56,10 +48,10 @@ pub(super) enum DownloadTrigger {
 pub(super) async fn download_with_policy(
     c: &'static Core, file_id: [u8; 32], trigger: DownloadTrigger,
 ) -> anyhow::Result<()> {
-    if !DOWNLOADING.lock().insert(file_id) {
+    if !c.transfers.downloading.lock().insert(file_id) {
         return Ok(());
     }
-    let _guard = PullGuard(file_id);
+    let _guard = PullGuard(c, file_id);
     // Recheck after owning the writer slot, since another worker may have just finished. Only a
     // requested download retries a FAILED file.
     let current = store::partial_get_tx(&c.db.transfers().lock(), &file_id);
@@ -83,9 +75,9 @@ pub(super) async fn download_with_policy(
     }
     // Register before looking up the message: deletion before registration is
     // caught by the lookup, deletion after it cancels this generation.
-    let lease = store::receiver_lease(&c.db, file_id);
+    let lease = store::receiver_lease(c, file_id);
     let _slot = tokio::select! {
-        slot = PULLING.acquire() => slot?,
+        slot = c.transfers.pulling.acquire() => slot?,
         _ = lease.cancel.cancelled() => return Ok(()),
     };
     let offer = crate::data::media::attachment_offer_tx(&c.db.messages().lock(), &file_id)?;
@@ -99,7 +91,7 @@ pub(super) async fn download_with_policy(
         if let Some(p) = partial {
             set_state(c, &file_id, p.source_ipk, store::FAILED, &lease)?;
         }
-        crate::data::media::unlink_orphaned(&c.db, &c.db.messages().lock(), &[file_id]);
+        crate::data::media::unlink_orphaned(c, &c.db.messages().lock(), &[file_id]);
         anyhow::bail!("no incoming offer for that file_id");
     };
     let local = match auth::local_auth() {

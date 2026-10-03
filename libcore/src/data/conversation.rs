@@ -464,7 +464,7 @@ impl Conversation {
         }
         let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.commit()?;
-        crate::data::media::unlink_orphaned(&core().db, &conn, &orphaned);
+        crate::data::media::unlink_orphaned(core(), &conn, &orphaned);
         drop(conn);
         crate::groups::recovery::finish_clears()
     }
@@ -520,7 +520,7 @@ impl Conversation {
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
-        crate::data::media::unlink_orphaned(&core().db, &conn, &orphaned);
+        crate::data::media::unlink_orphaned(core(), &conn, &orphaned);
         drop(conn);
         crate::groups::recovery::finish_clears()
     }

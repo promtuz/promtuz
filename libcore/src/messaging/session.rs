@@ -1,8 +1,6 @@
 //! MLS sessions: creating, finding and repairing the group a chat sends through.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -22,7 +20,6 @@ use openmls::prelude::KeyPackage;
 use openmls::prelude::tls_codec::Deserialize as _;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::SignatureScheme;
-use parking_lot::Mutex as PlMutex;
 use tokio::sync::Mutex as TokMutex;
 
 use super::send_control;
@@ -39,16 +36,11 @@ use crate::mls::PromtuzMlsProvider;
 use crate::mls::make_welcome_envelope;
 use crate::mls::types::MlsGroupError;
 use crate::quic::dht_client::DhtClient;
-
-/// One `lazy_create_group` at a time per scope: concurrent first sends would each burn a
-/// KeyPackage and create a duplicate group. Entries are never removed.
-#[allow(clippy::type_complexity)]
-static GROUP_CREATE_LOCKS: LazyLock<PlMutex<HashMap<Vec<u8>, Arc<TokMutex<()>>>>> =
-    LazyLock::new(|| PlMutex::new(HashMap::new()));
+use crate::state::core;
 
 /// `scope` is a conversation id on the send path and a peer IPK on the inbound heal path.
 fn group_create_lock(scope: &[u8]) -> Arc<TokMutex<()>> {
-    let mut map = GROUP_CREATE_LOCKS.lock();
+    let mut map = core().messaging.group_create.lock();
     map.entry(scope.to_vec()).or_insert_with(|| Arc::new(TokMutex::new(()))).clone()
 }
 

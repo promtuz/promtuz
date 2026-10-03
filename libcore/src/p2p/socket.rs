@@ -53,7 +53,7 @@ struct TcpRoute {
     active: bool,
     established: bool,
     started: bool,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<tokio::task::AbortHandle>,
 }
 
 impl std::fmt::Debug for TcpRoute {
@@ -184,9 +184,7 @@ impl TurnRoutes {
         true
     }
 
-    pub(super) fn own_tcp_worker(
-        &mut self, synth: SocketAddr, worker: tokio::task::JoinHandle<()>,
-    ) {
+    pub(super) fn own_tcp_worker(&mut self, synth: SocketAddr, worker: tokio::task::AbortHandle) {
         if let Some(route) = self.tcp.get_mut(&synth) {
             route.worker = Some(worker);
         } else {
@@ -514,8 +512,7 @@ pub fn build_endpoint() -> Result<BuiltEndpoint> {
     let mut ep_cfg = EndpointConfig::default();
     ep_cfg.grease_quic_bit(false);
 
-    let alpns = super::protocol::offered_alpns();
-    let mut server_cfg = build_peer_server_cfg(key.clone(), alpns.clone())?;
+    let mut server_cfg = build_peer_server_cfg(key.clone())?;
     server_cfg.max_incoming(MAX_INCOMING);
 
     let mut endpoint = Endpoint::new_with_abstract_socket(
@@ -524,7 +521,7 @@ pub fn build_endpoint() -> Result<BuiltEndpoint> {
         bound.socket,
         Arc::new(TokioRuntime),
     )?;
-    endpoint.set_default_client_config(build_peer_client_cfg(key, alpns)?);
+    endpoint.set_default_client_config(build_peer_client_cfg(key)?);
     Ok(BuiltEndpoint {
         endpoint,
         pokes: bound.pokes,

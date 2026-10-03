@@ -8,8 +8,6 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::bail;
 use common::proto::mls_wire::AppPayload;
-use std::sync::LazyLock;
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
@@ -25,7 +23,7 @@ mod routing;
 mod tests;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Part {
+pub(crate) enum Part {
     Avatar,
     Details,
 }
@@ -108,8 +106,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // Suppress reconnect storms and overlapping relay lifetimes. A reconnect still
 // probes a peer even when its earlier ACK was current: it may have lost state.
 const PROBE_COOLDOWN: Duration = Duration::from_secs(60);
-type PeerKey = ([u8; 32], [u8; 32], Part);
-static PROBES: LazyLock<Mutex<HashMap<PeerKey, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) type PeerKey = ([u8; 32], [u8; 32], Part);
 
 fn known_revision(part: Part, conn: &Connection, peer: &[u8; 32]) -> Result<Option<u64>> {
     let sql = format!("SELECT revision FROM {} WHERE ipk = ?1", part.stored_table());
@@ -265,7 +262,7 @@ async fn reconcile_part(
             }
             known_revision(part, &conn, peer)?
         };
-        if !claim_probe(&mut PROBES.lock(), (owner, *peer, part), now) {
+        if !claim_probe(&mut core().profile_probes.lock(), (owner, *peer, part), now) {
             continue;
         }
         if let Err(e) = routing::probe(*peer, routes, part.sync(known, false)).await {
@@ -300,7 +297,10 @@ async fn reconcile(all: bool) {
     let avatar = identity.avatar_update().revision;
     let details = identity.details().revision;
     let peers = routing::routes(&owner);
-    PROBES.lock().retain(|(who, peer, _), _| *who == owner && peers.contains_key(peer));
+    core()
+        .profile_probes
+        .lock()
+        .retain(|(who, peer, _), _| *who == owner && peers.contains_key(peer));
     let (avatar, details, ()) = tokio::join!(
         reconcile_part(Part::Avatar, owner, avatar, &peers, all),
         reconcile_part(Part::Details, owner, details, &peers, all),

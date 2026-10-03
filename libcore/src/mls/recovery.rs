@@ -29,10 +29,9 @@ use super::storage::Operation;
 
 pub type Branch = [u8; 32];
 
-static OPERATIONS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
-
 pub fn operation_lock(group: &[u8; 32]) -> &'static Mutex<()> {
-    &OPERATIONS[usize::from(group[0]) % OPERATIONS.len()]
+    let stripes = &crate::state::core().mls_operations;
+    &stripes[usize::from(group[0]) % stripes.len()]
 }
 
 pub fn registered(provider: &PromtuzMlsProvider, gid: &[u8; 32]) -> Result<bool> {

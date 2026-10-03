@@ -52,13 +52,16 @@ pub(crate) mod member_requests;
 pub(crate) mod migration;
 pub(crate) mod recovery;
 
-/// One commit at a time on this device. Two built from the same epoch would
-/// fork the group.
-static MEMBERSHIP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// One follow-up of pending requests at a time, so a burst of commits asks the
-/// committer once rather than once per commit.
-static FOLLOW_UP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[derive(Default)]
+pub(crate) struct Groups {
+    /// One commit at a time on this device. Two built from the same epoch would fork the group.
+    membership:               tokio::sync::Mutex<()>,
+    /// One follow-up of pending requests at a time, so a burst of commits asks the committer once
+    /// rather than once per commit.
+    follow_up:                tokio::sync::Mutex<()>,
+    migration_retries:        parking_lot::Mutex<std::collections::HashSet<[u8; 16]>>,
+    pub(crate) picture_write: tokio::sync::Mutex<()>,
+}
 
 /// How long an admin's request waits on a silent committer before the admin
 /// takes its role.
@@ -332,7 +335,7 @@ async fn carry_request(conversation: [u8; 16], from: [u8; 32], signed: SignedCha
 
 /// Commit `signed` as the group's committer, or as the admin taking its place.
 async fn commit_change(conversation: [u8; 16], signed: SignedChange) -> Result<()> {
-    let _one = MEMBERSHIP.lock().await;
+    let _one = core().groups.membership.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     let group_id = require_group(&conversation)?;
     with_mls!(ctx, {
@@ -735,7 +738,7 @@ pub(crate) fn delete_after_leave(conversation: &[u8; 16]) -> Result<()> {
     )?;
     let orphaned = Conversation::clear_history_tx(&tx, conversation)?;
     tx.commit()?;
-    crate::data::media::unlink_orphaned(&core().db, &conn, &orphaned);
+    crate::data::media::unlink_orphaned(core(), &conn, &orphaned);
     drop(conn);
     recovery::finish_clears()
 }
@@ -818,7 +821,7 @@ pub(crate) fn on_reconnect() {
 /// Drops requests that are done or no longer allowed and asks again for the rest, signed for the
 /// current epoch; carried directly once this device commits.
 async fn follow_up(conversation: [u8; 16]) -> Result<()> {
-    let _one = FOLLOW_UP.lock().await;
+    let _one = core().groups.follow_up.lock().await;
     if migration::follow_up(conversation).await? { return Ok(()); }
     // Backups preserve the public group anchor and roster, not epoch secrets.
     // Request fresh keys without waiting for someone to send into the lost epoch.
@@ -1085,7 +1088,7 @@ async fn maybe_upgrade(conversation: [u8; 16]) -> Result<()> {
 /// Add someone to a group from before signed rules: its founder commits it and
 /// Welcomes them directly.
 async fn legacy_add(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
-    let _one = MEMBERSHIP.lock().await;
+    let _one = core().groups.membership.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     require_owner(&conversation, &our_ipk)?;
     let group_id = require_group(&conversation)?;
@@ -1136,7 +1139,7 @@ pub async fn carry_leave(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
 async fn evict(
     conversation: [u8; 16], who: [u8; 32], narration: Option<SystemEvent>,
 ) -> Result<()> {
-    let _one = MEMBERSHIP.lock().await;
+    let _one = core().groups.membership.lock().await;
     let (our_ipk, ipk_signer) = local_signer()?;
     require_owner(&conversation, &our_ipk)?;
     let group_id = require_group(&conversation)?;

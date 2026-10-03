@@ -292,7 +292,7 @@ pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
 #[uniffi::export]
 pub fn set_presence(idle: bool) {
     // Apply the local upload policy synchronously, before any relay work.
-    crate::transfer::sharing::set_foreground(!idle);
+    crate::transfer::sharing::set_foreground(core(), !idle);
     core().spawn(async move {
         let session = core().session();
         if let Err(e) = crate::presence::set_presence(session.as_deref(), idle).await {
@@ -308,23 +308,20 @@ pub async fn sync_messages() -> Result<(), CoreError> {
     let ipk = crate::data::identity::Identity::public_key().map_err(anyhow::Error::from)?;
     // Replacing an Android wake job must not cancel a message mid-decryption, so core runs this
     // bounded sync on its own task.
-    core()
-        .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(45), async {
-                loop {
-                    let session = core().session();
-                    if let Some(session) = session.filter(|s| s.conn.close_reason().is_none()) {
-                        return session.sync_incoming(ipk).await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    on_runtime(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            loop {
+                let session = core().session();
+                if let Some(session) = session.filter(|s| s.conn.close_reason().is_none()) {
+                    return session.sync_incoming(ipk).await;
                 }
-            })
-            .await
-            .map_err(anyhow::Error::from)?
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         })
         .await
-        .map_err(anyhow::Error::from)??;
-    Ok(())
+        .map_err(anyhow::Error::from)?
+    })
+    .await
 }
 
 #[uniffi::export]
@@ -796,11 +793,11 @@ where
     T: Send + 'static,
     F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
 {
-    core()
-        .spawn(fut)
-        .await
-        .map_err(|e| CoreError::Internal { msg: format!("core task did not finish: {e}") })?
-        .map_err(CoreError::from)
+    match core().spawn(fut).await {
+        Ok(Some(result)) => result.map_err(CoreError::from),
+        Ok(None) => Err(CoreError::Internal { msg: "core stopped".into() }),
+        Err(e) => Err(CoreError::Internal { msg: format!("core task did not finish: {e}") }),
+    }
 }
 
 /// Returns the new conversation id, ready to send in.

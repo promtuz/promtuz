@@ -1,11 +1,14 @@
 //! The client core: one owner for the databases, the host ports, the relay session and the
 //! background tasks.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -18,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::data::ResolverSeed;
+use crate::data::identity::CachedIsk;
 use crate::db::Stores;
 use crate::platform::CoreEvents;
 use crate::platform::SecureStore;
@@ -34,7 +38,7 @@ pub struct Core {
     pub(crate) net: OnceLock<Net>,
     /// Counts every task core spawns.
     pub tasks: TaskTracker,
-    /// The parent of every session's token; cancelling it stops the long-lived loops.
+    /// Cancelling it ends the relay session and every task core spawned.
     pub cancel: CancellationToken,
     session: RwLock<Option<Arc<Session>>>,
     /// Relay id the user asked to connect to. The relay loop takes it on its next pick instead of
@@ -45,6 +49,24 @@ pub struct Core {
     pub(crate) relay_probe: tokio::sync::Mutex<()>,
     pub(crate) task_removed: AtomicBool,
     pub(crate) network_change_pending: AtomicBool,
+    /// Serializes inbox drains across sessions: the relay tracks one batch.
+    pub(crate) inbox_sync: tokio::sync::Mutex<()>,
+    /// Starts idle: a headless push wake stays idle until the UI foregrounds it.
+    pub(crate) presence_idle: AtomicBool,
+    pub(crate) isk: RwLock<Option<CachedIsk>>,
+    pub(crate) avatar_generation: AtomicU64,
+    pub(crate) kp_publish_ready: AtomicBool,
+    pub(crate) mls_operations: [Mutex<()>; 64],
+    pub(crate) profile_probes: Mutex<HashMap<crate::profile_sync::PeerKey, Instant>>,
+    pub(crate) p2p: crate::p2p::P2p,
+    pub(crate) calls: crate::call::Calls,
+    pub(crate) transfers: crate::transfer::Transfers,
+    pub(crate) stickers: crate::stickers::Stickers,
+    pub(crate) push: crate::push::Push,
+    pub(crate) staging: crate::staging::Staging,
+    pub(crate) groups: crate::groups::Groups,
+    pub(crate) messaging: crate::messaging::Messaging,
+    pub(crate) receipts: crate::data::receipts::Receipts,
 }
 
 /// What `init` builds for reaching relays, resolvers and gateways.
@@ -70,16 +92,32 @@ impl Core {
             relay_probe: tokio::sync::Mutex::new(()),
             task_removed: AtomicBool::new(false),
             network_change_pending: AtomicBool::new(false),
+            inbox_sync: tokio::sync::Mutex::new(()),
+            presence_idle: AtomicBool::new(true),
+            isk: RwLock::new(None),
+            avatar_generation: AtomicU64::new(0),
+            kp_publish_ready: AtomicBool::new(false),
+            mls_operations: [const { Mutex::new(()) }; 64],
+            profile_probes: Mutex::default(),
+            p2p: Default::default(),
+            calls: Default::default(),
+            transfers: Default::default(),
+            stickers: Default::default(),
+            push: Default::default(),
+            staging: Default::default(),
+            groups: Default::default(),
+            messaging: Default::default(),
+            receipts: Default::default(),
         }
     }
 
-    /// Runs `task` on the runtime, counted by `tasks` until it finishes.
-    pub fn spawn<F>(&self, task: F) -> JoinHandle<F::Output>
+    /// Runs `task` on the runtime, counted by `tasks` until it finishes or `cancel` drops it.
+    pub fn spawn<F>(&self, task: F) -> JoinHandle<Option<F::Output>>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.tasks.spawn_on(task, &self.runtime)
+        self.tasks.spawn_on(self.cancel.clone().run_until_cancelled_owned(task), &self.runtime)
     }
 
     pub fn spawn_blocking<F, T>(&self, task: F) -> JoinHandle<T>
@@ -108,10 +146,7 @@ impl Core {
                     Ok(Err(e)) => log::warn!("{name} failed, restarting: {e:#}"),
                     Err(e) => log::warn!("{name} stopped, restarting: {e}"),
                 }
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(backoff) => {},
-                }
+                tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
             }
         });
@@ -164,4 +199,80 @@ pub fn core() -> &'static Core {
         return core;
     }
     &CORE
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use common::proto::mls_wire::CallMsg;
+    use common::utils::now_ms;
+    use ed25519_dalek::SigningKey;
+
+    use crate::call::Phase;
+    use crate::data::contact::Contact;
+    use crate::data::conversation::Conversation;
+    use crate::data::message::Message;
+    use crate::p2p::diagnostics::Event;
+    use crate::test_support::ScopedCore;
+    use crate::test_support::data::identity;
+    use crate::test_support::transfer::attachment;
+
+    /// Without a relay, the P2P endpoint's loops never end, a download sleeps between retries and
+    /// an answered call waits 20 s for media. Cancelling the core stops all of them at once.
+    #[tokio::test]
+    async fn cancelling_the_core_stops_p2p_loops_a_download_and_a_call() {
+        let _ = common::quic::config::setup_crypto_provider();
+        let scope = ScopedCore::new();
+        let core = scope.core;
+        let me = identity(&core.db.identity().lock(), 0x61).verifying_key().to_bytes();
+        let peer = SigningKey::from_bytes(&[0x62; 32]).verifying_key().to_bytes();
+        {
+            let contacts = core.db.contacts().lock();
+            Contact::save_pending_tx(&contacts, peer, "peer", 0).unwrap();
+            Contact::mark_paired_tx(&contacts, &peer).unwrap();
+        }
+        let (file, dispatch) = ([0x63; 32], [0x64; 16]);
+        let chat = {
+            let db = core.db.messages().lock();
+            let chat = Conversation::join_group_tx(&db, &peer, &[peer, me]).unwrap();
+            Message::save_incoming_tx(&db, chat, peer, &dispatch, "", 0, None).unwrap();
+            crate::data::media::save_tx(&db, &chat, &dispatch, &attachment(file, 4096)).unwrap();
+            chat
+        };
+
+        assert!(crate::p2p::link(peer).await.is_err(), "no relay carries the offer");
+        crate::api::media::download_attachment(file.to_vec()).unwrap();
+        let call = [0x65; 16];
+        let offer = CallMsg::Offer {
+            call,
+            expires_at_ms: now_ms() + 30_000,
+            video: false,
+            ufrag: "ufrag".into(),
+            pwd: "pwd-of-twenty-four-chars".into(),
+            fingerprint: [0; 32],
+            ssrc: 1,
+            video_ssrc: 0,
+            candidates: Vec::new(),
+        };
+        crate::call::on_signal(peer, chat, offer);
+        crate::call::accept(call).unwrap();
+        let recorded = |event: fn(&Event) -> bool| {
+            crate::p2p::diagnostics::snapshot().events.iter().any(|(_, e)| event(e))
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !recorded(|e| matches!(e, Event::TransportRetry)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the download waits to retry");
+        assert!(recorded(|e| matches!(e, Event::SignalingFailed)), "the endpoint is up");
+        assert!(crate::call::current().is_some_and(|c| c.phase == Phase::Connecting));
+
+        core.cancel.cancel();
+        core.tasks.close();
+        let stopped = tokio::time::timeout(Duration::from_millis(500), core.tasks.wait()).await;
+        assert!(stopped.is_ok(), "{} tasks still running", core.tasks.len());
+    }
 }

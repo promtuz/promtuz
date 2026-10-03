@@ -383,30 +383,35 @@ fn pending_rows_tx(conn: &Connection, conv: [u8; 16], author: [u8; 32]) -> Resul
             entry:ReceiptEntry {message_id:r.get(1)?,delivered_at:r.get(2)?,read_at:r.get(3)?}}))?)
 }
 
-static FLUSH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[derive(Default)]
+pub(crate) struct Receipts {
+    flush:     tokio::sync::Mutex<()>,
+    requested: std::sync::atomic::AtomicBool,
+    running:   std::sync::atomic::AtomicBool,
+}
+
 pub(crate) fn schedule() {
     use std::sync::atomic::Ordering::SeqCst;
-    REQUESTED.store(true, SeqCst);
-    if RUNNING.swap(true, SeqCst) {
+    let receipts = &core().receipts;
+    receipts.requested.store(true, SeqCst);
+    if receipts.running.swap(true, SeqCst) {
         return;
     }
-    core().spawn(async {
-        while REQUESTED.swap(false, SeqCst) {
+    core().spawn(async move {
+        while receipts.requested.swap(false, SeqCst) {
             if let Err(e) = flush().await {
                 log::debug!("RECEIPTS: deferred: {e}");
                 break;
             }
         }
-        RUNNING.store(false, SeqCst);
-        if REQUESTED.load(SeqCst) {
+        receipts.running.store(false, SeqCst);
+        if receipts.requested.load(SeqCst) {
             schedule();
         }
     });
 }
 pub(crate) async fn flush() -> Result<()> {
-    let _guard = FLUSH.lock().await;
+    let _guard = core().receipts.flush.lock().await;
     let mut failed = std::collections::HashSet::new();
     loop {
         let rows = pending(&failed)?;

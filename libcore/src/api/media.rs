@@ -9,7 +9,7 @@ use crate::state::core;
 /// must report false; this never restricts the original sender's transfers.
 #[uniffi::export]
 pub fn set_attachment_sharing_network(unmetered_wifi: bool) {
-    crate::transfer::sharing::set_network(unmetered_wifi);
+    crate::transfer::sharing::set_network(core(), unmetered_wifi);
 }
 
 /// Process-local debug events with fixed categories only, never peer or file identifiers.

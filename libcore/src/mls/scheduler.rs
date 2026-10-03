@@ -70,11 +70,8 @@ fn tick(
 
 /// Set once a KeyPackage publish succeeds. The share screen holds back the QR until then, so a new
 /// user cannot hand out a link nobody can pair with.
-pub static KP_PUBLISH_READY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 pub fn kp_publish_ready() -> bool {
-    KP_PUBLISH_READY.load(std::sync::atomic::Ordering::Relaxed)
+    core().kp_publish_ready.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
@@ -87,7 +84,7 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
     match dht.publish_keypackages(records).await {
         Ok(()) => {
             crate::delivery::retire(&kp_id, None);
-            KP_PUBLISH_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+            core().kp_publish_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         },
         Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),
     }

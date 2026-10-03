@@ -715,10 +715,11 @@ mod tests {
         };
 
         let (held, holding) = std::sync::mpsc::channel();
+        let operation = journal::operation_lock(&gid);
         let receive = std::thread::spawn({
             let mls = mls.clone();
             move || {
-                let _operation = journal::operation_lock(&gid).lock();
+                let _operation = operation.lock();
                 held.send(()).unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 retried(&mls)

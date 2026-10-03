@@ -1,5 +1,8 @@
 //! End-to-end encrypted application messaging via MLS.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -35,6 +38,17 @@ pub mod receive;
 pub mod send;
 pub mod session;
 pub mod welcome;
+
+#[derive(Default)]
+pub(crate) struct Messaging {
+    /// One `lazy_create_group` at a time per scope: concurrent first sends would each burn a
+    /// KeyPackage and create a duplicate group. Entries are never removed.
+    group_create:      parking_lot::Mutex<HashMap<Vec<u8>, Arc<tokio::sync::Mutex<()>>>>,
+    failed_dispatches: parking_lot::Mutex<HashMap<([u8; 32], [u8; 16]), u8>>,
+    /// Per-`welcome_id` failure counts, in memory only: a restart resets them, and the home's TTL
+    /// still bounds the queue.
+    welcome_retries:   parking_lot::Mutex<HashMap<[u8; 8], u8>>,
+}
 
 /// `msg` is already saved, so a failure leaves it pending rather than lost; without a relay it
 /// waits for `retry_pending_sends`.

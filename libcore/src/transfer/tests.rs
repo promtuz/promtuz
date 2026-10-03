@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use common::utils::now_secs;
 
-use super::pull::DOWNLOADING;
 use super::pull::DownloadTrigger;
 use super::pull::PullGuard;
 use super::pull::RETRY_DELAYS;
@@ -19,7 +18,6 @@ use super::v2::ReadPhase;
 use super::*;
 use crate::data::conversation::Conversation;
 use crate::p2p::PeerLink;
-use crate::p2p::protocol::offered_alpns;
 use crate::state::Core;
 use crate::test_support::transfer::content;
 use crate::test_support::transfer::device;
@@ -31,7 +29,7 @@ use crate::test_support::transfer::manifest;
 async fn pull(
     c: &'static Core, link: &PeerLink, file: &wire::Manifest, local: &wire::Auth,
 ) -> Result<(), Failure> {
-    let lease = store::receiver_lease(&c.db, file.file_id());
+    let lease = store::receiver_lease(c, file.file_id());
     pull_live(c, link, file.file_id(), file.total_size, local, &lease).await
 }
 
@@ -72,7 +70,7 @@ async fn group_media_without_pairing_is_scoped_and_revocable() {
     let group = s.group(&[sender.ipk, receiver.ipk]);
     let file = s.retain(&content(1, 3), 1024);
     s.offer(sender.ipk, group, &file);
-    let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+    let link = linked(&sender, &receiver).await;
     let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
 
     pull(r.core, &link.client, &file, &receiver).await.unwrap();
@@ -113,7 +111,7 @@ async fn v2_authorization_precedes_metadata_and_is_rechecked_on_existing_link() 
     let (s, r) = (device(), device());
     s.pair(receiver.ipk);
     let file = s.retain(&content(3, 2), 1024);
-    let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+    let link = linked(&sender, &receiver).await;
     let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
 
     let refused = pull(r.core, &link.client, &file, &receiver).await.unwrap_err();
@@ -159,10 +157,10 @@ async fn serving_and_pulling_refuse_before_any_state_or_bytes() {
         (&file, 1024, receiver.clone(), Some(FailureKind::InvalidData),
             "a manifest that belies the offered size"),
     ] {
-        let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+        let link = linked(&sender, &receiver).await;
         let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
         let fid = pulled.file_id();
-        let lease = store::receiver_lease(&r.core.db, fid);
+        let lease = store::receiver_lease(r.core, fid);
         let error =
             pull_live(r.core, &link.client, fid, claimed, &local, &lease).await.unwrap_err();
         assert!(kind.is_none_or(|kind| error.kind == kind), "{why}: {error:?}");
@@ -182,7 +180,7 @@ async fn group_revocation_interrupts_a_flow_controlled_v2_response() {
     let group = s.group(&[sender.ipk, receiver.ipk]);
     let file = s.retain(&vec![0x6d; 8 * wire::CHUNK_SIZE], wire::CHUNK_SIZE);
     s.offer(sender.ipk, group, &file);
-    let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+    let link = linked(&sender, &receiver).await;
     let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender.clone()));
 
     let (mut tx, mut rx, _) = open_v2_request(&link.client, &receiver).await.unwrap();
@@ -246,7 +244,7 @@ async fn malformed_range_responses_are_terminal_without_claiming_bad_progress() 
     for (case, (corruption, verified)) in cases.into_iter().enumerate() {
         let bytes = content(100 + case as u8, 3);
         let file = manifest(&bytes, 1024);
-        let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+        let link = linked(&sender, &receiver).await;
         let (server, local, m, b) =
             (link.server.clone(), sender.clone(), file.clone(), bytes.clone());
         let serve = tokio::spawn(async move {
@@ -283,7 +281,7 @@ async fn malformed_range_responses_are_terminal_without_claiming_bad_progress() 
             }
             let _ = s.finish();
         });
-        let lease = store::receiver_lease(&r.core.db, file.file_id());
+        let lease = store::receiver_lease(r.core, file.file_id());
         let mut next = Some(link.client.clone());
         let mut attempts = 0;
         let error = drive_download_inner(
@@ -321,7 +319,7 @@ async fn bad_auth_or_capabilities_fail_once_before_any_metadata() {
     r.pair(sender.ipk);
     for (case, bad_auth) in [true, false].into_iter().enumerate() {
         let file = manifest(&content(130 + case as u8, 2), 1024);
-        let link = linked(&sender, &receiver, offered_alpns(), offered_alpns()).await;
+        let link = linked(&sender, &receiver).await;
         let (server, local) = (link.server.clone(), sender.clone());
         let serve = tokio::spawn(async move {
             let (mut s, mut r) = server.accept_stream().await.unwrap();
@@ -340,7 +338,7 @@ async fn bad_auth_or_capabilities_fail_once_before_any_metadata() {
             }
             let _ = s.finish();
         });
-        let lease = store::receiver_lease(&r.core.db, file.file_id());
+        let lease = store::receiver_lease(r.core, file.file_id());
         let mut next = Some(link.client.clone());
         let mut attempts = 0;
         let error = drive_download_inner(
@@ -384,7 +382,7 @@ async fn only_transport_failures_retry_and_automatic_resumes_respect_the_outcome
     ];
     for kind in kinds {
         let fid: [u8; 32] = rand::random();
-        let lease = store::receiver_lease(&r.core.db, fid);
+        let lease = store::receiver_lease(r.core, fid);
         let mut attempts = 0;
         let result = drive_download_inner(
             r.core,
@@ -419,12 +417,12 @@ async fn only_transport_failures_retry_and_automatic_resumes_respect_the_outcome
     }
 
     let fid: [u8; 32] = rand::random();
-    let lease = store::receiver_lease(&r.core.db, fid);
+    let lease = store::receiver_lease(r.core, fid);
     set_state(r.core, &fid, peer, store::HELD, &lease).unwrap();
     drop(lease);
     assert!(store::claim_wake_tx(&mut r.core.db.transfers().lock(), &fid, now_secs(), 60).unwrap());
-    assert!(DOWNLOADING.lock().insert(fid));
-    let writer = PullGuard(fid);
+    assert!(r.core.transfers.downloading.lock().insert(fid));
+    let writer = PullGuard(r.core, fid);
     download_with_policy(r.core, fid, DownloadTrigger::WakeResponse).await.unwrap();
     let claimed = store::claim_ready_retry_tx(&r.core.db.transfers().lock(), &fid).unwrap();
     assert!(claimed, "a second download of a file being pulled spends nothing");

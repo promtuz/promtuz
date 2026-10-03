@@ -107,7 +107,7 @@ fn remove(c: &Core, targets: Vec<StorageTarget>) -> anyhow::Result<u32> {
             "SELECT file_id FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conv.as_slice(), did.as_slice()), |r| r.get(0))?;
         if let Some(fid) = fid.and_then(|f| <[u8; 32]>::try_from(f).ok()) {
-            if crate::staging::holds(&fid) || store::partial_get_tx(&c.db.transfers().lock(), &fid)
+            if crate::staging::holds(c, &fid) || store::partial_get_tx(&c.db.transfers().lock(), &fid)
                 .is_some_and(|p| !p.is_complete()) { continue; }
         }
         tx.execute("DELETE FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
@@ -116,7 +116,7 @@ fn remove(c: &Core, targets: Vec<StorageTarget>) -> anyhow::Result<u32> {
         removed.push((conv, row));
     }
     tx.commit()?;
-    crate::data::media::unlink_orphaned(&c.db, &db, &orphans);
+    crate::data::media::unlink_orphaned(c, &db, &orphans);
     drop(db);
     let count = removed.len() as u32;
     for (conversation, row) in removed {
@@ -193,7 +193,7 @@ mod tests {
         assert!(remove(&[(conv, vec![1; 16]), (conv, vec![0])]).is_err());
         assert!(media::get(&conv, &[1; 16]).unwrap().is_some());
         // The transfer started after the inventory was shown.
-        let lease = store::receiver_lease(&c.db, fid);
+        let lease = store::receiver_lease(c, fid);
         let mut partial = store::Partial {
             file_id:    fid,
             source_ipk: sender,

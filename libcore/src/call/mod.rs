@@ -106,10 +106,12 @@ pub struct Snapshot {
     pub connected_ms: u64,
 }
 
-static CURRENT: Mutex<Option<Call>> = parking_lot::const_mutex(None);
-/// Effects in the order their transitions held [`CURRENT`], and whether a caller is running them.
-static EFFECTS: Mutex<(VecDeque<Effect>, bool)> =
-    parking_lot::const_mutex((VecDeque::new(), false));
+#[derive(Default)]
+pub(crate) struct Calls {
+    current: Mutex<Option<Call>>,
+    /// Effects in the order their transitions held `current`, and whether a caller runs them.
+    effects: Mutex<(VecDeque<Effect>, bool)>,
+}
 
 /// A new call's DTLS certificate and audio path.
 type Media = (DtlsCert, Arc<AudioPath>);
@@ -153,7 +155,7 @@ struct Offer {
     media:         fn() -> Option<Media>,
 }
 
-/// What a transition asks for, run in order once `CURRENT` is unlocked.
+/// What a transition asks for, run in order once `current` is unlocked.
 enum Effect {
     Signal([u8; 16], CallMsg),
     Emit(CallEvent),
@@ -198,10 +200,11 @@ fn short(id: &[u8]) -> String {
 /// Applies `input`, then runs what it asked for. Effects queue under the state lock and one caller
 /// at a time runs them outside it, so the platform sees events in the order the state changed.
 fn apply(input: Input) -> Result<()> {
+    let calls = &core().calls;
     {
-        let mut current = CURRENT.lock();
+        let mut current = calls.current.lock();
         let effects = step(&mut current, input)?;
-        let mut queue = EFFECTS.lock();
+        let mut queue = calls.effects.lock();
         queue.0.extend(effects);
         if std::mem::replace(&mut queue.1, true) {
             return Ok(());
@@ -209,7 +212,7 @@ fn apply(input: Input) -> Result<()> {
     }
     loop {
         let effect = {
-            let mut queue = EFFECTS.lock();
+            let mut queue = calls.effects.lock();
             let Some(effect) = queue.0.pop_front() else {
                 queue.1 = false;
                 return Ok(());
@@ -373,7 +376,7 @@ pub fn start(peer: [u8; 32], video: bool) -> Result<[u8; 16]> {
     let conversation = Conversation::for_peer(&peer)?;
     let cert = new_cert()?;
     let id = rand_id();
-    if CURRENT.lock().is_some() {
+    if core().calls.current.lock().is_some() {
         bail!("already in a call");
     }
     let call = Call {
@@ -417,7 +420,7 @@ pub fn network_changed() {
 }
 
 pub fn current() -> Option<Snapshot> {
-    CURRENT.lock().as_ref().map(|c| Snapshot {
+    core().calls.current.lock().as_ref().map(|c| Snapshot {
         id:           c.id,
         peer:         c.peer,
         conversation: c.conversation,
@@ -436,7 +439,7 @@ pub fn set_camera(on: bool) {
 
 /// str0m derives keyframes from the NAL types, so the flag goes unused.
 pub fn video_capture(frame: Vec<u8>, _keyframe: bool) {
-    let session = CURRENT.lock().as_ref().and_then(|c| c.session.clone());
+    let session = core().calls.current.lock().as_ref().and_then(|c| c.session.clone());
     if let Some(session) = session {
         let _ = session.send(rtc::Cmd::Video(frame));
     }
@@ -444,7 +447,7 @@ pub fn video_capture(frame: Vec<u8>, _keyframe: bool) {
 
 pub fn audio_capture(pcm: &[u8]) {
     let target = {
-        let current = CURRENT.lock();
+        let current = core().calls.current.lock();
         current.as_ref().and_then(|c| Some((c.audio.clone(), c.session.clone()?)))
     };
     if let Some((audio, session)) = target {
@@ -455,7 +458,7 @@ pub fn audio_capture(pcm: &[u8]) {
 }
 
 pub fn audio_playback(frames: usize) -> Vec<u8> {
-    let audio = CURRENT.lock().as_ref().map(|c| c.audio.clone());
+    let audio = core().calls.current.lock().as_ref().map(|c| c.audio.clone());
     match audio {
         Some(audio) => audio.playback(frames),
         None => vec![0u8; frames * audio::FRAME_SAMPLES * 2],
@@ -732,7 +735,7 @@ async fn spawn_session(id: [u8; 16], role: rtc::Role, video: bool) {
     let relay = turn_credentials().await;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
     {
-        let mut current = CURRENT.lock();
+        let mut current = core().calls.current.lock();
         let Some(call) = current.as_mut().filter(|c| c.id == id) else { return };
         let session = rtc::spawn(role, call.cert.clone(), relay, video, call.audio.clone(), ev_tx);
         call.session = Some(session);
@@ -1087,12 +1090,13 @@ mod tests {
     /// platform after them.
     #[tokio::test]
     async fn effects_reach_the_platform_in_the_order_the_state_changed() {
-        let _core = crate::test_support::ScopedCore::new();
-        *CURRENT.lock() = Some(call(1, LOWER, Phase::Offering));
-        EFFECTS.lock().1 = true;
+        let scope = crate::test_support::ScopedCore::new();
+        let calls = &scope.core.calls;
+        *calls.current.lock() = Some(call(1, LOWER, Phase::Offering));
+        calls.effects.lock().1 = true;
         apply(offer(LOWER, 2, NOW + 30_000, true)).unwrap();
         apply(Input::Hangup([2; 16])).unwrap();
-        let (queued, _) = std::mem::take(&mut *EFFECTS.lock());
+        let (queued, _) = std::mem::take(&mut *calls.effects.lock());
         assert_eq!(
             queued.iter().map(describe).collect::<Vec<_>>().join(", "),
             "emit Switched, emit Connecting, start callee, arm 20s Connecting Failed, \

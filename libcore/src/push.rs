@@ -28,7 +28,6 @@ use common::utils::now_ms;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 use ed25519_dalek::ed25519::signature::rand_core::RngCore;
-use std::sync::LazyLock;
 use rusqlite::params;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -41,21 +40,24 @@ use crate::db::one;
 use crate::quic::dialer::connect_to_any_seed;
 use crate::state::core;
 
-static PUSH_KEY: LazyLock<parking_lot::Mutex<Option<SigningKey>>> =
-    LazyLock::new(|| parking_lot::Mutex::new(None));
-static REGISTRATION: Mutex<()> = Mutex::const_new(());
-static REFRESH: Notify = Notify::const_new();
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 const GATEWAY_RETRY_AFTER: Duration = Duration::from_secs(600);
-
-static REFUSED_GATEWAYS: LazyLock<parking_lot::Mutex<HashMap<RelayId, Instant>>> =
-    LazyLock::new(Default::default);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+#[derive(Default)]
+pub(crate) struct Push {
+    key:              parking_lot::Mutex<Option<SigningKey>>,
+    registration:     Mutex<()>,
+    refresh:          Notify,
+    refused_gateways: parking_lot::Mutex<HashMap<RelayId, Instant>>,
+    /// The platform push token (FCM), registered with a gateway under `P`.
+    token:            parking_lot::RwLock<Option<Vec<u8>>>,
+}
 
 /// Per-install key, sealed by the platform and excluded from identity backups.
 /// Restarting the app must not replace a still-working relay/gateway binding.
 fn push_key() -> Result<SigningKey> {
-    let mut key = PUSH_KEY.lock();
+    let mut key = core().push.key.lock();
     if let Some(key) = key.as_ref() {
         return Ok(key.clone());
     }
@@ -90,7 +92,7 @@ fn load_push_key(
 }
 
 pub fn request_registration() {
-    REFRESH.notify_one();
+    core().push.refresh.notify_one();
 }
 
 pub async fn maintain_registration(cancel: CancellationToken) -> Result<()> {
@@ -99,7 +101,7 @@ pub async fn maintain_registration(cancel: CancellationToken) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(wait) => {},
-            _ = REFRESH.notified() => {},
+            _ = core().push.refresh.notified() => {},
             _ = cancel.cancelled() => return Ok(()),
         }
         let result = async {
@@ -146,11 +148,8 @@ pub async fn register_push() -> Result<()> {
     Ok(())
 }
 
-/// The platform push token (FCM), registered with a gateway under `P`.
-static PUSH_TOKEN: parking_lot::RwLock<Option<Vec<u8>>> = parking_lot::RwLock::new(None);
-
 pub async fn set_push_token(token: Vec<u8>) -> Result<()> {
-    *PUSH_TOKEN.write() = Some(token);
+    *core().push.token.write() = Some(token);
     request_registration();
     register_token_at_gateway().await
 }
@@ -158,11 +157,12 @@ pub async fn set_push_token(token: Vec<u8>) -> Result<()> {
 /// Dials the gateway directly so the relay never learns the token, and signs with `P` so the
 /// gateway never learns the IPK.
 pub async fn register_token_at_gateway() -> Result<()> {
-    let _guard = REGISTRATION.lock().await;
+    let push = &core().push;
+    let _guard = push.registration.lock().await;
     if core().net.get().is_none() {
         return Err(anyhow!("endpoint not initialized"));
     }
-    let Some(token) = PUSH_TOKEN.read().clone() else { return Ok(()) };
+    let Some(token) = push.token.read().clone() else { return Ok(()) };
     let directory = match timeout(REGISTRATION_TIMEOUT, fetch_gateways()).await {
         Ok(Ok(gateways)) => gateways,
         _ => cached_gateways(),
@@ -170,7 +170,7 @@ pub async fn register_token_at_gateway() -> Result<()> {
     // Relays wake only their wake targets, so registration walks the same set, skipping recent
     // refusals the way a relay skips gateways that failed its dial.
     let gateways = wake_targets(directory, |gateway| {
-        let refused_at = REFUSED_GATEWAYS.lock().get(&gateway.id).copied();
+        let refused_at = push.refused_gateways.lock().get(&gateway.id).copied();
         refused_at.is_none_or(|at| at.elapsed() >= GATEWAY_RETRY_AFTER)
     });
     let mut error = anyhow!("no push gateways available");
@@ -180,7 +180,7 @@ pub async fn register_token_at_gateway() -> Result<()> {
             Ok(Err(e)) => error = e,
             Err(e) => error = e.into(),
         }
-        REFUSED_GATEWAYS.lock().insert(gateway.id, Instant::now());
+        push.refused_gateways.lock().insert(gateway.id, Instant::now());
     }
     Err(error)
 }

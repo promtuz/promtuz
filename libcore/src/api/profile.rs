@@ -121,8 +121,7 @@ pub fn group_picture(conversation_id: Vec<u8>) -> Result<Option<Vec<u8>>, CoreEr
 pub async fn set_group_picture(
     conversation_id: Vec<u8>, rgba: Option<Vec<u8>>, width: u32, height: u32,
 ) -> Result<(), CoreError> {
-    static WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _one = WRITE.lock().await;
+    let _one = core().groups.picture_write.lock().await;
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let me = Identity::local_ipk().ok_or_else(|| anyhow::anyhow!("no identity"))?;
     if !crate::data::conversation::Conversation::may_edit(&conv, &me) {

@@ -1,14 +1,11 @@
 //! P2P signaling: candidate offers over the MLS channel. Each offer expires, so a peer who was
 //! away does not answer a queue of dead bridges.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use anyhow::Result;
 use common::proto::mls_wire::AppPayload;
 use common::utils::now_ms;
-use std::sync::LazyLock;
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::state::core;
@@ -43,17 +40,11 @@ impl Offer {
     }
 }
 
-type Listeners = Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Offer>>>;
-static LISTENERS: LazyLock<Listeners> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Offers that arrived before their session was listening.
-static PENDING: LazyLock<Mutex<HashMap<[u8; 32], Offer>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
 /// The returned sender identifies this listener to [`stop`].
 pub fn listen(peer: [u8; 32]) -> (mpsc::UnboundedReceiver<Offer>, mpsc::UnboundedSender<Offer>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    LISTENERS.lock().insert(peer, tx.clone());
-    if let Some(buffered) = PENDING.lock().remove(&peer) {
+    core().p2p.offer_listeners.lock().insert(peer, tx.clone());
+    if let Some(buffered) = core().p2p.early_offers.lock().remove(&peer) {
         if buffered.is_fresh(now_ms()) {
             log::info!("P2P[{}]: draining buffered offer", hex::encode(&peer[..4]));
             let _ = tx.send(buffered);
@@ -71,7 +62,7 @@ pub fn deliver(from: [u8; 32], mut offer: Offer) {
         log::info!("P2P[{}]: offer expired in transit, dropped", hex::encode(&from[..4]));
         return;
     }
-    let listener = LISTENERS.lock().get(&from).cloned();
+    let listener = core().p2p.offer_listeners.lock().get(&from).cloned();
     match listener {
         Some(tx) if tx.send(offer.clone()).is_ok() => {},
         _ => {
@@ -94,7 +85,7 @@ pub fn deliver(from: [u8; 32], mut offer: Offer) {
                 if disclosure == crate::p2p::Disclosure::Direct { "direct" } else { "relayed" }
             );
             let session = offer.session;
-            PENDING.lock().insert(from, offer);
+            core().p2p.early_offers.lock().insert(from, offer);
             core().spawn(async move {
                 let r = crate::p2p::connect_with(from, disclosure, Some(session)).await;
                 if let Err(e) = r {
@@ -107,7 +98,7 @@ pub fn deliver(from: [u8; 32], mut offer: Offer) {
 
 /// A newer session for the same peer keeps its own listener.
 pub fn stop(peer: [u8; 32], tx: &mpsc::UnboundedSender<Offer>) {
-    let mut listeners = LISTENERS.lock();
+    let mut listeners = core().p2p.offer_listeners.lock();
     if listeners.get(&peer).is_some_and(|t| t.same_channel(tx)) {
         listeners.remove(&peer);
     }

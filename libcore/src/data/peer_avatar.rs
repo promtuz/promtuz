@@ -1,6 +1,5 @@
 //! Pictures people assert about themselves, stored as the AVIF bytes they sent.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
@@ -13,16 +12,14 @@ use crate::state::core;
 
 /// Moves whenever any picture changes. The DB doorbell fires on every commit, so a client caching
 /// decoded pictures compares this instead.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
 pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Relaxed)
+    core().avatar_generation.load(Ordering::Relaxed)
 }
 
 /// Call after releasing the DB lock: the commit hook fired before the generation moved, and the
 /// identity DB has no hook at all.
 pub(crate) fn notify_changed() {
-    GENERATION.fetch_add(1, Ordering::Relaxed);
+    core().avatar_generation.fetch_add(1, Ordering::Relaxed);
     if let Some(events) = core().events.get() {
         events.on_db_changed(vec!["peer_avatars".into()]);
     }

@@ -13,7 +13,6 @@ use common::utils::now_ms;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use std::sync::LazyLock;
 use parking_lot::RwLock;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -26,12 +25,10 @@ const INVITE_TTL_MS: u64 = 10 * 60 * 1000;
 
 /// Keyed by IPK, so a restore misses; the ~1s StrongBox open runs once per launch. Accepted
 /// exposure: the isk already exists raw in platform escrow and as a phrase.
-struct CachedIsk {
+pub(crate) struct CachedIsk {
     ipk:    [u8; 32],
     secret: Zeroizing<[u8; 32]>,
 }
-
-static ISK_CACHE: LazyLock<RwLock<Option<CachedIsk>>> = LazyLock::new(|| RwLock::new(None));
 
 fn cached_or_open(
     cache: &RwLock<Option<CachedIsk>>,
@@ -246,7 +243,7 @@ impl Identity {
     /// `pub(super)`, so the raw secret bytes never leave `data`.
     pub(super) fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
         let current_ipk = Identity::public_key()?.to_bytes();
-        cached_or_open(&ISK_CACHE, current_ipk, || {
+        cached_or_open(&core().isk, current_ipk, || {
             let store = core().secure_store.get().ok_or(anyhow!("API is not initialized"))?;
             let conn = core().db.identity().lock();
             conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {

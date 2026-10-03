@@ -10,7 +10,6 @@ use common::node::config::DEFAULT_RESOLVER_PORT;
 use common::proto::client_res::{ClientRequest, ClientResponse, RelayDescriptor};
 use common::proto::pack::{Packer, Unpacker};
 use common::quic::tunnel::{self, Request};
-use std::sync::LazyLock;
 use parking_lot::Mutex;
 use tokio::time::Instant;
 
@@ -24,9 +23,6 @@ const JOIN_DEADLINE: Duration = Duration::from_secs(8);
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(3);
 const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(60);
 const DISCOVERY_CONCURRENCY: usize = 4;
-static DISCOVERY_CURSOR: AtomicUsize = AtomicUsize::new(0);
-static DISCOVERY: LazyLock<tokio::sync::Mutex<Option<Instant>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(None));
 
 /// A peer may name a relay address, but never supplies the identity trusted by
 /// TLS. Only our resolver-authenticated local relay records supply that name.
@@ -112,7 +108,7 @@ async fn refresh_descriptors(wanted: SocketAddr) -> anyhow::Result<()> {
         .get()
         .ok_or_else(|| anyhow::anyhow!("no trusted resolver seeds"))?
         .seeds;
-    let relays = race_seed_lookups(seeds.len(), &DISCOVERY_CURSOR, |index| {
+    let relays = race_seed_lookups(seeds.len(), &core().p2p.discovery_cursor, |index| {
         query_descriptors(&seeds[index], wanted)
     })
     .await?;
@@ -166,7 +162,8 @@ pub(super) fn start(
         if !needed(&weak, synth) { return; }
         let setup = async {
             let roots = crate::quic::dialer::roots()?;
-            let name = refreshed_name(&DISCOVERY, || known_relay_name(relay), || refresh_descriptors(relay))
+            let discovery = &core().p2p.relay_discovery;
+            let name = refreshed_name(discovery, || known_relay_name(relay), || refresh_descriptors(relay))
                 .await.ok_or_else(|| anyhow::anyhow!("offered relay has no trusted identity"))?;
             anyhow::ensure!(needed(&weak, synth), "route no longer needs TCP");
             let request = Request::Assist {
@@ -211,7 +208,7 @@ pub(super) fn start(
             }
         }
     });
-    routes.lock().own_tcp_worker(synth, worker);
+    routes.lock().own_tcp_worker(synth, worker.abort_handle());
 }
 
 #[cfg(test)]

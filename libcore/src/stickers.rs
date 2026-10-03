@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -45,7 +46,6 @@ use common::proto::sticker::manifest_signing_input;
 use common::types::bytes::Bytes;
 use common::utils::now_ms;
 use common::utils::now_secs;
-use std::sync::LazyLock;
 
 use crate::platform::Refused;
 use parking_lot::Mutex;
@@ -68,20 +68,34 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REFRESH_EVERY: Duration = Duration::from_secs(10 * 60);
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .expect("reqwest client")
-});
+const CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 // Concurrent reads of the same sticker share one download.
 type Gates = HashMap<([u8; 16], [u8; 32]), Weak<tokio::sync::Mutex<()>>>;
-static INFLIGHT: LazyLock<Mutex<Gates>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static REFRESHED: LazyLock<Mutex<HashMap<[u8; 16], Instant>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) struct Stickers {
+    http:             OnceLock<reqwest::Client>,
+    inflight:         Mutex<Gates>,
+    refreshed:        Mutex<HashMap<[u8; 16], Instant>>,
+    cache_generation: AtomicU64,
+    cache_writes:     tokio::sync::Mutex<()>,
+    downloads:        tokio::sync::Semaphore,
+    publishing:       tokio::sync::Mutex<()>,
+}
+
+impl Default for Stickers {
+    fn default() -> Self {
+        Self {
+            http:             OnceLock::new(),
+            inflight:         Default::default(),
+            refreshed:        Default::default(),
+            cache_generation: AtomicU64::new(0),
+            cache_writes:     Default::default(),
+            downloads:        tokio::sync::Semaphore::new(4),
+            publishing:       Default::default(),
+        }
+    }
+}
 
 pub struct SourceImage {
     pub rgba: Vec<u8>,
@@ -94,17 +108,12 @@ pub struct PackView {
     pub stickers: Vec<StickerRow>,
 }
 
-static CACHE_ROOT: LazyLock<PathBuf> = LazyLock::new(|| PathBuf::from(core().db.files_dir(CACHE_DIR)));
-
-const CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
-static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
-static CACHE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-
-static PUBLISHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+fn cache_root() -> PathBuf {
+    PathBuf::from(core().db.files_dir(CACHE_DIR))
+}
 
 pub fn cache_path(pack: &[u8; 16], id: &[u8; 32]) -> PathBuf {
-    CACHE_ROOT.join(hex::encode(pack)).join(hex::encode(id))
+    cache_root().join(hex::encode(pack)).join(hex::encode(id))
 }
 
 fn aad_sticker(id: &[u8; 32]) -> Vec<u8> {
@@ -139,8 +148,9 @@ pub async fn fetch(r: &StickerRef) -> Result<Vec<u8>> {
     if let Ok(bytes) = tokio::fs::read(&path).await {
         return Ok(bytes);
     }
+    let stickers = &core().stickers;
     let gate = {
-        let mut gates = INFLIGHT.lock();
+        let mut gates = stickers.inflight.lock();
         gates.retain(|_, g| g.strong_count() > 0);
         let entry = gates.entry((r.pack, r.id)).or_default();
         entry.upgrade().unwrap_or_else(|| {
@@ -153,20 +163,21 @@ pub async fn fetch(r: &StickerRef) -> Result<Vec<u8>> {
     if let Ok(bytes) = tokio::fs::read(&path).await {
         return Ok(bytes);
     }
-    let generation = CACHE_GENERATION.load(Ordering::Relaxed);
-    let _permit = DOWNLOADS.acquire().await?;
+    let generation = stickers.cache_generation.load(Ordering::Relaxed);
+    let _permit = stickers.downloads.acquire().await?;
     let blob = get_object(r.store, &blob_path(&r.pack, &blob_key(&r.token, &r.id)), BLOB_MAX_BYTES)
         .await?;
     let plain = open(&r.token, &aad_sticker(&r.id), &blob).context("open sticker")?;
     if blake3::hash(&plain).as_bytes() != &r.id {
         bail!("sticker bytes don't match their id");
     }
-    let _write = CACHE_WRITES.lock().await;
-    if CACHE_GENERATION.load(Ordering::Relaxed) == generation {
+    let _write = stickers.cache_writes.lock().await;
+    if stickers.cache_generation.load(Ordering::Relaxed) == generation {
+        let root = cache_root();
         if let Err(e) = write_atomic(&path, &plain).await {
             log::debug!("STICKERS: cache write: {e:#}");
         } else if let Err(e) =
-            core().spawn_blocking(|| trim_cache(&CACHE_ROOT, CACHE_MAX_BYTES))
+            core().spawn_blocking(move || trim_cache(&root, CACHE_MAX_BYTES))
                 .await
                 .context("cache cleanup task")
                 .and_then(|result| result)
@@ -268,12 +279,12 @@ pub async fn install(r: &StickerRef) -> Result<()> {
 /// Cached message images stay available offline.
 pub fn remove(pack: &[u8; 16]) -> Result<()> {
     db::remove_pack(pack)?;
-    REFRESHED.lock().remove(pack);
+    core().stickers.refreshed.lock().remove(pack);
     Ok(())
 }
 
 pub async fn refresh_kept() {
-    if let Ok(_publishing) = PUBLISHING.try_lock() {
+    if let Ok(_publishing) = core().stickers.publishing.try_lock() {
         match db::pending_uploads() {
             Ok(uploads) => {
                 for pending in uploads {
@@ -286,14 +297,14 @@ pub async fn refresh_kept() {
         }
     }
     let due: Vec<PackRow> = {
-        let refreshed = REFRESHED.lock();
+        let refreshed = core().stickers.refreshed.lock();
         db::list_packs()
             .into_iter()
             .filter(|p| refreshed.get(&p.pack_id).is_none_or(|t| t.elapsed() >= REFRESH_EVERY))
             .collect()
     };
     for kept in due {
-        REFRESHED.lock().insert(kept.pack_id, Instant::now());
+        core().stickers.refreshed.lock().insert(kept.pack_id, Instant::now());
         match fetch_manifest(kept.pack_id, kept.store_id, kept.token).await {
             Ok(m) if m.version > kept.version && admissible(&m, Some(&kept)).is_ok() => {
                 let (pack, stickers) = rows_of(&m, kept.token, kept.added_at);
@@ -314,7 +325,7 @@ pub async fn refresh_kept() {
 }
 
 pub async fn create(name: String, images: Vec<SourceImage>) -> Result<[u8; 16]> {
-    let _publishing = PUBLISHING.lock().await;
+    let _publishing = core().stickers.publishing.lock().await;
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > PACK_NAME_MAX {
         bail!("name must be 1..={PACK_NAME_MAX} characters");
@@ -346,7 +357,7 @@ pub async fn create(name: String, images: Vec<SourceImage>) -> Result<[u8; 16]> 
 }
 
 pub async fn append(pack: [u8; 16], images: Vec<SourceImage>) -> Result<()> {
-    let _publishing = PUBLISHING.lock().await;
+    let _publishing = core().stickers.publishing.lock().await;
     if let Some(pending) = db::pending_uploads()?.into_iter().find(|p| p.pack.pack_id == pack) {
         resume_upload(&pending).await?;
     }
@@ -384,7 +395,7 @@ async fn resume_upload(pending: &db::PendingUpload) -> Result<()> {
         match upload(&pending.requests).await {
             Ok(()) => {
                 db::finish_upload(&pending)?;
-                REFRESHED.lock().insert(pending.pack.pack_id, Instant::now());
+                core().stickers.refreshed.lock().insert(pending.pack.pack_id, Instant::now());
                 return Ok(());
             },
             Err(e) if e.downcast_ref::<StoreReject>() == Some(&StoreReject::StaleVersion) => {
@@ -691,8 +702,15 @@ impl Fetch {
 }
 
 async fn http_get(url: &str, max: usize) -> Result<Vec<u8>, Fetch> {
+    let http = core().stickers.http.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("reqwest client")
+    });
     // Debug, not Display: reqwest keeps the reason (refused, no route, DNS) in the source chain.
-    let mut resp = HTTP
+    let mut resp = http
         .get(url)
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
@@ -725,13 +743,15 @@ async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 /// Cached images are replaceable; pack tokens and upload drafts live in the database.
 pub fn cache_bytes() -> Result<u64> {
-    Ok(cache_files(&CACHE_ROOT)?.iter().map(|(_, m)| m.len()).sum())
+    Ok(cache_files(&cache_root())?.iter().map(|(_, m)| m.len()).sum())
 }
 
 pub async fn clear_cache() -> Result<()> {
-    let _write = CACHE_WRITES.lock().await;
-    CACHE_GENERATION.fetch_add(1, Ordering::Relaxed);
-    core().spawn_blocking(|| trim_cache(&CACHE_ROOT, 0)).await??;
+    let stickers = &core().stickers;
+    let _write = stickers.cache_writes.lock().await;
+    stickers.cache_generation.fetch_add(1, Ordering::Relaxed);
+    let root = cache_root();
+    core().spawn_blocking(move || trim_cache(&root, 0)).await??;
     Ok(())
 }
 

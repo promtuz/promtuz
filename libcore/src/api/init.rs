@@ -189,7 +189,7 @@ async fn wait_to_retry(cancel: &CancellationToken, delay: Duration) -> bool {
 /// Closing the connection lets the relay mark us offline at once instead of at idle timeout.
 #[uniffi::export]
 pub fn on_task_removed() {
-    crate::transfer::sharing::set_foreground(false);
+    crate::transfer::sharing::set_foreground(core(), false);
     core().task_removed.store(true, Ordering::SeqCst);
     if let Some(session) = core().session() {
         session.conn.close(quinn::VarInt::from_u32(0), b"task removed");

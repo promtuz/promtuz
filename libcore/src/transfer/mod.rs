@@ -1,10 +1,14 @@
 //! Attachment transfer: chunked-manifest pulls over a [`crate::p2p`] link, not store-and-forward.
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::p2p::diagnostics::{self, Event};
 use crate::state::core;
 use common::utils::now_secs;
+use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use pull::DownloadTrigger;
@@ -30,6 +34,32 @@ const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const CHUNK_DEADLINE: Duration = Duration::from_secs(5 * 60);
+
+pub(crate) struct Transfers {
+    receivers:      store::Receivers,
+    /// Pulls in flight, so two `download`s of one file never co-write its partial.
+    downloading:    Mutex<HashSet<[u8; 32]>>,
+    pulling:        Semaphore,
+    serving:        Semaphore,
+    helping:        Semaphore,
+    /// Recovery scans can read GiB, so they run blocking under a bound of their own.
+    recovery_scans: Arc<Semaphore>,
+    policy:         Mutex<sharing::Policy>,
+}
+
+impl Default for Transfers {
+    fn default() -> Self {
+        Self {
+            receivers:      Default::default(),
+            downloading:    Default::default(),
+            pulling:        Semaphore::new(4),
+            serving:        Semaphore::new(16),
+            helping:        Semaphore::new(2),
+            recovery_scans: Arc::new(Semaphore::new(2)),
+            policy:         Default::default(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind {
@@ -155,6 +185,7 @@ fn report_failure(kind: FailureKind) {
 pub fn gc(now: u64) {
     let _ = store::gc_dead_partials_tx(
         &core().db.transfers().lock(),
+        &core().transfers.receivers,
         now.saturating_sub(DEAD_PARTIAL_TTL_SECS),
     );
     sharing::gc(now);
@@ -163,7 +194,7 @@ pub fn gc(now: u64) {
 /// At startup: a staged chip that died with the process leaves retention that nothing names.
 pub fn sweep_orphaned_retention() {
     let fids = store::retention_file_ids_tx(&core().db.transfers().lock());
-    crate::data::media::unlink_orphaned(&core().db, &core().db.messages().lock(), &fids);
+    crate::data::media::unlink_orphaned(core(), &core().db.messages().lock(), &fids);
 }
 
 pub fn should_auto_download(ipk: &[u8; 32], size: u64, on_wifi: bool) -> bool {

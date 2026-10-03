@@ -469,7 +469,7 @@ impl Session {
         };
         drop(offer_guard);
         // Bound the handshake too: past the dialer's own timeout nobody drives it, and quinn's
-        // idle timer would hold this peer's CONNECTING slot for another half minute.
+        // idle timer would hold this peer's `connecting` slot for another half minute.
         let conn = timeout(ACCEPT_TIMEOUT, incoming.accept()?)
             .await
             .map_err(|_| {

@@ -4,13 +4,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use std::sync::LazyLock;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Stores;
+use crate::state::Core;
 use crate::state::core;
 
 /// Download states for a `partials` row.
@@ -179,8 +179,7 @@ fn partial_put_locked(conn: &Connection, p: &Partial) -> rusqlite::Result<()> {
 
 /// One live receiver per file. Deletion cancels it under the transfers lock, which also guards
 /// opening files and publishing progress, so a late worker cannot recreate a deleted path or row.
-static RECEIVERS: LazyLock<Mutex<HashMap<[u8; 32], Arc<CancellationToken>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(super) type Receivers = Mutex<HashMap<[u8; 32], Arc<CancellationToken>>>;
 
 #[derive(Clone)]
 pub(crate) struct ReceiverLease {
@@ -191,26 +190,28 @@ pub(crate) struct ReceiverLease {
 }
 
 struct ReceiverOwner {
+    receivers: &'static Receivers,
     file_id: [u8; 32],
     cancel: Arc<CancellationToken>,
 }
 
 impl Drop for ReceiverOwner {
     fn drop(&mut self) {
-        let mut receivers = RECEIVERS.lock();
+        let mut receivers = self.receivers.lock();
         if receivers.get(&self.file_id).is_some_and(|token| Arc::ptr_eq(token, &self.cancel)) {
             receivers.remove(&self.file_id);
         }
     }
 }
 
-pub(crate) fn receiver_lease(db: &Stores, file_id: [u8; 32]) -> ReceiverLease {
-    let _db = db.transfers().lock();
+pub(crate) fn receiver_lease(c: &'static Core, file_id: [u8; 32]) -> ReceiverLease {
+    let _db = c.db.transfers().lock();
+    let receivers = &c.transfers.receivers;
     let cancel = Arc::new(CancellationToken::new());
-    if let Some(previous) = RECEIVERS.lock().insert(file_id, cancel.clone()) {
+    if let Some(previous) = receivers.lock().insert(file_id, cancel.clone()) {
         previous.cancel();
     }
-    let owner = Arc::new(ReceiverOwner { file_id, cancel: cancel.clone() });
+    let owner = Arc::new(ReceiverOwner { receivers, file_id, cancel: cancel.clone() });
     ReceiverLease { file_id, cancel, _owner: owner }
 }
 
@@ -369,7 +370,9 @@ pub(crate) fn defer_retry_tx(conn: &Connection, file_id: &[u8; 32], until: u64) 
 }
 
 /// Never selects `DONE`: that `.part` is the delivered attachment the user keeps.
-pub(crate) fn gc_dead_partials_tx(conn: &Connection, older_than: u64) -> Vec<String> {
+pub(crate) fn gc_dead_partials_tx(
+    conn: &Connection, receivers: &Receivers, older_than: u64,
+) -> Vec<String> {
     let mut stmt = conn
         .prepare(
             "SELECT file_id, path FROM partials WHERE state IN (?1, ?2, ?3) AND updated_at < ?4",
@@ -384,7 +387,7 @@ pub(crate) fn gc_dead_partials_tx(conn: &Connection, older_than: u64) -> Vec<Str
         .expect("gc_dead_partials rows");
     drop(stmt);
     // A live receiver owns its partial even while waiting to retry.
-    let active = RECEIVERS.lock();
+    let active = receivers.lock();
     let paths: Vec<String> = rows
         .into_iter()
         .filter(|(fid, _)| !active.contains_key(fid))
@@ -401,20 +404,16 @@ pub(crate) fn gc_dead_partials_tx(conn: &Connection, older_than: u64) -> Vec<Str
 
 /// Removes every row naming `file_id` and its bytes, once no message points at it. Deleted means
 /// gone: a peer that had not pulled it yet gets `Gone`. Best effort.
-pub fn forget_file(db: &Stores, file_id: &[u8; 32]) {
-    let conn = db.transfers().lock();
-    forget_row_tx(&conn, "partials", file_id, Some(partial_path(db, file_id)));
+pub fn forget_file(c: &Core, file_id: &[u8; 32]) {
+    let conn = c.db.transfers().lock();
+    if let Some(cancel) = c.transfers.receivers.lock().get(file_id) {
+        cancel.cancel();
+    }
+    forget_row_tx(&conn, "partials", file_id, Some(partial_path(&c.db, file_id)));
     forget_row_tx(&conn, "retention", file_id, None);
 }
 
-pub(crate) fn forget_row_tx(
-    conn: &Connection, table: &str, file_id: &[u8; 32], fallback: Option<String>,
-) {
-    if table == "partials"
-        && let Some(cancel) = RECEIVERS.lock().get(file_id)
-    {
-        cancel.cancel();
-    }
+fn forget_row_tx(conn: &Connection, table: &str, file_id: &[u8; 32], fallback: Option<String>) {
     // The row's `path` is the `local_path` handed out; without it, try the canonical `.part`.
     let sql = format!("SELECT path FROM {table} WHERE file_id = ?1");
     let path = match conn.query_row(&sql, params![file_id], |r| r.get::<_, String>(0)) {
@@ -439,7 +438,7 @@ pub(crate) fn forget_row_tx(
     }
 }
 
-/// Resumable partials; the `DOWNLOADING` guard makes re-driving a live pull a no-op.
+/// Resumable partials; the `downloading` set makes re-driving a live pull a no-op.
 pub(crate) fn incomplete_file_ids_tx(conn: &Connection) -> Vec<[u8; 32]> {
     let mut stmt = conn
         .prepare("SELECT file_id FROM partials WHERE state IN (?1, ?2, ?3)")
@@ -522,7 +521,7 @@ mod tests {
         partial_put_locked(&db, &row([0xd1; 32], FAILED, &dead, 100)).unwrap();
         partial_put_locked(&db, &row([0xd2; 32], DONE, &done, 100)).unwrap();
         partial_put_locked(&db, &row([0xd3; 32], FAILED, &fresh, 5000)).unwrap();
-        assert_eq!(gc_dead_partials_tx(&db, 1000), vec![dead.clone()]);
+        assert_eq!(gc_dead_partials_tx(&db, &Receivers::default(), 1000), vec![dead.clone()]);
         assert!(partial_get_tx(&db, &[0xd1; 32]).is_none() && !Path::new(&dead).exists());
         assert!(partial_get_tx(&db, &[0xd2; 32]).unwrap().is_complete(), "a delivered file stays");
         assert!(partial_get_tx(&db, &[0xd3; 32]).is_some() && Path::new(&fresh).exists());

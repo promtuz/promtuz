@@ -174,12 +174,9 @@ fn disposition(result: &Result<InboundDecoded>, attempts: u8) -> Disposition {
 
 const MAX_PROCESS_ATTEMPTS: u8 = 3;
 
-static FAILED_DISPATCHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<([u8; 32], [u8; 16]), u8>>> =
-    std::sync::LazyLock::new(Default::default);
-
 /// Count one more failed attempt for a dispatch; a new entry evicts the map when it grows large.
 fn failed_attempts(from: &[u8; 32], id: &[u8; 16]) -> u8 {
-    let mut failed = FAILED_DISPATCHES.lock();
+    let mut failed = core().messaging.failed_dispatches.lock();
     if failed.len() >= 1024 && !failed.contains_key(&(*from, *id)) {
         failed.clear();
     }

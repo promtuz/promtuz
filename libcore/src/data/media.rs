@@ -37,17 +37,17 @@ from_row!(MediaRow {
 /// Lock order: the messages lock (held), then the transfers or the staging lock; nothing takes
 /// the messages lock while holding either. A file stays while a media row or the composer names it.
 pub(crate) fn unlink_orphaned(
-    db: &crate::db::Stores, conn: &rusqlite::Connection, file_ids: &[[u8; 32]],
+    c: &crate::state::Core, conn: &rusqlite::Connection, file_ids: &[[u8; 32]],
 ) {
     for fid in file_ids {
-        if crate::staging::holds(fid) {
+        if crate::staging::holds(c, fid) {
             continue;
         }
         let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
         match conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
             // Nothing names it any more. Only this answer frees the bytes.
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                crate::transfer::store::forget_file(db, fid)
+                crate::transfer::store::forget_file(c, fid)
             },
             // A row still names it, or the read failed: a failed check is no permission to delete.
             _ => {},
@@ -160,7 +160,7 @@ pub fn apply_revise(
         crate::db::messages::MessageRow::from_row,
     )?;
     tx.commit()?;
-    unlink_orphaned(&core().db, &db, old.as_slice());
+    unlink_orphaned(core(), &db, old.as_slice());
     Ok(Some(row))
 }
 

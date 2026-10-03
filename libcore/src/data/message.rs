@@ -215,7 +215,7 @@ impl Message {
         }
         let orphan = crate::data::media::drop_row_tx(&tx, conversation_id, dispatch_id).ok()?;
         tx.commit().ok()?;
-        crate::data::media::unlink_orphaned(&core().db, &conn, orphan.as_slice());
+        crate::data::media::unlink_orphaned(core(), &conn, orphan.as_slice());
         conn.query_row(
             "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conversation_id.as_slice(), dispatch_id),
@@ -233,7 +233,7 @@ impl Message {
         let tx = conn.transaction()?;
         let (row, orphan) = Self::receive_delete_tx(&tx, conversation_id, dispatch_id, author)?;
         tx.commit()?;
-        crate::data::media::unlink_orphaned(&core().db, &conn, orphan.as_slice());
+        crate::data::media::unlink_orphaned(core(), &conn, orphan.as_slice());
         Ok(row)
     }
 
@@ -282,7 +282,7 @@ impl Message {
         .ok()?;
         let orphan = crate::data::media::drop_row_tx(&tx, conversation_id, dispatch_id).ok()?;
         tx.commit().ok()?;
-        crate::data::media::unlink_orphaned(&core().db, &conn, orphan.as_slice());
+        crate::data::media::unlink_orphaned(core(), &conn, orphan.as_slice());
         Some(row)
     }
 

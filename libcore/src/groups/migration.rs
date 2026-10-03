@@ -16,16 +16,13 @@ use crate::mls::PromtuzMlsProvider;
 use crate::mls::migration;
 use crate::state::core;
 
-static RETRIES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<[u8; 16]>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
-
 fn retry_later(conversation: [u8; 16]) {
-    if !RETRIES.lock().insert(conversation) {
+    if !core().groups.migration_retries.lock().insert(conversation) {
         return;
     }
     core().spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        RETRIES.lock().remove(&conversation);
+        core().groups.migration_retries.lock().remove(&conversation);
         if core().session().is_some() {
             super::resume(conversation);
         }
@@ -204,7 +201,7 @@ pub async fn follow_up(conversation: [u8; 16]) -> Result<bool> {
         return Ok(true);
     }
     source.verify_all(&approvals)?;
-    let _one = super::MEMBERSHIP.lock().await;
+    let _one = core().groups.membership.lock().await;
     let client = core().session().map(|s| s.dht.clone());
     let Some(client) = client else { return Ok(true) };
     let stash = crate::mls::KeyPackageStash::new(provider.storage().connection());

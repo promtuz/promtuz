@@ -18,12 +18,12 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
 use anyhow::bail;
-use std::sync::LazyLock;
 use parking_lot::Mutex;
 use quinn::Connection;
 use quinn::Endpoint;
@@ -60,19 +60,30 @@ pub enum Disclosure {
     RelayOnly,
 }
 
-/// Peers with a connect in flight, so a second session cannot race the first.
-static CONNECTING: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+#[derive(Default)]
+pub(crate) struct P2p {
+    /// Peers with a connect in flight, so a second session cannot race the first.
+    connecting:       Mutex<HashSet<[u8; 32]>>,
+    /// Built lazily per network, from the tokio runtime; a network change retires it.
+    endpoint:         Mutex<Option<Arc<P2pEndpoint>>>,
+    offer_listeners:  Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Offer>>>,
+    /// Offers that arrived before their session was listening.
+    early_offers:     Mutex<HashMap<[u8; 32], Offer>>,
+    relay_discovery:  tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    discovery_cursor: AtomicUsize,
+    diagnostics:      diagnostics::Diagnostics,
+}
 
 struct ConnectingGuard([u8; 32]);
 impl ConnectingGuard {
     fn acquire(peer: [u8; 32]) -> Result<Self> {
-        if !CONNECTING.lock().insert(peer) { bail!("{ALREADY_CONNECTING}"); }
+        if !core().p2p.connecting.lock().insert(peer) { bail!("{ALREADY_CONNECTING}"); }
         Ok(Self(peer))
     }
 }
 impl Drop for ConnectingGuard {
     fn drop(&mut self) {
-        CONNECTING.lock().remove(&self.0);
+        core().p2p.connecting.lock().remove(&self.0);
     }
 }
 
@@ -173,11 +184,8 @@ struct P2pEndpoint {
     inbound: Arc<Mutex<InboundRouter>>,
 }
 
-static P2P: LazyLock<Mutex<Option<Arc<P2pEndpoint>>>> = LazyLock::new(|| Mutex::new(None));
-
-/// Built lazily per network, from the tokio runtime; a network change retires it.
 fn endpoint() -> Result<Arc<P2pEndpoint>> {
-    let mut current = P2P.lock();
+    let mut current = core().p2p.endpoint.lock();
     if let Some(ep) = current.as_ref() { return Ok(ep.clone()); }
     let built = (|| -> Result<P2pEndpoint> {
         let built = socket::build_endpoint()?;
@@ -209,10 +217,10 @@ fn endpoint() -> Result<Arc<P2pEndpoint>> {
 
         // accept() is always drained; each session picks only its own connection from the router.
         let inbound: Arc<Mutex<InboundRouter>> = Arc::new(Mutex::new(InboundRouter::default()));
-        let acceptor = built.endpoint.clone();
+        let acceptor = CloseOnDrop(built.endpoint.clone());
         let router = inbound.clone();
         core().spawn(async move {
-            while let Some(incoming) = acceptor.accept().await {
+            while let Some(incoming) = acceptor.0.accept().await {
                 router.lock().route(incoming);
             }
         });
@@ -234,7 +242,15 @@ fn endpoint() -> Result<Arc<P2pEndpoint>> {
     Ok(ep)
 }
 
-struct AbortGuard(tokio::task::JoinHandle<()>);
+/// Held by the acceptor task: a shutdown drops it, closing the endpoint and every link on it.
+struct CloseOnDrop(Endpoint);
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"shutdown");
+    }
+}
+
+struct AbortGuard(tokio::task::JoinHandle<Option<()>>);
 impl Drop for AbortGuard {
     fn drop(&mut self) {
         self.0.abort();
@@ -408,9 +424,9 @@ async fn wait_for_cached_link(ep: Arc<P2pEndpoint>, peer: [u8; 32]) -> Result<Pe
         {
             return Ok(l);
         }
-        // The winner publishes its link before clearing CONNECTING, so once the flag is gone one
+        // The winner publishes its link before clearing `connecting`, so once the flag is gone one
         // more cache check is authoritative.
-        if !CONNECTING.lock().contains(&peer) {
+        if !core().p2p.connecting.lock().contains(&peer) {
             if let Some(l) = ep.links.lock().links.get(&peer).cloned()
                 && l.conn.close_reason().is_none() && l.still_permitted()
             {
@@ -426,7 +442,7 @@ async fn wait_for_cached_link(ep: Arc<P2pEndpoint>, peer: [u8; 32]) -> Result<Pe
 }
 
 pub(crate) fn drop_link(peer: &[u8; 32]) {
-    if let Some(ep) = P2P.lock().clone() {
+    if let Some(ep) = core().p2p.endpoint.lock().clone() {
         if let Some(link) = ep.links.lock().links.remove(peer) {
             link.conn.close(0u32.into(), b"contact forgotten");
         }
@@ -436,7 +452,7 @@ pub(crate) fn drop_link(peer: &[u8; 32]) {
 /// Bridge tokens bind exact source addresses, so the endpoint and its links are retired.
 pub(crate) async fn network_changed() {
     diagnostics::record(Event::NetworkChanged);
-    let retired = P2P.lock().take();
+    let retired = core().p2p.endpoint.lock().take();
     if let Some(ep) = retired {
         let links = {
             let mut state = ep.links.lock();
@@ -460,12 +476,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_attempt_releases_its_peer_slot_and_background_work() {
+        let _core = crate::test_support::ScopedCore::new();
         let peer: [u8; 32] = rand::random();
         let (ready, started) = tokio::sync::oneshot::channel();
         let (finished, background) = tokio::sync::oneshot::channel::<()>();
         let attempt = tokio::spawn(async move {
             let _slot = ConnectingGuard::acquire(peer).unwrap();
-            let _work = AbortGuard(tokio::spawn(async move {
+            let _work = AbortGuard(core().spawn(async move {
                 let _finished = finished;
                 std::future::pending::<()>().await
             }));
@@ -486,8 +503,8 @@ mod tests {
         let link = |h: &crate::test_support::transfer::Handshake| {
             test_link(h.dialed.as_ref().unwrap().clone(), peer)
         };
-        let first = handshake(protocol::offered_alpns(), protocol::offered_alpns()).await;
-        let second = handshake(protocol::offered_alpns(), protocol::offered_alpns()).await;
+        let first = handshake().await;
+        let second = handshake().await;
         let (old, current) = (link(&first), link(&second));
         let mut state = LinkState { generation: 0, links: HashMap::new() };
         state.publish(0, old.clone()).unwrap();

@@ -4,9 +4,10 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::LazyLock;
 use common::utils::now_ms;
 use parking_lot::Mutex;
+
+use crate::state::core;
 
 const HISTORY_LIMIT: usize = 128;
 
@@ -35,16 +36,19 @@ pub(crate) enum Event {
     TransferComplete,
 }
 
-static EVENTS: LazyLock<Mutex<VecDeque<(u64, Event)>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
-static DIRECT_SENT: AtomicU64 = AtomicU64::new(0);
-static RELAY_SENT: AtomicU64 = AtomicU64::new(0);
-static CONTENT_SENT: AtomicU64 = AtomicU64::new(0);
-static VERIFIED_RECEIVED: AtomicU64 = AtomicU64::new(0);
-static TCP_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
+#[derive(Default)]
+pub(super) struct Diagnostics {
+    events:            Mutex<VecDeque<(u64, Event)>>,
+    direct_sent:       AtomicU64,
+    relay_sent:        AtomicU64,
+    content_sent:      AtomicU64,
+    verified_received: AtomicU64,
+    tcp_queue_drops:   AtomicU64,
+}
 
 pub(crate) fn record(event: Event) {
     let at = now_ms();
-    let mut events = EVENTS.lock();
+    let mut events = core().p2p.diagnostics.events.lock();
     if events.len() == HISTORY_LIMIT {
         events.pop_front();
     }
@@ -55,20 +59,21 @@ pub(crate) fn record(event: Event) {
 /// QUIC datagram bytes accepted by UDP or the TCP relay queue, not bytes delivered. Setup
 /// packets sent on both relay paths count twice.
 pub(super) fn sent_datagram(relayed: bool, bytes: usize) {
-    let counter = if relayed { &RELAY_SENT } else { &DIRECT_SENT };
+    let d = &core().p2p.diagnostics;
+    let counter = if relayed { &d.relay_sent } else { &d.direct_sent };
     counter.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn sent_content(bytes: u64) {
-    CONTENT_SENT.fetch_add(bytes, Ordering::Relaxed);
+    core().p2p.diagnostics.content_sent.fetch_add(bytes, Ordering::Relaxed);
 }
 
 pub(crate) fn received_verified(bytes: u64) {
-    VERIFIED_RECEIVED.fetch_add(bytes, Ordering::Relaxed);
+    core().p2p.diagnostics.verified_received.fetch_add(bytes, Ordering::Relaxed);
 }
 
 pub(super) fn dropped_tcp_datagram() {
-    TCP_QUEUE_DROPS.fetch_add(1, Ordering::Relaxed);
+    core().p2p.diagnostics.tcp_queue_drops.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) struct Snapshot {
@@ -81,12 +86,13 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) fn snapshot() -> Snapshot {
+    let d = &core().p2p.diagnostics;
     Snapshot {
-        events: EVENTS.lock().iter().copied().collect(),
-        direct_sent: DIRECT_SENT.load(Ordering::Relaxed),
-        relay_sent: RELAY_SENT.load(Ordering::Relaxed),
-        content_sent: CONTENT_SENT.load(Ordering::Relaxed),
-        verified_received: VERIFIED_RECEIVED.load(Ordering::Relaxed),
-        tcp_queue_drops: TCP_QUEUE_DROPS.load(Ordering::Relaxed),
+        events:            d.events.lock().iter().copied().collect(),
+        direct_sent:       d.direct_sent.load(Ordering::Relaxed),
+        relay_sent:        d.relay_sent.load(Ordering::Relaxed),
+        content_sent:      d.content_sent.load(Ordering::Relaxed),
+        verified_received: d.verified_received.load(Ordering::Relaxed),
+        tcp_queue_drops:   d.tcp_queue_drops.load(Ordering::Relaxed),
     }
 }

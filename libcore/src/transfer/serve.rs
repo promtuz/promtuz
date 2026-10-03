@@ -1,5 +1,4 @@
 use common::utils::now_secs;
-use tokio::sync::Semaphore;
 
 use super::CHUNK_DEADLINE;
 use super::CONTROL_TIMEOUT;
@@ -19,8 +18,6 @@ use crate::p2p::diagnostics;
 use crate::state::Core;
 
 const SERVES_PER_LINK: usize = 4;
-static SERVING: Semaphore = Semaphore::const_new(16);
-static HELPING: Semaphore = Semaphore::const_new(2);
 
 /// Retention is keyed by content hash alone, so the outgoing message row scopes a pull to whom
 /// the file was sent: in a group, every active member of that conversation.
@@ -60,14 +57,14 @@ pub(super) async fn serve_streams(c: &'static Core, link: crate::p2p::PeerLink, 
             accepted = link.accept_stream(), if streams.len() < SERVES_PER_LINK => {
                 let Ok((mut s, mut r)) = accepted else { break };
                 // Never queue work: a busy stream resets, and its caller retries within its budget.
-                let Ok(slot) = SERVING.try_acquire() else {
+                let Ok(slot) = c.transfers.serving.try_acquire() else {
                     let _ = s.reset(0u32.into());
                     let _ = r.stop(0u32.into());
                     continue;
                 };
                 let link = link.clone();
                 let local = local.clone();
-                streams.spawn(async move {
+                streams.spawn(c.tasks.track_future(async move {
                     let _slot = slot;
                     if let Err(e) = serve_stream(c, &link, &local, s, r).await {
                         if e.kind == FailureKind::Authentication {
@@ -76,7 +73,7 @@ pub(super) async fn serve_streams(c: &'static Core, link: crate::p2p::PeerLink, 
                         report_failure(e.kind);
                         log::debug!("transfer: serve ended: {e}");
                     }
-                });
+                }));
             },
         }
     }
@@ -114,8 +111,8 @@ async fn serve_v2(
         _ => return v2_error(s, v2::ErrorCode::InvalidRequest).await,
     };
     if grant.is_some() {
-        let Some(scope) = sharing::serving_scope() else { return v2_error(s, v2::ErrorCode::Unavailable).await };
-        let Ok(_slot) = HELPING.try_acquire() else { return v2_error(s, v2::ErrorCode::Busy).await };
+        let Some(scope) = sharing::serving_scope(c) else { return v2_error(s, v2::ErrorCode::Unavailable).await };
+        let Ok(_slot) = c.transfers.helping.try_acquire() else { return v2_error(s, v2::ErrorCode::Busy).await };
         tokio::select! {
             biased;
             _ = scope.cancelled() => Err(Failure::new(FailureKind::Unavailable, anyhow::anyhow!("recipient uploads suspended"))),

@@ -119,7 +119,7 @@ pub fn revise_with_staged(
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn commit_shared(conversation_id: Vec<u8>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
     let to = fixed::<16>(&conversation_id, "conversation id")?;
-    core().spawn(async move {
+    crate::api::messaging::on_runtime(async move {
         if ids.is_empty() {
             anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
             let message = crate::data::message::Message::save_outgoing(to, &caption, None)?;
@@ -134,6 +134,5 @@ pub async fn commit_shared(conversation_id: Vec<u8>, ids: Vec<u64>, caption: Str
             crate::staging::commit(to, ids, caption, None).await
         }
     })
-        .await.map_err(anyhow::Error::from)??;
-    Ok(())
+    .await
 }

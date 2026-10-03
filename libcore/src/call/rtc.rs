@@ -157,12 +157,17 @@ struct TurnClient {
 impl Drop for TurnClient {
     fn drop(&mut self) {
         let (client, conn) = (self.client.clone(), self.conn.take());
-        core().spawn(async move {
-            if let Some(conn) = conn {
-                let _ = conn.close().await;
-            }
-            let _ = client.close().await;
-        });
+        // Tracked but not cancellable, so a shutdown still closes the reader.
+        let core = core();
+        core.tasks.spawn_on(
+            async move {
+                if let Some(conn) = conn {
+                    let _ = conn.close().await;
+                }
+                let _ = client.close().await;
+            },
+            &core.runtime,
+        );
     }
 }
 

@@ -130,13 +130,13 @@ pub(crate) struct Handshake {
 }
 
 /// The dialer's small receive windows make a large response wait on its reader.
-pub(crate) async fn handshake(server: Vec<Vec<u8>>, client: Vec<Vec<u8>>) -> Handshake {
+pub(crate) async fn handshake() -> Handshake {
     let _ = common::quic::config::setup_crypto_provider();
     let key = Arc::new(common::quic::config::build_self_signed_ed25519_cert(
         SigningKey::from_bytes(&TLS_SEED),
     ));
-    let server = build_peer_server_cfg(key.clone(), server).unwrap();
-    let mut client = build_peer_client_cfg(key, client).unwrap();
+    let server = build_peer_server_cfg(key.clone()).unwrap();
+    let mut client = build_peer_client_cfg(key).unwrap();
     let mut transport = quinn::TransportConfig::default();
     transport.stream_receive_window((64u32 * 1024).into());
     transport.receive_window((128u32 * 1024).into());
@@ -160,10 +160,8 @@ pub(crate) struct Linked {
     pub _endpoints: [quinn::Endpoint; 2],
 }
 
-pub(crate) async fn linked(
-    sender: &wire::Auth, receiver: &wire::Auth, server: Vec<Vec<u8>>, client: Vec<Vec<u8>>,
-) -> Linked {
-    let h = handshake(server, client).await;
+pub(crate) async fn linked(sender: &wire::Auth, receiver: &wire::Auth) -> Linked {
+    let h = handshake().await;
     Linked {
         server:     crate::p2p::test_link(h.accepted.unwrap(), receiver.ipk),
         client:     crate::p2p::test_link(h.dialed.unwrap(), sender.ipk),

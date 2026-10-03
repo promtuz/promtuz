@@ -1,7 +1,5 @@
 //! Pairing and Welcomes: starting a pair, accepting a Welcome, and introducing ourselves.
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -436,16 +434,12 @@ pub fn process_welcome_inbound_no_contacts<C: DhtClient>(
 /// After this many failed polls, a Welcome from an unknown sender is acked and dropped.
 const POLL_WELCOMES_MAX_RETRY: u8 = 5;
 
-/// Per-`welcome_id` failure counts, in memory only: a restart resets them, and the home's TTL
-/// still bounds the queue.
-static WELCOME_RETRY_COUNTS: std::sync::LazyLock<parking_lot::Mutex<HashMap<[u8; 8], u8>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
-
 /// Returns how many Welcomes were accepted. Every outcome is acked except an error from an
 /// unknown sender, held for `POLL_WELCOMES_MAX_RETRY` polls.
 pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usize> {
     let entries = ctx.dht.fetch_welcomes().await.map_err(|e| anyhow!("fetch_welcomes: {e}"))?;
 
+    let retries = &core().messaging.welcome_retries;
     let mut ack_ids: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     let mut count = 0usize;
     for entry in entries {
@@ -458,7 +452,7 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
             Ok(accepted) => {
                 ack_ids.push(welcome_id);
                 count += usize::from(accepted);
-                WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
+                retries.lock().remove(&welcome_id);
             },
             Err(e) => {
                 if known_contact {
@@ -468,10 +462,10 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
                         hex::encode(&sender_ipk[..4])
                     );
                     ack_ids.push(welcome_id);
-                    WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
+                    retries.lock().remove(&welcome_id);
                 } else {
                     // Hold for the next reconnect: the sender may become a contact meanwhile.
-                    let mut counts = WELCOME_RETRY_COUNTS.lock();
+                    let mut counts = retries.lock();
                     let entry_count = counts.entry(welcome_id).or_insert(0);
                     *entry_count = entry_count.saturating_add(1);
                     let attempts = *entry_count;
@@ -489,7 +483,7 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
                             attempts
                         );
                         ack_ids.push(welcome_id);
-                        WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
+                        retries.lock().remove(&welcome_id);
                     }
                 }
             },

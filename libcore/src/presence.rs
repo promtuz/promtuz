@@ -1,6 +1,5 @@
 //! Presence and typing. Neither goes through MLS.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
@@ -190,18 +189,15 @@ pub(crate) fn next_presence_lease_version_tx(conn: &rusqlite::Connection, now: u
     Ok(version)
 }
 
-/// Defaults to idle: a headless push wake stays idle until the UI foregrounds it.
-static PRESENCE_IDLE: AtomicBool = AtomicBool::new(true);
-
 /// Whether the user is in the app. The renewal loop asks before spending a
 /// lease renewal and a K-home publish on a connection nobody is looking at.
 pub fn presence_is_active() -> bool {
-    !PRESENCE_IDLE.load(Ordering::Relaxed)
+    !core().presence_idle.load(Ordering::Relaxed)
 }
 
 /// `idle` is sent as the last packet before the app freezes, `false` on return.
 pub async fn set_presence(session: Option<&Session>, idle: bool) -> Result<()> {
-    PRESENCE_IDLE.store(idle, Ordering::Relaxed);
+    core().presence_idle.store(idle, Ordering::Relaxed);
     send_presence(session, idle).await
 }
 
@@ -231,7 +227,7 @@ async fn send_presence(session: Option<&Session>, idle: bool) -> Result<()> {
 /// Only while the user is in the app: idle is already the default on a fresh connection, and
 /// saying so would cost a K-home publish.
 pub async fn reassert_presence(session: &Session) -> Result<()> {
-    if PRESENCE_IDLE.load(Ordering::Relaxed) {
+    if !presence_is_active() {
         return Ok(());
     }
     set_presence(Some(session), false).await

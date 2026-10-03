@@ -4,8 +4,6 @@
 use anyhow::{Result, ensure};
 use common::proto::mls_wire::AttachmentSharing;
 use common::utils::now_secs;
-use std::sync::LazyLock;
-use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +17,8 @@ const MAX_PENDING_PER_AUTHOR: u32 = 64;
 const MAX_PENDING: u32 = 1024;
 pub(super) const MAX_PROVIDERS: usize = 3;
 
-struct Policy {
+#[derive(Default)]
+pub(super) struct Policy {
     foreground: bool,
     wifi: bool,
     cancel: CancellationToken,
@@ -45,19 +44,15 @@ impl Policy {
     }
 }
 
-static POLICY: LazyLock<Mutex<Policy>> = LazyLock::new(|| {
-    Mutex::new(Policy { foreground: false, wifi: false, cancel: CancellationToken::new() })
-});
-
-pub(crate) fn set_foreground(active: bool) {
-    POLICY.lock().update(Some(active), None);
+pub(crate) fn set_foreground(c: &Core, active: bool) {
+    c.transfers.policy.lock().update(Some(active), None);
 }
-pub(crate) fn set_network(unmetered_wifi: bool) {
-    POLICY.lock().update(None, Some(unmetered_wifi));
+pub(crate) fn set_network(c: &Core, unmetered_wifi: bool) {
+    c.transfers.policy.lock().update(None, Some(unmetered_wifi));
 }
 
-pub(super) fn serving_scope() -> Option<CancellationToken> {
-    let policy = POLICY.lock();
+pub(super) fn serving_scope(c: &Core) -> Option<CancellationToken> {
+    let policy = c.transfers.policy.lock();
     policy.allowed().then(|| policy.cancel.clone())
 }
 
@@ -407,7 +402,6 @@ mod tests {
     use crate::data::message::Message;
     use crate::mls::policy::ROLE_MEMBER;
     use crate::p2p::PeerLink;
-    use crate::p2p::protocol::offered_alpns;
     use crate::test_support::transfer::Device;
     use crate::test_support::transfer::attachment;
     use crate::test_support::transfer::device;
@@ -581,8 +575,6 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_copies_fall_back_past_old_and_damaged_helpers_and_stop_when_backgrounded() {
-        set_foreground(true);
-        set_network(true);
         let author = identity(210).ipk;
         let (receiver, old, bad, good) =
             (identity(211), identity(212), identity(213), identity(214));
@@ -594,7 +586,7 @@ mod tests {
         let (fid, chunks) = (file.file_id(), file.chunks.len() as u32);
         let expires = now_secs() + 3600;
 
-        let old_link = linked(&old, &receiver, offered_alpns(), offered_alpns()).await;
+        let old_link = linked(&old, &receiver).await;
         let (server, local) = (old_link.server.clone(), old.clone());
         let old_peer = tokio::spawn(async move {
             let (mut s, mut r) = server.accept_stream().await.unwrap();
@@ -613,6 +605,8 @@ mod tests {
         let mut helpers = Vec::new();
         for helper in [&bad, &good] {
             let dev = device();
+            set_foreground(dev.core, true);
+            set_network(dev.core, true);
             shared(&dev, helper.ipk, author, &recipients, &file, expires);
             let mut copy = bytes.clone();
             if helper.ipk == bad.ipk {
@@ -631,10 +625,10 @@ mod tests {
                 path:       path.display().to_string(),
                 updated_at: 1000,
             };
-            let lease = store::receiver_lease(&dev.core.db, fid);
+            let lease = store::receiver_lease(dev.core, fid);
             store::partial_put_live_tx(&dev.core.db.transfers().lock(), &done, &lease).unwrap();
             drop(lease);
-            let link = linked(helper, &receiver, offered_alpns(), offered_alpns()).await;
+            let link = linked(helper, &receiver).await;
             tokio::spawn(super::super::serve::serve_streams(
                 dev.core,
                 link.server.clone(),
@@ -646,7 +640,7 @@ mod tests {
 
         let r = device();
         let grant = shared(&r, receiver.ipk, author, &recipients, &file, expires);
-        let lease = store::receiver_lease(&r.core.db, fid);
+        let lease = store::receiver_lease(r.core, fid);
         let mut partial = ranges::Receiver::open_async(
             r.core,
             fid,
@@ -699,7 +693,7 @@ mod tests {
         s.finish().unwrap();
         let first = v2::read_frame_for(&mut rx, ReadPhase::Chunk).await.unwrap();
         assert!(matches!(first, Frame::Chunk { index: 0, .. }));
-        set_foreground(false);
+        set_foreground(helpers[1].core, false);
         let mut received = 1;
         while let Ok(Frame::Chunk { .. }) = v2::read_frame_for(&mut rx, ReadPhase::Chunk).await {
             received += 1;
@@ -707,7 +701,7 @@ mod tests {
         assert!(received < chunks, "backgrounding stops an upload already streaming");
         let refused = describe_shared(good_link, &receiver, fid, grant).await;
         assert_eq!(refused, Frame::Error(ErrorCode::Unavailable));
-        set_foreground(true);
+        set_foreground(helpers[1].core, true);
         let served = describe_shared(good_link, &receiver, fid, grant).await;
         assert!(matches!(served, Frame::Manifest(_)));
     }

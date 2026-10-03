@@ -8,12 +8,12 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use std::sync::LazyLock;
 use parking_lot::Mutex;
 
 use crate::data::media::KIND_ATTACHMENT;
 use crate::data::media::KIND_IMAGE;
 use crate::data::media::MediaRow;
+use crate::state::Core;
 use crate::state::core;
 
 pub const PREPARING: u8 = 0;
@@ -60,10 +60,13 @@ impl Staged {
     }
 }
 
-static ITEMS: LazyLock<Mutex<HashMap<u64, Staged>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-/// Files a direct send retained and has not yet named on its message row, once per send.
-static SENDING: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::new());
+#[derive(Default)]
+pub(crate) struct Staging {
+    items:   Mutex<HashMap<u64, Staged>>,
+    last_id: AtomicU64,
+    /// Files a direct send retained and has not yet named on its message row, once per send.
+    sending: Mutex<Vec<[u8; 32]>>,
+}
 
 /// Keeps a direct send's file from cleanup until dropped, without naming it on the row a reconnect
 /// retry would send.
@@ -71,14 +74,14 @@ pub(crate) struct Hold([u8; 32]);
 
 impl Hold {
     pub(crate) fn new(file_id: [u8; 32]) -> Self {
-        SENDING.lock().push(file_id);
+        core().staging.sending.lock().push(file_id);
         Self(file_id)
     }
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        let mut sending = SENDING.lock();
+        let mut sending = core().staging.sending.lock();
         if let Some(i) = sending.iter().position(|f| *f == self.0) {
             sending.swap_remove(i);
         }
@@ -92,7 +95,7 @@ fn ring() {
 }
 
 pub fn list() -> Vec<Staged> {
-    let mut v: Vec<Staged> = ITEMS.lock().values().cloned().collect();
+    let mut v: Vec<Staged> = core().staging.items.lock().values().cloned().collect();
     v.sort_by_key(|s| s.id);
     v
 }
@@ -100,7 +103,7 @@ pub fn list() -> Vec<Staged> {
 /// A prepare job still running lands through [`finish`], which ignores a discarded id.
 pub fn discard(id: u64) {
     let orphans = {
-        let mut items = ITEMS.lock();
+        let mut items = core().staging.items.lock();
         let gone = items.remove(&id);
         orphans_of(&items, gone.into_iter())
     };
@@ -110,7 +113,7 @@ pub fn discard(id: u64) {
 
 pub fn clear() {
     let orphans = {
-        let mut items = ITEMS.lock();
+        let mut items = core().staging.items.lock();
         let gone = std::mem::take(&mut *items);
         orphans_of(&items, gone.into_values())
     };
@@ -120,8 +123,9 @@ pub fn clear() {
 
 /// Consulted by the message-side unlink: a chip or a send in flight can hold the same file as a
 /// deleted message.
-pub(crate) fn holds(file_id: &[u8; 32]) -> bool {
-    SENDING.lock().contains(file_id) || ITEMS.lock().values().any(|s| s.file_id == Some(*file_id))
+pub(crate) fn holds(c: &Core, file_id: &[u8; 32]) -> bool {
+    c.staging.sending.lock().contains(file_id)
+        || c.staging.items.lock().values().any(|s| s.file_id == Some(*file_id))
 }
 
 /// Files `gone` held that no remaining item holds. Retention is one row per content hash, so the
@@ -133,16 +137,16 @@ fn orphans_of(items: &HashMap<u64, Staged>, gone: impl Iterator<Item = Staged>) 
 }
 
 /// Unlinks what unsent items retained; a just-committed item keeps its file through its new
-/// `message_media` row. Takes the messages lock only after the `ITEMS` lock is released.
+/// `message_media` row. Takes the messages lock only after the items lock is released.
 fn release(fids: &[[u8; 32]]) {
     if !fids.is_empty() {
-        crate::data::media::unlink_orphaned(&core().db, &core().db.messages().lock(), fids);
+        crate::data::media::unlink_orphaned(core(), &core().db.messages().lock(), fids);
     }
 }
 
 /// `false` when the item was discarded meanwhile, so the caller can release what it produced.
 fn finish(id: u64, f: impl FnOnce(&mut Staged)) -> bool {
-    let mut items = ITEMS.lock();
+    let mut items = core().staging.items.lock();
     let Some(s) = items.get_mut(&id) else { return false };
     f(s);
     drop(items);
@@ -152,14 +156,14 @@ fn finish(id: u64, f: impl FnOnce(&mut Staged)) -> bool {
 
 fn insert(s: Staged) -> u64 {
     let id = s.id;
-    ITEMS.lock().insert(id, s);
+    core().staging.items.lock().insert(id, s);
     ring();
     id
 }
 
 fn blank(kind: u8) -> Staged {
     Staged {
-        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        id: core().staging.last_id.fetch_add(1, Ordering::Relaxed) + 1,
         kind,
         state: PREPARING,
         mime: String::new(),
@@ -226,7 +230,7 @@ pub fn stage_attachment(
                 // Discarded while the hash ran: the retention it just wrote is an orphan.
                 if !landed {
                     let ghost = Staged { file_id: Some(file_id), ..blank(KIND_ATTACHMENT) };
-                    let orphans = orphans_of(&ITEMS.lock(), std::iter::once(ghost));
+                    let orphans = orphans_of(&core().staging.items.lock(), std::iter::once(ghost));
                     release(&orphans);
                 }
             },
@@ -244,7 +248,7 @@ pub fn stage_attachment(
 /// Names the chip's file before it is retained, so an unlink of the same content meanwhile keeps
 /// the new copy.
 fn hold(id: u64, file_id: [u8; 32]) {
-    if let Some(s) = ITEMS.lock().get_mut(&id) {
+    if let Some(s) = core().staging.items.lock().get_mut(&id) {
         s.file_id = Some(file_id);
     }
 }
@@ -258,7 +262,7 @@ pub async fn commit(
         bail!("nothing staged");
     }
     let staged: Vec<Staged> = {
-        let items = ITEMS.lock();
+        let items = core().staging.items.lock();
         ids.iter()
             .map(|id| items.get(id).cloned().ok_or_else(|| anyhow!("staged item {id} is gone")))
             .collect::<Result<_>>()?
@@ -298,7 +302,7 @@ pub async fn commit(
 pub fn body_of(id: u64, caption: String) -> Result<common::proto::mls_wire::Body> {
     use common::proto::mls_wire::Body;
 
-    let items = ITEMS.lock();
+    let items = core().staging.items.lock();
     let s = items.get(&id).ok_or_else(|| anyhow!("staged item {id} is gone"))?;
     if s.state != READY {
         bail!("staged item {id} is not ready");
@@ -362,7 +366,7 @@ mod tests {
         };
 
         // A message with the same content is deleted before the chip lands.
-        crate::data::media::unlink_orphaned(db, &db.messages().lock(), &[file_id]);
+        crate::data::media::unlink_orphaned(scope.core, &db.messages().lock(), &[file_id]);
         let kept = retained().expect("the chip keeps its retention");
         assert!(Path::new(&kept).exists());
         discard(id);

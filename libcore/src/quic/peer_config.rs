@@ -15,6 +15,8 @@ use x509_parser::oid_registry::asn1_rs::oid;
 use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 
+use crate::p2p::protocol::ALPN;
+
 const ED25519_OID: x509_parser::der_parser::Oid<'static> = oid!(1.3.101 .112);
 
 fn peer_transport_cfg() -> Arc<TransportConfig> {
@@ -23,12 +25,12 @@ fn peer_transport_cfg() -> Arc<TransportConfig> {
     Arc::new(cfg)
 }
 
-pub fn build_peer_server_cfg(key: Arc<CertifiedKey>, alpns: Vec<Vec<u8>>) -> Result<ServerConfig> {
+pub fn build_peer_server_cfg(key: Arc<CertifiedKey>) -> Result<ServerConfig> {
     let mut crypto = rustls::ServerConfig::builder()
         .with_client_cert_verifier(Arc::new(Ed25519CertVerifier))
         .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(key)));
 
-    crypto.alpn_protocols = alpns;
+    crypto.alpn_protocols = vec![ALPN.to_vec()];
 
     let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
     cfg.transport_config(peer_transport_cfg());
@@ -38,13 +40,13 @@ pub fn build_peer_server_cfg(key: Arc<CertifiedKey>, alpns: Vec<Vec<u8>>) -> Res
     Ok(cfg)
 }
 
-pub fn build_peer_client_cfg(key: Arc<CertifiedKey>, alpns: Vec<Vec<u8>>) -> Result<ClientConfig> {
+pub fn build_peer_client_cfg(key: Arc<CertifiedKey>) -> Result<ClientConfig> {
     let mut tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Ed25519CertVerifier))
         .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(key)));
 
-    tls.alpn_protocols = alpns;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
 
     let quic_config = QuicClientConfig::try_from(tls)?;
 

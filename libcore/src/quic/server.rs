@@ -67,7 +67,6 @@ where
 }
 
 const MAX_CONCURRENT_STREAMS: usize = 16;
-static INBOX_SYNC: Mutex<()> = Mutex::const_new(());
 const RTT_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Below half of `PRESENCE_LEASE_MAX_MS`, so a single missed renewal leaves the
@@ -288,7 +287,10 @@ impl Session {
             if let Err(e) = self.relay.record_rtt(rtt_ms) {
                 warn!("relay {} rtt sample failed: {e}", node_short(&self.relay.id));
             }
-            tokio::time::sleep(RTT_SAMPLE_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(RTT_SAMPLE_INTERVAL) => {},
+                _ = self.cancel.cancelled() => return,
+            }
         }
     }
 
@@ -349,7 +351,7 @@ impl Session {
     }
 
     async fn sync_incoming_inner(&self, ipk: VerifyingKey) -> Result<()> {
-        let _guard = INBOX_SYNC.lock().await;
+        let _guard = core().inbox_sync.lock().await;
         let conn = &self.conn;
         let mut sync = InboxSync { connection: conn.clone(), completed: false };
         // Poll Welcomes before the drain: a message for a group we have not joined yet would be
