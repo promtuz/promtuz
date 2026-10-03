@@ -17,14 +17,12 @@ use common::proto::client_rel::client_auth_message;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::kp_publish_records_digest;
 use common::proto::mls_wire::kp_publish_signing_input;
 use common::proto::mls_wire::kp_record_signing_input;
-use common::proto::mls_wire::kp_refill_signing_input;
 use common::proto::mls_wire::welcome_envelope_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -124,20 +122,11 @@ pub(crate) fn kp_record(
     }
 }
 
-pub(crate) fn kp_sig(
-    owner: &SigningKey, records: &[KeyPackageRecord], mode: KpPublishMode, timestamp: u64,
-) -> [u8; 64] {
+pub(crate) fn kp_sig(owner: &SigningKey, records: &[KeyPackageRecord], timestamp: u64) -> [u8; 64] {
     let ipk = owner.verifying_key().to_bytes();
     let digest = kp_publish_records_digest(MLS_WIRE_VERSION, records);
     let count = records.len() as u32;
-    let msg = match mode {
-        KpPublishMode::Publish => {
-            kp_publish_signing_input(MLS_WIRE_VERSION, &ipk, &digest, count, timestamp)
-        },
-        KpPublishMode::Refill => {
-            kp_refill_signing_input(MLS_WIRE_VERSION, &ipk, &digest, count, timestamp)
-        },
-    };
+    let msg = kp_publish_signing_input(MLS_WIRE_VERSION, &ipk, &digest, count, timestamp);
     owner.sign(&msg).to_bytes()
 }
 

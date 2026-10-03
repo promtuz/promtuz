@@ -32,7 +32,7 @@ AppPayload
  30 GroupInvitation 1e 20 22*32 20 22*32 01 01 01 02
 Wake No=00 Message=01 Call=02
 StickerRef aa*16 bb*32 cc*32 82 02
-NodeId::new([1; 32]) SUKQJEDR5WITCSNIBU53PCI7ZVGGYHR5CSWYPCJZVAHZXGUR4CGA
+NodeId::new([1; 32]) SUKQJEDR5WITCSNIBU53PCI7ZVGGYHR5CSWYPCJZVAHZXGUR4CGA 20 95 15 04 90 71 ed 91 31 49 a8 0d 3b b7 89 1f cd 4c 6c 1e 3d 14 ad 87 89 39 a8 0f 9b 9a 91 e0 8c
 blob_key 60 e9 1f 7c f7 51 7a 37 07 b8 ae 73 b5 cb ec 1a de 96 93 12 24 cd f1 26 c5 ff 0b 97 b2 72 46 88
 key_package_stash_prefix ec 99 06 86 0f c6 29 95 a4 e3 af 79 34 3d 35 04 f8 f9 f2 87 e1 36 fb f3 b3 dd e3 70 20 57 87 3a
 NodeCapabilities 3f 00 00 00 RELAY=0x1 PUSH_GATEWAY=0x2 BLOB_STORE=0x4 CALL_RELAY=0x8 HIGH_AVAILABILITY=0x10 STICKER_STORE=0x20
@@ -56,15 +56,13 @@ GroupRequest: Add Remove Sync Change Ready RecoveryReady
 GroupChange: Add Remove Leave Role Rules Handover Takeover Upgrade MemberRequest
 GroupMemberAction: Refresh Leave
 ReceiptKind: Delivered Read
-KpPublishMode: Publish Refill
 KeyPackagePublishOutcome: Stored BadSig Expired NotOwner RateLimited TooMany StaticFieldsConflict Unavailable
 KeyPackageFetchOutcome: Found NoStash NotOwner RateLimited Unavailable
-KeyPackageRefillOutcome: Appended BadSig Expired NotOwner RateLimited TooMany StaticFieldsConflict Unavailable
 WelcomePublishOutcome: Stored BadSig StaleTimestamp NotOwner QueueFull RateLimited
 WelcomeFetchOutcome: Found BadSig NotOwner RateLimited
 DhtPacket: Request Response
-DhtRequest: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch KeyPackageRefill WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
-DhtResponse: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch KeyPackageRefill WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
+DhtRequest: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
+DhtResponse: FindNode Forward ActivityForward PresenceConsent PresenceState PresenceLease LiveForward PushPseudonymPublish QueueFetch QueueFetchAck KeyPackagePublish KeyPackageFetch WelcomePublish WelcomeFetch WelcomeAck ServiceCapabilities KeyPackageInventory
 ForwardOutcome: Delivered Stored NotOwner QueueFull BadSig RateLimited
 GatewayRequest: Register Wake Store
 RegisterResponse: Registered Rejected

@@ -619,8 +619,6 @@ pub enum DhtRequest {
 
     KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishReq),
     KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchReq),
-    /// Appends to the stash where a publish replaces it; the transcripts differ only in domain.
-    KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillReq),
 
     WelcomePublish(crate::proto::mls_wire::WelcomePublishReq),
     WelcomeFetch(crate::proto::mls_wire::WelcomeFetchReq),
@@ -647,7 +645,6 @@ pub enum DhtResponse {
 
     KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishResp),
     KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchResp),
-    KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillResp),
 
     WelcomePublish(crate::proto::mls_wire::WelcomePublishResp),
     WelcomeFetch(crate::proto::mls_wire::WelcomeFetchResp),

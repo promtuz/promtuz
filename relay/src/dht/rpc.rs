@@ -76,9 +76,7 @@ pub(crate) async fn ask_homes(
 
 fn required_service(req: &DhtRequest) -> Option<(u16, u16)> {
     match req {
-        DhtRequest::KeyPackagePublish(_)
-        | DhtRequest::KeyPackageRefill(_)
-        | DhtRequest::KeyPackageFetch(_) => {
+        DhtRequest::KeyPackagePublish(_) | DhtRequest::KeyPackageFetch(_) => {
             Some((services::KEY_PACKAGE_CUSTODY, services::KEY_PACKAGE_CUSTODY_VERSION))
         },
         DhtRequest::KeyPackageInventory { .. } => {

@@ -1,4 +1,4 @@
-//! KeyPackage stash RPCs at a home relay: publish, refill and the one-shot fetch.
+//! KeyPackage stash RPCs at a home relay: publish and the one-shot fetch.
 
 use common::crypto::verify_ed25519;
 use common::proto::mls_wire::KP_STASH_TARGET;
@@ -7,8 +7,6 @@ use common::proto::mls_wire::KeyPackageFetchOutcome;
 use common::proto::mls_wire::KeyPackageFetchReq;
 use common::proto::mls_wire::KeyPackagePublishOutcome;
 use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::mls_wire::KeyPackageRefillOutcome;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::MAX_KP_FETCH_PER_HOUR;
 use common::proto::mls_wire::MAX_KP_SKEW_MS;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
@@ -16,7 +14,6 @@ use common::proto::mls_wire::key_package_stash_prefix;
 use common::proto::mls_wire::kp_publish_records_digest;
 use common::proto::mls_wire::kp_publish_signing_input;
 use common::proto::mls_wire::kp_record_signing_input;
-use common::proto::mls_wire::kp_refill_signing_input;
 use common::quic::id::NodeId;
 
 use super::Reject;
@@ -112,8 +109,8 @@ enum KeyPackageVerifyError {
 }
 
 fn verify_outer_sig(
-    publisher_ipk: &[u8; 32], outer_sig: &[u8; 64], records: &[KeyPackageRecord],
-    timestamp: u64, mode: KpPublishMode, now_ms: u64,
+    publisher_ipk: &[u8; 32], outer_sig: &[u8; 64], records: &[KeyPackageRecord], timestamp: u64,
+    now_ms: u64,
 ) -> bool {
     let skew = now_ms.abs_diff(timestamp);
     if skew > MAX_KP_SKEW_MS {
@@ -122,14 +119,7 @@ fn verify_outer_sig(
 
     let digest = kp_publish_records_digest(MLS_WIRE_VERSION, records);
     let count = records.len() as u32;
-    let msg = match mode {
-        KpPublishMode::Publish => {
-            kp_publish_signing_input(MLS_WIRE_VERSION, publisher_ipk, &digest, count, timestamp)
-        },
-        KpPublishMode::Refill => {
-            kp_refill_signing_input(MLS_WIRE_VERSION, publisher_ipk, &digest, count, timestamp)
-        },
-    };
+    let msg = kp_publish_signing_input(MLS_WIRE_VERSION, publisher_ipk, &digest, count, timestamp);
     verify_ed25519(publisher_ipk, &msg, outer_sig).is_ok()
 }
 
@@ -158,18 +148,17 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
     *NodeId::new(&buf).as_bytes()
 }
 
-/// Publish replaces the stash and refill appends to it. `Stored` is a durable promise, so it waits
-/// for the persist barrier.
+/// Replaces the stash. `Stored` is a durable promise, so it waits for the persist barrier.
 pub(crate) async fn handle_keypackage_publish(
     dht: &Dht, ipk: &[u8; 32], records: &[KeyPackageRecord], timestamp: u64, sig: &[u8; 64],
-    mode: KpPublishMode, now_ms: u64,
+    now_ms: u64,
 ) -> KeyPackagePublishOutcome {
     use KeyPackagePublishOutcome as Outcome;
 
     if records.len() > KP_STASH_TARGET {
         return Outcome::TooMany;
     }
-    if !verify_outer_sig(ipk, sig, records, timestamp, mode, now_ms) {
+    if !verify_outer_sig(ipk, sig, records, timestamp, now_ms) {
         return Outcome::BadSig;
     }
     if !crate::dht::routing::homes(dht, &NodeId::from_bytes(key_package_stash_prefix(ipk))).1 {
@@ -186,12 +175,12 @@ pub(crate) async fn handle_keypackage_publish(
         }
     }
 
-    match dht.store.key_packages.publish(ipk, records, mode == KpPublishMode::Publish, now_ms) {
+    match dht.store.key_packages.publish(ipk, records) {
         Ok(()) => {},
         Err(key_packages::Error::Conflict) => return Outcome::StaticFieldsConflict,
         Err(key_packages::Error::Full) => return Outcome::TooMany,
         Err(error) => {
-            common::warn!("key package {mode:?} failed: {error}");
+            common::warn!("key package publish failed: {error}");
             return Outcome::Unavailable;
         },
     }
@@ -199,22 +188,6 @@ pub(crate) async fn handle_keypackage_publish(
         return Outcome::Unavailable;
     }
     Outcome::Stored
-}
-
-/// A refill answers with the publish outcomes, `Appended` standing for `Stored`.
-pub(crate) fn refill_outcome(outcome: KeyPackagePublishOutcome) -> KeyPackageRefillOutcome {
-    use KeyPackagePublishOutcome as P;
-    use KeyPackageRefillOutcome as R;
-    match outcome {
-        P::Stored => R::Appended,
-        P::BadSig => R::BadSig,
-        P::Expired => R::Expired,
-        P::NotOwner => R::NotOwner,
-        P::RateLimited => R::RateLimited,
-        P::TooMany => R::TooMany,
-        P::StaticFieldsConflict => R::StaticFieldsConflict,
-        P::Unavailable => R::Unavailable,
-    }
 }
 
 /// A consumed record is not released to a requester until both its removal and the
@@ -271,12 +244,11 @@ mod tests {
     const HOUR: u64 = 3_600_000;
 
     async fn publish(
-        dht: &Dht, owner: &SigningKey, records: &[KeyPackageRecord], mode: KpPublishMode,
-        signed_at: u64, now: u64,
+        dht: &Dht, owner: &SigningKey, records: &[KeyPackageRecord], signed_at: u64, now: u64,
     ) -> KeyPackagePublishOutcome {
-        let sig = kp_sig(owner, records, mode, signed_at);
+        let sig = kp_sig(owner, records, signed_at);
         let ipk = owner.verifying_key().to_bytes();
-        handle_keypackage_publish(dht, &ipk, records, signed_at, &sig, mode, now).await
+        handle_keypackage_publish(dht, &ipk, records, signed_at, &sig, now).await
     }
 
     async fn fetch(
@@ -305,9 +277,7 @@ mod tests {
     async fn each_fetch_vends_a_different_package_exactly_once() {
         let (_dir, dht) = dht(NodeId::from_bytes([0; 32]));
         let (owner, peer, now) = (key(1), NodeId::from_bytes([2; 32]), now_ms());
-        let stored =
-            publish(&dht, &owner, &records(&owner, 1..4, now), KpPublishMode::Publish, now, now)
-                .await;
+        let stored = publish(&dht, &owner, &records(&owner, 1..4, now), now, now).await;
         assert_eq!(stored, KeyPackagePublishOutcome::Stored);
         let mut vended = Vec::new();
         for remaining in [2, 1, 0] {
@@ -333,7 +303,7 @@ mod tests {
         for requester in [[0xA1; 32], [0xB2; 32]] {
             let (_dir, replica) = dht(NodeId::from_bytes([0; 32]));
             let requester = NodeId::from_bytes(requester);
-            publish(&replica, &owner, &all, KpPublishMode::Publish, now, now).await;
+            publish(&replica, &owner, &all, now, now).await;
             let KeyPackageFetchOutcome::Found(found) =
                 fetch(&replica, &owner, requester, requester, now).await
             else {
@@ -359,7 +329,6 @@ mod tests {
         let expired = kp_record(&owner, [4; 32], now);
         let full = records(&owner, 10..10 + KP_STASH_TARGET as u8, now);
         let too_many = records(&owner, 10..11 + KP_STASH_TARGET as u8, now);
-        let (publish_, refill) = (KpPublishMode::Publish, KpPublishMode::Refill);
 
         use KeyPackagePublishOutcome::*;
         let filled: Vec<u8> = (10..10 + KP_STASH_TARGET as u8).collect();
@@ -371,77 +340,39 @@ mod tests {
         };
         check(
             "forged record",
-            publish(&dht, &owner, &[forged_record], publish_, now, now).await,
+            publish(&dht, &owner, &[forged_record], now, now).await,
             BadSig,
             &[],
         );
         check(
             "stale signature",
-            publish(&dht, &owner, &[a.clone()], publish_, now - 120_000, now).await,
+            publish(&dht, &owner, &[a.clone()], now - 120_000, now).await,
             BadSig,
             &[],
         );
-        check(
-            "expired record",
-            publish(&dht, &owner, &[expired], publish_, now, now).await,
-            Expired,
-            &[],
-        );
-        check(
-            "past the target",
-            publish(&dht, &owner, &too_many, publish_, now, now).await,
-            TooMany,
-            &[],
-        );
-        check(
-            "publish",
-            publish(&dht, &owner, &[a.clone()], publish_, now, now).await,
-            Stored,
-            &[1],
-        );
+        check("expired record", publish(&dht, &owner, &[expired], now, now).await, Expired, &[]);
+        check("past the target", publish(&dht, &owner, &too_many, now, now).await, TooMany, &[]);
+        check("publish", publish(&dht, &owner, &[a, b], now, now).await, Stored, &[1, 2]);
         check(
             "same ref, other bytes",
-            publish(&dht, &owner, &[changed_a.clone()], publish_, now, now).await,
+            publish(&dht, &owner, &[changed_a], now, now).await,
             StaticFieldsConflict,
-            &[1],
+            &[1, 2],
         );
-        check(
-            "refill, same ref, other bytes",
-            publish(&dht, &owner, &[changed_a], refill, now, now).await,
-            StaticFieldsConflict,
-            &[1],
-        );
-        check("refill", publish(&dht, &owner, &[b], refill, now, now).await, Stored, &[1, 2]);
-        check(
-            "publish replaces",
-            publish(&dht, &owner, &[c], publish_, now, now).await,
-            Stored,
-            &[3],
-        );
-        check("fill", publish(&dht, &owner, &full, publish_, now, now).await, Stored, &filled);
-        check(
-            "refill past the target",
-            publish(&dht, &owner, &[a], refill, now, now).await,
-            TooMany,
-            &filled,
-        );
-        check(
-            "idempotent resend",
-            publish(&dht, &owner, &full[..1], refill, now, now).await,
-            Stored,
-            &filled,
-        );
+        check("publish replaces", publish(&dht, &owner, &[c], now, now).await, Stored, &[3]);
+        check("fill", publish(&dht, &owner, &full, now, now).await, Stored, &filled);
+        check("idempotent resend", publish(&dht, &owner, &full, now, now).await, Stored, &filled);
 
         // Only an owner-signed empty snapshot withdraws the last packages.
-        let mut forged_empty = kp_sig(&owner, &[], publish_, now);
+        let mut forged_empty = kp_sig(&owner, &[], now);
         forged_empty[0] ^= 1;
         let ipk = owner.verifying_key().to_bytes();
         assert_eq!(
-            handle_keypackage_publish(&dht, &ipk, &[], now, &forged_empty, publish_, now).await,
+            handle_keypackage_publish(&dht, &ipk, &[], now, &forged_empty, now).await,
             BadSig
         );
         assert_eq!(stash(&dht, &owner, now).len(), KP_STASH_TARGET);
-        assert_eq!(publish(&dht, &owner, &[], publish_, now, now).await, Stored);
+        assert_eq!(publish(&dht, &owner, &[], now, now).await, Stored);
         assert!(stash(&dht, &owner, now).is_empty());
 
         // A fetch captured from one relay and replayed by another gets nothing.

@@ -5,14 +5,12 @@ use anyhow::Result;
 use common::proto::Sender;
 use common::proto::mls_wire::KP_STASH_TARGET;
 use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::MAX_KP_SKEW_MS;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::kp_fetch_wrap_signing_input;
 use common::proto::mls_wire::kp_publish_records_digest;
 use common::proto::mls_wire::kp_publish_signing_input;
-use common::proto::mls_wire::kp_refill_signing_input;
 use common::proto::mls_wire::welcome_ack_signing_input;
 use common::proto::mls_wire::welcome_fetch_signing_input;
 use common::proto::mls_wire::welcome_publish_wrap_signing_input;
@@ -37,26 +35,18 @@ fn fresh_and_valid(ipk: &PublicKey, msg: &[u8], sig: &[u8; 64], now_ms: u64, tim
 }
 
 fn verify_publish_keypackage(
-    ipk: &PublicKey, now_ms: u64, records: &[KeyPackageRecord], mode: KpPublishMode,
-    timestamp: u64, sig: &[u8; 64],
+    ipk: &PublicKey, now_ms: u64, records: &[KeyPackageRecord], timestamp: u64, sig: &[u8; 64],
 ) -> bool {
-    let ipk_bytes = ipk.to_bytes();
     let digest = kp_publish_records_digest(MLS_WIRE_VERSION, records);
     let count = records.len() as u32;
-    let msg = match mode {
-        KpPublishMode::Publish => {
-            kp_publish_signing_input(MLS_WIRE_VERSION, &ipk_bytes, &digest, count, timestamp)
-        },
-        KpPublishMode::Refill => {
-            kp_refill_signing_input(MLS_WIRE_VERSION, &ipk_bytes, &digest, count, timestamp)
-        },
-    };
+    let msg =
+        kp_publish_signing_input(MLS_WIRE_VERSION, &ipk.to_bytes(), &digest, count, timestamp);
     fresh_and_valid(ipk, &msg, sig, now_ms, timestamp)
 }
 
 pub(crate) async fn handle_publish_keypackage(
-    ctx: ClientCtxHandle, records: Vec<KeyPackageRecord>, timestamp: u64,
-    mode: KpPublishMode, sig: [u8; 64], tx: &mut SendStream,
+    ctx: ClientCtxHandle, records: Vec<KeyPackageRecord>, timestamp: u64, sig: [u8; 64],
+    tx: &mut SendStream,
 ) -> Result<()> {
     // A batch the homes would reject anyway costs one length compare here
     // instead of a K-way reflection of the client's upload.
@@ -69,13 +59,12 @@ pub(crate) async fn handle_publish_keypackage(
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
     };
-    if !verify_publish_keypackage(&ctx.ipk, now_ms, &records, mode, timestamp, &sig) {
+    if !verify_publish_keypackage(&ctx.ipk, now_ms, &records, timestamp, &sig) {
         trace!("MLS publish-kp: wrapper sig/skew rejected");
         return Ok(());
     }
     let q =
-        kp_originate::originate_publish(&dht, ctx.ipk.to_bytes(), records, mode, timestamp, sig)
-            .await;
+        kp_originate::originate_publish(&dht, ctx.ipk.to_bytes(), records, timestamp, sig).await;
     SRelayPacket::KeyPackagePublished {
         homes_succeeded: q.homes_succeeded,
         quorum_met: q.quorum_met,

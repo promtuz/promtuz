@@ -173,7 +173,6 @@ impl Dht {
 mod tests {
     use std::time::Duration;
 
-    use common::proto::mls_wire::KpPublishMode;
     use common::proto::mls_wire::MLS_WIRE_VERSION;
     use common::proto::mls_wire::welcome_ack_signing_input;
     use common::proto::mls_wire::welcome_fetch_signing_input;
@@ -219,10 +218,8 @@ mod tests {
 
             let owner = key(seed + 2);
             let records = vec![kp_record(&owner, [seed; 32], now + HOUR)];
-            let sig = kp_sig(&owner, &records, KpPublishMode::Publish, now);
-            let published =
-                originate_publish(&dht, ipk(seed + 2), records, KpPublishMode::Publish, now, sig)
-                    .await;
+            let sig = kp_sig(&owner, &records, now);
+            let published = originate_publish(&dht, ipk(seed + 2), records, now, sig).await;
             assert_eq!((published.homes_succeeded, published.quorum_met), (1, quorum));
 
             let invite = welcome(&key(seed + 3), ipk(seed + 4), seed);
@@ -237,25 +234,13 @@ mod tests {
         let (_dir, dht) = dht(NodeId::from_bytes([1; 32]));
         let (owner, now) = (key(3), now_ms());
         let owner_ipk = owner.verifying_key().to_bytes();
-        let first = vec![kp_record(&owner, [1; 32], now + HOUR)];
-        let unsigned =
-            originate_publish(&dht, owner_ipk, first.clone(), KpPublishMode::Publish, now, [0; 64])
-                .await;
+        let packages =
+            vec![kp_record(&owner, [1; 32], now + HOUR), kp_record(&owner, [2; 32], now + HOUR)];
+        let unsigned = originate_publish(&dht, owner_ipk, packages.clone(), now, [0; 64]).await;
         assert_eq!((unsigned.homes_succeeded, unsigned.quorum_met), (0, false));
         assert!(originate_fetch(&dht, owner_ipk, now).await.record.is_none());
-        let sig = kp_sig(&owner, &first, KpPublishMode::Publish, now);
-        assert!(
-            originate_publish(&dht, owner_ipk, first, KpPublishMode::Publish, now, sig)
-                .await
-                .quorum_met
-        );
-        let refill = vec![kp_record(&owner, [2; 32], now + HOUR)];
-        let sig = kp_sig(&owner, &refill, KpPublishMode::Refill, now);
-        assert!(
-            originate_publish(&dht, owner_ipk, refill, KpPublishMode::Refill, now, sig)
-                .await
-                .quorum_met
-        );
+        let sig = kp_sig(&owner, &packages, now);
+        assert!(originate_publish(&dht, owner_ipk, packages, now, sig).await.quorum_met);
         let mut vended = Vec::new();
         for _ in 0..2 {
             vended.push(originate_fetch(&dht, owner_ipk, now).await.record.unwrap().kp_ref.0[0]);

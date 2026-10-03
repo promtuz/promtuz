@@ -1,12 +1,11 @@
 //! Dumps the relay's fjall keyspaces: `cargo run -p relay --bin ldb -- [db_path]` (default `db`).
 //! fjall is single-writer, so stop the relay first or the open fails on the directory lock.
 
-use common::proto::client_rel::DeliverP;
-use common::proto::client_rel::DispatchP;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::pack::Unpacker;
 use relay::storage::MessageKey;
 use relay::storage::db::Store;
+use relay::storage::queued_dispatch;
 
 fn short(ipk: &[u8]) -> String {
     hex::encode(&ipk[..ipk.len().min(6)])
@@ -26,8 +25,8 @@ fn main() -> anyhow::Result<()> {
             continue;
         };
         let time = u64::from_be_bytes(parsed.ts_be);
-        let msg = DeliverP::deser(&value[..]).map(|d| short(&d.from.0)).unwrap_or_else(|_| "??".into());
-        println!("  to={} ts={} id={} from={}", short(&parsed.recipient), time, hex::encode(parsed.id), msg);
+        let from = queued_dispatch(&parsed.recipient, &value).map_or("??".into(), |d| short(&d.from.0));
+        println!("  to={} ts={} id={} from={}", short(&parsed.recipient), time, hex::encode(parsed.id), from);
         n += 1;
     }
     println!("  ({n} rows)");
@@ -40,7 +39,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  invalid queue key len {}", key.len());
             continue;
         };
-        let from = DispatchP::deser(&value[..]).map(|d| short(&d.from.0)).unwrap_or_else(|_| "??".into());
+        let from = queued_dispatch(&parsed.recipient, &value).map_or("??".into(), |d| short(&d.from.0));
         println!(
             "  to={} ts={} dispatch_id={} from={} ({} bytes)",
             short(&parsed.recipient), u64::from_be_bytes(parsed.ts_be), hex::encode(parsed.id), from, value.len()

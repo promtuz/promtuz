@@ -62,18 +62,15 @@ impl KeyPackages {
         }
         Ok(records)
     }
-    /// Any error leaves the stash unchanged. The caller must await the store's persist barrier
-    /// before acking.
-    pub fn publish(
-        &self, ipk: &[u8; 32], incoming: &[KeyPackageRecord], replace: bool, now: u64,
-    ) -> Result<()> {
+    /// Replaces the stash; any error leaves it unchanged. The caller must await the store's persist
+    /// barrier before acking.
+    pub fn publish(&self, ipk: &[u8; 32], incoming: &[KeyPackageRecord]) -> Result<()> {
         if incoming.len() > KP_STASH_TARGET {
             return Err(Error::Full);
         }
         let _lock = self.locks[usize::from(ipk[0]) % self.locks.len()].lock();
         let existing = self.entries(ipk)?;
-        let mut final_records = if replace { BTreeMap::new() } else { existing.clone() };
-        final_records.retain(|_,record|record.expires_at_ms>now);
+        let mut final_records = BTreeMap::new();
         for record in incoming {
             if record.ipk.0 != *ipk {
                 return Err(Error::Invalid);
@@ -96,9 +93,6 @@ impl KeyPackages {
                 return Err(Error::Conflict);
             }
             final_records.insert(key, record.clone());
-        }
-        if final_records.len() > KP_STASH_TARGET {
-            return Err(Error::Full);
         }
         let mut batch = self.db.batch();
         for key in existing.keys().filter(|key| !final_records.contains_key(*key)) {
@@ -197,7 +191,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
         let package = record(1);
-        store.key_packages.publish(&[7; 32], &[package.clone()], true, 1).unwrap();
+        store.key_packages.publish(&[7; 32], &[package.clone()]).unwrap();
         let vended = std::thread::scope(|scope| {
             let takes: Vec<_> = (0..16)
                 .map(|_| {
@@ -216,10 +210,9 @@ mod tests {
         drop(store);
 
         let store = Store::open(dir.path()).unwrap();
-        store.key_packages.publish(&[7; 32], &[package.clone()], true, 1).unwrap();
-        store.key_packages.publish(&[7; 32], &[package], false, 1).unwrap();
+        store.key_packages.publish(&[7; 32], &[package]).unwrap();
         assert!(store.key_packages.take(&[7; 32], &[0; 32], 1).unwrap().is_none());
-        store.key_packages.publish(&[7; 32], &[record(2)], false, 1).unwrap();
+        store.key_packages.publish(&[7; 32], &[record(2)]).unwrap();
         assert_eq!(store.key_packages.take(&[7; 32], &[0; 32], 1).unwrap().unwrap().0, record(2));
     }
 
@@ -230,10 +223,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
         let old = vec![record(1), record(2)];
-        store.key_packages.publish(&[7; 32], &old, true, 1).unwrap();
+        store.key_packages.publish(&[7; 32], &old).unwrap();
         let mut conflict = record(2);
         conflict.kp_bytes.0.push(1);
-        let rejected = store.key_packages.publish(&[7; 32], &[record(3), conflict], true, 1);
+        let rejected = store.key_packages.publish(&[7; 32], &[record(3), conflict]);
         assert!(matches!(rejected, Err(Error::Conflict)));
         let mut kept: Vec<_> = (0..2)
             .map(|_| store.key_packages.take(&[7; 32], &[0; 32], 1).unwrap().unwrap().0)
@@ -241,7 +234,7 @@ mod tests {
         kept.sort_by(|a, b| a.kp_ref.0.cmp(&b.kp_ref.0));
         assert_eq!(kept, old);
 
-        store.key_packages.publish(&[7; 32], &[record(4)], true, 1).unwrap();
+        store.key_packages.publish(&[7; 32], &[record(4)]).unwrap();
         store
             .key_packages
             .records
@@ -250,23 +243,5 @@ mod tests {
         assert!(matches!(store.key_packages.take(&[7; 32], &[0; 32], 1), Err(Error::Invalid)));
         assert!(matches!(store.key_packages.inventory(&[7; 32], 1), Err(Error::Invalid)));
         assert_eq!(store.key_packages.count().unwrap(), 2, "nothing was consumed");
-    }
-
-    /// An idle owner can refill an expired full stash without waiting for someone else's fetch
-    /// to clean it up.
-    #[test]
-    fn an_expired_full_stash_does_not_block_a_refill() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_empty(dir.path());
-        let expired: Vec<_> = (0..KP_STASH_TARGET as u8)
-            .map(|id| KeyPackageRecord { expires_at_ms: 10, ..record(id) })
-            .collect();
-        store.key_packages.publish(&[7; 32], &expired, true, 1).unwrap();
-        store.key_packages.publish(&[7; 32], &[record(200)], false, 11).unwrap();
-        assert_eq!(
-            store.key_packages.take(&[7; 32], &[0; 32], 11).unwrap().unwrap().0,
-            record(200)
-        );
-        assert!(store.key_packages.take(&[7; 32], &[0; 32], 11).unwrap().is_none());
     }
 }

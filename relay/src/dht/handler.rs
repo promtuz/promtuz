@@ -14,8 +14,6 @@ use common::proto::dht_p2p::MAX_FIND_NODE_RESULTS;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::mls_wire::KeyPackageFetchResp;
 use common::proto::mls_wire::KeyPackagePublishResp;
-use common::proto::mls_wire::KeyPackageRefillResp;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::WelcomeFetchResp;
 use common::proto::mls_wire::WelcomePublishResp;
 use common::proto::pack::Packer;
@@ -298,20 +296,17 @@ pub(crate) async fn handle_dht_request(
         ),
         DhtRequest::KeyPackagePublish(r) => DhtResponse::KeyPackagePublish(KeyPackagePublishResp {
             outcome: kp::handle_keypackage_publish(
-                dht, &r.ipk.0, &r.records, r.timestamp, &r.sig.0, KpPublishMode::Publish, now_ms(),
+                dht,
+                &r.ipk.0,
+                &r.records,
+                r.timestamp,
+                &r.sig.0,
+                now_ms(),
             )
             .await,
         }),
         DhtRequest::KeyPackageFetch(req) => DhtResponse::KeyPackageFetch(KeyPackageFetchResp {
             outcome: kp::handle_keypackage_fetch(dht, req, authenticated_peer_id, now_ms()).await,
-        }),
-        DhtRequest::KeyPackageRefill(r) => DhtResponse::KeyPackageRefill(KeyPackageRefillResp {
-            outcome: kp::refill_outcome(
-                kp::handle_keypackage_publish(
-                    dht, &r.ipk.0, &r.records, r.timestamp, &r.sig.0, KpPublishMode::Refill, now_ms(),
-                )
-                .await,
-            ),
         }),
         DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(WelcomePublishResp {
             outcome: welcome::handle_welcome_publish(dht, req, authenticated_peer_id, now_ms()).await,

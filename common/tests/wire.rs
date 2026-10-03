@@ -557,7 +557,6 @@ fn encodings_match_what_deployed_peers_expect() {
     assert_eq!(names, variants::<P>(), "one payload per variant, in declaration order");
 
     let node = NodeId::new([1; 32]);
-    assert_eq!(node.ser().unwrap(), node.to_string().ser().unwrap());
     let sticker =
         StickerRef { pack: [0xaa; 16], id: [0xbb; 32], token: [0xcc; 32], store: 258 };
     let all = NodeCapabilities::all();
@@ -571,7 +570,7 @@ fn encodings_match_what_deployed_peers_expect() {
             encoded(&Wake::Call)
         ),
         format!("StickerRef {}", encoded(&sticker)),
-        format!("NodeId::new([1; 32]) {node}"),
+        format!("NodeId::new([1; 32]) {node} {}", encoded(&node)),
         format!("blob_key {}", hex(&blob_key(&[1; 32], &[2; 32]))),
         format!("key_package_stash_prefix {}", hex(&key_package_stash_prefix(&[1; 32]))),
         format!("NodeCapabilities {} {}", hex(&all.encode()), bits.join(" ")),
@@ -580,8 +579,8 @@ fn encodings_match_what_deployed_peers_expect() {
         CHandshakePacket, SHandshakePacket, ServerHandshakeResultP, CRelayPacket, SRelayPacket,
         DispatchAckP, QueryP, QueryResultP, PresenceState, PresenceMode,
         MlsEnvelopeP, Body, CallMsg, CallCandidate, CallEnd, SystemEvent, GroupRequest, GroupChange,
-        GroupMemberAction, ReceiptKind, KpPublishMode, KeyPackagePublishOutcome,
-        KeyPackageFetchOutcome, KeyPackageRefillOutcome, WelcomePublishOutcome, WelcomeFetchOutcome,
+        GroupMemberAction, ReceiptKind, KeyPackagePublishOutcome, KeyPackageFetchOutcome,
+        WelcomePublishOutcome, WelcomeFetchOutcome,
         DhtPacket, DhtRequest, DhtResponse, ForwardOutcome,
         GatewayRequest, RegisterResponse, PushProvider, StoreRequest, StoreReject, StoreResponse,
         ResolverPacket, LifetimeP, ClientRequest, ClientResponse,

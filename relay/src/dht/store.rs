@@ -5,12 +5,12 @@ use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::ForwardOutcome;
 use common::proto::pack::MAX_FRAME_BYTES;
 use common::proto::pack::Packer;
-use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
 
 use super::Dht;
 use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
+use crate::storage::queued_dispatch;
 
 /// One sender's share of a recipient's [`MAX_QUEUED_PER_RECIPIENT`] slots. Kept above
 /// `MAX_FETCH_QUEUE_BATCH` so a single busy conversation still pages normally.
@@ -32,7 +32,6 @@ pub(crate) enum QueueAdmission {
 /// unattributed and only the per-recipient cap binds.
 pub(crate) fn admit_to_queue(
     ks: &fjall::Keyspace, recipient: &[u8; 32], dispatch_id: &[u8; 16], sender: &[u8; 32],
-    sender_of: impl Fn(&[u8]) -> Option<[u8; 32]>,
 ) -> QueueAdmission {
     let mut total: usize = 0;
     let mut from_sender: usize = 0;
@@ -47,7 +46,8 @@ pub(crate) fn admit_to_queue(
             continue;
         }
         let attributable = attributed_bytes < SENDER_SCAN_BYTE_BUDGET;
-        let same_sender = attributable && sender_of(&value).is_some_and(|f| f == *sender);
+        let same_sender = attributable
+            && queued_dispatch(recipient, &value).is_some_and(|queued| queued.from.0 == *sender);
         if attributable {
             attributed_bytes += value.len();
         }
@@ -107,7 +107,7 @@ pub(crate) fn plan_drift_migrations(
         if !is_drifted {
             continue;
         }
-        let Ok(dispatch) = DispatchP::deser(&value) else {
+        let Some(dispatch) = queued_dispatch(&user_ipk, &value) else {
             continue;
         };
         out.push((key, dispatch));
@@ -128,9 +128,7 @@ pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
     let _admission = dht.store.admission(user_ipk);
-    match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0, |v| {
-        DispatchP::deser(v).ok().map(|d| d.from.0)
-    }) {
+    match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0) {
         QueueAdmission::Insert => {},
         QueueAdmission::AlreadyQueued => return ForwardOutcome::Stored,
         QueueAdmission::IdTakenByOther | QueueAdmission::ScanFailed => {
@@ -187,7 +185,7 @@ pub(crate) fn queue_batch_for_user(
             dead.push(key_bytes.to_vec());
             continue;
         }
-        let Ok(dispatch) = DispatchP::deser(&value) else {
+        let Some(dispatch) = queued_dispatch(user_ipk, &value) else {
             continue;
         };
         if dispatch.is_expired(now_ms) {
@@ -247,11 +245,10 @@ pub(crate) fn delete_queue_entries(
 
 #[cfg(test)]
 mod tests {
-    use common::proto::client_rel::DeliverP;
     use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
+    use common::proto::pack::Unpacker;
 
     use super::*;
-    use crate::quic::handler::client::events::forward::dispatch_to_deliver;
     use crate::test_support::dht;
     use crate::test_support::dispatch;
     use crate::test_support::ipk;
@@ -321,10 +318,9 @@ mod tests {
         let theirs = dispatch(&legit, to, [0xEF; 16], b"legit");
         assert_eq!(enqueue_for_home(&dht, &to, &theirs, NOW), ForwardOutcome::Stored);
 
-        // The relay's local fallback queue holds `DeliverP` rows under the same rule.
-        let sender_of = |value: &[u8]| DeliverP::deser(value).ok().map(|d| d.from.0);
+        // The relay's local fallback queue holds its rows under the same rule.
         for n in 0..MAX_QUEUED_PER_SENDER {
-            let row = dispatch_to_deliver(dispatch(&hog, to, id(n), b"hog"));
+            let row = dispatch(&hog, to, id(n), b"hog");
             dht.store
                 .messages
                 .insert(MessageKey::new(&to, n as u64, &id(n)).as_bytes(), row.ser().unwrap())
@@ -333,11 +329,11 @@ mod tests {
         let hog_ipk = hog.verifying_key().to_bytes();
         let legit_ipk = legit.verifying_key().to_bytes();
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to, &[0xEE; 16], &hog_ipk, sender_of),
+            admit_to_queue(&dht.store.messages, &to, &[0xEE; 16], &hog_ipk),
             QueueAdmission::Full
         ));
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to, &[0xEF; 16], &legit_ipk, sender_of),
+            admit_to_queue(&dht.store.messages, &to, &[0xEF; 16], &legit_ipk),
             QueueAdmission::Insert
         ));
 

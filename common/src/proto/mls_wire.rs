@@ -513,7 +513,7 @@ pub const MAX_EPOCH_AHEAD: u64 = 64;
 
 pub const MAX_WELCOME_BYTES: usize = 256 * 1024;
 
-/// Cap on one publish or refill batch and on a home's stash.
+/// Cap on one publish batch and on a home's stash.
 pub const KP_STASH_TARGET: usize = 100;
 
 pub const KP_STASH_LOW_WATER: usize = 20;
@@ -554,9 +554,6 @@ pub const KP_PUBLISH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-publish";
 
 /// Reserved; a KeyPackage fetch carries no user signature.
 pub const KP_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-fetch";
-
-/// Publish and refill transcripts differ only in this domain.
-pub const KP_REFILL_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-refill";
 
 pub const KP_RECORD_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-record";
 
@@ -916,49 +913,6 @@ pub struct KeyPackageFetchResp {
     pub outcome: KeyPackageFetchOutcome,
 }
 
-/// Appends to the stash; a publish replaces it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeyPackageRefillReq {
-    pub ipk:       Bytes<32>,
-    pub records:   Vec<KeyPackageRecord>,
-    pub timestamp: u64,
-    pub sig:       Bytes<64>,
-}
-
-/// Same meanings as [`KeyPackagePublishOutcome`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum KeyPackageRefillOutcome {
-    Appended,
-    BadSig,
-    Expired,
-    NotOwner,
-    RateLimited,
-    TooMany,
-    StaticFieldsConflict,
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeyPackageRefillResp {
-    pub outcome: KeyPackageRefillOutcome,
-}
-
-/// [`kp_publish_signing_input`]'s layout under [`KP_REFILL_DOMAIN`].
-pub fn kp_refill_signing_input(
-    protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32], record_count: u32,
-    timestamp: u64,
-) -> Vec<u8> {
-    [
-        KP_REFILL_DOMAIN,
-        &protocol_version.to_be_bytes(),
-        ipk,
-        &record_count.to_be_bytes(),
-        records_digest,
-        &timestamp.to_be_bytes(),
-    ]
-    .concat()
-}
-
 /// The envelope's own `sender_sig` authenticates the inviter; `DhtHello` authenticates only the
 /// forwarding relay.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1065,14 +1019,6 @@ pub fn welcome_ack_signing_input(
     .concat()
 }
 
-/// `Publish` replaces the home's stash and `Refill` appends; each signs its own transcript.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum KpPublishMode {
-    Publish = 0,
-    Refill = 1,
-}
-
 pub fn kp_fetch_wrap_signing_input(
     protocol_version: u16, sender_ipk: &[u8; 32], target_ipk: &[u8; 32], timestamp: u64,
 ) -> Vec<u8> {
@@ -1144,7 +1090,6 @@ mod tests {
                 kp_record_signing_input(0x0102, &a, &[2; 3], b"kp", 0x0304),
                 kp_publish_records_digest(0x0102, &[record.clone(), record]).to_vec(),
                 kp_publish_signing_input(0x0102, &a, &b, 3, 0x0304),
-                kp_refill_signing_input(0x0102, &a, &b, 3, 0x0304),
                 welcome_fetch_signing_input(0x0102, &a, &relay, 0x0304),
                 welcome_ack_signing_input(0x0102, &a, &relay, &[[2; 8], [3; 8]], 0x0304),
                 kp_fetch_wrap_signing_input(0x0102, &a, &b, 0x0304),
@@ -1163,7 +1108,6 @@ mod tests {
              9640a1a268717fe173fdb5f548e8b25466c5c6a1b761fbf94de1dc7dece04a6f
              3dc6d271bfbf1e927e9fb80bfdd8b7641c06a9d82909599df01055cdef0a2445
              45b0cc8e1be92a717f7859aba7b99afa49b1cae95acb497cbbc479e883ade5ac
-             ac4dbe14183d50e617dc0a086bd4e20b8d174cd6bef6a209b9364f7c97c63907
              aee9979f078b0d299e37f50793049cfa9a2ccd034001770625fce635e6ba5eb1
              f38d8e9f55ce19391e036d7c421bfe3ab4d04da4bc5e90056c0e2f0be74fd8a0
              39239d71e0b5c805ef6c68646be02939875d9c2a1e6e23598eb6e874a1af2f7b

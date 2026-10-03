@@ -8,7 +8,6 @@ use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::MAX_FRAMED_MLS_BYTES;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::MlsEnvelopeP;
@@ -79,7 +78,6 @@ impl RelayDhtClient {
         let req = CRelayPacket::PublishKeyPackage {
             records: records.to_vec(),
             timestamp,
-            mode: KpPublishMode::Publish,
             sig: Bytes(sig),
         };
         match self.rpc(req).await? {

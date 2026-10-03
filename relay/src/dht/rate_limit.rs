@@ -94,7 +94,6 @@ impl RpcClass {
             | DhtRequest::QueueFetch(_)
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)
-            | DhtRequest::KeyPackageRefill(_)
             | DhtRequest::KeyPackageInventory { .. } => RpcClass::Expensive,
             // The largest payloads: a `welcome_blob` reaches `MAX_WELCOME_BYTES`.
             DhtRequest::WelcomePublish(_)

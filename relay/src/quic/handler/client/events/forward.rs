@@ -13,7 +13,6 @@ use common::proto::client_rel::SRelayPacket;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::trace;
-use common::types::bytes::Bytes;
 use common::utils::now_ms;
 use quinn::Connection;
 use quinn::ConnectionError;
@@ -31,6 +30,7 @@ use crate::quic::handler::client::events::spawn_tied;
 use crate::quic::handler::client::remove_client_if_same;
 use crate::storage::MessageKey;
 use crate::storage::db::Store;
+use crate::storage::queued_dispatch;
 
 const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -61,10 +61,8 @@ pub(super) async fn handle_forward(
     let accepted_at_ms = now_ms();
     let fwd = DispatchP { accepted_at_ms, ..fwd };
 
-    let recipient = fwd.to;
-    let delivery = dispatch_to_deliver(fwd.clone());
     accept_dispatch(
-        store_in_rocks(&ctx.relay.store, recipient, &delivery),
+        store_in_rocks(&ctx.relay.store, &fwd),
         route_dispatch(fwd.clone(), &ctx),
         |ack| async move { SRelayPacket::DispatchAck(ack).send(tx).await.map_err(Into::into) },
         || retire_local_copy(&ctx.relay.store, &fwd),
@@ -156,7 +154,7 @@ fn retire_local_copy(store: &Store, fwd: &DispatchP) -> Result<()> {
         let (key, value) = entry.into_inner()?;
         let Some(key_fields) = MessageKey::parse(&key) else { continue };
         if key_fields.id == fwd.id.0
-            && let Ok(queued) = DeliverP::deser(&value)
+            && let Some(queued) = queued_dispatch(&fwd.to.0, &value)
             && queued.from == fwd.from
             && queued.payload == fwd.payload
             && queued.sig == fwd.sig
@@ -240,24 +238,21 @@ pub(crate) fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
     }
 }
 
-async fn store_in_rocks(
-    store: &Store, recipient: Bytes<32>, delivery: &DeliverP,
-) -> Result<DispatchAckP> {
+async fn store_in_rocks(store: &Store, dispatch: &DispatchP) -> Result<DispatchAckP> {
+    let recipient = dispatch.to;
     debug!(
         "dispatch {}: recipient {} — accepting in local queue",
-        hex::encode(&delivery.id.0[..8]),
+        hex::encode(&dispatch.id.0[..8]),
         hex::encode(&recipient.0[..8])
     );
 
     let admission = {
         let _admission = store.admission(&recipient.0);
         let admission =
-            admit_to_queue(&store.messages, &recipient.0, &delivery.id.0, &delivery.from.0, |v| {
-                DeliverP::deser(v).ok().map(|d| d.from.0)
-            });
+            admit_to_queue(&store.messages, &recipient.0, &dispatch.id.0, &dispatch.from.0);
         if matches!(admission, QueueAdmission::Insert) {
-            let key = MessageKey::new(&recipient.0, delivery.accepted_at_ms, &delivery.id.0);
-            store.put_sync(&store.messages, key.as_bytes(), delivery.ser()?)?;
+            let key = MessageKey::new(&recipient.0, dispatch.accepted_at_ms, &dispatch.id.0);
+            store.put_sync(&store.messages, key.as_bytes(), dispatch.ser()?)?;
         }
         admission
     };
@@ -266,7 +261,7 @@ async fn store_in_rocks(
         // once the group commit covering the write is on disk.
         QueueAdmission::Insert | QueueAdmission::AlreadyQueued => {
             store.persist_barrier().wait().await?;
-            Ok(DispatchAckP::Queued { accepted_at_ms: delivery.accepted_at_ms })
+            Ok(DispatchAckP::Queued { accepted_at_ms: dispatch.accepted_at_ms })
         },
         QueueAdmission::IdTakenByOther => {
             Ok(DispatchAckP::Error { reason: "dispatch id already queued".into() })
@@ -405,9 +400,7 @@ mod tests {
     async fn a_retried_dispatch_is_stored_once_and_retired_only_for_its_author() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
-        let queue = async |sent: &DispatchP| {
-            store_in_rocks(&store, sent.to, &dispatch_to_deliver(sent.clone())).await.unwrap()
-        };
+        let queue = async |sent: &DispatchP| store_in_rocks(&store, sent).await.unwrap();
         let mut sent = dispatch(&key(1), [2; 32], [3; 16], b"once");
         assert!(matches!(queue(&sent).await, DispatchAckP::Queued { .. }));
         sent.accepted_at_ms = 43;

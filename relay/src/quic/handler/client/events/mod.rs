@@ -77,9 +77,8 @@ pub(super) async fn handle_packet(
             Ok(())
         },
 
-        PublishKeyPackage { records, timestamp, mode, sig } => {
-            mls_relay::handle_publish_keypackage(ctx.clone(), records, timestamp, mode, sig.0, tx)
-                .await
+        PublishKeyPackage { records, timestamp, sig } => {
+            mls_relay::handle_publish_keypackage(ctx.clone(), records, timestamp, sig.0, tx).await
         },
         FetchKeyPackage { target_ipk, timestamp, sig } => {
             mls_relay::handle_fetch_keypackage(ctx.clone(), target_ipk.0, timestamp, sig.0, tx)

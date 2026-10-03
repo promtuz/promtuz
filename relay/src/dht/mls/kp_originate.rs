@@ -12,10 +12,6 @@ use common::proto::mls_wire::KeyPackagePublishOutcome;
 use common::proto::mls_wire::KeyPackagePublishReq;
 use common::proto::mls_wire::KeyPackagePublishResp;
 use common::proto::mls_wire::KeyPackageRecord;
-use common::proto::mls_wire::KeyPackageRefillOutcome;
-use common::proto::mls_wire::KeyPackageRefillReq;
-use common::proto::mls_wire::KeyPackageRefillResp;
-use common::proto::mls_wire::KpPublishMode;
 use common::proto::mls_wire::key_package_stash_prefix;
 use common::quic::id::NodeId;
 
@@ -39,41 +35,24 @@ pub(crate) struct KpFetchResult {
 }
 
 pub(crate) async fn originate_publish(
-    dht: &Arc<Dht>, ipk: [u8; 32], records: Vec<KeyPackageRecord>, mode: KpPublishMode,
-    timestamp: u64, sig: [u8; 64],
+    dht: &Arc<Dht>, ipk: [u8; 32], records: Vec<KeyPackageRecord>, timestamp: u64, sig: [u8; 64],
 ) -> KpPublishQuorum {
-    let req = match mode {
-        KpPublishMode::Publish => DhtRequest::KeyPackagePublish(KeyPackagePublishReq {
-            ipk: ipk.into(),
-            records,
-            timestamp,
-            sig: sig.into(),
-        }),
-        KpPublishMode::Refill => DhtRequest::KeyPackageRefill(KeyPackageRefillReq {
-            ipk: ipk.into(),
-            records,
-            timestamp,
-            sig: sig.into(),
-        }),
-    };
+    let req = DhtRequest::KeyPackagePublish(KeyPackagePublishReq {
+        ipk: ipk.into(),
+        records,
+        timestamp,
+        sig: sig.into(),
+    });
     let target = NodeId::from_bytes(key_package_stash_prefix(&ipk));
     let (asked, replies) = ask_homes(dht, &target, req).await;
     let succeeded = replies
         .iter()
         .filter(|(_, reply)| {
             matches!(
-                (mode, reply),
-                (
-                    KpPublishMode::Publish,
-                    DhtResponse::KeyPackagePublish(KeyPackagePublishResp {
-                        outcome: KeyPackagePublishOutcome::Stored
-                    })
-                ) | (
-                    KpPublishMode::Refill,
-                    DhtResponse::KeyPackageRefill(KeyPackageRefillResp {
-                        outcome: KeyPackageRefillOutcome::Appended
-                    })
-                )
+                reply,
+                DhtResponse::KeyPackagePublish(KeyPackagePublishResp {
+                    outcome: KeyPackagePublishOutcome::Stored,
+                })
             )
         })
         .count();

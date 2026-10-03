@@ -7,11 +7,11 @@ use data_encoding::BASE32_NOPAD;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
-use serde::Serializer;
 use serde::de::Visitor;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BaseId<const N: usize>([u8; N]);
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BaseId<const N: usize>(#[serde(with = "serde_bytes")] [u8; N]);
 
 impl<const N: usize> BaseId<N> {
     pub const LEN: usize = N;
@@ -49,25 +49,6 @@ impl<const N: usize> FromStr for BaseId<N> {
         let mut arr = [0u8; N];
         arr.copy_from_slice(&decoded);
         Ok(Self(arr))
-    }
-}
-
-impl<const N: usize> Serialize for BaseId<N> {
-    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        s.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de, const N: usize> Deserialize<'de> for BaseId<N> {
-    fn deserialize<D>(d: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

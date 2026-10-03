@@ -8,6 +8,7 @@ use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::QueryP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::Wake;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
@@ -15,6 +16,8 @@ use common::utils::now_ms;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 
+use crate::quic::handler::client::events::forward::dispatch_to_deliver;
+use crate::storage::MessageKey;
 use crate::test_support::Client;
 use crate::test_support::Node;
 use crate::test_support::dispatch;
@@ -163,4 +166,41 @@ async fn a_drain_at_the_third_home_delivers_what_only_the_other_two_hold() {
             "homes keep custody until the user acks"
         );
     }
+}
+
+/// Rows older relays queued still drain: the delivered form `messages` held, with and without
+/// `ttl_ms`, and a dispatch from before `ttl_ms`. A call offer past its life still goes out, so the
+/// recipient can record the missed call; any other expired row does not.
+#[tokio::test]
+async fn rows_older_relays_queued_still_drain() {
+    let node = Node::start(41, true).await;
+    let bob = key(43);
+    let bob_ipk = bob.verifying_key().to_bytes();
+    let now = now_ms();
+    let sent =
+        |n: u8| DispatchP { accepted_at_ms: now, ..dispatch(&key(42), bob_ipk, [n; 16], &[n]) };
+    let expired =
+        |n, wake| DispatchP { accepted_at_ms: now - 60_000, wake, ttl_ms: 40_000, ..sent(n) };
+    let delivered = |d: &DispatchP| (d.id, d.from, d.payload.clone(), d.sig, d.accepted_at_ms);
+    let put = |ks: &fjall::Keyspace, row: &DispatchP, value: Vec<u8>| {
+        let key = MessageKey::new(&bob_ipk, row.accepted_at_ms, &row.id.0);
+        ks.insert(key.as_bytes(), value).unwrap();
+    };
+    let (messages, queue) = (&node.relay.store.messages, &node.relay.store.queue);
+
+    let timed = DispatchP { ttl_ms: 30_000, ..sent(1) };
+    let (id, from, payload, sig, at) = delivered(&timed);
+    put(messages, &timed, (id, from, payload, sig, at, timed.ttl_ms).ser().unwrap());
+    let untimed = sent(2);
+    put(messages, &untimed, delivered(&untimed).ser().unwrap());
+    let bool_wake = DispatchP { wake: Wake::Message, ..sent(3) };
+    let (id, from, payload, sig, at) = delivered(&bool_wake);
+    put(queue, &bool_wake, (bool_wake.to, from, id, payload, sig, at, true).ser().unwrap());
+    let (missed, stale) = (expired(4, Wake::Call), expired(5, Wake::Message));
+    put(queue, &missed, missed.ser().unwrap());
+    put(queue, &stale, stale.ser().unwrap());
+
+    let phone = authenticated(&node, &bob).await;
+    let expected = [timed, untimed, missed, bool_wake].map(dispatch_to_deliver);
+    assert_eq!(drain(&phone, vec![]).await, expected);
 }

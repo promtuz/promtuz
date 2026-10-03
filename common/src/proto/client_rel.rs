@@ -92,10 +92,13 @@ pub struct DispatchP {
 }
 
 impl DispatchP {
-    /// Past its sender-declared life at `now_ms`. Zero never expires here;
-    /// the store's retention sweep still bounds it.
+    /// Past its sender-declared life at `now_ms`, so a queue drops it unsent. Zero never expires
+    /// here; the store's retention sweep still bounds it. A call offer never expires here: its
+    /// late delivery is how the recipient records the missed call.
     pub fn is_expired(&self, now_ms: u64) -> bool {
-        self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
+        self.wake != Wake::Call
+            && self.ttl_ms != 0
+            && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
     }
 }
 
@@ -106,7 +109,7 @@ pub enum Wake {
     No,
     /// New content the recipient should see soon.
     Message,
-    /// A ringing call: the platform's highest push priority, worthless once the offer expires.
+    /// A call offer: the platform's highest push priority, and it rings only until it expires.
     Call,
 }
 
@@ -136,12 +139,6 @@ pub struct DeliverP {
     pub accepted_at_ms: u64,
     /// Copied from [`DispatchP::ttl_ms`]; zero means default retention.
     pub ttl_ms:         u64,
-}
-
-impl DeliverP {
-    pub fn is_expired(&self, now_ms: u64) -> bool {
-        self.ttl_ms != 0 && now_ms.saturating_sub(self.accepted_at_ms) > self.ttl_ms
-    }
 }
 
 /// Bits OR'd into [`ActivityP::activity`]; zero is a bare presence heartbeat.
@@ -268,12 +265,11 @@ pub enum CRelayPacket {
         timestamp: u64,
     },
 
-    /// User-signed: `sig` covers the inner publish or refill transcript (per `mode`), and the home
-    /// checks it, then forwards it unchanged to the storage homes, which check it again.
+    /// User-signed: `sig` covers the inner publish transcript, and the home checks it, then
+    /// forwards it unchanged to the storage homes, which check it again.
     PublishKeyPackage {
         records:   Vec<crate::proto::mls_wire::KeyPackageRecord>,
         timestamp: u64,
-        mode:      crate::proto::mls_wire::KpPublishMode,
         sig:       Bytes<64>,
     },
 

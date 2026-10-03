@@ -55,8 +55,7 @@ fn tick(
     }
 
     if stash.should_rotate(now_ms) {
-        // Publish, not Refill: the home caps a refill at `KP_STASH_TARGET` including what it
-        // holds, which a full batch never fits. Publishing also evicts the old generation there.
+        // Publishing replaces the home's stash, which evicts the old generation.
         let recs = stash
             .rotate_periodic(provider, ipk_signer, now_ms)
             .map_err(|e| anyhow!("rotate_periodic: {e}"))?;

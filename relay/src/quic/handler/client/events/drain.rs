@@ -5,11 +5,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use common::proto::Sender;
-use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
 use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
-use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
 use common::trace;
 use common::utils::now_ms;
@@ -24,6 +22,7 @@ use crate::quic::handler::client::RemoteDrainState;
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::quic::handler::client::events::forward::dispatch_to_deliver;
 use crate::storage::MessageKey;
+use crate::storage::queued_dispatch;
 
 /// Bytes one `DrainQueue` ships before stopping; the client re-issues it for the rest.
 const DRAIN_MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
@@ -48,7 +47,6 @@ pub(super) async fn handle_drain_queue(
     stream_keyspace(
         &ctx.relay.store.messages,
         &recipient_arr,
-        decode_deliver,
         now_ms,
         tx,
         &mut batch,
@@ -60,7 +58,6 @@ pub(super) async fn handle_drain_queue(
         let dht_ids = stream_keyspace(
             &dht.store.queue,
             &recipient_arr,
-            decode_dispatch,
             now_ms,
             tx,
             &mut batch,
@@ -96,11 +93,11 @@ pub(super) async fn handle_drain_queue(
         if batch.is_full() {
             break;
         }
-        let deliver = dispatch_to_deliver(dispatch);
         // Expired: skipped here, and the home drops it on its own sweep.
-        if deliver.is_expired(now_ms) {
+        if dispatch.is_expired(now_ms) {
             continue;
         }
+        let deliver = dispatch_to_deliver(dispatch);
         if !batch.admit(deliver.id.0, deliver.payload.0.len()) {
             continue;
         }
@@ -238,19 +235,11 @@ impl DrainBatch {
     }
 }
 
-fn decode_deliver(value: &[u8]) -> Option<DeliverP> {
-    DeliverP::deser(value).ok()
-}
-
-fn decode_dispatch(value: &[u8]) -> Option<DeliverP> {
-    DispatchP::deser(value).ok().map(dispatch_to_deliver)
-}
-
 /// Expired entries are deleted instead of sent. Keys are collected first, so no keyspace
 /// iterator is held across the `await` that writes to the wire.
 async fn stream_keyspace(
-    ks: &Keyspace, recipient: &[u8; 32], decode: fn(&[u8]) -> Option<DeliverP>, now_ms: u64,
-    tx: &mut SendStream, batch: &mut DrainBatch, keys: &mut Vec<MessageKey>,
+    ks: &Keyspace, recipient: &[u8; 32], now_ms: u64, tx: &mut SendStream, batch: &mut DrainBatch,
+    keys: &mut Vec<MessageKey>,
 ) -> Result<Vec<[u8; 16]>> {
     let mut sent: Vec<[u8; 16]> = Vec::new();
     for key in collect_keys(ks, recipient) {
@@ -258,22 +247,22 @@ async fn stream_keyspace(
             break;
         }
         let Ok(Some(value)) = ks.get(key.as_bytes()) else { continue };
-        let Some(deliver) = decode(&value) else {
+        let Some(dispatch) = queued_dispatch(recipient, &value) else {
             warn!("DRAIN: malformed queue value; skipping");
             continue;
         };
-        if deliver.is_expired(now_ms) {
-            trace!("DRAIN: dropping expired message id={}", hex::encode(deliver.id));
+        if dispatch.is_expired(now_ms) {
+            trace!("DRAIN: dropping expired message id={}", hex::encode(dispatch.id));
             let _ = ks.remove(key.as_bytes());
             continue;
         }
         keys.push(key);
-        if !batch.admit(deliver.id.0, value.len()) {
+        if !batch.admit(dispatch.id.0, value.len()) {
             continue;
         }
-        trace!("DRAIN: sending queued message id={}", hex::encode(deliver.id));
-        sent.push(deliver.id.0);
-        SRelayPacket::Deliver(deliver).send(tx).await?;
+        trace!("DRAIN: sending queued message id={}", hex::encode(dispatch.id));
+        sent.push(dispatch.id.0);
+        SRelayPacket::Deliver(dispatch_to_deliver(dispatch)).send(tx).await?;
     }
     Ok(sent)
 }
