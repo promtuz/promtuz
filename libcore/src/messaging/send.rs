@@ -249,20 +249,17 @@ pub(super) async fn send_payload<C: DhtClient>(
         _ => None,
     };
 
-    // A legacy session reaches only current members its roster holds; the rest fail at once.
-    let signed = group.group_meta().is_some_and(|m| m.state.is_some());
-    if !signed {
-        let roster = group.roster();
-        for to in
-            recipients.extract_if(.., |to| !current_recipients.contains(to) || !roster.contains(to))
-        {
-            crate::data::receipts::send_result(
-                &id,
-                Some(to),
-                crate::data::message::STATUS_FAILED,
-                None,
-            )?;
-        }
+    // Only current members the roster holds are reached; the rest fail at once.
+    let roster = group.roster();
+    for to in
+        recipients.extract_if(.., |to| !current_recipients.contains(to) || !roster.contains(to))
+    {
+        crate::data::receipts::send_result(
+            &id,
+            Some(to),
+            crate::data::message::STATUS_FAILED,
+            None,
+        )?;
     }
     let gid = group.group_id();
 
@@ -302,10 +299,10 @@ pub(super) async fn send_payload<C: DhtClient>(
         0,
         true,
     );
-    // A legacy message its group refuses to seal is failed rather than retried.
+    // A message its group refuses to seal or send is failed rather than retried.
     if let Err(e) = &queued
-        && !signed
-        && e.downcast_ref::<MlsGroupError>().is_some()
+        && (e.downcast_ref::<MlsGroupError>().is_some()
+            || e.downcast_ref::<crate::groups::recovery::Refused>().is_some())
     {
         Message::mark_failed(&msg_id);
     }

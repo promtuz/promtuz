@@ -429,26 +429,40 @@ pub fn process_application_inbound_for<C: DhtClient>(
     let proto: ProtocolMessage =
         in_msg.try_into_protocol_message().map_err(|e| anyhow!("not a ProtocolMessage: {e:?}"))?;
 
-    // A commit is processed and merged in one storage operation, so a failed merge leaves the group
-    // at its epoch and the redelivered commit still decrypts.
+    // A commit is processed and merged in one storage operation, and a permitted plaintext is
+    // staged in the one that decrypts it, so a failure leaves the group at its epoch and the
+    // redelivery still decrypts.
+    let gid = env.group_id.0;
     let mut merging = false;
     let processed = ctx.provider.storage().atomic(|| -> Result<_, MlsGroupError> {
         let processed = match group.process_incoming(ctx.provider, proto) {
             Err(MlsGroupError::UnboundSender) => return Ok(None),
             processed => processed?,
         };
+        // The MLS leaf credential says who wrote this; the outer sender only proves who put it on
+        // the wire. They coincide in a pair and routinely diverge in a group.
+        let author = processed.sender;
         let inbound = match processed.content {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 merging = true;
                 Inbound::Commit(group.merge_staged_commit_if_permitted(
                     ctx.provider,
                     *staged,
-                    processed.sender,
+                    author,
                 )?)
+            },
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                let payload = app.into_bytes();
+                let staged = group.application_is_permitted(&author, &payload);
+                if staged {
+                    let live = Received { author, id: dispatch_id, accepted_at_ms, payload };
+                    ctx.provider.storage().with_conn(|conn| live.stage(conn, &gid, &[0; 32]))?;
+                }
+                Inbound::Message { staged }
             },
             content => Inbound::Content(content),
         };
-        Ok(Some((processed.sender, inbound)))
+        Ok(Some((author, inbound)))
     });
     let (author, inbound) = match processed {
         Ok(Some(processed)) => processed,
@@ -460,26 +474,25 @@ pub fn process_application_inbound_for<C: DhtClient>(
             return Ok(InboundDecoded::ApplicationStale);
         },
         Err(err) if merging => return Err(anyhow!("merge_staged_commit: {err}")),
-        Err(err) if err.is_spent_secret() => return Ok(InboundDecoded::ApplicationUndecryptable),
-        Err(err) => return Err(anyhow!("process_incoming: {err}")),
+        Err(err) if err.is_spent_secret() => {
+            // Its plaintext was staged with the decrypt, and applying it may have failed since.
+            if let Some(conversation) = Conversation::for_group(&gid) {
+                crate::groups::recovery::deliver_plaintext(ctx.provider, gid, conversation)?;
+            }
+            return Ok(InboundDecoded::ApplicationUndecryptable);
+        },
+        Err(err) => return Err(err.into()),
     };
 
-    // The MLS leaf credential says who wrote this; the outer sender only proves who put it on the
-    // wire. They coincide in a pair and routinely diverge in a group.
-    let (plaintext, changed) = match inbound {
-        Inbound::Content(ProcessedMessageContent::ApplicationMessage(app)) => {
-            let plaintext = app.into_bytes();
-            if !group.application_is_permitted(&author, &plaintext) {
-                return Ok(InboundDecoded::ApplicationStale);
-            }
-            (Some(plaintext), None)
-        },
-        // Every honest device refuses it alike, so the epoch holds for all but the committer.
-        // Acked as stale: redelivery would only be refused again.
-        Inbound::Commit(crate::mls::CommitOutcome::Refused) => {
+    let (live, changed) = match inbound {
+        Inbound::Message { staged: true } => (true, None),
+        // Every honest device refuses it alike, and a refused commit holds the epoch for all but
+        // the committer. Acked as stale: redelivery would only be refused again.
+        Inbound::Message { staged: false }
+        | Inbound::Commit(crate::mls::CommitOutcome::Refused) => {
             return Ok(InboundDecoded::ApplicationStale);
         },
-        Inbound::Commit(crate::mls::CommitOutcome::Merged(changed)) => (None, changed),
+        Inbound::Commit(crate::mls::CommitOutcome::Merged(changed)) => (false, changed),
         Inbound::Content(ProcessedMessageContent::ProposalMessage(p)) => {
             // A self-removal proposal in a pre-rules group is a leave the founder commits inline: a
             // commit by reference would fork off every member who missed the proposal.
@@ -507,14 +520,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
         Inbound::Content(_) => return Ok(InboundDecoded::ApplicationBuffered),
     };
     // Read the roster after draining, since a drained commit may have moved it. The drain stages
-    // its messages and the live one is staged here, so a failure below loses neither.
+    // its messages and the live one was staged with its decrypt, so a failure below loses neither.
     let drained = ctx.buffer.drain_when_ready(&mut group, ctx.provider);
-    let gid = env.group_id.0;
-    let live =
-        plaintext.map(|payload| Received { author, id: dispatch_id, accepted_at_ms, payload });
-    if let Some(live) = &live {
-        ctx.provider.storage().with_conn(|conn| live.stage(conn, &gid, &[0; 32]))?;
-    }
     // A restored group may outlive its messages-DB mapping, so resolve its real chat, and only
     // after every group mutation: homing can spawn an introduction.
     let conversation = home_for_group(&group, &author)?;
@@ -526,8 +533,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
             accepted_at_secs(accepted_at_ms),
         )?;
     }
-    // Record before applying, so a redelivery is caught before decrypt. Older buffer rows carry a
-    // ciphertext-derived id instead of the dispatch id.
+    // Drained copies are recorded before applying, so a copy from another home is caught before
+    // decrypt. Older buffer rows carry a ciphertext-derived id instead of the dispatch id.
     let now = now_secs();
     for drained in drained {
         match drained {
@@ -545,12 +552,15 @@ pub fn process_application_inbound_for<C: DhtClient>(
             },
         }
     }
-    if live.is_some() {
+    if live {
         // Any decryptable message proves the pair works, confirming a pending contact.
         Contact::mark_paired(&sender_ipk);
-        crate::data::seen::Seen::record(&sender_ipk, &dispatch_id, now);
     }
     crate::groups::recovery::deliver_plaintext(ctx.provider, gid, conversation)?;
+    if live {
+        // Only once applied: until then its redelivery is what finishes applying it.
+        crate::data::seen::Seen::record(&sender_ipk, &dispatch_id, now);
+    }
     drop(operation);
     crate::data::receipts::schedule();
     if group.epoch() != epoch_before {
@@ -559,10 +569,12 @@ pub fn process_application_inbound_for<C: DhtClient>(
     Ok(InboundDecoded::ApplicationBuffered)
 }
 
-/// What processing one message produced: its content, or the outcome of merging its commit.
+/// What processing one message produced: an application message, staged when its author may send
+/// it, the outcome of merging a commit, or other content.
 enum Inbound {
-    Content(ProcessedMessageContent),
+    Message { staged: bool },
     Commit(crate::mls::CommitOutcome),
+    Content(ProcessedMessageContent),
 }
 
 /// The merged tree says who is in the group and its context who runs it, not the commit's
@@ -897,6 +909,7 @@ mod tests {
     use crate::test_support::data::identity;
     use crate::test_support::mls::Party;
     use crate::test_support::mls::found;
+    use crate::test_support::mls::with_failing_trigger;
     use crate::test_support::net::Device;
     use crate::test_support::net::FakeDhtClient;
     use crate::test_support::net::pair;
@@ -1089,6 +1102,41 @@ mod tests {
         };
         stored.merge_staged_commit(&bob.provider, *staged).unwrap();
         assert_eq!(stored.epoch(), epoch + 1);
+    }
+
+    /// A plaintext that fails to stage takes its decrypt back with it, so the redelivery decrypts
+    /// again and the message arrives.
+    #[tokio::test]
+    async fn a_message_that_fails_to_stage_decrypts_again_on_redelivery() {
+        let scope = ScopedCore::new();
+        let (alice, bob) = (Party::new(0xA6), Party::new(0xB6));
+        let gid = [0xD6; 32];
+        let meta = GroupMeta::founded("Retry".into(), alice.ipk);
+        let (mut group, _) = found(&alice, gid, Some(&meta), [&bob]);
+        let conversation = Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk]).unwrap();
+        Conversation::bind_group(&conversation, &gid).unwrap();
+        let stash = KeyPackageStash::new(bob.db.clone());
+        let (buffer, dht) = (EpochCatchupBuffer::new(bob.db.clone()), FakeDhtClient::default());
+        let ctx = MlsContext { provider: &bob.provider, stash: &stash, buffer: &buffer, dht: &dht };
+        let post = AppPayload::Post { reply_to: None, body: Body::Text("hello".into()) };
+        let post = post.ser().unwrap();
+        let sealed = seal_application_message(&alice.provider, &mut group, &alice.leaf, &post);
+        let bytes = sealed.unwrap().address_to(&bob.ipk, &alice.identity).unwrap();
+        let Ok(MlsEnvelopeP::Application(env)) = MlsEnvelopeP::deser(&bytes) else {
+            panic!("not an application envelope")
+        };
+        let id = next_dispatch_id();
+        let receive =
+            || process_application_inbound_for(&ctx, alice.ipk, &bob.ipk, env.clone(), 0, id);
+
+        let failed = with_failing_trigger(&bob.db, "INSERT ON mls_group_received", receive);
+        assert!(crate::utils::is_storage_error(&failed.unwrap_err()));
+        assert!(matches!(receive(), Ok(InboundDecoded::ApplicationBuffered)));
+        let sql = "SELECT content FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2";
+        let key = (conversation.as_slice(), id.as_slice());
+        let saved: String =
+            scope.core.db.messages().lock().query_row(sql, key, |r| r.get(0)).unwrap();
+        assert_eq!(saved, "hello");
     }
 
     /// Messages that arrive a commit early apply, once it lands, as their MLS author wrote them,

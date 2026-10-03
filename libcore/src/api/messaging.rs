@@ -142,15 +142,21 @@ pub struct ContactInfo {
     pub reject_reason: Option<u8>,
 }
 
-/// The outcome arrives via `CoreEvents::on_message`; the `Result` only reports invalid input.
+/// The row is saved before this returns, so an error means nothing was kept. Delivery is
+/// reported through `CoreEvents::on_message`.
 #[uniffi::export]
 pub fn send_message(
     conversation_id: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let reply = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
+    let msg = Message::save_outgoing(conv, &content, reply)?;
     core().spawn(async move {
-        if let Err(e) = crate::messaging::send(conv, content, reply).await {
+        let sent = async {
+            let payload = crate::messaging::body::rebuild_pending_payload(&conv, &msg)?;
+            crate::messaging::send_prepared(conv, &msg, payload).await
+        };
+        if let Err(e) = sent.await {
             log::error!("MESSAGE: send failed: {e}");
         }
     });

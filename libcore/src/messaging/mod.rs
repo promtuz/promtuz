@@ -36,16 +36,8 @@ pub mod send;
 pub mod session;
 pub mod welcome;
 
-/// Saves a pending row first; without a relay it waits for `retry_pending_sends`.
-pub async fn send(
-    conversation: [u8; 16], content: String, reply_to: Option<[u8; 16]>,
-) -> Result<()> {
-    let msg = Message::save_outgoing(conversation, &content, reply_to)?;
-    let payload = rebuild_pending_payload(&conversation, &msg)?;
-    send_prepared(conversation, &msg, payload).await
-}
-
-/// `msg` is already saved, so a failure leaves it pending rather than lost.
+/// `msg` is already saved, so a failure leaves it pending rather than lost; without a relay it
+/// waits for `retry_pending_sends`.
 pub(crate) async fn send_prepared(
     conversation: [u8; 16], msg: &Message, payload_bytes: Vec<u8>,
 ) -> Result<()> {

@@ -116,6 +116,11 @@ pub fn addressed(
         .collect()
 }
 
+/// The group refuses the send, so a retry gets the same answer.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Refused(&'static str);
+
 /// Seal a logical payload once, retaining its original recipient set for
 /// recovery. Replays never disclose pre-join content to newly added members.
 pub fn queue_locked(
@@ -137,13 +142,13 @@ pub fn queue_locked(
     let me = signer.verifying_key().to_bytes();
     ensure!(
         operation.group.application_is_permitted(&me, &payload),
-        "this action is not permitted in the group"
+        Refused("this action is not permitted in the group")
     );
     let roster = operation.group.roster();
-    ensure!(roster.contains(&me), "you are no longer in this group");
+    ensure!(roster.contains(&me), Refused("you are no longer in this group"));
     let recipients: Vec<_> =
         recipients.iter().copied().filter(|r| roster.contains(r) && *r != me).collect();
-    ensure!(!recipients.is_empty(), "no original recipients remain in the group");
+    ensure!(!recipients.is_empty(), Refused("no original recipients remain in the group"));
     let leaf = crate::messaging::session::leaf_signer_for_group(&operation.provider, &operation.group, &me)?;
     let bytes = postcard::to_allocvec(&GroupMessage {
         id:      id.into(),
@@ -478,10 +483,10 @@ pub async fn reconcile(conversation: [u8; 16]) -> Result<()> {
     dispatch(flush_jobs(&provider, gid)?).await;
     drain(&provider, &me, gid)?;
     recover_missing_branches(&provider, gid, conversation)?;
-    reconcile_events(&provider, gid, conversation)?;
-    restore_requests(&provider, gid, conversation, &me)?;
     {
         let _operation = journal::operation_lock(&gid).lock();
+        reconcile_events(&provider, gid, conversation)?;
+        restore_requests(&provider, gid, conversation, &me)?;
         deliver_plaintext(&provider, gid, conversation)?;
     }
     if super::member_requests::left(&gid) {
@@ -674,7 +679,56 @@ fn restore_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScopedCore;
     use crate::test_support::net::Device;
+
+    /// A receive holds the group while it merges and narrates a commit, so reconciling waits for
+    /// it instead of acting on the history that commit is changing.
+    #[tokio::test]
+    async fn reconcile_waits_for_a_receive_holding_the_group() {
+        let scope = ScopedCore::new();
+        let me = crate::test_support::data::identity(&scope.core.db.identity().lock(), 0x5A);
+        let gid = [0x5B; 32];
+        let conversation = Conversation::join_group(&me.verifying_key().to_bytes(), &[]).unwrap();
+        Conversation::bind_group(&conversation, &gid).unwrap();
+        // A change on a branch that lost the election, which reconciling marks as retried.
+        let change = common::proto::mls_wire::SignedChange {
+            by:     [0x5C; 32].into(),
+            epoch:  0,
+            branch: [0; 32].into(),
+            change: common::proto::mls_wire::GroupChange::Takeover,
+            sig:    common::types::bytes::Bytes([0; 64]),
+        };
+        let mls = scope.core.db.mls();
+        let root = "INSERT INTO mls_recovery_roots VALUES (?1, ?2)";
+        mls.lock().execute(root, params![gid, [1u8; 32]]).unwrap();
+        mls.lock()
+            .execute(
+                "INSERT INTO mls_branches (group_id, branch, parent, epoch, rank, commit_hash, \
+                 snapshot, change_blob) VALUES (?1, ?2, ?3, 1, 0, X'', X'', ?4)",
+                params![gid, [2u8; 32], [3u8; 32], postcard::to_allocvec(&change).unwrap()],
+            )
+            .unwrap();
+        let retried = |mls: &parking_lot::Mutex<rusqlite::Connection>| -> u32 {
+            let sql = "SELECT COUNT(*) FROM mls_recovery_retries";
+            mls.lock().query_row(sql, [], |r| r.get(0)).unwrap()
+        };
+
+        let (held, holding) = std::sync::mpsc::channel();
+        let receive = std::thread::spawn({
+            let mls = mls.clone();
+            move || {
+                let _operation = journal::operation_lock(&gid).lock();
+                held.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                retried(&mls)
+            }
+        });
+        holding.recv().unwrap();
+        reconcile(conversation).await.unwrap();
+        assert_eq!(receive.join().unwrap(), 0, "nothing was reconciled while the receive ran");
+        assert_eq!(retried(&mls), 1);
+    }
 
     /// A rejected payload is dropped so it cannot block the group's queue. A failed store keeps
     /// the rest staged, and the next delivery applies them first, in arrival order.
