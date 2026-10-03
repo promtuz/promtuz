@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.media.*
 import com.promtuz.chat.ui.text.dateAndTime
@@ -112,7 +113,7 @@ fun SharedMediaScreen(conversation: String, name: String) {
                             if (thumb != null) Image(thumb!!, null, Modifier.size(64.dp), contentScale = ContentScale.Crop)
                             else DrawableIcon(when (tab) { "Media" -> R.drawable.oi_image; "Stickers" -> R.drawable.oi_sticker; else -> R.drawable.oi_file_attachment }, size = 32.dp)
                         },
-                        headlineContent = { Text(row.name.ifBlank { if (row.kind.toInt() == 4) "Sticker" else if (row.mime.startsWith("video/")) "Video" else "Photo" }, maxLines = 2) },
+                        headlineContent = { Text(row.name.ifBlank { if (row.mime.startsWith("video/")) "Video" else mediaLabel(row.kind.toInt()) }, maxLines = 2) },
                         supportingContent = { Text(listOfNotNull(
                             row.size.toLong().takeIf { it > 0 }?.let { Formatter.formatShortFileSize(context, it) },
                             DateFormat.getDateInstance().format(Date(row.timestamp.toLong() * 1000))

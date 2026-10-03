@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.components
 
 import androidx.annotation.DrawableRes
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -11,11 +10,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.*
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.R
 
 /** The grid icons are drawn on. A drawable this size renders 1 viewport unit per dp. */
 val IconGrid = 24.dp
@@ -50,14 +47,5 @@ fun DrawableIcon(
     Box(modifier.size(size), contentAlignment = Alignment.Center) {
         // requiredSize ignores the slot's constraints, which lets the art overflow.
         Icon(painter, desc, Modifier.requiredSize(drawn), tint)
-    }
-}
-
-@Preview
-@Composable
-private fun DrawableIconPreview() {
-    Column(Modifier.background(Color.White).padding(4.dp)) {
-        DrawableIcon(R.drawable.oi_volume, size = 24.dp)
-        DrawableIcon(R.drawable.oi_volume_off, size = 24.dp)
     }
 }

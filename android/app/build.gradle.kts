@@ -439,6 +439,4 @@ dependencies {
     // device-specific — absent on API 26–30 and some 31+ builds reject our
     // encoder's output — so decode goes through this first.
     implementation("org.aomedia.avif.android:avif:1.3.0.841110fd")
-
-    testImplementation(kotlin("test"))
 }

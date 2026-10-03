@@ -59,7 +59,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import kotlin.math.ceil
@@ -67,13 +66,10 @@ import com.promtuz.chat.domain.model.MessageContent
 import androidx.compose.ui.text.font.FontWeight
 import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
-import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.stage.ChatMotion
-import com.promtuz.chat.ui.theme.PromtuzTheme
-import android.content.res.Configuration
 import android.os.Build
 
 internal val BubblePadH = 11.dp
@@ -535,117 +531,6 @@ private class CoordsHolder {
 
     /** Last text layout, written during the text child's measure and read right after it. */
     var text: TextLayoutResult? = null
-}
-
-private fun previewMsg(
-    text: String,
-    outgoing: Boolean,
-    id: String,
-    status: SendStatus = SendStatus.Read,
-    edited: Boolean = false,
-    deleted: Boolean = false,
-    reactions: List<ReactionGroup> = emptyList(),
-    quote: Quote? = null,
-    content: MessageContent = MessageContent.Text(text),
-) = UiMessage(
-    key = id,
-    localId = id,
-    dispatchIdHex = id,
-    content = content,
-    outgoing = outgoing,
-    status = status,
-    edited = edited,
-    deleted = deleted,
-    timestampMs = 1_700_000_000_000L,
-    reactions = reactions,
-    quote = quote,
-)
-
-@Preview(name = "Meta wrap", showBackground = true)
-@Composable
-private fun MessageBubbleMetaWrapPreview() {
-    PromtuzTheme {
-        Column(
-            Modifier
-                .background(MaterialTheme.colorScheme.background)
-                .padding(vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            listOf(
-                "Hi",
-                "Hey! Did the preview",
-                "Hey! Did the preview land",
-                "Hey! Did the preview land yet?",
-                "Hey! Did the preview land yet? Checking the wrap boundary here.",
-            ).forEachIndexed { i, t ->
-                MessageBubble(msg = previewMsg(t, outgoing = i % 2 == 1, id = "w$i"))
-            }
-        }
-    }
-}
-
-@Composable
-private fun MessageBubbleGallery() {
-    Column(
-        Modifier
-            .background(MaterialTheme.colorScheme.background)
-            .padding(vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
-    ) {
-        MessageBubble(msg = previewMsg("Hey! Did the preview land yet?", outgoing = false, id = "1"))
-        MessageBubble(
-            msg = previewMsg(
-                "Just wiring them up now — a full gallery of states so you can eyeball the layout.",
-                outgoing = true, id = "2",
-            ),
-        )
-        MessageBubble(
-            msg = previewMsg(
-                "Nice, this one is a reply.", outgoing = false, id = "3",
-                quote = Quote(dispatchIdHex = "2", text = "Just wiring them up now…"),
-            ),
-        )
-        MessageBubble(
-            msg = previewMsg(
-                "Loved it ❤️", outgoing = true, id = "4", edited = true,
-                reactions = listOf(ReactionGroup("❤️", 2, true), ReactionGroup("🔥", 1, false)),
-            ),
-        )
-        MessageBubble(msg = previewMsg("Sending…", outgoing = true, id = "5", status = SendStatus.Pending))
-        MessageBubble(msg = previewMsg("Didn't go through", outgoing = true, id = "6", status = SendStatus.Failed))
-        MessageBubble(msg = previewMsg("", outgoing = false, id = "7", deleted = true))
-        MessageBubble(
-            msg = previewMsg(
-                "A longer incoming message to check how the bubble wraps across multiple " +
-                    "lines and reserves the trailing meta corner without colliding with text.",
-                outgoing = false, id = "8",
-            ),
-        )
-    }
-}
-
-@Preview(name = "Light", showBackground = true)
-@Preview(name = "Dark", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
-@Composable
-private fun MessageBubblePreview() {
-    PromtuzTheme { MessageBubbleGallery() }
-}
-
-@Preview(name = "Merged run", showBackground = true)
-@Composable
-private fun MessageBubbleMergedPreview() {
-    PromtuzTheme {
-        Column(
-            Modifier
-                .background(MaterialTheme.colorScheme.background)
-                .padding(vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            MessageBubble(msg = previewMsg("First in the run", outgoing = true, id = "m1"), mergedBottom = true)
-            MessageBubble(msg = previewMsg("Middle one", outgoing = true, id = "m2"), mergedTop = true, mergedBottom = true)
-            MessageBubble(msg = previewMsg("Last in the run", outgoing = true, id = "m3"), mergedTop = true)
-        }
-    }
 }
 
 @Composable

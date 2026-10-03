@@ -75,7 +75,7 @@ fun SettingsScreen(appViewModel: AppVM) {
                 item(key = "heading-${group.name}", contentType = "heading") {
                     SettingsSection(group.name, top = if (groupIndex == 0) 0.dp else 20.dp)
                 }
-                itemsIndexed(group.items, key = { _, item -> item.title }, contentType = { _, _ -> "setting" }) { index, setting ->
+                itemsIndexed(group.items, key = { _, item -> item.route.toString() }, contentType = { _, _ -> "setting" }) { index, setting ->
                     GroupedActionRow(
                         title = setting.title,
                         index = index,
