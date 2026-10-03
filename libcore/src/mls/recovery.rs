@@ -422,6 +422,16 @@ pub fn logical_dispatch(id: &[u8]) -> Result<Vec<u8>> {
     Ok(mapped.unwrap_or_else(|| id.to_vec()))
 }
 
+/// The branch-derived ids the copies of a group send went out under.
+pub fn dispatch_ids(
+    provider: &PromtuzMlsProvider, logical_id: &[u8],
+) -> rusqlite::Result<Vec<Vec<u8>>> {
+    provider.storage().with_conn(|conn| {
+        let mut q = conn.prepare("SELECT dispatch_id FROM mls_dispatch_ids WHERE logical_id=?1")?;
+        q.query_map([logical_id], |r| r.get(0))?.collect()
+    })
+}
+
 pub fn dispatch_id(branch: &Branch, logical_id: &[u8; 16]) -> [u8; 16] {
     let mut hash = Sha256::new();
     hash.update(b"promtuz group dispatch v1");

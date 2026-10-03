@@ -333,7 +333,7 @@ pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
     // Snapshot first: a first send binds its group, which `attempt_send` handles.
     let deferred: Vec<_> = Message::pending_outgoing()
         .into_iter()
-        .filter(|row| !row.dispatch_id.as_deref().is_some_and(delivery::any_pending))
+        .filter(|row| !row.dispatch_id.as_deref().is_some_and(|id| queued(ctx.provider, id)))
         .collect();
     for row in deferred {
         let conversation = row.conversation_id;
@@ -344,6 +344,13 @@ pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
             );
         }
     }
+}
+
+/// Whether a copy of the send still waits in the outbox, so the outbox retries it, not a new seal.
+fn queued(provider: &PromtuzMlsProvider, logical_id: &[u8]) -> bool {
+    delivery::any_pending(logical_id)
+        || crate::mls::recovery::dispatch_ids(provider, logical_id)
+            .is_ok_and(|ids| ids.iter().any(|id| delivery::any_pending(id)))
 }
 
 #[cfg(test)]
