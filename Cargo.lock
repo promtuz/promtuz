@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4078,7 +4078,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "relay"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4150,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "resolver"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
