@@ -678,7 +678,7 @@ pub(crate) fn receive_application_content(
                 },
                 Err(e) => {
                     warn!("MESSAGE: failed to save incoming: {e}");
-                    bail!("save failed: {e}");
+                    return Err(e.context("save failed"));
                 },
             }
         },
@@ -1101,10 +1101,10 @@ mod tests {
         assert_eq!(stored.epoch(), epoch + 1);
     }
 
-    /// A plaintext that fails to stage takes its decrypt back with it, so the redelivery decrypts
-    /// again and the message arrives.
+    /// A plaintext that fails to stage takes its decrypt back with it, and one that fails to save
+    /// stays staged, so a redelivery delivers the message either way.
     #[tokio::test]
-    async fn a_message_that_fails_to_stage_decrypts_again_on_redelivery() {
+    async fn a_message_that_fails_to_stage_or_save_arrives_on_redelivery() {
         let scope = ScopedCore::new();
         let (alice, bob) = (Party::new(0xA6), Party::new(0xB6));
         let gid = [0xD6; 32];
@@ -1128,7 +1128,9 @@ mod tests {
 
         let failed = with_failing_trigger(&bob.db, "INSERT ON mls_group_received", receive);
         assert!(crate::utils::is_storage_error(&failed.unwrap_err()));
-        assert!(matches!(receive(), Ok(InboundDecoded::ApplicationBuffered)));
+        let failed = with_failing_trigger(scope.core.db.messages(), "INSERT ON messages", receive);
+        assert!(crate::utils::is_storage_error(&failed.unwrap_err()));
+        assert!(matches!(receive(), Ok(InboundDecoded::ApplicationUndecryptable)));
         let sql = "SELECT content FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2";
         let key = (conversation.as_slice(), id.as_slice());
         let saved: String =
