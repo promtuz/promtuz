@@ -8,9 +8,11 @@ use anyhow::bail;
 use common::crypto::verify_ed25519;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::CRelayPacket;
+use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::SubscribePresenceP;
 use common::proto::client_rel::activity_sig_message;
 use common::proto::pack::Packer;
+use common::proto::pack::Unpacker;
 use common::types::bytes::Bytes;
 use common::utils::now_ms;
 use ed25519_dalek::VerifyingKey;
@@ -66,14 +68,32 @@ pub async fn set_activity(
 
 /// Replaces the prior interest set; the relay pushes a snapshot, then deltas.
 pub async fn subscribe_presence(session: Option<&Session>, contacts: Vec<[u8; 32]>) -> Result<()> {
+    let _update = core().presence_update.lock().await;
     subscribe_presence_in(core().db.network(), session, contacts).await
 }
 
-/// The set is replaced only once sent, since the next subscription revokes against it.
+/// Desired reads survive offline changes; possible grants survive lost acknowledgement.
 async fn subscribe_presence_in(
     network: &PlMutex<rusqlite::Connection>, session: Option<&Session>, contacts: Vec<[u8; 32]>,
 ) -> Result<()> {
-    let previous = persisted_presence_contacts_tx(&network.lock())?.into_iter().collect();
+    let previous: std::collections::HashSet<_> =
+        persisted_presence_contacts_tx(&network.lock())?.into_iter().collect();
+    // Persist possible grants before sending. A lost ACK must not make a later removal forget
+    // a grant the relay may already have accepted.
+    {
+        let mut conn = network.lock();
+        let tx = conn.transaction()?;
+        let possible: Vec<_> = previous.iter().copied().chain(contacts.iter().copied()).collect();
+        replace_presence_contacts_tx(&tx, &possible)?;
+        tx.execute("DELETE FROM presence_interest", [])?;
+        for peer in &contacts {
+            tx.execute(
+                "INSERT OR IGNORE INTO presence_interest(peer) VALUES (?1)",
+                [peer.as_slice()],
+            )?;
+        }
+        tx.commit()?;
+    }
     send_presence_subscription(session, contacts.clone(), previous).await?;
     let mut conn = network.lock();
     let tx = conn.transaction()?;
@@ -84,12 +104,14 @@ async fn subscribe_presence_in(
 
 /// The contact set is durable, so revocations still diff correctly after a restart.
 async fn renew_presence_lease(session: &Session) -> Result<()> {
-    let contacts = persisted_presence_contacts()?;
-    if contacts.is_empty() {
-        return Ok(());
-    }
-    let previous = contacts.iter().copied().collect();
-    send_presence_subscription(Some(session), contacts, previous).await
+    let contacts = {
+        let conn = core().db.network().lock();
+        let mut stmt = conn.prepare("SELECT peer FROM presence_interest")?;
+        stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .map(|peer| Ok(peer?.try_into().map_err(|_| anyhow!("invalid presence peer"))?))
+            .collect::<Result<Vec<[u8; 32]>>>()?
+    };
+    subscribe_presence(Some(session), contacts).await
 }
 
 async fn send_presence_subscription(
@@ -101,15 +123,28 @@ async fn send_presence_subscription(
     use common::proto::dht_p2p::presence_consent_signing_input;
     use common::proto::dht_p2p::presence_lease_signing_input;
     use ed25519_dalek::Signer;
-    let relay_id = session
-        .and_then(|s| s.home_node_id)
-        .ok_or_else(|| anyhow!("presence requires DHT-enabled relay"))?;
-    let relay_id = common::quic::id::NodeId::from_bytes(relay_id);
+    let session = session.ok_or_else(|| anyhow!("presence: no relay connection"))?;
+    let durable = durable_presence(session).await;
+    let relay_id = match session.home_node_id {
+        Some(id) => common::quic::id::NodeId::from_bytes(id),
+        None if durable => {
+            session.relay.id.parse().map_err(|_| anyhow!("invalid relay storage identity"))?
+        },
+        None => bail!("relay does not support local presence"),
+    };
     let identity = Identity::get().ok_or_else(|| anyhow!("identity not found"))?;
     let me = identity.ipk();
     let signer = crate::data::identity::secret_key_signing(&me)?;
     let now = now_ms();
-    let desired: std::collections::HashSet<_> = contacts.iter().copied().collect();
+    let version = next_presence_lease_version(now)?;
+    let desired: std::collections::HashSet<_> = contacts
+        .iter()
+        .copied()
+        .filter(|peer| {
+            Contact::get(peer)
+                .is_some_and(|c| c.inner.status == crate::data::contact::PAIR_STATUS_PAIRED)
+        })
+        .collect();
     let consents = desired
         .iter()
         .map(|recipient| (*recipient, true))
@@ -117,16 +152,15 @@ async fn send_presence_subscription(
         .map(|(recipient, granted)| PresenceConsent {
             owner: me.into(),
             recipient: recipient.into(),
-            version: now,
+            version,
             issued_at_ms: now,
             granted,
             user_sig: signer
-                .sign(&presence_consent_signing_input(&me, &recipient, now, now, granted))
+                .sign(&presence_consent_signing_input(&me, &recipient, version, now, granted))
                 .to_bytes()
                 .into(),
         })
         .collect();
-    let version = next_presence_lease_version(now)?;
     let expires_at_ms = now + common::proto::dht_p2p::PRESENCE_LEASE_MAX_MS;
     let lease = PresenceLease {
         user: me.into(),
@@ -141,22 +175,18 @@ async fn send_presence_subscription(
     };
     let sub =
         SubscribePresenceP { contacts: contacts.into_iter().map(Bytes).collect(), consents, lease };
-    let bytes =
-        CRelayPacket::SubscribePresence(sub).pack().map_err(|e| anyhow!("pack subscribe: {e}"))?;
-    let Some(session) = session else { bail!("presence: no relay connection") };
-    let (mut tx, _rx) = session.conn.open_bi().await?;
-    tx.write_all(&bytes).await?;
-    tx.finish()?;
-    Ok(())
-}
-
-fn persisted_presence_contacts() -> Result<Vec<[u8; 32]>> {
-    persisted_presence_contacts_tx(&core().db.network().lock())
+    let packet = if durable {
+        CRelayPacket::SubscribePresenceDurable(sub)
+    } else {
+        CRelayPacket::SubscribePresence(sub)
+    };
+    presence_request(session, packet, durable).await
 }
 
 pub(crate) fn persisted_presence_contacts_tx(conn: &rusqlite::Connection) -> Result<Vec<[u8; 32]>> {
     let mut stmt = conn.prepare("SELECT peer FROM presence_contacts")?;
-    Ok(stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?
+    Ok(stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
         .filter_map(|peer| peer.ok().and_then(|peer| peer.try_into().ok()))
         .collect())
 }
@@ -166,7 +196,10 @@ pub(crate) fn replace_presence_contacts_tx(
 ) -> Result<()> {
     conn.execute("DELETE FROM presence_contacts", [])?;
     for peer in contacts {
-        conn.execute("INSERT OR IGNORE INTO presence_contacts(peer) VALUES (?1)", [peer.as_slice()])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO presence_contacts(peer) VALUES (?1)",
+            [peer.as_slice()],
+        )?;
     }
     Ok(())
 }
@@ -214,19 +247,48 @@ async fn send_presence(session: Option<&Session>, idle: bool) -> Result<()> {
     } else {
         common::proto::client_rel::PresenceMode::Active
     };
-    let bytes =
-        CRelayPacket::SetPresence(mode).pack().map_err(|e| anyhow!("pack set_presence: {e}"))?;
     let Some(session) = session else { return Ok(()) };
-    if let Ok((mut tx, _rx)) = session.conn.open_bi().await {
-        let _ = tx.write_all(&bytes).await;
-        let _ = tx.finish();
-    }
-    Ok(())
+    let _update = core().presence_update.lock().await;
+    let durable = durable_presence(session).await;
+    let packet = if durable {
+        CRelayPacket::SetPresenceDurable(mode)
+    } else {
+        CRelayPacket::SetPresence(mode)
+    };
+    presence_request(session, packet, durable).await
+}
+
+async fn durable_presence(session: &Session) -> bool {
+    use common::contracts::services;
+    session
+        .services()
+        .await
+        .supports(services::DURABLE_PRESENCE, services::DURABLE_PRESENCE_VERSION)
+}
+
+async fn presence_request(session: &Session, packet: CRelayPacket, durable: bool) -> Result<()> {
+    use common::proto::Sender;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let (mut tx, mut rx) = session.conn.open_bi().await?;
+        packet.send(&mut tx).await?;
+        tx.finish()?;
+        if durable
+            && !matches!(
+                SRelayPacket::unpack(&mut rx).await?,
+                SRelayPacket::PresenceAck { accepted: true }
+            )
+        {
+            bail!("relay rejected presence update");
+        }
+        Ok(())
+    })
+    .await?
 }
 
 /// Only while the user is in the app: idle is already the default on a fresh connection, and
 /// saying so would cost a K-home publish.
 pub async fn reassert_presence(session: &Session) -> Result<()> {
+    renew_presence_lease(session).await?;
     if !presence_is_active() {
         return Ok(());
     }
@@ -300,5 +362,15 @@ mod tests {
         let mut persisted = persisted_presence_contacts_tx(&db.network().lock()).unwrap();
         persisted.sort_unstable();
         assert_eq!(persisted, [kept, dropped]);
+        let desired: Vec<Vec<u8>> = db
+            .network()
+            .lock()
+            .prepare("SELECT peer FROM presence_interest")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(desired, [kept.to_vec()], "a retry must not restore the dropped contact");
     }
 }

@@ -38,21 +38,27 @@ pub struct Relay {
     pub store: Arc<Store>,
 
     pub dht: Option<Arc<Dht>>,
+    /// Storage identity exists even when distributed routing is disabled.
+    pub node_id: NodeId,
 
     /// Authenticated clients by IPK, shared with `Dht` for home-side delivery.
     pub clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>,
 
-    /// Subscriber IPK to its contact set, removed on disconnect. While subscribed, the set is
-    /// also the subscriber's presence consent.
+    /// Subscriber IPK to its interest set, removed on disconnect. Consent is stored separately.
     pub presence_subs: RwLock<HashMap<[u8; 32], HashSet<[u8; 32]>>>,
     pub presence_leases: Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>,
     pub presence_versions: RwLock<HashMap<[u8; 32], u64>>,
 
     /// Foreground-active clients and when they asserted it; connection alone is not presence.
     pub active_clients: RwLock<HashMap<[u8; 32], u64>>,
+    // ponytail: stripes bound lock memory; split by owner if collisions limit throughput.
+    presence_updates: [tokio::sync::Mutex<()>; 64],
 }
 
 impl Relay {
+    pub async fn presence_update(&self, owner: &[u8; 32]) -> tokio::sync::MutexGuard<'_, ()> {
+        self.presence_updates[usize::from(owner[0]) % self.presence_updates.len()].lock().await
+    }
     /// The peer ALPN serves a self-signed NodeKey cert that libcore pins against
     /// `RelayDescriptor.pubkey`; every other ALPN serves the CA-issued cert.
     pub fn bind(
@@ -150,6 +156,7 @@ impl Relay {
             cfg,
             store,
             dht,
+            node_id: NodeId::new(signing.verifying_key()),
             endpoint,
             assist: Mutex::new(assist),
             assist_enabled,
@@ -159,6 +166,7 @@ impl Relay {
             presence_leases,
             presence_versions: RwLock::new(HashMap::new()),
             active_clients: RwLock::new(HashMap::new()),
+            presence_updates: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
         }
     }
 }

@@ -24,8 +24,6 @@ import com.promtuz.core.PresenceStore
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.android.ext.koin.androidLogger
@@ -76,12 +74,6 @@ class Promtuz : Application() {
 
         PushRegistrationWorker.enqueue(this)
 
-        CoroutineScope(Dispatchers.IO).launch {
-            CoreEventBus.presenceByPeer.collectLatest { map ->
-                delay(1500)
-                PresenceStore.save(map, System.currentTimeMillis())
-            }
-        }
 
         val updates: UpdateRepository = startKoin {
             androidLogger()

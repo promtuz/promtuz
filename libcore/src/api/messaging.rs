@@ -275,7 +275,7 @@ pub fn unread_counts() -> Vec<UnreadCount> {
         .collect()
 }
 
-/// Replaces the prior interest set; presence arrives only from contacts subscribed to us too.
+/// Replaces the prior interest set. Each peer independently authorizes its own publication.
 #[uniffi::export]
 pub fn subscribe_presence(contacts: Vec<Vec<u8>>) -> Result<(), CoreError> {
     let list = contacts.iter().map(|c| fixed::<32>(c, "ipk")).collect::<Result<Vec<_>, _>>()?;

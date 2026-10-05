@@ -92,6 +92,7 @@ async fn main() -> Result<()> {
     }));
 
     tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
+    tokio::spawn(quic::handler::client::events::presence::maintain(relay.clone(), cancel.clone()));
 
     if let Some(assist) = relay.assist.lock().take() {
         tokio::spawn(stunturn::serve(assist, cancel.clone()));

@@ -180,14 +180,20 @@ pub fn activity_sig_message(
     .concat()
 }
 
-/// Replaces the caller's whole interest set; every contact needs a granted, signed consent.
-/// Presence flows only between mutual subscribers.
+/// Replaces the caller's interest set. Signed consents independently control who may see the
+/// caller; subscribing to someone does not grant that person access in return.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SubscribePresenceP {
+    #[serde(deserialize_with = "crate::proto::pack::bounded_vec::<_, _, MAX_PRESENCE_CONTACTS>")]
     pub contacts: Vec<Bytes<32>>,
+    #[serde(deserialize_with = "crate::proto::pack::bounded_vec::<_, _, MAX_PRESENCE_CONSENTS>")]
     pub consents: Vec<crate::proto::dht_p2p::PresenceConsent>,
     pub lease:    crate::proto::dht_p2p::PresenceLease,
 }
+
+pub const MAX_PRESENCE_CONTACTS: usize = 256;
+/// A complete contact replacement can grant 256 new peers and revoke 256 previous ones.
+pub const MAX_PRESENCE_CONSENTS: usize = 2 * MAX_PRESENCE_CONTACTS;
 
 /// `Online` needs the client's `SetPresence(Active)`; `Idle` is asserted on backgrounding. A
 /// frozen app can hold its connection until the idle timeout, so connected is not online.
@@ -326,6 +332,10 @@ pub enum CRelayPacket {
     ServiceCapabilities,
     /// Bounded owner-signed services::key_inventory::Request.
     KeyPackageInventory { request: ByteVec },
+    /// Like SubscribePresence, with explicit local durability acknowledgement.
+    SubscribePresenceDurable(SubscribePresenceP),
+    /// Like SetPresence, with acknowledgement after the observation reaches stable storage.
+    SetPresenceDurable(PresenceMode),
 }
 
 /// Variant ordinals are wire format: append only.
@@ -382,6 +392,10 @@ pub enum SRelayPacket {
     ServiceCapabilities { supported: ByteVec },
     /// Bounded services::key_inventory::Inventory, including unavailable homes.
     KeyPackageInventory { inventory: ByteVec },
+    /// On the request stream. False means validation, stale version, admission or rate rejection.
+    PresenceAck {
+        accepted: bool,
+    },
 }
 
 impl Sender for CRelayPacket {}

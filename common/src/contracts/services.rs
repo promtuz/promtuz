@@ -11,3 +11,8 @@ pub const KEY_PACKAGE_CUSTODY_VERSION: u16 = 1;
 pub const KEY_PACKAGE_INVENTORY: u16 = 2;
 pub const KEY_PACKAGE_INVENTORY_VERSION: u16 = 1;
 pub mod key_inventory;
+
+/// Local presence works without DHT. Subscription policy and observations are persisted before
+/// acknowledgement. Read interests never imply consent to publish one's own state.
+pub const DURABLE_PRESENCE: u16 = 3;
+pub const DURABLE_PRESENCE_VERSION: u16 = 1;

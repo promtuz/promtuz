@@ -42,13 +42,14 @@ const PRESENCE_STATE_TTL_MS: u64 = 600_000;
 /// step ahead by one only for updates within the same millisecond.
 const PRESENCE_VERSION_MAX_LEAD_MS: u64 = 60_000;
 
-/// Consent grants, last-seen stamps and push pseudonyms are all rewritten when
-/// the identity next connects, so this expires quiet identities, not records.
+/// Push registrations expire after prolonged inactivity. Last seen and authorization records
+/// survive until explicitly replaced; removing a revocation would reopen replayed grants.
 const IDLE_IDENTITY_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 
 /// `presence_consent` takes writes for any `(owner, recipient)` pair a DHT peer can sign for,
 /// so its size does not follow this relay's own user count.
 const MAX_PRESENCE_CONSENT_ROWS: usize = 1_000_000;
+const MAX_LAST_SEEN_ROWS: usize = 1_000_000;
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_SWEEP_SCAN: usize = 65_536;
@@ -118,8 +119,6 @@ impl Store {
             SweepTarget::queue(&messages, queued_message_expired),
             SweepTarget::queue(&queue, queued_message_expired),
             SweepTarget::queue(&welcome, welcome_expired),
-            SweepTarget::new(&last_seen, last_seen_expired),
-            SweepTarget::new(&presence_consent, presence_consent_expired),
             SweepTarget::new(&presence_state, presence_state_expired),
             SweepTarget::new(&presence_lease, presence_lease_expired),
             SweepTarget::new(&push_pseudonym, push_pseudonym_expired),
@@ -156,14 +155,72 @@ impl Store {
         self.admission[usize::from(owner[0]) % self.admission.len()].lock()
     }
 
-    /// Not fsynced: a stamp lost in a crash only degrades last-seen.
-    pub fn put_last_seen(&self, ipk: &[u8; 32], ts_ms: u64) -> fjall::Result<()> {
-        self.last_seen.insert(ipk, ts_ms.to_be_bytes())
+    /// Last observed activity, monotonic even if concurrent transitions or the clock reorder.
+    /// Callers wait for a persistence barrier before acknowledging or publishing this value.
+    pub fn put_last_seen(&self, ipk: &[u8; 32], ts_ms: u64) -> Result<()> {
+        let _admission = self.admission(ipk);
+        let stored = self.last_seen.get(ipk)?;
+        anyhow::ensure!(
+            stored.is_some() || self.last_seen.approximate_len() < MAX_LAST_SEEN_ROWS,
+            "last-seen storage admission limit reached"
+        );
+        let old = stored.and_then(|v| be_u64(&v, 0)).unwrap_or(0);
+        if ts_ms > old {
+            self.put_sync(&self.last_seen, ipk, ts_ms.to_be_bytes())?;
+        }
+        Ok(())
     }
 
     pub fn get_last_seen(&self, ipk: &[u8; 32]) -> Option<u64> {
         let v = self.last_seen.get(ipk).ok().flatten()?;
         Some(u64::from_be_bytes(v.as_ref().try_into().ok()?))
+    }
+
+    /// Policy changes and the lease version commit together. A lost ACK can repeat the exact
+    /// subscription, but an older lease cannot reinstall a stale interest/policy set.
+    pub fn put_presence_subscription(
+        &self, sub: &common::proto::client_rel::SubscribePresenceP,
+    ) -> Result<bool> {
+        use common::proto::pack::{Packer, Unpacker};
+        let owner = &sub.lease.user.0;
+        let _admission = self.admission(owner);
+        if let Some(value) = self.presence_lease.get(owner)? {
+            let old = common::proto::dht_p2p::PresenceLease::deser(&value)?;
+            if old.version > sub.lease.version
+                || (old.version == sub.lease.version && old != sub.lease)
+            {
+                return Ok(false);
+            }
+        }
+        let mut batch = self.db.batch();
+        let mut added = 0;
+        for consent in &sub.consents {
+            anyhow::ensure!(consent.owner.0 == *owner, "presence consent owner mismatch");
+            let key = [owner.as_slice(), consent.recipient.0.as_slice()].concat();
+            let mut value = Vec::with_capacity(17);
+            value.extend_from_slice(&consent.version.to_be_bytes());
+            value.extend_from_slice(&consent.issued_at_ms.to_be_bytes());
+            value.push(u8::from(consent.granted));
+            match self.presence_consent.get(&key)? {
+                Some(old) => {
+                    if be_u64(&old, 0).is_some_and(|v| v > consent.version)
+                        || (be_u64(&old, 0) == Some(consent.version) && old.as_ref() != value)
+                    {
+                        return Ok(false);
+                    }
+                },
+                None => added += 1,
+            }
+            batch.insert(&self.presence_consent, key, value);
+        }
+        if added > 0 && self.presence_consent.approximate_len() + added > MAX_PRESENCE_CONSENT_ROWS
+        {
+            return Ok(false);
+        }
+        batch.insert(&self.presence_lease, owner, sub.lease.ser()?);
+        batch.commit()?;
+        self.request_persist();
+        Ok(true)
     }
 
     /// Value layout: `version (u64 BE) || issued_at_ms (u64 BE) || granted (u8)`.
@@ -586,14 +643,6 @@ fn welcome_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
     be_u64(value, 0).is_none_or(|expires| expires <= now_ms)
 }
 
-fn last_seen_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
-    be_u64(value, 0).is_none_or(|ts| now_ms.saturating_sub(ts) > IDLE_IDENTITY_TTL_MS)
-}
-
-fn presence_consent_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
-    be_u64(value, 8).is_none_or(|issued_at| now_ms.saturating_sub(issued_at) > IDLE_IDENTITY_TTL_MS)
-}
-
 /// Presence dies at its stored deadline. Older 25-byte rows carry no deadline and fall back to
 /// the fixed ceiling.
 fn presence_state_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
@@ -627,6 +676,53 @@ mod tests {
 
     use super::*;
 
+    /// The child exits without destructors: recovery must depend on the ACK barrier, not Drop.
+    #[test]
+    fn presence_survives_abrupt_exit_and_older_observations() {
+        const CHILD_PATH: &str = "PROMTUZ_PRESENCE_CRASH_TEST_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = Store::open(path).unwrap();
+            store.put_last_seen(&[1; 32], 500).unwrap();
+            store.put_last_seen(&[1; 32], 100).unwrap();
+            let consent = PresenceConsent {
+                owner: [1; 32].into(),
+                recipient: [2; 32].into(),
+                version: 9,
+                issued_at_ms: 1,
+                granted: false,
+                user_sig: [0; 64].into(),
+            };
+            store.put_presence_consent(&consent).unwrap();
+            store.persist_barrier().wait_blocking().unwrap();
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::db::tests::presence_survives_abrupt_exit_and_older_observations",
+            ])
+            .env(CHILD_PATH, dir.path())
+            .status()
+            .unwrap();
+        assert!(result.success());
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.get_last_seen(&[1; 32]), Some(500));
+        assert!(
+            !store
+                .put_presence_consent(&PresenceConsent {
+                    owner: [1; 32].into(),
+                    recipient: [2; 32].into(),
+                    version: 8,
+                    issued_at_ms: 1,
+                    granted: true,
+                    user_sig: [0; 64].into(),
+                })
+                .unwrap()
+        );
+        assert!(!store.has_presence_consent(&[1; 32], &[2; 32]));
+    }
+
     /// The barrier is the custody point every `Stored` and `Queued` waits on: it resolves after
     /// the commit covering the writes before it, and a store shutting down still releases it.
     #[tokio::test]
@@ -657,20 +753,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
         let now = 10 * IDLE_IDENTITY_TTL_MS;
-        store.put_last_seen(&[0xFF; 32], now).unwrap();
+        let row = |stamp: u64| [[1; 32].as_slice(), stamp.to_be_bytes().as_slice()].concat();
+        store.push_pseudonym.insert([0xFF; 32], row(now)).unwrap();
         for n in 0..MAX_SWEEP_REMOVALS as u64 + 32 {
             let mut ipk = [0; 32];
             ipk[..8].copy_from_slice(&n.to_be_bytes());
-            store.put_last_seen(&ipk, now - IDLE_IDENTITY_TTL_MS - 1).unwrap();
+            store.push_pseudonym.insert(ipk, row(now - IDLE_IDENTITY_TTL_MS - 1)).unwrap();
         }
-        let mut target = SweepTarget::new(&store.last_seen, last_seen_expired);
+        let mut target = SweepTarget::new(&store.push_pseudonym, push_pseudonym_expired);
         sweep(&mut target, now);
         assert!(target.cursor.is_some(), "the budget ran out mid-keyspace");
-        assert_eq!(store.last_seen.len().unwrap(), 33);
+        assert_eq!(store.push_pseudonym.len().unwrap(), 33);
         sweep(&mut target, now);
         assert!(target.cursor.is_none());
-        assert_eq!(store.last_seen.len().unwrap(), 1);
-        assert_eq!(store.get_last_seen(&[0xFF; 32]), Some(now));
+        assert_eq!(store.push_pseudonym.len().unwrap(), 1);
     }
 
     /// A replayed consent cannot undo a revocation, a version far ahead of its observation

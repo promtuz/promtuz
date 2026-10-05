@@ -250,6 +250,7 @@ pub struct Session {
     runtime:          tokio::runtime::Handle,
     /// Held by the outbox pass in progress.
     pub(crate) reconciling: Mutex<()>,
+    services: tokio::sync::OnceCell<common::contracts::Support>,
 }
 
 impl Session {
@@ -268,7 +269,26 @@ impl Session {
             parent: core.tasks.clone(),
             runtime: core.runtime.clone(),
             reconciling: Mutex::new(()),
+            services: tokio::sync::OnceCell::new(),
         }
+    }
+
+    pub(crate) async fn services(&self) -> &common::contracts::Support {
+        self.services.get_or_init(|| async {
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                let (mut tx, mut rx) = self.conn.open_bi().await?;
+                CRelayPacket::ServiceCapabilities.send(&mut tx).await?;
+                tx.finish()?;
+                let SRelayPacket::ServiceCapabilities { supported } = SRelayPacket::unpack(&mut rx).await? else {
+                    bail!("unexpected service capabilities response");
+                };
+                Ok::<_, anyhow::Error>(common::contracts::Support::decode(&supported.0)?)
+            }).await;
+            match result {
+                Ok(Ok(support)) => support,
+                _ => common::contracts::Support::default(),
+            }
+        }).await
     }
 
     /// Runs `task` on the runtime, counted by this session and by its core.

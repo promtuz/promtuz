@@ -80,6 +80,8 @@ pub(super) async fn handle_handshake(
             CloseReason::Reconnecting.close(existing);
         }
         clients.insert(ipk_bytes, new_conn);
+        // A replacement connection starts idle, including a background push wake.
+        relay.active_clients.write().remove(&ipk_bytes);
     }
 
     Ok(ipk)

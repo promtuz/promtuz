@@ -2,7 +2,6 @@ package com.promtuz.core
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.core.content.edit
 import com.promtuz.chat.domain.model.Presence
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -13,39 +12,45 @@ private data class PresenceEntry(val kind: Int, val ts: Long)
 @Serializable
 private data class PresenceSnapshot(val savedAt: Long, val peers: Map<String, PresenceEntry>)
 
-/** Last-known presence per hex IPK, so a cold start shows last-seens at once. */
+/** Persist observations separately from live reachability. Online never erases last seen. */
 object PresenceStore {
-    private const val KEY = "presence"
     private lateinit var prefs: SharedPreferences
     private val json = Json { ignoreUnknownKeys = true }
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("presence", Context.MODE_PRIVATE)
+        // Migrate the old whole-map cache once without clearing other app/device data.
+        prefs.getString("presence", null)?.let { encoded ->
+            val snap = runCatching { json.decodeFromString<PresenceSnapshot>(encoded) }.getOrNull()
+            val editor = prefs.edit().remove("presence")
+            snap?.peers?.forEach { (peer, entry) ->
+                if (!prefs.contains(peer) && entry.kind == 2 && entry.ts > 0) {
+                    editor.putLong(peer, entry.ts)
+                }
+            }
+            check(editor.commit()) { "Could not migrate presence cache" }
+        }
     }
 
-    fun seed(): Map<String, Presence> {
-        val snap = prefs.getString(KEY, null)
-            ?.let { runCatching { json.decodeFromString<PresenceSnapshot>(it) }.getOrNull() }
-            ?: return emptyMap()
-        return snap.peers.mapValues { (_, e) -> restore(e) }
+    fun seed(): Map<String, Presence> = prefs.all.mapNotNull { (peer, value) ->
+        (value as? Long)?.let { peer to restored(it) }
+    }.toMap()
+
+    fun lastSeen(peer: String): Presence = restored(prefs.getLong(peer, 0))
+
+    /** Called by the serial IO worker before displaying the accepted observation. */
+    @Synchronized
+    fun record(peer: String, presence: Presence) {
+        val timestamp = when (presence) {
+            Presence.Online -> return
+            is Presence.Idle -> presence.sinceMs
+            is Presence.LastSeen -> presence.atMs
+            Presence.Unknown -> 0L // Explicit withdrawal must also clear the retained observation.
+        }
+        if (prefs.getLong(peer, -1) == timestamp) return
+        check(prefs.edit().putLong(peer, timestamp).commit()) { "Could not persist presence" }
     }
 
-    fun save(map: Map<String, Presence>, savedAt: Long) {
-        val peers = map.mapValues { (_, p) -> entry(p) }
-        prefs.edit { putString(KEY, json.encodeToString(PresenceSnapshot.serializer(), PresenceSnapshot(savedAt, peers))) }
-    }
-
-    private fun entry(p: Presence): PresenceEntry = when (p) {
-        Presence.Online -> PresenceEntry(0, 0)
-        is Presence.Idle -> PresenceEntry(1, p.sinceMs)
-        is Presence.LastSeen -> PresenceEntry(2, p.atMs)
-        Presence.Unknown -> PresenceEntry(3, 0)
-    }
-
-    // A cached live state cannot prove when a peer was last online.
-    private fun restore(e: PresenceEntry): Presence = when (e.kind) {
-        0, 1 -> Presence.Unknown
-        2 -> Presence.LastSeen(e.ts)
-        else -> Presence.Unknown
-    }
+    private fun restored(timestamp: Long): Presence =
+        if (timestamp > 0) Presence.LastSeen(timestamp) else Presence.Unknown
 }

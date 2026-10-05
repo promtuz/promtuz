@@ -109,9 +109,13 @@ const MIGRATION_ARRAY: &[M] = &[
     // Whether the relay bridges hole-punch assist, as it said at handshake.
     // Unknown until we have connected to it once, which reads as "no".
     M::up("ALTER TABLE relays ADD COLUMN assist INTEGER NOT NULL DEFAULT 0;"),
+    M::up("CREATE TABLE presence_interest (peer BLOB PRIMARY KEY CHECK(length(peer) = 32));
+           INSERT INTO presence_interest SELECT peer FROM presence_contacts;"),
 ];
 pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub fn migrate(conn: &mut Connection) {
     super::prepare(conn, &MIGRATIONS);
+    // Presence revocations and versions must survive power loss, including on Android.
+    conn.pragma_update(None, "synchronous", "FULL").expect("durable network state");
 }

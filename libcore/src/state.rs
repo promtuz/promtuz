@@ -53,6 +53,7 @@ pub struct Core {
     pub(crate) inbox_sync: tokio::sync::Mutex<()>,
     /// Starts idle: a headless push wake stays idle until the UI foregrounds it.
     pub(crate) presence_idle: AtomicBool,
+    pub(crate) presence_update: tokio::sync::Mutex<()>,
     pub(crate) isk: RwLock<Option<CachedIsk>>,
     pub(crate) avatar_generation: AtomicU64,
     pub(crate) kp_publish_ready: AtomicBool,
@@ -94,6 +95,7 @@ impl Core {
             network_change_pending: AtomicBool::new(false),
             inbox_sync: tokio::sync::Mutex::new(()),
             presence_idle: AtomicBool::new(true),
+            presence_update: tokio::sync::Mutex::new(()),
             isk: RwLock::new(None),
             avatar_generation: AtomicU64::new(0),
             kp_publish_ready: AtomicBool::new(false),

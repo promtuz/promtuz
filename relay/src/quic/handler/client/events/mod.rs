@@ -96,9 +96,22 @@ pub(super) async fn handle_packet(
 
         Activity(eph) => forward::handle_activity(eph, ctx.clone()).await,
 
-        SubscribePresence(sub) => presence::handle_subscribe(sub, ctx.clone()).await,
+        SubscribePresence(sub) => presence::handle_subscribe(sub, ctx.clone()).await.map(|_| ()),
 
-        SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await,
+        SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await.map(|_| ()),
+
+        SubscribePresenceDurable(sub) => {
+            use common::proto::{Sender, client_rel::SRelayPacket};
+            let accepted = presence::handle_subscribe(sub, ctx.clone()).await?;
+            SRelayPacket::PresenceAck { accepted }.send(tx).await?;
+            Ok(())
+        },
+        SetPresenceDurable(mode) => {
+            use common::proto::{Sender, client_rel::SRelayPacket};
+            let accepted = presence::handle_set_presence(mode, ctx.clone()).await?;
+            SRelayPacket::PresenceAck { accepted }.send(tx).await?;
+            Ok(())
+        },
 
         RegisterPush { pseudonym, timestamp, sig } => {
             misc::handle_register_push(pseudonym.0, timestamp, sig.0, ctx.clone()).await
@@ -110,7 +123,15 @@ pub(super) async fn handle_packet(
         },
         ServiceCapabilities => {
             use common::proto::{Sender, client_rel::SRelayPacket};
-            let support=if ctx.relay.dht.is_some() { crate::dht::mls::service_support() } else { common::contracts::Support::default() };
+            use common::contracts::{Support, services};
+            let mut offers = vec![(services::DURABLE_PRESENCE, vec![services::DURABLE_PRESENCE_VERSION])];
+            if ctx.relay.dht.is_some() {
+                offers.extend([
+                    (services::KEY_PACKAGE_CUSTODY, vec![services::KEY_PACKAGE_CUSTODY_VERSION]),
+                    (services::KEY_PACKAGE_INVENTORY, vec![services::KEY_PACKAGE_INVENTORY_VERSION]),
+                ]);
+            }
+            let support = Support::new(offers).expect("fixed service versions");
             SRelayPacket::ServiceCapabilities { supported:support.encode().into() }.send(tx).await?;
             Ok(())
         },

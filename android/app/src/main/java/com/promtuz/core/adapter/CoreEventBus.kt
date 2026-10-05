@@ -1,7 +1,12 @@
 package com.promtuz.core.adapter
 
 import com.promtuz.chat.presentation.state.ConnectionState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,6 +29,8 @@ class PresenceSignal(val peer: ByteArray, val presence: Presence)
 /** Core calls these on its own threads. They must not block, and on_db_changed runs with the writer
  *  connection locked, so each body is a tryEmit into a bounded flow or a guarded call. */
 object CoreEventBus : CoreEvents {
+    // Serialize disk writes off core's callback threads. Display follows successful persistence.
+    private val presenceWriter = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private val _connection = MutableStateFlow(ConnectionState.Idle)
     val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
 
@@ -45,6 +52,16 @@ object CoreEventBus : CoreEvents {
     }
 
     override fun onConnection(state: FfiConnectionState) {
+        if (state == FfiConnectionState.DISCONNECTED || state == FfiConnectionState.FAILED) {
+            presenceWriter.launch { guard {
+                _presenceByPeer.update { peers -> peers.mapValues { (peer, value) ->
+                    when (value) {
+                        Presence.Online, is Presence.Idle -> com.promtuz.core.PresenceStore.lastSeen(peer)
+                        else -> value
+                    }
+                } }
+            } }
+        }
         _connection.value = when (state) {
             FfiConnectionState.DISCONNECTED -> ConnectionState.Disconnected
             FfiConnectionState.RESOLVING -> ConnectionState.Resolving
@@ -93,15 +110,23 @@ object CoreEventBus : CoreEvents {
         _activity.tryEmit(ActivitySignal(conversation, peer, activity.toInt()))
     }
 
-    override fun onPresence(peer: ByteArray, presence: FfiPresence) {
+    override fun onPresence(peer: ByteArray, presence: FfiPresence) = guard {
         val p = when (presence) {
             is FfiPresence.Online -> Presence.Online
             is FfiPresence.Idle -> Presence.Idle(presence.since.toLong())
             is FfiPresence.Offline ->
                 if (presence.lastSeen == 0uL) Presence.Unknown else Presence.LastSeen(presence.lastSeen.toLong())
         }
-        _presence.tryEmit(PresenceSignal(peer, p))
-        _presenceByPeer.value = _presenceByPeer.value + (peer.toHex() to p)
+        presenceWriter.launch { guard {
+            val key = peer.toHex()
+            com.promtuz.core.PresenceStore.record(key, p)
+            val disconnected = _connection.value == ConnectionState.Disconnected || _connection.value == ConnectionState.Failed
+            val visible = if (disconnected && (p == Presence.Online || p is Presence.Idle)) {
+                com.promtuz.core.PresenceStore.lastSeen(key)
+            } else p
+            _presence.tryEmit(PresenceSignal(peer, visible))
+            _presenceByPeer.update { it + (key to visible) }
+        } }
     }
 
     private inline fun guard(block: () -> Unit) {
