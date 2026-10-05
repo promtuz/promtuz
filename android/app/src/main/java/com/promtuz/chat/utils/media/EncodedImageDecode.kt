@@ -113,7 +113,7 @@ private fun sameTransferCurve(actual: ColorSpace.Rgb, expected: ColorSpace.Rgb):
 internal fun bitmapHasHdr(bitmap: Bitmap): Boolean =
     (Build.VERSION.SDK_INT >= 34 && bitmap.hasGainmap()) || isHdrColorSpace(bitmap.colorSpace)
 
-/** Preserve the platform's color space, precision, orientation and gain map whenever supported. */
+/** Prefer bundled decoding for ordinary AVIFs; retain platform HDR, gain maps and color profiles. */
 internal fun prepareEncodedImage(
     bytes: ByteArray,
     sourceMaxEdge: Int = MAX_SOURCE_EDGE,
@@ -148,46 +148,63 @@ internal fun prepareEncodedImage(
         }
     }
 
-    var poster: Bitmap? = try {
-        if (Build.VERSION.SDK_INT >= 28) {
-            ImageDecoder.decodeBitmap(ImageDecoder.createSource(sequenceBuffer?.duplicate() ?: ByteBuffer.wrap(bytes))) { decoder, info, _ ->
-                checkDimensions(info.size.width, info.size.height)
-                sourceColorSpace = info.colorSpace
-                // A software bitmap remains usable in notification/share preview canvases. This
-                // does not force ARGB_8888, sRGB, or removal of the Android 14+ gain map.
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                val (width, height) = scaledDimensions(info.size.width, info.size.height, targetEdge)
-                if (width != info.size.width || height != info.size.height) {
-                    decoder.setTargetSize(width, height)
+    // Keep ordinary previews on the same decoder across devices. ICC profiles, gain maps and
+    // extended color still need the platform path; the native allocation limit also still applies.
+    val preferBundledSdr = metadata?.let {
+        !it.hasIcc && !it.hasGainMap &&
+            it.colorPrimaries?.toInt() in setOf(1, 2) &&
+            it.transferCharacteristics?.toInt() in setOf(1, 2, 6, 13) &&
+            it.decodedPixelCount <= MAX_NATIVE_POSTER_PIXELS.toULong()
+    } == true
+    var platformAttempted = false
+    fun decodePlatformPoster(): Bitmap? {
+        if (platformAttempted || invalidDimensions) return null
+        platformAttempted = true
+        return try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(sequenceBuffer?.duplicate() ?: ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+                    checkDimensions(info.size.width, info.size.height)
+                    sourceColorSpace = info.colorSpace
+                    // A software bitmap remains usable in notification/share preview canvases. This
+                    // does not force ARGB_8888, sRGB, or removal of the Android 14+ gain map.
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val (width, height) = scaledDimensions(info.size.width, info.size.height, targetEdge)
+                    if (width != info.size.width || height != info.size.height) {
+                        decoder.setTargetSize(width, height)
+                    }
+                }
+            } else {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Platform image decoder unavailable" }
+                checkDimensions(bounds.outWidth, bounds.outHeight)
+                sourceColorSpace = bounds.outColorSpace
+                val options = BitmapFactory.Options().apply {
+                    var sample = 1
+                    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= targetEdge) sample *= 2
+                    inSampleSize = sample
+                    inPreferredConfig = bounds.outConfig ?: Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { full ->
+                    val (width, height) = scaledDimensions(full.width, full.height, targetEdge)
+                    if (width == full.width && height == full.height) full else {
+                        Bitmap.createScaledBitmap(full, width, height, true).also { full.recycle() }
+                    }
                 }
             }
-        } else {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Platform image decoder unavailable" }
-            checkDimensions(bounds.outWidth, bounds.outHeight)
-            sourceColorSpace = bounds.outColorSpace
-            val options = BitmapFactory.Options().apply {
-                var sample = 1
-                while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= targetEdge) sample *= 2
-                inSampleSize = sample
-                inPreferredConfig = bounds.outConfig ?: Bitmap.Config.ARGB_8888
-            }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { full ->
-                val (width, height) = scaledDimensions(full.width, full.height, targetEdge)
-                if (width == full.width && height == full.height) full else {
-                    Bitmap.createScaledBitmap(full, width, height, true).also { full.recycle() }
-                }
-            }
+        } catch (_: Exception) {
+            null // Bundled libavif also covers Android versions with no platform AVIF decoder.
         }
-    } catch (_: Exception) {
-        null // Bundled libavif also covers Android versions with no platform AVIF decoder.
+    }
+    var poster = if (preferBundledSdr) null else decodePlatformPoster()
+    fun preparedPoster(): PreparedEncodedImage? {
+        if (invalidDimensions) return null
+        val image = poster ?: decodePlatformPoster() ?: return null
+        return PreparedEncodedImage(image.asImageBitmap(), null, bitmapHasHdr(image))
     }
     if (invalidDimensions) return null
 
-    if (!avif) {
-        return poster?.let { PreparedEncodedImage(it.asImageBitmap(), null, bitmapHasHdr(it)) }
-    }
+    if (!avif) return preparedPoster()
     if (metadata == null) return null
     val sourceIsHdr = metadata.transferCharacteristics?.toInt() in setOf(16, 18)
     // Some Android 16 AVIF codecs report sRGB/ARGB_8888 even for PQ/HLG sources. A successful
@@ -195,14 +212,12 @@ internal fun prepareEncodedImage(
     val preferNativeHdr = sourceIsHdr && Build.VERSION.SDK_INT >= 34 && poster != null &&
         !bitmapHasHdr(poster)
     if (!animation && poster != null && !preferNativeHdr) {
-        return PreparedEncodedImage(poster.asImageBitmap(), null, bitmapHasHdr(poster))
+        return preparedPoster()
     }
 
     return try {
         val encoded = sequenceBuffer ?: ByteBuffer.allocateDirect(bytes.size).put(bytes).apply { rewind() }
-        val decoder = AvifDecoder.create(encoded, 1) ?: return poster?.let {
-            PreparedEncodedImage(it.asImageBitmap(), null, bitmapHasHdr(it))
-        }
+        val decoder = AvifDecoder.create(encoded, 1) ?: return preparedPoster()
         try {
             checkDimensions(decoder.width, decoder.height)
             val nativeDisplayWidth = if (metadata.rotationQuarterTurns.toInt() and 1 != 0) decoder.height else decoder.width
@@ -210,7 +225,7 @@ internal fun prepareEncodedImage(
             if (nativeDisplayWidth.toUInt() != metadata.width || nativeDisplayHeight.toUInt() != metadata.height) {
                 // The pinned JNI ignores clap values requiring chroma upsampling/fractional crops.
                 // Keep the platform's correctly transformed image in those cases.
-                return poster?.let { PreparedEncodedImage(it.asImageBitmap(), null, bitmapHasHdr(it)) }
+                return preparedPoster()
             }
             // The JNI adapter copies YUV->RGB without changing the transfer function or gamut.
             // Its output must carry the source profile, never a profile inferred from bit depth.
@@ -229,7 +244,7 @@ internal fun prepareEncodedImage(
                     previous?.recycle() // Never published: this function still owns both posters.
                 } else bitmap.recycle()
             }
-            val image = poster ?: return null
+            val image = poster ?: return preparedPoster()
             val sequence = if (animation && colorSpace != null && decoder.frameCount in 2..600 &&
                 !metadata.hasGainMap && !(Build.VERSION.SDK_INT >= 34 && image.hasGainmap())) {
                 AvifAnimationSource(encoded, decoder.width, decoder.height, decoder.depth, metadata.decodedPixelCount.toLong(),
@@ -242,10 +257,10 @@ internal fun prepareEncodedImage(
         }
     } catch (error: LinkageError) {
         Timber.tag("MediaImage").w(error, "Bundled AVIF decoder unavailable")
-        poster?.let { PreparedEncodedImage(it.asImageBitmap(), null, bitmapHasHdr(it)) }
+        preparedPoster()
     } catch (error: Exception) {
         Timber.tag("MediaImage").d(error, "Encoded image unavailable")
-        poster?.let { PreparedEncodedImage(it.asImageBitmap(), null, bitmapHasHdr(it)) }
+        preparedPoster()
     }
 }
 
