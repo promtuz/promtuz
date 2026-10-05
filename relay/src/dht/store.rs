@@ -4,76 +4,12 @@
 use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::ForwardOutcome;
 use common::proto::pack::MAX_FRAME_BYTES;
-use common::proto::pack::Packer;
 use common::quic::id::NodeId;
 
 use super::Dht;
-use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
+use crate::storage::queue::QueueAdmission;
 use crate::storage::queued_dispatch;
-
-/// One sender's share of a recipient's [`MAX_QUEUED_PER_RECIPIENT`] slots. Kept above
-/// `MAX_FETCH_QUEUE_BATCH` so a single busy conversation still pages normally.
-const MAX_QUEUED_PER_SENDER: usize = 128;
-
-/// Ceiling on queued bytes deserialized to attribute rows to their sender
-/// during one admission scan.
-const SENDER_SCAN_BYTE_BUDGET: usize = 8 * 1024 * 1024;
-
-pub(crate) enum QueueAdmission {
-    Insert,
-    AlreadyQueued,
-    IdTakenByOther,
-    Full,
-    ScanFailed,
-}
-
-/// Per-recipient cap, per-sender share and one row per id. Past [`SENDER_SCAN_BYTE_BUDGET`] rows go
-/// unattributed and only the per-recipient cap binds.
-pub(crate) fn admit_to_queue(
-    ks: &fjall::Keyspace, recipient: &[u8; 32], dispatch_id: &[u8; 16], sender: &[u8; 32],
-) -> QueueAdmission {
-    let mut total: usize = 0;
-    let mut from_sender: usize = 0;
-    let mut attributed_bytes: usize = 0;
-    let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for guard in ks.prefix(recipient) {
-        // A failed scan cannot prove the queue is under its cap, so it rejects.
-        let Ok((key_bytes, value)) = guard.into_inner() else {
-            return QueueAdmission::ScanFailed;
-        };
-        if key_bytes.len() != MessageKey::SIZE {
-            continue;
-        }
-        let attributable = attributed_bytes < SENDER_SCAN_BYTE_BUDGET;
-        let same_sender = attributable
-            && queued_dispatch(recipient, &value).is_some_and(|queued| queued.from.0 == *sender);
-        if attributable {
-            attributed_bytes += value.len();
-        }
-        if key_bytes[40..56] == *dispatch_id {
-            return if same_sender {
-                QueueAdmission::AlreadyQueued
-            } else {
-                QueueAdmission::IdTakenByOther
-            };
-        }
-        total += 1;
-        if same_sender {
-            from_sender += 1;
-            if from_sender >= MAX_QUEUED_PER_SENDER {
-                break;
-            }
-        }
-        if total >= stop_at {
-            break;
-        }
-    }
-    if total >= MAX_QUEUED_PER_RECIPIENT || from_sender >= MAX_QUEUED_PER_SENDER {
-        return QueueAdmission::Full;
-    }
-    QueueAdmission::Insert
-}
 
 /// Leaves framing headroom under [`MAX_FRAME_BYTES`]. A bigger batch would make a `QueueFetchResp`
 /// the packer refuses, stranding the queue for good.
@@ -81,16 +17,13 @@ const QUEUE_BATCH_MAX_BYTES: usize = MAX_FRAME_BYTES - 64 * 1024;
 
 /// Up to `max` queued rows whose recipient no longer has this relay among its homes. The caller
 /// deletes a row only after a durable handover.
-pub(crate) fn plan_drift_migrations(
-    dht: &Dht, max: usize,
-) -> Vec<(MessageKey, DispatchP)> {
+pub(crate) fn plan_drift_migrations(dht: &Dht, max: usize) -> Vec<(MessageKey, DispatchP)> {
     let mut out: Vec<(MessageKey, DispatchP)> = Vec::new();
     if max == 0 {
         return out;
     }
 
-    let mut drifted: std::collections::HashMap<[u8; 32], bool> =
-        std::collections::HashMap::new();
+    let mut drifted: std::collections::HashMap<[u8; 32], bool> = std::collections::HashMap::new();
 
     for guard in dht.store.queue.iter() {
         let (key_bytes, value) = match guard.into_inner() {
@@ -127,28 +60,19 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
-    let _admission = dht.store.admission(user_ipk);
-    match admit_to_queue(&dht.store.queue, user_ipk, &dispatch.id.0, &dispatch.from.0) {
-        QueueAdmission::Insert => {},
-        QueueAdmission::AlreadyQueued => return ForwardOutcome::Stored,
-        QueueAdmission::IdTakenByOther | QueueAdmission::ScanFailed => {
-            return ForwardOutcome::BadSig;
-        },
-        QueueAdmission::Full => {
+    if dispatch.to.0 != *user_ipk {
+        return ForwardOutcome::BadSig;
+    }
+    match dht.store.queue.admit(dispatch, now_ms) {
+        Ok(QueueAdmission::Insert | QueueAdmission::AlreadyQueued) => {},
+        Ok(QueueAdmission::Full(reason)) => {
+            common::trace!(
+                "FORWARD: home queue admission limited by {reason} for {}",
+                hex::encode(user_ipk)
+            );
             return ForwardOutcome::QueueFull;
         },
-    }
-
-    let key = MessageKey::new(user_ipk, now_ms, &dispatch.id.0);
-    let value = match dispatch.ser() {
-        Ok(b) => b,
-        Err(_) => return ForwardOutcome::BadSig,
-    };
-
-    // Queues the group-commit fsync. `Stored` is a durable promise, so the caller awaits
-    // `Store::persist_barrier` before putting it on the wire.
-    if dht.store.put_sync(&dht.store.queue, key.as_bytes(), &value).is_err() {
-        return ForwardOutcome::BadSig;
+        Ok(QueueAdmission::IdTakenByOther) | Err(_) => return ForwardOutcome::BadSig,
     }
 
     ForwardOutcome::Stored
@@ -200,9 +124,8 @@ pub(crate) fn queue_batch_for_user(
         out.push((key, dispatch));
     }
 
-    for key in &dead {
-        let _ = dht.store.queue.remove(key);
-    }
+    let dead: Vec<_> = dead.into_iter().map(Into::into).collect();
+    let _ = dht.store.queue.remove_many(&dead);
     if oversize > 0 {
         common::warn!(
             "dht_queue: dropped {oversize} unframeable entr(ies) (> {QUEUE_BATCH_MAX_BYTES} bytes) for {}",
@@ -222,33 +145,23 @@ pub(crate) fn delete_queue_entries(
     }
 
     let target: std::collections::HashSet<[u8; 16]> = dispatch_ids.iter().copied().collect();
-    let mut victims: Vec<Vec<u8>> = Vec::new();
-
-    for guard in dht.store.queue.prefix(user_ipk) {
-        let key_bytes = match guard.key() {
-            Ok(k) => k,
-            Err(_) => break,
-        };
-        if MessageKey::parse(&key_bytes).is_some_and(|key| target.contains(&key.id)) {
-            victims.push(key_bytes.to_vec());
-        }
+    let mut keys = Vec::new();
+    for id in target {
+        let Ok(found) = dht.store.queue.keys_for(user_ipk, &id) else { continue };
+        keys.extend(found.into_iter().map(|key| key.as_bytes().into()));
     }
-
-    let mut count = 0usize;
-    for k in victims {
-        if dht.store.queue.remove(&k).is_ok() {
-            count += 1;
-        }
-    }
-    count
+    dht.store.queue.remove_many(&keys).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
+    use common::proto::pack::Packer;
     use common::proto::pack::Unpacker;
 
     use super::*;
+    use crate::storage::MAX_QUEUED_PER_RECIPIENT;
+    use crate::storage::queue::MAX_QUEUED_PER_SENDER;
     use crate::test_support::dht;
     use crate::test_support::dispatch;
     use crate::test_support::ipk;
@@ -323,17 +236,15 @@ mod tests {
             let row = dispatch(&hog, to, id(n), b"hog");
             dht.store
                 .messages
-                .insert(MessageKey::new(&to, n as u64, &id(n)).as_bytes(), row.ser().unwrap())
+                .insert(MessageKey::new(&to, NOW + n as u64, &id(n)).as_bytes(), row.ser().unwrap())
                 .unwrap();
         }
-        let hog_ipk = hog.verifying_key().to_bytes();
-        let legit_ipk = legit.verifying_key().to_bytes();
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to, &[0xEE; 16], &hog_ipk),
-            QueueAdmission::Full
+            dht.store.messages.admit(&dispatch(&hog, to, [0xEE; 16], b"hog"), NOW).unwrap(),
+            QueueAdmission::Full(_)
         ));
         assert!(matches!(
-            admit_to_queue(&dht.store.messages, &to, &[0xEF; 16], &legit_ipk),
+            dht.store.messages.admit(&dispatch(&legit, to, [0xEF; 16], b"legit"), NOW).unwrap(),
             QueueAdmission::Insert
         ));
 

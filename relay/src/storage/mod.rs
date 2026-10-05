@@ -1,5 +1,6 @@
 pub mod db;
 pub mod key_packages;
+pub mod queue;
 
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::Wake;
@@ -13,7 +14,7 @@ use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 
 /// Past this a recipient's new dispatches get `QueueFull`, bounding disk and drain time per user.
-pub const MAX_QUEUED_PER_RECIPIENT: usize = 1024;
+pub const MAX_QUEUED_PER_RECIPIENT: usize = 16_384;
 
 /// The recipient stays at offset 0 so a 32-byte prefix scan yields one user's queue; the
 /// big-endian ms timestamp keeps it in order, and the client's message id makes the key unique.

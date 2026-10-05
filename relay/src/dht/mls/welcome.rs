@@ -1,9 +1,9 @@
 //! MLS Welcome queue at a home relay: publish, fetch and ack over the `dht_welcome` keyspace.
 
 use common::crypto::verify_ed25519;
-use common::proto::mls_wire::MAX_WELCOMES_PER_RECIPIENT;
 use common::proto::mls_wire::MAX_WELCOME_ACK_IDS;
 use common::proto::mls_wire::MAX_WELCOME_BYTES;
+use common::proto::mls_wire::MAX_WELCOMES_PER_RECIPIENT;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
 use common::proto::mls_wire::WELCOME_ID_LEN;
 use common::proto::mls_wire::WELCOME_LIFETIME_MS;
@@ -31,6 +31,7 @@ use crate::dht::Dht;
 use crate::dht::rate_limit::KeyedLimiter;
 use crate::dht::rate_limit::LimiterClock;
 use crate::dht::rate_limit::keyed;
+use crate::storage::queue::QueueAdmission;
 
 const STASH_PREFIX_LEN: usize = 32;
 
@@ -183,14 +184,14 @@ pub(crate) async fn handle_welcome_publish(
     }
 
     match verify_welcome_envelope(&req.envelope) {
-        Ok(()) => {}
+        Ok(()) => {},
         Err(e) => {
             common::warn!(
                 "MLS welcome_publish: envelope sig verify failed for recipient={}: {e:?}",
                 recipient_short
             );
             return WelcomePublishOutcome::BadSig;
-        }
+        },
     }
 
     let envelope_bytes = match req.envelope.ser() {
@@ -198,7 +199,7 @@ pub(crate) async fn handle_welcome_publish(
         Err(e) => {
             common::warn!("MLS welcome_publish: envelope encode failed: {e:?}");
             return WelcomePublishOutcome::BadSig;
-        }
+        },
     };
 
     let expires_at_ms = now_ms.saturating_add(WELCOME_LIFETIME_MS);
@@ -215,11 +216,20 @@ pub(crate) async fn handle_welcome_publish(
             common::warn!("MLS welcome_publish: queue full for recipient={recipient_short}");
             return WelcomePublishOutcome::QueueFull;
         }
-        if let Err(e) = dht.store.put_sync(&dht.store.welcome, key, &value) {
-            common::warn!(
-                "MLS welcome_publish: fjall put failed for recipient={recipient_short}: {e}"
-            );
-            return WelcomePublishOutcome::BadSig;
+        match dht.store.welcome.admit_welcome(&key, &value) {
+            Ok(QueueAdmission::Insert) => {},
+            Ok(QueueAdmission::Full(reason)) => {
+                common::warn!(
+                    "MLS welcome_publish: {reason} limit for recipient={recipient_short}"
+                );
+                return WelcomePublishOutcome::QueueFull;
+            },
+            result => {
+                common::warn!(
+                    "MLS welcome_publish: storage failed for recipient={recipient_short}: {result:?}"
+                );
+                return WelcomePublishOutcome::BadSig;
+            },
         }
     }
     if dht.store.persist_barrier().wait().await.is_err() {
@@ -273,10 +283,7 @@ pub(crate) fn handle_welcome_fetch(
         let mut id = [0u8; WELCOME_ID_LEN];
         id.copy_from_slice(&key[STASH_PREFIX_LEN..]);
         used += stored_len;
-        welcomes.push(WelcomeEntry {
-            welcome_id: id.into(),
-            envelope: env,
-        });
+        welcomes.push(WelcomeEntry { welcome_id: id.into(), envelope: env });
     }
 
     for k in &to_evict {
@@ -298,8 +305,7 @@ pub(crate) fn handle_welcome_ack(
         return WelcomeAckResp { ok: false };
     }
 
-    let ids: Vec<[u8; WELCOME_ID_LEN]> =
-        req.welcome_ids.iter().map(|b| b.0).collect();
+    let ids: Vec<[u8; WELCOME_ID_LEN]> = req.welcome_ids.iter().map(|b| b.0).collect();
     let msg = welcome_ack_signing_input(
         MLS_WIRE_VERSION,
         &req.user_ipk.0,
@@ -361,10 +367,10 @@ mod tests {
         let fetch = |peer| {
             let msg = welcome_fetch_signing_input(MLS_WIRE_VERSION, &recipient_ipk, &relay, now);
             let req = WelcomeFetchReq {
-                user_ipk:           recipient_ipk.into(),
+                user_ipk: recipient_ipk.into(),
                 requester_relay_id: relay,
-                timestamp:          now,
-                user_sig:           recipient.sign(&msg).to_bytes().into(),
+                timestamp: now,
+                user_sig: recipient.sign(&msg).to_bytes().into(),
             };
             match handle_welcome_fetch(&dht, req, peer, now) {
                 WelcomeFetchOutcome::Found(found) => {
@@ -377,11 +383,11 @@ mod tests {
             let msg =
                 welcome_ack_signing_input(MLS_WIRE_VERSION, &recipient_ipk, &relay, &ids, now);
             let req = WelcomeAckReq {
-                user_ipk:           recipient_ipk.into(),
+                user_ipk: recipient_ipk.into(),
                 requester_relay_id: relay,
-                welcome_ids:        ids.into_iter().map(Into::into).collect(),
-                timestamp:          now,
-                user_sig:           recipient.sign(&msg).to_bytes().into(),
+                welcome_ids: ids.into_iter().map(Into::into).collect(),
+                timestamp: now,
+                user_sig: recipient.sign(&msg).to_bytes().into(),
             };
             handle_welcome_ack(&dht, req, peer, now).ok
         };

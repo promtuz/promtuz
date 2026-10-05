@@ -210,7 +210,7 @@ async fn rows_older_relays_queued_still_drain() {
     let expired =
         |n, wake| DispatchP { accepted_at_ms: now - 60_000, wake, ttl_ms: 40_000, ..sent(n) };
     let delivered = |d: &DispatchP| (d.id, d.from, d.payload.clone(), d.sig, d.accepted_at_ms);
-    let put = |ks: &fjall::Keyspace, row: &DispatchP, value: Vec<u8>| {
+    let put = |ks: &crate::storage::queue::Queue, row: &DispatchP, value: Vec<u8>| {
         let key = MessageKey::new(&bob_ipk, row.accepted_at_ms, &row.id.0);
         ks.insert(key.as_bytes(), value).unwrap();
     };
@@ -231,4 +231,43 @@ async fn rows_older_relays_queued_still_drain() {
     let phone = authenticated(&node, &bob).await;
     let expected = [timed, untimed, missed, bool_wake].map(dispatch_to_deliver);
     assert_eq!(drain(&phone, vec![]).await, expected);
+}
+
+/// A backlog spans multiple key pages and the drain byte budget. Partial durable receipt,
+/// disconnect and reconnect must retain every unacknowledged row, in order, with DHT disabled.
+#[tokio::test]
+async fn paged_backlog_survives_partial_ack_and_reconnect_without_dht() {
+    let node = Node::start(71, false).await;
+    let bob = key(72);
+    let recipient = bob.verifying_key().to_bytes();
+    let senders = [key(73), key(74)];
+    let now = now_ms();
+    let payload = vec![42; 16 * 1024];
+    let mut ids = Vec::new();
+    for n in 0..600u16 {
+        let mut id = [0; 16];
+        id[..2].copy_from_slice(&n.to_be_bytes());
+        let mut row = dispatch(&senders[n as usize % 2], recipient, id, &payload);
+        row.accepted_at_ms = now + u64::from(n);
+        assert_eq!(
+            node.relay.store.messages.admit(&row, row.accepted_at_ms).unwrap(),
+            crate::storage::queue::QueueAdmission::Insert
+        );
+        ids.push(id);
+    }
+    node.relay.store.persist_barrier().wait().await.unwrap();
+    let phone = authenticated(&node, &bob).await;
+    let first = drain(&phone, vec![]).await;
+    assert!(first.len() > 256 && first.len() < ids.len());
+    assert_eq!(first.iter().map(|row| row.id.0).collect::<Vec<_>>(), ids[..first.len()]);
+    let acknowledged = first.len() / 2;
+    ask_address(&phone, vec![CRelayPacket::AckDrain { ids: ids[..acknowledged].to_vec() }]).await;
+    drop(phone);
+    eventually(|| !node.relay.clients.read().contains_key(&recipient)).await;
+    let phone = authenticated(&node, &bob).await;
+    let rest = drain(&phone, vec![]).await;
+    assert_eq!(rest.iter().map(|row| row.id.0).collect::<Vec<_>>(), ids[acknowledged..]);
+    ask_address(&phone, vec![CRelayPacket::AckDrain { ids: ids[acknowledged..].to_vec() }]).await;
+    assert_eq!(node.relay.store.messages.len().unwrap(), 0);
+    assert!(drain(&phone, vec![]).await.is_empty());
 }

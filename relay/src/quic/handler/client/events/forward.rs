@@ -10,7 +10,6 @@ use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::SRelayPacket;
-use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::trace;
 use common::utils::now_ms;
@@ -22,14 +21,12 @@ use crate::dht::forward::ForwardSummary;
 use crate::dht::forward::activity_is_authentic;
 use crate::dht::forward::forward_to_homes;
 use crate::dht::forward::verify_dispatch_user_sig;
-use crate::dht::store::QueueAdmission;
-use crate::dht::store::admit_to_queue;
 use crate::quic::handler::client::ClientCtxHandle;
 use crate::quic::handler::client::events::STREAM_OPEN_TIMEOUT;
 use crate::quic::handler::client::events::spawn_tied;
 use crate::quic::handler::client::remove_client_if_same;
-use crate::storage::MessageKey;
 use crate::storage::db::Store;
+use crate::storage::queue::QueueAdmission;
 use crate::storage::queued_dispatch;
 
 const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -134,12 +131,10 @@ async fn route_dispatch(fwd: DispatchP, ctx: &ClientCtxHandle) -> Option<Dispatc
         match forward_to_homes(dht, fwd, accepted_at_ms).await {
             Ok(summary) => {
                 return Some(ack_for_summary(&summary, accepted_at_ms));
-            }
+            },
             Err(err) => {
-                trace!(
-                    "FORWARD: K-closest fan-out fell back to local queue: {err}"
-                );
-            }
+                trace!("FORWARD: K-closest fan-out fell back to local queue: {err}");
+            },
         }
     }
 
@@ -149,20 +144,18 @@ async fn route_dispatch(fwd: DispatchP, ctx: &ClientCtxHandle) -> Option<Dispatc
 /// Removes only copies of this exact signed dispatch: a retry can carry a different ingress
 /// timestamp, and another sender's colliding id must never be deleted.
 fn retire_local_copy(store: &Store, fwd: &DispatchP) -> Result<()> {
-    let mut batch = store.batch();
-    for entry in store.messages.prefix(fwd.to.0) {
-        let (key, value) = entry.into_inner()?;
-        let Some(key_fields) = MessageKey::parse(&key) else { continue };
-        if key_fields.id == fwd.id.0
-            && let Some(queued) = queued_dispatch(&fwd.to.0, &value)
+    let mut retired = Vec::new();
+    for key in store.messages.keys_for(&fwd.to.0, &fwd.id.0)? {
+        let Some(value) = store.messages.get(key.as_bytes())? else { continue };
+        if let Some(queued) = queued_dispatch(&fwd.to.0, &value)
             && queued.from == fwd.from
             && queued.payload == fwd.payload
             && queued.sig == fwd.sig
         {
-            batch.remove(&store.messages, key);
+            retired.push(key.as_bytes().into());
         }
     }
-    batch.commit()?;
+    store.messages.remove_many(&retired)?;
     Ok(())
 }
 
@@ -221,7 +214,9 @@ pub(crate) async fn try_deliver(
         _ => return Err(ConnectionError::TimedOut),
     }
 
-    match tokio::time::timeout(LIVE_DELIVER_ACK_TIMEOUT, CRelayPacket::unpack(&mut deliver_rx)).await {
+    match tokio::time::timeout(LIVE_DELIVER_ACK_TIMEOUT, CRelayPacket::unpack(&mut deliver_rx))
+        .await
+    {
         Ok(Ok(CRelayPacket::DeliverAck)) => Ok(()),
         _ => Err(ConnectionError::TimedOut),
     }
@@ -229,46 +224,43 @@ pub(crate) async fn try_deliver(
 
 pub(crate) fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
     DeliverP {
-        id:      d.id,
-        from:    d.from,
+        id: d.id,
+        from: d.from,
         payload: d.payload,
-        sig:     d.sig,
+        sig: d.sig,
         accepted_at_ms: d.accepted_at_ms,
-        ttl_ms:  d.ttl_ms,
+        ttl_ms: d.ttl_ms,
     }
 }
 
 async fn store_in_rocks(store: &Store, dispatch: &DispatchP) -> Result<DispatchAckP> {
     let recipient = dispatch.to;
-    debug!(
-        "dispatch {}: recipient {} — accepting in local queue",
-        hex::encode(&dispatch.id.0[..8]),
-        hex::encode(&recipient.0[..8])
-    );
-
-    let admission = {
-        let _admission = store.admission(&recipient.0);
-        let admission =
-            admit_to_queue(&store.messages, &recipient.0, &dispatch.id.0, &dispatch.from.0);
-        if matches!(admission, QueueAdmission::Insert) {
-            let key = MessageKey::new(&recipient.0, dispatch.accepted_at_ms, &dispatch.id.0);
-            store.put_sync(&store.messages, key.as_bytes(), dispatch.ser()?)?;
-        }
-        admission
-    };
+    let admission = store.messages.admit(dispatch, dispatch.accepted_at_ms)?;
     match admission {
         // `Queued` is a durability promise, so the reply waits for the barrier, which resolves
         // once the group commit covering the write is on disk.
         QueueAdmission::Insert | QueueAdmission::AlreadyQueued => {
             store.persist_barrier().wait().await?;
+            debug!(
+                "dispatch {}: recipient {} — {}",
+                hex::encode(&dispatch.id.0[..8]),
+                hex::encode(&recipient.0[..8]),
+                if admission == QueueAdmission::Insert {
+                    "stored in local queue"
+                } else {
+                    "already queued; acknowledged retry"
+                },
+            );
             Ok(DispatchAckP::Queued { accepted_at_ms: dispatch.accepted_at_ms })
         },
         QueueAdmission::IdTakenByOther => {
             Ok(DispatchAckP::Error { reason: "dispatch id already queued".into() })
         },
-        QueueAdmission::ScanFailed => Ok(DispatchAckP::Error { reason: "queue scan failed".into() }),
-        QueueAdmission::Full => {
-            trace!("FORWARD: queue full for recipient {}; rejecting", hex::encode(recipient));
+        QueueAdmission::Full(reason) => {
+            trace!(
+                "FORWARD: local queue admission limited by {reason} for {}; trying routing",
+                hex::encode(recipient)
+            );
             Ok(DispatchAckP::QueueFull)
         },
     }

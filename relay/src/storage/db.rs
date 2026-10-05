@@ -23,6 +23,9 @@ use fjall::PersistMode;
 use fjall::UserKey;
 use fjall::UserValue;
 
+use super::queue::QUEUED_MESSAGE_TTL_MS;
+use super::queue::Queue;
+
 pub const KS_MESSAGES: &str = "messages";
 pub const KS_DHT_QUEUE: &str = "dht_queue";
 pub const KS_DHT_WELCOME: &str = "dht_welcome";
@@ -43,9 +46,6 @@ const PRESENCE_VERSION_MAX_LEAD_MS: u64 = 60_000;
 /// the identity next connects, so this expires quiet identities, not records.
 const IDLE_IDENTITY_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 
-/// Matches the Welcome retention window, so a recipient offline past it loses both.
-const QUEUED_MESSAGE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-
 /// `presence_consent` takes writes for any `(owner, recipient)` pair a DHT peer can sign for,
 /// so its size does not follow this relay's own user count.
 const MAX_PRESENCE_CONSENT_ROWS: usize = 1_000_000;
@@ -58,23 +58,23 @@ const MAX_SWEEP_REMOVALS: usize = 4_096;
 const STORE_DIR_MODE: u32 = 0o700;
 
 pub struct Store {
-    db:                   Database,
-    pub messages:         Keyspace,
-    pub queue:            Keyspace,
-    pub key_packages:     super::key_packages::KeyPackages,
-    pub welcome:          Keyspace,
+    db: Database,
+    pub messages: Queue,
+    pub queue: Queue,
+    pub key_packages: super::key_packages::KeyPackages,
+    pub welcome: Queue,
     /// IPK -> unix ms (u64 BE) when the client last left foreground-active.
-    pub last_seen:        Keyspace,
+    pub last_seen: Keyspace,
     /// `(owner, recipient)` -> newest signed consent or revocation tombstone.
     pub presence_consent: Keyspace,
-    pub presence_state:   Keyspace,
-    pub presence_lease:   Keyspace,
-    pub push_pseudonym:   Keyspace,
-    pub push_pending:     Keyspace,
+    pub presence_state: Keyspace,
+    pub presence_lease: Keyspace,
+    pub push_pseudonym: Keyspace,
+    pub push_pending: Keyspace,
     /// Striped by the row's owner, so a cap or version check sees every earlier write.
-    admission:            [parking_lot::Mutex<()>; 64],
-    maintenance:          Arc<Maintenance>,
-    worker:               Option<JoinHandle<()>>,
+    admission: [parking_lot::Mutex<()>; 64],
+    maintenance: Arc<Maintenance>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -103,6 +103,8 @@ impl Store {
         let queue = open(KS_DHT_QUEUE)?;
         let key_packages = super::key_packages::KeyPackages::open(&db)?;
         let welcome = open(KS_DHT_WELCOME)?;
+        let [messages, queue, welcome] =
+            Queue::open(&db, messages, queue, welcome).context("index queued messages")?;
         let last_seen = open(KS_LAST_SEEN)?;
         let presence_consent = open(KS_PRESENCE_CONSENT)?;
         let presence_state = open(KS_PRESENCE_STATE)?;
@@ -113,8 +115,9 @@ impl Store {
         let maintenance = Arc::new(Maintenance::default());
         let targets = vec![
             SweepTarget::new(&key_packages.spent, super::key_packages::spent_expired),
-            SweepTarget::new(&messages, queued_message_expired),
-            SweepTarget::new(&queue, queued_message_expired),
+            SweepTarget::queue(&messages, queued_message_expired),
+            SweepTarget::queue(&queue, queued_message_expired),
+            SweepTarget::queue(&welcome, welcome_expired),
             SweepTarget::new(&last_seen, last_seen_expired),
             SweepTarget::new(&presence_consent, presence_consent_expired),
             SweepTarget::new(&presence_state, presence_state_expired),
@@ -221,8 +224,8 @@ impl Store {
             common::proto::client_rel::PresenceState::Offline { last_seen } => (2, *last_seen),
         };
         // Clamped so a relay cannot pin a user online with a distant lease.
-        let expires_at_ms = lease_expires_at_ms
-            .min(observed_at_ms.saturating_add(PRESENCE_STATE_TTL_MS));
+        let expires_at_ms =
+            lease_expires_at_ms.min(observed_at_ms.saturating_add(PRESENCE_STATE_TTL_MS));
         let mut value = Vec::with_capacity(33);
         value.extend_from_slice(&version.to_be_bytes());
         value.extend_from_slice(&observed_at_ms.to_be_bytes());
@@ -348,20 +351,15 @@ impl Store {
         PersistBarrier { maintenance: self.maintenance.clone(), target: self.request_persist() }
     }
 
-    /// Not fsynced: a crash only re-delivers, and the client dedupes by id.
-    pub fn batch(&self) -> fjall::OwnedWriteBatch {
-        self.db.batch()
-    }
-
     /// Clears every keyspace on disk; in-memory routing and connections stay.
     pub fn clear_all(&self) -> Result<usize> {
-        let mut n = 0usize;
+        let mut n = self.messages.len()? + self.queue.len()? + self.welcome.len()?;
+        self.messages.clear()?;
+        self.queue.clear()?;
+        self.welcome.clear()?;
         for ks in [
-            &self.messages,
-            &self.queue,
             &self.key_packages.records,
             &self.key_packages.spent,
-            &self.welcome,
             &self.last_seen,
             &self.presence_consent,
             &self.presence_state,
@@ -429,19 +427,19 @@ impl Drop for Store {
 #[derive(Default)]
 struct Maintenance {
     state: Mutex<MaintenanceState>,
-    wake:  Condvar,
-    done:  Condvar,
+    wake: Condvar,
+    done: Condvar,
 }
 
 #[derive(Default)]
 struct MaintenanceState {
     persist_requested: bool,
-    shutdown:          bool,
+    shutdown: bool,
     /// Bumped per write; the commit that observes a value covers every write
     /// numbered at or below it.
-    requested_gen:     u64,
-    persisted_gen:     u64,
-    persist_failed:    bool,
+    requested_gen: u64,
+    persisted_gen: u64,
+    persist_failed: bool,
 }
 
 impl Maintenance {
@@ -452,7 +450,7 @@ impl Maintenance {
 
 pub struct PersistBarrier {
     maintenance: Arc<Maintenance>,
-    target:      u64,
+    target: u64,
 }
 
 impl PersistBarrier {
@@ -465,11 +463,7 @@ impl PersistBarrier {
     fn wait_blocking(&self) -> Result<()> {
         let mut state = self.maintenance.lock();
         while state.persisted_gen < self.target && !state.shutdown {
-            state = self
-                .maintenance
-                .done
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+            state = self.maintenance.done.wait(state).unwrap_or_else(PoisonError::into_inner);
         }
         if state.persist_failed {
             bail!("relay store fsync failed; the database is poisoned");
@@ -481,14 +475,19 @@ impl PersistBarrier {
 type ExpiryFn = fn(&[u8], &[u8], u64) -> bool;
 
 struct SweepTarget {
-    ks:      Keyspace,
+    ks: Keyspace,
     expired: ExpiryFn,
-    cursor:  Option<UserKey>,
+    cursor: Option<UserKey>,
+    queue: Option<Queue>,
 }
 
 impl SweepTarget {
+    fn queue(queue: &Queue, expired: ExpiryFn) -> Self {
+        Self { ks: queue.ks.clone(), expired, cursor: None, queue: Some(queue.clone()) }
+    }
+
     fn new(ks: &Keyspace, expired: ExpiryFn) -> Self {
-        Self { ks: ks.clone(), expired, cursor: None }
+        Self { ks: ks.clone(), expired, cursor: None, queue: None }
     }
 }
 
@@ -563,18 +562,28 @@ fn sweep(target: &mut SweepTarget, now_ms: u64) {
         }
     }
 
-    for key in expired {
-        let _ = target.ks.remove(key);
+    if let Some(queue) = &target.queue {
+        let _ = queue.remove_many_if(&expired, |key, value| (target.expired)(key, value, now_ms));
+    } else {
+        for key in expired {
+            let _ = target.ks.remove(key);
+        }
     }
     target.cursor = resume;
 }
 
-/// Queue rows carry their acceptance time in the key
-/// (`recipient(32) || ts_be(8) || id(16)`), so this needs no value decode.
-fn queued_message_expired(key: &[u8], _value: &[u8], now_ms: u64) -> bool {
-    be_u64(key, 32).is_none_or(|accepted_at| {
-        now_ms.saturating_sub(accepted_at) > QUEUED_MESSAGE_TTL_MS
-    })
+/// Retention uses the stored key's clock; shorter sender TTLs also release space, while
+/// call offers remain available to record missed calls until normal retention expires.
+fn queued_message_expired(key: &[u8], value: &[u8], now_ms: u64) -> bool {
+    be_u64(key, 32)
+        .is_none_or(|accepted_at| now_ms.saturating_sub(accepted_at) > QUEUED_MESSAGE_TTL_MS)
+        || super::MessageKey::parse(key)
+            .and_then(|key| super::queued_dispatch(&key.recipient, value))
+            .is_some_and(|dispatch| dispatch.is_expired(now_ms))
+}
+
+fn welcome_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
+    be_u64(value, 0).is_none_or(|expires| expires <= now_ms)
 }
 
 fn last_seen_expired(_key: &[u8], value: &[u8], now_ms: u64) -> bool {
@@ -625,14 +634,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
         for n in 0..8u8 {
-            store.put_sync(&store.messages, [n], [n]).unwrap();
+            store.messages.insert([n], [n]).unwrap();
+            store.request_persist();
         }
         let barrier = store.persist_barrier();
         let covers = barrier.target;
         tokio::time::timeout(Duration::from_secs(5), barrier.wait()).await.unwrap().unwrap();
         assert!(store.maintenance.lock().persisted_gen >= covers);
 
-        store.put_sync(&store.messages, [8], [8]).unwrap();
+        store.messages.insert([8], [8]).unwrap();
+        store.request_persist();
         let pending = store.persist_barrier();
         drop(store);
         tokio::time::timeout(Duration::from_secs(5), pending.wait()).await.unwrap().unwrap();

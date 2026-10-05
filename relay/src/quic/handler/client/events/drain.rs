@@ -12,7 +12,6 @@ use common::quic::id::NodeId;
 use common::trace;
 use common::utils::now_ms;
 use common::warn;
-use fjall::Keyspace;
 use quinn::SendStream;
 use tokio::sync::oneshot;
 
@@ -22,6 +21,7 @@ use crate::quic::handler::client::RemoteDrainState;
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::quic::handler::client::events::forward::dispatch_to_deliver;
 use crate::storage::MessageKey;
+use crate::storage::queue::Queue;
 use crate::storage::queued_dispatch;
 
 /// Bytes one `DrainQueue` ships before stopping; the client re-issues it for the rest.
@@ -31,9 +31,7 @@ const DRAIN_MAX_BATCH_IDS: usize = 16 * 1024;
 
 /// Delivered entries stay on disk until an `AckDrain` names them, once the client has stored
 /// them durably.
-pub(super) async fn handle_drain_queue(
-    ctx: ClientCtxHandle, tx: &mut SendStream,
-) -> Result<()> {
+pub(super) async fn handle_drain_queue(ctx: ClientCtxHandle, tx: &mut SendStream) -> Result<()> {
     let recipient_arr: [u8; 32] = *ctx.ipk.as_bytes();
 
     let (remote_homes, i_am_home) = match ctx.relay.dht.as_ref() {
@@ -80,9 +78,13 @@ pub(super) async fn handle_drain_queue(
     let mut remote_msgs: Vec<DispatchP> = Vec::new();
     if !batch.is_full() {
         if let (Some(auth), Some(dht)) = (auth_snapshot, ctx.relay.dht.as_ref()) {
-            remote_msgs =
-                crate::dht::queue_drain::fetch_remote_queues(dht, &recipient_arr, &auth, &remote_homes)
-                    .await;
+            remote_msgs = crate::dht::queue_drain::fetch_remote_queues(
+                dht,
+                &recipient_arr,
+                &auth,
+                &remote_homes,
+            )
+            .await;
         } else {
             trace!("DRAIN: no drain auth or DHT, serving local only");
         }
@@ -111,8 +113,8 @@ pub(super) async fn handle_drain_queue(
 
     if !delivered_remote.is_empty() {
         let mut pending = ctx.pending_remote_drain.lock();
-        let state = pending
-            .get_or_insert_with(|| RemoteDrainState { ids: Vec::new(), homes: Vec::new() });
+        let state =
+            pending.get_or_insert_with(|| RemoteDrainState { ids: Vec::new(), homes: Vec::new() });
         state.ids.extend(delivered_remote);
         for home in remote_homes {
             if !state.homes.iter().any(|h| h.id == home.id) {
@@ -137,12 +139,9 @@ pub(super) async fn handle_ack_drain(
     let mut keys = std::mem::take(&mut *ctx.pending_drain.lock());
     keys.retain(|key| stored.contains(&key.id));
     if !keys.is_empty() {
-        let mut batch = ctx.relay.store.batch();
-        for key in &keys {
-            batch.remove(&ctx.relay.store.messages, key.as_bytes());
-            batch.remove(&ctx.relay.store.queue, key.as_bytes());
-        }
-        batch.commit()?;
+        let stored_keys: Vec<_> = keys.iter().map(|key| key.as_bytes().into()).collect();
+        ctx.relay.store.messages.remove_many(&stored_keys)?;
+        ctx.relay.store.queue.remove_many(&stored_keys)?;
         trace!("DRAIN: cleared {} acked messages", keys.len());
     }
 
@@ -223,7 +222,7 @@ async fn run_remote_ack_round(
 
 #[derive(Default)]
 struct DrainBatch {
-    seen:  std::collections::HashSet<[u8; 16]>,
+    seen: std::collections::HashSet<[u8; 16]>,
     bytes: usize,
 }
 
@@ -243,54 +242,48 @@ impl DrainBatch {
     }
 }
 
-/// Expired entries are deleted instead of sent. Keys are collected first, so no keyspace
-/// iterator is held across the `await` that writes to the wire.
+/// Page keys before awaiting the network; retire expired rows in bounded storage batches.
 async fn stream_keyspace(
-    ks: &Keyspace, recipient: &[u8; 32], now_ms: u64, tx: &mut SendStream, batch: &mut DrainBatch,
+    ks: &Queue, recipient: &[u8; 32], now_ms: u64, tx: &mut SendStream, batch: &mut DrainBatch,
     keys: &mut Vec<MessageKey>,
 ) -> Result<Vec<[u8; 16]>> {
-    let mut sent: Vec<[u8; 16]> = Vec::new();
-    for key in collect_keys(ks, recipient) {
-        if batch.is_full() {
+    let mut sent = Vec::new();
+    let mut cursor = None;
+    while !batch.is_full() {
+        let page = ks.key_page(recipient, cursor.take())?;
+        if page.is_empty() {
             break;
         }
-        let Ok(Some(value)) = ks.get(key.as_bytes()) else { continue };
-        let Some(dispatch) = queued_dispatch(recipient, &value) else {
-            warn!("DRAIN: malformed queue value; skipping");
-            continue;
-        };
-        if dispatch.is_expired(now_ms) {
-            trace!("DRAIN: dropping expired message id={}", hex::encode(dispatch.id));
-            let _ = ks.remove(key.as_bytes());
-            continue;
+        cursor = page.last().cloned();
+        let mut expired = Vec::new();
+        for key_bytes in page {
+            if batch.is_full() {
+                break;
+            }
+            let Some(key) = MessageKey::parse(&key_bytes) else {
+                warn!("DRAIN: malformed queue key (len={}); skipping", key_bytes.len());
+                continue;
+            };
+            let Ok(Some(value)) = ks.get(&key_bytes) else { continue };
+            let Some(dispatch) = queued_dispatch(recipient, &value) else {
+                warn!("DRAIN: malformed queue value; skipping");
+                continue;
+            };
+            if dispatch.is_expired(now_ms) {
+                expired.push(key_bytes);
+                continue;
+            }
+            keys.push(key);
+            if !batch.admit(dispatch.id.0, value.len()) {
+                continue;
+            }
+            trace!("DRAIN: sending queued message id={}", hex::encode(dispatch.id));
+            sent.push(dispatch.id.0);
+            SRelayPacket::Deliver(dispatch_to_deliver(dispatch)).send(tx).await?;
         }
-        keys.push(key);
-        if !batch.admit(dispatch.id.0, value.len()) {
-            continue;
-        }
-        trace!("DRAIN: sending queued message id={}", hex::encode(dispatch.id));
-        sent.push(dispatch.id.0);
-        SRelayPacket::Deliver(dispatch_to_deliver(dispatch)).send(tx).await?;
+        let _ = ks.remove_many(&expired);
     }
     Ok(sent)
-}
-
-fn collect_keys(ks: &Keyspace, recipient: &[u8; 32]) -> Vec<MessageKey> {
-    let mut keys: Vec<MessageKey> = Vec::new();
-    for guard in ks.prefix(recipient) {
-        let key_bytes = match guard.key() {
-            Ok(k) => k,
-            Err(e) => {
-                warn!("DRAIN: queue iterator error: {e}");
-                break;
-            },
-        };
-        match MessageKey::parse(&key_bytes) {
-            Some(key) => keys.push(key),
-            None => warn!("DRAIN: malformed queue key (len={}); skipping", key_bytes.len()),
-        }
-    }
-    keys
 }
 
 #[cfg(test)]
