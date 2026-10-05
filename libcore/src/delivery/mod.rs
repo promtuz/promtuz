@@ -268,6 +268,11 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
     let rows = due_tx(&outbox.lock(), now).unwrap_or_default();
     for row in rows {
         let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
+        log::debug!(
+            "OUTBOX: retry dispatch {}, op={op:?}, previous attempts={}",
+            hex::encode(&row.id),
+            row.attempts,
+        );
         let target: Option<[u8; 32]> =
             row.target_ipk.as_ref().and_then(|t| t.as_slice().try_into().ok());
         let mut accepted_timestamp = None;

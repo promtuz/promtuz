@@ -192,6 +192,12 @@ pub(crate) struct ControlDeferred;
 async fn send_control_inner(
     conversation: [u8; 16], payload: AppPayload, wake: Wake, only: Option<[u8; 32]>,
 ) -> Result<()> {
+    let kind = match &payload {
+        AppPayload::AvatarSync { .. } => "avatar probe",
+        AppPayload::ProfileDetailsSync { .. } => "profile details probe",
+        AppPayload::GroupPicture { .. } => "group picture",
+        _ => "control",
+    };
     // Offers, call signaling and profile probes describe current state, so they are never retried,
     // and offers and calls carry a TTL so the relay drops them once stale.
     let ttl_ms = match &payload {
@@ -239,6 +245,11 @@ async fn send_control_inner(
     // A signed group's copies carry a branch-derived wire id.
     let _dispatch =
         ControlDispatchGuard { id: copies.first().map_or(id, |c| c.1), ephemeral: !durable };
+    log::debug!(
+        "CONTROL: {kind}, dispatch {}, {} recipient(s), ttl_ms={ttl_ms}",
+        hex::encode(&_dispatch.id[..8]),
+        copies.len(),
+    );
     // Queued for every member: fine when durable, a failure when not.
     if crate::groups::recovery::dispatch(copies).await == 0 && !durable {
         return Err(ControlDeferred.into());
