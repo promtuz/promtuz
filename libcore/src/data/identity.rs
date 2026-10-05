@@ -132,6 +132,7 @@ impl Identity {
 
     pub fn set_details(name: &str, bio: &str) -> Result<()> {
         set_details_tx(&core().db.identity().lock(), name, bio, now_ms())?;
+        crate::profile_sync::store::wake();
         crate::data::peer_avatar::notify_changed();
         Ok(())
     }
@@ -154,6 +155,7 @@ impl Identity {
             set_avatar_tx(&conn, avif, now_ms())?
         };
         crate::data::peer_avatar::notify_changed();
+        crate::profile_sync::store::wake();
         Ok(revision)
     }
 

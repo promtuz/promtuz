@@ -192,6 +192,24 @@ pub(crate) struct ControlDeferred;
 async fn send_control_inner(
     conversation: [u8; 16], payload: AppPayload, wake: Wake, only: Option<[u8; 32]>,
 ) -> Result<()> {
+    use common::proto::profile::Field;
+    let fields: &[Field] = match &payload {
+        AppPayload::Profile { .. } => &[Field::Name],
+        AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. } => &[Field::Avatar],
+        AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. } => &[Field::Name, Field::Bio],
+        _ => &[],
+    };
+    if !fields.is_empty() {
+        if crate::profile_sync::store::uses_service().await {
+            crate::profile_sync::store::wake();
+            return Ok(());
+        }
+        let private_pair = Conversation::get(&conversation).is_some_and(|c| c.kind == crate::data::conversation::KIND_DIRECT);
+        let peer = Conversation::peer_of(&conversation);
+        if !private_pair || !peer.is_some_and(|p| fields.iter().all(|f| crate::profile_sync::store::allows(*f, &p))) {
+            return Ok(());
+        }
+    }
     let kind = match &payload {
         AppPayload::AvatarSync { .. } => "avatar probe",
         AppPayload::ProfileDetailsSync { .. } => "profile details probe",
@@ -203,6 +221,7 @@ async fn send_control_inner(
     let ttl_ms = match &payload {
         AppPayload::P2pOffer { .. } => crate::p2p::OFFER_TTL_MS,
         AppPayload::Call(_) => crate::call::SIGNAL_TTL_MS,
+        AppPayload::AvatarSync { .. } | AppPayload::ProfileDetailsSync { .. } => 60_000,
         _ => 0,
     };
     let durable = ttl_ms == 0

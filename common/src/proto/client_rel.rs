@@ -336,6 +336,7 @@ pub enum CRelayPacket {
     SubscribePresenceDurable(SubscribePresenceP),
     /// Like SetPresence, with acknowledgement after the observation reaches stable storage.
     SetPresenceDurable(PresenceMode),
+    Profile(crate::proto::profile::Request),
 }
 
 /// Variant ordinals are wire format: append only.
@@ -396,6 +397,9 @@ pub enum SRelayPacket {
     PresenceAck {
         accepted: bool,
     },
+    Profile(crate::proto::profile::Response),
+    /// Ephemeral invalidation; fetch the latest signed state. Never enters a recipient queue.
+    ProfileChanged { owner: Bytes<32> },
 }
 
 impl Sender for CRelayPacket {}

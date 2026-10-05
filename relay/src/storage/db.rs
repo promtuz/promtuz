@@ -63,6 +63,7 @@ pub struct Store {
     pub messages: Queue,
     pub queue: Queue,
     pub key_packages: super::key_packages::KeyPackages,
+    pub profiles: super::profiles::Profiles,
     pub welcome: Queue,
     /// IPK -> unix ms (u64 BE) when the client last left foreground-active.
     pub last_seen: Keyspace,
@@ -103,6 +104,7 @@ impl Store {
         let messages = open(KS_MESSAGES)?;
         let queue = open(KS_DHT_QUEUE)?;
         let key_packages = super::key_packages::KeyPackages::open(&db)?;
+        let profiles = super::profiles::Profiles::open(&db)?;
         let welcome = open(KS_DHT_WELCOME)?;
         let [messages, queue, welcome] =
             Queue::open(&db, messages, queue, welcome).context("index queued messages")?;
@@ -137,6 +139,7 @@ impl Store {
             messages,
             queue,
             key_packages,
+            profiles,
             welcome,
             last_seen,
             presence_consent,

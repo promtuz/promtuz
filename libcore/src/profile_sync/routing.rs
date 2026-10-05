@@ -18,6 +18,7 @@ pub(crate) fn routes(owner: &[u8; 32]) -> HashMap<[u8; 32], Vec<[u8; 16]>> {
     chats.sort_by_key(|c| c.kind != KIND_DIRECT);
     let mut routes: HashMap<_, Vec<_>> = HashMap::new();
     for chat in chats {
+        if chat.kind != KIND_DIRECT { continue; }
         if crate::requests::is_request_chat(&chat.id)
             || crate::groups::is_leaving(&chat.id)
             || crate::groups::delete_pending(&chat.id)
@@ -30,6 +31,7 @@ pub(crate) fn routes(owner: &[u8; 32]) -> HashMap<[u8; 32], Vec<[u8; 16]>> {
             continue;
         }
         for member in group.roster().into_iter().filter(|m| m != owner) {
+            if !crate::data::contact::Contact::is_paired(&member) { continue; }
             routes.entry(member).or_default().push(chat.id);
         }
     }

@@ -251,6 +251,7 @@ pub struct Session {
     /// Held by the outbox pass in progress.
     pub(crate) reconciling: Mutex<()>,
     services: tokio::sync::OnceCell<common::contracts::Support>,
+    pub(crate) profile_registered: tokio::sync::OnceCell<()>,
 }
 
 impl Session {
@@ -270,6 +271,7 @@ impl Session {
             runtime: core.runtime.clone(),
             reconciling: Mutex::new(()),
             services: tokio::sync::OnceCell::new(),
+            profile_registered: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -503,6 +505,12 @@ impl Session {
                         },
                         SRelayPacket::Presence(list) => {
                             handle_presence(list);
+                            Ok(())
+                        },
+                        SRelayPacket::ProfileChanged { owner } => {
+                            if crate::data::contact::Contact::is_paired(&owner.0) {
+                                crate::profile_sync::store::invalidate(owner.0);
+                            }
                             Ok(())
                         },
                         // An ack authorization only ever answers our own

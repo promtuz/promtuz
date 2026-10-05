@@ -232,6 +232,7 @@ pub fn import(blob: &[u8], replace: bool) -> Result<BackupMergeReport> {
     let secret = Identity::secret_key_with_manager()?;
     let report = import_into(&core().db, &backup_key(&secret), blob, replace);
     crate::data::peer_avatar::notify_changed();
+    crate::profile_sync::store::wake();
     report
 }
 

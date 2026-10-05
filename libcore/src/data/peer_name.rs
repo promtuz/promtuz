@@ -40,7 +40,7 @@ pub fn resolve_claimed(who: &[u8; 32]) -> (String, bool) {
 /// Their profile name, the address book, then a group-asserted name, and whether it is only their
 /// own claim.
 pub fn named(who: &[u8; 32]) -> Option<(String, bool)> {
-    if let Some(profile) = crate::data::peer_profile::get(who) {
+    if let Some(profile) = crate::data::peer_profile::get(who).filter(|p| !p.name.is_empty()) {
         return Some((profile.name, true));
     }
     if let Some(c) = crate::data::contact::Contact::get(who).filter(|c| !c.inner.name.is_empty()) {

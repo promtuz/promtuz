@@ -16,3 +16,7 @@ pub mod key_inventory;
 /// acknowledgement. Read interests never imply consent to publish one's own state.
 pub const DURABLE_PRESENCE: u16 = 3;
 pub const DURABLE_PRESENCE_VERSION: u16 = 1;
+
+/// Atomic, locally durable latest encrypted profile fields and reader grants, without DHT.
+pub const PROFILE_STORE: u16 = 4;
+pub const PROFILE_STORE_VERSION: u16 = 1;

@@ -21,7 +21,7 @@ pub(crate) struct Card {
     pub request_key: [u8; 32],
     pub signature: Bytes<64>,
 }
-fn hpke() -> Hpke<HpkeRustCrypto> {
+pub(crate) fn hpke() -> Hpke<HpkeRustCrypto> {
     Hpke::new(
         Mode::Base,
         KemAlgorithm::DhKem25519,
@@ -30,10 +30,13 @@ fn hpke() -> Hpke<HpkeRustCrypto> {
     )
 }
 fn keys(signing: &SigningKey) -> Result<HpkeKeyPair> {
+    derive_keys(signing, b"promtuz-contact-request-key-v1")
+}
+pub(crate) fn derive_keys(signing: &SigningKey, domain: &[u8]) -> Result<HpkeKeyPair> {
     let seed = Zeroizing::new(signing.to_bytes());
     let mut ikm = Zeroizing::new([0u8; 32]);
     hkdf::Hkdf::<sha2::Sha256>::new(None, seed.as_ref())
-        .expand(b"promtuz-contact-request-key-v1", ikm.as_mut())
+        .expand(domain, ikm.as_mut())
         .map_err(|_| anyhow!("key derivation"))?;
     hpke().derive_key_pair(ikm.as_ref()).map_err(|e| anyhow!("request key: {e:?}"))
 }

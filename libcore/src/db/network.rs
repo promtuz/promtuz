@@ -111,6 +111,8 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("ALTER TABLE relays ADD COLUMN assist INTEGER NOT NULL DEFAULT 0;"),
     M::up("CREATE TABLE presence_interest (peer BLOB PRIMARY KEY CHECK(length(peer) = 32));
            INSERT INTO presence_interest SELECT peer FROM presence_contacts;"),
+    M::up("CREATE TABLE profile_publication (owner BLOB NOT NULL, field INTEGER NOT NULL,
+             fingerprint BLOB NOT NULL, publication BLOB NOT NULL, PRIMARY KEY(owner, field));"),
 ];
 pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

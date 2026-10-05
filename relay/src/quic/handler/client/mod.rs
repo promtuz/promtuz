@@ -61,12 +61,16 @@ pub(crate) struct ClientLimits {
     pub register_push:      DirectLimiter,
     pub fetch_keypackage:   TargetLimiter,
     pub dispatch:           DirectLimiter,
+    pub profile_read:       DirectLimiter,
+    pub profile_write:      DirectLimiter,
 }
 
 impl ClientLimits {
     fn new() -> Self {
         let per_minute = |n| RateLimiter::direct(quota(n, n));
         Self {
+            profile_read:       per_minute(8192),
+            profile_write:      per_minute(30),
             dispatch:           RateLimiter::direct(quota(DISPATCH_PER_MIN, DISPATCH_BURST)),
             subscribe_presence: per_minute(SUBSCRIBE_PRESENCE_PER_MIN),
             set_presence:       per_minute(SET_PRESENCE_PER_MIN),

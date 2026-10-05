@@ -511,6 +511,9 @@ const MIGRATION_ARRAY: &[M] = &[
         WHERE m.outgoing=0 AND m.system=0 AND m.dispatch_id IS NOT NULL;
         CREATE INDEX idx_incoming_pending ON incoming_receipts(message_id) WHERE pending=1;
         CREATE INDEX idx_incoming_unread ON incoming_receipts(message_id) WHERE is_read=0;"),
+    M::up("CREATE TABLE profile_fields (owner BLOB NOT NULL, field INTEGER NOT NULL,
+             object BLOB NOT NULL, version INTEGER NOT NULL, withdrawn INTEGER NOT NULL,
+             PRIMARY KEY(owner, field));"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -539,6 +542,8 @@ pub(super) const WATCHED: &[&str] = &[
 
 pub fn migrate(conn: &mut Connection) {
     super::prepare(conn, &MIGRATIONS);
+    // Profile withdrawals and privacy policies must not roll back after power loss.
+    conn.pragma_update(None, "synchronous", "FULL").expect("durable message/profile state");
 }
 
 #[cfg(test)]

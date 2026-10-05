@@ -1,6 +1,7 @@
 pub mod db;
 pub mod key_packages;
 pub mod queue;
+pub mod profiles;
 
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::Wake;

@@ -23,6 +23,7 @@ pub mod forward;
 pub mod misc;
 pub mod mls_relay;
 pub mod presence;
+mod profile;
 
 /// Bounds opening an outbound stream: a remote that grants no stream credit would pin the task.
 pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,6 +66,7 @@ pub(super) async fn handle_packet(
 
     match packet {
         Query(query) => handle_misc(query, ctx.clone(), tx).await,
+        Profile(request) => profile::handle(request, ctx.clone(), tx).await,
         Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue => handle_drain_queue(ctx.clone(), tx).await,
         AckDrain { ids } => handle_ack_drain(ctx.clone(), ids, tx).await,
@@ -125,6 +127,7 @@ pub(super) async fn handle_packet(
             use common::proto::{Sender, client_rel::SRelayPacket};
             use common::contracts::{Support, services};
             let mut offers = vec![(services::DURABLE_PRESENCE, vec![services::DURABLE_PRESENCE_VERSION])];
+            offers.push((services::PROFILE_STORE, vec![services::PROFILE_STORE_VERSION]));
             if ctx.relay.dht.is_some() {
                 offers.extend([
                     (services::KEY_PACKAGE_CUSTODY, vec![services::KEY_PACKAGE_CUSTODY_VERSION]),

@@ -115,6 +115,7 @@ pub fn person_profile(ipk: Vec<u8>) -> Result<PersonProfile, CoreError> {
     Ok(PersonProfile {
         name: profile
             .as_ref()
+            .filter(|p| !p.name.is_empty())
             .map(|p| p.name.clone())
             .or_else(|| crate::data::peer_name::named(&who).map(|(name, _)| name))
             .unwrap_or_default(),

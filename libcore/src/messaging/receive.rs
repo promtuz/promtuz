@@ -752,7 +752,9 @@ pub(crate) fn receive_application_content(
         Ok(AppPayload::Profile { name }) => {
             // Their claim about themselves, kept apart from the address book so it never overwrites
             // a name we chose.
-            crate::data::peer_name::put(&author, &name)?;
+            if !crate::profile_sync::store::has_field(&core().db.messages().lock(), &author, common::proto::profile::Field::Name) {
+                crate::data::peer_name::put(&author, &name)?;
+            }
         },
         Ok(
             payload @ (AppPayload::ProfileDetails { .. }

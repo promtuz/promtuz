@@ -19,6 +19,8 @@ use crate::db::one;
 use crate::state::core;
 
 mod routing;
+mod crypto;
+pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 
@@ -204,6 +206,14 @@ fn receive_tx(
 /// `peer` is the authenticated MLS author, never a key supplied in the payload.
 pub(crate) fn receive(conversation: [u8; 16], peer: [u8; 32], payload: AppPayload) {
     let Some(part) = Part::of(&payload) else { return };
+    {
+        use common::proto::profile::Field;
+        let conn = core().db.messages().lock();
+        if match part {
+            Part::Avatar => store::has_field(&conn, &peer, Field::Avatar),
+            Part::Details => store::has_field(&conn, &peer, Field::Name) || store::has_field(&conn, &peer, Field::Bio),
+        } { return; }
+    }
     // Never nest the identity lock inside the messages lock.
     let own = Identity::get().map(|i| (i.ipk(), part.own(&i)));
     let result = receive_tx(&core().db.messages().lock(), own.as_ref(), &peer, payload);
@@ -292,6 +302,12 @@ async fn reconcile_group_pictures(owner: &[u8; 32], all: bool) {
     }
 }
 async fn reconcile(all: bool) {
+    let _update = core().profile_update.lock().await;
+    match store::reconcile().await {
+        Ok(true) => return,
+        Err(e) => { log::warn!("PROFILE: latest-state reconciliation deferred: {e}"); return; },
+        Ok(false) => {},
+    }
     let Some(identity) = Identity::get() else { return };
     let owner = identity.ipk();
     let avatar = identity.avatar_update().revision;
@@ -315,17 +331,29 @@ async fn reconcile(all: bool) {
 
 pub(crate) async fn run(cancel: CancellationToken) {
     let mut all = true;
+    let mut full = true;
+    let mut maintenance = tokio::time::interval(RETRY_INTERVAL);
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    maintenance.tick().await;
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            _ = reconcile(all) => {},
+            _ = async {
+                if full { reconcile(all).await; }
+                else if let Err(e) = store::refresh_pending().await { log::debug!("PROFILE: live refresh deferred: {e}"); }
+            } => {},
         }
         all = false;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(RETRY_INTERVAL) => {},
+            _ = maintenance.tick() => { full = true; },
+            _ = core().profile_changed.notified() => {
+                // Coalesce several field edits/notifications into one latest-state pass.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                full = core().profile_publish.swap(false, std::sync::atomic::Ordering::AcqRel);
+            },
         }
     }
 }

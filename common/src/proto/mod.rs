@@ -14,6 +14,7 @@ pub mod mls_wire;
 pub mod p2p_relay;
 pub mod pack;
 pub mod push;
+pub mod profile;
 #[cfg(all(feature = "server", feature = "proto"))]
 pub mod relay_res;
 pub mod sticker;

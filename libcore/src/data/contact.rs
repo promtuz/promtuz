@@ -150,20 +150,24 @@ impl Contact {
 
     pub fn accept_request(ipk: &[u8; 32]) -> Result<bool> {
         let conn = core().db.contacts().lock();
-        Ok(conn.execute(
+        let changed = conn.execute(
             "UPDATE contacts SET status = ?1 WHERE ipk = ?2 AND status = ?3",
             params![PAIR_STATUS_PAIRED, ipk, PAIR_STATUS_REQUEST],
-        )? == 1)
+        )? == 1;
+        crate::profile_sync::store::wake();
+        Ok(changed)
     }
 
     /// They deleted our pair. The contact stays, pending the fresh pair our next
     /// message starts; until they accept it, they are no longer confirmed.
     pub fn unpair(ipk: &[u8; 32]) -> Result<bool> {
         let conn = core().db.contacts().lock();
-        Ok(conn.execute(
+        let changed = conn.execute(
             "UPDATE contacts SET mls_group_id = NULL, status = ?1 WHERE ipk = ?2 AND status IN (?1, ?3)",
             params![PAIR_STATUS_PENDING, ipk, PAIR_STATUS_PAIRED],
-        )? == 1)
+        )? == 1;
+        crate::profile_sync::store::wake();
+        Ok(changed)
     }
 
     pub fn count_requests() -> u32 {
@@ -174,6 +178,7 @@ impl Contact {
 
     pub fn mark_paired(ipk: &[u8; 32]) {
         let _ = Self::mark_paired_tx(&core().db.contacts().lock(), ipk);
+        crate::profile_sync::store::wake();
     }
 
     pub(crate) fn mark_paired_tx(conn: &Connection, ipk: &[u8; 32]) -> rusqlite::Result<usize> {
@@ -219,6 +224,7 @@ impl Contact {
     pub fn delete(ipk: &[u8; 32]) -> Result<()> {
         let conn = core().db.contacts().lock();
         conn.execute("DELETE FROM contacts WHERE ipk = ?1", params![ipk])?;
+        crate::profile_sync::store::wake();
         Ok(())
     }
 }
