@@ -191,7 +191,7 @@ impl MlsGroupHandle {
                 .padding_size(super::MLS_PADDING_SIZE)
                 .use_ratchet_tree_extension(true)
                 .sender_ratchet_configuration(
-                    inner.configuration().sender_ratchet_configuration().clone(),
+                    *inner.configuration().sender_ratchet_configuration(),
                 )
                 .build();
             if inner.configuration() != &config {
@@ -1081,7 +1081,7 @@ mod tests {
         // The epoch secrets are written after the new tree and context.
         let mid_merge =
             format!("INSERT ON mls_storage WHEN NEW.key_tag = {}", tags::GROUP_EPOCH_SECRETS);
-        assert!(with_failing_trigger(&bob.db, &mid_merge, &apply).is_err());
+        assert!(with_failing_trigger(&bob.db, &mid_merge, apply).is_err());
         assert_eq!(dump(&bob.db), before, "nothing of the new epoch is left");
         apply().unwrap();
         let mut gb = bob.group(&gid);

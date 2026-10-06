@@ -250,7 +250,7 @@ async fn handle_one_stream(
         super::lookup::probe_pending_ping(&dht, outcome);
     }
 
-    let bytes = match DhtPacket::Response(resp).pack() {
+    let bytes = match DhtPacket::Response(Box::new(resp)).pack() {
         Ok(b) => b,
         Err(_) => {
             CloseReason::DhtMalformedKey.close(&conn);
@@ -264,9 +264,9 @@ async fn handle_one_stream(
 }
 
 pub(crate) async fn handle_dht_request(
-    dht: &Arc<Dht>, req: DhtRequest, authenticated_peer_id: NodeId,
+    dht: &Arc<Dht>, req: Box<DhtRequest>, authenticated_peer_id: NodeId,
 ) -> DhtResponse {
-    match req {
+    match *req {
         DhtRequest::ServiceCapabilities => DhtResponse::ServiceCapabilities { supported: super::mls::service_support().encode().into() },
         DhtRequest::KeyPackageInventory { request } => DhtResponse::KeyPackageInventory {
             inventory: super::mls::inventory::handle(dht, &request.0, authenticated_peer_id, now_ms()).await.into(),
@@ -383,39 +383,39 @@ mod tests {
     use crate::test_support::put_queued;
     use crate::test_support::queued;
 
-    fn forward(relay: &SigningKey, sent: &DispatchP, now: u64) -> DhtRequest {
+    fn forward(relay: &SigningKey, sent: &DispatchP, now: u64) -> Box<DhtRequest> {
         let sender_relay_id = NodeId::new(relay.verifying_key().to_bytes());
         let sig = relay.sign(&forward_signing_input(&sent.id.0, &sender_relay_id, now)).to_bytes();
-        DhtRequest::Forward(Forward {
+        Box::new(DhtRequest::Forward(Forward {
             dispatch: sent.clone(),
             sender_relay_id,
             timestamp: now,
             sig: sig.into(),
-        })
+        }))
     }
 
-    fn fetch(user: &SigningKey, requester: NodeId, now: u64) -> DhtRequest {
+    fn fetch(user: &SigningKey, requester: NodeId, now: u64) -> Box<DhtRequest> {
         let user_ipk = user.verifying_key().to_bytes();
         let sig = user.sign(&queue_fetch_signing_input(&user_ipk, &requester, now)).to_bytes();
-        DhtRequest::QueueFetch(QueueFetch {
+        Box::new(DhtRequest::QueueFetch(QueueFetch {
             user_ipk:           user_ipk.into(),
             requester_relay_id: requester,
             timestamp:          now,
             user_sig:           sig.into(),
-        })
+        }))
     }
 
-    fn ack(user: &SigningKey, requester: NodeId, ids: Vec<[u8; 16]>, now: u64) -> DhtRequest {
+    fn ack(user: &SigningKey, requester: NodeId, ids: Vec<[u8; 16]>, now: u64) -> Box<DhtRequest> {
         let user_ipk = user.verifying_key().to_bytes();
         let sig =
             user.sign(&queue_fetch_ack_signing_input(&user_ipk, &requester, &ids, now)).to_bytes();
-        DhtRequest::QueueFetchAck(QueueFetchAck {
+        Box::new(DhtRequest::QueueFetchAck(QueueFetchAck {
             user_ipk:           user_ipk.into(),
             requester_relay_id: requester,
             delivered_ids:      ids,
             timestamp:          now,
             user_sig:           sig.into(),
-        })
+        }))
     }
 
     fn stored(outcome: ForwardOutcome) -> DhtResponse {
@@ -448,13 +448,13 @@ mod tests {
         let bob_ipk = bob.verifying_key().to_bytes();
         let sent = dispatch(&key(3), bob_ipk, [1; 16], b"offline");
         let mut forged_relay = forward(&relay, &sent, now);
-        if let DhtRequest::Forward(f) = &mut forged_relay {
+        if let DhtRequest::Forward(f) = &mut *forged_relay {
             f.sig.0[0] ^= 1;
         }
         let mut forged_user = sent.clone();
         forged_user.sig.0[0] ^= 1;
         let mut bad_ack = ack(&bob, drainer, vec![[1; 16]], now);
-        if let DhtRequest::QueueFetchAck(a) = &mut bad_ack {
+        if let DhtRequest::QueueFetchAck(a) = &mut *bad_ack {
             a.user_sig.0[0] ^= 1;
         }
 

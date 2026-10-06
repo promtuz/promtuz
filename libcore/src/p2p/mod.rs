@@ -442,10 +442,10 @@ async fn wait_for_cached_link(ep: Arc<P2pEndpoint>, peer: [u8; 32]) -> Result<Pe
 }
 
 pub(crate) fn drop_link(peer: &[u8; 32]) {
-    if let Some(ep) = core().p2p.endpoint.lock().clone() {
-        if let Some(link) = ep.links.lock().links.remove(peer) {
-            link.conn.close(0u32.into(), b"contact forgotten");
-        }
+    if let Some(ep) = core().p2p.endpoint.lock().clone()
+        && let Some(link) = ep.links.lock().links.remove(peer)
+    {
+        link.conn.close(0u32.into(), b"contact forgotten");
     }
 }
 

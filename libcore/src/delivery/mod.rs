@@ -29,6 +29,7 @@ use crate::data::message::STATUS_FAILED;
 use crate::data::message::STATUS_SENT;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
+use crate::groups::recovery::Copy;
 use crate::quic::dht_client::DhtClient;
 use crate::quic::server::Session;
 use crate::state::core;
@@ -89,18 +90,18 @@ pub(crate) fn enqueue_checked(id:&[u8],op:OpType,target:Option<[u8;32]>,payload:
     enqueue_tx(&core().db.outbox().lock(),id,op,target,payload)
 }
 
-pub(crate) fn enqueue_batch(copies:&mut [([u8;32],[u8;16],OpType,Vec<u8>)])->anyhow::Result<()> {
+pub(crate) fn enqueue_batch(copies:&mut [Copy])->anyhow::Result<()> {
     enqueue_batch_in(&mut core().db.outbox().lock(), copies)
 }
 
-pub(crate) fn enqueue_batch_in(conn: &mut Connection, copies: &mut [([u8;32],[u8;16],OpType,Vec<u8>)]) -> anyhow::Result<()> {
+pub(crate) fn enqueue_batch_in(conn: &mut Connection, copies: &mut [Copy]) -> anyhow::Result<()> {
     let tx=conn.transaction()?;
     batch_tx(&tx, copies)?;
     tx.commit()?;Ok(())
 }
 
 fn batch_tx(
-    tx: &Connection, copies: &mut [([u8; 32], [u8; 16], OpType, Vec<u8>)],
+    tx: &Connection, copies: &mut [Copy],
 ) -> anyhow::Result<()> {
     for (to,id,op,bytes) in copies {
         enqueue_tx(tx,id,*op,Some(*to),bytes)?;
@@ -115,7 +116,7 @@ fn batch_tx(
 /// Queues a commit's copies with the mark that it left the device, built at `epoch`, so neither
 /// lands without the other.
 pub(crate) fn enqueue_commit(
-    copies: &mut [([u8; 32], [u8; 16], OpType, Vec<u8>)], group: &[u8; 32], epoch: u64,
+    copies: &mut [Copy], group: &[u8; 32], epoch: u64,
 ) -> anyhow::Result<()> {
     let mut conn = core().db.outbox().lock();
     let tx = conn.transaction()?;
@@ -321,11 +322,11 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
                 retire_tx(&outbox.lock(), &row.id, target).ok();
             },
             Next::Dead => {
-                if op == OpType::Message {
-                    if let Err(e) = crate::data::receipts::send_result(&row.id, target, STATUS_FAILED, None) {
-                        warn!("MESSAGE: failure persistence failed, retaining outbox: {e}");
-                        continue;
-                    }
+                if op == OpType::Message
+                    && let Err(e) = crate::data::receipts::send_result(&row.id, target, STATUS_FAILED, None)
+                {
+                    warn!("MESSAGE: failure persistence failed, retaining outbox: {e}");
+                    continue;
                 }
                 mark_dead_tx(&outbox.lock(), &row.id, target).ok();
             },
@@ -480,7 +481,7 @@ pub(crate) async fn dispatch_queued(
             debug!("MESSAGE: {} send stream failed to open; left in outbox", hex::encode(&to[..4]));
             return LastOutcome::Silence;
         };
-        if send.write_all(&bytes).await.is_err() || send.finish().is_err() {
+        if send.write_all(bytes).await.is_err() || send.finish().is_err() {
             debug!("MESSAGE: {} interrupted mid-send; left in outbox", hex::encode(&to[..4]));
             return LastOutcome::Silence;
         }

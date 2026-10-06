@@ -286,7 +286,7 @@ pub(crate) fn verified_count_tx(conn: &Connection, p: &Partial) -> u32 {
     let Ok(Some(bits)) = verified_bitmap_tx(conn, &p.file_id) else { return prefix };
     if chunks > (8 * 1024 * 1024 / 32)
         || bits.len() as u64 != chunks.div_ceil(8)
-        || (chunks % 8 != 0 && bits.last().is_some_and(|last| last >> (chunks % 8) != 0))
+        || (!chunks.is_multiple_of(8) && bits.last().is_some_and(|last| last >> (chunks % 8) != 0))
     {
         return 0;
     }

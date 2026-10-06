@@ -106,10 +106,9 @@ fn remove(c: &Core, targets: Vec<StorageTarget>) -> anyhow::Result<u32> {
         let fid: Option<Vec<u8>> = tx.query_row(
             "SELECT file_id FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conv.as_slice(), did.as_slice()), |r| r.get(0))?;
-        if let Some(fid) = fid.and_then(|f| <[u8; 32]>::try_from(f).ok()) {
-            if crate::staging::holds(c, &fid) || store::partial_get_tx(&c.db.transfers().lock(), &fid)
-                .is_some_and(|p| !p.is_complete()) { continue; }
-        }
+        if let Some(fid) = fid.and_then(|f| <[u8; 32]>::try_from(f).ok())
+            && (crate::staging::holds(c, &fid) || store::partial_get_tx(&c.db.transfers().lock(), &fid)
+                .is_some_and(|p| !p.is_complete())) { continue; }
         tx.execute("DELETE FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conv.as_slice(), did.as_slice()))?;
         if let Some(fid) = crate::data::media::drop_row_tx(&tx, &conv, &did)? { orphans.push(fid); }

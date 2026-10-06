@@ -127,7 +127,7 @@ impl Queue {
     pub fn get(&self, key: impl AsRef<[u8]>) -> fjall::Result<Option<UserValue>> {
         self.ks.get(key)
     }
-    pub fn len(&self) -> fjall::Result<usize> {
+    pub(crate) fn len(&self) -> fjall::Result<usize> {
         self.ks.len()
     }
 

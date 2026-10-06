@@ -654,12 +654,12 @@ pub(crate) fn receive_application_content(
                     let from = author;
                     // Fetch the bytes without a tap only from a paired contact over a trusted
                     // network; otherwise the UI drives the pull.
-                    if let Some((size, file_id)) = auto {
-                        if crate::transfer::should_auto_download(&from, size, false) {
-                            core().spawn(async move {
-                                let _ = crate::transfer::download(file_id).await;
-                            });
-                        }
+                    if let Some((size, file_id)) = auto
+                        && crate::transfer::should_auto_download(&from, size, false)
+                    {
+                        core().spawn(async move {
+                            let _ = crate::transfer::download(file_id).await;
+                        });
                     }
                     // A sticker is small and named by hash: fetch it now so
                     // the chat opens on the picture, not on a fetch.
@@ -729,12 +729,11 @@ pub(crate) fn receive_application_content(
                 }
             }
             // A new member needs the current group picture.
-            if let SystemEvent::Added { who } = &event {
-                if who.0
+            if let SystemEvent::Added { who } = &event
+                && who.0
                     != crate::data::identity::Identity::local_ipk().unwrap_or_default()
-                {
-                    crate::messaging::welcome::send_group_picture_to(conv, who.0);
-                }
+            {
+                crate::messaging::welcome::send_group_picture_to(conv, who.0);
             }
             match Message::save_system(conv, actor, &dispatch_id, code, &target, ts, false) {
                 Ok(Some(row)) => MessageEv::Received {

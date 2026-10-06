@@ -22,105 +22,6 @@ pub struct Profiles {
     write: parking_lot::Mutex<()>,
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use common::proto::profile::{Grant, Value};
-    use ed25519_dalek::{Signer, SigningKey};
-
-    pub(crate) fn fixture(version: u64, readers: Vec<[u8; 32]>) -> (ReaderKey, Publication) {
-        let key = SigningKey::from_bytes(&[31; 32]);
-        let owner = key.verifying_key().to_bytes();
-        let mut reader =
-            ReaderKey { owner: owner.into(), key: [32; 32].into(), signature: [0; 64].into() };
-        reader.signature = key.sign(&reader.input()).to_bytes().into();
-        let mut value = Value {
-            owner: owner.into(),
-            field: Field::Avatar,
-            object: [33; 32].into(),
-            version,
-            ciphertext: vec![version as u8; 40].into(),
-            signature: [0; 64].into(),
-        };
-        value.signature = key.sign(&value.input()).to_bytes().into();
-        let mut grants: Vec<_> = readers
-            .into_iter()
-            .map(|reader| Grant {
-                reader: reader.into(),
-                encapsulated: [34; 32].into(),
-                wrapped_key: [35; 48].into(),
-            })
-            .collect();
-        grants.sort_by_key(|g| g.reader.0);
-        (reader, Publication { value, grants })
-    }
-
-    #[test]
-    fn replacement_revocation_and_usage_survive_abrupt_exit() {
-        const CHILD: &str = "PROMTUZ_PROFILE_CRASH_PATH";
-        let (key, original) = fixture(1, vec![[42; 32]]);
-        let owner = key.owner.0;
-        let (_, revoked) = fixture(3, vec![]);
-        if let Some(path) = std::env::var_os(CHILD) {
-            let store = crate::storage::db::Store::open(path).unwrap();
-            assert!(store.profiles.register(&owner, &key).unwrap());
-            assert!(store.profiles.publish(&owner, &original).unwrap());
-            assert!(store.profiles.publish(&owner, &original).unwrap(), "lost ACK retry");
-            let (_, middle) = fixture(2, vec![[42; 32]]);
-            std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    store.profiles.publish(&owner, &middle).unwrap();
-                });
-                scope.spawn(|| {
-                    store.profiles.publish(&owner, &revoked).unwrap();
-                });
-            });
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(store.persist_barrier().wait())
-                .unwrap();
-            std::process::exit(0);
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "storage::profiles::tests::replacement_revocation_and_usage_survive_abrupt_exit",
-            ])
-            .env(CHILD, dir.path())
-            .status()
-            .unwrap();
-        assert!(result.success());
-        let store = crate::storage::db::Store::open(dir.path()).unwrap();
-        assert_eq!(
-            store.profiles.fetch(&[42; 32], &owner, Field::Avatar, Some(1)).unwrap(),
-            Response::Withdrawn { value: revoked.value.clone() }
-        );
-        assert!(!store.profiles.publish(&owner, &original).unwrap());
-        assert!(store.profiles.publish(&owner, &revoked).unwrap());
-        assert_eq!(store.profiles.values.len().unwrap(), 1);
-        let usage = store.profiles.usage.get(b"bytes").unwrap().unwrap();
-        assert_eq!(
-            u64::from_be_bytes(usage.as_ref().try_into().unwrap()),
-            revoked.ser().unwrap().len() as u64
-        );
-        assert!(store.profiles.publish(&[9; 32], &original).is_err());
-        let (_, mut invalid) = fixture(4, vec![[42; 32]]);
-        invalid.value.ciphertext[0] ^= 1;
-        assert!(store.profiles.publish(&owner, &invalid).is_err());
-        let (_, mut invalid) = fixture(4, vec![[42; 32], [42; 32]]);
-        assert!(store.profiles.publish(&owner, &invalid).is_err());
-        invalid.grants.clear();
-        invalid.value.ciphertext = vec![0; MAX_CIPHERTEXT + 1].into();
-        assert!(store.profiles.publish(&owner, &invalid).is_err());
-        assert_eq!(
-            store.profiles.head(&owner, Field::Avatar).unwrap(),
-            Response::Head(Some((revoked.value.object, 3)))
-        );
-    }
-}
 impl Profiles {
     pub fn open(db: &Database) -> Result<Self> {
         Ok(Self {
@@ -240,5 +141,105 @@ impl Profiles {
         let key = [owner.as_slice(), &[field.id()]].concat();
         let record = self.values.get(key)?.map(|v| Publication::deser(&v)).transpose()?;
         Ok(record.map_or_else(Vec::new, |p| p.grants.into_iter().map(|g| g.reader.0).collect()))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use common::proto::profile::{Grant, Value};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    pub(crate) fn fixture(version: u64, readers: Vec<[u8; 32]>) -> (ReaderKey, Publication) {
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let owner = key.verifying_key().to_bytes();
+        let mut reader =
+            ReaderKey { owner: owner.into(), key: [32; 32].into(), signature: [0; 64].into() };
+        reader.signature = key.sign(&reader.input()).to_bytes().into();
+        let mut value = Value {
+            owner: owner.into(),
+            field: Field::Avatar,
+            object: [33; 32].into(),
+            version,
+            ciphertext: vec![version as u8; 40].into(),
+            signature: [0; 64].into(),
+        };
+        value.signature = key.sign(&value.input()).to_bytes().into();
+        let mut grants: Vec<_> = readers
+            .into_iter()
+            .map(|reader| Grant {
+                reader: reader.into(),
+                encapsulated: [34; 32].into(),
+                wrapped_key: [35; 48].into(),
+            })
+            .collect();
+        grants.sort_by_key(|g| g.reader.0);
+        (reader, Publication { value, grants })
+    }
+
+    #[test]
+    fn replacement_revocation_and_usage_survive_abrupt_exit() {
+        const CHILD: &str = "PROMTUZ_PROFILE_CRASH_PATH";
+        let (key, original) = fixture(1, vec![[42; 32]]);
+        let owner = key.owner.0;
+        let (_, revoked) = fixture(3, vec![]);
+        if let Some(path) = std::env::var_os(CHILD) {
+            let store = crate::storage::db::Store::open(path).unwrap();
+            assert!(store.profiles.register(&owner, &key).unwrap());
+            assert!(store.profiles.publish(&owner, &original).unwrap());
+            assert!(store.profiles.publish(&owner, &original).unwrap(), "lost ACK retry");
+            let (_, middle) = fixture(2, vec![[42; 32]]);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    store.profiles.publish(&owner, &middle).unwrap();
+                });
+                scope.spawn(|| {
+                    store.profiles.publish(&owner, &revoked).unwrap();
+                });
+            });
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(store.persist_barrier().wait())
+                .unwrap();
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::profiles::tests::replacement_revocation_and_usage_survive_abrupt_exit",
+            ])
+            .env(CHILD, dir.path())
+            .status()
+            .unwrap();
+        assert!(result.success());
+        let store = crate::storage::db::Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.profiles.fetch(&[42; 32], &owner, Field::Avatar, Some(1)).unwrap(),
+            Response::Withdrawn { value: revoked.value.clone() }
+        );
+        assert!(!store.profiles.publish(&owner, &original).unwrap());
+        assert!(store.profiles.publish(&owner, &revoked).unwrap());
+        assert_eq!(store.profiles.values.len().unwrap(), 1);
+        let usage = store.profiles.usage.get(b"bytes").unwrap().unwrap();
+        assert_eq!(
+            u64::from_be_bytes(usage.as_ref().try_into().unwrap()),
+            revoked.ser().unwrap().len() as u64
+        );
+        assert!(store.profiles.publish(&[9; 32], &original).is_err());
+        let (_, mut invalid) = fixture(4, vec![[42; 32]]);
+        invalid.value.ciphertext[0] ^= 1;
+        assert!(store.profiles.publish(&owner, &invalid).is_err());
+        let (_, mut invalid) = fixture(4, vec![[42; 32], [42; 32]]);
+        assert!(store.profiles.publish(&owner, &invalid).is_err());
+        invalid.grants.clear();
+        invalid.value.ciphertext = vec![0; MAX_CIPHERTEXT + 1].into();
+        assert!(store.profiles.publish(&owner, &invalid).is_err());
+        assert_eq!(
+            store.profiles.head(&owner, Field::Avatar).unwrap(),
+            Response::Head(Some((revoked.value.object, 3)))
+        );
     }
 }

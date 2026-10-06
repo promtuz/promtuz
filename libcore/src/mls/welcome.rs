@@ -249,16 +249,16 @@ mod tests {
             credential:    BasicCredential::new(ipk.to_vec()).into(),
             signature_key: holder.leaf.public().into(),
         };
-        let pair = |gid| welcome(&alice, alice.credential(), gid, None, &[kp.clone()]);
+        let pair = |gid| welcome(&alice, alice.credential(), gid, None, std::slice::from_ref(&kp));
         let sealed = |w, gid, from: &Party, to: [u8; 32]| {
             make_welcome_envelope(w, gid, from.ipk, to, kp_ref(&kp), &from.identity).unwrap()
         };
         let three = welcome(&alice, alice.credential(), [1; 32], None, &[kp.clone(), carol.kp()]);
-        let impostor = welcome(&carol, claiming(dave.ipk, &carol), [2; 32], None, &[kp.clone()]);
+        let impostor = welcome(&carol, claiming(dave.ipk, &carol), [2; 32], None, std::slice::from_ref(&kp));
         let forged = [kp.clone(), dave.key_package(claiming(carol.ipk, &dave))];
         let forged = welcome(&alice, alice.credential(), [3; 32], Some(&room), &forged);
-        let daves = welcome(&dave, dave.credential(), [4; 32], None, &[kp.clone()]);
-        let unreadable = unreadable_rules(&alice, [5; 32], &[kp.clone()]);
+        let daves = welcome(&dave, dave.credential(), [4; 32], None, std::slice::from_ref(&kp));
+        let unreadable = unreadable_rules(&alice, [5; 32], std::slice::from_ref(&kp));
         let mut flipped = sealed(pair([8; 32]), [8; 32], &alice, bob.ipk);
         flipped.sender_sig.0[0] ^= 0xFF;
         let mut redirected = sealed(pair([9; 32]), [9; 32], &alice, bob.ipk);
@@ -306,7 +306,7 @@ mod tests {
         let room = GroupMeta::founded("book club".into(), alice.ipk);
         for (gid, meta) in [([7; 32], Some(room)), ([8; 32], None)] {
             let kp = bob.kp();
-            let w = welcome(&alice, alice.credential(), gid, meta.as_ref(), &[kp.clone()]);
+            let w = welcome(&alice, alice.credential(), gid, meta.as_ref(), std::slice::from_ref(&kp));
             let joined =
                 process_welcome(&bob.provider, &alice.envelope(&bob, gid, w, &kp)).unwrap();
             assert_eq!((joined.group_meta(), joined.member_count()), (meta, 2));

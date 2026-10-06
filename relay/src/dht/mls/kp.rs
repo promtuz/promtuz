@@ -346,7 +346,7 @@ mod tests {
         );
         check(
             "stale signature",
-            publish(&dht, &owner, &[a.clone()], now - 120_000, now).await,
+            publish(&dht, &owner, std::slice::from_ref(&a), now - 120_000, now).await,
             BadSig,
             &[],
         );

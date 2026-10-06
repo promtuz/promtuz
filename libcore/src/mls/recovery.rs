@@ -499,7 +499,7 @@ pub fn accept_root(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, proof: &GroupBranch,
 ) -> Result<()> {
     let gid = group.group_id();
-    super::branch_proof::verify_history(&gid, &[proof.clone()], group)?;
+    super::branch_proof::verify_history(&gid, std::slice::from_ref(proof), group)?;
     provider.storage().with_tx(|tx| {
         if tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM mls_recovery_roots WHERE group_id=?1)",

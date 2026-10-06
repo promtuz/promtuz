@@ -155,7 +155,7 @@ fn next<T: DeserializeOwned + Default>(rest: &mut &[u8], what: &str) -> Result<T
         return Ok(T::default());
     }
     let (value, tail) =
-        postcard::take_from_bytes(*rest).map_err(|e| anyhow!("decode {what}: {e}"))?;
+        postcard::take_from_bytes(rest).map_err(|e| anyhow!("decode {what}: {e}"))?;
     *rest = tail;
     Ok(value)
 }

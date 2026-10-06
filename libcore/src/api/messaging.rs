@@ -725,10 +725,10 @@ pub async fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
         purge_mls_group(&gid);
     }
 
-    if let Ok(conv) = Conversation::for_peer(&ipk) {
-        if let Err(e) = Conversation::delete(&conv) {
-            log::error!("FORGET: conversation delete failed: {e}");
-        }
+    if let Ok(conv) = Conversation::for_peer(&ipk)
+        && let Err(e) = Conversation::delete(&conv)
+    {
+        log::error!("FORGET: conversation delete failed: {e}");
     }
     // Sever any live direct link so a forgotten contact can't keep talking
     // over an already-open P2P connection.

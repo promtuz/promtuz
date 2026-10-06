@@ -77,7 +77,7 @@ pub(crate) async fn originate_fetch(
     // `None` is this relay, asked first through its own dispatcher.
     for home in is_home.then_some(None).into_iter().chain(peers.iter().map(Some)) {
         let reply = match home {
-            None => Some(handle_dht_request(dht, req.clone(), dht.node_id).await),
+            None => Some(handle_dht_request(dht, Box::new(req.clone()), dht.node_id).await),
             Some(peer) => rpc(dht, peer, &req, FORWARD_TIMEOUT_MS).await,
         };
         match reply {

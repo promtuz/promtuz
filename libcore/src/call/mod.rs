@@ -450,10 +450,10 @@ pub fn audio_capture(pcm: &[u8]) {
         let current = core().calls.current.lock();
         current.as_ref().and_then(|c| Some((c.audio.clone(), c.session.clone()?)))
     };
-    if let Some((audio, session)) = target {
-        if let Some(packet) = audio.encode(pcm) {
-            let _ = session.send(rtc::Cmd::Audio(packet));
-        }
+    if let Some((audio, session)) = target
+        && let Some(packet) = audio.encode(pcm)
+    {
+        let _ = session.send(rtc::Cmd::Audio(packet));
     }
 }
 

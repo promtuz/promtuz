@@ -62,7 +62,6 @@ pub(crate) fn confirm_pair(to: [u8; 32]) {
     core().spawn(async move {
         if let Err(e) = send_pair_ack(to).await {
             warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
-            return;
         }
     });
 }

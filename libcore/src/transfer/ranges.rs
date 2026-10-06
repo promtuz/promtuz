@@ -83,7 +83,7 @@ fn validate_manifest(m: &wire::Manifest, file_id: &[u8; 32], offered_size: u64) 
 fn validate_bitmap(bits: &[u8], chunks: usize) -> Result<()> {
     if chunks > MAX_CHUNKS
         || bits.len() != chunks.div_ceil(8)
-        || (chunks % 8 != 0 && bits.last().is_some_and(|last| last >> (chunks % 8) != 0))
+        || (!chunks.is_multiple_of(8) && bits.last().is_some_and(|last| last >> (chunks % 8) != 0))
     {
         return Err(invalid("invalid stored verified chunk bitmap"));
     }

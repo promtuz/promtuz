@@ -1345,7 +1345,7 @@ fn require_group(conversation: &[u8; 16]) -> Result<[u8; 32]> {
 }
 
 fn local_ipk() -> Result<[u8; 32]> {
-    Ok(Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))?)
+    Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))
 }
 
 fn local_signer() -> Result<([u8; 32], SigningKey)> {

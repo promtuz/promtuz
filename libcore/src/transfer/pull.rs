@@ -178,16 +178,16 @@ where
         }
         let consent = crate::p2p::consent::may_connect_in(&c.db, &peer);
         if consent == crate::p2p::consent::Decision::No {
-            set_state(c, &file_id, peer, store::FAILED, &lease)?;
+            set_state(c, &file_id, peer, store::FAILED, lease)?;
             report_failure(FailureKind::Unavailable);
             anyhow::bail!("attachment sender is no longer permitted");
         }
-        set_state(c, &file_id, peer, store::CONNECTING, &lease)?;
+        set_state(c, &file_id, peer, store::CONNECTING, lease)?;
         let attempt_result = tokio::select! {
             _ = lease.cancel.cancelled() => return Ok(false),
             result = async {
                 let link = connect().await?;
-                let result = pull_live(c, &link, file_id, offered_size, &local, &lease).await;
+                let result = pull_live(c, &link, file_id, offered_size, local, lease).await;
                 if result.as_ref().is_err_and(|e|
                     matches!(e.kind, FailureKind::Transport | FailureKind::Authentication)
                         && e.source.downcast_ref::<v2::ErrorCode>() != Some(&v2::ErrorCode::Busy)
@@ -208,13 +208,13 @@ where
             Err(e) if e.kind != FailureKind::Transport => {
                 if !(may_help && e.kind == FailureKind::Unavailable) {
                     report_failure(e.kind);
-                    set_state(c, &file_id, peer, store::FAILED, &lease)?;
+                    set_state(c, &file_id, peer, store::FAILED, lease)?;
                 }
                 return Err(e.into());
             },
             Err(e) => {
                 log::debug!("transfer: transient failure, attempt {}: {e}", attempt + 1);
-                set_state(c, &file_id, peer, store::HELD, &lease)?;
+                set_state(c, &file_id, peer, store::HELD, lease)?;
                 if let Some(delay) = retry_delays.get(attempt) {
                     diagnostics::record(Event::TransportRetry);
                     tokio::select! {
@@ -357,10 +357,10 @@ async fn pull_v2_from(
             .map_err(coordinator_failure)?;
     while receiver.prefix() < manifest.chunks.len() as u32 {
         let (mut s, mut r, limits) = open_v2_request(link, local).await?;
-        if let Some(id) = &grant {
-            if !limits.sharing || sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_none() {
-                return Err(remote_failure(v2::ErrorCode::Unavailable));
-            }
+        if let Some(id) = &grant
+            && (!limits.sharing || sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_none())
+        {
+            return Err(remote_failure(v2::ErrorCode::Unavailable));
         }
         let requested = receiver.missing(limits.max_ranges as usize, limits.max_chunks as u32);
         let expected = v2::validate_ranges(&requested, &manifest, limits).map_err(Failure::wire)?;

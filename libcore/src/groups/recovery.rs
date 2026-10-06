@@ -612,8 +612,7 @@ fn drain(provider: &PromtuzMlsProvider, me: &[u8; 32], gid: [u8; 32]) -> Result<
         for (sender, id, accepted_at_ms, bytes) in pending {
             if let MlsEnvelopeP::GroupApplication { branch, message, proof } =
                 MlsEnvelopeP::deser(&bytes)?
-            {
-                if let Err(e) = receive(
+                && let Err(e) = receive(
                     provider,
                     me,
                     sender,
@@ -622,10 +621,10 @@ fn drain(provider: &PromtuzMlsProvider, me: &[u8; 32], gid: [u8; 32]) -> Result<
                     proof.map(|p| p.0),
                     id,
                     accepted_at_ms,
-                ) {
-                    log::warn!("GROUP: buffered frame could not be applied: {e}");
-                    continue;
-                }
+                )
+            {
+                log::warn!("GROUP: buffered frame could not be applied: {e}");
+                continue;
             }
             provider.storage().connection().lock().execute(
                 "DELETE FROM mls_branch_inbox WHERE group_id=?1 AND sender=?2 AND dispatch_id=?3",

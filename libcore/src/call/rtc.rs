@@ -431,19 +431,19 @@ impl Session {
             return;
         };
         let input = Input::Receive(Instant::now(), recv);
-        if self.rtc.accepts(&input) {
-            if let Err(e) = self.rtc.handle_input(input) {
-                debug!("CALL: input rejected: {e}");
-            }
+        if self.rtc.accepts(&input)
+            && let Err(e) = self.rtc.handle_input(input)
+        {
+            debug!("CALL: input rejected: {e}");
         }
     }
 
     async fn transmit(&self, t: str0m::net::Transmit) {
-        if let Some(r) = &self.transport.relayed {
-            if t.source == r.addr {
-                let _ = r.conn.send_to(&t.contents, t.destination).await;
-                return;
-            }
+        if let Some(r) = &self.transport.relayed
+            && t.source == r.addr
+        {
+            let _ = r.conn.send_to(&t.contents, t.destination).await;
+            return;
         }
         let _ = self.transport.socket.send_to(&t.contents, t.destination).await;
     }

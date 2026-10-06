@@ -82,7 +82,7 @@ pub(crate) async fn ask_homes(
     let mut replies = Vec::with_capacity(asked.len() + 1);
     if is_home {
         asked.push(dht.node_id);
-        let local = super::handler::handle_dht_request(dht, req.clone(), dht.node_id).await;
+        let local = super::handler::handle_dht_request(dht, Box::new(req.clone()), dht.node_id).await;
         replies.push((dht.node_id, local));
     }
     replies.extend(fan_out(dht, &peers, &req, FORWARD_TIMEOUT_MS).await);
@@ -102,12 +102,12 @@ fn required_service(req: &DhtRequest) -> Option<(u16, u16)> {
 }
 
 async fn exchange(conn: &Connection, req: DhtRequest) -> Option<DhtResponse> {
-    let bytes = DhtPacket::Request(req).pack().ok()?;
+    let bytes = DhtPacket::Request(Box::new(req)).pack().ok()?;
     let (mut send, mut recv) = conn.open_bi().await.ok()?;
     send.write_all(&bytes).await.ok()?;
     send.finish().ok()?;
     match DhtPacket::unpack(&mut recv).await.ok()? {
-        DhtPacket::Response(response) => Some(response),
+        DhtPacket::Response(response) => Some(*response),
         DhtPacket::Request(_) => None,
     }
 }

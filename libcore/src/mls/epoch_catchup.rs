@@ -469,7 +469,7 @@ mod tests {
             let got = posts(with_failing_trigger(&bob.db, failing, drain));
             assert_eq!((got, buffered(&bob.db), gb.epoch()), (drained, left, 2), "{failing}");
         }
-        assert_eq!(posts(buffer.drain_when_ready(&mut gb, &bob.provider)), [y.clone()]);
+        assert_eq!(posts(buffer.drain_when_ready(&mut gb, &bob.provider)), std::slice::from_ref(&y));
         assert_eq!(buffered(&bob.db), 0);
         assert_eq!(gb.epoch(), ga.epoch());
         let sql = "SELECT payload FROM mls_group_received ORDER BY rowid";

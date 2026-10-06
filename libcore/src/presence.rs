@@ -103,7 +103,7 @@ async fn renew_presence_lease(session: &Session) -> Result<()> {
         let conn = core().db.network().lock();
         let mut stmt = conn.prepare("SELECT peer FROM presence_interest")?;
         stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .map(|peer| Ok(peer?.try_into().map_err(|_| anyhow!("invalid presence peer"))?))
+            .map(|peer| peer?.try_into().map_err(|_| anyhow!("invalid presence peer")))
             .collect::<Result<Vec<[u8; 32]>>>()?
     };
     send_presence_subscription(core().db.network(), session, contacts).await

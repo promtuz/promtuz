@@ -373,12 +373,12 @@ async fn fetch(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            for (&peer, reply) in chunk.iter().zip(batch(&session, requests).await?) {
+            for (&peer, reply) in chunk.iter().zip(batch(session, requests).await?) {
                 let received = (|| -> Result<bool> {
                     let (value, content) = match reply {
                         Response::Value { value, grant } => {
                             crypto::verify(&value, &peer, field)?;
-                            let bytes = crypto::open(&signer, &value, &grant)?;
+                            let bytes = crypto::open(signer, &value, &grant)?;
                             (value, Some(Content::deser(&bytes)?))
                         },
                         Response::Withdrawn { value } => {

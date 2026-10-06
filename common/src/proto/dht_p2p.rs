@@ -158,7 +158,7 @@ mod verify_impl {
         pub fn verify(&self, authenticated_relay: &NodeId, now_ms: u64) -> bool {
             self.who == self.lease.user
                 && self.lease.relay_id == *authenticated_relay
-                && NodeId::new(&self.relay_pubkey.0) == self.lease.relay_id
+                && NodeId::new(self.relay_pubkey.0) == self.lease.relay_id
                 && self.lease.verify(now_ms)
                 && now_ms.abs_diff(self.observed_at_ms) <= PRESENCE_STATE_MAX_SKEW_MS
                 && verify_ed25519(
@@ -656,8 +656,8 @@ pub enum DhtResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DhtPacket {
-    Request(DhtRequest),
-    Response(DhtResponse),
+    Request(Box<DhtRequest>),
+    Response(Box<DhtResponse>),
 }
 
 #[cfg(test)]

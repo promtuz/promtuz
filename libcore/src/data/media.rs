@@ -44,13 +44,9 @@ pub(crate) fn unlink_orphaned(
             continue;
         }
         let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
-        match conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
-            // Nothing names it any more. Only this answer frees the bytes.
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                crate::transfer::store::forget_file(c, fid)
-            },
-            // A row still names it, or the read failed: a failed check is no permission to delete.
-            _ => {},
+        // Only a missing row permits deletion; a failed read must retain the file.
+        if let Err(rusqlite::Error::QueryReturnedNoRows) = conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
+            crate::transfer::store::forget_file(c, fid)
         }
     }
 }

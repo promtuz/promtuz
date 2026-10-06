@@ -191,7 +191,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_empty(dir.path());
         let package = record(1);
-        store.key_packages.publish(&[7; 32], &[package.clone()]).unwrap();
+        store.key_packages.publish(&[7; 32], std::slice::from_ref(&package)).unwrap();
         let vended = std::thread::scope(|scope| {
             let takes: Vec<_> = (0..16)
                 .map(|_| {

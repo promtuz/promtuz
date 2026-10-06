@@ -125,9 +125,9 @@ impl Conversation {
              VALUES (?1, ?2, '', NULL, ?3, ?4)",
             (id.as_slice(), KIND_GROUP, now, creator.as_slice()),
         )?;
-        Self::put_member(&conn, &id, creator, ROLE_OWNER)?;
+        Self::put_member(conn, &id, creator, ROLE_OWNER)?;
         for m in members.iter().filter(|m| *m != creator) {
-            Self::put_member(&conn, &id, m, ROLE_MEMBER)?;
+            Self::put_member(conn, &id, m, ROLE_MEMBER)?;
         }
         Ok(id)
     }
@@ -308,7 +308,7 @@ impl Conversation {
             [id.as_slice()],
         )?;
         for m in members {
-            Self::put_member(&tx, id, m, ROLE_MEMBER)?;
+            Self::put_member(tx, id, m, ROLE_MEMBER)?;
         }
         if let Some(meta) = meta {
             let state = meta.effective();

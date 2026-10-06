@@ -138,7 +138,7 @@ pub fn inspect_avif(bytes: &[u8]) -> Result<Option<AvifInfo>> {
     if !is_avif {
         return Ok(None);
     }
-    ensure!((ftyp.len() - 8) % 4 == 0, "Invalid AVIF brands");
+    ensure!((ftyp.len() - 8).is_multiple_of(4), "Invalid AVIF brands");
     let top = boxes(bytes, 0)?;
     ensure!(top.iter().any(|b| b.kind == b"mdat" || b.kind == b"meta"), "Missing AVIF image data");
     let mut info = None;
