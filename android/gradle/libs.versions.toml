@@ -1,55 +1,48 @@
 [versions]
-agp = "9.2.1"
+agp = "9.3.3"
+avif = "1.3.0.841110fd"
 barcodeScanning = "17.3.0"
 capturable = "3.0.1"
 core = "3.5.4"
 coreSplashscreen = "1.2.0"
-firebaseBom = "34.16.0"
-hazeMaterials = "1.7.2"
-jnaVersion = "5.19.0"
-kotlin = "2.4.0"
-coreKtx = "1.19.0"
-appcompat = "1.7.1"
+firebaseBom = "34.19.0"
+hazeMaterials = "1.7.3"
+jna = "5.19.1"
+kotlin = "2.4.20"
+coreKtx = "1.19.1"
+appcompat = "1.8.0"
 junit = "4.13.2"
-junitVersion = "1.3.0"
-concurrentFutures = "1.2.0"
-espressoCore = "3.7.0"
 kotlinxCoroutinesCore = "1.11.0"
 lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
-composeBom = "2026.06.01"
+composeBom = "2026.09.00"
 
 material = "1.14.0"
-material3 = "1.5.0-alpha23"
+material3 = "1.5.0-alpha29"
 
-nav3Core = "1.1.4"
+nav3Core = "1.2.0"
 lifecycleViewmodelNav3 = "2.11.0"
 kotlinxSerializationCore = "1.11.0"
-kotlinSerialization = "2.4.0"
+kotlinSerialization = "2.4.20"
 
-material3AdaptiveNav3 = "1.3.0-rc01"
+material3AdaptiveNav3 = "1.3.0"
 
 
-cameraCore = "1.6.1"
+cameraCore = "1.6.2"
 coil = "2.7.0"
 media3 = "1.11.1"
 lottie = "6.7.1"
 
 koin-bom = "4.2.2"
 timber = "5.0.1"
-uiGraphics = "1.11.4"
 
-# JNA backs the uniffi Kotlin bindings. >=5.17 required for 16KB-page
-# devices (Android 15+/Play); declared with @aar in app/build.gradle.kts.
-jna = "5.19.0"
-
-# Identity recovery (IDENTITY_RECOVERY.md): Block Store = Channel A escrow;
-# WorkManager writes the backup blob Auto Backup ships to the cloud.
 blockstore = "16.4.0"
-workRuntime = "2.10.5"
+workRuntime = "2.12.0"
 
 [libraries]
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+avif = { module = "org.aomedia.avif.android:avif", version.ref = "avif" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesCore" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 coil-video = { module = "io.coil-kt:coil-video", version.ref = "coil" }
@@ -64,14 +57,12 @@ androidx-media3-transformer = { module = "androidx.media3:media3-transformer", v
 androidx-media3-effect = { module = "androidx.media3:media3-effect", version.ref = "media3" }
 androidx-media3-inspector = { module = "androidx.media3:media3-inspector", version.ref = "media3" }
 lottie-compose = { module = "com.airbnb.android:lottie-compose", version.ref = "lottie" }
-androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics", version.ref = "uiGraphics" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "coreSplashscreen" }
 barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref = "barcodeScanning" }
 capturable = { module = "dev.shreyaspatil:capturable", version.ref = "capturable" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
-jna = { module = "net.java.dev.jna:jna", version.ref = "jnaVersion" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
 kotlinx-coroutines-play-services = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutinesCore" }
@@ -81,9 +72,6 @@ timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "core" }
 haze-materials = { module = "dev.chrisbanes.haze:haze-materials", version.ref = "hazeMaterials" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
-androidx-concurrent-futures-ktx = { module = "androidx.concurrent:concurrent-futures-ktx", version.ref = "concurrentFutures" }
-androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
-androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
 androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycleRuntimeKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -92,8 +80,6 @@ androidx-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
-androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
-androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 google-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
@@ -115,6 +101,5 @@ koin-androidx-compose = { module = "io.insert-koin:koin-androidx-compose" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 jetbrains-kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlinSerialization" }

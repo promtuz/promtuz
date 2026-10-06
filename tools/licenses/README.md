@@ -58,7 +58,7 @@ These upstream texts fill omissions in published dependency archives:
 | `libavif.txt` | [libavif 841110fd LICENSE](https://github.com/AOMediaCodec/libavif/blob/841110fd/LICENSE), including its libyuv notice |
 | `dav1d.txt` | [dav1d 1.5.1 COPYING](https://github.com/videolan/dav1d/blob/1.5.1/COPYING); pinned by libavif's `ext/dav1d_android.sh` |
 | `android-cpufeatures.txt` | First comment in NDK 29.0.14206865 `sources/android/cpufeatures/cpu-features.c`; this library is linked by libavif's Android JNI CMake target |
-| `libffi.txt` | [JNA 5.19.0 native/libffi/LICENSE](https://github.com/java-native-access/jna/blob/5.19.0/native/libffi/LICENSE) |
+| `libffi.txt` | [JNA 5.19.1 native/libffi/LICENSE](https://github.com/java-native-access/jna/blob/5.19.1/native/libffi/LICENSE) |
 | `openmls.txt` | [OpenMLS 47dbedec LICENSE](https://github.com/openmls/openmls/blob/47dbedecad0c1fd8eb5368d582250ebfcc1e1ce6/LICENSE); source revision recorded in the published crate's `.cargo_vcs_info.json` |
 | `capturable.txt` | [Capturable v3.0.1 LICENSE](https://github.com/PatilShreyas/Capturable/blob/v3.0.1/LICENSE) |
 | `protobuf.txt` | [protobuf v28.2 LICENSE](https://github.com/protocolbuffers/protobuf/blob/v28.2/LICENSE); DataStore 1.1.7's shaded `RuntimeVersion` declares Java version 4.28.2 |

@@ -112,7 +112,7 @@ val rustLicenseArtifacts = layout.buildDirectory.file("intermediates/licenses/ru
 android {
     namespace = "com.promtuz.chat"
     compileSdk = 37
-    ndkVersion = "29.0.14206865"
+    ndkVersion = "30.0.15729638"
 
     defaultConfig {
         applicationId = "com.promtuz.chat"
@@ -432,13 +432,6 @@ dependencies {
 
     implementation(libs.firebase.messaging)
 
-    // uniffi Kotlin bindings run on JNA. MUST be @aar (bundles the per-ABI
-    // jnidispatch.so; a plain jar throws UnsatisfiedLinkError at the first FFI
-    // call). A version-catalog alias can't carry the @aar classifier, so pin it
-    // here with the catalog version. >=5.17 is 16KB-page-safe.
-    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
-
-    // Bundled AVIF sequence decoder and still-image fallback. Platform decoding
-    // preserves supported HDR/color profiles; libavif also works below API 31.
-    implementation("org.aomedia.avif.android:avif:1.3.0.841110fd")
+    implementation(variantOf(libs.jna) { artifactType("aar") })
+    implementation(libs.avif)
 }

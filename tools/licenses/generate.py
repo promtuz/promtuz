@@ -84,7 +84,7 @@ def android_libraries(inventory):
                         ("dav1d", (NOTICES / "dav1d.txt").read_text()),
                         ("Android CPU features", (NOTICES / "android-cpufeatures.txt").read_text())]
         elif group == "net.java.dev.jna" and artifact == "jna":
-            if version != "5.19.0":
+            if version != "5.19.1":
                 raise ValueError("Review tools/licenses/notices/libffi.txt for the new JNA version")
             name = "Java Native Access"
             labels = ["LGPL-2.1-or-later OR Apache-2.0"]
