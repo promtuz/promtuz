@@ -14,12 +14,10 @@ pub struct IdentityRow {
     pub name: String,
     /// Our profile picture as AVIF, as last set. `None` when we have none.
     pub avatar: Option<Vec<u8>>,
-    pub avatar_revision: u64,
     pub bio: String,
-    pub profile_revision: u64,
 }
 
-from_row!(IdentityRow { id, ipk, enc_isk, created_at, name, avatar, avatar_revision, bio, profile_revision });
+from_row!(IdentityRow { id, ipk, enc_isk, created_at, name, avatar, bio });
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
@@ -42,6 +40,7 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("ALTER TABLE identity ADD COLUMN avatar BLOB;"),
     M::up("ALTER TABLE identity ADD COLUMN avatar_revision INTEGER NOT NULL DEFAULT 0;"),
     M::up("ALTER TABLE identity ADD COLUMN bio TEXT NOT NULL DEFAULT ''; ALTER TABLE identity ADD COLUMN profile_revision INTEGER NOT NULL DEFAULT 0;"),
+    M::up("ALTER TABLE identity DROP COLUMN avatar_revision; ALTER TABLE identity DROP COLUMN profile_revision;"),
 ];
 pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

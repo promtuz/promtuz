@@ -81,25 +81,23 @@ pub enum AppPayload {
         body:   Body,
     },
     System(SystemEvent),
-    /// The sender's self-asserted name, sent only to chats shared with us. It never outranks an
-    /// address book entry.
+    /// Retired personal-profile controls: kept for decoding queued packets and stable ordinals.
+    /// These no longer update profile state; use the encrypted profile store.
     Profile {
         name: String,
     },
-    /// The sender's picture as AVIF, or `None` once removed. Self-asserted and chat-scoped like
-    /// `Profile`, and held to [`MAX_AVATAR_BYTES`] on both ends.
+    /// Retired; see `Profile`.
     Avatar {
         /// Owner-issued revision, shared across chats; removals carry one too.
         revision: u64,
         avif: Option<Vec<u8>>,
     },
-    /// `known_revision` is the revision of their picture we hold (`None`: unknown, not zero). A
-    /// request gets one reply, and replies never solicit another.
+    /// Retired; see `Profile`.
     AvatarSync {
         known_revision: Option<u64>,
         reply: bool,
     },
-    /// The receiver stored this picture revision; not a relay delivery acknowledgement.
+    /// Retired; see `Profile`.
     AvatarAck {
         revision: u64,
     },
@@ -115,17 +113,19 @@ pub enum AppPayload {
         disco_key:     [u8; 32],
     },
     Call(CallMsg),
-    /// Versioned profile metadata, authenticated by the MLS author.
+    /// Retired; see `Profile`.
     ProfileDetails {
         revision: u64,
         name:     String,
         bio:      String,
         card:     Vec<u8>,
     },
+    /// Retired; see `Profile`.
     ProfileDetailsSync {
         known_revision: Option<u64>,
         reply:          bool,
     },
+    /// Retired; see `Profile`.
     ProfileDetailsAck {
         revision: u64,
     },

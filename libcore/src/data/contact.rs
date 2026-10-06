@@ -56,6 +56,7 @@ impl Contact {
             log::warn!("CONTACT: could not open a conversation for a new contact: {e}");
         }
 
+        crate::profile_sync::store::wake();
         Ok(if existed { SaveOutcome::Existed } else { SaveOutcome::Created })
     }
 

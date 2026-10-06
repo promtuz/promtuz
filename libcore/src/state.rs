@@ -1,14 +1,12 @@
 //! The client core: one owner for the databases, the host ports, the relay session and the
 //! background tasks.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-use std::time::Instant;
 
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -58,7 +56,6 @@ pub struct Core {
     pub(crate) avatar_generation: AtomicU64,
     pub(crate) kp_publish_ready: AtomicBool,
     pub(crate) mls_operations: [Mutex<()>; 64],
-    pub(crate) profile_probes: Mutex<HashMap<crate::profile_sync::PeerKey, Instant>>,
     pub(crate) profile_changed: Notify,
     pub(crate) profile_publish: AtomicBool,
     pub(crate) profile_refresh: Mutex<std::collections::BTreeSet<[u8; 32]>>,
@@ -104,7 +101,6 @@ impl Core {
             avatar_generation: AtomicU64::new(0),
             kp_publish_ready: AtomicBool::new(false),
             mls_operations: [const { Mutex::new(()) }; 64],
-            profile_probes: Mutex::default(),
             profile_changed: Notify::new(),
             profile_publish: AtomicBool::new(true),
             profile_refresh: Mutex::default(),

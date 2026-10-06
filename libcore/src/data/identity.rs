@@ -84,8 +84,8 @@ impl Identity {
 
         conn.execute(
             "INSERT INTO identity (
-                    id, ipk, enc_isk, created_at, name, avatar, avatar_revision, bio, profile_revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
+                    id, ipk, enc_isk, created_at, name, avatar, bio
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             (
                 identity.id,
                 identity.ipk,
@@ -93,9 +93,7 @@ impl Identity {
                 identity.created_at,
                 identity.name.clone(),
                 identity.avatar.clone(),
-                identity.avatar_revision,
                 identity.bio.clone(),
-                identity.profile_revision,
             ),
         )?;
 
@@ -118,20 +116,20 @@ impl Identity {
             created_at: now_ms(),
             name,
             avatar: None,
-            avatar_revision: 0, bio: String::new(), profile_revision: 0,
+            bio: String::new(),
         })?;
         Ok(())
     }
 
-    pub fn details(&self) -> crate::data::peer_profile::ProfileUpdate {
-        crate::data::peer_profile::ProfileUpdate {
-            revision: self.inner.profile_revision, name: self.name(), bio: self.inner.bio.clone(),
+    pub fn details(&self) -> crate::data::peer_profile::Profile {
+        crate::data::peer_profile::Profile {
+            name: self.name(), bio: self.inner.bio.clone(),
             card: secret_key_signing(&self.ipk()).and_then(|key| crate::contact_card::make_card(&key, self.name())).unwrap_or_default(),
         }
     }
 
     pub fn set_details(name: &str, bio: &str) -> Result<()> {
-        set_details_tx(&core().db.identity().lock(), name, bio, now_ms())?;
+        set_details_tx(&core().db.identity().lock(), name, bio)?;
         crate::profile_sync::store::wake();
         crate::data::peer_avatar::notify_changed();
         Ok(())
@@ -141,22 +139,11 @@ impl Identity {
         self.inner.avatar.clone()
     }
 
-    pub fn avatar_update(&self) -> crate::data::peer_avatar::AvatarUpdate {
-        crate::data::peer_avatar::AvatarUpdate {
-            revision: self.inner.avatar_revision,
-            avif: self.avatar(),
-        }
-    }
-
-    /// Allocates the revision under the same lock; the caller broadcasts exactly this revision.
-    pub fn set_avatar(avif: Option<&[u8]>) -> Result<u64> {
-        let revision = {
-            let conn = core().db.identity().lock();
-            set_avatar_tx(&conn, avif, now_ms())?
-        };
+    pub fn set_avatar(avif: Option<&[u8]>) -> Result<()> {
+        set_avatar_tx(&core().db.identity().lock(), avif)?;
         crate::data::peer_avatar::notify_changed();
         crate::profile_sync::store::wake();
-        Ok(revision)
+        Ok(())
     }
 
     pub(super) fn restore(isk: &[u8; 32], name: &str) -> Result<()> {
@@ -176,7 +163,7 @@ impl Identity {
             created_at: now_ms(),
             name,
             avatar: None,
-            avatar_revision: 0, bio: String::new(), profile_revision: 0,
+            bio: String::new(),
         })?;
         Ok(())
     }
@@ -313,58 +300,17 @@ fn validate_nickname(name: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-pub(super) fn set_details_tx(
-    conn: &rusqlite::Connection, name: &str, bio: &str, now_ms: u64,
-) -> Result<()> {
+pub(super) fn set_details_tx(conn: &rusqlite::Connection, name: &str, bio: &str) -> Result<()> {
     let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
     anyhow::ensure!(bio.chars().count() <= 160, "Bio is limited to 160 characters");
-    let old: u64 =
-        conn.query_row("SELECT profile_revision FROM identity WHERE id = 0", [], |r| r.get(0))?;
-    let revision = old.max(now_ms).checked_add(1).ok_or_else(|| anyhow!("revision overflow"))?;
-    conn.execute(
-        "UPDATE identity SET name = ?1, bio = ?2, profile_revision = ?3 WHERE id = 0",
-        (name, bio.trim(), revision),
-    )?;
+    conn.execute("UPDATE identity SET name = ?1, bio = ?2 WHERE id = 0", (&name, bio.trim()))?;
     Ok(())
 }
 
-/// Wall time lets a fresh restore supersede its old profile; the persisted
-/// counter also advances when changes share a millisecond or the clock recedes.
-pub(super) fn set_avatar_tx(
-    conn: &rusqlite::Connection, avif: Option<&[u8]>, now_ms: u64,
-) -> Result<u64> {
+pub(super) fn set_avatar_tx(conn: &rusqlite::Connection, avif: Option<&[u8]>) -> Result<()> {
     if let Some(bytes) = avif {
         crate::data::peer_avatar::check_avif(bytes)?;
     }
-    let previous: u64 = conn.query_row(
-        "SELECT avatar_revision FROM identity WHERE id = 0", [], |r| r.get(0),
-    )?;
-    let next = previous.checked_add(1).ok_or_else(|| anyhow!("profile revision exhausted"))?;
-    let revision = now_ms.max(next);
-    let stored_revision = i64::try_from(revision)?;
-    conn.execute(
-        "UPDATE identity SET avatar = ?1, avatar_revision = ?2 WHERE id = 0",
-        (avif, stored_revision),
-    )?;
-    Ok(revision)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::data::identity;
-    use crate::test_support::data::open;
-
-    #[test]
-    fn revisions_advance_with_equal_or_backwards_clocks() {
-        let conn = open(crate::db::identity::migrate);
-        identity(&conn, 1);
-        let image = b"\0\0\0\x0cftypavif";
-        assert_eq!(set_avatar_tx(&conn, Some(image), 100).unwrap(), 100);
-        assert_eq!(set_avatar_tx(&conn, None, 100).unwrap(), 101);
-        assert_eq!(set_avatar_tx(&conn, Some(image), 90).unwrap(), 102);
-        let row = conn.query_row("SELECT * FROM identity", [], IdentityRow::from_row).unwrap();
-        assert_eq!(row.avatar_revision, 102);
-        assert_eq!(row.avatar.as_deref(), Some(image.as_slice()));
-    }
+    conn.execute("UPDATE identity SET avatar = ?1 WHERE id = 0", [avif])?;
+    Ok(())
 }

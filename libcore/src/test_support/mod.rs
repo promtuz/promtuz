@@ -21,7 +21,6 @@ use crate::state::Core;
 /// `events` as its sink. A current-thread test runs its spawned tasks here, so they see it too.
 pub(crate) struct ScopedCore {
     pub core:   &'static Core,
-    pub events: Arc<Events>,
     previous:   Option<&'static Core>,
     _files:     TempDir,
 }
@@ -34,7 +33,7 @@ impl ScopedCore {
         let _ = core.events.set(events.clone());
         let _ = core.secure_store.set(Arc::new(Plain));
         let previous = crate::state::SCOPED.replace(Some(core));
-        Self { core, events, previous, _files: files }
+        Self { core, previous, _files: files }
     }
 }
 

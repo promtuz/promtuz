@@ -185,50 +185,16 @@ impl Drop for ControlDispatchGuard {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("control probe deferred until a recipient's relay accepts it")]
-pub(crate) struct ControlDeferred;
-
 async fn send_control_inner(
     conversation: [u8; 16], payload: AppPayload, wake: Wake, only: Option<[u8; 32]>,
 ) -> Result<()> {
-    use common::proto::profile::Field;
-    let fields: &[Field] = match &payload {
-        AppPayload::Profile { .. } => &[Field::Name],
-        AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. } => &[Field::Avatar],
-        AppPayload::ProfileDetails { .. } | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. } => &[Field::Name, Field::Bio],
-        _ => &[],
-    };
-    if !fields.is_empty() {
-        if crate::profile_sync::store::uses_service().await {
-            crate::profile_sync::store::wake();
-            return Ok(());
-        }
-        let private_pair = Conversation::get(&conversation).is_some_and(|c| c.kind == crate::data::conversation::KIND_DIRECT);
-        let peer = Conversation::peer_of(&conversation);
-        if !private_pair || !peer.is_some_and(|p| fields.iter().all(|f| crate::profile_sync::store::allows(*f, &p))) {
-            return Ok(());
-        }
-    }
-    let kind = match &payload {
-        AppPayload::AvatarSync { .. } => "avatar probe",
-        AppPayload::ProfileDetailsSync { .. } => "profile details probe",
-        AppPayload::GroupPicture { .. } => "group picture",
-        _ => "control",
-    };
-    // Offers, call signaling and profile probes describe current state, so they are never retried,
-    // and offers and calls carry a TTL so the relay drops them once stale.
+    // Offers and call signaling expire instead of entering durable retries.
     let ttl_ms = match &payload {
         AppPayload::P2pOffer { .. } => crate::p2p::OFFER_TTL_MS,
         AppPayload::Call(_) => crate::call::SIGNAL_TTL_MS,
-        AppPayload::AvatarSync { .. } | AppPayload::ProfileDetailsSync { .. } => 60_000,
         _ => 0,
     };
-    let durable = ttl_ms == 0
-        && !matches!(
-            payload,
-            AppPayload::AvatarSync { .. } | AppPayload::ProfileDetailsSync { .. }
-        );
+    let durable = ttl_ms == 0;
     ensure!(!crate::requests::is_request_chat(&conversation), "request not accepted");
     let our_ipk = Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))?;
     let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
@@ -265,13 +231,13 @@ async fn send_control_inner(
     let _dispatch =
         ControlDispatchGuard { id: copies.first().map_or(id, |c| c.1), ephemeral: !durable };
     log::debug!(
-        "CONTROL: {kind}, dispatch {}, {} recipient(s), ttl_ms={ttl_ms}",
+        "CONTROL: dispatch {}, {} recipient(s), ttl_ms={ttl_ms}",
         hex::encode(&_dispatch.id[..8]),
         copies.len(),
     );
     // Queued for every member: fine when durable, a failure when not.
     if crate::groups::recovery::dispatch(copies).await == 0 && !durable {
-        return Err(ControlDeferred.into());
+        bail!("control deferred until a recipient relay accepts it");
     }
     Ok(())
 }

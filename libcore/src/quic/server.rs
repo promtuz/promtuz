@@ -98,6 +98,33 @@ impl Drop for InboxSync {
     }
 }
 
+/// The same channel-bound authentication is used by messaging and pinned profile reads.
+async fn authenticate(conn: &quinn::Connection, ipk: VerifyingKey) -> Result<SHSRP> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (mut tx, mut rx) = conn.open_bi().await?;
+
+        CHandshakePacket::Hello { ipk: ipk.to_bytes().into() }.send(&mut tx).await?;
+
+        let SHSP::Challenge { nonce } = SHSP::unpack(&mut rx).await? else {
+            bail!("Handshake Packet Order Mismatch");
+        };
+
+        let binding = common::quic::client_auth_binding(conn)?;
+        let msg = common::proto::client_rel::client_auth_message(&nonce, &binding);
+
+        CHandshakePacket::Proof { sig: IdentitySigner::sign(&msg)?.to_bytes().into() }
+            .send(&mut tx)
+            .await?;
+
+        let SHSP::HandshakeResult(result) = SHSP::unpack(&mut rx).await? else {
+            bail!("Handshake Packet Order Mismatch");
+        };
+
+        Ok(result)
+    })
+    .await?
+}
+
 impl Relay {
     pub async fn connect(
         mut self, ipk: VerifyingKey,
@@ -107,6 +134,9 @@ impl Relay {
         info!("connecting to relay {} ({})", node_short(&self.id), addr_short(addr));
         ConnectionState::Connecting.emit();
 
+        // Wait before dialing: the relay's authentication deadline starts when it accepts the
+        // transport. Keep profile logins excluded until the primary session is published.
+        let profile_update = core().profile_update.lock().await;
         let conn = match crate::quic::dialer::connect(addr, &self.id).await {
             Ok(conn) => conn,
             Err(err) => {
@@ -132,26 +162,7 @@ impl Relay {
 
         ConnectionState::Handshaking.emit();
 
-        let (mut tx, mut rx) = conn.open_bi().await?;
-
-        CHandshakePacket::Hello { ipk: ipk.to_bytes().into() }.send(&mut tx).await?;
-
-        let SHSP::Challenge { nonce } = SHSP::unpack(&mut rx).await? else {
-            return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
-        };
-
-        let binding = common::quic::client_auth_binding(&conn).map_err(RelayConnError::Error)?;
-        let msg = common::proto::client_rel::client_auth_message(&nonce, &binding);
-
-        CHandshakePacket::Proof {
-            sig: IdentitySigner::sign(&msg).map_err(RelayConnError::Error)?.to_bytes().into(),
-        }
-        .send(&mut tx)
-        .await?;
-
-        let SHSP::HandshakeResult(result) = SHSP::unpack(&mut rx).await? else {
-            return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
-        };
+        let result = authenticate(&conn, ipk).await.map_err(RelayConnError::Error)?;
 
         let (home_node_id, turn_port) = match result {
             SHSRP::Accept { relay_node_id, assist, turn_port, .. } => {
@@ -181,6 +192,7 @@ impl Relay {
         let session = Arc::new(Session::new(core, self, conn, ipk, home_node_id, turn_port));
         // Published before `handle` starts, so the work it spawns finds this connection.
         core.publish(session.clone());
+        drop(profile_update);
 
         session.spawn({
             let session = session.clone();
@@ -240,7 +252,7 @@ pub struct Session {
     pub relay:        Relay,
     pub conn:         quinn::Connection,
     pub dht:          Arc<RelayDhtClient>,
-    /// The relay's DHT NodeId from the handshake, `None` when its DHT is disabled.
+    /// Relay storage identity from the handshake; older relays may omit it without DHT.
     pub home_node_id: Option<[u8; 32]>,
     /// UDP port of the relay's call TURN server.
     pub turn_port:    Option<u16>,
@@ -273,6 +285,22 @@ impl Session {
             services: tokio::sync::OnceCell::new(),
             profile_registered: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// A short connection to the existing profile host. Does not publish a primary session,
+    /// drain messages, assert presence, or emit connection-state changes. Caller holds
+    /// profile_update until this connection is closed.
+    pub(crate) async fn connect_profile(relay: Relay, ipk: VerifyingKey) -> Result<Self> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let addr = SocketAddr::new(IpAddr::from_str(&relay.host)?, relay.port);
+            let conn = crate::quic::dialer::connect(addr, &relay.id).await?;
+            let SHSRP::Accept { relay_node_id, turn_port, .. } = authenticate(&conn, ipk).await? else {
+                conn.close(0u32.into(), b"profile-auth-rejected");
+                bail!("profile host rejected authentication");
+            };
+            Ok(Self::new(core(), relay, conn, ipk, relay_node_id.map(|id| id.0), turn_port))
+        })
+        .await?
     }
 
     pub(crate) async fn services(&self) -> &common::contracts::Support {
@@ -607,4 +635,113 @@ pub(crate) async fn retry_pending_sends_once(client: Arc<RelayDhtClient>) {
         dht:      client.as_ref(),
     };
     crate::messaging::send::retry_pending_sends(&ctx).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ScopedCore, data, net};
+    use common::quic::protorole::ProtoRole;
+
+    /// A profile pass may outlast the relay's authentication deadline. Waiting for it must
+    /// happen before any transport is opened, while still excluding temporary profile logins.
+    #[tokio::test(start_paused = true)]
+    async fn primary_waits_for_profile_before_opening_transport() {
+        let _clock = net::step_paused_clock();
+        let scope = ScopedCore::new();
+        let me = data::identity(&scope.core.db.identity().lock(), 94);
+        let (endpoint, roots) = net::server(ProtoRole::Client);
+        let relay = Relay {
+            id: "localhost".into(),
+            host: "127.0.0.1".into(),
+            port: endpoint.local_addr().unwrap().port(),
+            pubkey: None,
+            assist: false,
+        };
+        assert!(
+            scope
+                .core
+                .net
+                .set(crate::state::Net {
+                    endpoint: net::client_endpoint(),
+                    dialer: crate::quic::dialer::ClientConfigs {
+                        quic: net::client_config(ProtoRole::Client, &roots),
+                        roots,
+                    },
+                    seeds: vec![],
+                })
+                .is_ok()
+        );
+        scope.core.db.network().lock().execute(
+            "INSERT INTO relays(id,host,port,protocol_version,window_start,last_seen) VALUES ('localhost','127.0.0.1',?1,?2,0,0)",
+            (relay.port, common::PROTOCOL_VERSION),
+        ).unwrap();
+        let profile = scope.core.profile_update.lock().await;
+        let connect = relay.connect(me.verifying_key());
+        tokio::pin!(connect);
+        tokio::select! {
+            biased;
+            _ = &mut connect => panic!("connection completed while a profile pass held the lock"),
+            _ = endpoint.accept() => panic!("transport opened before the profile pass finished"),
+            _ = tokio::time::sleep(Duration::from_secs(16)) => {},
+        }
+        assert!(scope.core.session().is_none());
+        drop(profile);
+
+        let server = async {
+            let conn = endpoint.accept().await.unwrap().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
+                assert!(matches!(
+                    CHandshakePacket::unpack(&mut rx).await.unwrap(),
+                    CHandshakePacket::Hello { .. }
+                ));
+                // Still exclude profile connections until the primary session is published.
+                assert!(scope.core.profile_update.try_lock().is_err());
+                let nonce = [9; 32];
+                SHSP::Challenge { nonce: nonce.into() }.send(&mut tx).await.unwrap();
+                let CHandshakePacket::Proof { sig } =
+                    CHandshakePacket::unpack(&mut rx).await.unwrap()
+                else {
+                    panic!("expected authentication proof")
+                };
+                common::crypto::verify_ed25519(
+                    &me.verifying_key().to_bytes(),
+                    &common::proto::client_rel::client_auth_message(
+                        &nonce,
+                        &common::quic::client_auth_binding(&conn).unwrap(),
+                    ),
+                    &sig.0,
+                )
+                .unwrap();
+                SHSP::HandshakeResult(SHSRP::Accept {
+                    timestamp: now_ms(),
+                    relay_node_id: None,
+                    assist: false,
+                    turn_port: None,
+                })
+                .send(&mut tx)
+                .await
+                .unwrap();
+                tx.finish().unwrap();
+            })
+            .await
+            .expect("authentication exceeded the relay's deadline");
+            conn
+        };
+        let (connected, peer) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(&mut connect, server)
+        })
+        .await
+        .unwrap();
+        let Ok(handle) = connected else { panic!("primary connection failed after profile pass") };
+        let session = scope.core.session().expect("authenticated session must be published");
+        assert!(scope.core.profile_update.try_lock().is_ok());
+        assert!(session.conn.close_reason().is_none());
+        scope.core.cancel.cancel();
+        peer.close(0u32.into(), b"test complete");
+        session.conn.close(0u32.into(), b"test complete");
+        handle.abort();
+        let _ = handle.await;
+    }
 }

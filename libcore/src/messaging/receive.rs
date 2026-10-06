@@ -728,12 +728,12 @@ pub(crate) fn receive_application_content(
                     Conversation::set_title(&conv, title)?;
                 }
             }
-            // Someone who joined after us never heard our introduction, so repeat it to them alone.
+            // A new member needs the current group picture.
             if let SystemEvent::Added { who } = &event {
                 if who.0
                     != crate::data::identity::Identity::local_ipk().unwrap_or_default()
                 {
-                    crate::messaging::welcome::introduce_ourselves_to(conv, who.0);
+                    crate::messaging::welcome::send_group_picture_to(conv, who.0);
                 }
             }
             match Message::save_system(conv, actor, &dispatch_id, code, &target, ts, false) {
@@ -749,31 +749,15 @@ pub(crate) fn receive_application_content(
                 Err(e) => return Err(e),
             }
         },
-        Ok(AppPayload::Profile { name }) => {
-            // Their claim about themselves, kept apart from the address book so it never overwrites
-            // a name we chose.
-            if !crate::profile_sync::store::has_field(&core().db.messages().lock(), &author, common::proto::profile::Field::Name) {
-                crate::data::peer_name::put(&author, &name)?;
-            }
-        },
-        Ok(
-            payload @ (AppPayload::ProfileDetails { .. }
-            | AppPayload::ProfileDetailsSync { .. }
-            | AppPayload::ProfileDetailsAck { .. }),
-        ) => {
-            crate::profile_sync::receive(conv, author, payload);
-        },
+        // Retired profile controls retain their wire ordinals so queued packets can drain.
+        // Only the encrypted profile store may update personal profile fields.
+        Ok(AppPayload::Profile { .. } | AppPayload::ProfileDetails { .. }
+            | AppPayload::ProfileDetailsSync { .. } | AppPayload::ProfileDetailsAck { .. }
+            | AppPayload::Avatar { .. } | AppPayload::AvatarSync { .. } | AppPayload::AvatarAck { .. }) => {},
         Ok(AppPayload::GroupPicture { revision, avif }) => {
             if let Err(e) = crate::data::group_picture::receive_authorized(conv, revision, avif) {
                 log::warn!("GROUP: picture rejected: {e}");
             }
-        },
-        Ok(
-            payload @ (AppPayload::Avatar { .. }
-            | AppPayload::AvatarSync { .. }
-            | AppPayload::AvatarAck { .. }),
-        ) => {
-            crate::profile_sync::receive(conv, author, payload);
         },
         Ok(AppPayload::Unpaired) => crate::messaging::welcome::unpaired(conv, author),
         Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
@@ -786,9 +770,6 @@ pub(crate) fn receive_application_content(
         Ok(AppPayload::PairAck) => {
             // Proof of pair: delivery already marked the contact paired.
             info!("PAIR: confirmed by {}", hex::encode(&author[..4]));
-            // The pair now works both ways, and they hold our name from
-            // the invite: our picture is the one thing left to show them.
-            crate::messaging::welcome::introduce_ourselves(conv);
         },
         Ok(AppPayload::P2pOffer {
             session,
@@ -1148,7 +1129,6 @@ mod tests {
         let (alice, bob, carol) = (Party::new(0xA5), Party::new(0xB5), Party::new(0xC5));
         let db = &scope.core.db;
         identity(&db.identity().lock(), 0xB5);
-        db.identity().lock().execute("UPDATE identity SET avatar_revision = 9", []).unwrap();
         let gid = [0xD5; 32];
         let meta = GroupMeta::founded("Catch-up".into(), alice.ipk);
         let (mut group, _) = found(&alice, gid, Some(&meta), [&bob, &carol]);
@@ -1263,12 +1243,10 @@ mod tests {
         let read = (4, delivered_at, read_at);
         assert_eq!([seat(alice.ipk), seat(carol.ipk)], [read, (0, None, None)]);
 
-        assert_eq!(crate::data::peer_avatar::get(&alice.ipk), Some(image));
-        let sql = "SELECT revision FROM avatar_acks WHERE owner_ipk = ?1 AND peer_ipk = ?2";
-        let key = (bob.ipk.as_slice(), alice.ipk.as_slice());
-        let acked: Option<u64> = db.messages().lock().query_row(sql, key, |r| r.get(0)).unwrap();
-        assert_eq!(acked, Some(9));
-        let rung = scope.events.0.lock().iter().any(|(t, g)| t == &["peer_avatars"] && *g > before);
-        assert!(rung, "the app hears of the picture once its generation has moved");
+        assert!(
+            crate::data::peer_avatar::get(&alice.ipk).is_none(),
+            "retired profile controls cannot restore pictures"
+        );
+        assert_eq!(crate::data::peer_avatar::generation(), before);
     }
 }

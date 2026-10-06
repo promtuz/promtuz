@@ -12,7 +12,6 @@ use common::utils::now_ms;
 use ed25519_dalek::Signature;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
-use log::debug;
 use log::info;
 use log::warn;
 use openmls::prelude::CredentialWithKey;
@@ -22,8 +21,6 @@ use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::SignatureScheme;
 use tokio::sync::Mutex as TokMutex;
 
-use super::send_control;
-use super::welcome::own_introduction;
 use super::welcome::valid_initial_pair;
 use crate::data::contact::Contact;
 use crate::data::conversation::Conversation;
@@ -265,22 +262,12 @@ pub(super) async fn group_for_conversation<C: DhtClient>(
         return Ok(group);
     }
     // Our first message to someone who never added us, or who deleted our pair since, lands as a
-    // request. Introduce ourselves first so the request never shows only a key.
+    // request. Profile access follows acceptance, independently of this MLS group.
     if status.is_none() {
         Contact::save_pending(peer, String::new())?;
     }
     Contact::set_mls_group_id(&peer, &group.group_id())?;
-    let gid = group.group_id();
-    drop(group);
-    for payload in own_introduction() {
-        if let Err(e) = send_control(*conversation, payload).await {
-            debug!("PROFILE: could not introduce ourselves to a new chat: {e}");
-        }
-    }
-    // The introduction advanced the group's state; the handle we built is stale.
-    MlsGroupHandle::load(ctx.provider, &gid)
-        .map_err(|e| anyhow!("load group: {e}"))?
-        .ok_or_else(|| anyhow!("no local group state for {}", hex::encode(&gid[..4])))
+    Ok(group)
 }
 
 pub fn leaf_signer_for_group(

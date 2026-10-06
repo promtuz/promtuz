@@ -98,9 +98,8 @@ pub(super) async fn handle_packet(
 
         Activity(eph) => forward::handle_activity(eph, ctx.clone()).await,
 
-        SubscribePresence(sub) => presence::handle_subscribe(sub, ctx.clone()).await.map(|_| ()),
-
-        SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await.map(|_| ()),
+        // Retired unacknowledged presence requests keep their wire ordinals only.
+        SubscribePresence(_) | SetPresence(_) => Ok(()),
 
         SubscribePresenceDurable(sub) => {
             use common::proto::{Sender, client_rel::SRelayPacket};

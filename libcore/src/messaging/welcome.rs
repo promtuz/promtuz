@@ -57,16 +57,12 @@ pub(crate) fn unpaired(conversation: [u8; 16], from: [u8; 32]) {
     info!("PAIR: {} deleted our chat; the next message starts a fresh pair", hex::encode(&from[..4]));
 }
 
-/// Confirm a working pair with `to`, then show them who we are. They hold our
-/// name from an invite; a requester learns it here.
+/// Confirm a working pair with `to`. Profile grants follow accepted contact status.
 pub(crate) fn confirm_pair(to: [u8; 32]) {
     core().spawn(async move {
         if let Err(e) = send_pair_ack(to).await {
             warn!("PAIR: ack send to {} failed: {e}", hex::encode(&to[..4]));
             return;
-        }
-        if let Ok(conv) = Conversation::for_peer(&to) {
-            introduce_ourselves(conv);
         }
     });
 }
@@ -105,76 +101,18 @@ pub(crate) async fn pair_with_consent(
     Ok(())
 }
 
-/// Name, picture and profile details, each in its own control message so a member holding one
-/// loses nothing when only another changes.
-pub(super) fn own_introduction() -> Vec<AppPayload> {
-    let Some(identity) = Identity::get() else { return Vec::new() };
-    let mut out = Vec::with_capacity(2);
-    let name = identity.name();
-    if !name.is_empty() {
-        out.push(AppPayload::Profile { name });
-    }
-    // Include removals too, so introductions cannot revive a stale picture.
-    out.push(identity.avatar_update().into_payload());
-    out.push(identity.details().into_payload());
-    out
-}
-
-/// Spawned because every caller is on a receive path that must not block on a send.
-pub(crate) fn introduce_ourselves(conversation: [u8; 16]) {
-    let payloads = own_introduction();
-    if payloads.is_empty() {
-        return;
-    }
-    core().spawn(async move {
-        for payload in payloads {
-            if let Err(e) = send_control(conversation, payload).await {
-                debug!("PROFILE: could not introduce ourselves: {e}");
-            }
-        }
-    });
-}
-
-/// For a member who joined after us and never heard our introduction.
-pub(crate) fn introduce_ourselves_to(conversation: [u8; 16], who: [u8; 32]) {
-    let mut payloads = own_introduction();
+/// Group pictures still travel through MLS until group storage is migrated.
+pub(crate) fn send_group_picture_to(conversation: [u8; 16], who: [u8; 32]) {
     let me = Identity::local_ipk().unwrap_or_default();
-    if Conversation::may_edit(&conversation, &me)
-        && let Some((revision, avif)) = crate::data::group_picture::snapshot(&conversation)
-    {
-        payloads.push(AppPayload::GroupPicture { revision, avif });
-    }
-    if payloads.is_empty() {
+    if !Conversation::may_edit(&conversation, &me) {
         return;
     }
+    let Some((revision, avif)) = crate::data::group_picture::snapshot(&conversation) else { return };
     core().spawn(async move {
-        for payload in payloads {
-            if let Err(e) = send_control_to(conversation, payload, who).await {
-                debug!("PROFILE: could not introduce ourselves to a new member: {e}");
-            }
-        }
-    });
-}
-
-/// A removal travels too, so members stop showing a picture we took down.
-pub(crate) fn broadcast_avatar(update: crate::data::peer_avatar::AvatarUpdate) {
-    broadcast_profile(update.into_payload());
-}
-
-pub(crate) fn broadcast_profile(payload: AppPayload) {
-    let Some(me) = Identity::local_ipk() else { return };
-    let chats: Vec<[u8; 16]> = Conversation::list()
-        .into_iter()
-        .filter(|c| c.mls_group_id.is_some())
-        .map(|c| c.id)
-        .filter(|id| Conversation::members(id).iter().any(|m| m.active && m.member_ipk == me))
-        .filter(|id| !crate::requests::is_request_chat(id))
-        .collect();
-    core().spawn(async move {
-        for id in chats {
-            if let Err(e) = send_control(id, payload.clone()).await {
-                debug!("PROFILE: could not send our picture to {}: {e}", hex::encode(&id[..4]));
-            }
+        if let Err(e) =
+            send_control_to(conversation, AppPayload::GroupPicture { revision, avif }, who).await
+        {
+            debug!("GROUP: could not send picture to member: {e}");
         }
     });
 }
@@ -206,9 +144,8 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     if !meta.title.is_empty() {
         let _ = Conversation::set_title(&id, &meta.title);
     }
-    introduce_ourselves(id);
     // Whatever the committer sent us before our Welcome landed was dropped:
-    // its introduction and the group's photo. Ask again.
+    // the group's photo. Ask again.
     let committer = meta.effective().committer;
     if Identity::get().is_some_and(|i| i.ipk() != committer) {
         core().spawn(async move {

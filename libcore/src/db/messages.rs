@@ -514,6 +514,8 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("CREATE TABLE profile_fields (owner BLOB NOT NULL, field INTEGER NOT NULL,
              object BLOB NOT NULL, version INTEGER NOT NULL, withdrawn INTEGER NOT NULL,
              PRIMARY KEY(owner, field));"),
+    M::up("DROP TABLE avatar_acks; DROP TABLE profile_acks;
+           ALTER TABLE peer_avatars DROP COLUMN revision; ALTER TABLE peer_profiles DROP COLUMN revision;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.

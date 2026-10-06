@@ -14,7 +14,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
 
-use common::utils::now_ms;
 
 use crate::data::contact::Contact;
 use crate::data::conversation::Conversation;
@@ -275,11 +274,10 @@ fn import_into(
             &identity,
             &payload.name,
             bio.map_or("", |(_, v)| v.as_str()),
-            now_ms(),
         )?;
         // The picture can fail its own gate, and the restore must not fail over it.
         if let Err(e) =
-            crate::data::identity::set_avatar_tx(&identity, suffixes.avatar.as_deref(), now_ms())
+            crate::data::identity::set_avatar_tx(&identity, suffixes.avatar.as_deref())
         {
             log::warn!("BACKUP: could not restore the profile picture: {e}");
         }

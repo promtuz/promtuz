@@ -30,8 +30,8 @@ pub fn dispatch_sig_message(
 pub enum ServerHandshakeResultP {
     Accept {
         timestamp:     u64,
-        /// This relay's DHT NodeId, or `None` with DHT disabled. The phone binds it as
-        /// `requester_relay_id` when signing welcome fetches and acks.
+        /// This relay's storage NodeId, also available without DHT. Older relays may send `None`.
+        /// The phone binds it as `requester_relay_id` when signing welcome fetches and acks.
         relay_node_id: Option<Bytes<32>>,
         /// Whether this relay answers STUN echoes and bridges TURN on its QUIC port. A bridge
         /// aimed at a relay without it is a silent black hole.
@@ -195,7 +195,7 @@ pub const MAX_PRESENCE_CONTACTS: usize = 256;
 /// A complete contact replacement can grant 256 new peers and revoke 256 previous ones.
 pub const MAX_PRESENCE_CONSENTS: usize = 2 * MAX_PRESENCE_CONTACTS;
 
-/// `Online` needs the client's `SetPresence(Active)`; `Idle` is asserted on backgrounding. A
+/// `Online` needs the client's `SetPresenceDurable(Active)`; `Idle` is asserted on backgrounding. A
 /// frozen app can hold its connection until the idle timeout, so connected is not online.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PresenceState {
@@ -311,10 +311,10 @@ pub enum CRelayPacket {
         sig:         Bytes<64>,
     },
 
-    /// No reply on this stream; presence arrives as [`SRelayPacket::Presence`] on the relay's own
-    /// streams.
+    /// Retired: decode only. Use the acknowledged service below.
     SubscribePresence(SubscribePresenceP),
 
+    /// Retired: decode only. Use the acknowledged service below.
     SetPresence(PresenceMode),
 
     /// Our push pseudonym `P`, so this home can wake our offline queue without the device token.
@@ -332,9 +332,9 @@ pub enum CRelayPacket {
     ServiceCapabilities,
     /// Bounded owner-signed services::key_inventory::Request.
     KeyPackageInventory { request: ByteVec },
-    /// Like SubscribePresence, with explicit local durability acknowledgement.
+    /// Replace read interests and signed consent, with a local durability acknowledgement.
     SubscribePresenceDurable(SubscribePresenceP),
-    /// Like SetPresence, with acknowledgement after the observation reaches stable storage.
+    /// Publish activity, with acknowledgement after the observation reaches stable storage.
     SetPresenceDurable(PresenceMode),
     Profile(crate::proto::profile::Request),
 }
@@ -380,10 +380,10 @@ pub enum SRelayPacket {
 
     WelcomesAcked,
 
-    /// The home runs without DHT; any of the five MLS wrapper RPCs can get this.
+    /// MLS storage is unavailable. Older relays also return this whenever DHT is disabled.
     DhtUnavailable,
 
-    /// A snapshot right after `SubscribePresence`, then single-entry deltas.
+    /// A snapshot right after `SubscribePresenceDurable`, then single-entry deltas.
     Presence(Vec<PresenceP>),
 
     /// `None` when this relay runs no TURN server.

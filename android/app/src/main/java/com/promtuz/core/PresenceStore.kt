@@ -16,7 +16,11 @@ private data class PresenceSnapshot(val savedAt: Long, val peers: Map<String, Pr
 object PresenceStore {
     private lateinit var prefs: SharedPreferences
     private val json = Json { ignoreUnknownKeys = true }
+    // SharedPreferences changes its memory even when commit() fails. Only successful writes
+    // belong in this map, which is also the source for display and duplicate suppression.
+    private val committed = mutableMapOf<String, Long>()
 
+    @Synchronized
     fun init(context: Context) {
         prefs = context.getSharedPreferences("presence", Context.MODE_PRIVATE)
         // Migrate the old whole-map cache once without clearing other app/device data.
@@ -30,13 +34,15 @@ object PresenceStore {
             }
             check(editor.commit()) { "Could not migrate presence cache" }
         }
+        committed.clear()
+        prefs.all.forEach { (peer, value) -> if (value is Long) committed[peer] = value }
     }
 
-    fun seed(): Map<String, Presence> = prefs.all.mapNotNull { (peer, value) ->
-        (value as? Long)?.let { peer to restored(it) }
-    }.toMap()
+    @Synchronized
+    fun seed(): Map<String, Presence> = committed.mapValues { restored(it.value) }
 
-    fun lastSeen(peer: String): Presence = restored(prefs.getLong(peer, 0))
+    @Synchronized
+    fun lastSeen(peer: String): Presence = restored(committed[peer] ?: 0)
 
     /** Called by the serial IO worker before displaying the accepted observation. */
     @Synchronized
@@ -47,8 +53,9 @@ object PresenceStore {
             is Presence.LastSeen -> presence.atMs
             Presence.Unknown -> 0L // Explicit withdrawal must also clear the retained observation.
         }
-        if (prefs.getLong(peer, -1) == timestamp) return
+        if (committed[peer] == timestamp) return
         check(prefs.edit().putLong(peer, timestamp).commit()) { "Could not persist presence" }
+        committed[peer] = timestamp
     }
 
     private fun restored(timestamp: Long): Presence =

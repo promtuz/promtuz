@@ -90,13 +90,6 @@ pub(crate) fn invalidate(owner: [u8; 32]) {
     core().profile_changed.notify_one();
 }
 
-/// Legacy publication is restricted too; a group encryption context is not a private pair.
-pub(crate) fn allows(field: Field, peer: &[u8; 32]) -> bool {
-    Contact::is_paired(peer)
-        && !crate::requests::is_blocked(peer)
-        && policy(field)
-            .is_ok_and(|p| p.accepted_contacts && !p.excluded.iter().any(|p| p.as_slice() == peer))
-}
 fn host(owner: &[u8; 32]) -> Result<Option<String>> {
     Ok(one(
         &core().db.messages().lock(),
@@ -105,17 +98,45 @@ fn host(owner: &[u8; 32]) -> Result<Option<String>> {
         |r| r.get(0),
     )?)
 }
-pub(crate) async fn uses_service() -> bool {
-    if Identity::local_ipk().is_some_and(|owner| host(&owner).map_or(true, |h| h.is_some())) {
-        return true;
-    }
-    match core().session() {
-        Some(s) => {
-            s.services().await.supports(services::PROFILE_STORE, services::PROFILE_STORE_VERSION)
-        },
-        None => false,
+/// The primary connection is borrowed; a temporary connection to the pinned host is always
+/// closed, including on cancellation. It never becomes the messaging/presence session.
+struct ProfileSession {
+    session: std::sync::Arc<crate::quic::server::Session>,
+    temporary: bool,
+}
+impl std::ops::Deref for ProfileSession {
+    type Target = std::sync::Arc<crate::quic::server::Session>;
+    fn deref(&self) -> &Self::Target {
+        &self.session
     }
 }
+impl Drop for ProfileSession {
+    fn drop(&mut self) {
+        if self.temporary {
+            self.session.conn.close(0u32.into(), b"profile-pass-complete");
+            self.session.cancel.cancel();
+        }
+    }
+}
+
+/// Call only while holding profile_update, also held by primary authentication/publication.
+async fn session(owner: &[u8; 32], pinned: Option<&str>) -> Result<Option<ProfileSession>> {
+    if let Some(session) = core().session()
+        && session.conn.close_reason().is_none()
+        && pinned.is_none_or(|id| id == session.relay.id.as_ref())
+    {
+        return Ok(Some(ProfileSession { session, temporary: false }));
+    }
+    let Some(id) = pinned else { return Ok(None) };
+    let relay = crate::data::relay::Relay::fetch_by_id(id)?;
+    let session = crate::quic::server::Session::connect_profile(
+        relay,
+        ed25519_dalek::VerifyingKey::from_bytes(owner)?,
+    )
+    .await?;
+    Ok(Some(ProfileSession { session: std::sync::Arc::new(session), temporary: true }))
+}
+
 async fn rpc(session: &crate::quic::server::Session, request: Request) -> Result<Response> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let (mut tx, mut rx) = session.conn.open_bi().await?;
@@ -184,20 +205,15 @@ fn staged(
     row.map(|(fingerprint, bytes)| Ok((fingerprint, Publication::deser(&bytes)?))).transpose()
 }
 
-/// Returns true once this identity uses the store; errors must never downgrade to queued MLS.
-pub(super) async fn reconcile() -> Result<bool> {
-    let Some(session) = core().session() else { return Ok(false) };
-    let Some(identity) = Identity::get() else { return Ok(false) };
+/// The profile store is the only publication path; unsupported hosts leave local work pending.
+pub(super) async fn reconcile() -> Result<()> {
+    let Some(identity) = Identity::get() else { return Ok(()) };
     let owner = identity.ipk();
     let pinned = host(&owner)?;
-    if !session.services().await.supports(services::PROFILE_STORE, services::PROFILE_STORE_VERSION)
-    {
-        ensure!(pinned.is_none(), "profile storage relay unavailable; publication deferred");
-        return Ok(false);
-    }
+    let Some(session) = session(&owner, pinned.as_deref()).await? else { return Ok(()) };
     ensure!(
-        pinned.as_ref().is_none_or(|h| h.as_str() == session.relay.id.as_ref()),
-        "profile storage is on another relay; migration is not automatic"
+        session.services().await.supports(services::PROFILE_STORE, services::PROFILE_STORE_VERSION),
+        "relay does not support profile storage"
     );
     // Pin before any upload. A lost ACK or connection switch must not create an unmanaged copy.
     if pinned.is_none() {
@@ -319,7 +335,7 @@ pub(super) async fn reconcile() -> Result<bool> {
         return Err(error);
     }
     fetched?;
-    Ok(true)
+    Ok(())
 }
 
 pub(super) async fn refresh_pending() -> Result<()> {
@@ -331,12 +347,11 @@ pub(super) async fn refresh_pending() -> Result<()> {
     if peers.is_empty() {
         return Ok(());
     }
-    let session = core().session().ok_or_else(|| anyhow!("profile relay unavailable"))?;
     let owner = Identity::local_ipk().ok_or_else(|| anyhow!("identity unavailable"))?;
-    ensure!(
-        host(&owner)?.is_some_and(|h| h.as_str() == session.relay.id.as_ref()),
-        "profile storage relay unavailable"
-    );
+    let pinned = host(&owner)?.ok_or_else(|| anyhow!("profile host not selected"))?;
+    let session = session(&owner, Some(&pinned))
+        .await?
+        .ok_or_else(|| anyhow!("profile relay unavailable"))?;
     let signer = crate::data::identity::secret_key_signing(&owner)?;
     fetch(&session, &signer, &peers).await
 }
@@ -399,10 +414,6 @@ fn cached(
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?)
 }
-pub(crate) fn has_field(conn: &Connection, owner: &[u8; 32], field: Field) -> bool {
-    // Fail closed on a storage error: legacy controls must not bypass a withdrawal.
-    cached(conn, owner, field).map_or(true, |row| row.is_some())
-}
 fn apply(conn: &Connection, value: &Value, content: Option<Content>) -> Result<bool> {
     let owner = &value.owner.0;
     let tx = conn.unchecked_transaction()?;
@@ -430,7 +441,7 @@ fn apply(conn: &Connection, value: &Value, content: Option<Content>) -> Result<b
                 ensure!(c.ipk == *owner && c.name == name, "profile card mismatch");
             }
             tx.execute(
-                "INSERT INTO peer_profiles(ipk,name,bio,revision,card) VALUES (?1,?2,'',0,?3)
+                "INSERT INTO peer_profiles(ipk,name,bio,card) VALUES (?1,?2,'',?3)
                 ON CONFLICT(ipk) DO UPDATE SET name=excluded.name,card=excluded.card",
                 (owner.as_slice(), name, card),
             )?;
@@ -439,7 +450,7 @@ fn apply(conn: &Connection, value: &Value, content: Option<Content>) -> Result<b
         (Field::Bio, Content::Bio(bio)) => {
             ensure!(bio.chars().count() <= 160, "invalid profile bio");
             tx.execute(
-                "INSERT INTO peer_profiles(ipk,name,bio,revision,card) VALUES (?1,'',?2,0,X'')
+                "INSERT INTO peer_profiles(ipk,name,bio,card) VALUES (?1,'',?2,X'')
                 ON CONFLICT(ipk) DO UPDATE SET bio=excluded.bio",
                 (owner.as_slice(), bio),
             )?;
@@ -449,7 +460,7 @@ fn apply(conn: &Connection, value: &Value, content: Option<Content>) -> Result<b
                 crate::data::peer_avatar::check_avif(bytes)?;
             }
             tx.execute(
-                "INSERT INTO peer_avatars(ipk,avif,updated_at,revision) VALUES (?1,?2,?3,0)
+                "INSERT INTO peer_avatars(ipk,avif,updated_at) VALUES (?1,?2,?3)
                 ON CONFLICT(ipk) DO UPDATE SET avif=excluded.avif,updated_at=excluded.updated_at",
                 (owner.as_slice(), avif, now_ms() / 1000),
             )?;
@@ -489,7 +500,7 @@ mod tests {
             .query_row("SELECT name,bio FROM peer_profiles", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((n, b), ("".into(), "hello".into()));
-        assert!(has_field(&conn, &[1; 32], Field::Name));
+        assert!(cached(&conn, &[1; 32], Field::Name).unwrap().unwrap().2);
         conn.execute_batch("CREATE TABLE parent(id INTEGER PRIMARY KEY);
             CREATE TABLE child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
             CREATE TRIGGER fail_commit AFTER UPDATE ON peer_profiles BEGIN INSERT INTO child VALUES(1); END;").unwrap();
@@ -507,7 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_recovers_lost_ack_coalesces_edits_and_never_dispatches() {
+    async fn reconciliation_recovers_lost_ack_switches_relays_and_cancels_without_dispatches() {
         use crate::test_support::{ScopedCore, data, net};
         use ed25519_dalek::SigningKey;
         use std::sync::Arc;
@@ -528,71 +539,144 @@ mod tests {
         let peer_key = crypto::reader_key(&peer).unwrap();
         let publications = Arc::new(parking_lot::Mutex::new(BTreeMap::<u8, Publication>::new()));
         let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (ours, theirs) = net::connection().await;
-        let session = Arc::new(net::session(ours));
-        scope.core.publish(session);
+        use common::proto::client_rel::{
+            CHandshakePacket, SHandshakePacket, ServerHandshakeResultP,
+        };
+        use common::quic::protorole::ProtoRole;
+        let (endpoint, roots) = net::server(ProtoRole::Client);
+        let relay = crate::data::relay::Relay {
+            id: "localhost".into(),
+            host: "127.0.0.1".into(),
+            port: endpoint.local_addr().unwrap().port(),
+            pubkey: None,
+            assist: false,
+        };
+        assert!(
+            scope
+                .core
+                .net
+                .set(crate::state::Net {
+                    endpoint: net::client_endpoint(),
+                    dialer: crate::quic::dialer::ClientConfigs {
+                        quic: net::client_config(ProtoRole::Client, &roots),
+                        roots
+                    },
+                    seeds: vec![],
+                })
+                .is_ok()
+        );
+        scope.core.db.network().lock().execute(
+            "INSERT INTO relays(id,host,port,protocol_version,window_start,last_seen) VALUES ('localhost','127.0.0.1',?1,?2,0,0)",
+            (relay.port, common::PROTOCOL_VERSION),
+        ).unwrap();
         let task = tokio::spawn({
             let publications = publications.clone();
             let sent = sent.clone();
             async move {
                 let mut lose_ack = true;
-                while let Ok((mut tx, mut rx)) = theirs.accept_bi().await {
-                    let packet = CRelayPacket::unpack(&mut rx).await.unwrap();
-                    let response = match packet {
-                        CRelayPacket::ServiceCapabilities => {
-                            let support = common::contracts::Support::new([(
-                                services::PROFILE_STORE,
-                                vec![1],
-                            )])
-                            .unwrap();
-                            SRelayPacket::ServiceCapabilities { supported: support.encode().into() }
-                        },
-                        CRelayPacket::Profile(request) => SRelayPacket::Profile(match request {
-                            Request::Register(_) => Response::Accepted,
-                            Request::ReaderKey { owner } => {
-                                assert_eq!(owner.0, peer_id);
-                                Response::ReaderKey(Some(peer_key.clone()))
-                            },
-                            Request::Head { field } => Response::Head(
-                                publications
-                                    .lock()
-                                    .get(&field.id())
-                                    .map(|p| (p.value.object, p.value.version)),
-                            ),
-                            Request::Publish(p) => {
-                                sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                publications.lock().insert(p.value.field.id(), p);
-                                if lose_ack {
-                                    lose_ack = false;
-                                    tx.reset(0u32.into()).unwrap();
-                                    continue;
-                                }
-                                Response::Accepted
-                            },
-                            Request::Fetch { owner, field, known_version } => {
-                                assert_eq!(owner.0, peer_id);
-                                if field != Field::Name {
-                                    Response::Missing
-                                } else if known_version == Some(1) {
-                                    Response::Unchanged
-                                } else {
-                                    Response::Value {
-                                        value: their_name.value.clone(),
-                                        grant: their_name.grants[0].clone(),
-                                    }
-                                }
-                            },
-                        }),
-                        other => panic!("profile reconciliation must not dispatch: {other:?}"),
+                while let Some(incoming) = endpoint.accept().await {
+                    let theirs = incoming.await.unwrap();
+                    let (mut tx, mut rx) = theirs.accept_bi().await.unwrap();
+                    let CHandshakePacket::Hello { ipk } =
+                        CHandshakePacket::unpack(&mut rx).await.unwrap()
+                    else {
+                        panic!("hello")
                     };
-                    response.send(&mut tx).await.unwrap();
+                    let nonce = [8; 32];
+                    SHandshakePacket::Challenge { nonce: nonce.into() }
+                        .send(&mut tx)
+                        .await
+                        .unwrap();
+                    let CHandshakePacket::Proof { sig } =
+                        CHandshakePacket::unpack(&mut rx).await.unwrap()
+                    else {
+                        panic!("proof")
+                    };
+                    common::crypto::verify_ed25519(
+                        &ipk.0,
+                        &common::proto::client_rel::client_auth_message(
+                            &nonce,
+                            &common::quic::client_auth_binding(&theirs).unwrap(),
+                        ),
+                        &sig.0,
+                    )
+                    .unwrap();
+                    SHandshakePacket::HandshakeResult(ServerHandshakeResultP::Accept {
+                        timestamp: now_ms(),
+                        relay_node_id: None,
+                        assist: false,
+                        turn_port: None,
+                    })
+                    .send(&mut tx)
+                    .await
+                    .unwrap();
                     tx.finish().unwrap();
+                    while let Ok((mut tx, mut rx)) = theirs.accept_bi().await {
+                        let packet = CRelayPacket::unpack(&mut rx).await.unwrap();
+                        let response = match packet {
+                            CRelayPacket::ServiceCapabilities => {
+                                let support = common::contracts::Support::new([(
+                                    services::PROFILE_STORE,
+                                    vec![1],
+                                )])
+                                .unwrap();
+                                SRelayPacket::ServiceCapabilities {
+                                    supported: support.encode().into(),
+                                }
+                            },
+                            CRelayPacket::Profile(request) => {
+                                SRelayPacket::Profile(match request {
+                                    Request::Register(_) => Response::Accepted,
+                                    Request::ReaderKey { owner } => {
+                                        assert_eq!(owner.0, peer_id);
+                                        Response::ReaderKey(Some(peer_key.clone()))
+                                    },
+                                    Request::Head { field } => Response::Head(
+                                        publications
+                                            .lock()
+                                            .get(&field.id())
+                                            .map(|p| (p.value.object, p.value.version)),
+                                    ),
+                                    Request::Publish(p) => {
+                                        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        publications.lock().insert(p.value.field.id(), p);
+                                        if lose_ack {
+                                            lose_ack = false;
+                                            tx.reset(0u32.into()).unwrap();
+                                            continue;
+                                        }
+                                        Response::Accepted
+                                    },
+                                    Request::Fetch { owner, field, known_version } => {
+                                        assert_eq!(owner.0, peer_id);
+                                        if field != Field::Name {
+                                            Response::Missing
+                                        } else if known_version == Some(1) {
+                                            Response::Unchanged
+                                        } else {
+                                            Response::Value {
+                                                value: their_name.value.clone(),
+                                                grant: their_name.grants[0].clone(),
+                                            }
+                                        }
+                                    },
+                                })
+                            },
+                            other => panic!("profile reconciliation must not dispatch: {other:?}"),
+                        };
+                        response.send(&mut tx).await.unwrap();
+                        tx.finish().unwrap();
+                    }
                 }
             }
         });
+        let primary = Arc::new(
+            crate::quic::server::Session::connect_profile(relay, me.verifying_key()).await.unwrap(),
+        );
+        scope.core.publish(primary.clone());
         assert!(reconcile().await.is_err(), "first publication loses its ACK after storage");
         let first = publications.lock()[&Field::Name.id()].clone();
-        assert!(reconcile().await.unwrap());
+        reconcile().await.unwrap();
         assert_eq!(
             publications.lock()[&Field::Name.id()],
             first,
@@ -600,11 +684,11 @@ mod tests {
         );
         assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), 3);
         assert_eq!(crate::data::peer_profile::get(&peer_id).unwrap().name, "Peer name");
-        assert!(reconcile().await.unwrap());
+        reconcile().await.unwrap();
         assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), 3, "no unchanged uploads");
         Identity::set_details("First edit", "").unwrap();
         Identity::set_details("Latest edit", "").unwrap();
-        assert!(reconcile().await.unwrap());
+        reconcile().await.unwrap();
         assert_eq!(
             sent.load(std::sync::atomic::Ordering::Relaxed),
             4,
@@ -620,16 +704,39 @@ mod tests {
             ProfileSharing { accepted_contacts: false, excluded: vec![] },
         )
         .unwrap();
-        assert!(reconcile().await.unwrap());
+        reconcile().await.unwrap();
         assert!(publications.lock()[&Field::Name.id()].grants.is_empty());
         assert_eq!(
             publications.lock()[&Field::Bio.id()].grants.len(),
             1,
             "bio policy remains independent"
         );
+        // Messaging reconnects elsewhere. Withdrawals must still reach the original host.
+        let (other, _other_relay) = net::connection().await;
+        let messaging = Arc::new(net::session(other));
+        scope.core.publish(messaging.clone());
+        primary.conn.close(0u32.into(), b"switch-relay");
         Contact::delete(&peer_id).unwrap();
-        assert!(reconcile().await.unwrap());
+        reconcile().await.unwrap();
         assert!(publications.lock().values().all(|p| p.grants.is_empty()));
+        assert_eq!(host(&me.verifying_key().to_bytes()).unwrap().as_deref(), Some("localhost"));
+        assert!(messaging.conn.close_reason().is_none());
+        assert_eq!(scope.core.session().unwrap().conn.stable_id(), messaging.conn.stable_id());
+        // Cancelling a pass closes its temporary transport, including when another clone exists.
+        let (opened, connection) = tokio::sync::oneshot::channel();
+        let owner = me.verifying_key().to_bytes();
+        let pass = tokio::spawn(async move {
+            let _update = core().profile_update.lock().await;
+            let service = session(&owner, Some("localhost")).await.unwrap().unwrap();
+            opened.send(service.conn.clone()).unwrap();
+            std::future::pending::<()>().await;
+            drop(service);
+        });
+        let connection = connection.await.unwrap();
+        pass.abort();
+        assert!(pass.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), connection.closed()).await.unwrap();
+        assert!(messaging.conn.close_reason().is_none());
         task.abort();
     }
 }

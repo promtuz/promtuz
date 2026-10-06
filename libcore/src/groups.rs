@@ -186,8 +186,6 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         Conversation::sync_group(&conversation, &group.roster(), group.group_meta().as_ref())?;
         recovery::dispatch(recovery::flush_jobs(ctx.provider, group_id)?).await;
         info!("GROUP: created \"{title}\" with {} members", members.len() + 1);
-        // Members who never paired with us may not know our name.
-        crate::messaging::welcome::introduce_ourselves(conversation);
         Ok(conversation)
     })
 }
@@ -616,7 +614,7 @@ pub(crate) fn changed(conversation: [u8; 16], changed: &Changed, ts: u64) -> Res
         }
         if let GroupChange::Add { who } = &changed.signed.change {
             for who in who.iter().filter(|w| w.0 != me) {
-                crate::messaging::welcome::introduce_ourselves_to(conversation, who.0);
+                crate::messaging::welcome::send_group_picture_to(conversation, who.0);
             }
         }
     }
@@ -988,7 +986,7 @@ async fn catch_up(conversation: [u8; 16], who: [u8; 32]) {
             warn!("GROUP: the new member may not have the group's name yet: {e}");
         }
     }
-    crate::messaging::welcome::introduce_ourselves_to(conversation, who);
+    crate::messaging::welcome::send_group_picture_to(conversation, who);
 }
 
 /// The committer's Welcome for someone we asked to add. They know us, and may

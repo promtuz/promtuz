@@ -5,7 +5,6 @@ use common::types::bytes::fixed;
 use common::utils::now_ms;
 
 use crate::data::identity::Identity;
-use crate::data::peer_avatar::AvatarUpdate;
 use crate::platform::CoreError;
 use crate::state::core;
 
@@ -53,7 +52,7 @@ pub fn profile_picture() -> Option<Vec<u8>> {
 }
 
 /// Takes platform-decoded RGBA and encodes AVIF here so every platform ships the same bytes.
-/// Blocks on the encode; the broadcast to every chat is fire-and-forget.
+/// Blocks on the encode; profile publication runs separately.
 #[uniffi::export]
 pub fn set_profile_picture(rgba: Vec<u8>, width: u32, height: u32) -> Result<(), CoreError> {
     let avif = crate::media::avatar_from_rgba(&rgba, width, height)?;
@@ -61,7 +60,7 @@ pub fn set_profile_picture(rgba: Vec<u8>, width: u32, height: u32) -> Result<(),
 }
 
 /// Saves exactly the prepared AVIF shown by the editor, including its animation
-/// and colour metadata. Validation completes before revision/storage changes.
+/// and colour metadata. Validation completes before storage changes.
 #[uniffi::export]
 pub fn set_profile_picture_encoded(avif: Vec<u8>) -> Result<(), CoreError> {
     let image = crate::media::validate_avatar_avif(&avif)
@@ -75,8 +74,7 @@ pub fn clear_profile_picture() -> Result<(), CoreError> {
 }
 
 fn save_profile_picture(avif: Option<Vec<u8>>) -> Result<(), CoreError> {
-    let revision = Identity::set_avatar(avif.as_deref())?;
-    crate::messaging::welcome::broadcast_avatar(AvatarUpdate { revision, avif });
+    Identity::set_avatar(avif.as_deref())?;
     Ok(())
 }
 
@@ -133,13 +131,6 @@ pub fn profile_bio() -> String {
 #[uniffi::export]
 pub fn set_profile_details(name: String, bio: String) -> Result<(), CoreError> {
     Identity::set_details(&name, &bio)?;
-    if let Some(me) = Identity::get() {
-        crate::messaging::welcome::broadcast_profile(me.details().into_payload());
-        // Older peers still understand the name-only introduction.
-        crate::messaging::welcome::broadcast_profile(common::proto::mls_wire::AppPayload::Profile {
-            name: me.name(),
-        });
-    }
     Ok(())
 }
 
