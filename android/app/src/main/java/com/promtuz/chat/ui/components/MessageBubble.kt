@@ -369,10 +369,13 @@ private fun QuoteBlock(
 ) {
     Row(
         modifier
+            .then(onClick?.let {
+                Modifier.clickable(onClick = {})
+                    .pressScale(it, 0.95f)
+            } ?: Modifier)
             .padding(top = 2.dp, bottom = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(textColor.copy(alpha = 0.08f))
-            .then(onClick?.let { Modifier.clickable(onClick = it) } ?: Modifier)
             .height(IntrinsicSize.Min),
     ) {
         Box(Modifier
