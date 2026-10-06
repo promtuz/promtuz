@@ -14,7 +14,6 @@ use common::proto::pack::Packer;
 use common::utils::now_secs;
 use log::debug;
 
-use self::body::rebuild_pending_payload;
 use self::body::stored_body;
 use self::send::queue_application;
 use self::send::send_payload;
@@ -240,77 +239,6 @@ async fn send_control_inner(
         bail!("control deferred until a recipient relay accepts it");
     }
     Ok(())
-}
-
-/// A placeholder row with a null blob so the bubble shows at once; [`finish_image`] adds bytes.
-pub(crate) fn build_image_message(
-    conversation: [u8; 16], width: u32, height: u32, caption: &str, group_id: Option<[u8; 16]>,
-) -> Result<Message> {
-    crate::data::media::save_outgoing_with_media(
-        &conversation,
-        caption,
-        None,
-        &crate::data::media::MediaRow {
-            kind: crate::data::media::KIND_IMAGE,
-            group_id: group_id.map(|g| g.to_vec()),
-            mime: "image/avif".into(),
-            name: String::new(),
-            size: 0,
-            width,
-            height,
-            blob: None,
-            thumb: None,
-            file_id: None,
-            duration_ms: 0,
-            sticker: None,
-        },
-    )
-}
-
-/// A placeholder row without a file id; [`finish_attachment`] lands it after the manifest pass.
-pub(crate) fn build_attachment_message(
-    conversation: [u8; 16], size: u64, name: &str, mime: &str, thumb: Option<Vec<u8>>,
-    caption: &str, group_id: Option<[u8; 16]>,
-) -> Result<Message> {
-    crate::data::media::save_outgoing_with_media(
-        &conversation,
-        caption,
-        None,
-        &crate::data::media::MediaRow {
-            kind: crate::data::media::KIND_ATTACHMENT,
-            group_id: group_id.map(|g| g.to_vec()),
-            mime: mime.to_string(),
-            name: name.to_string(),
-            size,
-            width: 0,
-            height: 0,
-            blob: None,
-            thumb,
-            file_id: None,
-            duration_ms: 0,
-            sticker: None,
-        },
-    )
-}
-
-pub(crate) async fn finish_image(
-    conversation: [u8; 16], did: [u8; 16], avif: Vec<u8>, width: u32, height: u32,
-) -> Result<()> {
-    crate::data::media::set_blob(&conversation, &did, &avif, width, height)?;
-    let msg = Message::get_by_dispatch(&conversation, &did)
-        .ok_or_else(|| anyhow!("image row vanished"))?;
-    let payload_bytes = rebuild_pending_payload(&conversation, &msg)?;
-    send_prepared(conversation, &msg, payload_bytes).await
-}
-
-pub(crate) async fn finish_attachment(
-    conversation: [u8; 16], did: [u8; 16], file_id: [u8; 32],
-) -> Result<()> {
-    crate::data::media::set_file_id(&conversation, &did, &file_id)?;
-    let msg = Message::get_by_dispatch(&conversation, &did)
-        .ok_or_else(|| anyhow!("attachment row vanished"))?;
-    let payload_bytes = rebuild_pending_payload(&conversation, &msg)?;
-    send_prepared(conversation, &msg, payload_bytes).await
 }
 
 #[cfg(test)]

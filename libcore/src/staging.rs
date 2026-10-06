@@ -68,26 +68,6 @@ pub(crate) struct Staging {
     sending: Mutex<Vec<[u8; 32]>>,
 }
 
-/// Keeps a direct send's file from cleanup until dropped, without naming it on the row a reconnect
-/// retry would send.
-pub(crate) struct Hold([u8; 32]);
-
-impl Hold {
-    pub(crate) fn new(file_id: [u8; 32]) -> Self {
-        core().staging.sending.lock().push(file_id);
-        Self(file_id)
-    }
-}
-
-impl Drop for Hold {
-    fn drop(&mut self) {
-        let mut sending = core().staging.sending.lock();
-        if let Some(i) = sending.iter().position(|f| *f == self.0) {
-            sending.swap_remove(i);
-        }
-    }
-}
-
 fn ring() {
     if let Some(events) = core().events.get() {
         events.on_db_changed(vec!["staging".to_string()]);
