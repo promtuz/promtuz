@@ -57,8 +57,7 @@ pub(super) async fn handle_handshake(
     }
 
     // The client binds its welcome fetch/ack signatures to this NodeId.
-    let relay_node_id =
-        relay.dht.as_ref().map(|d| common::types::bytes::Bytes(*d.node_id.as_bytes()));
+    let relay_node_id = Some(common::types::bytes::Bytes(*relay.node_id.as_bytes()));
     HandshakeResult(ServerHandshakeResultP::Accept {
         timestamp: common::utils::now_secs(),
         relay_node_id,

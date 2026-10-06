@@ -127,12 +127,10 @@ pub(super) async fn handle_packet(
             use common::contracts::{Support, services};
             let mut offers = vec![(services::DURABLE_PRESENCE, vec![services::DURABLE_PRESENCE_VERSION])];
             offers.push((services::PROFILE_STORE, vec![services::PROFILE_STORE_VERSION]));
-            if ctx.relay.dht.is_some() {
-                offers.extend([
-                    (services::KEY_PACKAGE_CUSTODY, vec![services::KEY_PACKAGE_CUSTODY_VERSION]),
-                    (services::KEY_PACKAGE_INVENTORY, vec![services::KEY_PACKAGE_INVENTORY_VERSION]),
-                ]);
-            }
+            offers.extend([
+                (services::KEY_PACKAGE_CUSTODY, vec![services::KEY_PACKAGE_CUSTODY_VERSION]),
+                (services::KEY_PACKAGE_INVENTORY, vec![services::KEY_PACKAGE_INVENTORY_VERSION]),
+            ]);
             let support = Support::new(offers).expect("fixed service versions");
             SRelayPacket::ServiceCapabilities { supported:support.encode().into() }.send(tx).await?;
             Ok(())

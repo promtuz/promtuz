@@ -55,16 +55,13 @@ pub(crate) async fn handle_publish_keypackage(
         return Ok(());
     }
     let now_ms = now_ms();
-    let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     if !verify_publish_keypackage(&ctx.ipk, now_ms, &records, timestamp, &sig) {
         trace!("MLS publish-kp: wrapper sig/skew rejected");
         return Ok(());
     }
     let q =
-        kp_originate::originate_publish(&dht, ctx.ipk.to_bytes(), records, timestamp, sig).await;
+        kp_originate::originate_publish(dht, ctx.ipk.to_bytes(), records, timestamp, sig).await;
     SRelayPacket::KeyPackagePublished {
         homes_succeeded: q.homes_succeeded,
         quorum_met: q.quorum_met,
@@ -82,10 +79,7 @@ pub(crate) async fn handle_keypackage_inventory(
     use common::contracts::services::key_inventory::Request;
     let Ok(request) = Request::decode(bytes) else { return Ok(()); };
     if request.owner != ctx.ipk.to_bytes() { return Ok(()); }
-    let Some(dht) = ctx.relay.dht.as_ref() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     let now = now_ms();
     let Some(inventory) = crate::dht::mls::inventory::originate(dht, &request, now).await else {
         return Ok(());
@@ -106,10 +100,7 @@ pub(crate) async fn handle_fetch_keypackage(
     tx: &mut SendStream,
 ) -> Result<()> {
     let now_ms = now_ms();
-    let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     if !verify_fetch_keypackage(&ctx.ipk, now_ms, &target_ipk, timestamp, &sig) {
         trace!("MLS fetch-kp: wrapper sig/skew rejected");
         return Ok(());
@@ -120,7 +111,7 @@ pub(crate) async fn handle_fetch_keypackage(
         trace!("MLS fetch-kp: per-client quota for this target exhausted");
         return Ok(());
     }
-    let r = kp_originate::originate_fetch(&dht, target_ipk, now_ms).await;
+    let r = kp_originate::originate_fetch(dht, target_ipk, now_ms).await;
     if r.unavailable {
         SRelayPacket::DhtUnavailable.send(tx).await?;
         return Ok(());
@@ -155,15 +146,12 @@ pub(crate) async fn handle_publish_welcome(
         return Ok(());
     }
     let now_ms = now_ms();
-    let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     if !verify_publish_welcome(&ctx.ipk, now_ms, &envelope, timestamp, &sig) {
         trace!("MLS publish-welcome: wrapper sig/skew rejected");
         return Ok(());
     }
-    let quorum_met = welcome_originate::originate_welcome_publish(&dht, envelope, timestamp).await;
+    let quorum_met = welcome_originate::originate_welcome_publish(dht, envelope, timestamp).await;
     SRelayPacket::WelcomePublished { quorum_met }.send(tx).await?;
     Ok(())
 }
@@ -179,16 +167,13 @@ pub(crate) async fn handle_fetch_welcomes(
     ctx: ClientCtxHandle, timestamp: u64, sig: [u8; 64], tx: &mut SendStream,
 ) -> Result<()> {
     let now_ms = now_ms();
-    let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     if !verify_fetch_welcomes(&ctx.ipk, &dht.node_id, now_ms, timestamp, &sig) {
         trace!("MLS fetch-welcomes: wrapper sig/skew rejected");
         return Ok(());
     }
     let entries =
-        welcome_originate::originate_welcome_fetch(&dht, ctx.ipk.to_bytes(), timestamp, sig).await;
+        welcome_originate::originate_welcome_fetch(dht, ctx.ipk.to_bytes(), timestamp, sig).await;
     SRelayPacket::WelcomesFetched { entries }.send(tx).await?;
     Ok(())
 }
@@ -206,16 +191,13 @@ pub(crate) async fn handle_ack_welcomes(
     tx: &mut SendStream,
 ) -> Result<()> {
     let now_ms = now_ms();
-    let Some(dht) = ctx.relay.dht.as_ref().cloned() else {
-        SRelayPacket::DhtUnavailable.send(tx).await?;
-        return Ok(());
-    };
+    let dht = &ctx.relay.mls;
     let ids: Vec<[u8; 8]> = welcome_ids.iter().map(|b| b.0).collect();
     if !verify_ack_welcomes(&ctx.ipk, &dht.node_id, now_ms, &ids, timestamp, &sig) {
         trace!("MLS ack-welcomes: wrapper sig/skew rejected");
         return Ok(());
     }
-    welcome_originate::originate_welcome_ack(&dht, ctx.ipk.to_bytes(), ids, timestamp, sig).await;
+    welcome_originate::originate_welcome_ack(dht, ctx.ipk.to_bytes(), ids, timestamp, sig).await;
     SRelayPacket::WelcomesAcked.send(tx).await?;
     Ok(())
 }

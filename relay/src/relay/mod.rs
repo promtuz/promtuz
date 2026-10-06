@@ -38,6 +38,9 @@ pub struct Relay {
     pub store: Arc<Store>,
 
     pub dht: Option<Arc<Dht>>,
+    /// MLS custody is always available. With DHT disabled this context has no peers or dialer;
+    /// with DHT enabled it is shared with the mesh, including its storage and rate limiters.
+    pub(crate) mls: Arc<Dht>,
     /// Storage identity exists even when distributed routing is disabled.
     pub node_id: NodeId,
 
@@ -136,17 +139,16 @@ impl Relay {
         let clients = Arc::new(RwLock::new(HashMap::new()));
         let presence_leases = Arc::new(RwLock::new(HashMap::new()));
 
-        let dht = if cfg.dht.enabled {
-            let node_id = NodeId::new(signing.verifying_key());
-            let mut d = Dht::new(node_id, signing.clone(), cfg.dht.clone(), store.clone());
+        let node_id = NodeId::new(signing.verifying_key());
+        let mut d = Dht::new(node_id, signing.clone(), cfg.dht.clone(), store.clone());
+        if cfg.dht.enabled {
             d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
             d.attach_clients(clients.clone());
             d.attach_presence_leases(presence_leases.clone());
             info!("DHT enabled (node_id = {node_id})");
-            Some(Arc::new(d))
-        } else {
-            None
-        };
+        }
+        let mls = Arc::new(d);
+        let dht = cfg.dht.enabled.then(|| mls.clone());
 
         let assist_enabled = cfg.assist.enabled;
         let turn = cfg.turn.enabled.then(|| {
@@ -156,7 +158,8 @@ impl Relay {
             cfg,
             store,
             dht,
-            node_id: NodeId::new(signing.verifying_key()),
+            mls,
+            node_id,
             endpoint,
             assist: Mutex::new(assist),
             assist_enabled,

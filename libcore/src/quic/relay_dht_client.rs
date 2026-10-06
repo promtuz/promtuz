@@ -39,7 +39,7 @@ pub struct RelayDhtClient {
     conn: Connection,
     /// Our IPK, bound by every wrapper transcript.
     user_ipk: [u8; 32],
-    /// `None` when the home has DHT disabled; welcome fetch and ack then fail fast.
+    /// Storage identity from the handshake, including standalone relays. Older relays may omit it.
     home_node_id: Option<[u8; 32]>,
 }
 
@@ -216,7 +216,7 @@ fn random_dispatch_id() -> [u8; 16] {
 }
 
 fn dht_unavailable() -> DhtClientError {
-    DhtClientError::Transport("home relay has DHT disabled".into())
+    DhtClientError::Transport("relay MLS storage unavailable".into())
 }
 
 fn unexpected(reply: &SRelayPacket) -> DhtClientError {

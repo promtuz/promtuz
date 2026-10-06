@@ -93,6 +93,21 @@ async fn main() -> Result<()> {
 
     tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
     tokio::spawn(quic::handler::client::events::presence::maintain(relay.clone(), cancel.clone()));
+    // Custody limiters also need sweeping on relays with no DHT scheduler.
+    tokio::spawn({
+        let (mls, cancel) = (relay.mls.clone(), cancel.clone());
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                dht::config::ANTI_ENTROPY_INTERVAL_MS,
+            ));
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tick.tick() => mls.sweep_limiters(),
+                }
+            }
+        }
+    });
 
     if let Some(assist) = relay.assist.lock().take() {
         tokio::spawn(stunturn::serve(assist, cancel.clone()));

@@ -282,22 +282,28 @@ impl Client {
     pub(crate) async fn authenticate(
         &self, identity: &SigningKey, proof: &SigningKey, session: &Connection,
     ) -> bool {
+        matches!(self.handshake(identity, proof, session).await, Some(ServerHandshakeResultP::Accept { .. }))
+    }
+
+    pub(crate) async fn handshake(
+        &self, identity: &SigningKey, proof: &SigningKey, session: &Connection,
+    ) -> Option<ServerHandshakeResultP> {
         let (mut send, mut receive) = self.connection.open_bi().await.unwrap();
         let hello = CHandshakePacket::Hello { ipk: identity.verifying_key().to_bytes().into() };
         send.write_all(&hello.pack().unwrap()).await.unwrap();
         let Ok(SHandshakePacket::Challenge { nonce }) =
             SHandshakePacket::unpack(&mut receive).await
         else {
-            return false;
+            return None;
         };
         let binding = common::quic::client_auth_binding(session).unwrap();
         let sig = proof.sign(&client_auth_message(&nonce, &binding)).to_bytes();
         send.write_all(&CHandshakePacket::Proof { sig: sig.into() }.pack().unwrap()).await.unwrap();
         let _ = send.finish();
-        matches!(
-            SHandshakePacket::unpack(&mut receive).await,
-            Ok(SHandshakePacket::HandshakeResult(ServerHandshakeResultP::Accept { .. }))
-        )
+        match SHandshakePacket::unpack(&mut receive).await.ok()? {
+            SHandshakePacket::HandshakeResult(result) => Some(result),
+            _ => None,
+        }
     }
 
     /// Sends `packets` on one stream and returns every reply until the relay ends it.

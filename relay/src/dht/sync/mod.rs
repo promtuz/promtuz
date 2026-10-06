@@ -49,7 +49,6 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 return;
             }
             _ = bootstrap_tick.tick() => {
-                dht.sweep_limiters();
                 let known = dht.routing.read().total_known();
                 let sparse = known < BOOTSTRAP_RETRY_THRESHOLD;
                 if sparse && !was_sparse {

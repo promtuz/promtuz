@@ -271,3 +271,123 @@ async fn paged_backlog_survives_partial_ack_and_reconnect_without_dht() {
     assert_eq!(node.relay.store.messages.len().unwrap(), 0);
     assert!(drain(&phone, vec![]).await.is_empty());
 }
+
+/// Disabling the mesh must preserve MLS custody through the actual client protocol:
+/// signed publication, owner-only inventory, one-use fetches and reconnecting Welcome readers.
+#[tokio::test]
+async fn mls_custody_works_without_dht() {
+    use crate::test_support::{kp_record, kp_sig, welcome};
+    use common::contracts::services::{
+        self,
+        key_inventory::{Inventory, Request},
+    };
+    use common::proto::client_rel::ServerHandshakeResultP;
+    use common::proto::mls_wire::*;
+
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let node = Node::start(91, false).await;
+        assert!(node.relay.dht.is_none());
+        assert!(node.relay.mls.endpoint.is_none());
+        assert!(node.relay.mls.peer_client_cfg.is_none());
+        let (owner, sender) = (key(92), key(93));
+        let owner_ipk = owner.verifying_key().to_bytes();
+        let phone = Client::connect(&node).await;
+        let Some(ServerHandshakeResultP::Accept { relay_node_id: Some(node_id), .. }) =
+            phone.handshake(&owner, &owner, &phone.connection).await
+        else { panic!("standalone relay must advertise its storage identity") };
+        assert_eq!(node_id.0, *node.relay.node_id.as_bytes());
+        let peer = authenticated(&node, &sender).await;
+        let capabilities = phone.request(vec![CRelayPacket::ServiceCapabilities]).await;
+        let [SRelayPacket::ServiceCapabilities { supported }] = capabilities.as_slice()
+        else { panic!("missing capabilities") };
+        let support = Support::decode(&supported.0).unwrap();
+        assert!(support.supports(services::KEY_PACKAGE_CUSTODY, services::KEY_PACKAGE_CUSTODY_VERSION));
+        assert!(support.supports(services::KEY_PACKAGE_INVENTORY, services::KEY_PACKAGE_INVENTORY_VERSION));
+
+        let now = now_ms();
+        let records = vec![kp_record(&owner, [1; 32], now + 3_600_000)];
+        let publish = || CRelayPacket::PublishKeyPackage {
+            sig: kp_sig(&owner, &records, now).into(), records: records.clone(), timestamp: now,
+        };
+        // A valid signature by another identity cannot replace this connection owner's stash.
+        assert!(peer.request(vec![publish()]).await.is_empty());
+        assert!(matches!(phone.request(vec![publish()]).await.as_slice(),
+            [SRelayPacket::KeyPackagePublished { homes_succeeded: 1, quorum_met: true }]));
+        let mut inventory = Request {
+            owner: owner_ipk, delegate: node_id.0, timestamp: now, signature: [0; 64],
+        };
+        inventory.signature = owner.sign(&inventory.signing_input()).to_bytes();
+        let inventory_packet = || CRelayPacket::KeyPackageInventory { request: inventory.encode().into() };
+        assert!(peer.request(vec![inventory_packet()]).await.is_empty());
+        let result = phone.request(vec![inventory_packet()]).await;
+        let [SRelayPacket::KeyPackageInventory { inventory: encoded }] = result.as_slice()
+        else { panic!("missing inventory") };
+        let observed = Inventory::decode(&encoded.0).unwrap();
+        assert!(observed.matches(&inventory) && observed.complete());
+        assert_eq!(observed.homes.len(), 1);
+        assert_eq!(observed.homes[0].node, node_id.0);
+        assert_eq!(observed.homes[0].snapshot.as_ref().unwrap().references, [[1; 32]]);
+
+        let fetch = || CRelayPacket::FetchKeyPackage {
+            target_ipk: owner_ipk.into(), timestamp: now,
+            sig: sender.sign(&kp_fetch_wrap_signing_input(
+                MLS_WIRE_VERSION, &sender.verifying_key().to_bytes(), &owner_ipk, now,
+            )).to_bytes().into(),
+        };
+        // Racing streams must never vend the same one-use package twice.
+        let (first, second) = tokio::join!(
+            peer.request(vec![fetch()]), peer.request(vec![fetch()]),
+        );
+        let replies: Vec<_> = first.into_iter().chain(second).collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies.iter().filter(|reply| matches!(reply,
+            SRelayPacket::KeyPackageFetched { record: Some(_), .. })).count(), 1);
+        assert_eq!(replies.iter().filter(|reply| matches!(reply,
+            SRelayPacket::KeyPackageFetched { record: None, .. })).count(), 1);
+
+        drop(phone);
+        let phone = authenticated(&node, &owner).await;
+        // A reconnect or a replayed publication must not resurrect consumed packages.
+        assert!(matches!(phone.request(vec![publish()]).await.as_slice(),
+            [SRelayPacket::KeyPackagePublished { quorum_met: true, .. }]));
+        assert!(matches!(peer.request(vec![fetch()]).await.as_slice(),
+            [SRelayPacket::KeyPackageFetched { record: None, .. }]));
+
+        let envelope = welcome(&sender, owner_ipk, 7);
+        let packet = CRelayPacket::PublishWelcome {
+            sig: sender.sign(&welcome_publish_wrap_signing_input(
+                MLS_WIRE_VERSION, &sender.verifying_key().to_bytes(), &envelope.welcome_blob.0, now,
+            )).to_bytes().into(), envelope, timestamp: now,
+        };
+        assert!(matches!(peer.request(vec![packet]).await.as_slice(),
+            [SRelayPacket::WelcomePublished { quorum_met: true }]));
+        let fetch_welcome = || CRelayPacket::FetchWelcomes {
+            timestamp: now,
+            sig: owner.sign(&welcome_fetch_signing_input(
+                MLS_WIRE_VERSION, &owner_ipk, &node.relay.node_id, now,
+            )).to_bytes().into(),
+        };
+        assert!(peer.request(vec![fetch_welcome()]).await.is_empty());
+        let result = phone.request(vec![fetch_welcome()]).await;
+        let [SRelayPacket::WelcomesFetched { entries }] = result.as_slice()
+        else { panic!("missing Welcomes") };
+        assert_eq!(entries.len(), 1);
+        let ids = vec![entries[0].welcome_id.0];
+        drop(phone);
+        let phone = authenticated(&node, &owner).await;
+        assert_eq!(phone.request(vec![fetch_welcome()]).await, result,
+            "unacknowledged Welcome must survive reconnect");
+        let ack = || CRelayPacket::AckWelcomes {
+            timestamp: now, welcome_ids: ids.iter().copied().map(Into::into).collect(),
+            sig: owner.sign(&welcome_ack_signing_input(
+                MLS_WIRE_VERSION, &owner_ipk, &node.relay.node_id, &ids, now,
+            )).to_bytes().into(),
+        };
+        assert!(peer.request(vec![ack()]).await.is_empty());
+        assert!(matches!(phone.request(vec![ack()]).await.as_slice(), [SRelayPacket::WelcomesAcked]));
+        let result = phone.request(vec![fetch_welcome()]).await;
+        assert!(matches!(result.as_slice(), [SRelayPacket::WelcomesFetched { entries }] if entries.is_empty()));
+        assert!(node.relay.mls.peer_conns.read().is_empty());
+        assert_eq!(node.relay.mls.routing.read().total_known(), 0);
+    }).await.expect("standalone MLS custody timed out");
+}
