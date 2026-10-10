@@ -454,7 +454,8 @@ $(print -r -- "$certs" | sed 's/^/    /')"
         cp "$src" "$dir/$APK_NAME"
 
         sha="$(openssl dgst -sha256 "$dir/$APK_NAME" | awk '{print $NF}')"
-        size="$(stat -f %z "$dir/$APK_NAME" 2>/dev/null || stat -c %s "$dir/$APK_NAME")"
+        size="$(stat -c %s "$dir/$APK_NAME" 2>/dev/null || stat -f %z "$dir/$APK_NAME")"
+        [[ "$size" == <-> ]] || _die "could not measure $channel/$abi APK size"
 
         # EXACTLY the six fields UpdateManifest declares, in declaration order.
         cat > "$dir/manifest.json" <<EOF
@@ -472,7 +473,7 @@ EOF
         openssl pkeyutl -sign -inkey "$SCRATCH/manifest.key" -rawin \
             -in "$dir/manifest.json" -out "$dir/manifest.json.sig" \
             || _die "could not sign the $channel/$abi manifest"
-        sigsize="$(stat -f %z "$dir/manifest.json.sig" 2>/dev/null || stat -c %s "$dir/manifest.json.sig")"
+        sigsize="$(stat -c %s "$dir/manifest.json.sig" 2>/dev/null || stat -f %z "$dir/manifest.json.sig")"
         [[ "$sigsize" == 64 ]] || _die "manifest signature is $sigsize bytes, expected 64"
 
         openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
