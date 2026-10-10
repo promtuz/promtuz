@@ -309,14 +309,14 @@ private fun BoxScope.MediaTileContent(
     }
     val playingThumb = thumb?.takeIf { video && ready && originKey != null && InlinePlayback.key == originKey }
     val playingHere = playingThumb != null
-    if (playingThumb != null) {
+    if (playingThumb != null && originKey != null) {
         val player = rememberVideoPlayer(att.localPath ?: return, active = true)
         DisposableEffect(player) {
             InlinePlayback.attach(originKey, player)
             onDispose { if (InlinePlayback.key == originKey) InlinePlayback.stop() }
         }
         LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
-        VideoSurface(player, MediaItem(originKey ?: return, playingThumb, playingThumb.width, playingThumb.height), Modifier.fillMaxSize())
+        VideoSurface(player, MediaItem(originKey, playingThumb, playingThumb.width, playingThumb.height), Modifier.fillMaxSize())
     }
     if (!ready) Box(
         Modifier.align(Alignment.Center)
