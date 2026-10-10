@@ -3,7 +3,7 @@ members = ["resolver", "relay", "gateway", "common", "libcore", "tools/uniffi-bi
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/promtuz/promtuz"
 
@@ -33,7 +33,6 @@ lto = "thin"
 codegen-units = 8
 panic = "unwind"
 strip = "debuginfo"
-debug = true
 incremental = false
 
 [profile.release.package."*"]
