@@ -198,7 +198,7 @@ fun MessageBubble(
                                 content, textColor, appearance.type.fontScale,
                                 metaLabel, outgoing,
                                 originKey = msg.dispatchIdHex,
-                                onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
+                                onOpen = onMediaTap?.let { cb -> { cb(msg.dispatchIdHex) } },
                             )
                         content is MessageContent.Album ->
                             AlbumBlock(
@@ -213,7 +213,7 @@ fun MessageBubble(
                                 content, textColor, appearance.type.fontScale,
                                 metaLabel, outgoing,
                                 originKey = msg.dispatchIdHex, onDownload = onDownload,
-                                onOpen = msg.dispatchIdHex?.let { did -> onMediaTap?.let { cb -> { cb(did) } } },
+                                onOpen = onMediaTap?.let { cb -> { cb(msg.dispatchIdHex) } },
                             )
                         content is MessageContent.Attachment ->
                             AttachmentBlock(

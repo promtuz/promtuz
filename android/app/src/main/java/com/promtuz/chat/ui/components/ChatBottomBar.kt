@@ -484,7 +484,7 @@ private fun ComposerActionBlock(
         }
         val onLineTap: (() -> Unit)? = when {
             offersMedia -> onAddMedia
-            !editing -> action.msg.dispatchIdHex?.let { did -> { onJumpTo(did) } }
+            !editing -> { { onJumpTo(action.msg.dispatchIdHex) } }
             else -> null
         }
         Column(

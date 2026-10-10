@@ -307,14 +307,14 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                         )
                         Box(Modifier.background(highlight)) {
                             SwipeToReply(
-                                enabled = chatRow.msg.dispatchIdHex != null && !chatRow.msg.deleted,
+                                enabled = !chatRow.msg.deleted,
                                 onReply = { viewModel.beginReply(chatRow.msg) },
                                 Modifier
                                     .padding(top = gapAbove)
                                     // the context menu re-draws this row lifted; hide the original
                                     .graphicsLayer { alpha = if (menu.anchor?.msg?.key == chatRow.msg.key) 1f - menu.lift else 1f },
                             ) {
-                                val actionable = chatRow.msg.dispatchIdHex != null && !chatRow.msg.deleted
+                                val actionable = !chatRow.msg.deleted
                                 val interaction = appearance.interaction
                                 MessageBubble(
                                     msg = chatRow.msg,
@@ -434,9 +434,8 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
 /** What a Delete confirms: one message, or every photo of an album. */
 private class PendingDelete(val ids: List<String>, val outgoing: Boolean)
 
-private fun UiMessage.deleteTargets(): PendingDelete? = dispatchIdHex?.let { did ->
-    PendingDelete((content as? MessageContent.Album)?.items?.map { it.dispatchIdHex } ?: listOf(did), outgoing)
-}
+private fun UiMessage.deleteTargets() =
+    PendingDelete((content as? MessageContent.Album)?.items?.map { it.dispatchIdHex } ?: listOf(dispatchIdHex), outgoing)
 
 private val QuickReactions = listOf("❤️", "👍", "👎", "😂", "🔥", "😢")
 
@@ -451,7 +450,7 @@ private fun menuActionsFor(
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val main = buildList {
-        val actionable = msg.dispatchIdHex != null && !msg.deleted
+        val actionable = !msg.deleted
         if (actionable) add(MenuAction("Reply", R.drawable.oi_reply) {
             viewModel.beginReply(msg); close()
         })
@@ -474,9 +473,7 @@ private fun menuActionsFor(
         })
     }
     val destructive = buildList {
-        if (msg.dispatchIdHex != null) add(MenuAction("Delete", R.drawable.oi_trash, destructive = true) {
-            onDelete(msg); close()
-        })
+        add(MenuAction("Delete", R.drawable.oi_trash, destructive = true) { onDelete(msg); close() })
     }
     return listOf(main, destructive).filter { it.isNotEmpty() }
 }

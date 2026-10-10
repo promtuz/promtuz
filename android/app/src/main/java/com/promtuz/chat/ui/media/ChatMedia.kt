@@ -21,7 +21,7 @@ fun chatMediaItems(
     val items = ArrayList<MediaItem>()
     for (msg in messages.asReversed()) {
         if (msg.deleted) continue
-        val did = msg.dispatchIdHex ?: continue
+        val did = msg.dispatchIdHex
         val title = if (msg.outgoing) "You" else msg.senderName ?: chatName
         val subtitle = dateAndTime(context, msg.timestampMs)
         val location = com.promtuz.chat.domain.model.MessageLocation(conversation, chatName, did, msg.timestampMs)

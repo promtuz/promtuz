@@ -1118,7 +1118,7 @@ mod tests {
             save_inbound_body(&conversation, &author, &did, 1, None, original).unwrap();
         }
         let mine = Message::save_outgoing(conversation, "hello", None).unwrap().inner.dispatch_id;
-        let mine: [u8; 16] = mine.unwrap().try_into().unwrap();
+        let mine: [u8; 16] = mine.try_into().unwrap();
         let attachment = |caption: &str, file_id| Body::Attachment {
             caption: caption.into(),
             group_id: None,

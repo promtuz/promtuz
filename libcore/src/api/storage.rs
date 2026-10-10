@@ -173,7 +173,7 @@ mod tests {
         };
         save(&conv, 3, "photo", &photo);
         let pending = media::save_outgoing_with_media(&conv, "sending", None, &photo).unwrap();
-        let pending = pending.inner.dispatch_id.unwrap();
+        let pending = pending.inner.dispatch_id;
 
         let shown = inventory(c).unwrap();
         let bytes = |did| shown.iter().find(|r| r.dispatch_id == [did; 16]).unwrap().local_bytes;

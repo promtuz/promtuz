@@ -22,9 +22,8 @@ pub struct MessageRow {
     pub timestamp: u64,
     /// 0 = pending, 1 = sent, 2 = failed, 3 = delivered, 4 = read
     pub status: u8,
-    /// Sender-minted 16-byte id, NULL on legacy rows. The cross-device dedup key; the ULID `id`
-    /// stays the row key and sort order.
-    pub dispatch_id: Option<Vec<u8>>,
+    /// Sender-minted 16-byte cross-device dedup key; the ULID `id` stays the row key and sort order.
+    pub dispatch_id: Vec<u8>,
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
@@ -516,6 +515,53 @@ const MIGRATION_ARRAY: &[M] = &[
              PRIMARY KEY(owner, field));"),
     M::up("DROP TABLE avatar_acks; DROP TABLE profile_acks;
            ALTER TABLE peer_avatars DROP COLUMN revision; ALTER TABLE peer_profiles DROP COLUMN revision;"),
+    M::up("DELETE FROM messages WHERE dispatch_id IS NULL OR length(dispatch_id) != 16;
+        CREATE TEMP TABLE retained_attachment_sharing_intents AS
+            SELECT i.* FROM attachment_sharing_intents i JOIN messages m ON m.id = i.message_id;
+        CREATE TEMP TABLE retained_message_audiences AS
+            SELECT a.* FROM message_audiences a JOIN messages m ON m.id = a.message_id;
+        CREATE TEMP TABLE retained_message_recipients AS
+            SELECT r.* FROM message_recipients r JOIN messages m ON m.id = r.message_id;
+        CREATE TEMP TABLE retained_incoming_receipts AS
+            SELECT r.* FROM incoming_receipts r JOIN messages m ON m.id = r.message_id;
+        CREATE TABLE messages_new (
+            id TEXT PRIMARY KEY,
+            conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+            sender_ipk BLOB CHECK(sender_ipk IS NULL OR length(sender_ipk) = 32),
+            content TEXT NOT NULL,
+            outgoing INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            status INTEGER NOT NULL DEFAULT 0,
+            dispatch_id BLOB NOT NULL CHECK(length(dispatch_id) = 16),
+            edited INTEGER NOT NULL DEFAULT 0,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            reply_to BLOB,
+            system INTEGER NOT NULL DEFAULT 0,
+            notification_seen INTEGER NOT NULL DEFAULT 1,
+            group_change BLOB
+        );
+        INSERT INTO messages_new (
+            id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id,
+            edited, deleted, reply_to, system, notification_seen, group_change
+        ) SELECT
+            id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id,
+            edited, deleted, reply_to, system, notification_seen, group_change
+        FROM messages;
+        DROP TABLE messages;
+        ALTER TABLE messages_new RENAME TO messages;
+        CREATE INDEX idx_messages_conv ON messages(conversation_id, id DESC);
+        CREATE UNIQUE INDEX idx_messages_dedup ON messages(conversation_id, dispatch_id);
+        CREATE INDEX idx_messages_notification_pending ON messages(conversation_id)
+            WHERE notification_seen = 0 AND outgoing = 0 AND deleted = 0;
+        CREATE INDEX idx_messages_dispatch ON messages(dispatch_id);
+        INSERT INTO attachment_sharing_intents SELECT * FROM retained_attachment_sharing_intents;
+        INSERT INTO message_audiences SELECT * FROM retained_message_audiences;
+        INSERT INTO message_recipients SELECT * FROM retained_message_recipients;
+        INSERT INTO incoming_receipts SELECT * FROM retained_incoming_receipts;
+        DROP TABLE retained_attachment_sharing_intents;
+        DROP TABLE retained_message_audiences;
+        DROP TABLE retained_message_recipients;
+        DROP TABLE retained_incoming_receipts;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -551,7 +597,6 @@ pub fn migrate(conn: &mut Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::message::Message;
     use crate::test_support::data::ulid;
 
     /// A database a release left at schema `version`, holding what `seed` wrote, upgraded.
@@ -629,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_rows_without_dispatch_ids_still_read_back() {
+    fn legacy_rows_without_dispatch_ids_are_deleted() {
         let peer = [5u8; 32];
         let conn = migrate_from(1, |conn| {
             conn.execute(
@@ -639,14 +684,13 @@ mod tests {
             )
             .unwrap();
         });
-        let conversation: [u8; 16] =
-            conn.query_row("SELECT id FROM conversations", [], |r| r.get(0)).unwrap();
-        let rows = Message::get_messages_tx(&conn, &conversation, 10, "").unwrap();
-        let me = [7u8; 32];
-        let read: Vec<_> = rows
-            .iter()
-            .map(|r| (r.content.as_str(), r.dispatch_id.clone(), r.sender(&me)))
-            .collect();
-        assert_eq!(read, vec![("theirs", None, peer), ("mine", None, me)]);
+        let count: u32 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let not_null: u32 = conn.query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('messages') WHERE name = 'dispatch_id'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(not_null, 1);
     }
 }

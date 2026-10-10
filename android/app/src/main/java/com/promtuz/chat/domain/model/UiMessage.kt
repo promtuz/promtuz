@@ -2,15 +2,12 @@ package com.promtuz.chat.domain.model
 
 import androidx.compose.runtime.Immutable
 
-/**
- * [key] is the shared dispatch id when present, else the local ULID, so edits and receipts
- * update the same row. Ids ride as hex so value equality holds.
- */
+/** [key] is the shared dispatch id, while [localId] preserves local sort order. */
 @Immutable
 data class UiMessage(
     val key: String,
     val localId: String,
-    val dispatchIdHex: String?,
+    val dispatchIdHex: String,
     val content: MessageContent,
     val outgoing: Boolean,
     /** Set only on incoming group messages. */

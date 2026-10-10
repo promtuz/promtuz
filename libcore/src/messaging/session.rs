@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(Conversation::for_peer(&bob.ipk).unwrap(), conversation);
         assert_eq!(Conversation::group_of(&conversation), Some(gid));
         assert_eq!(Contact::get(&bob.ipk).unwrap().inner.mls_group_id, Some(gid));
-        let did = history.inner.dispatch_id.unwrap().try_into().unwrap();
+        let did = history.inner.dispatch_id.try_into().unwrap();
         let kept = Message::get_by_dispatch(&conversation, &did).unwrap();
         assert_eq!(kept.inner.content, "Retain this history");
 

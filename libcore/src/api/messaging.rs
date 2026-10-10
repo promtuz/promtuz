@@ -21,8 +21,8 @@ pub struct MessageRecord {
     pub timestamp: u64,
     /// 0 = pending, 1 = sent, 2 = failed, 3 = delivered, 4 = read.
     pub status: u8,
-    /// 16-byte shared id that edits and deletes target; `None` on legacy rows.
-    pub dispatch_id: Option<Vec<u8>>,
+    /// 16-byte shared id that edits and deletes target.
+    pub dispatch_id: Vec<u8>,
     pub edited: bool,
     /// Tombstoned by delete-for-everyone; `content` is cleared.
     pub deleted: bool,
@@ -389,7 +389,7 @@ pub fn search_messages(
 #[derive(uniffi::Record)]
 pub struct MessagePosition {
     pub id: String,
-    pub dispatch_id: Option<Vec<u8>>,
+    pub dispatch_id: Vec<u8>,
     pub newer: u32,
 }
 
@@ -421,7 +421,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
     if groups.is_empty() {
         return;
     }
-    let group_of = |r: &MessageRecord| r.dispatch_id.as_ref().and_then(|d| groups.get(d)).cloned();
+    let group_of = |r: &MessageRecord| groups.get(&r.dispatch_id).cloned();
 
     let mut i = 0;
     while i < rows.len() {
@@ -434,8 +434,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
             j += 1;
         }
         if j - i > 1 {
-            rows[i].album_items =
-                rows[i..j].iter().filter_map(|r| r.dispatch_id.clone()).collect();
+            rows[i].album_items = rows[i..j].iter().map(|r| r.dispatch_id.clone()).collect();
             let statuses: Vec<u8> = rows[i..j].iter().map(|r| r.status).collect();
             rows[i].status = crate::data::receipts::combined_status(&statuses, true);
             rows[i + 1..j].iter_mut().for_each(|r| r.in_album = true);
@@ -663,7 +662,7 @@ pub fn get_conversations() -> Vec<MessageRecord> {
 
 fn with_media_kind(row: MessageRow) -> MessageRecord {
     let mut rec = MessageRecord::from(row);
-    if let Some(did) = rec.dispatch_id.as_deref().and_then(|d| <[u8; 16]>::try_from(d).ok())
+    if let Ok(did) = <[u8; 16]>::try_from(rec.dispatch_id.as_slice())
         && let Ok(conv) = fixed::<16>(&rec.conversation_id, "conversation id")
     {
         rec.media_kind = crate::data::media::kind(&conv, &did).unwrap_or(0);

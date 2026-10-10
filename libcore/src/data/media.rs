@@ -113,13 +113,7 @@ pub fn save_outgoing_with_media(
     let mut db = core().db.messages().lock();
     let tx = db.transaction()?;
     let msg = crate::data::message::Message::save_outgoing_tx(&tx, *conv, caption, reply_to, me)?;
-    let did: [u8; 16] = msg
-        .inner
-        .dispatch_id
-        .as_deref()
-        .expect("save_outgoing mints a dispatch_id")
-        .try_into()
-        .expect("dispatch_id is 16 bytes");
+    let did: [u8; 16] = msg.inner.dispatch_id.as_slice().try_into().expect("dispatch_id is 16 bytes");
     save_tx(&tx, conv, &did, r)?;
     if r.kind == KIND_ATTACHMENT {
         tx.execute("INSERT INTO attachment_sharing_intents (message_id) VALUES (?1)",

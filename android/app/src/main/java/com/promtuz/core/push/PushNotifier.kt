@@ -272,8 +272,8 @@ object PushNotifier {
         val previewEnabled = ChatPrefs.notifPreview
         val images = if (previewEnabled) coroutineScope {
             recent.map { message -> async {
-                val did = message.dispatchId?.toHex()
-                message.id to if (did != null && message.mediaKind.toInt() in listOf(1, 2, 4))
+                val did = message.dispatchId.toHex()
+                message.id to if (message.mediaKind.toInt() in listOf(1, 2, 4))
                     notificationImage(convHex, did) else null
             } }.awaitAll().toMap()
         } else emptyMap()

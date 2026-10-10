@@ -75,7 +75,7 @@ impl Message {
                 outgoing: true,
                 timestamp,
                 status: STATUS_PENDING,
-                dispatch_id: Some(dispatch_id.to_vec()),
+                dispatch_id: dispatch_id.to_vec(),
                 edited: false,
                 deleted: false,
                 reply_to: reply_to.map(|r| r.to_vec()),
@@ -115,7 +115,7 @@ impl Message {
              SELECT ?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, 0
              WHERE NOT EXISTS (SELECT 1 FROM message_deletions
                  WHERE conversation_id = ?2 AND sender_ipk = ?3 AND dispatch_id = ?7)
-             ON CONFLICT(conversation_id, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
+             ON CONFLICT(conversation_id, dispatch_id) DO NOTHING",
             (&id.to_string(), conversation_id.as_slice(), sender.as_slice(), content, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
@@ -133,7 +133,7 @@ impl Message {
                 outgoing: false,
                 timestamp,
                 status: STATUS_SENT,
-                dispatch_id: Some(dispatch_id.to_vec()),
+                dispatch_id: dispatch_id.to_vec(),
                 edited: false,
                 deleted: false,
                 reply_to: reply_to.map(|r| r.to_vec()),
@@ -377,7 +377,7 @@ impl Message {
         let changed = conn.execute(
             "INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, system, group_change) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-             ON CONFLICT(conversation_id, dispatch_id) WHERE dispatch_id IS NOT NULL DO NOTHING",
+             ON CONFLICT(conversation_id, dispatch_id) DO NOTHING",
             (
                 &id.to_string(),
                 conversation_id.as_slice(),
@@ -403,7 +403,7 @@ impl Message {
                 outgoing,
                 timestamp,
                 status: STATUS_SENT,
-                dispatch_id: Some(dispatch_id.to_vec()),
+                dispatch_id: dispatch_id.to_vec(),
                 edited: false,
                 deleted: false,
                 reply_to: None,
@@ -516,7 +516,7 @@ impl Message {
                       WHERE n.conversation_id = m.conversation_id AND n.deleted = 0 AND n.id > m.id) \
              FROM messages m \
              WHERE m.conversation_id = ?1 AND m.deleted = 0 AND m.system = 0 \
-               AND m.dispatch_id IS NOT NULL AND m.content LIKE ?2 ESCAPE '\\' \
+               AND m.content LIKE ?2 ESCAPE '\\' \
              ORDER BY m.id DESC LIMIT ?3",
             (conversation_id.as_slice(), pattern, limit),
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u32>(1)?)),
@@ -530,7 +530,7 @@ impl Message {
     /// Timestamp and id order differ after an offline drain, so pick by timestamp, count by id.
     pub fn position_at_time(
         conversation_id: &[u8; 16], timestamp: u64,
-    ) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+    ) -> Result<Option<(String, Vec<u8>, u32)>> {
         position_at_time(&core().db.messages().lock(), conversation_id, timestamp)
     }
 
@@ -563,7 +563,7 @@ impl Message {
         let conn = core().db.messages().lock();
         conn.query_row(
             "SELECT dispatch_id FROM messages
-             WHERE conversation_id = ?1 AND outgoing = 0 AND dispatch_id IS NOT NULL
+             WHERE conversation_id = ?1 AND outgoing = 0
              ORDER BY id DESC LIMIT 1",
             [conversation_id.as_slice()],
             |r| r.get(0),
@@ -587,7 +587,7 @@ impl Message {
 
 fn position_at_time(
     conn: &rusqlite::Connection, conversation: &[u8; 16], timestamp: u64,
-) -> Result<Option<(String, Option<Vec<u8>>, u32)>> {
+) -> Result<Option<(String, Vec<u8>, u32)>> {
     Ok(one(
         conn,
         "SELECT m.id, m.dispatch_id, (SELECT COUNT(*) FROM messages n WHERE n.conversation_id = m.conversation_id AND n.deleted = 0 AND n.id > m.id) \

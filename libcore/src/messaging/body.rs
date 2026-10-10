@@ -208,11 +208,9 @@ pub(crate) fn rebuild_pending_payload(conversation: &[u8; 16], msg: &Message) ->
 }
 
 pub(super) fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
-    let did: Option<[u8; 16]> = msg.inner.dispatch_id.as_deref().and_then(|r| r.try_into().ok());
-    let media = match did {
-        Some(d) => crate::data::media::get(conversation, &d)?,
-        None => None,
-    };
+    let did = msg.inner.dispatch_id.as_slice().try_into()
+        .map_err(|_| anyhow!("invalid dispatch id"))?;
+    let media = crate::data::media::get(conversation, &did)?;
     join_body(msg.inner.content.clone(), media)
 }
 

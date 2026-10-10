@@ -164,7 +164,7 @@ private fun PreviewCard(appearance: ChatAppearance) {
     val now = remember { System.currentTimeMillis() }
     val fakes = remember(now) {
         fun msg(id: String, text: String, out: Boolean) = UiMessage(
-            key = id, localId = id, dispatchIdHex = null,
+            key = id, localId = id, dispatchIdHex = id,
             content = MessageContent.Text(text), outgoing = out,
             status = SendStatus.Read, edited = false, deleted = false,
             timestampMs = now, reactions = emptyList(),

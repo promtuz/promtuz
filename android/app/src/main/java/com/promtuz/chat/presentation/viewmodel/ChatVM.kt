@@ -222,12 +222,12 @@ class ChatVM(
     suspend fun jumpToDate(date: java.time.LocalDate, zone: java.time.ZoneId): Boolean {
         val start = date.atStartOfDay(zone).toEpochSecond()
         val position = CoreBridge.messageAtTime(conversation, start) ?: return false
-        val dispatch = position.dispatchId?.toHex()
+        val dispatch = position.dispatchId.toHex()
         limit = maxOf(limit, position.newer.toInt() + PAGE)
         var loaded = load()
         fun target() = loaded.firstOrNull { message ->
-            message.localId == position.id || (dispatch != null &&
-                (message.content as? MessageContent.Album)?.items?.any { it.dispatchIdHex == dispatch } == true)
+            message.localId == position.id ||
+                (message.content as? MessageContent.Album)?.items?.any { it.dispatchIdHex == dispatch } == true
         }
         // Concurrent arrivals can push the target below the depth we just read.
         // A folded album may also need its head from the preceding page.
@@ -425,7 +425,7 @@ class ChatVM(
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
         val media = CoreBridge.getMedia(conversation, want).associateBy { it.dispatchId.toHex() }
         // Quotes resolve within the loaded window; one outside it shows as unavailable.
-        val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
+        val byDid = rows.associateBy { it.dispatchId.toHex() }
         // toUi decodes AVIF, so this maps off the main thread.
         val loaded = withContext(Dispatchers.Default) {
             // Core folds pictures sent together onto the album's head row and marks the rest.
@@ -467,10 +467,6 @@ class ChatVM(
             return
         }
         val did = editing?.msg?.dispatchIdHex
-        if (editing != null && did == null) {
-            composerError.value = "This message can’t be edited yet."
-            return
-        }
         if (editing != null && items.isEmpty() && text == editing.msg.editableText().trim()) {
             restoreDraft()
             return
@@ -501,7 +497,7 @@ class ChatVM(
                             val ids = chunk.map { it.id }
                             try {
                                 CoreBridge.sendStaged(conversation, ids, if (i == 0) text else "",
-                                    if (i == 0) (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex() else null)
+                                    if (i == 0) (action as? ComposerAction.Reply)?.msg?.let { it.dispatchIdHex.fromHex() } else null)
                             } finally {
                                 // A batch can fail after creating some messages. A fresh read after
                                 // the awaited commit keeps only its unsent remainder available to retry.
@@ -516,7 +512,7 @@ class ChatVM(
                     }
                     else -> {
                         CoreBridge.sendMessage(conversation, text,
-                            (action as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex())
+                            (action as? ComposerAction.Reply)?.msg?.let { it.dispatchIdHex.fromHex() })
                         markSent()
                     }
                 }
@@ -586,7 +582,7 @@ class ChatVM(
 
     fun toggleReaction(msg: UiMessage, emoji: String) {
         if (_request.value) { composerError.value = "Accept the request to react"; return }
-        val id = msg.dispatchIdHex ?: return
+        val id = msg.dispatchIdHex
         val mine = msg.reactions.any { it.emoji == emoji && it.mine }
         react(id, emoji, add = !mine)
     }
@@ -738,7 +734,7 @@ class ChatVM(
         _recording.value = null
         val r = rec ?: return
         val to = conversation
-        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
+        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.let { it.dispatchIdHex.fromHex() }
         composerAction.value = null
         fire { CoreBridge.sendVoice(to, r.bytes, r.mime, r.durationMs, r.waveform, replyTo) }
     }
@@ -746,7 +742,7 @@ class ChatVM(
     fun sendSticker(ref: StickerRef) {
         if (composerAction.value is ComposerAction.Edit) return
         val to = conversation
-        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
+        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.let { it.dispatchIdHex.fromHex() }
         composerAction.value = null
         fire { CoreBridge.sendSticker(to, ref.toRecord(), replyTo) }
     }
@@ -826,8 +822,8 @@ private fun MessageRecord.toUi(
     memberNames: Map<String, String> = emptyMap(),
     isGroup: Boolean = false,
 ): UiMessage {
-    val didHex = dispatchId?.toHex()
-    val reactions = didHex?.let { reactionsByMsg[it] }
+    val didHex = dispatchId.toHex()
+    val reactions = reactionsByMsg[didHex]
         ?.groupBy { it.emoji }
         ?.map { (emoji, rs) -> ReactionGroup(emoji, rs.size, rs.any { it.mine }) }
         ?: emptyList()
@@ -857,11 +853,10 @@ private fun MessageRecord.toUi(
                 AlbumItem(h, mediaByDid[h]?.toContent(h, "") ?: MessageContent.Text(""))
             },
         )
-        else -> didHex?.let { h -> mediaByDid[h]?.toContent(h, content) }
-            ?: MessageContent.Text(content)
+        else -> mediaByDid[didHex]?.toContent(didHex, content) ?: MessageContent.Text(content)
     }
     return UiMessage(
-        key = didHex ?: id,
+        key = didHex,
         localId = id,
         dispatchIdHex = didHex,
         content = payload,

@@ -222,13 +222,7 @@ pub(super) async fn send_payload<C: DhtClient>(
         return Err(e);
     }
 
-    let id: [u8; 16] = msg
-        .inner
-        .dispatch_id
-        .as_deref()
-        .expect("save_outgoing always mints a dispatch_id")
-        .try_into()
-        .expect("dispatch_id is 16 bytes");
+    let id: [u8; 16] = msg.inner.dispatch_id.as_slice().try_into().expect("dispatch_id is 16 bytes");
 
     let sharing = match AppPayload::deser(&payload_bytes) {
         Ok(AppPayload::Post { body: Body::Attachment { file_id, size, .. }, .. }) => {
@@ -330,7 +324,7 @@ pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
     // Snapshot first: a first send binds its group, which `attempt_send` handles.
     let deferred: Vec<_> = Message::pending_outgoing()
         .into_iter()
-        .filter(|row| !row.dispatch_id.as_deref().is_some_and(|id| queued(ctx.provider, id)))
+        .filter(|row| !queued(ctx.provider, &row.dispatch_id))
         .collect();
     for row in deferred {
         let conversation = row.conversation_id;

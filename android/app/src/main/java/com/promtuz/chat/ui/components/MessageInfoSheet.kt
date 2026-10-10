@@ -31,7 +31,7 @@ import java.util.Date
 fun MessageInfoSheet(conversationHex: String, message: UiMessage, onDismiss: () -> Unit) {
     val dispatches = remember(message.key) {
         (message.content as? MessageContent.Album)?.items?.map { it.dispatchIdHex.fromHex() }
-            ?: listOfNotNull(message.dispatchIdHex?.fromHex())
+            ?: listOf(message.dispatchIdHex.fromHex())
     }
     var info by remember(message.key) { mutableStateOf<MessageReceiptInfo?>(null) }
     var error by remember(message.key) { mutableStateOf(false) }

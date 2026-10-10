@@ -64,7 +64,7 @@ impl Device {
     pub fn offer(&self, me: [u8; 32], conversation: [u8; 16], manifest: &wire::Manifest) {
         let db = self.core.db.messages().lock();
         let sent = Message::save_outgoing_tx(&db, conversation, "", None, Some(me)).unwrap();
-        let dispatch: [u8; 16] = sent.inner.dispatch_id.unwrap().try_into().unwrap();
+        let dispatch: [u8; 16] = sent.inner.dispatch_id.try_into().unwrap();
         let row = attachment(manifest.file_id(), manifest.total_size);
         crate::data::media::save_tx(&db, &conversation, &dispatch, &row).unwrap();
     }
