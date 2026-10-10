@@ -60,6 +60,7 @@ import timber.log.Timber
 import uniffi.core.ConversationRecord
 
 /** Reconciles the notification shade with unread messages and persisted alert state. */
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 object PushNotifier {
     private const val SUMMARY_ID = 1
     private const val REQUESTS_ID = 2

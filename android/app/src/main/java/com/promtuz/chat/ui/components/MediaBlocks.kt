@@ -307,16 +307,16 @@ private fun BoxScope.MediaTileContent(
         FileGlyph(att.mime, textColor, LocalChatColors.current.accent)
         Text(att.name, color = textColor, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
-    // A clip plays in its own bubble; tapping the playing picture carries it into the viewer.
-    val playingHere = video && ready && originKey != null && InlinePlayback.key == originKey
-    if (playingHere && thumb != null) {
-        val player = rememberVideoPlayer(att.localPath!!, active = true)
+    val playingThumb = thumb?.takeIf { video && ready && originKey != null && InlinePlayback.key == originKey }
+    val playingHere = playingThumb != null
+    if (playingThumb != null) {
+        val player = rememberVideoPlayer(att.localPath ?: return, active = true)
         DisposableEffect(player) {
             InlinePlayback.attach(originKey, player)
             onDispose { if (InlinePlayback.key == originKey) InlinePlayback.stop() }
         }
         LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
-        VideoSurface(player, MediaItem(originKey, thumb, thumb.width, thumb.height), Modifier.fillMaxSize())
+        VideoSurface(player, MediaItem(originKey ?: return, playingThumb, playingThumb.width, playingThumb.height), Modifier.fillMaxSize())
     }
     if (!ready) Box(
         Modifier.align(Alignment.Center)

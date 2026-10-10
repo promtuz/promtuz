@@ -190,15 +190,13 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (!dialogOpen) item { GroupWorkFeedback(work) }
                 item {
                     ListItem(
-                        headlineContent = { Text("Notifications") },
                         supportingContent = { Text(if (muted) "Muted" else "On") },
                         trailingContent = { Switch(checked = !muted, onCheckedChange = { actions.setMuted(!it) }, enabled = !busy) },
-                    )
+                    ) { Text("Notifications") }
                     if (canManage && hasRules && conversation != null) ListItem(
-                        headlineContent = { Text("Group settings") },
                         supportingContent = { Text("Who can send messages, edit group info and add members") },
                         modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.GroupSettings(conversation)) },
-                    )
+                    ) { Text("Group settings") }
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Members", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
@@ -208,8 +206,10 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     }
                 }
                 if (media > 0 && conversation != null) item {
-                    ListItem(headlineContent = { Text("Shared media") }, supportingContent = { Text(if (media == 1) "1 attachment" else "$media attachments") },
-                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
+                    ListItem(supportingContent = { Text(if (media == 1) "1 attachment" else "$media attachments") },
+                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) }) {
+                        Text("Shared media")
+                    }
                 }
                 items(active, key = { it.ipkHex }) { member ->
                     GroupMemberRow(member, !busy, actionsFor(member),
@@ -250,8 +250,11 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     if (adding) {
         var dismissRequested by remember { mutableStateOf(false) }
         val currentBusy by rememberUpdatedState(busy)
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
-            confirmValueChange = { !currentBusy })
+        val sheetState = rememberBottomSheetState(
+            initialValue = SheetValue.Hidden,
+            enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+            confirmValueChange = { !currentBusy },
+        )
         LaunchedEffect(dismissRequested, busy) {
             if (dismissRequested && !busy) {
                 sheetState.hide()
@@ -313,7 +316,6 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
 private fun GroupMemberRow(member: UiMember, enabled: Boolean, actions: List<MenuAction>, onClick: () -> Unit) {
     val row = @Composable {
         ListItem(
-            headlineContent = { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             leadingContent = {
                 val avatar = rememberAvatar(member.ipkHex)
                 Avatar(
@@ -325,7 +327,7 @@ private fun GroupMemberRow(member: UiMember, enabled: Boolean, actions: List<Men
             trailingContent = if (member.admin && member.active) {{
                 Text(if (member.owner) "Owner" else "Admin", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }} else null,
-        )
+        ) { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }
     if (actions.isEmpty() || !enabled) Box(Modifier.clickable(enabled = enabled, onClick = onClick)) { row() }
     else AppDropMenu(anchor = row, groups = listOf(actions), onClick = onClick, onClickLabel = "Open profile",

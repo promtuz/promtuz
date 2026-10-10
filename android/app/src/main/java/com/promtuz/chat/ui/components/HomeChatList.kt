@@ -73,10 +73,9 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         if (requests.isNotEmpty()) item(key = "message-requests") {
             androidx.compose.material3.ListItem(
                 modifier = Modifier.clickable { appViewModel.navigator.push(com.promtuz.chat.navigation.Routes.MessageRequests) },
-                headlineContent = { Text("Message requests") },
                 supportingContent = { Text(requesters(requests), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
                 leadingContent = { DrawableIcon(com.promtuz.chat.R.drawable.i_user_add, size = 28.dp) },
-            )
+            ) { Text("Message requests") }
         }
         itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
             // Presence is per person, so a group shows none; typing is per chat.

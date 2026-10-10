@@ -159,9 +159,10 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         owned.toList().forEach { pick ->
             val state = records.firstOrNull { it.id == pick.id }
             ListItem(leadingContent = { pick.preview?.let { Image(it, null, Modifier.size(48.dp)) } },
-                headlineContent = { Text(pick.name, maxLines = 2) },
                 supportingContent = { if (state?.state?.toInt() != 1) Text(if (state?.state?.toInt() == 2) "Couldn't prepare attachment" else "Preparing…") },
-                trailingContent = { IconButton(enabled = !busy && pick.id !in removing, onClick = { remove(pick.id) }) { DrawableIcon(R.drawable.oi_trash, desc = "Remove attachment") } })
+                trailingContent = { IconButton(enabled = !busy && pick.id !in removing, onClick = { remove(pick.id) }) { DrawableIcon(R.drawable.oi_trash, desc = "Remove attachment") } }) {
+                Text(pick.name, maxLines = 2)
+            }
         }
     }
 
@@ -222,7 +223,7 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
                 items(recipients.filter { it.name.contains(model.query, ignoreCase = true) }, key = { it.conversation }) { (conv, name, group, peer) ->
                     ListItem(modifier = Modifier.clickable { model.stack.add(ShareReview(conv, name)) },
                         leadingContent = { if (group) GroupAvatar(name, emptyList(), conversation = conv) else Avatar(name, identityKey = peer ?: conv, image = rememberAvatar(peer)) },
-                        headlineContent = { Text(name) })
+                    ) { Text(name) }
                 }
             }
         }

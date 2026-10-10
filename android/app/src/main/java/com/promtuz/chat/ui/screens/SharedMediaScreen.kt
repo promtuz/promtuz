@@ -139,12 +139,11 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                 else -> DrawableIcon(when (tab) { "Media" -> R.drawable.oi_image; "Stickers" -> R.drawable.oi_sticker; else -> R.drawable.oi_file_attachment }, size = 32.dp)
                             }
                         },
-                        headlineContent = { Text(row.name.ifBlank { if (row.mime.startsWith("video/")) "Video" else mediaLabel(row.kind.toInt()) }, maxLines = 2) },
                         supportingContent = { Text(listOfNotNull(
                             row.size.toLong().takeIf { it > 0 }?.let { Formatter.formatShortFileSize(context, it) },
                             DateFormat.getDateInstance().format(Date(row.timestamp.toLong() * 1000))
                         ).joinToString(" · ")) },
-                    )
+                    ) { Text(row.name.ifBlank { if (row.mime.startsWith("video/")) "Video" else mediaLabel(row.kind.toInt()) }, maxLines = 2) }
                 }
             }
         }

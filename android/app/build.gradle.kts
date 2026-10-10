@@ -26,9 +26,10 @@ val localProperties = Properties().apply {
 val pythonExecutable = localProperties.getProperty("python.executable")
     ?.trim()?.takeIf { it.isNotEmpty() } ?: "python3"
 
-// Release signing comes from gitignored keystore.properties or temporary
-// release-script environment variables. Missing credentials leave release
-// unsigned rather than silently using another signing identity.
+val repoRoot = rootProject.file("..")
+val minSdkVersion = 26
+val abis = listOf("arm64-v8a", "x86_64")
+
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
@@ -39,6 +40,7 @@ val hasReleaseSigning = keystorePropsFile.exists() &&
 
 val publishedVersionCode = providers.gradleProperty("promtuzVersionCode").get().toInt()
 val publishedVersionName = providers.gradleProperty("promtuzVersionName").get()
+
 val promptedSigning = mapOf(
     "storeFile" to System.getenv("PROMTUZ_ANDROID_KEYSTORE"),
     "storePassword" to System.getenv("PROMTUZ_ANDROID_STORE_PASSWORD"),
@@ -47,16 +49,6 @@ val promptedSigning = mapOf(
 )
 val hasPromptedSigning = promptedSigning.values.all { !it.isNullOrBlank() }
 
-// Debug signing credentials, chosen as ONE whole source — never merged field
-// by field, which could pair one keystore's path with another's password and
-// fail at signing time with nothing useful to say.
-//
-// The last branch is the interesting one: debug signs with the RELEASE key
-// when one is configured. Same signer means a debug build installs straight
-// over a release build and vice versa, with no uninstall and no data wipe —
-// and UpdateRepository.verifyApk(), which compares signer digests, treats
-// both channels as the same app. Falling through to null leaves AGP's default
-// debug keystore in play, so a machine without the vault still builds.
 val debugSigning: Map<String, String?>? = when {
     hasPromptedSigning -> promptedSigning
     localProperties.getProperty("debug.store.file") != null -> mapOf(
@@ -76,9 +68,6 @@ val debugSigning: Map<String, String?>? = when {
     else -> null
 }
 
-// Resolver bootstrap seeds, injected from a gitignored secrets.properties so
-// the OSS repo never commits infra endpoints. Format: <IPK_HEX>::<host[:port]>
-// (port defaults to 40433 in libcore). Empty when absent -> no bundled resolver.
 val secretsFile = rootProject.file("secrets.properties")
 val secrets = Properties().apply {
     if (secretsFile.exists()) secretsFile.inputStream().use { load(it) }
@@ -86,8 +75,6 @@ val secrets = Properties().apply {
 val resolverSeedsLiteral = secrets.getProperty("RESOLVER_SEEDS", "")
     .replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
-// SDK dir resolved the way AGP does (local.properties sdk.dir -> env), used to
-// hand cargo-ndk an absolute NDK path (see buildRustCore).
 val sdkDir = Properties().apply {
     val lp = rootProject.file("local.properties")
     if (lp.exists()) lp.inputStream().use { load(it) }
@@ -95,17 +82,11 @@ val sdkDir = Properties().apply {
     ?: System.getenv("ANDROID_HOME")
     ?: System.getenv("ANDROID_SDK_ROOT")
 
-// Gradle's Exec resolves the command name via the JVM's PATH (NOT the task's
-// environment map) — and a GUI-launched Android Studio has launchd's bare PATH
-// without ~/.cargo/bin. So invoke cargo by absolute path; the PATH env is still
-// set below for the rustc/ndk toolchain cargo-ndk re-spawns. (Homebrew: repoint cargoBin.)
 val cargoBin = "${System.getProperty("user.home")}/.cargo/bin"
 val cargo = file("$cargoBin/cargo").takeIf { it.exists() }?.absolutePath ?: "cargo"
 val cargoNdk = file("$cargoBin/cargo-ndk").takeIf { it.exists() }?.absolutePath ?: "cargo-ndk"
 val cargoAugmentedPath = "$cargoBin:${System.getenv("PATH") ?: ""}"
 
-// Generated uniffi Kotlin bindings land here (see generateUniffiBindings).
-// mkdirs at config time so the Variant API can register it as a source dir.
 val uniffiOutDir = layout.buildDirectory.dir("generated/source/uniffi/kotlin").get().asFile.apply { mkdirs() }
 val rustLicenseArtifacts = layout.buildDirectory.file("intermediates/licenses/rust-artifacts.jsonl")
 
@@ -116,26 +97,23 @@ android {
 
     defaultConfig {
         applicationId = "com.promtuz.chat"
-        minSdk = 26
+        minSdk = minSdkVersion
         targetSdk = 37
         versionCode = publishedVersionCode
         versionName = publishedVersionName
 
-
         buildConfigField("String", "RESOLVER_SEEDS", "\"$resolverSeedsLiteral\"")
-
     }
     splits {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "x86_64")
+            include(*abis.toTypedArray())
             isUniversalApk = false
         }
     }
     packaging {
         jniLibs {
-            // false => .so ship uncompressed + 16KB-page-aligned (libcore.so + JNA's jnidispatch.so).
             useLegacyPackaging = false
         }
     }
@@ -155,10 +133,6 @@ android {
                 keyPassword = it["keyPassword"]
             }
         }
-        // rootProject.file, not file: keystore.properties is read from the root
-        // project, so a relative storeFile in it must resolve there too — plain
-        // file() would resolve against app/ and miss. Absolute paths (what the
-        // release script exports) pass through either way.
         if (hasPromptedSigning || hasReleaseSigning) create("release") {
             storeFile = rootProject.file(promptedSigning["storeFile"] ?: keystoreProps.getProperty("storeFile"))
             storePassword = promptedSigning["storePassword"] ?: keystoreProps.getProperty("storePassword")
@@ -176,10 +150,6 @@ android {
             )
             signingConfig = if (hasPromptedSigning || hasReleaseSigning) signingConfigs.getByName("release") else null
         }
-        // Perf measurement: AOT-compiled, non-debuggable (no Compose debug checks,
-        // no JIT cold start), debug-signed so it installs anywhere. Minify stays
-        // off to keep uniffi/JNA out of R8's reach — the wins we're measuring are
-        // debuggable=false + AOT, not shrinking. `gradlew installBenchmark`.
         create("benchmark") {
             initWith(getByName("release"))
             isMinifyEnabled = false
@@ -194,40 +164,37 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
 
-    kotlin {
-        compilerOptions {
-            freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
-            freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
-            freeCompilerArgs.add("-XXLanguage:+NestedTypeAliases")
-        }
-    }
     buildFeatures {
         compose = true
         buildConfig = true
     }
 }
 
-// Register the generated uniffi bindings as a Kotlin source dir per variant
-// (AGP 9 wants source dirs via the Variant API, not the sourceSets DSL).
-// generateUniffiBindings populates it before compile (via preBuild ordering).
+kotlin {
+    compilerOptions {
+        freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
+        freeCompilerArgs.add("-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
+    }
+}
+
 androidComponents {
     onVariants { variant ->
-        variant.sources.java?.addStaticSourceDirectory("build/generated/source/uniffi/kotlin")
+        variant.sources.java?.addStaticSourceDirectory(uniffiOutDir.absolutePath)
 
         val variantName = variant.name.replaceFirstChar { it.uppercase() }
         val licenseOutput = layout.buildDirectory.dir("generated/licenses/${variant.name}")
         val generateLicenses = tasks.register<Exec>("generate${variantName}LicenseAssets") {
             dependsOn("buildRustCore")
             val runtime = configurations.named("${variant.name}RuntimeClasspath")
-            val generator = rootProject.file("../tools/licenses/generate.py")
+            val generator = repoRoot.resolve("tools/licenses/generate.py")
             inputs.files(runtime)
-            inputs.files(rootProject.file("../Cargo.lock"), rootProject.file("../Cargo.toml"),
-                rootProject.file("../libcore/Cargo.toml"), rootProject.file("../common/Cargo.toml"), generator)
+            inputs.files(repoRoot.resolve("Cargo.lock"), repoRoot.resolve("Cargo.toml"),
+                repoRoot.resolve("libcore/Cargo.toml"), repoRoot.resolve("common/Cargo.toml"), generator)
             inputs.file(rustLicenseArtifacts)
-            inputs.dir(rootProject.file("../tools/licenses/notices"))
+            inputs.dir(repoRoot.resolve("tools/licenses/notices"))
             outputs.dir(licenseOutput)
             environment("PATH", cargoAugmentedPath)
-            workingDir = rootProject.file("..")
+            workingDir = repoRoot
             val inventory = layout.buildDirectory.file("intermediates/licenses/${variant.name}.json")
             doFirst {
                 val artifacts = runtime.get().resolvedConfiguration.resolvedArtifacts
@@ -284,20 +251,25 @@ androidComponents {
                 "--rust-artifacts", rustLicenseArtifacts.get().asFile.absolutePath)
         }
         variant.sources.assets?.addStaticSourceDirectory(licenseOutput.get().asFile.absolutePath)
-        tasks.matching {
-            it.name == "merge${variantName}Assets" ||
-                (it.name.contains("lint", ignoreCase = true) && it.name.contains(variantName))
-        }.configureEach { dependsOn(generateLicenses) }
+        tasks.configureEach {
+            if (name == "merge${variantName}Assets" ||
+                (name.contains("lint", ignoreCase = true) && name.contains(variantName))
+            ) dependsOn(generateLicenses)
+        }
     }
 }
 
 tasks.register<Exec>("buildRustCore") {
     val artifactOutput = rustLicenseArtifacts.get().asFile
     val pendingArtifacts = file("${artifactOutput.absolutePath}.pending")
-    environment("CARGO", rootProject.file("../tools/licenses/cargo-artifacts.py").absolutePath)
+    environment("CARGO", repoRoot.resolve("tools/licenses/cargo-artifacts.py").absolutePath)
     environment("PROMTUZ_REAL_CARGO", cargo)
     environment("PROMTUZ_RUST_ARTIFACTS", pendingArtifacts.absolutePath)
+    val isRelease = gradle.startParameter.taskNames.any { task ->
+        listOf("Release", "Benchmark").any { task.contains(it, ignoreCase = true) }
+    }
     doFirst {
+        logger.lifecycle("Compiling libcore for ${if (isRelease) "Release" else "Debug"} build")
         pendingArtifacts.parentFile.mkdirs()
         pendingArtifacts.writeText("")
     }
@@ -305,47 +277,32 @@ tasks.register<Exec>("buildRustCore") {
         pendingArtifacts.copyTo(artifactOutput, overwrite = true)
         pendingArtifacts.delete()
     }
-    val isRelease =
-        name.contains("Release", ignoreCase = true) || gradle.startParameter.taskNames.any {
-            it.contains("Release", ignoreCase = true)
-        }
 
-    println("Compiling libcore for ${if (isRelease) "Release" else "Debug"} build")
+    workingDir = repoRoot.resolve("libcore")
 
-    workingDir = file("../../libcore")
-
-    // Hand cargo-ndk an absolute NDK path derived from AGP's own ndkVersion,
-    // so the build never depends on a tilde'd / unset ambient ANDROID_NDK_ROOT
-    // (which fails outside an interactive shell — Android Studio, CI, daemons).
-    val ndkDir = "$sdkDir/ndk/${android.ndkVersion}"
+    val ndkDir = "${checkNotNull(sdkDir) {
+        "Android SDK not found: set sdk.dir in local.properties, or ANDROID_HOME / ANDROID_SDK_ROOT"
+    }}/ndk/${android.ndkVersion}"
     environment("ANDROID_NDK_HOME", ndkDir)
     environment("ANDROID_NDK_ROOT", ndkDir)
     environment("PATH", cargoAugmentedPath)
 
-    // @formatter:off
-    if (isRelease) commandLine(
-        cargoNdk, "ndk",
-        "-t", "arm64-v8a",
-        "-t", "x86_64",
-        "-o", "../android/app/src/main/jniLibs",
-        "--platform", (android.defaultConfig.minSdk ?: 21).toString(),
-        "build", "--release"
-    ) else commandLine(
-        cargoNdk, "ndk",
-        "-t", "arm64-v8a",
-        "-t", "x86_64",
-        "-o", "../android/app/src/main/jniLibs",
-        "--platform", (android.defaultConfig.minSdk ?: 21).toString(),
-        "build"
-    )
-    // @formatter:on
+    val cargoNdkArgs = buildList {
+        add("ndk")
+        abis.forEach { addAll(listOf("-t", it)) }
+        addAll(listOf(
+            "-o", file("src/main/jniLibs").absolutePath,
+            "--platform", minSdkVersion.toString(),
+            "build",
+        ))
+        if (isRelease) add("--release")
+    }
+    commandLine(listOf(cargoNdk) + cargoNdkArgs)
 }
 
-// Generate the uniffi Kotlin bindings from the built .so (library mode).
-// Bindings are identical across ABIs, so point --library at one (arm64-v8a).
 tasks.register<Exec>("generateUniffiBindings") {
     dependsOn("buildRustCore")
-    workingDir = file("../..") // cargo workspace root
+    workingDir = repoRoot
     environment("PATH", cargoAugmentedPath)
     val outDir = uniffiOutDir
     doFirst { outDir.mkdirs() }
@@ -358,8 +315,7 @@ tasks.register<Exec>("generateUniffiBindings") {
     )
 }
 
-tasks.preBuild.dependsOn("buildRustCore")
-tasks.preBuild.dependsOn("generateUniffiBindings")
+tasks.named("preBuild") { dependsOn("generateUniffiBindings") }
 
 dependencies {
 
@@ -393,7 +349,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
 
-    // Identity recovery: Block Store escrow + daily backup-blob worker.
     implementation(libs.play.services.blockstore)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.lifecycle.process)
@@ -412,7 +367,6 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
 
-    // Video playback in the media viewer.
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui.compose)
     implementation(libs.androidx.media3.transformer)
