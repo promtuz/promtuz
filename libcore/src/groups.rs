@@ -49,7 +49,6 @@ use crate::quic::dht_client::DhtClientError;
 use crate::state::core;
 
 pub(crate) mod member_requests;
-pub(crate) mod migration;
 pub(crate) mod recovery;
 
 #[derive(Default)]
@@ -59,7 +58,6 @@ pub(crate) struct Groups {
     /// One follow-up of pending requests at a time, so a burst of commits asks the committer once
     /// rather than once per commit.
     follow_up:                tokio::sync::Mutex<()>,
-    migration_retries:        parking_lot::Mutex<std::collections::HashSet<[u8; 16]>>,
     pub(crate) picture_write: tokio::sync::Mutex<()>,
 }
 
@@ -193,13 +191,7 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
 /// No pre-join history: forward secrecy means its keys no longer exist. Returns whether it is
 /// done or was asked of the committer.
 pub async fn add_members(conversation: [u8; 16], who: Vec<[u8; 32]>) -> Result<bool> {
-    require_group(&conversation)?;
-    if !Conversation::has_signed_rules(&conversation) {
-        for w in who {
-            legacy_add(conversation, w).await?;
-        }
-        return Ok(true);
-    }
+    require_signed_rules(&conversation)?;
     // Marks the adds we asked for, so we deliver only the Welcomes we wanted
     // delivered.
     for w in &who {
@@ -210,12 +202,7 @@ pub async fn add_members(conversation: [u8; 16], who: Vec<[u8; 32]>) -> Result<b
 
 /// The removing commit refreshes the group's keys, so their device cannot read what follows.
 pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<bool> {
-    require_group(&conversation)?;
-    if !Conversation::has_signed_rules(&conversation) {
-        require_owner(&conversation, &local_ipk()?)?;
-        evict(conversation, who, Some(SystemEvent::Removed { who: who.into() })).await?;
-        return Ok(true);
-    }
+    require_signed_rules(&conversation)?;
     ask(conversation, GroupChange::Remove { who: who.into() }).await
 }
 
@@ -233,10 +220,7 @@ pub async fn set_rules(conversation: [u8; 16], rules: GroupRules) -> Result<bool
 /// The conversation and its history stay. The signed departure survives epoch changes and local
 /// deletion, and the chat shows us gone at once while delivery finishes.
 pub async fn leave(conversation: [u8; 16]) -> Result<()> {
-    require_group(&conversation)?;
-    if !Conversation::has_signed_rules(&conversation) {
-        return legacy_leave(conversation).await;
-    }
+    require_signed_rules(&conversation)?;
     let me = local_ipk()?;
     member_requests::leave(conversation)?;
     if Conversation::active_members(&conversation) == [me] {
@@ -293,7 +277,7 @@ pub(crate) fn requested(conversation: [u8; 16], from: [u8; 32], request: GroupRe
                 Ok(())
             },
             GroupRequest::Ready => Ok(()),
-            GroupRequest::RecoveryReady => ready_from(conversation, from).await,
+            GroupRequest::RecoveryReady => Ok(()),
             GroupRequest::Add { .. } | GroupRequest::Remove { .. } => Ok(()),
         };
         if let Err(e) = done {
@@ -344,7 +328,7 @@ async fn commit_change(conversation: [u8; 16], signed: SignedChange) -> Result<(
         }
         // Validate before fetching, then validate again against the snapshot
         // after the network await. An incoming commit may have advanced us.
-        load_settled(ctx.provider, &conversation, &group_id)?
+        load_group(ctx.provider, &group_id)?
             .state_after_change(&our_ipk, &signed)
             .map_err(|e| anyhow!("{e}"))?;
         let mut joiners = Vec::new();
@@ -426,8 +410,7 @@ async fn commit_change(conversation: [u8; 16], signed: SignedChange) -> Result<(
                 &candidate.message,
                 &ipk_signer,
             )?;
-            let bootstrap =
-                matches!(signed.change, GroupChange::Upgrade).then(|| root_history[0].clone());
+            let bootstrap: Option<common::proto::mls_wire::GroupBranch> = None;
             sealed.proof = Some(crate::mls::branch_proof::seal(
                 ctx.provider,
                 &root,
@@ -820,7 +803,6 @@ pub(crate) fn on_reconnect() {
 /// current epoch; carried directly once this device commits.
 async fn follow_up(conversation: [u8; 16]) -> Result<()> {
     let _one = core().groups.follow_up.lock().await;
-    if migration::follow_up(conversation).await? { return Ok(()); }
     // Backups preserve the public group anchor and roster, not epoch secrets.
     // Request fresh keys without waiting for someone to send into the lost epoch.
     if let Some(gid) = Conversation::group_of(&conversation)
@@ -833,8 +815,7 @@ async fn follow_up(conversation: [u8; 16]) -> Result<()> {
         recovery::reconcile(conversation).await?;
     }
     if !Conversation::has_signed_rules(&conversation) {
-        announce_ready(conversation).await?;
-        return maybe_upgrade(conversation).await;
+        return Ok(());
     }
     let mut list = pending(&conversation);
     if list.is_empty() {
@@ -980,7 +961,7 @@ async fn catch_up(conversation: [u8; 16], who: [u8; 32]) {
         return;
     }
     let title = Conversation::get(&conversation).map(|c| c.title).unwrap_or_default();
-    if !Conversation::has_signed_rules(&conversation) && !title.is_empty() {
+    if !title.is_empty() {
         let titled = AppPayload::System(SystemEvent::Titled { title });
         if let Err(e) = crate::messaging::send_control_to(conversation, titled, who).await {
             warn!("GROUP: the new member may not have the group's name yet: {e}");
@@ -993,7 +974,7 @@ async fn catch_up(conversation: [u8; 16], who: [u8; 32]) {
 /// not know the committer, so we seal it as ours and deliver it.
 pub(crate) fn forward_welcome(
     conversation: [u8; 16], _from: [u8; 32], who: [u8; 32], kp_ref: [u8; 32], welcome: Vec<u8>,
-    history: Option<Vec<u8>>,
+    history: Vec<u8>,
 ) -> Result<()> {
     let asked = asked_key(&conversation, &who);
     // The MLS application gate checked the sender's role at its own epoch.
@@ -1004,10 +985,7 @@ pub(crate) fn forward_welcome(
     let (me, signer) = local_signer()?;
     let gid = require_group(&conversation)?;
     let env = crate::mls::seal_welcome_blob(welcome, gid, me, who, kp_ref, &signer)?;
-    let envelope = match history {
-        Some(history) => recovery::welcome_envelope(env, &history, &signer)?,
-        None => MlsEnvelopeP::Welcome(env),
-    };
+    let envelope = recovery::welcome_envelope(env, &history, &signer)?;
     let mut copies = vec![welcome_copy(who, &envelope, &me, &signer)?];
     crate::delivery::enqueue_batch(&mut copies)?;
     crate::data::app_prefs::remove(&asked)?;
@@ -1019,243 +997,6 @@ pub(crate) fn forward_welcome(
 
 fn asked_key(conversation: &[u8; 16], who: &[u8; 32]) -> String {
     format!("group_add:{}{}", hex::encode(conversation), hex::encode(who))
-}
-
-/// Tell the founder of a group from before signed rules that we can follow
-/// them. Once per epoch, so one lost to a concurrent commit is said again.
-async fn announce_ready(conversation: [u8; 16]) -> Result<()> {
-    let me = local_ipk()?;
-    let Some(state) = Conversation::state(&conversation) else { return Ok(()) };
-    let founder = state.committer;
-    let members = Conversation::active_members(&conversation);
-    if founder == me || !members.contains(&me) || !members.contains(&founder) {
-        return Ok(());
-    }
-    let group_id = require_group(&conversation)?;
-    let epoch = load_group(&PromtuzMlsProvider::shared(), &group_id)?.epoch().to_string();
-    let key = format!("group_recovery_ready_sent:{}", hex::encode(conversation));
-    if crate::data::app_prefs::get(&key).as_deref() == Some(epoch.as_str()) {
-        return Ok(());
-    }
-    crate::messaging::send_control_to(
-        conversation,
-        AppPayload::GroupRequest(GroupRequest::RecoveryReady),
-        founder,
-    )
-    .await?;
-    crate::data::app_prefs::set(&key, &epoch)
-}
-
-fn ready_key(conversation: &[u8; 16], who: &[u8; 32]) -> String {
-    format!("group_recovery_ready:{}{}", hex::encode(conversation), hex::encode(who))
-}
-
-async fn ready_from(conversation: [u8; 16], from: [u8; 32]) -> Result<()> {
-    if Conversation::has_signed_rules(&conversation)
-        || !Conversation::active_members(&conversation).contains(&from)
-    {
-        return Ok(());
-    }
-    crate::data::app_prefs::set(&ready_key(&conversation, &from), "1")?;
-    maybe_upgrade(conversation).await
-}
-
-/// Converts a group we founded before signed rules once every member can follow them: older
-/// clients refuse the converting commit and would be left behind.
-async fn maybe_upgrade(conversation: [u8; 16]) -> Result<()> {
-    let me = local_ipk()?;
-    if Conversation::has_signed_rules(&conversation) || !Conversation::is_owner(&conversation, &me)
-    {
-        return Ok(());
-    }
-    let members = Conversation::active_members(&conversation);
-    let ready = |m: &[u8; 32]| {
-        *m == me || crate::data::app_prefs::get(&ready_key(&conversation, m)).is_some()
-    };
-    if !members.iter().all(ready) {
-        return Ok(());
-    }
-    commit_change(conversation, sign(&conversation, GroupChange::Upgrade)?).await?;
-    for m in members {
-        let _ = crate::data::app_prefs::remove(&ready_key(&conversation, &m));
-    }
-    info!("GROUP: {} now runs by signed rules", hex::encode(&conversation[..4]));
-    Ok(())
-}
-
-/// Add someone to a group from before signed rules: its founder commits it and
-/// Welcomes them directly.
-async fn legacy_add(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
-    let _one = core().groups.membership.lock().await;
-    let (our_ipk, ipk_signer) = local_signer()?;
-    require_owner(&conversation, &our_ipk)?;
-    let group_id = require_group(&conversation)?;
-    if Conversation::active_members(&conversation).contains(&who) {
-        bail!("that member is already in this group");
-    }
-
-    with_mls!(ctx, {
-        let (kp, kp_ref) = crate::messaging::session::fetch_verified_keypackage(&ctx, &who, true)
-            .await
-            .map_err(|e| no_keys_error(&who, e))?;
-        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
-        if group.member_count() + 1 > crate::mls::MAX_GROUP_MEMBERS {
-            bail!("a group is limited to {} members", crate::mls::MAX_GROUP_MEMBERS);
-        }
-        let (commit, welcome) = group
-            .add_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[kp])
-            .map_err(|e| anyhow!("add_members: {e}"))?;
-        let env =
-            crate::mls::make_welcome_envelope(welcome, group_id, our_ipk, who, kp_ref, &ipk_signer)
-                .map_err(|e| anyhow!("make_welcome_envelope: {e}"))?;
-        // Queued with the commit, so the joiner never holds an epoch the members never reach.
-        let welcome = welcome_copy(who, &MlsEnvelopeP::Welcome(env), &our_ipk, &ipk_signer)?;
-        let recipients = Conversation::recipients(&conversation);
-        let copies = publish_commit(
-            ctx.provider,
-            &mut group,
-            &recipients,
-            &commit,
-            &ipk_signer,
-            Some(welcome),
-        )?;
-        Conversation::sync_group(&conversation, &group.roster(), group.group_meta().as_ref())?;
-        recovery::dispatch(copies).await;
-        announce(conversation, SystemEvent::Added { who: who.into() }).await;
-        catch_up(conversation, who).await;
-        Ok(())
-    })
-}
-
-/// Only the founder's commit takes a leaf out of a pre-rules group. Committed inline rather than
-/// by reference to the proposal, so a member who never saw it can still apply the commit.
-pub async fn carry_leave(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
-    evict(conversation, who, None).await?;
-    maybe_upgrade(conversation).await
-}
-
-async fn evict(
-    conversation: [u8; 16], who: [u8; 32], narration: Option<SystemEvent>,
-) -> Result<()> {
-    let _one = core().groups.membership.lock().await;
-    let (our_ipk, ipk_signer) = local_signer()?;
-    require_owner(&conversation, &our_ipk)?;
-    let group_id = require_group(&conversation)?;
-    if who == our_ipk {
-        bail!("use leave to remove yourself");
-    }
-
-    with_mls!(ctx, {
-        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
-        let idx = group
-            .member_index_by_ipk(&who)
-            .ok_or_else(|| anyhow!("that member is not in this group"))?;
-
-        // Address the Commit to the roster as it stands now, the removed member included: they
-        // need it to learn they are out.
-        let recipients = Conversation::recipients(&conversation);
-        let commit = group
-            .remove_members(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?, &[idx])
-            .map_err(|e| anyhow!("remove_members: {e}"))?;
-        let copies =
-            publish_commit(ctx.provider, &mut group, &recipients, &commit, &ipk_signer, None)?;
-
-        // The tree, not our intent, is the roster: the commit may have
-        // carried more than this one removal.
-        Conversation::sync_group(&conversation, &group.roster(), group.group_meta().as_ref())?;
-        recovery::dispatch(copies).await;
-        if let Some(event) = narration {
-            announce(conversation, event).await;
-        }
-        Ok(())
-    })
-}
-
-/// Leave a group from before signed rules: propose our own removal, tell
-/// everyone, then drop the local group state. Its founder carries the leave.
-async fn legacy_leave(conversation: [u8; 16]) -> Result<()> {
-    let (our_ipk, ipk_signer) = local_signer()?;
-    let group_id = require_group(&conversation)?;
-    require_not_stranding_the_group(&conversation, &our_ipk)?;
-
-    with_mls!(ctx, {
-        let mut group = load_settled(ctx.provider, &conversation, &group_id)?;
-        let recipients = Conversation::recipients(&conversation);
-        let commit_epoch = group.epoch();
-
-        // Announce first: once the group state is gone we can no longer encrypt to it.
-        announce(conversation, SystemEvent::Left { who: our_ipk.into() }).await;
-
-        let proposal = group
-            .leave(ctx.provider, &leaf_for(ctx.provider, &group, &our_ipk)?)
-            .map_err(|e| anyhow!("leave: {e}"))?;
-        let mut copies =
-            sealed_copies(&recipients, &proposal, group_id, commit_epoch, &ipk_signer)?;
-        crate::delivery::enqueue_batch(&mut copies)?;
-        recovery::dispatch(copies).await;
-
-        Conversation::deactivate_member(&conversation, &our_ipk)?;
-        if let Err(e) = group.delete(ctx.provider) {
-            warn!("GROUP: dropping local group state after leave failed: {e}");
-        }
-        info!("GROUP: left {}", hex::encode(&conversation[..4]));
-        Ok(())
-    })
-}
-
-/// A sealed copy of `message` per recipient, so an offline member still applies it.
-fn sealed_copies(
-    recipients: &[[u8; 32]], message: &openmls::prelude::MlsMessageOut, group_id: [u8; 32],
-    epoch: u64, ipk_signer: &SigningKey,
-) -> Result<Vec<recovery::Copy>> {
-    let sealed = SealedMessage::from_mls_out(message, group_id, epoch)
-        .map_err(|e| anyhow!("seal commit: {e}"))?;
-    Ok(recovery::copies(&recovery::addressed(
-        &sealed,
-        crate::data::message::next_dispatch_id(),
-        recipients,
-        ipk_signer,
-        OpType::Control,
-        common::proto::client_rel::Wake::Message,
-        0,
-    )?))
-}
-
-/// Queues our pending commit for every recipient, `welcome` beside it, with the mark that it left,
-/// then merges it. Whatever fails here the next change settles. The caller sends the copies with
-/// [`recovery::dispatch`].
-fn publish_commit(
-    provider: &PromtuzMlsProvider, group: &mut MlsGroupHandle, recipients: &[[u8; 32]],
-    commit: &openmls::prelude::MlsMessageOut, ipk_signer: &SigningKey,
-    welcome: Option<recovery::Copy>,
-) -> Result<Vec<recovery::Copy>> {
-    // Members apply it at the epoch it was built in, which the merge moves us past.
-    let (group_id, epoch) = (group.group_id(), group.epoch());
-    let mut copies = sealed_copies(recipients, commit, group_id, epoch, ipk_signer)?;
-    copies.extend(welcome);
-    crate::delivery::enqueue_commit(&mut copies, &group_id, epoch)?;
-    group.merge_pending_commit(provider).map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
-    Ok(copies)
-}
-
-/// Settles the commit a failed or interrupted change left pending before the next is built: merged
-/// if it was queued, since members hold it or will, and dropped otherwise.
-fn load_settled(
-    provider: &PromtuzMlsProvider, conversation: &[u8; 16], group_id: &[u8; 32],
-) -> Result<MlsGroupHandle> {
-    let mut group = load_group(provider, group_id)?;
-    if !group.has_pending_commit() {
-        return Ok(group);
-    }
-    if crate::delivery::commit_left(group_id, group.epoch())? {
-        warn!("GROUP: merging a commit queued before an interruption");
-        group.merge_pending_commit(provider)?;
-        Conversation::sync_group(conversation, &group.roster(), group.group_meta().as_ref())?;
-    } else {
-        warn!("GROUP: dropping a commit that never left");
-        group.clear_pending_commit(provider);
-    }
-    Ok(group)
 }
 
 /// `envelope` framed for `who`'s outbox row.
@@ -1292,34 +1033,17 @@ fn no_keys_error(who: &[u8; 32], e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Refuses a departure that leaves nobody able to change the group: a pre-rules founder leaving
-/// while others remain, or a committer deleting without leaving, which would hand nothing over.
+/// A committer must hand over management before deleting a group they still belong to.
 pub(crate) fn require_not_stranding_the_group(
     conversation: &[u8; 16], who: &[u8; 32],
 ) -> Result<()> {
-    let others = Conversation::active_members(conversation).iter().filter(|m| *m != who).count();
-    if others == 0 || !Conversation::active_members(conversation).contains(who) {
-        return Ok(());
-    }
-    if Conversation::has_signed_rules(conversation) {
-        if Conversation::state(conversation).is_some_and(|s| s.committer == *who) {
-            bail!("leave the group before deleting it, so someone else can manage it");
-        }
-        return Ok(());
-    }
-    if Conversation::is_owner(conversation, who) {
-        bail!(
-            "you created this group — remove the other {} member{} before leaving it",
-            others,
-            if others == 1 { "" } else { "s" }
-        );
-    }
-    Ok(())
-}
-
-fn require_owner(conversation: &[u8; 16], who: &[u8; 32]) -> Result<()> {
-    if !Conversation::is_owner(conversation, who) {
-        bail!("only the group's owner can make this change");
+    let members = Conversation::active_members(conversation);
+    if members.iter().any(|m| m != who)
+        && members.contains(who)
+        && Conversation::has_signed_rules(conversation)
+        && Conversation::state(conversation).is_some_and(|s| s.committer == *who)
+    {
+        bail!("leave the group before deleting it, so someone else can manage it");
     }
     Ok(())
 }
@@ -1327,7 +1051,7 @@ fn require_owner(conversation: &[u8; 16], who: &[u8; 32]) -> Result<()> {
 fn require_signed_rules(conversation: &[u8; 16]) -> Result<()> {
     require_group(conversation)?;
     if !Conversation::has_signed_rules(conversation) {
-        bail!("this group needs every member on the latest version first");
+        bail!("This group uses an unsupported format. Create a new group to continue.");
     }
     Ok(())
 }
@@ -1364,61 +1088,4 @@ fn leaf_for(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, our_ipk: &[u8; 32],
 ) -> Result<openmls_basic_credential::SignatureKeyPair> {
     crate::messaging::session::leaf_signer_for_group(provider, group, our_ipk)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::ScopedCore;
-    use crate::test_support::mls::Party;
-    use crate::test_support::mls::commit_of;
-    use crate::test_support::mls::found;
-    use crate::test_support::mls::with_failing_trigger;
-
-    /// A commit queued before its merge failed has reached the members, so the next change merges
-    /// it; one that never reached the outbox is dropped. Either way the next change commits, and
-    /// the members follow it.
-    #[tokio::test]
-    async fn the_next_change_settles_a_commit_left_pending() {
-        let scope = ScopedCore::new();
-        let [alice, bob, carol, dave] = [0xA7, 0xB7, 0xC7, 0xD7].map(Party::new);
-        let gid = [0xE7; 32];
-        let meta = GroupMeta { title: String::new(), founder: alice.ipk, state: None };
-        let (mut group, [mut at_bob, _]) = found(&alice, gid, Some(&meta), [&bob, &carol]);
-        let conversation =
-            Conversation::join_group(&alice.ipk, &[alice.ipk, bob.ipk, carol.ipk]).unwrap();
-        Conversation::bind_group(&conversation, &gid).unwrap();
-        let provider = &alice.provider;
-        let publish = |group: &mut MlsGroupHandle, commit| {
-            publish_commit(provider, group, &[bob.ipk, carol.ipk], commit, &alice.identity, None)
-        };
-        let epoch = group.epoch();
-
-        let carol_at = group.member_index_by_ipk(&carol.ipk).unwrap();
-        let removal = group.remove_members(provider, &alice.leaf, &[carol_at]).unwrap();
-        let merge = || publish(&mut group, &removal);
-        assert!(with_failing_trigger(&alice.db, "INSERT ON mls_storage", merge).is_err());
-        drop(group);
-        let mut group = load_settled(provider, &conversation, &gid).unwrap();
-        assert_eq!(group.epoch(), epoch + 1, "the queued removal is merged");
-        let removal = commit_of(bob.receive(&mut at_bob, &removal));
-        at_bob.merge_staged_commit(&bob.provider, removal).unwrap();
-
-        let (add, _) = group.add_members(provider, &alice.leaf, &[dave.kp()]).unwrap();
-        let queue = || publish(&mut group, &add);
-        assert!(with_failing_trigger(scope.core.db.outbox(), "INSERT ON outbox", queue).is_err());
-        drop(group);
-        let mut group = load_settled(provider, &conversation, &gid).unwrap();
-        assert_eq!(group.epoch(), epoch + 1, "the add that never left is dropped");
-
-        let (add, welcome) = group.add_members(provider, &alice.leaf, &[dave.kp()]).unwrap();
-        publish(&mut group, &add).unwrap();
-        let add = commit_of(bob.receive(&mut at_bob, &add));
-        at_bob.merge_staged_commit(&bob.provider, add).unwrap();
-        let at_dave = dave.join(&welcome);
-        assert_eq!(group.epoch(), epoch + 2);
-        for member in [&at_bob, &at_dave] {
-            assert_eq!((member.epoch(), member.roster()), (group.epoch(), group.roster()));
-        }
-    }
 }

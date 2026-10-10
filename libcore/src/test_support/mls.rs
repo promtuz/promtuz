@@ -8,7 +8,6 @@ use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::group_change_signing_input;
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
-use openmls::prelude::BasicCredential;
 use openmls::prelude::Capabilities;
 use openmls::prelude::CredentialWithKey;
 use openmls::prelude::KeyPackage;
@@ -59,14 +58,6 @@ impl Party {
     pub fn credential(&self) -> CredentialWithKey {
         CredentialWithKey {
             credential:    bound_credential(&self.identity, self.leaf.public()).into(),
-            signature_key: self.leaf.public().into(),
-        }
-    }
-
-    /// The bare IPK leaves carried before credentials were bound.
-    pub fn legacy_credential(&self) -> CredentialWithKey {
-        CredentialWithKey {
-            credential:    BasicCredential::new(self.ipk.to_vec()).into(),
             signature_key: self.leaf.public().into(),
         }
     }

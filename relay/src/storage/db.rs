@@ -62,6 +62,7 @@ pub struct Store {
     db: Database,
     pub messages: Queue,
     pub queue: Queue,
+    pub(super) payloads: Queue,
     pub key_packages: super::key_packages::KeyPackages,
     pub profiles: super::profiles::Profiles,
     pub welcome: Queue,
@@ -106,7 +107,7 @@ impl Store {
         let key_packages = super::key_packages::KeyPackages::open(&db)?;
         let profiles = super::profiles::Profiles::open(&db)?;
         let welcome = open(KS_DHT_WELCOME)?;
-        let [messages, queue, welcome] =
+        let [messages, queue, welcome, payloads] =
             Queue::open(&db, messages, queue, welcome).context("index queued messages")?;
         let last_seen = open(KS_LAST_SEEN)?;
         let presence_consent = open(KS_PRESENCE_CONSENT)?;
@@ -121,6 +122,7 @@ impl Store {
             SweepTarget::queue(&messages, queued_message_expired),
             SweepTarget::queue(&queue, queued_message_expired),
             SweepTarget::queue(&welcome, welcome_expired),
+            SweepTarget::queue(&payloads, super::queue::payload_expired),
             SweepTarget::new(&presence_state, presence_state_expired),
             SweepTarget::new(&presence_lease, presence_lease_expired),
             SweepTarget::new(&push_pseudonym, push_pseudonym_expired),
@@ -138,6 +140,7 @@ impl Store {
             db,
             messages,
             queue,
+            payloads,
             key_packages,
             profiles,
             welcome,
@@ -417,6 +420,7 @@ impl Store {
         self.messages.clear()?;
         self.queue.clear()?;
         self.welcome.clear()?;
+        self.payloads.clear()?;
         for ks in [
             &self.key_packages.records,
             &self.key_packages.spent,
@@ -635,8 +639,9 @@ fn sweep(target: &mut SweepTarget, now_ms: u64) {
 /// Retention uses the stored key's clock; shorter sender TTLs also release space, while
 /// call offers remain available to record missed calls until normal retention expires.
 fn queued_message_expired(key: &[u8], value: &[u8], now_ms: u64) -> bool {
-    be_u64(key, 32)
-        .is_none_or(|accepted_at| now_ms.saturating_sub(accepted_at) > QUEUED_MESSAGE_TTL_MS)
+    super::queue::reference_expired(value, now_ms)
+        || be_u64(key, 32)
+            .is_none_or(|accepted_at| now_ms.saturating_sub(accepted_at) > QUEUED_MESSAGE_TTL_MS)
         || super::MessageKey::parse(key)
             .and_then(|key| super::queued_dispatch(&key.recipient, value))
             .is_some_and(|dispatch| dispatch.is_expired(now_ms))

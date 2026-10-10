@@ -337,6 +337,8 @@ pub enum CRelayPacket {
     /// Publish activity, with acknowledgement after the observation reaches stable storage.
     SetPresenceDurable(PresenceMode),
     Profile(crate::proto::profile::Request),
+    /// Mandatory queue operation; appended to preserve existing packet ordinals.
+    PublishGroup(Box<crate::proto::group_queue::Publication>),
 }
 
 /// Variant ordinals are wire format: append only.

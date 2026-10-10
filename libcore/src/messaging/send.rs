@@ -73,8 +73,8 @@ pub fn seal_application_message(
     })
 }
 
-/// Seals `payload` once for `gid` and queues one copy per recipient in the outbox, all under the
-/// group's operation lock so no two sends share a ratchet step. A signed group seals on its branch.
+/// Seals once under the group's operation lock, then queues one shared group publication or
+/// an addressed direct dispatch. Concurrent sends cannot share a ratchet step.
 pub(crate) fn queue_application(
     outbox: &PlMutex<rusqlite::Connection>, provider: &PromtuzMlsProvider, gid: [u8; 32],
     id: [u8; 16], payload: Vec<u8>, recipients: &[[u8; 32]], signer: &SigningKey, op: OpType,
@@ -206,9 +206,6 @@ pub(super) async fn send_payload<C: DhtClient>(
     let group = match group_for_conversation(ctx, &conversation, &our_ipk, &ipk_signer).await {
         Ok(g) => g,
         Err(e) => {
-            if e.downcast_ref::<crate::groups::migration::Pending>().is_some() {
-                return Ok(());
-            }
             if awaits_keypackage(&e) {
                 info!("MESSAGE: recipient has no published KP yet — left pending, will retry");
                 return Ok(());

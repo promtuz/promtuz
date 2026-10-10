@@ -67,6 +67,81 @@ pub(super) async fn handle_forward(
     .await
 }
 
+/// Group publications use the same queue, signatures, drain and recipient ACKs as direct sends.
+pub(super) async fn handle_group(
+    publication: common::proto::group_queue::Publication, ctx: ClientCtxHandle, tx: &mut SendStream,
+) -> Result<()> {
+    if publication.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
+        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig).send(tx).await?;
+        return Ok(());
+    }
+    if ctx.limits.dispatch.check().is_err() {
+        SRelayPacket::DispatchAck(DispatchAckP::QueueFull).send(tx).await?;
+        return Ok(());
+    }
+    let at = now_ms();
+    let mut audience = std::collections::HashSet::new();
+    if publication.recipients.is_empty()
+        || publication.recipients.iter().any(|reader| {
+            reader.to == publication.from
+                || !audience.insert(reader.to.0)
+                || !publication.dispatch(reader, at).is_ok_and(|d| verify_dispatch_user_sig(&d))
+        })
+    {
+        SRelayPacket::DispatchAck(DispatchAckP::InvalidSig).send(tx).await?;
+        return Ok(());
+    }
+    let admission = ctx.relay.store.messages.admit_group(&publication, at)?;
+    let ack = match admission {
+        QueueAdmission::Insert | QueueAdmission::AlreadyQueued => {
+            ctx.relay.store.persist_barrier().wait().await?;
+            DispatchAckP::Queued {
+                accepted_at_ms: ctx
+                    .relay
+                    .store
+                    .messages
+                    .group_accepted_at(&publication)?
+                    .unwrap_or(at),
+            }
+        },
+        QueueAdmission::IdTakenByOther => {
+            DispatchAckP::Error { reason: "dispatch id already queued".into() }
+        },
+        QueueAdmission::Full(_) => DispatchAckP::QueueFull,
+    };
+    let accepted = matches!(ack, DispatchAckP::Queued { .. });
+    let reply = SRelayPacket::DispatchAck(ack).send(tx).await;
+    if accepted {
+        // A retry routes only still-pending readers. A slow reader cannot serialize the fan-out.
+        let tasks = publication.recipients.into_iter().map(|reader| {
+            let ctx = ctx.clone();
+            async move {
+                let store = &ctx.relay.store;
+                let Ok(keys) = store.messages.keys_for(&reader.to.0, &publication.id.0) else {
+                    return;
+                };
+                for key in keys {
+                    let Ok(Some(value)) = store.messages.get(key.as_bytes()) else { continue };
+                    let Some(dispatch) = queued_dispatch(&reader.to.0, &value) else { continue };
+                    if dispatch.from != publication.from {
+                        continue;
+                    }
+                    if let Ok(Some(
+                        DispatchAckP::Delivered { .. } | DispatchAckP::Forwarded { .. },
+                    )) =
+                        tokio::time::timeout(ROUTE_TIMEOUT, route_dispatch(dispatch.clone(), &ctx))
+                            .await
+                    {
+                        let _ = retire_local_copy(store, &dispatch);
+                    }
+                }
+            }
+        });
+        super::bounded_fanout(tasks.collect(), 8).await;
+    }
+    reply.map_err(Into::into)
+}
+
 /// A durable local copy releases the sender. Routing continues after the reply, so a slow
 /// recipient never gates acceptance and a lost sender ack never cancels delivery.
 async fn accept_dispatch<Q, R, S, SF, C>(queue: Q, route: R, respond: S, retire: C) -> Result<()>

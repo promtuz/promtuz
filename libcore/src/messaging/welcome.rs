@@ -120,10 +120,6 @@ pub(crate) fn send_group_picture_to(conversation: [u8; 16], who: [u8; 32]) {
 /// have the same roster. A group chat always gets its own conversation, never a DM's.
 pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<[u8; 16]> {
     let gid = group.group_id();
-    ensure!(!crate::groups::migration::retired(&PromtuzMlsProvider::shared(), &gid)?, "group session was migrated");
-    if let Some(id) = crate::groups::migration::destination(&PromtuzMlsProvider::shared(), &gid)? {
-        return Ok(id);
-    }
     if let Some(id) = Conversation::for_group(&gid) {
         return Ok(id); // already homed; a redelivered Welcome mints no second one
     }
@@ -208,9 +204,6 @@ fn admission(
 pub(super) fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP, history: Option<&[u8]>,
 ) -> Result<bool> {
-    if crate::groups::migration::retired(ctx.provider, &env.group_id.0)? {
-        return Ok(false);
-    }
     if env.sender_ipk.0 != sender_ipk {
         warn!("MLS: dropped Welcome with sender_ipk mismatch with DispatchP.from");
         return Ok(false);

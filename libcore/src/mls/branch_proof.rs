@@ -168,17 +168,9 @@ fn transition(gid: &[u8; 32], parent: &GroupBranch, next: &GroupBranch) -> Resul
             &signed.change,
         )?;
         verify_ed25519(&signed.by.0, &input, &signed.sig.0)?;
-        let expected = if before.state.is_none() {
-            ensure!(
-                signed.change == GroupChange::Upgrade
-                    && signed.by.0 == before.founder
-                    && next.author.0 == before.founder,
-                "invalid legacy upgrade"
-            );
-            GroupState { last: Some(signed.clone()), ..GroupState::founded(before.founder) }
-        } else {
-            policy::apply(&state, &roster, &next.author.0, signed).map_err(|e| anyhow!("{e}"))?
-        };
+        ensure!(before.state.is_some(), "unsupported group format");
+        let expected =
+            policy::apply(&state, &roster, &next.author.0, signed).map_err(|e| anyhow!("{e}"))?;
         ensure!(*new_state == expected, "history rewrites the group's rules");
         match &signed.change {
             GroupChange::Add { who } => roster.extend(who.iter().map(|w| w.0)),

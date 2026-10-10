@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common::proto::client_rel::{DispatchP, Wake};
-use common::proto::pack::Packer;
+use common::proto::group_queue::Publication;
+use common::proto::pack::{Packer, Unpacker};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, UserKey, UserValue};
 use parking_lot::Mutex;
 
@@ -27,6 +28,11 @@ const INDEX_MEMTABLE_BYTES: u64 = 4 * 1024 * 1024;
 const USAGE_MEMTABLE_BYTES: u64 = 1024 * 1024;
 const INDEX: &str = "queue_index_v1";
 const USAGE: &str = "queue_usage_v1";
+// Reader references: tag(1), payload key(49), reader index(2), expiry(8), logical bytes(8).
+// Payload keys: queue kind(1), sender(32), dispatch id(16). Values: retention deadline(8),
+// acceptance time(8), original audience count(8), digest(32), immutable publication.
+// The usage index holds the remaining-reader count, so ACKs never rewrite the ciphertext.
+// The last ACK replaces the publication with its 56-byte retry tombstone (audience count zero).
 const READY: &[u8] = b"ready";
 const TOTAL: &[u8] = b"total";
 
@@ -110,7 +116,7 @@ pub struct Queue {
     pub(super) ks: Keyspace,
     db: Database,
     kind: u8,
-    peers: [Keyspace; 3],
+    peers: [Keyspace; 4],
     index: Keyspace,
     usage: Keyspace,
     // ponytail: serialize quota changes; shard only if bounded batches still show contention.
@@ -125,7 +131,17 @@ impl Queue {
         self.ks.prefix(prefix)
     }
     pub fn get(&self, key: impl AsRef<[u8]>) -> fjall::Result<Option<UserValue>> {
-        self.ks.get(key)
+        let key = key.as_ref();
+        let _guard = self.budget.lock();
+        let Some(value) = self.ks.get(key)? else { return Ok(None) };
+        let Some(reference) = reference(&value) else { return Ok(Some(value)) };
+        let Some(body) = self.peers[3].get(reference)? else { return Err(invalid_metadata()) };
+        let publication = Publication::deser(&body[56..]).map_err(|_| invalid_metadata())?;
+        let n = u16::from_be_bytes(value[50..52].try_into().unwrap()) as usize;
+        let recipient = publication.recipients.get(n).ok_or_else(invalid_metadata)?;
+        let dispatch =
+            publication.dispatch(recipient, number(&body, 8)).map_err(|_| invalid_metadata())?;
+        Ok(Some(dispatch.ser().map_err(|_| invalid_metadata())?.into()))
     }
     pub(crate) fn len(&self) -> fjall::Result<usize> {
         self.ks.len()
@@ -161,7 +177,7 @@ impl Queue {
 
     pub(super) fn open(
         db: &Database, messages: Keyspace, home: Keyspace, welcome: Keyspace,
-    ) -> fjall::Result<[Self; 3]> {
+    ) -> fjall::Result<[Self; 4]> {
         let index = db.keyspace(INDEX, || {
             KeyspaceCreateOptions::default().max_memtable_size(INDEX_MEMTABLE_BYTES)
         })?;
@@ -176,7 +192,8 @@ impl Queue {
             0
         };
         let budget = Arc::new(Mutex::new(Budget { bytes }));
-        let peers = [messages, home, welcome];
+        let payloads = db.keyspace("queue_payloads", KeyspaceCreateOptions::default)?;
+        let peers = [messages, home, welcome, payloads];
         let queues = std::array::from_fn(|kind| Self {
             ks: peers[kind].clone(),
             db: db.clone(),
@@ -258,6 +275,93 @@ impl Queue {
         )?;
         change.commit(&mut budget)?;
         Ok(QueueAdmission::Insert)
+    }
+
+    /// Atomically accepts a fixed audience. Each reader consumes the normal queue quota;
+    /// the relay budget counts the ciphertext once, plus its small reader references.
+    pub fn admit_group(
+        &self, publication: &Publication, stored_at: u64,
+    ) -> anyhow::Result<QueueAdmission> {
+        anyhow::ensure!(
+            !publication.recipients.is_empty()
+                && publication.recipients.len() <= common::proto::group_queue::MAX_RECIPIENTS,
+            "invalid queue audience"
+        );
+        let mut audience = HashSet::new();
+        anyhow::ensure!(
+            publication.recipients.iter().all(|r| audience.insert(r.to.0)),
+            "duplicate reader"
+        );
+        let mut budget = self.budget.lock();
+        let body_key =
+            [vec![self.kind], publication.from.0.to_vec(), publication.id.0.to_vec()].concat();
+        let encoded = publication.ser()?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, &encoded);
+        if let Some(body) = self.peers[3].get(&body_key)? {
+            return Ok(if body.get(24..56) == Some(digest.as_ref()) {
+                QueueAdmission::AlreadyQueued
+            } else {
+                QueueAdmission::IdTakenByOther
+            });
+        }
+        let first = publication.dispatch(&publication.recipients[0], stored_at)?;
+        let key = MessageKey::new(&first.to.0, stored_at, &first.id.0);
+        let bytes = (MessageKey::SIZE + first.ser()?.len()) as u64;
+        let row = Row::new(&key, bytes, Some(&first));
+        let mut body = Vec::with_capacity(56 + encoded.len());
+        body.extend_from_slice(&stored_at.saturating_add(QUEUED_MESSAGE_TTL_MS).to_be_bytes());
+        body.extend_from_slice(&stored_at.to_be_bytes());
+        body.extend_from_slice(&(publication.recipients.len() as u64).to_be_bytes());
+        body.extend_from_slice(digest.as_ref());
+        body.extend_from_slice(&encoded);
+        let physical = (body_key.len()
+            + body.len()
+            + publication.recipients.len() * (MessageKey::SIZE + 68)) as u64;
+        if budget.bytes.saturating_add(physical) > MAX_QUEUE_BYTES {
+            return Ok(QueueAdmission::Full("relay bytes"));
+        }
+        if self.disk_full(physical)? {
+            return Ok(QueueAdmission::Full("database bytes"));
+        }
+        let mut change = Change::new(self, &budget);
+        for (n, recipient) in publication.recipients.iter().enumerate() {
+            if self
+                .index
+                .range(index_range(self.kind, &recipient.to.0, &publication.id.0))
+                .next()
+                .is_some()
+            {
+                return Ok(QueueAdmission::IdTakenByOther);
+            }
+            if let Some(reason) =
+                change.reader_limit(&recipient.to.0, &publication.from.0, bytes)?
+            {
+                return Ok(QueueAdmission::Full(reason));
+            }
+            let key = MessageKey::new(&recipient.to.0, stored_at, &publication.id.0);
+            let mut value = Vec::with_capacity(68);
+            value.push(255);
+            value.extend_from_slice(&body_key);
+            value.extend_from_slice(&(n as u16).to_be_bytes());
+            value.extend_from_slice(&row.expires.to_be_bytes());
+            value.extend_from_slice(&bytes.to_be_bytes());
+            change.insert(
+                self.kind,
+                key.as_bytes(),
+                &value,
+                Some(Row { sender: row.sender, bytes, expires: row.expires }),
+            )?;
+        }
+        change.usage(body_key.clone())?.count = publication.recipients.len() as u64;
+        change.insert(3, &body_key, &body, None)?;
+        change.commit(&mut budget)?;
+        Ok(QueueAdmission::Insert)
+    }
+
+    pub fn group_accepted_at(&self, publication: &Publication) -> fjall::Result<Option<u64>> {
+        let key =
+            [vec![self.kind], publication.from.0.to_vec(), publication.id.0.to_vec()].concat();
+        Ok(self.peers[3].get(key)?.map(|body| number(&body, 8)))
     }
 
     fn disk_full(&self, bytes: u64) -> fjall::Result<bool> {
@@ -386,6 +490,12 @@ impl<'a> Change<'a> {
         if self.bytes.saturating_add(bytes) > MAX_QUEUE_BYTES {
             return Ok(Some("relay bytes"));
         }
+        self.reader_limit(recipient, sender, bytes)
+    }
+
+    fn reader_limit(
+        &mut self, recipient: &[u8; 32], sender: &[u8; 32], bytes: u64,
+    ) -> fjall::Result<Option<&'static str>> {
         let total = self.usage(recipient.to_vec())?;
         if total.count >= MAX_QUEUED_PER_RECIPIENT as u64 {
             return Ok(Some("recipient count"));
@@ -434,7 +544,16 @@ impl<'a> Change<'a> {
         self.bytes += bytes;
         if let Some(key) = MessageKey::parse(key) {
             let dispatch = queued_dispatch(&key.recipient, value);
-            let row = Row::new(&key, bytes, dispatch.as_ref());
+            let row = if let Some(body_key) = reference(value) {
+                self.usage(body_key.to_vec())?.count += 1;
+                Row {
+                    sender: Some(body_key[1..33].try_into().unwrap()),
+                    bytes: number(value, 60),
+                    expires: number(value, 52),
+                }
+            } else {
+                Row::new(&key, bytes, dispatch.as_ref())
+            };
             self.batch.insert(&self.queue.index, index_key(kind, &key), row.encode());
             self.account(&key, &row, true)?;
         }
@@ -446,7 +565,7 @@ impl<'a> Change<'a> {
         self.batch.insert(&self.queue.peers[kind as usize], key, value);
         if let Some(row) = row {
             let key = MessageKey::parse(key).ok_or_else(invalid_metadata)?;
-            self.bytes += row.bytes;
+            self.bytes += (key.as_bytes().len() + value.len()) as u64;
             self.batch.insert(&self.queue.index, index_key(kind, &key), row.encode());
             self.account(&key, &row, true)?;
         } else {
@@ -464,7 +583,22 @@ impl<'a> Change<'a> {
             let row = Row::decode(&value)?;
             self.batch.remove(&self.queue.index, index);
             self.account(&message, &row, false)?;
-            row.bytes
+            let value = self.queue.peers[kind as usize].get(key)?.ok_or_else(invalid_metadata)?;
+            if let Some(body_key) = reference(&value) {
+                let usage = self.usage(body_key.to_vec())?;
+                usage.count = usage.count.checked_sub(1).ok_or_else(invalid_metadata)?;
+                if usage.count == 0 {
+                    let body = self.queue.peers[3].get(body_key)?.ok_or_else(invalid_metadata)?;
+                    self.bytes = self
+                        .bytes
+                        .checked_sub((body.len() - 56) as u64)
+                        .ok_or_else(invalid_metadata)?;
+                    let mut tombstone = body[..56].to_vec();
+                    tombstone[16..24].fill(0);
+                    self.batch.insert(&self.queue.peers[3], body_key, tombstone);
+                }
+            }
+            (key.len() + value.len()) as u64
         } else {
             let Some(value) = self.queue.peers[kind as usize].get(key)? else { return Ok(()) };
             (key.len() + value.len()) as u64
@@ -490,6 +624,19 @@ impl<'a> Change<'a> {
         budget.bytes = self.bytes;
         Ok(())
     }
+}
+
+fn number(value: &[u8], offset: usize) -> u64 {
+    u64::from_be_bytes(value[offset..offset + 8].try_into().unwrap())
+}
+fn reference(value: &[u8]) -> Option<&[u8]> {
+    (value.len() == 68 && value[0] == 255).then(|| &value[1..50])
+}
+pub(super) fn reference_expired(value: &[u8], now: u64) -> bool {
+    reference(value).is_some() && now > number(value, 52)
+}
+pub(super) fn payload_expired(_: &[u8], value: &[u8], now: u64) -> bool {
+    value.len() >= 56 && number(value, 16) == 0 && now > number(value, 0)
 }
 
 fn invalid_metadata() -> fjall::Error {
@@ -620,11 +767,22 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let store = Store::open(dir.path()).unwrap();
-        assert_eq!(store.messages.len().unwrap(), 1);
-        assert_eq!(store.messages.index.len().unwrap(), 1);
-        let (key, value) = store.messages.iter().next().unwrap().into_inner().unwrap();
-        assert_eq!(store.messages.budget.lock().bytes, (key.len() + value.len()) as u64);
-        store.messages.remove(key).unwrap();
+        assert_eq!(store.messages.len().unwrap(), 3);
+        assert_eq!(store.messages.index.len().unwrap(), 3);
+        let bytes: u64 = [&store.messages, &store.payloads]
+            .into_iter()
+            .flat_map(|q| q.iter())
+            .map(|r| {
+                let (k, v) = r.into_inner().unwrap();
+                (k.len() + v.len()) as u64
+            })
+            .sum();
+        assert_eq!(store.messages.budget.lock().bytes, bytes);
+        for row in store.messages.iter() {
+            let key = row.key().unwrap();
+            assert!(store.messages.get(key).unwrap().is_some());
+        }
+        store.clear_all().unwrap();
         assert_eq!(store.messages.budget.lock().bytes, 0);
     }
 
@@ -641,8 +799,151 @@ mod tests {
             .messages
             .remove(MessageKey::new(&a.to.0, a.accepted_at_ms, &a.id.0).as_bytes())
             .unwrap();
+        let group = publication();
+        let at = now_ms();
+        store.messages.admit_group(&group, at).unwrap();
+        store
+            .messages
+            .remove(MessageKey::new(&group.recipients[0].to.0, at, &group.id.0).as_bytes())
+            .unwrap();
         store.messages.db.persist(fjall::PersistMode::SyncAll).unwrap();
         std::process::exit(0);
+    }
+
+    fn publication() -> Publication {
+        Publication {
+            from: [1; 32].into(),
+            id: [2; 16].into(),
+            group: [3; 32].into(),
+            branch: [4; 32].into(),
+            epoch: 7,
+            message: vec![5; 128_000].into(),
+            proof: None,
+            wake: Wake::Message,
+            ttl_ms: 1000,
+            recipients: [6, 7, 8]
+                .map(|n| common::proto::group_queue::Recipient {
+                    to: [n; 32].into(),
+                    envelope_sig: [n; 64].into(),
+                    dispatch_sig: [n; 64].into(),
+                })
+                .into(),
+        }
+    }
+
+    #[test]
+    fn shared_payload_survives_partial_ack_restart_and_retry_without_resurrecting_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = publication();
+        let at = now_ms();
+        let store = Store::open_empty(dir.path());
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| store.messages.admit_group(&group, at).unwrap()))
+                .collect();
+            assert_eq!(
+                jobs.into_iter()
+                    .map(|j| j.join().unwrap())
+                    .filter(|a| *a == QueueAdmission::Insert)
+                    .count(),
+                1
+            );
+        });
+        assert_eq!(store.messages.len().unwrap(), 3);
+        let physical = store.messages.budget.lock().bytes;
+        assert!(physical < 130_000, "only one ciphertext is stored: {physical}");
+        let keys: Vec<UserKey> = group
+            .recipients
+            .iter()
+            .map(|r| MessageKey::new(&r.to.0, at, &group.id.0).as_bytes().into())
+            .collect();
+        for (reader, key) in group.recipients.iter().zip(&keys) {
+            let value = store.messages.get(key).unwrap().unwrap();
+            assert_eq!(DispatchP::deser(&value).unwrap(), group.dispatch(reader, at).unwrap());
+            assert!(Usage::read(&store.messages.usage, &reader.to.0).unwrap().bytes > 128_000);
+        }
+        let (_, body) = store.payloads.iter().next().unwrap().into_inner().unwrap();
+        store.messages.remove(keys[0].clone()).unwrap();
+        assert_eq!(
+            store.payloads.iter().next().unwrap().value().unwrap(),
+            body,
+            "partial ACK does not rewrite ciphertext"
+        );
+        // Rebuild the existing index after an interrupted rebuild, including reader counts.
+        store.messages.usage.remove(READY).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.messages.admit_group(&group, at + 10).unwrap(),
+            QueueAdmission::AlreadyQueued
+        );
+        assert_eq!(store.messages.group_accepted_at(&group).unwrap(), Some(at));
+        assert!(store.messages.get(&keys[0]).unwrap().is_none());
+        assert_eq!(store.messages.len().unwrap(), 2);
+        // TTL expiry of outstanding references uses the ordinary queue deletion path.
+        store.messages.remove_many_if(&keys, |_, v| reference_expired(v, at + 1001)).unwrap();
+        assert_eq!(store.messages.len().unwrap(), 0);
+        assert_eq!(store.messages.budget.lock().bytes, 105, "only the retry tombstone remains");
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.messages.admit_group(&group, at + 20).unwrap(),
+            QueueAdmission::AlreadyQueued
+        );
+        assert_eq!(store.messages.len().unwrap(), 0);
+        let mut changed = group.clone();
+        changed.message.0[0] ^= 1;
+        assert_eq!(
+            store.messages.admit_group(&changed, at).unwrap(),
+            QueueAdmission::IdTakenByOther
+        );
+        let tombstones: Vec<_> = store.payloads.iter().map(|r| r.key().unwrap()).collect();
+        store
+            .payloads
+            .remove_many_if(&tombstones, |k, v| {
+                payload_expired(k, v, at + QUEUED_MESSAGE_TTL_MS + 1)
+            })
+            .unwrap();
+        assert_eq!(store.messages.budget.lock().bytes, 0);
+    }
+
+    #[test]
+    fn group_admission_and_reference_deletion_are_atomic_with_quotas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_empty(dir.path());
+        let group = publication();
+        let last = group.recipients.last().unwrap().to.0;
+        store
+            .messages
+            .usage
+            .insert(last, Usage { count: MAX_QUEUED_PER_RECIPIENT as u64, bytes: 0 }.encode())
+            .unwrap();
+        assert_eq!(
+            store.messages.admit_group(&group, 50).unwrap(),
+            QueueAdmission::Full("recipient count")
+        );
+        assert_eq!(store.messages.len().unwrap(), 0);
+        assert_eq!(store.payloads.len().unwrap(), 0);
+        assert_eq!(store.messages.budget.lock().bytes, 0);
+        store.messages.usage.remove(last).unwrap();
+        assert_eq!(store.messages.admit_group(&group, 50).unwrap(), QueueAdmission::Insert);
+        let baseline = store.messages.budget.lock().bytes;
+        let keys: Vec<UserKey> = group
+            .recipients
+            .iter()
+            .map(|r| MessageKey::new(&r.to.0, 50, &group.id.0).as_bytes().into())
+            .collect();
+        let sender = [last, group.from.0].concat();
+        let saved = store.messages.usage.get(&sender).unwrap().unwrap();
+        store.messages.usage.insert(&sender, Usage::default().encode()).unwrap();
+        assert!(store.messages.remove_many(&keys).is_err());
+        assert_eq!(store.messages.budget.lock().bytes, baseline);
+        assert_eq!(store.messages.len().unwrap(), 3);
+        assert!(store.messages.get(&keys[0]).unwrap().is_some());
+        store.messages.usage.insert(sender, saved).unwrap();
+        assert_eq!(store.messages.remove_many(&keys).unwrap(), 3);
+        store.clear_all().unwrap();
+        assert_eq!(store.messages.budget.lock().bytes, 0);
     }
 
     fn dispatch(id: u8, sender: u8, recipient: u8, payload: usize) -> DispatchP {

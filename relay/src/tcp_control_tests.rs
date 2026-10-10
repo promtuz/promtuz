@@ -391,3 +391,70 @@ async fn mls_custody_works_without_dht() {
         assert_eq!(node.relay.mls.routing.read().total_known(), 0);
     }).await.expect("standalone MLS custody timed out");
 }
+
+/// Shared publications and direct messages share the real standalone drain/ACK protocol.
+#[tokio::test]
+async fn group_queue_works_without_dht_and_retries_only_pending_readers() {
+    use common::proto::client_rel::dispatch_sig_message;
+    use common::proto::group_queue::{Publication, Recipient};
+    let node = Node::start(101, false).await;
+    let (alice, bob, carol, newcomer) = (key(102), key(103), key(104), key(105));
+    let mut group = Publication {
+        from: alice.verifying_key().to_bytes().into(),
+        id: [42; 16].into(),
+        group: [43; 32].into(),
+        branch: [44; 32].into(),
+        epoch: 1,
+        message: vec![45; 4096].into(),
+        proof: None,
+        wake: Wake::Message,
+        ttl_ms: 0,
+        recipients: Vec::new(),
+    };
+    for to in [&bob, &carol] {
+        let mut reader = Recipient {
+            to: to.verifying_key().to_bytes().into(),
+            envelope_sig: [46; 64].into(),
+            dispatch_sig: [0; 64].into(),
+        };
+        let d = group.dispatch(&reader, 0).unwrap();
+        reader.dispatch_sig = alice
+            .sign(&dispatch_sig_message(
+                common::PROTOCOL_VERSION,
+                &d.to.0,
+                &d.from.0,
+                &d.id.0,
+                &d.payload.0,
+            ))
+            .to_bytes()
+            .into();
+        group.recipients.push(reader);
+    }
+    let publisher = authenticated(&node, &alice).await;
+    let publish = || CRelayPacket::PublishGroup(Box::new(group.clone()));
+    let replies = publisher.request(vec![publish()]).await;
+    let [SRelayPacket::DispatchAck(DispatchAckP::Queued { accepted_at_ms })] = replies.as_slice()
+    else {
+        panic!("{replies:?}")
+    };
+    let bob_phone = authenticated(&node, &bob).await;
+    assert_eq!(
+        drain(&bob_phone, vec![]).await,
+        [dispatch_to_deliver(group.dispatch(&group.recipients[0], *accepted_at_ms).unwrap())]
+    );
+    ask_address(&bob_phone, vec![CRelayPacket::AckDrain { ids: vec![group.id.0] }]).await;
+    let retry = publisher.request(vec![publish()]).await;
+    assert_eq!(retry, replies);
+    assert!(drain(&bob_phone, vec![]).await.is_empty());
+    let stranger = authenticated(&node, &newcomer).await;
+    assert!(drain(&stranger, vec![]).await.is_empty(), "joining later grants no earlier delivery");
+    assert!(matches!(
+        stranger.request(vec![publish()]).await.as_slice(),
+        [SRelayPacket::DispatchAck(DispatchAckP::InvalidSig)]
+    ));
+    let carol_phone = authenticated(&node, &carol).await;
+    assert_eq!(drain(&carol_phone, vec![]).await.len(), 1);
+    ask_address(&carol_phone, vec![CRelayPacket::AckDrain { ids: vec![group.id.0] }]).await;
+    assert_eq!(publisher.request(vec![publish()]).await, replies);
+    assert_eq!(node.relay.store.messages.len().unwrap(), 0);
+}

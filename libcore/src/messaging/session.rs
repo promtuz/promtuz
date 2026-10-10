@@ -223,11 +223,6 @@ pub(super) async fn group_for_conversation<C: DhtClient>(
     if let Some(gid) = bound {
         match MlsGroupHandle::load(ctx.provider, &gid) {
             Ok(Some(g)) => {
-                if row.kind == crate::data::conversation::KIND_GROUP
-                    && crate::mls::migration::Source::read(&g)?.is_some() {
-                    crate::groups::resume(*conversation);
-                    return Err(crate::groups::migration::Pending.into());
-                }
                 // A damaged pair session is replaceable without removing its
                 // conversation. A real group must use its authenticated recovery.
                 if row.kind != crate::data::conversation::KIND_DIRECT
@@ -277,18 +272,9 @@ pub fn leaf_signer_for_group(
         !group.is_group_chat() || group.group_meta().is_some(),
         "this group's rules are not supported by this app version"
     );
-    let leaf_idx = group.member_index_by_ipk(our_ipk).ok_or_else(|| {
-        // An unbound leaf from before leaves carried the identity's signature: every member refuses
-        // it, so report a pending migration rather than "not a member".
-        let legacy = group
-            .members()
-            .any(|m| crate::mls::credential::member_ipk(&m, false) == Some(*our_ipk));
-        if legacy {
-            crate::groups::migration::Pending.into()
-        } else {
-            anyhow!("our IPK is not a member of group")
-        }
-    })?;
+    let leaf_idx = group
+        .member_index_by_ipk(our_ipk)
+        .ok_or_else(|| anyhow!("our IPK is not a member of group"))?;
     let pub_key: Vec<u8> = group
         .members()
         .find(|m| m.index == leaf_idx)

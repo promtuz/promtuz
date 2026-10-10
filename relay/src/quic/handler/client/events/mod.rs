@@ -67,6 +67,7 @@ pub(super) async fn handle_packet(
     match packet {
         Query(query) => handle_misc(query, ctx.clone(), tx).await,
         Profile(request) => profile::handle(request, ctx.clone(), tx).await,
+        PublishGroup(group) => forward::handle_group(*group, ctx.clone(), tx).await,
         Dispatch(fwd) => handle_forward(fwd, ctx.clone(), tx).await,
         DrainQueue => handle_drain_queue(ctx.clone(), tx).await,
         AckDrain { ids } => handle_ack_drain(ctx.clone(), ids, tx).await,

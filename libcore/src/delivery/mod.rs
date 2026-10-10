@@ -113,32 +113,7 @@ fn batch_tx(
     Ok(())
 }
 
-/// Queues a commit's copies with the mark that it left the device, built at `epoch`, so neither
-/// lands without the other.
-pub(crate) fn enqueue_commit(
-    copies: &mut [Copy], group: &[u8; 32], epoch: u64,
-) -> anyhow::Result<()> {
-    let mut conn = core().db.outbox().lock();
-    let tx = conn.transaction()?;
-    tx.execute(
-        "INSERT OR REPLACE INTO commit_left (group_id, epoch) VALUES (?1, ?2)",
-        params![group, epoch],
-    )?;
-    batch_tx(&tx, copies)?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Whether the commit `group` built at `epoch` was queued for its members.
-pub(crate) fn commit_left(group: &[u8; 32], epoch: u64) -> anyhow::Result<bool> {
-    Ok(core().db.outbox().lock().query_row(
-        "SELECT EXISTS(SELECT 1 FROM commit_left WHERE group_id = ?1 AND epoch = ?2)",
-        params![group, epoch],
-        |r| r.get(0),
-    )?)
-}
-
-/// Retires one member's copy; each member acks on its own schedule.
+/// Retires one accepted outbox publication; recipient ACKs belong to the relay queue.
 pub fn retire(id: &[u8], target: Option<[u8; 32]>) {
     retire_tx(&core().db.outbox().lock(), id, target).ok();
 }
@@ -313,8 +288,15 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
         match classify(op, outcome, row.attempts, age) {
             Next::Retire => {
                 if op == OpType::Message {
-                    let status = if outcome == LastOutcome::Terminal { STATUS_FAILED } else { STATUS_SENT };
-                    if let Err(e) = crate::data::receipts::send_result(&row.id, target, status, accepted_timestamp) {
+                    let status =
+                        if outcome == LastOutcome::Terminal { STATUS_FAILED } else { STATUS_SENT };
+                    if let Err(e) = record_send_result(
+                        &row.id,
+                        target,
+                        &row.payload,
+                        status,
+                        accepted_timestamp,
+                    ) {
                         warn!("MESSAGE: outcome persistence failed, retaining outbox: {e}");
                         continue;
                     }
@@ -323,7 +305,8 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
             },
             Next::Dead => {
                 if op == OpType::Message
-                    && let Err(e) = crate::data::receipts::send_result(&row.id, target, STATUS_FAILED, None)
+                    && let Err(e) =
+                        record_send_result(&row.id, target, &row.payload, STATUS_FAILED, None)
                 {
                     warn!("MESSAGE: failure persistence failed, retaining outbox: {e}");
                     continue;
@@ -468,6 +451,20 @@ pub(crate) async fn dispatch_to_member(
     dispatch_queued(core().session().as_deref(), to, id, op, &copies[0].3).await
 }
 
+/// A group publication has one outbox row, but acceptance applies to its fixed audience.
+fn record_send_result(
+    id: &[u8], target: Option<[u8; 32]>, frame: &[u8], status: u8, at: Option<u64>,
+) -> Result<()> {
+    let packet =
+        CRelayPacket::deser(frame.get(4..).ok_or_else(|| anyhow!("missing dispatch frame"))?)?;
+    if let CRelayPacket::PublishGroup(publication) = packet {
+        let members: Vec<_> = publication.recipients.iter().map(|r| r.to.0).collect();
+        crate::data::receipts::send_results(id, &members, status, at)
+    } else {
+        crate::data::receipts::send_result(id, target, status, at)
+    }
+}
+
 /// Sends one queued copy over `session`; every failure leaves the outbox row to the reconciler.
 pub(crate) async fn dispatch_queued(
     session: Option<&Session>, to: &[u8; 32], id: &[u8; 16], op: OpType, bytes: &[u8],
@@ -497,12 +494,9 @@ pub(crate) async fn dispatch_queued(
                         } else {
                             crate::data::message::STATUS_FAILED
                         };
-                        if let Err(e) = crate::data::receipts::send_result(
-                            id,
-                            Some(*to),
-                            status,
-                            accepted_at_secs(&ack),
-                        ) {
+                        if let Err(e) =
+                            record_send_result(id, Some(*to), bytes, status, accepted_at_secs(&ack))
+                        {
                             warn!("MESSAGE: receipt persistence failed, retaining outbox: {e}");
                             return LastOutcome::Silence;
                         }

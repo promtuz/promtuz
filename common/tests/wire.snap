@@ -39,7 +39,7 @@ NodeCapabilities 3f 00 00 00 RELAY=0x1 PUSH_GATEWAY=0x2 BLOB_STORE=0x4 CALL_RELA
 CHandshakePacket: Hello Proof
 SHandshakePacket: Challenge HandshakeResult
 ServerHandshakeResultP: Accept Reject
-CRelayPacket: Query Dispatch Activity DeliverAck DrainQueue AckDrain DrainAuth AckAuth PublishKeyPackage FetchKeyPackage PublishWelcome FetchWelcomes AckWelcomes SubscribePresence SetPresence RegisterPush TurnCredentials ServiceCapabilities KeyPackageInventory SubscribePresenceDurable SetPresenceDurable Profile
+CRelayPacket: Query Dispatch Activity DeliverAck DrainQueue AckDrain DrainAuth AckAuth PublishKeyPackage FetchKeyPackage PublishWelcome FetchWelcomes AckWelcomes SubscribePresence SetPresence RegisterPush TurnCredentials ServiceCapabilities KeyPackageInventory SubscribePresenceDurable SetPresenceDurable Profile PublishGroup
 SRelayPacket: QueryResult DispatchAck Deliver Activity AckAuthRequest KeyPackagePublished KeyPackageFetched WelcomePublished WelcomesFetched WelcomesAcked DhtUnavailable Presence TurnCredentials ServiceCapabilities KeyPackageInventory PresenceAck Profile ProfileChanged
 DispatchAckP: Queued Delivered NotFound InvalidSig QueueFull Forwarded Error
 QueryP: PubAddress

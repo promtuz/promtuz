@@ -19,11 +19,12 @@ fn main() -> anyhow::Result<()> {
     println!("\n=== messages ===");
     let mut n = 0;
     for guard in store.messages.iter() {
-        let (key, value) = guard.into_inner()?;
+        let key = guard.key()?;
         let Some(parsed) = MessageKey::parse(&key[..]) else {
             eprintln!("  invalid messages key len {}", key.len());
             continue;
         };
+        let Some(value) = store.messages.get(&key)? else { continue };
         let time = u64::from_be_bytes(parsed.ts_be);
         let from = queued_dispatch(&parsed.recipient, &value).map_or("??".into(), |d| short(&d.from.0));
         println!("  to={} ts={} id={} from={}", short(&parsed.recipient), time, hex::encode(parsed.id), from);
@@ -34,11 +35,12 @@ fn main() -> anyhow::Result<()> {
     println!("\n=== dht_queue (offline messages awaiting drain) ===");
     n = 0;
     for guard in store.queue.iter() {
-        let (key, value) = guard.into_inner()?;
+        let key = guard.key()?;
         let Some(parsed) = MessageKey::parse(&key[..]) else {
             eprintln!("  invalid queue key len {}", key.len());
             continue;
         };
+        let Some(value) = store.queue.get(&key)? else { continue };
         let from = queued_dispatch(&parsed.recipient, &value).map_or("??".into(), |d| short(&d.from.0));
         println!(
             "  to={} ts={} dispatch_id={} from={} ({} bytes)",

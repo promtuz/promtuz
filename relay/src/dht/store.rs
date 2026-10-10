@@ -26,13 +26,14 @@ pub(crate) fn plan_drift_migrations(dht: &Dht, max: usize) -> Vec<(MessageKey, D
     let mut drifted: std::collections::HashMap<[u8; 32], bool> = std::collections::HashMap::new();
 
     for guard in dht.store.queue.iter() {
-        let (key_bytes, value) = match guard.into_inner() {
+        let (key_bytes, _) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => continue,
         };
         let Some(key) = MessageKey::parse(&key_bytes) else {
             continue;
         };
+        let Ok(Some(value)) = dht.store.queue.get(&key_bytes) else { continue };
         let user_ipk = key.recipient;
         let is_drifted = *drifted
             .entry(user_ipk)
@@ -94,7 +95,7 @@ pub(crate) fn queue_batch_for_user(
     let mut exhausted = true;
 
     for guard in dht.store.queue.prefix(user_ipk) {
-        let (key_bytes, value) = match guard.into_inner() {
+        let (key_bytes, _) = match guard.into_inner() {
             Ok(kv) => kv,
             Err(_) => {
                 exhausted = false;
@@ -103,6 +104,10 @@ pub(crate) fn queue_batch_for_user(
         };
         let Some(key) = MessageKey::parse(&key_bytes) else {
             continue;
+        };
+        let Ok(Some(value)) = dht.store.queue.get(&key_bytes) else {
+            exhausted = false;
+            break;
         };
         if value.len() > QUEUE_BATCH_MAX_BYTES {
             oversize += 1;

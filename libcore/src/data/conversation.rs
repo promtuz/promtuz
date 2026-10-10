@@ -331,26 +331,6 @@ impl Conversation {
         Ok(())
     }
 
-    /// Replace encryption without replacing the conversation or its content.
-    pub(crate) fn migrate_group(
-        id: &[u8; 16], old: &[u8; 32], target: &[u8; 32], members: &[[u8; 32]],
-        meta: &GroupMeta, anchor: [u8; 32],
-    ) -> Result<()> {
-        let mut conn = core().db.messages().lock();
-        let tx = conn.transaction()?;
-        let changed = tx.execute("UPDATE conversations SET mls_group_id=?3 WHERE id=?1 AND kind=1 AND (mls_group_id=?2 OR mls_group_id=?3)",
-            (id.as_slice(),old.as_slice(),target.as_slice()))?;
-        anyhow::ensure!(changed == 1, "migration conversation changed");
-        Self::sync_group_tx(&tx, id, members, Some(meta))?;
-        for (key, value) in [
-            (format!("group_migrated:{}",hex::encode(old)),hex::encode(target)),
-            (format!("group_anchor:{}",hex::encode(target)),hex::encode(anchor)),
-        ] {
-            tx.execute("INSERT OR REPLACE INTO app_prefs(key,value) VALUES(?1,?2)", (key,value))?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
 
     /// A group from before signed rules runs by its founder alone.
     pub fn state(id: &[u8; 16]) -> Option<GroupState> {

@@ -119,18 +119,23 @@ fn aggregate_tx(conn: &Connection, id: &str) -> Result<()> {
 pub(crate) fn send_result(
     dispatch: &[u8], member: Option<[u8; 32]>, status: u8, at: Option<u64>,
 ) -> Result<()> {
-    let Some(member) = member else { return Ok(()) };
+    send_results(dispatch, member.as_slice(), status, at)
+}
+
+pub(crate) fn send_results(
+    dispatch: &[u8], members: &[[u8; 32]], status: u8, at: Option<u64>,
+) -> Result<()> {
     let dispatch = crate::mls::recovery::logical_dispatch(dispatch)?;
     let at = at.filter(|time| *time > 0 && *time <= i64::MAX as u64);
     let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    send_result_tx(&tx, &dispatch, &member, status, at)?;
+    send_result_tx(&tx, &dispatch, members, status, at)?;
     tx.commit()?;
     Ok(())
 }
 
 fn send_result_tx(
-    conn: &Connection, dispatch: &[u8], member: &[u8; 32], status: u8, at: Option<u64>,
+    conn: &Connection, dispatch: &[u8], members: &[[u8; 32]], status: u8, at: Option<u64>,
 ) -> Result<()> {
     let id: Option<String> = conn
         .query_row(
@@ -146,13 +151,15 @@ fn send_result_tx(
         "INSERT OR IGNORE INTO message_audiences(message_id,complete) VALUES (?1,0)",
         [&id],
     )?;
-    conn.execute("INSERT OR IGNORE INTO message_recipients(message_id,member)
-        SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM message_audiences WHERE message_id=?1 AND complete=0)",(&id,member.as_slice()))?;
-    conn.execute(
-        "UPDATE message_recipients SET send_status=CASE WHEN send_status=1 THEN 1 ELSE ?3 END,
-        sent_at=COALESCE(sent_at,?4) WHERE message_id=?1 AND member=?2",
-        params![id, member.as_slice(), status, at],
-    )?;
+    for member in members {
+        conn.execute("INSERT OR IGNORE INTO message_recipients(message_id,member)
+            SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM message_audiences WHERE message_id=?1 AND complete=0)",(&id,member.as_slice()))?;
+        conn.execute(
+            "UPDATE message_recipients SET send_status=CASE WHEN send_status=1 THEN 1 ELSE ?3 END,
+            sent_at=COALESCE(sent_at,?4) WHERE message_id=?1 AND member=?2",
+            params![id, member.as_slice(), status, at],
+        )?;
+    }
     aggregate_tx(conn, &id)
 }
 
@@ -652,7 +659,7 @@ mod tests {
                 results.reverse();
             }
             for (peer, status, at) in results {
-                send_result_tx(&conn, &did, &peer, status, at).unwrap();
+                send_result_tx(&conn, &did, &[peer], status, at).unwrap();
             }
             assert_eq!(state(&conn, &id), STATUS_SENT);
             let failed =
@@ -666,8 +673,8 @@ mod tests {
                 "one read and one delivered is not all read"
             );
             exact(&conn, conv, &B, did, None, Some(14));
-            send_result_tx(&conn, &did, &A, STATUS_FAILED, None).unwrap();
-            send_result_tx(&conn, &did, &B, STATUS_SENT, Some(20)).unwrap();
+            send_result_tx(&conn, &did, &[A], STATUS_FAILED, None).unwrap();
+            send_result_tx(&conn, &did, &[B], STATUS_SENT, Some(20)).unwrap();
             assert_eq!(state(&conn, &id), STATUS_READ, "a late send result never undoes a read");
             exact(&conn, conv, &B, did, Some(19), Some(21));
             let rows = rows_tx(&conn, &id).unwrap();
@@ -680,9 +687,9 @@ mod tests {
         }
         let (conn, conv) = db();
         let (id, did) = post(&conn, conv);
-        send_result_tx(&conn, &did, &A, STATUS_FAILED, None).unwrap();
+        send_result_tx(&conn, &did, &[A], STATUS_FAILED, None).unwrap();
         assert_eq!(state(&conn, &id), STATUS_PENDING);
-        send_result_tx(&conn, &did, &B, STATUS_FAILED, None).unwrap();
+        send_result_tx(&conn, &did, &[B], STATUS_FAILED, None).unwrap();
         assert_eq!(state(&conn, &id), STATUS_FAILED);
     }
 
@@ -693,7 +700,7 @@ mod tests {
         let (second, b) = post(&conn, conv);
         for did in [a, b] {
             for peer in [A, B] {
-                send_result_tx(&conn, &did, &peer, STATUS_SENT, Some(10)).unwrap();
+                send_result_tx(&conn, &did, &[peer], STATUS_SENT, Some(10)).unwrap();
             }
         }
         let legacy = |peer: &[u8; 32], kind, upto| {

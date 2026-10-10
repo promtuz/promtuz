@@ -94,6 +94,53 @@ pub fn addressed(
     let id =
         sealed.branch.as_ref().map(|b| journal::dispatch_id(b, &logical_id)).unwrap_or(logical_id);
     let me = signer.verifying_key().to_bytes();
+    if let Some(branch) = sealed.branch {
+        use common::proto::client_rel::{CRelayPacket, dispatch_sig_message};
+        use common::proto::group_queue::{MAX_RECIPIENTS, Publication, Recipient};
+        use ed25519_dalek::Signer;
+        ensure!(recipients.len() <= MAX_RECIPIENTS, "group audience exceeds queue limit");
+        if recipients.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut publication = Publication {
+            from: me.into(),
+            id: id.into(),
+            group: sealed.group_id.into(),
+            branch: branch.into(),
+            epoch: sealed.epoch,
+            message: sealed.mls_bytes.clone().into(),
+            proof: sealed.proof.clone().map(Into::into),
+            wake,
+            ttl_ms,
+            recipients: Vec::new(),
+        };
+        for to in recipients {
+            let payload = sealed.address_to(to, signer)?;
+            let MlsEnvelopeP::GroupApplication { message, .. } = MlsEnvelopeP::deser(&payload)?
+            else {
+                unreachable!("branched messages carry group envelopes");
+            };
+            let sig = signer.sign(&dispatch_sig_message(
+                common::PROTOCOL_VERSION,
+                to,
+                &me,
+                &id,
+                &payload,
+            ));
+            publication.recipients.push(Recipient {
+                to: (*to).into(),
+                envelope_sig: message.sender_sig,
+                dispatch_sig: sig.to_bytes().into(),
+            });
+        }
+        return Ok(vec![DispatchJob {
+            recipient: sealed.group_id,
+            id,
+            logical_id,
+            kind: kind as i64,
+            frame: CRelayPacket::PublishGroup(Box::new(publication)).pack()?,
+        }]);
+    }
     recipients
         .iter()
         .map(|to| {
@@ -374,8 +421,7 @@ pub fn receive(
                 crate::mls::CommitOutcome::Refused => return Ok(InboundDecoded::ApplicationStale),
                 crate::mls::CommitOutcome::Merged(change) => changed = change,
             }
-            let (bootstrap, proof) =
-                proof.ok_or_else(|| anyhow!("group commit has no recovery proof"))?;
+            let (_, proof) = proof.ok_or_else(|| anyhow!("group commit has no recovery proof"))?;
             crate::mls::branch_proof::verify_commit(
                 &parent_group,
                 &operation.group,
@@ -383,13 +429,7 @@ pub fn receive(
                 &author,
                 &envelope.mls_message.0,
             )?;
-            if !journal::registered(provider, &gid)? {
-                journal::accept_root(
-                    provider,
-                    &parent_group,
-                    &bootstrap.ok_or_else(|| anyhow!("group upgrade has no founder proof"))?,
-                )?;
-            }
+            ensure!(journal::registered(provider, &gid)?, "group has no authenticated root");
             candidate = Some(Candidate {
                 rank:    before.role(&author),
                 message: envelope.mls_message.0,
@@ -680,6 +720,47 @@ mod tests {
     use super::*;
     use crate::test_support::ScopedCore;
     use crate::test_support::net::Device;
+
+    #[test]
+    fn one_group_job_preserves_every_recipient_signature_and_fixes_the_audience() {
+        use common::proto::client_rel::{CRelayPacket, dispatch_sig_message};
+        let signer = SigningKey::from_bytes(&[31; 32]);
+        let sealed = SealedMessage {
+            group_id: [32; 32],
+            epoch: 3,
+            mls_bytes: vec![33; 100_000],
+            branch: Some([34; 32]),
+            proof: Some(vec![35; 16]),
+        };
+        let recipients = [[36; 32], [37; 32]];
+        let jobs =
+            addressed(&sealed, [38; 16], &recipients, &signer, OpType::Message, Wake::Message, 0)
+                .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].frame.len() < 101_000);
+        let CRelayPacket::PublishGroup(group) = CRelayPacket::deser(&jobs[0].frame[4..]).unwrap()
+        else {
+            panic!("not grouped")
+        };
+        assert_eq!(group.recipients.iter().map(|r| r.to.0).collect::<Vec<_>>(), recipients);
+        for reader in &group.recipients {
+            let dispatch = group.dispatch(reader, 42).unwrap();
+            assert_eq!(dispatch.payload.0, sealed.address_to(&reader.to.0, &signer).unwrap());
+            signer
+                .verifying_key()
+                .verify_strict(
+                    &dispatch_sig_message(
+                        common::PROTOCOL_VERSION,
+                        &reader.to.0,
+                        &group.from.0,
+                        &group.id.0,
+                        &dispatch.payload.0,
+                    ),
+                    &ed25519_dalek::Signature::from_bytes(&dispatch.sig.0),
+                )
+                .unwrap();
+        }
+    }
 
     /// A receive holds the group while it merges and narrates a commit, so reconciling waits for
     /// it instead of acting on the history that commit is changing.

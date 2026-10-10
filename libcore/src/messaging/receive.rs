@@ -221,16 +221,8 @@ pub async fn process_inbound_envelope<C: DhtClient>(
     }
 
     match envelope {
-        MlsEnvelopeP::GroupMigrationReady { group, branch, approval } => {
-            crate::groups::migration::received(group.0, branch.0, approval)?;
-            Ok(InboundDecoded::ApplicationBuffered)
-        },
-        MlsEnvelopeP::GroupMigrationWelcome { group, branch, approvals, welcome, history, signature } => {
-            crate::groups::migration::accept(group.0, branch.0, sender_ipk, &approvals,
-                &welcome, &history.0, &signature.0)?;
-            // This updates an existing group, not a contact pairing. Do not
-            // create a direct chat with its founder through the PairAck path.
-            Ok(InboundDecoded::ApplicationBuffered)
+        MlsEnvelopeP::GroupMigrationReady { .. } | MlsEnvelopeP::GroupMigrationWelcome { .. } => {
+            Ok(InboundDecoded::ApplicationStale)
         },
         MlsEnvelopeP::GroupMemberRequest { group, request } => {
             crate::groups::member_requests::received(group.0, request)?;
@@ -356,8 +348,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
 
     // A recovery-enabled group must publish every ratchet and commit through
     // its journal. The retired envelope cannot bypass branch validation.
-    if crate::mls::recovery::registered(ctx.provider, &env.group_id.0)?
-        || crate::mls::migration::completed(ctx.provider, &env.group_id.0)?.is_some() {
+    if crate::mls::recovery::registered(ctx.provider, &env.group_id.0)? {
         return Ok(InboundDecoded::ApplicationStale);
     }
 
@@ -457,7 +448,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
                 }
                 Inbound::Message { staged }
             },
-            content => Inbound::Content(content),
+            _ => Inbound::Content,
         };
         Ok(Some((author, inbound)))
     });
@@ -490,31 +481,8 @@ pub fn process_application_inbound_for<C: DhtClient>(
             return Ok(InboundDecoded::ApplicationStale);
         },
         Inbound::Commit(crate::mls::CommitOutcome::Merged(changed)) => (false, changed),
-        Inbound::Content(ProcessedMessageContent::ProposalMessage(p)) => {
-            // A self-removal proposal in a pre-rules group is a leave the founder commits inline: a
-            // commit by reference would fork off every member who missed the proposal.
-            use openmls::prelude::Proposal;
-            use openmls::prelude::Sender;
-            let leaver = match (p.sender(), p.proposal()) {
-                (Sender::Member(i), Proposal::Remove(r)) if *i == r.removed() => {
-                    group.member_ipk_at(*i)
-                },
-                _ => None,
-            };
-            if let Some(who) = leaver
-                && group.group_meta().is_some_and(|m| m.state.is_none() && m.founder == *our_ipk)
-                && let Some(conversation) = Conversation::for_group(&env.group_id.0)
-            {
-                core().spawn(async move {
-                    if let Err(e) = crate::groups::carry_leave(conversation, who).await {
-                        warn!("GROUP: could not carry a leave: {e}");
-                    }
-                });
-            }
-            return Ok(InboundDecoded::ApplicationBuffered);
-        },
         // External join proposals; commits were merged above.
-        Inbound::Content(_) => return Ok(InboundDecoded::ApplicationBuffered),
+        Inbound::Content => return Ok(InboundDecoded::ApplicationBuffered),
     };
     // Read the roster after draining, since a drained commit may have moved it. The drain stages
     // its messages and the live one was staged with its decrypt, so a failure below loses neither.
@@ -571,7 +539,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
 enum Inbound {
     Message { staged: bool },
     Commit(crate::mls::CommitOutcome),
-    Content(ProcessedMessageContent),
+    Content,
 }
 
 /// The merged tree says who is in the group and its context who runs it, not the commit's
@@ -761,11 +729,9 @@ pub(crate) fn receive_application_content(
         Ok(AppPayload::Unpaired) => crate::messaging::welcome::unpaired(conv, author),
         Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
         Ok(AppPayload::GroupInvitation { who, kp_ref, welcome, history }) => {
-            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, Some(history))?;
+            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, history)?;
         },
-        Ok(AppPayload::GroupWelcome { who, kp_ref, welcome }) => {
-            crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, None)?;
-        },
+        Ok(AppPayload::GroupWelcome { .. }) => {}, // Retired wire ordinal.
         Ok(AppPayload::PairAck) => {
             // Proof of pair: delivery already marked the contact paired.
             info!("PAIR: confirmed by {}", hex::encode(&author[..4]));

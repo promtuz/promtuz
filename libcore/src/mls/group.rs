@@ -42,7 +42,7 @@ pub struct GroupMeta {
     pub title:   String,
     /// Read from the context, so every member agrees on it however they joined.
     pub founder: [u8; 32],
-    /// `None` for a group from before signed rules, which its founder alone runs until it converts.
+    /// `None` identifies an unsupported pre-rules group retained for local history.
     pub state:   Option<GroupState>,
 }
 
@@ -326,14 +326,7 @@ impl MlsGroupHandle {
             };
         };
         let Some(next) = next else {
-            let Some(state) = &meta.state else {
-                let leaves_only = adds.is_empty() && removes.iter().all(|(_, leaving)| *leaving);
-                return if leaves_only || author == meta.founder {
-                    Ok(None)
-                } else {
-                    Err("only the founder may change the membership")
-                };
-            };
+            let state = meta.state.as_ref().ok_or("unsupported group format")?;
             return if !adds.is_empty() || !removes.is_empty() {
                 Err("a membership change must say who asked for it")
             } else if author != state.committer {
@@ -392,16 +385,8 @@ impl MlsGroupHandle {
                 .map_err(|_| "invalid member resync authorization")?;
         }
         let meta = self.group_meta().ok_or("not a group chat")?;
-        match &meta.state {
-            Some(state) => policy::apply(state, &self.roster(), author, signed),
-            None if signed.change == GroupChange::Upgrade
-                && signed.by.0 == meta.founder
-                && *author == meta.founder =>
-            {
-                Ok(GroupState { last: Some(signed.clone()), ..GroupState::founded(meta.founder) })
-            },
-            None => Err("only the founder converts the group"),
-        }
+        let state = meta.state.as_ref().ok_or("unsupported group format")?;
+        policy::apply(state, &self.roster(), author, signed)
     }
 
     /// Authorize application intent against the epoch that decrypted it. A
@@ -446,10 +431,10 @@ impl MlsGroupHandle {
             AppPayload::System(SystemEvent::Left { who }) => {
                 meta.state.is_none() && who.0 == *author
             },
-            AppPayload::GroupWelcome { .. } | AppPayload::GroupInvitation { .. } => {
-                state.role(author) >= policy::ROLE_ADMIN
-            },
-            AppPayload::System(_) | AppPayload::GroupAdmins { .. } => false,
+            AppPayload::GroupInvitation { .. } => state.role(author) >= policy::ROLE_ADMIN,
+            AppPayload::System(_)
+            | AppPayload::GroupAdmins { .. }
+            | AppPayload::GroupWelcome { .. } => false,
             _ => true,
         }
     }
@@ -540,11 +525,6 @@ impl MlsGroupHandle {
         })
     }
 
-    /// openmls keeps it across a restart, and refuses adds, removals and leaves while it stands.
-    pub fn has_pending_commit(&self) -> bool {
-        self.inner.pending_commit().is_some()
-    }
-
     /// Drops a commit built but not sent, so the group takes the next one.
     pub fn clear_pending_commit(&mut self, provider: &PromtuzMlsProvider) {
         let dropped = provider.storage().atomic(|| {
@@ -613,11 +593,6 @@ impl MlsGroupHandle {
         self.inner.members()
     }
 
-    /// Only migration uses the legacy identity at our own authenticated seat.
-    pub(crate) fn migration_identity(&self) -> Option<[u8; 32]> {
-        self.inner.member_at(self.inner.own_leaf_index())
-            .and_then(|m| super::credential::member_ipk(&m, false))
-    }
 
     /// A group chat rather than a pair. Only group chats require bound credentials.
     pub fn is_group_chat(&self) -> bool {
@@ -711,53 +686,7 @@ mod tests {
         }
     }
 
-    fn proposal_of(content: ProcessedMessageContent) -> QueuedProposal {
-        match content {
-            ProcessedMessageContent::ProposalMessage(p) => *p,
-            other => panic!("expected a proposal, got {other:?}"),
-        }
-    }
 
-    /// Before signed rules, a removal its subject proposed is a leave anyone may carry, any other
-    /// removal is the founder's alone, and only the founder converts the group.
-    #[test]
-    fn a_group_from_before_signed_rules_keeps_its_founder_rule() {
-        let (alice, bob, carol) = (Party::new(1), Party::new(2), Party::new(3));
-        let meta = GroupMeta { title: "room".into(), founder: alice.ipk, state: None };
-        let (mut ga, [mut gb, mut gc]) = found(&alice, [0xAB; 32], Some(&meta), [&bob, &carol]);
-
-        let leave = gb.leave(&bob.provider, &bob.leaf).unwrap();
-        let p = proposal_of(alice.receive(&mut ga, &leave));
-        ga.openmls().store_pending_proposal(alice.provider.storage(), p).unwrap();
-        let p = proposal_of(carol.receive(&mut gc, &leave));
-        gc.openmls().store_pending_proposal(carol.provider.storage(), p).unwrap();
-        let (carried, _, _) =
-            gc.openmls().commit_to_pending_proposals(&carol.provider, &carol.leaf).unwrap();
-        let staged = commit_of(alice.receive(&mut ga, &carried));
-        assert!(ga.commit_is_permitted(&staged, carol.ipk).is_ok(), "anyone may carry a leave");
-        ga.merge_staged_commit(&alice.provider, staged).unwrap();
-        gc.merge_pending_commit(&carol.provider).unwrap();
-        assert_eq!(ga.member_count(), 2);
-
-        let alice_at = gc.member_index_by_ipk(&alice.ipk).unwrap();
-        let evict = gc.remove_members(&carol.provider, &carol.leaf, &[alice_at]).unwrap();
-        assert!(judge(&alice, &mut ga, &evict, carol.ipk).is_err(), "only the founder evicts");
-        gc.clear_pending_commit(&carol.provider);
-
-        let upgrade = |g: &MlsGroupHandle, p: &Party| {
-            meta_after(g, GroupState::founded(alice.ipk), p.sign(g, GroupChange::Upgrade))
-        };
-        let (forged, _) = gc
-            .commit_meta(&carol.provider, &carol.leaf, &upgrade(&gc, &carol), vec![], vec![])
-            .unwrap();
-        gc.clear_pending_commit(&carol.provider);
-        assert!(judge(&alice, &mut ga, &forged, carol.ipk).is_err(), "only the founder converts");
-        let (converted, _) = ga
-            .commit_meta(&alice.provider, &alice.leaf, &upgrade(&ga, &alice), vec![], vec![])
-            .unwrap();
-        let change = judge(&carol, &mut gc, &converted, alice.ipk).expect("the founder converts");
-        assert_eq!(change.map(|c| c.change), Some(GroupChange::Upgrade));
-    }
 
     /// With signed rules only the committer commits, unless an admin takes over, and a commit
     /// does exactly what a change signed by someone entitled to ask for it says.
