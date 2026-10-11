@@ -66,13 +66,7 @@ pub(crate) fn enqueue_for_home(
     }
     match dht.store.queue.admit(dispatch, now_ms) {
         Ok(QueueAdmission::Insert | QueueAdmission::AlreadyQueued) => {},
-        Ok(QueueAdmission::Full(reason)) => {
-            common::trace!(
-                "FORWARD: home queue admission limited by {reason} for {}",
-                hex::encode(user_ipk)
-            );
-            return ForwardOutcome::QueueFull;
-        },
+        Ok(QueueAdmission::Full(_)) => return ForwardOutcome::QueueFull,
         Ok(QueueAdmission::IdTakenByOther) | Err(_) => return ForwardOutcome::BadSig,
     }
 

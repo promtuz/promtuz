@@ -331,13 +331,7 @@ async fn store_in_rocks(store: &Store, dispatch: &DispatchP) -> Result<DispatchA
         QueueAdmission::IdTakenByOther => {
             Ok(DispatchAckP::Error { reason: "dispatch id already queued".into() })
         },
-        QueueAdmission::Full(reason) => {
-            trace!(
-                "FORWARD: local queue admission limited by {reason} for {}; trying routing",
-                hex::encode(recipient)
-            );
-            Ok(DispatchAckP::QueueFull)
-        },
+        QueueAdmission::Full(_) => Ok(DispatchAckP::QueueFull),
     }
 }
 

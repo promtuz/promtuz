@@ -39,6 +39,7 @@ use crate::state::core;
 pub enum LastOutcome {
     Durable,
     Reachable,
+    QueueFull,
     Terminal,
     /// No ack came back; only the reconciler produces it.
     Silence,
@@ -53,7 +54,8 @@ pub fn outcome_for_ack(ack: &DispatchAckP) -> LastOutcome {
         DispatchAckP::Forwarded { .. }
         | DispatchAckP::Delivered { .. }
         | DispatchAckP::Queued { .. } => Durable,
-        DispatchAckP::QueueFull | DispatchAckP::Error { .. } => Reachable,
+        DispatchAckP::QueueFull => QueueFull,
+        DispatchAckP::Error { .. } => Reachable,
         DispatchAckP::NotFound | DispatchAckP::InvalidSig => Terminal,
     }
 }
@@ -168,11 +170,13 @@ pub(crate) fn pending_ops_for_tx(conn: &Connection, ipk: &[u8; 32]) -> rusqlite:
     .map(|n| n as u32)
 }
 
+const OUTBOX_BATCH: u32 = 32;
+
 pub(crate) fn due_tx(conn: &Connection, now_ms: u64) -> rusqlite::Result<Vec<OutboxRow>> {
     crate::db::all(
         conn,
-        "SELECT * FROM outbox WHERE state = 0 AND next_attempt <= ?1 ORDER BY created_at ASC",
-        params![ms_i64(now_ms)],
+        "SELECT * FROM outbox WHERE state = 0 AND next_attempt <= ?1 ORDER BY created_at ASC LIMIT ?2",
+        params![ms_i64(now_ms), OUTBOX_BATCH],
         OutboxRow::from_row,
     )
 }
@@ -201,6 +205,8 @@ const BASE_BACKOFF_MS: u64 = 1_000;
 const CAP_BACKOFF_MS: u64 = 300_000;
 const DEAD_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000; // non-message silence past 7d dies
 const MESSAGE_SILENCE_MAX: u32 = 6; // fail a message after this many no-ack retries (~2min)
+const QUEUE_FULL_MAX: u32 = 3;
+const MESSAGE_MAX_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
@@ -209,11 +215,14 @@ pub enum Next {
     Dead,
 }
 
-/// Never fails a message prematurely, and never lets a persistently `Reachable` op die.
+/// Queue pressure is transient, but stale messages must not monopolize reconnects forever.
 pub fn classify(op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Next {
     match last {
         LastOutcome::Durable | LastOutcome::Terminal => Next::Retire,
+        _ if op == OpType::Message && age_ms >= MESSAGE_MAX_AGE_MS => Next::Dead,
         LastOutcome::Reachable => Next::KeepRetrying, // a negative response still proves reachability
+        LastOutcome::QueueFull if attempts >= QUEUE_FULL_MAX => Next::Dead,
+        LastOutcome::QueueFull => Next::KeepRetrying,
         // attempts-gated, not wall-clock, so an offline-queued msg isn't failed on reconnect
         LastOutcome::Silence => match op {
             OpType::Message if attempts >= MESSAGE_SILENCE_MAX => Next::Dead,
@@ -244,6 +253,16 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
     let rows = due_tx(&outbox.lock(), now).unwrap_or_default();
     for row in rows {
         let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
+        let age = now.saturating_sub(row.created_at);
+        if op == OpType::Message && age >= MESSAGE_MAX_AGE_MS {
+            let target = row.target_ipk.as_ref().and_then(|t| t.as_slice().try_into().ok());
+            if let Err(e) = record_send_result(&row.id, target, &row.payload, STATUS_FAILED, None) {
+                warn!("MESSAGE: expiry persistence failed, retaining outbox: {e}");
+                continue;
+            }
+            mark_dead_tx(&outbox.lock(), &row.id, target).ok();
+            continue;
+        }
         log::debug!(
             "OUTBOX: retry dispatch {}, op={op:?}, previous attempts={}",
             hex::encode(&row.id),
@@ -284,7 +303,6 @@ async fn reconcile_in(outbox: &Mutex<Connection>, session: &Session) {
             }}).await.unwrap_or(LastOutcome::Silence),
         };
 
-        let age = now.saturating_sub(row.created_at);
         match classify(op, outcome, row.attempts, age) {
             Next::Retire => {
                 if op == OpType::Message {
@@ -527,10 +545,9 @@ mod tests {
         Mutex::new(conn)
     }
 
-    /// A relay that answers proves a row can still go out, so only silence kills one: after a few
-    /// attempts for a message, after a week for anything else.
+    /// A full relay queue gets a few retries; stale messages never retry.
     #[test]
-    fn only_silence_kills_an_outbox_row() {
+    fn outbox_policy_is_bounded() {
         use LastOutcome::*;
         use Next::*;
         use OpType::*;
@@ -538,7 +555,7 @@ mod tests {
             (DispatchAckP::Queued { accepted_at_ms: 1 }, Durable),
             (DispatchAckP::Delivered { accepted_at_ms: 1 }, Durable),
             (DispatchAckP::Forwarded { accepted_at_ms: 1 }, Durable),
-            (DispatchAckP::QueueFull, Reachable),
+            (DispatchAckP::QueueFull, QueueFull),
             (DispatchAckP::Error { reason: String::new() }, Reachable),
             (DispatchAckP::NotFound, Terminal),
             (DispatchAckP::InvalidSig, Terminal),
@@ -551,6 +568,9 @@ mod tests {
             (Message, Durable, 0, 0, Retire),
             (Control, Terminal, 0, 0, Retire),
             (KpPublish, Reachable, u32::MAX, u64::MAX, KeepRetrying),
+            (Message, QueueFull, QUEUE_FULL_MAX - 1, 0, KeepRetrying),
+            (Message, QueueFull, QUEUE_FULL_MAX, 0, Dead),
+            (Message, Reachable, 0, MESSAGE_MAX_AGE_MS, Dead),
             (Message, Silence, MESSAGE_SILENCE_MAX - 1, 0, KeepRetrying),
             (Message, Silence, MESSAGE_SILENCE_MAX, 0, Dead),
             (Message, Silence, 0, DEAD_TTL_MS + 1, Dead),
@@ -580,6 +600,16 @@ mod tests {
         ] {
             assert_eq!(next_backoff(attempts), delay, "attempt {attempts}");
         }
+    }
+
+    #[test]
+    fn reconciliation_reads_a_bounded_batch() {
+        let outbox = outbox();
+        let conn = outbox.lock();
+        for n in 0..=OUTBOX_BATCH {
+            enqueue_tx(&conn, &[n as u8; 16], OpType::Control, Some([1; 32]), b"pending").unwrap();
+        }
+        assert_eq!(due_tx(&conn, u64::MAX).unwrap().len(), OUTBOX_BATCH as usize);
     }
 
     #[test]
