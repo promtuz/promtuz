@@ -154,7 +154,7 @@ VERSION="${VERSION## }"; VERSION="${VERSION%% }"
 [[ -n "$VERSION" ]] || _die "version is empty"
 
 # cargo-deb maps a semver prerelease to a debian tilde: 0.3.1-rc1 -> 0.3.1~rc1-1
-DEB_VERSION="${VERSION//-/\~}-1"
+DEB_VERSION="${VERSION//-/~}-1"
 if (( ${live_versions[(I)$DEB_VERSION]} )); then
     _die "$DEB_VERSION is already published. apt upgrades on the version string, so
     republishing it would leave every existing box on the old package —
