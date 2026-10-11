@@ -141,6 +141,7 @@ impl Relay {
 
         let node_id = NodeId::new(signing.verifying_key());
         let mut d = Dht::new(node_id, signing.clone(), cfg.dht.clone(), store.clone());
+        d.attach_push_endpoint(endpoint.clone());
         if cfg.dht.enabled {
             d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
             d.attach_clients(clients.clone());

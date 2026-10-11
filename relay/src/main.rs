@@ -125,19 +125,17 @@ async fn main() -> Result<()> {
     );
     let resolver_handle = ResolverLinkHandle(session);
 
+    relay.mls.attach_resolver(resolver_handle.clone());
+    tokio::spawn({
+        let (dht, resolver) = (relay.mls.clone(), resolver_handle.clone());
+        async move {
+            resolver.ready().await;
+            crate::dht::push_wake::refresh_gateways(dht, resolver).await
+        }
+    });
+
     if let Some(dht) = relay.dht.clone()
         && dht.cfg.enabled {
-            dht.attach_resolver(resolver_handle.clone());
-
-            // Both startup calls wait for a registered session. Called earlier they fail, and the
-            // gateway list would stay empty for a whole refresh period.
-            tokio::spawn({
-                let (dht, resolver) = (dht.clone(), resolver_handle.clone());
-                async move {
-                    resolver.ready().await;
-                    crate::dht::push_wake::refresh_gateways(dht, resolver).await
-                }
-            });
 
             // Detached so a slow resolver cannot delay accepting; the sync scheduler retries a
             // failed bootstrap.

@@ -152,6 +152,10 @@ impl Dht {
         self.peer_client_cfg = Some(peer_client_cfg);
     }
 
+    pub fn attach_push_endpoint(&mut self, endpoint: Endpoint) {
+        self.endpoint = Some(endpoint);
+    }
+
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
     }

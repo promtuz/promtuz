@@ -182,6 +182,7 @@ where
 async fn route_dispatch(fwd: DispatchP, ctx: &ClientCtxHandle) -> Option<DispatchAckP> {
     let accepted_at_ms = fwd.accepted_at_ms;
     let recipient = fwd.to;
+    let wake = fwd.wake;
     let delivery = dispatch_to_deliver(fwd.clone());
     let recipient_conn = { ctx.relay.clients.read().get(&*recipient).cloned() };
 
@@ -211,6 +212,10 @@ async fn route_dispatch(fwd: DispatchP, ctx: &ClientCtxHandle) -> Option<Dispatc
                 trace!("FORWARD: K-closest fan-out fell back to local queue: {err}");
             },
         }
+    }
+
+    if wake.wakes() {
+        ctx.relay.mls.trigger_wake(&recipient.0, wake);
     }
 
     None
