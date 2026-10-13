@@ -454,19 +454,27 @@ pub(crate) fn prepare_dispatch(
 
 /// Enqueues and sends one member's copy. `Silence` covers every transport failure and leaves the
 /// outbox row for the reconciler.
+///
 pub(crate) async fn dispatch_to_member(
-    to: &[u8; 32], our_ipk: &[u8; 32], ipk_signer: &SigningKey, id: &[u8; 16], payload: Vec<u8>,
-    op: OpType, wake: Wake, ttl_ms: u64,
+    (to_id, from_id): (&[u8; 32], &[u8; 32]), //  (ReceiverID, SenderID)
+    signer: &SigningKey,
+    (id, payload, op, wake, ttl_ms): (
+        &[u8; 16], // id
+        Vec<u8>,   // payload
+        OpType,    // op
+        Wake,      // wake
+        u64,       // ttl_ms
+    ),
 ) -> LastOutcome {
-    let Ok(bytes) = prepare_dispatch(to, our_ipk, ipk_signer, id, payload, wake, ttl_ms) else {
+    let Ok(bytes) = prepare_dispatch(to_id, from_id, signer, id, payload, wake, ttl_ms) else {
         return LastOutcome::Terminal;
     };
-    let mut copies = [(*to, *id, op, bytes)];
+    let mut copies = [(*to_id, *id, op, bytes)];
     if let Err(e) = enqueue_batch(&mut copies) {
         warn!("MESSAGE: could not queue dispatch: {e}");
         return LastOutcome::Silence;
     }
-    dispatch_queued(core().session().as_deref(), to, id, op, &copies[0].3).await
+    dispatch_queued(core().session().as_deref(), to_id, id, op, &copies[0].3).await
 }
 
 /// A group publication has one outbox row, but acceptance applies to its fixed audience.

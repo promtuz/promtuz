@@ -227,14 +227,9 @@ pub fn received(gid: [u8; 32], request: GroupMemberRequest) -> Result<()> {
             };
             let id = crate::data::message::next_dispatch_id();
             crate::delivery::dispatch_to_member(
-                &state.committer,
-                &me,
+                (&state.committer, &me),
                 &signer,
-                &id,
-                payload,
-                OpType::Control,
-                Wake::Message,
-                0,
+                (&id, payload, OpType::Control, Wake::Message, 0),
             )
             .await;
         });
