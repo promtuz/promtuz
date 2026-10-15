@@ -1,7 +1,7 @@
 //! GIF disposal/compositing is handled by image's maintained GIF decoder.
 //! Decode, resize and feed one frame at a time; never retain an RGBA movie.
-use anyhow::{Result, anyhow, bail, ensure};
 use ::image::{AnimationDecoder, ImageDecoder};
+use anyhow::{Result, anyhow, bail, ensure};
 use rav1e::prelude::*;
 use std::io::Cursor;
 
@@ -10,6 +10,8 @@ use super::{
     avatar::CropArea,
     avif::{MAX_DURATION_CS, MAX_FRAMES},
     fit_dimensions,
+    frames::{FrameStore, PixelFormat},
+    policy::AnimationProfile,
     sequence::{self, Sample, Track},
     validate_dimensions,
 };
@@ -261,12 +263,12 @@ impl Encoder {
         loop {
             match self.context.receive_packet() {
                 Ok(packet) => {
-                    let expected =
-                        if self.independent.is_some() { 0 } else { self.track.samples.len() as u64 };
-                    ensure!(
-                        packet.input_frameno == expected,
-                        "AVIF encoder reordered a frame"
-                    );
+                    let expected = if self.independent.is_some() {
+                        0
+                    } else {
+                        self.track.samples.len() as u64
+                    };
+                    ensure!(packet.input_frameno == expected, "AVIF encoder reordered a frame");
                     self.encoded_bytes += packet.data.len();
                     ensure!(
                         self.encoded_bytes <= MAX_ENCODED_SOURCE_BYTES,
@@ -332,6 +334,128 @@ fn encode(
     sequence::mux(width, height, colour, alpha, &info.delays, info.repetitions)
 }
 
+/// Encode already-composited frames from any core decoder. Format-specific
+/// parsing ends before this point; every animated source therefore follows the
+/// same size, frame-rate and AVIF-writing rules.
+pub(super) fn encode_frames(
+    frames: &mut FrameStore, profile: AnimationProfile,
+) -> Result<PreparedImage> {
+    ensure!(frames.len() > 0, "The animation has no frames.");
+    let first = frames.frame(0)?;
+    ensure!(
+        first.format == PixelFormat::Rgba8,
+        "The animation must be normalized to SDR pixels before encoding."
+    );
+    let (source_width, source_height) = (first.width, first.height);
+    let mut edge = source_width.max(source_height).min(profile.image.max_edge);
+    let mut last_size = 0;
+    for (attempt, quantizer) in [85usize, 115, 135, 145].into_iter().enumerate() {
+        if attempt >= 2 && last_size > profile.image.max_bytes {
+            let scale = (0.82 * profile.image.max_bytes as f64 / last_size as f64).sqrt();
+            edge = ((f64::from(edge) * scale) as u32).max(64).min(edge);
+        }
+        let (width, height) = fit_dimensions(source_width, source_height, edge);
+        let (bytes, animated) = encode_store(frames, width, height, quantizer, profile)?;
+        last_size = bytes.len() as u64;
+        if last_size <= profile.image.max_bytes {
+            return Ok(PreparedImage { bytes, mime: "image/avif", width, height, animated });
+        }
+    }
+    bail!("This animation cannot fit within the send limit without removing frames")
+}
+
+fn encode_store(
+    frames: &mut FrameStore, width: u32, height: u32, quantizer: usize, profile: AnimationProfile,
+) -> Result<(Vec<u8>, bool)> {
+    let mut alpha = false;
+    let mut total_duration = 0_u64;
+    for index in 0..frames.len() {
+        let frame = frames.frame(index)?;
+        ensure!(
+            frame.format == PixelFormat::Rgba8
+                && (frame.width, frame.height) == (frames.frame(0)?.width, frames.frame(0)?.height),
+            "Animated image frames have different pixel layouts."
+        );
+        total_duration = total_duration.saturating_add(u64::from(frame.duration_ms.max(10)));
+        if let Some(max_duration) = profile.max_duration_ms {
+            ensure!(total_duration <= max_duration, "This animation is too long to send.");
+        }
+        alpha |= frame.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255);
+    }
+    let mut colour = Encoder::new(width, height, quantizer, false)?;
+    let mut alpha_encoder =
+        alpha.then(|| Encoder::new(width, height, quantizer, true)).transpose()?;
+    let interval = 1_000_u32.div_ceil(profile.max_fps.max(1));
+    let mut delays = Vec::new();
+    let mut pending = None;
+    let mut pending_duration = 0_u32;
+    for index in 0..frames.len() {
+        let frame = frames.frame(index)?;
+        let duration = frame.duration_ms.max(10);
+        if pending.is_none() {
+            pending = Some(frame);
+            pending_duration = duration;
+            continue;
+        }
+        pending_duration = pending_duration.saturating_add(duration);
+        if pending_duration < interval {
+            continue;
+        }
+        feed_pending(
+            &mut colour,
+            &mut alpha_encoder,
+            pending.take().expect("pending frame"),
+            width,
+            height,
+            pending_duration,
+            &mut delays,
+            profile.max_frames,
+        )?;
+        pending = Some(frame);
+        pending_duration = 0;
+    }
+    if let Some(frame) = pending {
+        feed_pending(
+            &mut colour,
+            &mut alpha_encoder,
+            frame,
+            width,
+            height,
+            pending_duration.max(10),
+            &mut delays,
+            profile.max_frames,
+        )?;
+    }
+    let colour = colour.finish()?;
+    let alpha = alpha_encoder.map(Encoder::finish).transpose()?;
+    let animated = delays.len() > 1;
+    Ok((sequence::mux(width, height, colour, alpha, &delays, None)?, animated))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn feed_pending(
+    colour: &mut Encoder, alpha: &mut Option<Encoder>, frame: super::frames::Frame, width: u32,
+    height: u32, duration: u32, delays: &mut Vec<u32>, max_frames: u32,
+) -> Result<()> {
+    ensure!(
+        u32::try_from(delays.len()).unwrap_or(u32::MAX) < max_frames,
+        "This animation has too many frames to send."
+    );
+    let rgba = ::image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels)
+        .ok_or_else(|| anyhow!("invalid normalized animation frame"))?;
+    let rgba = if (rgba.width(), rgba.height()) == (width, height) {
+        rgba
+    } else {
+        ::image::imageops::resize(&rgba, width, height, ::image::imageops::FilterType::Triangle)
+    };
+    colour.feed(&rgba, false)?;
+    if let Some(alpha) = alpha {
+        alpha.feed(&rgba, true)?;
+    }
+    delays.push(duration);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +511,37 @@ mod tests {
         assert_eq!(info.frame_count, 2);
         assert_eq!(info.duration_ms, Some(200));
         assert_eq!(info.has_alpha, Some(true));
+    }
+
+    #[test]
+    fn normalized_frames_use_the_shared_sequence_encoder() {
+        let mut frames = FrameStore::new(1_024, 1_024);
+        for value in [0, 255] {
+            frames
+                .push(
+                    super::super::frames::Frame::new(
+                        vec![value, 0, 0, 255],
+                        1,
+                        1,
+                        PixelFormat::Rgba8,
+                        100,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let image = encode_frames(
+            &mut frames,
+            AnimationProfile {
+                image: super::super::policy::CHAT_ANIMATION.image,
+                max_fps: 15,
+                max_frames: 150,
+                max_duration_ms: Some(10_000),
+            },
+        )
+        .unwrap();
+        let info = super::super::inspect_avif(&image.bytes).unwrap().unwrap();
+        assert_eq!(info.frame_count, 2);
+        assert!(image.animated);
     }
 }

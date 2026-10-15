@@ -42,7 +42,10 @@ pub struct PreparedStill {
 }
 
 pub struct PreparedImage {
-    pub still: PreparedStill,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
     pub animation_fallback: bool,
 }
 
@@ -143,7 +146,98 @@ pub fn prepare_sdr_image_with_crop(
         Some(crop) => crop_still(still, crop)?,
         None => still,
     };
-    Ok(PreparedImage { still: encode_sdr_still(still, profile)?, animation_fallback })
+    let still = encode_sdr_still(still, profile)?;
+    Ok(PreparedImage {
+        bytes: still.bytes,
+        width: still.width,
+        height: still.height,
+        animated: false,
+        animation_fallback,
+    })
+}
+
+/// Prepare a selected image for one of the product uses. Still and animated
+/// inputs share their decoder, normalizer and AVIF writer; only the product
+/// profile decides whether an animation is retained.
+pub fn prepare_image(bytes: &[u8], request: MediaRequest) -> Result<PreparedImage> {
+    request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let kind = inspect(bytes)?;
+    let animation = request.animation_profile();
+    let profile = request
+        .image_profile()
+        .or_else(|| animation.map(|profile| profile.image))
+        .ok_or_else(|| anyhow::anyhow!("This request expects video input."))?;
+    let animated = match kind {
+        ImageKind::Gif | ImageKind::WebP => true,
+        ImageKind::Png => ::image::codecs::png::PngDecoder::new(Cursor::new(bytes))?.is_apng()?,
+        ImageKind::Avif => decode_avif(bytes)?.frame_count > 1,
+        _ => false,
+    };
+    if !animated || animation.is_none() {
+        let crop = match request {
+            MediaRequest::Avatar { crop } => Some(crop),
+            _ => None,
+        };
+        return prepare_sdr_image_with_crop(bytes, profile, crop);
+    }
+    prepare_animation(bytes, kind, animation.expect("checked above"))
+}
+
+fn prepare_animation(
+    bytes: &[u8], kind: ImageKind, profile: super::policy::AnimationProfile,
+) -> Result<PreparedImage> {
+    let mut frames = match kind {
+        ImageKind::Avif => decode_avif_animation(bytes)?,
+        _ => decode_animation(bytes)?,
+    };
+    let fallback = frames.frames.frame(0)?;
+    let fallback =
+        DecodedStill { rgba: fallback.pixels, width: fallback.width, height: fallback.height };
+    match super::gif::encode_frames(&mut frames.frames, profile) {
+        Ok(prepared) => Ok(PreparedImage {
+            bytes: prepared.bytes,
+            width: prepared.width,
+            height: prepared.height,
+            animated: prepared.animated,
+            animation_fallback: false,
+        }),
+        Err(_) => {
+            let still = encode_sdr_still(fallback, profile.image)?;
+            Ok(PreparedImage {
+                bytes: still.bytes,
+                width: still.width,
+                height: still.height,
+                animated: false,
+                animation_fallback: true,
+            })
+        },
+    }
+}
+
+fn decode_avif_animation(bytes: &[u8]) -> Result<DecodedFrames> {
+    let (first, mut source) = decode_avif_frames(bytes)?;
+    ensure!(
+        !matches!(first.color.transfer, 16 | 18),
+        "HDR AVIF needs tone mapping before SDR conversion."
+    );
+    let limits = MediaRequest::resource_limits();
+    let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
+    for index in 0..source.len() {
+        let frame = source.frame(index)?;
+        let pixels = frame
+            .pixels
+            .chunks_exact(2)
+            .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
+            .collect();
+        frames.push(Frame::new(
+            pixels,
+            frame.width,
+            frame.height,
+            PixelFormat::Rgba8,
+            frame.duration_ms.max(10),
+        )?)?;
+    }
+    Ok(DecodedFrames { width: first.frame.width, height: first.frame.height, frames })
 }
 
 pub fn crop_still(decoded: DecodedStill, crop: NormalizedCrop) -> Result<DecodedStill> {
@@ -399,7 +493,7 @@ mod tests {
         )
         .unwrap();
         assert!(prepared.animation_fallback);
-        assert_eq!(inspect(&prepared.still.bytes).unwrap(), ImageKind::Avif);
+        assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
     }
 
     #[test]
