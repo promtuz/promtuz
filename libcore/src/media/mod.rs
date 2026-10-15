@@ -6,12 +6,12 @@
 
 mod avif;
 mod avatar;
-pub(crate) mod frames;
+pub mod frames;
 mod gif;
 #[path = "image.rs"]
 pub mod pipeline_image;
 mod policy;
-pub(crate) mod ports;
+pub mod ports;
 mod sequence;
 pub(crate) mod video;
 
