@@ -60,9 +60,9 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 x509-parser = "0.18.1"
 # HTTPS downloads of encrypted sticker objects.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
-# Shared image/sticker pipeline: retain AVIF sources, composite GIF animations,
-# and encode platform-decoded SDR pixels. Other decoders stay on the platform.
-image = { version = "0.25", default-features = false, features = ["gif"] }
+# Core-owned decoders for ordinary still and animated image formats. HEIF/JXL
+# stay platform ports because their platform support is materially better.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 # `threading` = parallel encode (rayon). Base dep skips `asm` so x86_64
 # (emulator, CI) never needs nasm; aarch64 layers it on below.
 ravif = { version = "0.11", default-features = false, features = ["threading"] }

@@ -1,7 +1,7 @@
 //! GIF disposal/compositing is handled by image's maintained GIF decoder.
 //! Decode, resize and feed one frame at a time; never retain an RGBA movie.
 use anyhow::{Result, anyhow, bail, ensure};
-use image::{AnimationDecoder, ImageDecoder};
+use ::image::{AnimationDecoder, ImageDecoder};
 use rav1e::prelude::*;
 use std::io::Cursor;
 
@@ -216,7 +216,7 @@ impl Encoder {
         })
     }
 
-    fn feed(&mut self, rgba: &image::RgbaImage, alpha: bool) -> Result<()> {
+    fn feed(&mut self, rgba: &::image::RgbaImage, alpha: bool) -> Result<()> {
         if let Some(config) = &self.independent
             && !self.track.samples.is_empty()
         {
@@ -297,9 +297,9 @@ impl Encoder {
 fn encode(
     bytes: &[u8], info: &GifInfo, width: u32, height: u32, quantizer: usize, crop: Option<CropArea>,
 ) -> Result<Vec<u8>> {
-    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?;
+    let mut decoder = ::image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?;
     ensure!(decoder.icc_profile()?.is_none(), "GIF colour profiles cannot be converted safely yet");
-    let mut limits = image::Limits::default();
+    let mut limits = ::image::Limits::default();
     limits.max_image_width = Some(info.width);
     limits.max_image_height = Some(info.height);
     limits.max_alloc = Some(192 * 1024 * 1024);
@@ -310,14 +310,14 @@ fn encode(
     for frame in decoder.into_frames() {
         let rgba = frame?.into_buffer();
         let rgba = if let Some(crop) = crop {
-            image::imageops::crop_imm(&rgba, crop.x, crop.y, crop.side, crop.side).to_image()
+            ::image::imageops::crop_imm(&rgba, crop.x, crop.y, crop.side, crop.side).to_image()
         } else {
             rgba
         };
         let rgba = if rgba.width() == width && rgba.height() == height {
             rgba
         } else {
-            image::imageops::resize(&rgba, width, height, image::imageops::FilterType::Triangle)
+            ::image::imageops::resize(&rgba, width, height, ::image::imageops::FilterType::Triangle)
         };
         colour.feed(&rgba, false)?;
         if let Some(alpha) = &mut alpha {

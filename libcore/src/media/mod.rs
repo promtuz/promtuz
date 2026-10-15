@@ -10,7 +10,7 @@ pub mod frames;
 mod gif;
 pub mod import;
 #[path = "image.rs"]
-pub mod pipeline_image;
+pub mod image;
 mod policy;
 pub mod ports;
 mod sequence;
@@ -115,12 +115,12 @@ fn fit_dimensions(width: u32, height: u32, edge: u32) -> (u32, u32) {
 /// SDR still stickers use the same precision rules as photos and GIF frames.
 pub fn compress_sticker(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, u32, u32)> {
     validate_rgba(rgba, width, height)?;
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+    let img = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
         .expect("validated RGBA");
     let mut edge = 512;
     for quality in [78.0, 62.0, 48.0] {
         let (w, h) = fit_dimensions(width, height, edge);
-        let scaled = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
+        let scaled = ::image::imageops::resize(&img, w, h, ::image::imageops::FilterType::Lanczos3);
         let out = Encoder::new()
             .with_quality(quality)
             .with_alpha_quality(85.0)
@@ -149,14 +149,14 @@ pub fn compress_image(
 
     // AVIF size scales about linearly with pixel count, so the overshoot ratio gives the
     // target dimensions; each retry resizes the original so resampling loss does not cascade.
-    let orig = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+    let orig = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
         .expect("len checked above");
     let (mut w, mut h) = (width, height);
     for _ in 0..2 {
         let s = (0.85 * max_bytes as f64 / out.len() as f64).sqrt();
         w = ((w as f64 * s).max(64.0).min(width as f64)) as u32;
         h = ((h as f64 * s).max(64.0).min(height as f64)) as u32;
-        let small = image::imageops::resize(&orig, w, h, image::imageops::FilterType::Triangle);
+        let small = ::image::imageops::resize(&orig, w, h, ::image::imageops::FilterType::Triangle);
         out = encode_avif(small.as_raw(), w, h, 60.0)?;
         if out.len() <= max_bytes {
             return Ok((out, w, h));
@@ -171,7 +171,7 @@ pub fn compress_image(
 pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     validate_rgba(rgba, width, height)?;
 
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+    let img = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
         .expect("len checked above");
 
     let scale = 48.0 / width.max(height) as f32;
@@ -180,8 +180,8 @@ pub fn blur_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
         ((height as f32 * scale).round() as u32).max(1),
     );
 
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-    let blurred = image::imageops::blur(&small, 2.0);
+    let small = ::image::imageops::resize(&img, tw, th, ::image::imageops::FilterType::Triangle);
+    let blurred = ::image::imageops::blur(&small, 2.0);
 
     encode_avif(blurred.as_raw(), tw, th, 50.0)
 }
@@ -193,7 +193,7 @@ const MAX_POSTER_BYTES: usize = 32 * 1024;
 /// A sharp preview for a picture or video attachment, drawn as a tile before the bytes arrive.
 pub fn poster_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     validate_rgba(rgba, width, height)?;
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba)
+    let img = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
         .expect("len checked above");
     let mut edge = POSTER_EDGE.min(width.max(height));
     loop {
@@ -202,7 +202,7 @@ pub fn poster_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
             ((width as f32 * scale).round() as u32).max(1),
             ((height as f32 * scale).round() as u32).max(1),
         );
-        let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+        let small = ::image::imageops::resize(&img, tw, th, ::image::imageops::FilterType::Triangle);
         let out = encode_avif(small.as_raw(), tw, th, 50.0)?;
         if out.len() <= MAX_POSTER_BYTES || edge <= 96 {
             return Ok(out);
@@ -227,17 +227,17 @@ pub const AVATAR_EDGE: u32 = 256;
 /// quality steps down before size, and a picture that fits at no quality is refused.
 pub fn avatar_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     validate_rgba(rgba, width, height)?;
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
+    let img = ::image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
 
     let side = width.min(height);
     let square =
-        image::imageops::crop_imm(&img, (width - side) / 2, (height - side) / 2, side, side)
+        ::image::imageops::crop_imm(&img, (width - side) / 2, (height - side) / 2, side, side)
             .to_image();
     let edge = side.min(AVATAR_EDGE);
     let scaled = if edge == side {
         square
     } else {
-        image::imageops::resize(&square, edge, edge, image::imageops::FilterType::Lanczos3)
+        ::image::imageops::resize(&square, edge, edge, ::image::imageops::FilterType::Lanczos3)
     };
 
     for quality in [65.0, 45.0, 30.0] {
