@@ -1,9 +1,83 @@
-//! Media FFI: images, attachments, voice notes and transfer state.
+//! Media FFI: platform source adapters, images, attachments, voice notes and transfer state.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use common::types::bytes::fixed;
 
 use crate::platform::CoreError;
 use crate::state::core;
+
+/// The host keeps URI, browser-file, or platform bookmark details on its side.
+/// Core only asks for bounded ranges, then owns a private copy before decoding.
+#[uniffi::export(with_foreign)]
+pub trait MediaSourceAdapter: Send + Sync {
+    fn length(&self) -> Result<Option<u64>, CoreError>;
+    fn read(&self, offset: u64, max_bytes: u32) -> Result<Vec<u8>, CoreError>;
+    fn release(&self);
+}
+
+struct SourceAdapter(Arc<dyn MediaSourceAdapter>);
+
+impl crate::media::ports::MediaSource for SourceAdapter {
+    fn length(&self) -> anyhow::Result<Option<u64>> {
+        self.0.length().map_err(source_error)
+    }
+
+    fn read(&mut self, offset: u64, max_bytes: u32) -> anyhow::Result<Vec<u8>> {
+        self.0.read(offset, max_bytes).map_err(source_error)
+    }
+
+    fn release(&mut self) {
+        self.0.release();
+    }
+}
+
+fn source_error(error: CoreError) -> anyhow::Error {
+    match error {
+        CoreError::Refused { msg } => crate::platform::Refused(msg).into(),
+        CoreError::Internal { msg } => anyhow::anyhow!(msg),
+    }
+}
+
+/// Owns a private source copy while a media job chooses and creates its rendition.
+#[derive(uniffi::Object)]
+pub struct MediaImport {
+    source: parking_lot::Mutex<Option<crate::media::import::ImportedSource>>,
+}
+
+#[uniffi::export]
+impl MediaImport {
+    #[uniffi::constructor]
+    pub fn from_source(source: Arc<dyn MediaSourceAdapter>) -> Result<Arc<Self>, CoreError> {
+        let directory = core().db.files_dir("media-imports");
+        let imported = crate::media::import::ImportedSource::from_source(
+            Box::new(SourceAdapter(source)),
+            Path::new(&directory),
+        )?;
+        Ok(Arc::new(Self { source: parking_lot::Mutex::new(Some(imported)) }))
+    }
+
+    pub fn source_path(&self) -> Result<String, CoreError> {
+        let source = self.source.lock();
+        let source = source
+            .as_ref()
+            .ok_or_else(|| CoreError::Refused { msg: "This media import was discarded.".into() })?;
+        Ok(source.path().to_string_lossy().into_owned())
+    }
+
+    pub fn size(&self) -> Result<u64, CoreError> {
+        let source = self.source.lock();
+        source
+            .as_ref()
+            .map(crate::media::import::ImportedSource::size)
+            .ok_or_else(|| CoreError::Refused { msg: "This media import was discarded.".into() })
+    }
+
+    pub fn discard(&self) {
+        self.source.lock().take();
+    }
+}
 
 /// A complete encoded image. Animation and color information stay in the container.
 #[derive(uniffi::Record)]

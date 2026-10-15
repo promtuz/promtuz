@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write;
+
 use anyhow::{Result, ensure};
 
 use super::policy::MAX_SOURCE_BYTES;
@@ -5,29 +8,40 @@ use super::policy::MAX_SOURCE_BYTES;
 pub const READ_CHUNK_BYTES: u32 = 1024 * 1024;
 
 pub trait MediaSource: Send {
-    fn length(&self) -> Result<u64>;
+    /// A known length lets core refuse an over-limit source before reading it.
+    /// Providers that cannot know it stream until EOF under the same hard cap.
+    fn length(&self) -> Result<Option<u64>>;
     fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>>;
     fn release(&mut self);
 }
 
 pub struct SourceLease {
     source: Option<Box<dyn MediaSource>>,
-    length: u64,
+    length: Option<u64>,
 }
 
 impl SourceLease {
     pub fn open(source: Box<dyn MediaSource>) -> Result<Self> {
         let length = source.length()?;
-        ensure!(length > 0, "The selected file is empty.");
-        ensure!(length <= MAX_SOURCE_BYTES, "The selected file exceeds the 100 MiB import limit.");
+        if let Some(length) = length {
+            ensure!(length > 0, "The selected file is empty.");
+            ensure!(
+                length <= MAX_SOURCE_BYTES,
+                "The selected file exceeds the 100 MiB import limit."
+            );
+        }
         Ok(Self { source: Some(source), length })
     }
 
     pub fn read_chunk(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
-        ensure!(offset <= self.length, "source offset is out of range");
+        if let Some(length) = self.length {
+            ensure!(offset <= length, "source offset is out of range");
+        }
         ensure!(max_bytes <= READ_CHUNK_BYTES, "source read exceeds the 1 MiB adapter limit");
-        let remaining = self.length - offset;
-        let requested = u64::from(max_bytes).min(remaining);
+        let requested = self
+            .length
+            .map_or(u64::from(max_bytes), |length| length - offset)
+            .min(u64::from(max_bytes));
         let bytes =
             self.source.as_deref_mut().expect("released source").read(offset, requested as u32)?;
         ensure!(
@@ -37,17 +51,36 @@ impl SourceLease {
         Ok(bytes)
     }
 
-    pub fn copy_to_memory(&mut self) -> Result<Vec<u8>> {
-        let capacity =
-            usize::try_from(self.length).map_err(|_| anyhow::anyhow!("source is too large"))?;
-        let mut bytes = Vec::with_capacity(capacity);
-        while bytes.len() < capacity {
-            let offset = u64::try_from(bytes.len())?;
-            let chunk = self.read_chunk(offset, READ_CHUNK_BYTES)?;
-            ensure!(!chunk.is_empty(), "source ended before its reported length");
-            bytes.extend_from_slice(&chunk);
+    /// Copies the source in bounded reads. `path` must be a new private file.
+    pub fn copy_to(&mut self, file: &mut File) -> Result<u64> {
+        let mut copied = 0_u64;
+        loop {
+            if self.length == Some(copied) {
+                break;
+            }
+            if self.length.is_none() && copied == MAX_SOURCE_BYTES {
+                ensure!(
+                    self.read_chunk(copied, 1)?.is_empty(),
+                    "The selected file exceeds the 100 MiB import limit."
+                );
+                break;
+            }
+            let remaining = MAX_SOURCE_BYTES - copied;
+            let requested = remaining.min(u64::from(READ_CHUNK_BYTES)) as u32;
+            let chunk = self.read_chunk(copied, requested)?;
+            if chunk.is_empty() {
+                break;
+            }
+            let chunk_len = u64::try_from(chunk.len())?;
+            ensure!(chunk_len <= remaining, "The selected file exceeds the 100 MiB import limit.");
+            file.write_all(&chunk)?;
+            copied += chunk_len;
         }
-        Ok(bytes)
+        ensure!(copied > 0, "The selected file is empty.");
+        if let Some(length) = self.length {
+            ensure!(copied == length, "source ended before its reported length");
+        }
+        Ok(copied)
     }
 
     pub fn release(mut self) {
@@ -80,8 +113,8 @@ mod tests {
     }
 
     impl MediaSource for Source {
-        fn length(&self) -> Result<u64> {
-            Ok(self.bytes.len() as u64)
+        fn length(&self) -> Result<Option<u64>> {
+            Ok(Some(self.bytes.len() as u64))
         }
 
         fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
@@ -103,7 +136,12 @@ mod tests {
         let source =
             Source { bytes: bytes.clone(), reads: reads.clone(), releases: releases.clone() };
         let mut lease = SourceLease::open(Box::new(source)).unwrap();
-        assert_eq!(lease.copy_to_memory().unwrap(), bytes);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source");
+        let mut output = File::create(&path).unwrap();
+        assert_eq!(lease.copy_to(&mut output).unwrap(), bytes.len() as u64);
+        drop(output);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
         assert_eq!(*reads.lock().unwrap(), vec![READ_CHUNK_BYTES, 9]);
         lease.release();
         assert_eq!(*releases.lock().unwrap(), 1);
@@ -118,5 +156,27 @@ mod tests {
         assert!(lease.read_chunk(0, READ_CHUNK_BYTES + 1).is_err());
         drop(lease);
         assert_eq!(*releases.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn unknown_length_stops_at_the_import_cap() {
+        struct Endless;
+
+        impl MediaSource for Endless {
+            fn length(&self) -> Result<Option<u64>> {
+                Ok(None)
+            }
+
+            fn read(&mut self, _offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
+                Ok(vec![0; max_bytes as usize])
+            }
+
+            fn release(&mut self) {}
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source");
+        let mut lease = SourceLease::open(Box::new(Endless)).unwrap();
+        assert!(lease.copy_to(&mut File::create(path).unwrap()).is_err());
     }
 }

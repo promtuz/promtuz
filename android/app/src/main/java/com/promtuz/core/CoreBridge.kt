@@ -1,6 +1,9 @@
 package com.promtuz.core
 
+import android.content.Context
+import android.net.Uri
 import com.promtuz.chat.presentation.state.ConnectionState
+import com.promtuz.chat.utils.media.AndroidMediaSource
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
@@ -10,6 +13,7 @@ import uniffi.core.BackupMergeReport
 import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
+import uniffi.core.MediaImport
 import uniffi.core.MediaRecord
 import uniffi.core.MessageRecord
 import uniffi.core.ReactionRecord
@@ -311,6 +315,10 @@ object CoreBridge {
     // Staged items encode at pick time and ring the doorbell under "staging".
     suspend fun stageImage(rgba: ByteArray, width: Int, height: Int): ULong =
         withContext(Dispatchers.IO) { ffiStageImage(rgba, width.toUInt(), height.toUInt()) }
+
+    /** Core takes a private bounded copy; URI access ends before any media job starts. */
+    suspend fun importMedia(context: Context, uri: Uri): MediaImport =
+        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaSource.open(context.contentResolver, uri)) }
 
     suspend fun prepareEncodedImage(bytes: ByteArray, sticker: Boolean = false): uniffi.core.PreparedImageRecord =
         withContext(Dispatchers.Default) { uniffi.core.prepareEncodedImage(bytes, sticker) }

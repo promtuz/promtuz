@@ -8,6 +8,7 @@ mod avif;
 mod avatar;
 pub mod frames;
 mod gif;
+pub mod import;
 #[path = "image.rs"]
 pub mod pipeline_image;
 mod policy;
