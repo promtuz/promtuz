@@ -141,30 +141,15 @@ pub fn compress_image(
     rgba: &[u8], width: u32, height: u32, max_bytes: usize,
 ) -> Result<(Vec<u8>, u32, u32)> {
     validate_rgba(rgba, width, height)?;
-
-    let mut out = encode_avif(rgba, width, height, 60.0)?;
-    if out.len() <= max_bytes {
-        return Ok((out, width, height));
-    }
-
-    // AVIF size scales about linearly with pixel count, so the overshoot ratio gives the
-    // target dimensions; each retry resizes the original so resampling loss does not cascade.
-    let orig = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
-        .expect("len checked above");
-    let (mut w, mut h) = (width, height);
-    for _ in 0..2 {
-        let s = (0.85 * max_bytes as f64 / out.len() as f64).sqrt();
-        w = ((w as f64 * s).max(64.0).min(width as f64)) as u32;
-        h = ((h as f64 * s).max(64.0).min(height as f64)) as u32;
-        let small = ::image::imageops::resize(&orig, w, h, ::image::imageops::FilterType::Triangle);
-        out = encode_avif(small.as_raw(), w, h, 60.0)?;
-        if out.len() <= max_bytes {
-            return Ok((out, w, h));
-        }
-    }
-
-    // The result inlines into a capped MLS `Image` frame; an over-budget buffer must be an error.
-    bail!("could not compress under {max_bytes} bytes");
+    let image = image::encode_sdr_still(
+        image::DecodedStill { rgba: rgba.to_vec(), width, height },
+        policy::ImageProfile {
+            max_edge: width.max(height),
+            max_bytes: u64::try_from(max_bytes)?,
+            emergency_edge: 64,
+        },
+    )?;
+    Ok((image.bytes, image.width, image.height))
 }
 
 /// A blurred placeholder of a few KB, 48 px on the longest side.
