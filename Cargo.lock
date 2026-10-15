@@ -3736,6 +3736,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "promtuz-avif"
+version = "0.1.0"
+dependencies = [
+ "promtuz-avif-sys",
+ "ravif",
+ "rgb",
+]
+
+[[package]]
+name = "promtuz-avif-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"

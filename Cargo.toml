@@ -1,5 +1,14 @@
 [workspace]
-members = ["resolver", "relay", "gateway", "common", "libcore", "tools/uniffi-bindgen"]
+members = [
+    "resolver",
+    "relay",
+    "gateway",
+    "common",
+    "libcore",
+    "media/avif-sys",
+    "media/avif",
+    "tools/uniffi-bindgen",
+]
 resolver = "2"
 
 [workspace.package]

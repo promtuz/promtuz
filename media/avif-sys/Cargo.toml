@@ -1,0 +1,11 @@
+[package]
+name = "promtuz-avif-sys"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+links = "promtuz_avif"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1.2.52"

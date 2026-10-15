@@ -1,0 +1,13 @@
+[package]
+name = "promtuz-avif"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+promtuz-avif-sys = { path = "../avif-sys" }
+
+[dev-dependencies]
+ravif = { version = "0.11", default-features = false }
+rgb = "0.8"
