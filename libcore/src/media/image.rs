@@ -4,7 +4,7 @@ use ::image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use anyhow::{Result, bail, ensure};
 
 use super::{
-    frames::{Frame, PixelFormat},
+    frames::{Frame, FrameStore, PixelFormat},
     policy::MediaRequest,
 };
 
@@ -103,6 +103,41 @@ pub fn decode_avif(bytes: &[u8]) -> Result<DecodedAvif> {
     })
 }
 
+pub fn decode_avif_frames(bytes: &[u8]) -> Result<(DecodedAvif, FrameStore)> {
+    let limits = MediaRequest::resource_limits();
+    let mut decoder = promtuz_avif::Decoder::open(
+        bytes,
+        promtuz_avif::DecodeLimits {
+            max_pixels: u32::try_from(limits.source_pixels)?,
+            max_edge: 8_192,
+            max_frames: limits.animation_frames,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
+    let mut first = None;
+    while let Some(image) = decoder
+        .next()
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?
+    {
+        let pixels = image.rgba16().iter().flat_map(|pixel| pixel.to_ne_bytes()).collect();
+        let frame =
+            Frame::new(pixels, image.width, image.height, PixelFormat::Rgba16, image.duration_ms)?;
+        if first.is_none() {
+            first = Some(DecodedAvif {
+                frame: frame.clone(),
+                color: image.color,
+                source_depth: image.source_depth,
+                frame_count: image.frame_count,
+                has_alpha: image.has_alpha,
+                has_gain_map: image.has_gain_map,
+            });
+        }
+        frames.push(frame)?;
+    }
+    Ok((first.ok_or_else(|| anyhow::anyhow!("AVIF contains no frames"))?, frames))
+}
+
 #[cfg(test)]
 mod tests {
     use ::image::{ColorType, ImageEncoder};
@@ -119,6 +154,14 @@ mod tests {
         assert_eq!(decoded.frame.pixels.len(), 16);
         assert_eq!(decoded.source_depth, 8);
         assert_eq!(decoded.frame_count, 1);
+    }
+
+    #[test]
+    fn avif_frames_share_the_bounded_frame_store() {
+        let encoded = super::super::encode_avif(&[255, 0, 0, 255], 1, 1, 60.0).unwrap();
+        let (first, mut frames) = decode_avif_frames(&encoded).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames.frame(0).unwrap(), first.frame);
     }
 
     #[test]

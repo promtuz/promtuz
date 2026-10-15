@@ -1,4 +1,4 @@
-use std::{mem::MaybeUninit, slice};
+use std::{mem::MaybeUninit, ptr::NonNull, slice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
@@ -20,6 +20,23 @@ pub struct Image {
     pub height: u32,
     pub source_depth: u32,
     pub frame_count: u32,
+    pub duration_ms: u32,
+    pub color: ColorInfo,
+    pub has_alpha: bool,
+    pub has_gain_map: bool,
+}
+
+pub struct Decoder {
+    raw: NonNull<promtuz_avif_sys::Decoder>,
+    pub info: ImageInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInfo {
+    pub width: u32,
+    pub height: u32,
+    pub source_depth: u32,
+    pub frame_count: u32,
     pub color: ColorInfo,
     pub has_alpha: bool,
     pub has_gain_map: bool,
@@ -32,24 +49,76 @@ impl Image {
 }
 
 pub fn decode_first(input: &[u8], limits: DecodeLimits) -> Result<Image, DecodeError> {
-    let mut raw = MaybeUninit::<promtuz_avif_sys::DecodedImage>::zeroed();
-    let result = unsafe {
-        promtuz_avif_sys::promtuz_avif_decode_rgba16(
-            input.as_ptr(),
-            input.len(),
-            limits.max_pixels,
-            limits.max_edge,
-            limits.max_frames,
-            raw.as_mut_ptr(),
-        )
-    };
-    if result == promtuz_avif_sys::LIMIT_EXCEEDED {
-        return Err(DecodeError::LimitExceeded);
+    let mut decoder = Decoder::open(input, limits)?;
+    decoder.next()?.ok_or(DecodeError::Decoder(promtuz_avif_sys::NO_IMAGES_REMAINING))
+}
+
+impl Decoder {
+    pub fn open(input: &[u8], limits: DecodeLimits) -> Result<Self, DecodeError> {
+        let mut raw = std::ptr::null_mut();
+        let mut info = MaybeUninit::<promtuz_avif_sys::ImageInfo>::zeroed();
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_decoder_open(
+                input.as_ptr(),
+                input.len(),
+                limits.max_pixels,
+                limits.max_edge,
+                limits.max_frames,
+                info.as_mut_ptr(),
+                &mut raw,
+            )
+        };
+        if result == promtuz_avif_sys::LIMIT_EXCEEDED {
+            return Err(DecodeError::LimitExceeded);
+        }
+        if result != 0 {
+            return Err(DecodeError::Decoder(result));
+        }
+        let raw = NonNull::new(raw).ok_or(DecodeError::Decoder(-2))?;
+        let info = unsafe { info.assume_init() };
+        Ok(Self { raw, info: image_info(info) })
     }
-    if result != 0 {
-        return Err(DecodeError::Decoder(result));
+
+    pub fn next(&mut self) -> Result<Option<Image>, DecodeError> {
+        let mut raw = MaybeUninit::<promtuz_avif_sys::DecodedImage>::zeroed();
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_decoder_next(self.raw.as_ptr(), raw.as_mut_ptr())
+        };
+        if result == promtuz_avif_sys::NO_IMAGES_REMAINING {
+            return Ok(None);
+        }
+        if result != 0 {
+            return Err(DecodeError::Decoder(result));
+        }
+        let raw = unsafe { raw.assume_init() };
+        Ok(Some(copy_image(raw)?))
     }
-    let raw = unsafe { raw.assume_init() };
+}
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        unsafe { promtuz_avif_sys::promtuz_avif_decoder_destroy(self.raw.as_ptr()) };
+    }
+}
+
+fn image_info(raw: promtuz_avif_sys::ImageInfo) -> ImageInfo {
+    ImageInfo {
+        width: raw.width,
+        height: raw.height,
+        source_depth: raw.source_depth,
+        frame_count: raw.frame_count,
+        color: ColorInfo {
+            primaries: raw.color_primaries,
+            transfer: raw.transfer_characteristics,
+            matrix: raw.matrix_coefficients,
+            full_range: raw.full_range,
+        },
+        has_alpha: raw.has_alpha,
+        has_gain_map: raw.has_gain_map,
+    }
+}
+
+fn copy_image(raw: promtuz_avif_sys::DecodedImage) -> Result<Image, DecodeError> {
     let expected = usize::try_from(raw.width)
         .ok()
         .and_then(|width| {
@@ -73,6 +142,7 @@ pub fn decode_first(input: &[u8], limits: DecodeLimits) -> Result<Image, DecodeE
         height: raw.height,
         source_depth: raw.source_depth,
         frame_count: raw.frame_count,
+        duration_ms: raw.duration_ms,
         color: ColorInfo {
             primaries: raw.color_primaries,
             transfer: raw.transfer_characteristics,
