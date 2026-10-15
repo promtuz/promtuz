@@ -1,11 +1,13 @@
 use std::io::Cursor;
 
-use ::image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
+use ::image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use anyhow::{Result, bail, ensure};
+use ravif::{BitDepth, Encoder, Img};
+use rgb::FromSlice;
 
 use super::{
     frames::{Frame, FrameStore, PixelFormat},
-    policy::MediaRequest,
+    policy::{ImageProfile, MediaRequest},
 };
 
 pub struct DecodedAvif {
@@ -31,6 +33,18 @@ pub struct DecodedStill {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+pub struct PreparedStill {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub struct DecodedFrames {
+    pub width: u32,
+    pub height: u32,
+    pub frames: FrameStore,
 }
 
 /// Content classification is deliberately independent of picker MIME types.
@@ -71,6 +85,69 @@ pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
     Ok(DecodedStill { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
 }
 
+/// Fully composited frames from core-owned animated formats. The caller can
+/// sample, resize, or collapse this same store without re-decoding the source.
+pub fn decode_animation(bytes: &[u8]) -> Result<DecodedFrames> {
+    match inspect(bytes)? {
+        ImageKind::Gif => {
+            collect_frames(::image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?.into_frames())
+        },
+        ImageKind::Png => {
+            let decoder = ::image::codecs::png::PngDecoder::new(Cursor::new(bytes))?;
+            ensure!(decoder.is_apng()?, "The PNG is not animated.");
+            collect_frames(decoder.apng()?.into_frames())
+        },
+        ImageKind::WebP => collect_frames(
+            ::image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))?.into_frames(),
+        ),
+        _ => bail!("This image format does not use the core animation decoder."),
+    }
+}
+
+fn collect_frames(
+    decoded: impl Iterator<Item = ::image::ImageResult<::image::Frame>>,
+) -> Result<DecodedFrames> {
+    let limits = MediaRequest::resource_limits();
+    let mut store = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
+    let mut dimensions = None;
+    let mut duration = 0_u64;
+    for decoded in decoded {
+        let decoded = decoded?;
+        let (numerator, denominator) = decoded.delay().numer_denom_ms();
+        let image = decoded.into_buffer();
+        validate_dimensions(image.width(), image.height())?;
+        let (width, height) = (image.width(), image.height());
+        if let Some(dimensions) = dimensions {
+            ensure!(
+                dimensions == (width, height),
+                "Animated image frames have different canvas sizes."
+            );
+        } else {
+            dimensions = Some((width, height));
+        }
+        let frame_duration = u64::from(numerator).div_ceil(u64::from(denominator.max(1))).max(10);
+        duration = duration.saturating_add(frame_duration);
+        ensure!(
+            duration <= limits.animation_duration_ms,
+            "The animation exceeds the five minute import limit."
+        );
+        ensure!(
+            store.len() < limits.animation_frames as usize,
+            "The animation exceeds the 600 frame import limit."
+        );
+        store.push(Frame::new(
+            image.into_raw(),
+            width,
+            height,
+            PixelFormat::Rgba8,
+            u32::try_from(frame_duration)?,
+        )?)?;
+    }
+    let (width, height) =
+        dimensions.ok_or_else(|| anyhow::anyhow!("The animation has no frames."))?;
+    Ok(DecodedFrames { width, height, frames: store })
+}
+
 fn validate_dimensions(width: u32, height: u32) -> Result<()> {
     let limits = MediaRequest::resource_limits();
     ensure!(width > 0 && height > 0, "The image has invalid dimensions.");
@@ -79,6 +156,49 @@ fn validate_dimensions(width: u32, height: u32) -> Result<()> {
         "The image exceeds the 32 megapixel import limit."
     );
     Ok(())
+}
+
+/// Writes a new, metadata-free SDR AVIF through a finite quality and spatial
+/// ladder. The input pixels are already oriented by the decoder.
+pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<PreparedStill> {
+    let image = ::image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+        .ok_or_else(|| anyhow::anyhow!("invalid decoded image"))?;
+    let mut edge = decoded.width.max(decoded.height).min(profile.max_edge);
+    loop {
+        let (width, height) = fit_dimensions(decoded.width, decoded.height, edge);
+        let scaled = if (width, height) == (decoded.width, decoded.height) {
+            image.clone()
+        } else {
+            ::image::imageops::resize(
+                &image,
+                width,
+                height,
+                ::image::imageops::FilterType::Lanczos3,
+            )
+        };
+        for quality in [72.0, 58.0, 44.0] {
+            let bytes = Encoder::new()
+                .with_quality(quality)
+                .with_alpha_quality(85.0)
+                .with_speed(8)
+                .with_bit_depth(BitDepth::Eight)
+                .encode_rgba(Img::new(scaled.as_raw().as_rgba(), width as usize, height as usize))?
+                .avif_file;
+            if bytes.len() as u64 <= profile.max_bytes {
+                return Ok(PreparedStill { bytes, width, height });
+            }
+        }
+        ensure!(edge > profile.emergency_edge, "This image cannot fit within the send limit.");
+        edge = (edge * 3 / 4).max(profile.emergency_edge);
+    }
+}
+
+fn fit_dimensions(width: u32, height: u32, edge: u32) -> (u32, u32) {
+    let scale = (f64::from(edge) / f64::from(width.max(height))).min(1.0);
+    (
+        (f64::from(width) * scale).round().max(1.0) as u32,
+        (f64::from(height) * scale).round().max(1.0) as u32,
+    )
 }
 
 pub fn decode_avif(bytes: &[u8]) -> Result<DecodedAvif> {
@@ -173,5 +293,25 @@ mod tests {
         assert_eq!(inspect(&png).unwrap(), ImageKind::Png);
         let decoded = decode_sdr_still(&png).unwrap();
         assert_eq!((decoded.width, decoded.height, decoded.rgba), (1, 1, vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn animated_gif_becomes_timed_frames() {
+        const GIF: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\x21\xf9\x04\x01\0\0\0\0\x2c\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3b";
+        let mut decoded = decode_animation(GIF).unwrap();
+        assert_eq!((decoded.width, decoded.height, decoded.frames.len()), (1, 1, 1));
+        assert_eq!(decoded.frames.frame(0).unwrap().duration_ms, 10);
+    }
+
+    #[test]
+    fn still_encoding_uses_the_emergency_rung_before_refusing() {
+        let source = DecodedStill { rgba: vec![0; 4 * 8 * 8], width: 8, height: 8 };
+        let rendered = encode_sdr_still(
+            source,
+            ImageProfile { max_edge: 8, max_bytes: 4_096, emergency_edge: 2 },
+        )
+        .unwrap();
+        assert!(rendered.bytes.len() <= 4_096);
+        assert_eq!((rendered.width, rendered.height), (8, 8));
     }
 }
