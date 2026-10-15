@@ -41,6 +41,11 @@ pub struct PreparedStill {
     pub height: u32,
 }
 
+pub struct PreparedImage {
+    pub still: PreparedStill,
+    pub animation_fallback: bool,
+}
+
 pub struct DecodedFrames {
     pub width: u32,
     pub height: u32,
@@ -83,6 +88,52 @@ pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
     image.apply_orientation(orientation);
     let rgba = image.into_rgba8();
     Ok(DecodedStill { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
+}
+
+/// The common SDR image path. Every successful result is a freshly encoded
+/// AVIF with no source container metadata.
+pub fn prepare_sdr_image(bytes: &[u8], profile: ImageProfile) -> Result<PreparedImage> {
+    let kind = inspect(bytes)?;
+    let (still, animation_fallback) = match kind {
+        ImageKind::Jpeg => (decode_sdr_still(bytes)?, false),
+        ImageKind::Png => {
+            let png = ::image::codecs::png::PngDecoder::new(Cursor::new(bytes))?;
+            if png.is_apng()? {
+                let mut frames = decode_animation(bytes)?.frames;
+                let frame = frames.frame(0)?;
+                (
+                    DecodedStill { rgba: frame.pixels, width: frame.width, height: frame.height },
+                    true,
+                )
+            } else {
+                (decode_sdr_still(bytes)?, false)
+            }
+        },
+        ImageKind::Gif | ImageKind::WebP => {
+            let mut frames = decode_animation(bytes)?.frames;
+            let frame = frames.frame(0)?;
+            (DecodedStill { rgba: frame.pixels, width: frame.width, height: frame.height }, true)
+        },
+        ImageKind::Avif => {
+            let decoded = decode_avif(bytes)?;
+            ensure!(
+                !matches!(decoded.color.transfer, 16 | 18),
+                "HDR AVIF needs tone mapping before SDR conversion."
+            );
+            let rgba = decoded
+                .frame
+                .pixels
+                .chunks_exact(2)
+                .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
+                .collect();
+            (
+                DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height },
+                decoded.frame_count > 1,
+            )
+        },
+        ImageKind::Platform => bail!("This image format needs a platform decoder."),
+    };
+    Ok(PreparedImage { still: encode_sdr_still(still, profile)?, animation_fallback })
 }
 
 /// Fully composited frames from core-owned animated formats. The caller can
@@ -313,5 +364,17 @@ mod tests {
         .unwrap();
         assert!(rendered.bytes.len() <= 4_096);
         assert_eq!((rendered.width, rendered.height), (8, 8));
+    }
+
+    #[test]
+    fn animated_input_has_one_composited_fallback_image() {
+        const GIF: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\x21\xf9\x04\x01\0\0\0\0\x2c\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3b";
+        let prepared = prepare_sdr_image(
+            GIF,
+            ImageProfile { max_edge: 512, max_bytes: 256 * 1024, emergency_edge: 128 },
+        )
+        .unwrap();
+        assert!(prepared.animation_fallback);
+        assert_eq!(inspect(&prepared.still.bytes).unwrap(), ImageKind::Avif);
     }
 }
