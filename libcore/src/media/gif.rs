@@ -401,30 +401,28 @@ fn encode_store(
         if pending_duration < interval {
             continue;
         }
-        feed_pending(
-            &mut colour,
-            &mut alpha_encoder,
-            pending.take().expect("pending frame"),
+        let mut output = FrameOutput {
+            colour: &mut colour,
+            alpha: &mut alpha_encoder,
             width,
             height,
-            pending_duration,
-            &mut delays,
-            profile.max_frames,
-        )?;
+            delays: &mut delays,
+            max_frames: profile.max_frames,
+        };
+        output.feed(pending.take().expect("pending frame"), pending_duration)?;
         pending = Some(frame);
         pending_duration = 0;
     }
     if let Some(frame) = pending {
-        feed_pending(
-            &mut colour,
-            &mut alpha_encoder,
-            frame,
+        let mut output = FrameOutput {
+            colour: &mut colour,
+            alpha: &mut alpha_encoder,
             width,
             height,
-            pending_duration.max(10),
-            &mut delays,
-            profile.max_frames,
-        )?;
+            delays: &mut delays,
+            max_frames: profile.max_frames,
+        };
+        output.feed(frame, pending_duration.max(10))?;
     }
     let colour = colour.finish()?;
     let alpha = alpha_encoder.map(Encoder::finish).transpose()?;
@@ -432,28 +430,40 @@ fn encode_store(
     Ok((sequence::mux(width, height, colour, alpha, &delays, None)?, animated))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn feed_pending(
-    colour: &mut Encoder, alpha: &mut Option<Encoder>, frame: super::frames::Frame, width: u32,
-    height: u32, duration: u32, delays: &mut Vec<u32>, max_frames: u32,
-) -> Result<()> {
-    ensure!(
-        u32::try_from(delays.len()).unwrap_or(u32::MAX) < max_frames,
-        "This animation has too many frames to send."
-    );
-    let rgba = ::image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels)
-        .ok_or_else(|| anyhow!("invalid normalized animation frame"))?;
-    let rgba = if (rgba.width(), rgba.height()) == (width, height) {
-        rgba
-    } else {
-        ::image::imageops::resize(&rgba, width, height, ::image::imageops::FilterType::Triangle)
-    };
-    colour.feed(&rgba, false)?;
-    if let Some(alpha) = alpha {
-        alpha.feed(&rgba, true)?;
+struct FrameOutput<'a> {
+    colour: &'a mut Encoder,
+    alpha: &'a mut Option<Encoder>,
+    width: u32,
+    height: u32,
+    delays: &'a mut Vec<u32>,
+    max_frames: u32,
+}
+
+impl FrameOutput<'_> {
+    fn feed(&mut self, frame: super::frames::Frame, duration: u32) -> Result<()> {
+        ensure!(
+            u32::try_from(self.delays.len()).unwrap_or(u32::MAX) < self.max_frames,
+            "This animation has too many frames to send."
+        );
+        let rgba = ::image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels)
+            .ok_or_else(|| anyhow!("invalid normalized animation frame"))?;
+        let rgba = if (rgba.width(), rgba.height()) == (self.width, self.height) {
+            rgba
+        } else {
+            ::image::imageops::resize(
+                &rgba,
+                self.width,
+                self.height,
+                ::image::imageops::FilterType::Triangle,
+            )
+        };
+        self.colour.feed(&rgba, false)?;
+        if let Some(alpha) = self.alpha {
+            alpha.feed(&rgba, true)?;
+        }
+        self.delays.push(duration);
+        Ok(())
     }
-    delays.push(duration);
-    Ok(())
 }
 
 #[cfg(test)]

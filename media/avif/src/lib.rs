@@ -50,7 +50,7 @@ impl Image {
 
 pub fn decode_first(input: &[u8], limits: DecodeLimits) -> Result<Image, DecodeError> {
     let mut decoder = Decoder::open(input, limits)?;
-    decoder.next()?.ok_or(DecodeError::Decoder(promtuz_avif_sys::NO_IMAGES_REMAINING))
+    decoder.decode_next()?.ok_or(DecodeError::Decoder(promtuz_avif_sys::NO_IMAGES_REMAINING))
 }
 
 impl Decoder {
@@ -79,7 +79,7 @@ impl Decoder {
         Ok(Self { raw, info: image_info(info) })
     }
 
-    pub fn next(&mut self) -> Result<Option<Image>, DecodeError> {
+    pub fn decode_next(&mut self) -> Result<Option<Image>, DecodeError> {
         let mut raw = MaybeUninit::<promtuz_avif_sys::DecodedImage>::zeroed();
         let result = unsafe {
             promtuz_avif_sys::promtuz_avif_decoder_next(self.raw.as_ptr(), raw.as_mut_ptr())

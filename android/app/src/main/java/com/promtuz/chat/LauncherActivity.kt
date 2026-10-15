@@ -4,11 +4,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.promtuz.chat.navigation.AppNavigation
 import com.promtuz.chat.navigation.Routes
@@ -22,8 +26,10 @@ import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
+import com.promtuz.core.adapter.CoreEventBus
 import com.promtuz.core.push.PushNotifier
 import org.koin.android.ext.android.inject
+import uniffi.core.MediaAlert
 
 class LauncherActivity : ComponentActivity() {
     private val viewModel: AppVM by inject()
@@ -48,6 +54,7 @@ class LauncherActivity : ComponentActivity() {
                 com.promtuz.chat.ui.camera.CameraOverlayHost()
                 InviteBottomSheet(viewModel)
                 RequiredUpdateHost()
+                MediaAlertHost()
                 }
             }
         }
@@ -100,5 +107,20 @@ class LauncherActivity : ComponentActivity() {
         intent.removeExtra(PushNotifier.EXTRA_CONVERSATION) // not replayed on recreation
         intent.removeExtra(PushNotifier.EXTRA_CONV_NAME)
         if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.Chat(convHex, name))
+    }
+}
+
+@Composable
+private fun MediaAlertHost() {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        CoreEventBus.mediaAlerts.collect { alert ->
+            val message = when (alert) {
+                MediaAlert.ANIMATION_SIMPLIFIED -> "Sent as a still image"
+                MediaAlert.HDR_CONVERTED_TO_SDR -> "HDR was converted to SDR"
+                MediaAlert.VIDEO_AUDIO_REMOVED -> "Sent without audio"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
     }
 }

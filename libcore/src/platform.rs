@@ -40,6 +40,15 @@ pub trait CoreEvents: Send + Sync {
     fn on_call_video_keyframe(&self);
     /// Target encoder bitrate from the bandwidth estimate.
     fn on_call_video_bitrate(&self, kbps: u32);
+    /// A completed media job used a valid lower rung. The host may show this once.
+    fn on_media_alert(&self, alert: MediaAlert);
+}
+
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaAlert {
+    AnimationSimplified,
+    HdrConvertedToSdr,
+    VideoAudioRemoved,
 }
 
 /// `call` is the 16-byte id every call API takes; `conversation` is where the call row lands.

@@ -12,6 +12,7 @@ use crate::events::connection::ConnectionState;
 use crate::platform::CallEvent;
 use crate::platform::CoreError;
 use crate::platform::CoreEvents;
+use crate::platform::MediaAlert;
 use crate::platform::MessageEvent;
 use crate::platform::Presence;
 use crate::platform::SecureStore;
@@ -60,6 +61,7 @@ impl CoreEvents for Events {
     fn on_call_video(&self, _: Vec<u8>, _: bool) {}
     fn on_call_video_keyframe(&self) {}
     fn on_call_video_bitrate(&self, _: u32) {}
+    fn on_media_alert(&self, _: MediaAlert) {}
 }
 
 struct Plain;

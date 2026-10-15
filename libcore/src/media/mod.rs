@@ -8,9 +8,9 @@ mod avif;
 mod avatar;
 pub mod frames;
 mod gif;
-pub mod import;
 #[path = "image.rs"]
 pub mod image;
+pub mod import;
 mod policy;
 pub mod ports;
 mod sequence;
@@ -20,10 +20,17 @@ pub use avif::{AvifInfo, inspect_avif};
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
+use crate::state::core;
 use anyhow::{Result, bail};
 use common::proto::mls_wire::MAX_AVATAR_BYTES;
 use ravif::{BitDepth, Encoder, Img};
 use rgb::FromSlice;
+
+pub(crate) fn alert(alert: crate::platform::MediaAlert) {
+    if let Some(events) = core().events.get() {
+        events.on_media_alert(alert);
+    }
+}
 
 fn encode_avif(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
     Ok(Encoder::new()

@@ -20,6 +20,7 @@ import uniffi.core.CoreEvents
 import uniffi.core.MessageEvent
 import uniffi.core.ConnectionState as FfiConnectionState
 import uniffi.core.Presence as FfiPresence
+import uniffi.core.MediaAlert
 
 /** [bits] is an OR of Activity bits; 0 is idle. */
 class ActivitySignal(val conversation: ByteArray, val peer: ByteArray, val bits: Int)
@@ -42,6 +43,9 @@ object CoreEventBus : CoreEvents {
 
     private val _presence = bounded<PresenceSignal>()
     val presence: SharedFlow<PresenceSignal> = _presence.asSharedFlow()
+
+    private val _mediaAlerts = bounded<MediaAlert>()
+    val mediaAlerts: SharedFlow<MediaAlert> = _mediaAlerts.asSharedFlow()
 
     /** Keyed by hex IPK. The event stream has no memory, so late collectors start here. */
     private val _presenceByPeer = MutableStateFlow<Map<String, Presence>>(emptyMap())
@@ -104,6 +108,10 @@ object CoreEventBus : CoreEvents {
 
     override fun onCallVideoBitrate(kbps: UInt) = guard {
         com.promtuz.core.call.CallVideoManager.onBitrate(kbps.toInt())
+    }
+
+    override fun onMediaAlert(alert: MediaAlert) {
+        _mediaAlerts.tryEmit(alert)
     }
 
     override fun onActivity(conversation: ByteArray, peer: ByteArray, activity: UShort) {

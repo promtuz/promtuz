@@ -202,6 +202,7 @@ fn prepare_animation(
             animation_fallback: false,
         }),
         Err(_) => {
+            super::alert(crate::platform::MediaAlert::AnimationSimplified);
             let still = encode_sdr_still(fallback, profile.image)?;
             Ok(PreparedImage {
                 bytes: still.bytes,
@@ -406,7 +407,7 @@ pub fn decode_avif_frames(bytes: &[u8]) -> Result<(DecodedAvif, FrameStore)> {
     let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
     let mut first = None;
     while let Some(image) = decoder
-        .next()
+        .decode_next()
         .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?
     {
         let pixels = image.rgba16().iter().flat_map(|pixel| pixel.to_ne_bytes()).collect();
