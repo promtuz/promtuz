@@ -74,6 +74,7 @@ avif-serialize = "0.8"
 # in the tree via ravif — direct line pulls zero new code.
 rgb = "0.8"
 promtuz-avif = { path = "../media/avif" }
+tempfile = "3"
 
 # MLS (RFC 9420) — see misc/specs/MLS.md
 openmls = "0.8.1"
@@ -114,5 +115,4 @@ rcgen = "0.14.8"
 openmls = { version = "0.8.1", features = ["test-utils"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 x509-parser = "0.18.1"
-tempfile = "3"
 expect-test = "1.5.1"
