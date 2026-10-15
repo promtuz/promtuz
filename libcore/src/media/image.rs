@@ -7,7 +7,7 @@ use rgb::FromSlice;
 
 use super::{
     frames::{Frame, FrameStore, PixelFormat},
-    policy::{ImageProfile, MediaRequest},
+    policy::{ImageProfile, MediaRequest, NormalizedCrop},
 };
 
 pub struct DecodedAvif {
@@ -93,6 +93,12 @@ pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
 /// The common SDR image path. Every successful result is a freshly encoded
 /// AVIF with no source container metadata.
 pub fn prepare_sdr_image(bytes: &[u8], profile: ImageProfile) -> Result<PreparedImage> {
+    prepare_sdr_image_with_crop(bytes, profile, None)
+}
+
+pub fn prepare_sdr_image_with_crop(
+    bytes: &[u8], profile: ImageProfile, crop: Option<NormalizedCrop>,
+) -> Result<PreparedImage> {
     let kind = inspect(bytes)?;
     let (still, animation_fallback) = match kind {
         ImageKind::Jpeg => (decode_sdr_still(bytes)?, false),
@@ -133,7 +139,25 @@ pub fn prepare_sdr_image(bytes: &[u8], profile: ImageProfile) -> Result<Prepared
         },
         ImageKind::Platform => bail!("This image format needs a platform decoder."),
     };
+    let still = match crop {
+        Some(crop) => crop_still(still, crop)?,
+        None => still,
+    };
     Ok(PreparedImage { still: encode_sdr_still(still, profile)?, animation_fallback })
+}
+
+pub fn crop_still(decoded: DecodedStill, crop: NormalizedCrop) -> Result<DecodedStill> {
+    crop.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let image = ::image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+        .ok_or_else(|| anyhow::anyhow!("invalid decoded image"))?;
+    let side = ((decoded.width.min(decoded.height) as f32 / crop.zoom).round() as u32).max(1);
+    let center_x = crop.center_x * decoded.width as f32;
+    let center_y = crop.center_y * decoded.height as f32;
+    let x = (center_x - side as f32 / 2.0).round().clamp(0.0, (decoded.width - side) as f32) as u32;
+    let y =
+        (center_y - side as f32 / 2.0).round().clamp(0.0, (decoded.height - side) as f32) as u32;
+    let image = ::image::imageops::crop_imm(&image, x, y, side, side).to_image();
+    Ok(DecodedStill { rgba: image.into_raw(), width: side, height: side })
 }
 
 /// Fully composited frames from core-owned animated formats. The caller can
@@ -376,5 +400,15 @@ mod tests {
         .unwrap();
         assert!(prepared.animation_fallback);
         assert_eq!(inspect(&prepared.still.bytes).unwrap(), ImageKind::Avif);
+    }
+
+    #[test]
+    fn crop_is_square_and_clamped_to_the_source() {
+        let cropped = crop_still(
+            DecodedStill { rgba: vec![0; 4 * 4 * 2], width: 4, height: 2 },
+            NormalizedCrop { center_x: 1.0, center_y: 0.0, zoom: 1.0 },
+        )
+        .unwrap();
+        assert_eq!((cropped.width, cropped.height, cropped.rgba.len()), (2, 2, 16));
     }
 }
