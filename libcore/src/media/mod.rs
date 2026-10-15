@@ -7,11 +7,13 @@
 mod avif;
 mod avatar;
 mod gif;
+mod policy;
 mod sequence;
 pub(crate) mod video;
 
 pub use avif::{AvifInfo, inspect_avif};
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
+pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
 use anyhow::{Result, bail};
 use common::proto::mls_wire::MAX_AVATAR_BYTES;
