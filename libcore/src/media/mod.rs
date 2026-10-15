@@ -6,6 +6,7 @@
 
 mod avif;
 mod avatar;
+pub(crate) mod frames;
 mod gif;
 mod policy;
 mod sequence;
