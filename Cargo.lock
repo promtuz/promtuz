@@ -903,6 +903,7 @@ dependencies = [
  "opus",
  "parking_lot",
  "postcard",
+ "promtuz-avif",
  "quinn",
  "rand 0.10.1",
  "rav1e",

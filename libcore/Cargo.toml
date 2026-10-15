@@ -73,6 +73,7 @@ avif-serialize = "0.8"
 # ravif's pixel types; `FromSlice` casts &[u8]→&[RGBA8] copy-free. Already
 # in the tree via ravif — direct line pulls zero new code.
 rgb = "0.8"
+promtuz-avif = { path = "../media/avif" }
 
 # MLS (RFC 9420) — see misc/specs/MLS.md
 openmls = "0.8.1"

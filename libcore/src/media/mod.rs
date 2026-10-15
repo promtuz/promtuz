@@ -8,6 +8,8 @@ mod avif;
 mod avatar;
 pub(crate) mod frames;
 mod gif;
+#[path = "image.rs"]
+pub mod pipeline_image;
 mod policy;
 pub(crate) mod ports;
 mod sequence;
