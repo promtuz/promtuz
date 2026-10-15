@@ -9,6 +9,7 @@ mod avatar;
 pub(crate) mod frames;
 mod gif;
 mod policy;
+pub(crate) mod ports;
 mod sequence;
 pub(crate) mod video;
 
