@@ -1,4 +1,8 @@
-use std::io::Cursor;
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Read},
+    path::Path,
+};
 
 use ::image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use anyhow::{Result, bail, ensure};
@@ -70,20 +74,50 @@ pub fn inspect(bytes: &[u8]) -> Result<ImageKind> {
     }
 }
 
+/// The private import is the only file path media decoding accepts. Picker URIs
+/// never reach this layer, and ordinary formats stream from that private copy.
+pub fn inspect_path(path: &Path) -> Result<ImageKind> {
+    let mut header = [0_u8; 64];
+    let used = File::open(path)?.read(&mut header)?;
+    let header = &header[..used];
+    if header.len() >= 12 && &header[4..8] == b"ftyp" {
+        return Ok(ImageKind::Avif);
+    }
+    match ::image::guess_format(header) {
+        Ok(ImageFormat::Jpeg) => Ok(ImageKind::Jpeg),
+        Ok(ImageFormat::Png) => Ok(ImageKind::Png),
+        Ok(ImageFormat::Gif) => Ok(ImageKind::Gif),
+        Ok(ImageFormat::WebP) => Ok(ImageKind::WebP),
+        Ok(_) => Ok(ImageKind::Platform),
+        Err(_) => bail!("This image format is not supported."),
+    }
+}
+
 /// Decodes a core-owned SDR still with orientation baked into pixels. Animated
 /// sources take the frame path instead, so this can never silently discard them.
 pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
     let kind = inspect(bytes)?;
+    decode_sdr_still_reader(kind, Cursor::new(bytes))
+}
+
+pub fn decode_sdr_still_path(path: &Path) -> Result<DecodedStill> {
+    let kind = inspect_path(path)?;
+    decode_sdr_still_reader(kind, BufReader::new(File::open(path)?))
+}
+
+fn decode_sdr_still_reader(
+    reader_kind: ImageKind, reader: impl std::io::BufRead + std::io::Seek,
+) -> Result<DecodedStill> {
     ensure!(
-        matches!(kind, ImageKind::Jpeg | ImageKind::Png),
+        matches!(reader_kind, ImageKind::Jpeg | ImageKind::Png),
         "This image needs animated or platform decoding."
     );
-    let format = match kind {
+    let format = match reader_kind {
         ImageKind::Jpeg => ImageFormat::Jpeg,
         ImageKind::Png => ImageFormat::Png,
         _ => unreachable!(),
     };
-    let mut decoder = ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+    let mut decoder = ImageReader::with_format(reader, format).into_decoder()?;
     let (width, height) = decoder.dimensions();
     validate_dimensions(width, height)?;
     let orientation = decoder.orientation()?;
@@ -91,6 +125,25 @@ pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
     image.apply_orientation(orientation);
     let rgba = image.into_rgba8();
     Ok(DecodedStill { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
+}
+
+pub fn decode_animation_path(path: &Path) -> Result<DecodedFrames> {
+    let kind = inspect_path(path)?;
+    match kind {
+        ImageKind::Gif => collect_frames(
+            ::image::codecs::gif::GifDecoder::new(BufReader::new(File::open(path)?))?.into_frames(),
+        ),
+        ImageKind::Png => {
+            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?;
+            ensure!(decoder.is_apng()?, "The PNG is not animated.");
+            collect_frames(decoder.apng()?.into_frames())
+        },
+        ImageKind::WebP => collect_frames(
+            ::image::codecs::webp::WebPDecoder::new(BufReader::new(File::open(path)?))?
+                .into_frames(),
+        ),
+        _ => bail!("This image format does not use the core animation decoder."),
+    }
 }
 
 /// The common SDR image path. Every successful result is a freshly encoded
@@ -183,13 +236,47 @@ pub fn prepare_image(bytes: &[u8], request: MediaRequest) -> Result<PreparedImag
     prepare_animation(bytes, kind, animation.expect("checked above"))
 }
 
+/// File-backed counterpart of [`prepare_image`]. It is used only after the
+/// source lease has become a bounded, private core import.
+pub fn prepare_image_path(path: &Path, request: MediaRequest) -> Result<PreparedImage> {
+    request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let kind = inspect_path(path)?;
+    let animation = request.animation_profile();
+    let profile = request
+        .image_profile()
+        .or_else(|| animation.map(|profile| profile.image))
+        .ok_or_else(|| anyhow::anyhow!("This request expects video input."))?;
+    let animated = match kind {
+        ImageKind::Gif | ImageKind::WebP => true,
+        ImageKind::Png => {
+            ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?.is_apng()?
+        },
+        ImageKind::Avif => bail!("AVIF file decoding has not been configured."),
+        _ => false,
+    };
+    if animated && let Some(animation) = animation {
+        return prepare_animation_frames(decode_animation_path(path)?, animation);
+    }
+    let crop = match request {
+        MediaRequest::Avatar { crop } => Some(crop),
+        _ => None,
+    };
+    prepare_sdr_image_path(path, kind, profile, crop)
+}
+
 fn prepare_animation(
     bytes: &[u8], kind: ImageKind, profile: super::policy::AnimationProfile,
 ) -> Result<PreparedImage> {
-    let mut frames = match kind {
+    let frames = match kind {
         ImageKind::Avif => decode_avif_animation(bytes)?,
         _ => decode_animation(bytes)?,
     };
+    prepare_animation_frames(frames, profile)
+}
+
+fn prepare_animation_frames(
+    mut frames: DecodedFrames, profile: super::policy::AnimationProfile,
+) -> Result<PreparedImage> {
     let fallback = frames.frames.frame(0)?;
     let fallback =
         DecodedStill { rgba: fallback.pixels, width: fallback.width, height: fallback.height };
@@ -213,6 +300,46 @@ fn prepare_animation(
             })
         },
     }
+}
+
+fn prepare_sdr_image_path(
+    path: &Path, kind: ImageKind, profile: ImageProfile, crop: Option<NormalizedCrop>,
+) -> Result<PreparedImage> {
+    let (still, animation_fallback) = match kind {
+        ImageKind::Jpeg => (decode_sdr_still_path(path)?, false),
+        ImageKind::Png => {
+            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?;
+            if !decoder.is_apng()? {
+                (decode_sdr_still_path(path)?, false)
+            } else {
+                let mut frames = decode_animation_path(path)?.frames;
+                let frame = frames.frame(0)?;
+                (
+                    DecodedStill { rgba: frame.pixels, width: frame.width, height: frame.height },
+                    true,
+                )
+            }
+        },
+        ImageKind::Gif | ImageKind::WebP => {
+            let mut frames = decode_animation_path(path)?.frames;
+            let frame = frames.frame(0)?;
+            (DecodedStill { rgba: frame.pixels, width: frame.width, height: frame.height }, true)
+        },
+        ImageKind::Avif => bail!("AVIF file decoding has not been configured."),
+        ImageKind::Platform => bail!("This image format needs a platform decoder."),
+    };
+    let still = match crop {
+        Some(crop) => crop_still(still, crop)?,
+        None => still,
+    };
+    let still = encode_sdr_still(still, profile)?;
+    Ok(PreparedImage {
+        bytes: still.bytes,
+        width: still.width,
+        height: still.height,
+        animated: false,
+        animation_fallback,
+    })
 }
 
 fn decode_avif_animation(bytes: &[u8]) -> Result<DecodedFrames> {
@@ -430,6 +557,8 @@ pub fn decode_avif_frames(bytes: &[u8]) -> Result<(DecodedAvif, FrameStore)> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use ::image::{ColorType, ImageEncoder};
 
     use super::*;
@@ -463,6 +592,22 @@ mod tests {
         assert_eq!(inspect(&png).unwrap(), ImageKind::Png);
         let decoded = decode_sdr_still(&png).unwrap();
         assert_eq!((decoded.width, decoded.height, decoded.rgba), (1, 1, vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn private_import_path_uses_the_same_core_decoder() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("picked.png");
+        let mut png = Vec::new();
+        ::image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[1, 2, 3, 4], 1, 1, ColorType::Rgba8.into())
+            .unwrap();
+        File::create(&path).unwrap().write_all(&png).unwrap();
+        assert_eq!(inspect_path(&path).unwrap(), ImageKind::Png);
+        assert_eq!(decode_sdr_still_path(&path).unwrap().rgba, vec![1, 2, 3, 4]);
+        let prepared =
+            prepare_image_path(&path, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
+        assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
     }
 
     #[test]
