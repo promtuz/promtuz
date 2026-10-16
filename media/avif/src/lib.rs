@@ -1,4 +1,4 @@
-use std::{mem::MaybeUninit, ptr::NonNull, slice};
+use std::{ffi::CString, mem::MaybeUninit, path::Path, ptr::NonNull, slice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
@@ -77,6 +77,31 @@ impl Decoder {
         let raw = NonNull::new(raw).ok_or(DecodeError::Decoder(-2))?;
         let info = unsafe { info.assume_init() };
         Ok(Self { raw, info: image_info(info) })
+    }
+
+    pub fn open_file(path: &Path, limits: DecodeLimits) -> Result<Self, DecodeError> {
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| DecodeError::Decoder(-2))?;
+        let mut raw = std::ptr::null_mut();
+        let mut info = MaybeUninit::<promtuz_avif_sys::ImageInfo>::zeroed();
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_decoder_open_file(
+                path.as_ptr(),
+                limits.max_pixels,
+                limits.max_edge,
+                limits.max_frames,
+                info.as_mut_ptr(),
+                &mut raw,
+            )
+        };
+        if result == promtuz_avif_sys::LIMIT_EXCEEDED {
+            return Err(DecodeError::LimitExceeded);
+        }
+        if result != 0 {
+            return Err(DecodeError::Decoder(result));
+        }
+        let raw = NonNull::new(raw).ok_or(DecodeError::Decoder(-2))?;
+        Ok(Self { raw, info: image_info(unsafe { info.assume_init() }) })
     }
 
     pub fn decode_next(&mut self) -> Result<Option<Image>, DecodeError> {
@@ -169,6 +194,8 @@ impl Default for DecodeLimits {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use ravif::{Encoder, Img};
     use rgb::FromSlice;
@@ -201,5 +228,18 @@ mod tests {
             decode_first(&encoded, DecodeLimits { max_pixels: 1, ..DecodeLimits::default() }),
             Err(DecodeError::LimitExceeded)
         ));
+    }
+
+    #[test]
+    fn opens_a_private_file_without_loading_the_container_in_rust() {
+        let encoded = Encoder::new()
+            .encode_rgba(Img::new([255_u8, 0, 0, 255].as_rgba(), 1, 1))
+            .unwrap()
+            .avif_file;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.avif");
+        std::fs::File::create(&path).unwrap().write_all(&encoded).unwrap();
+        let mut decoder = Decoder::open_file(&path, DecodeLimits::default()).unwrap();
+        assert_eq!(decoder.decode_next().unwrap().unwrap().rgba16().len(), 4);
     }
 }

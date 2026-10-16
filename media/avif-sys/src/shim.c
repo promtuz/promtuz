@@ -101,6 +101,53 @@ int promtuz_avif_decoder_open(const uint8_t *input, size_t input_len,
     return AVIF_RESULT_OK;
 }
 
+int promtuz_avif_decoder_open_file(const char *path,
+                                   uint32_t max_pixels, uint32_t max_edge,
+                                   uint32_t max_frames, PromtuzAvifInfo *info,
+                                   PromtuzAvifDecoder **output) {
+    if (path == NULL || path[0] == '\0' || max_pixels == 0 || max_edge == 0 ||
+        max_frames == 0 || info == NULL || output == NULL) {
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    memset(info, 0, sizeof(*info));
+    *output = NULL;
+
+    avifDecoder *decoder = avifDecoderCreate();
+    if (decoder == NULL) {
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    decoder->maxThreads = 1;
+    decoder->ignoreExif = AVIF_TRUE;
+    decoder->ignoreXMP = AVIF_TRUE;
+    decoder->imageCountLimit = max_frames;
+
+    avifResult result = avifDecoderSetIOFile(decoder, path);
+    if (result == AVIF_RESULT_OK) {
+        result = avifDecoderParse(decoder);
+    }
+    if (result != AVIF_RESULT_OK) {
+        avifDecoderDestroy(decoder);
+        return result;
+    }
+    if (decoder->imageCount <= 0 || (uint32_t)decoder->imageCount > max_frames ||
+        decoder->image->width > max_edge || decoder->image->height > max_edge ||
+        (uint64_t)decoder->image->width * decoder->image->height > max_pixels) {
+        avifDecoderDestroy(decoder);
+        return PROMTUZ_AVIF_LIMIT_EXCEEDED;
+    }
+    decoder->imageSizeLimit = max_pixels;
+    decoder->imageDimensionLimit = max_edge;
+    PromtuzAvifDecoder *state = avifAlloc(sizeof(*state));
+    if (state == NULL) {
+        avifDecoderDestroy(decoder);
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    state->decoder = decoder;
+    promtuz_avif_info(decoder, info);
+    *output = state;
+    return AVIF_RESULT_OK;
+}
+
 int promtuz_avif_decoder_next(PromtuzAvifDecoder *state, PromtuzAvifImage *output) {
     if (state == NULL || state->decoder == NULL || output == NULL) {
         return AVIF_RESULT_INVALID_ARGUMENT;

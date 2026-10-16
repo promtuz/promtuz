@@ -11,3 +11,4 @@ promtuz-avif-sys = { path = "../avif-sys" }
 [dev-dependencies]
 ravif = { version = "0.11", default-features = false }
 rgb = "0.8"
+tempfile = "3"

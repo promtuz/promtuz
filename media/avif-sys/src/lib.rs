@@ -45,6 +45,10 @@ unsafe extern "C" {
         input: *const u8, input_len: usize, max_pixels: u32, max_edge: u32, max_frames: u32,
         info: *mut ImageInfo, output: *mut *mut Decoder,
     ) -> c_int;
+    pub fn promtuz_avif_decoder_open_file(
+        path: *const std::ffi::c_char, max_pixels: u32, max_edge: u32, max_frames: u32,
+        info: *mut ImageInfo, output: *mut *mut Decoder,
+    ) -> c_int;
     pub fn promtuz_avif_decoder_next(decoder: *mut Decoder, output: *mut DecodedImage) -> c_int;
     pub fn promtuz_avif_decoder_destroy(decoder: *mut Decoder);
     pub fn promtuz_avif_free_pixels(pixels: *mut u8);
