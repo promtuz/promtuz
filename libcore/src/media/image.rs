@@ -61,6 +61,9 @@ pub struct DecodedFrames {
 
 /// Content classification is deliberately independent of picker MIME types.
 pub fn inspect(bytes: &[u8]) -> Result<ImageKind> {
+    if is_isobmff(bytes) {
+        return Ok(if has_avif_brand(bytes) { ImageKind::Avif } else { ImageKind::Platform });
+    }
     if crate::media::inspect_avif(bytes)?.is_some() {
         return Ok(ImageKind::Avif);
     }
@@ -80,8 +83,8 @@ pub fn inspect_path(path: &Path) -> Result<ImageKind> {
     let mut header = [0_u8; 64];
     let used = File::open(path)?.read(&mut header)?;
     let header = &header[..used];
-    if header.len() >= 12 && &header[4..8] == b"ftyp" {
-        return Ok(ImageKind::Avif);
+    if is_isobmff(header) {
+        return Ok(if has_avif_brand(header) { ImageKind::Avif } else { ImageKind::Platform });
     }
     match ::image::guess_format(header) {
         Ok(ImageFormat::Jpeg) => Ok(ImageKind::Jpeg),
@@ -91,6 +94,16 @@ pub fn inspect_path(path: &Path) -> Result<ImageKind> {
         Ok(_) => Ok(ImageKind::Platform),
         Err(_) => bail!("This image format is not supported."),
     }
+}
+
+fn is_isobmff(header: &[u8]) -> bool {
+    header.len() >= 16 && &header[4..8] == b"ftyp"
+}
+
+fn has_avif_brand(header: &[u8]) -> bool {
+    header[8..]
+        .chunks_exact(4)
+        .any(|brand| matches!(brand, b"avif" | b"avis"))
 }
 
 /// Decodes a core-owned SDR still with orientation baked into pixels. Animated
@@ -641,6 +654,17 @@ mod tests {
         assert_eq!(inspect(&png).unwrap(), ImageKind::Png);
         let decoded = decode_sdr_still(&png).unwrap();
         assert_eq!((decoded.width, decoded.height, decoded.rgba), (1, 1, vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn bmff_images_only_use_libavif_when_they_declare_an_avif_brand() {
+        let mut avif = b"\0\0\0\x18ftypavif\0\0\0\0mif1avis".to_vec();
+        avif.resize(64, 0);
+        assert_eq!(inspect(&avif).unwrap(), ImageKind::Avif);
+
+        let mut heif = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+        heif.resize(64, 0);
+        assert_eq!(inspect(&heif).unwrap(), ImageKind::Platform);
     }
 
     #[test]
