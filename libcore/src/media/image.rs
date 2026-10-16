@@ -349,14 +349,10 @@ fn prepare_animation_frames(
     let fallback = frames.frames.frame(0)?;
     let fallback =
         DecodedStill { rgba: fallback.pixels, width: fallback.width, height: fallback.height };
-    match super::gif::encode_frames(&mut frames.frames, profile) {
-        Ok(prepared) => Ok(PreparedImage {
-            bytes: prepared.bytes,
-            width: prepared.width,
-            height: prepared.height,
-            animated: prepared.animated,
-            animation_fallback: false,
-        }),
+    match encode_sdr_animation(&mut frames.frames, profile) {
+        Ok((bytes, width, height)) => {
+            Ok(PreparedImage { bytes, width, height, animated: true, animation_fallback: false })
+        },
         Err(_) => {
             super::alert(crate::platform::MediaAlert::AnimationSimplified);
             let still = encode_sdr_still(fallback, profile.image)?;
@@ -572,17 +568,113 @@ pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<
 pub(super) fn encode_sdr_avif(
     rgba: &[u8], width: u32, height: u32, quality: f32,
 ) -> Result<Vec<u8>> {
-    let quantizer = ((100.0 - quality.clamp(0.0, 100.0)) * 63.0 / 100.0).round() as u8;
-    let mut encoder = promtuz_avif::Encoder::new(
-        width,
-        height,
-        promtuz_avif::EncodeConfig { quantizer, ..promtuz_avif::EncodeConfig::default() },
-    )
-    .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))?;
+    let mut encoder = new_avif_encoder(width, height, quality, false)?;
     encoder
         .add_rgba(rgba, 1)
         .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))?;
     encoder.finish().map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))
+}
+
+fn new_avif_encoder(
+    width: u32, height: u32, quality: f32, animated: bool,
+) -> Result<promtuz_avif::Encoder> {
+    let quantizer = ((100.0 - quality.clamp(0.0, 100.0)) * 63.0 / 100.0).round() as u8;
+    promtuz_avif::Encoder::new(
+        width,
+        height,
+        promtuz_avif::EncodeConfig { quantizer, animated, ..promtuz_avif::EncodeConfig::default() },
+    )
+    .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))
+}
+
+fn encode_sdr_animation(
+    frames: &mut FrameStore, profile: super::policy::AnimationProfile,
+) -> Result<(Vec<u8>, u32, u32)> {
+    ensure!(frames.len() > 1, "The animation has no additional frames.");
+    let first = frames.frame(0)?;
+    ensure!(
+        first.format == PixelFormat::Rgba8,
+        "The animation must be normalized to SDR pixels before encoding."
+    );
+    let samples = select_animation_frames(frames, &first, profile)?;
+    let mut edge = first.width.max(first.height).min(profile.image.max_edge);
+    let mut last_size = 0_u64;
+    for (attempt, quality) in [72.0, 58.0, 44.0].into_iter().enumerate() {
+        if attempt >= 2 && last_size > profile.image.max_bytes {
+            let scale = (0.82 * profile.image.max_bytes as f64 / last_size as f64).sqrt();
+            edge = ((f64::from(edge) * scale) as u32).max(profile.image.emergency_edge).min(edge);
+        }
+        let (width, height) = fit_dimensions(first.width, first.height, edge);
+        let bytes = encode_animation_candidate(frames, &samples, width, height, quality)?;
+        last_size = u64::try_from(bytes.len())?;
+        if last_size <= profile.image.max_bytes {
+            return Ok((bytes, width, height));
+        }
+    }
+    bail!("This animation cannot fit within the send limit without removing frames")
+}
+
+fn select_animation_frames(
+    frames: &mut FrameStore, first: &Frame, profile: super::policy::AnimationProfile,
+) -> Result<Vec<(usize, u32)>> {
+    let interval = 1_000_u32.div_ceil(profile.max_fps.max(1));
+    let mut total_duration = 0_u64;
+    let mut samples = Vec::new();
+    let mut pending = Some((0, first.duration_ms.max(10)));
+    for index in 0..frames.len() {
+        let frame = if index == 0 { first.clone() } else { frames.frame(index)? };
+        ensure!(
+            frame.format == PixelFormat::Rgba8
+                && (frame.width, frame.height) == (first.width, first.height),
+            "Animated image frames have different pixel layouts."
+        );
+        let duration = frame.duration_ms.max(10);
+        total_duration = total_duration.saturating_add(u64::from(duration));
+        if let Some(max_duration) = profile.max_duration_ms {
+            ensure!(total_duration <= max_duration, "This animation is too long to send.");
+        }
+        if index == 0 {
+            continue;
+        }
+        let (pending_index, pending_duration) = pending.expect("first frame is pending");
+        if pending_duration.saturating_add(duration) < interval {
+            pending = Some((pending_index, pending_duration.saturating_add(duration)));
+            continue;
+        }
+        ensure!(
+            u32::try_from(samples.len()).unwrap_or(u32::MAX) < profile.max_frames,
+            "This animation has too many frames to send."
+        );
+        samples.push((pending_index, pending_duration));
+        pending = Some((index, duration));
+    }
+    let pending = pending.expect("first frame is pending");
+    ensure!(
+        u32::try_from(samples.len()).unwrap_or(u32::MAX) < profile.max_frames,
+        "This animation has too many frames to send."
+    );
+    samples.push(pending);
+    ensure!(samples.len() > 1, "The animation has no additional frames.");
+    Ok(samples)
+}
+
+fn encode_animation_candidate(
+    frames: &mut FrameStore, samples: &[(usize, u32)], width: u32, height: u32, quality: f32,
+) -> Result<Vec<u8>> {
+    ensure!(width >= 16 && height >= 16, "This animation is too small to encode.");
+    let mut encoder = new_avif_encoder(width, height, quality, true)?;
+    for &(index, duration) in samples {
+        let frame = frames.frame(index)?;
+        let image = ::image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels)
+            .ok_or_else(|| anyhow::anyhow!("invalid normalized animation frame"))?;
+        let scaled = resize_linear_srgb(&image, width, height);
+        encoder
+            .add_rgba(scaled.as_raw(), duration)
+            .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the animation: {error:?}"))?;
+    }
+    encoder
+        .finish()
+        .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the animation: {error:?}"))
 }
 
 pub(super) fn resize_linear_srgb(
@@ -848,6 +940,52 @@ mod tests {
         .unwrap();
         assert!(prepared.animation_fallback);
         assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
+    }
+
+    #[test]
+    fn normalized_animation_uses_the_libavif_sequence_writer() {
+        let mut frames = FrameStore::new(4_096, 4_096);
+        for value in [0, 255] {
+            frames
+                .push(
+                    Frame::new(
+                        vec![value, 0, 0, 255].repeat(16 * 16),
+                        16,
+                        16,
+                        PixelFormat::Rgba8,
+                        100,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let prepared = prepare_animation_frames(
+            DecodedFrames { width: 16, height: 16, frames },
+            super::super::policy::CHAT_ANIMATION,
+        )
+        .unwrap();
+        let info = super::super::inspect_avif(&prepared.bytes).unwrap().unwrap();
+        assert!(prepared.animated);
+        assert!(!prepared.animation_fallback);
+        assert_eq!(info.frame_count, 2);
+        assert_eq!(info.duration_ms, Some(200));
+    }
+
+    #[test]
+    fn tiny_animations_fall_back_to_the_first_composited_frame() {
+        let mut frames = FrameStore::new(1_024, 1_024);
+        for value in [0, 255] {
+            frames
+                .push(Frame::new(vec![value, 0, 0, 255], 1, 1, PixelFormat::Rgba8, 100).unwrap())
+                .unwrap();
+        }
+        let prepared = prepare_animation_frames(
+            DecodedFrames { width: 1, height: 1, frames },
+            super::super::policy::CHAT_ANIMATION,
+        )
+        .unwrap();
+        assert!(!prepared.animated);
+        assert!(prepared.animation_fallback);
     }
 
     #[test]
