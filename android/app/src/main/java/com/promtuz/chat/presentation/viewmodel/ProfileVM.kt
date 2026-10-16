@@ -1,5 +1,6 @@
 package com.promtuz.chat.presentation.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.utils.media.PhotoCrop
@@ -7,7 +8,6 @@ import com.promtuz.chat.utils.media.AvatarPicture
 import com.promtuz.chat.utils.media.AvatarSource
 import com.promtuz.chat.utils.media.ImagePreparationException
 import com.promtuz.chat.utils.media.prepareAvatar
-import com.promtuz.chat.utils.media.toRgba
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
@@ -59,24 +59,14 @@ class ProfileVM(private val group: String? = null) : ViewModel() {
         _profile.value = OwnProfile(name, picture, if (group == null) CoreBridge.profileBio() else "", if (group == null) withContext(Dispatchers.IO) { uniffi.core.profileIdentity().toHex() } else group)
     }
 
-    fun savePicture(source: AvatarSource, crop: PhotoCrop, requestId: String) = change({ _savedPhoto.value = requestId }) {
-        when (source) {
-            is AvatarSource.Still -> {
-                val rgba = withContext(Dispatchers.Default) {
-                    val bitmap = crop.render(source.bitmap)
-                    try { bitmap.toRgba() } finally { bitmap.recycle() }
-                }
-                if (group == null) CoreBridge.setProfilePicture(rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
-                else CoreBridge.setGroupPicture(group.fromHex(), rgba, PhotoCrop.OUTPUT_EDGE, PhotoCrop.OUTPUT_EDGE)
-            }
-            is AvatarSource.Encoded -> {
-                val bytes = if (source.canCrop) CoreBridge.prepareAvatarImage(source.original,
-                    uniffi.core.AvatarCropRecord(crop.centerX.toDouble(), crop.centerY.toDouble(), crop.zoom.toDouble()),
-                ).bytes else source.picture.encoded
-                if (group == null) CoreBridge.setProfilePictureEncoded(bytes)
-                else CoreBridge.setGroupPictureEncoded(group.fromHex(), bytes)
-            }
-        }
+    fun savePicture(context: Context, source: AvatarSource, crop: PhotoCrop, requestId: String) = change({ _savedPhoto.value = requestId }) {
+        val bytes = CoreBridge.prepareImportedAvatar(
+            context,
+            source.uri,
+            uniffi.core.ImageCropRecord(crop.centerX, crop.centerY, crop.zoom),
+        ).bytes
+        if (group == null) CoreBridge.setProfilePictureEncoded(bytes)
+        else CoreBridge.setGroupPictureEncoded(group.fromHex(), bytes)
     }
 
     fun removePicture() = change {

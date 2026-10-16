@@ -330,6 +330,12 @@ object CoreBridge {
     suspend fun prepareAvatarImage(bytes: ByteArray, crop: uniffi.core.AvatarCropRecord? = null): uniffi.core.PreparedImageRecord =
         withContext(Dispatchers.Default) { uniffi.core.prepareAvatarImage(bytes, crop) }
 
+    suspend fun prepareImportedAvatar(
+        context: Context, uri: Uri, crop: uniffi.core.ImageCropRecord,
+    ): uniffi.core.PreparedImageRecord = withContext(Dispatchers.IO) {
+        importMedia(context, uri).beginAvatar(crop).prepare()
+    }
+
     fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
 
     suspend fun stageEncodedImage(bytes: ByteArray): ULong =

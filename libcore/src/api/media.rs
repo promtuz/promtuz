@@ -108,6 +108,18 @@ pub struct MediaImageJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
 }
 
+#[derive(uniffi::Object)]
+pub struct MediaPreparedImageJob {
+    job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+}
+
+#[derive(uniffi::Record)]
+pub struct ImageCropRecord {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub zoom: f32,
+}
+
 #[derive(uniffi::Record)]
 pub struct StagedImageRecord {
     pub id: u64,
@@ -138,16 +150,41 @@ impl MediaImport {
     }
 
     pub fn begin_chat_image(&self, hd_enabled: bool) -> Result<Arc<MediaImageJob>, CoreError> {
-        let source = self.source.lock().take().ok_or_else(|| CoreError::Refused {
-            msg: "This media import was already used or discarded.".into(),
-        })?;
-        let job = crate::media::MediaJob::from_source(
-            source,
-            crate::media::MediaRequest::ChatImage { hd_enabled },
-            core().db.files_dir("media-imports").into(),
-        )?;
+        let job = take_import_job(self, crate::media::MediaRequest::ChatImage { hd_enabled })?;
         Ok(Arc::new(MediaImageJob { job: parking_lot::Mutex::new(Some(job)) }))
     }
+
+    pub fn begin_avatar(
+        &self, crop: ImageCropRecord,
+    ) -> Result<Arc<MediaPreparedImageJob>, CoreError> {
+        let crop = crate::media::NormalizedCrop {
+            center_x: crop.center_x,
+            center_y: crop.center_y,
+            zoom: crop.zoom,
+        }
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+        let job = take_import_job(self, crate::media::MediaRequest::Avatar { crop })?;
+        Ok(Arc::new(MediaPreparedImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+    }
+
+    pub fn begin_sticker(&self) -> Result<Arc<MediaPreparedImageJob>, CoreError> {
+        let job = take_import_job(self, crate::media::MediaRequest::Sticker { trim: None })?;
+        Ok(Arc::new(MediaPreparedImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+    }
+}
+
+fn take_import_job(
+    import: &MediaImport, request: crate::media::MediaRequest,
+) -> Result<crate::media::MediaJob, CoreError> {
+    let source = import.source.lock().take().ok_or_else(|| CoreError::Refused {
+        msg: "This media import was already used or discarded.".into(),
+    })?;
+    Ok(crate::media::MediaJob::from_source(
+        source,
+        request,
+        core().db.files_dir("media-imports").into(),
+    )?)
 }
 
 #[uniffi::export]
@@ -164,6 +201,34 @@ impl MediaImageJob {
         Ok(StagedImageRecord {
             id: image.id,
             avif: image.avif,
+            width: image.width,
+            height: image.height,
+            animated: image.animated,
+        })
+    }
+
+    pub fn cancel(&self) {
+        if let Some(mut job) = self.job.lock().take() {
+            job.cancel();
+        }
+    }
+}
+
+#[uniffi::export]
+impl MediaPreparedImageJob {
+    pub fn prepare(&self) -> Result<PreparedImageRecord, CoreError> {
+        let mut job = self.job.lock();
+        let image = job
+            .as_mut()
+            .ok_or_else(|| CoreError::Refused {
+                msg: "This media job is finished or cancelled.".into(),
+            })?
+            .run();
+        job.take();
+        let crate::media::PreparedMedia::Image(image) = image?;
+        Ok(PreparedImageRecord {
+            bytes: image.bytes,
+            mime: "image/avif".into(),
             width: image.width,
             height: image.height,
             animated: image.animated,
