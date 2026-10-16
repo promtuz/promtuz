@@ -36,6 +36,11 @@ pub struct Decoder {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct Encoder {
+    _private: [u8; 0],
+}
+
 unsafe extern "C" {
     pub fn promtuz_avif_decode_rgba16(
         input: *const u8, input_len: usize, max_pixels: u32, max_edge: u32, max_frames: u32,
@@ -52,6 +57,18 @@ unsafe extern "C" {
     pub fn promtuz_avif_decoder_next(decoder: *mut Decoder, output: *mut DecodedImage) -> c_int;
     pub fn promtuz_avif_decoder_destroy(decoder: *mut Decoder);
     pub fn promtuz_avif_free_pixels(pixels: *mut u8);
+    pub fn promtuz_avif_encoder_create(
+        width: u32, height: u32, quantizer: u32, speed: c_int, timescale: u32, animated: bool,
+        output: *mut *mut Encoder,
+    ) -> c_int;
+    pub fn promtuz_avif_encoder_add_rgba(
+        encoder: *mut Encoder, pixels: *const u8, pixel_bytes: usize, duration: u32,
+    ) -> c_int;
+    pub fn promtuz_avif_encoder_finish(
+        encoder: *mut Encoder, bytes: *mut *mut u8, size: *mut usize,
+    ) -> c_int;
+    pub fn promtuz_avif_encoder_destroy(encoder: *mut Encoder);
+    pub fn promtuz_avif_free_bytes(bytes: *mut u8);
 }
 
 pub const LIMIT_EXCEEDED: c_int = -1;

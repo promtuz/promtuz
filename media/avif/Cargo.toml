@@ -7,6 +7,12 @@ repository.workspace = true
 
 [dependencies]
 promtuz-avif-sys = { path = "../avif-sys" }
+# libavif calls rav1e through its stable C ABI. Keep the ABI provider beside the
+# safe wrapper so every libavif consumer links the same pinned encoder.
+rav1e = { version = "0.7", default-features = false, features = ["threading", "capi"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+rav1e = { version = "0.7", default-features = false, features = ["threading", "capi", "asm"] }
 
 [dev-dependencies]
 ravif = { version = "0.11", default-features = false }

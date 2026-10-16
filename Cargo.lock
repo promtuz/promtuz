@@ -3808,6 +3808,7 @@ name = "promtuz-avif"
 version = "0.1.0"
 dependencies = [
  "promtuz-avif-sys",
+ "rav1e",
  "ravif",
  "rgb",
  "tempfile",
@@ -4051,6 +4052,7 @@ dependencies = [
  "profiling",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
+ "scan_fmt",
  "simd_helpers",
  "system-deps",
  "thiserror 1.0.69",
@@ -4517,6 +4519,12 @@ checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "scan_fmt"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b53b0a5db882a8e2fdaae0a43f7b39e7e9082389e978398bdf223a55b581248"
 
 [[package]]
 name = "schannel"

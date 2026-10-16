@@ -14,12 +14,14 @@ fn main() {
     let dav1d_build = out.join("dav1d-build");
     let dav1d_install = out.join("dav1d-install");
     let avif_build = out.join("libavif-build");
+    let rav1e_stub = out.join("librav1e.a");
 
     for path in [
         "vendor/libavif/include/avif/avif.h",
         "vendor/libavif/src/avif.c",
         "vendor/dav1d/meson.build",
         "vendor/dav1d/src/meson.build",
+        "vendor/rav1e/rav1e.h",
         "src/shim.c",
     ] {
         println!("cargo:rerun-if-changed={path}");
@@ -50,6 +52,7 @@ fn main() {
         Command::new("ninja").arg("-C").arg(&dav1d_build).arg("install"),
         "Ninja could not install dav1d",
     );
+    create_empty_archive(&rav1e_stub, &target);
 
     let mut cmake = Command::new("cmake");
     cmake
@@ -63,12 +66,17 @@ fn main() {
         .arg("-DAVIF_BUILD_TESTS=OFF")
         .arg("-DAVIF_CODEC_AOM=OFF")
         .arg("-DAVIF_CODEC_DAV1D=SYSTEM")
+        .arg("-DAVIF_CODEC_RAV1E=SYSTEM")
+        .arg("-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE")
         .arg("-DAVIF_LIBYUV=OFF")
         .arg("-DAVIF_ZLIBPNG=OFF")
         .arg(format!("-DCMAKE_PREFIX_PATH={}", dav1d_install.display()))
         .arg(format!("-DDAV1D_INCLUDE_DIR={}", dav1d_install.join("include").display()))
         .arg(format!("-DDAV1D_LIBRARY={}", dav1d_install.join("lib/libdav1d.a").display()))
-        .arg(format!("-DDAV1D_LIBRARIES={}", dav1d_install.join("lib/libdav1d.a").display()));
+        .arg(format!("-DDAV1D_LIBRARIES={}", dav1d_install.join("lib/libdav1d.a").display()))
+        .arg(format!("-DRAV1E_INCLUDE_DIR={}", vendor.join("rav1e").display()))
+        .arg(format!("-DRAV1E_LIBRARY={}", rav1e_stub.display()))
+        .arg(format!("-DRAV1E_LIBRARIES={}", rav1e_stub.display()));
     configure_android(&mut cmake, &target);
     run(&mut cmake, "CMake could not configure the vendored libavif decoder");
     run(Command::new("cmake").arg("--build").arg(&avif_build), "CMake could not build libavif");
@@ -87,6 +95,25 @@ fn main() {
 
 fn dav1d_asm_enabled(target: &str) -> bool {
     !target.starts_with("x86_64-") || Command::new("nasm").arg("-v").output().is_ok()
+}
+
+fn create_empty_archive(path: &Path, target: &str) {
+    let archive = if target.contains("android") {
+        let ndk = env::var("ANDROID_NDK_HOME")
+            .or_else(|_| env::var("ANDROID_NDK_ROOT"))
+            .expect("ANDROID_NDK_HOME is required for Android builds");
+        std::fs::read_dir(Path::new(&ndk).join("toolchains/llvm/prebuilt"))
+            .expect("Android NDK LLVM toolchain is missing")
+            .find_map(Result::ok)
+            .map(|entry| entry.path().join("bin/llvm-ar"))
+            .expect("Android NDK has no LLVM archiver")
+    } else {
+        PathBuf::from("ar")
+    };
+    run(
+        Command::new(archive).arg("rcs").arg(path),
+        "An archiver is required to create the rav1e ABI placeholder",
+    );
 }
 
 fn run(command: &mut Command, missing_tool: &str) {

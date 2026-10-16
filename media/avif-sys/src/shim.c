@@ -36,6 +36,14 @@ typedef struct {
     avifDecoder *decoder;
 } PromtuzAvifDecoder;
 
+typedef struct {
+    avifEncoder *encoder;
+    uint32_t width;
+    uint32_t height;
+    avifBool animated;
+    avifBool wrote_frame;
+} PromtuzAvifEncoder;
+
 enum { PROMTUZ_AVIF_LIMIT_EXCEEDED = -1 };
 
 static void promtuz_avif_info(const avifDecoder *decoder, PromtuzAvifInfo *output) {
@@ -220,4 +228,101 @@ int promtuz_avif_decode_rgba16(const uint8_t *input, size_t input_len,
 
 void promtuz_avif_free_pixels(uint8_t *pixels) {
     avifFree(pixels);
+}
+
+int promtuz_avif_encoder_create(uint32_t width, uint32_t height, uint32_t quantizer,
+                                int speed, uint32_t timescale, uint8_t animated,
+                                PromtuzAvifEncoder **output) {
+    if (width == 0 || height == 0 || quantizer > AVIF_QUANTIZER_WORST_QUALITY ||
+        speed < AVIF_SPEED_SLOWEST || speed > AVIF_SPEED_FASTEST || timescale == 0 ||
+        output == NULL) {
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    *output = NULL;
+    PromtuzAvifEncoder *state = avifAlloc(sizeof(*state));
+    if (state == NULL) {
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    memset(state, 0, sizeof(*state));
+    state->encoder = avifEncoderCreate();
+    if (state->encoder == NULL) {
+        avifFree(state);
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    state->encoder->maxThreads = 2;
+    state->encoder->speed = speed;
+    state->encoder->quality =
+        ((AVIF_QUANTIZER_WORST_QUALITY - (int)quantizer) * 100 + 31) /
+        AVIF_QUANTIZER_WORST_QUALITY;
+    state->encoder->qualityAlpha = state->encoder->quality;
+    state->encoder->timescale = timescale;
+    state->encoder->keyframeInterval = animated ? 120 : 0;
+    state->encoder->repetitionCount = AVIF_REPETITION_COUNT_INFINITE;
+    state->width = width;
+    state->height = height;
+    state->animated = animated ? AVIF_TRUE : AVIF_FALSE;
+    *output = state;
+    return AVIF_RESULT_OK;
+}
+
+int promtuz_avif_encoder_add_rgba(PromtuzAvifEncoder *state, const uint8_t *pixels,
+                                  size_t pixel_bytes, uint32_t duration) {
+    if (state == NULL || state->encoder == NULL || pixels == NULL || duration == 0 ||
+        pixel_bytes != (size_t)state->width * state->height * 4) {
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    avifImage *image = avifImageCreate(state->width, state->height, 8, AVIF_PIXEL_FORMAT_YUV444);
+    if (image == NULL) {
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    image->colorPrimaries = AVIF_COLOR_PRIMARIES_BT709;
+    image->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_SRGB;
+    image->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT601;
+    image->yuvRange = AVIF_RANGE_FULL;
+
+    avifRGBImage rgb;
+    avifRGBImageSetDefaults(&rgb, image);
+    rgb.format = AVIF_RGB_FORMAT_RGBA;
+    rgb.depth = 8;
+    rgb.pixels = (uint8_t *)pixels;
+    rgb.rowBytes = state->width * 4;
+    avifResult result = avifImageRGBToYUV(image, &rgb);
+    if (result == AVIF_RESULT_OK) {
+        const avifAddImageFlags flags = state->animated
+            ? AVIF_ADD_IMAGE_FLAG_NONE
+            : AVIF_ADD_IMAGE_FLAG_SINGLE;
+        result = avifEncoderAddImage(state->encoder, image, duration, flags);
+    }
+    avifImageDestroy(image);
+    if (result == AVIF_RESULT_OK) {
+        state->wrote_frame = AVIF_TRUE;
+    }
+    return result;
+}
+
+int promtuz_avif_encoder_finish(PromtuzAvifEncoder *state, uint8_t **bytes, size_t *size) {
+    if (state == NULL || state->encoder == NULL || !state->wrote_frame ||
+        bytes == NULL || size == NULL) {
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    *bytes = NULL;
+    *size = 0;
+    avifRWData output = AVIF_DATA_EMPTY;
+    avifResult result = avifEncoderFinish(state->encoder, &output);
+    if (result == AVIF_RESULT_OK) {
+        *bytes = output.data;
+        *size = output.size;
+    }
+    return result;
+}
+
+void promtuz_avif_encoder_destroy(PromtuzAvifEncoder *state) {
+    if (state != NULL) {
+        avifEncoderDestroy(state->encoder);
+        avifFree(state);
+    }
+}
+
+void promtuz_avif_free_bytes(uint8_t *bytes) {
+    avifFree(bytes);
 }

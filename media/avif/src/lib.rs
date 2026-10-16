@@ -1,5 +1,11 @@
 use std::{ffi::CString, mem::MaybeUninit, path::Path, ptr::NonNull, slice};
 
+// `libavif` resolves rav1e's C ABI at the final link. Referencing one ABI symbol
+// keeps rav1e's C-API object in the Rust link without exposing it to callers.
+#[used]
+static RAV1E_C_API: unsafe extern "C" fn() -> *const std::ffi::c_char =
+    rav1e::capi::rav1e_version_short;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     LimitExceeded,
@@ -29,6 +35,29 @@ pub struct Image {
 pub struct Decoder {
     raw: NonNull<promtuz_avif_sys::Decoder>,
     pub info: ImageInfo,
+}
+
+pub struct Encoder {
+    raw: NonNull<promtuz_avif_sys::Encoder>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeConfig {
+    pub quantizer: u8,
+    pub speed: u8,
+    pub timescale: u32,
+    pub animated: bool,
+}
+
+impl Default for EncodeConfig {
+    fn default() -> Self {
+        Self { quantizer: 46, speed: 8, timescale: 1_000, animated: false }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeError {
+    Encoder(i32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +149,62 @@ impl Decoder {
     }
 }
 
+impl Encoder {
+    pub fn new(width: u32, height: u32, config: EncodeConfig) -> Result<Self, EncodeError> {
+        let mut raw = std::ptr::null_mut();
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_encoder_create(
+                width,
+                height,
+                u32::from(config.quantizer),
+                i32::from(config.speed),
+                config.timescale,
+                config.animated,
+                &mut raw,
+            )
+        };
+        if result != 0 {
+            return Err(EncodeError::Encoder(result));
+        }
+        Ok(Self { raw: NonNull::new(raw).ok_or(EncodeError::Encoder(-2))? })
+    }
+
+    pub fn add_rgba(&mut self, pixels: &[u8], duration: u32) -> Result<(), EncodeError> {
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_encoder_add_rgba(
+                self.raw.as_ptr(),
+                pixels.as_ptr(),
+                pixels.len(),
+                duration,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(EncodeError::Encoder(result)) }
+    }
+
+    pub fn finish(self) -> Result<Vec<u8>, EncodeError> {
+        let mut bytes = std::ptr::null_mut();
+        let mut size = 0;
+        let result = unsafe {
+            promtuz_avif_sys::promtuz_avif_encoder_finish(self.raw.as_ptr(), &mut bytes, &mut size)
+        };
+        if result != 0 {
+            return Err(EncodeError::Encoder(result));
+        }
+        let bytes = NonNull::new(bytes).ok_or(EncodeError::Encoder(-2))?;
+        Ok(unsafe {
+            let output = slice::from_raw_parts(bytes.as_ptr(), size).to_vec();
+            promtuz_avif_sys::promtuz_avif_free_bytes(bytes.as_ptr());
+            output
+        })
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        unsafe { promtuz_avif_sys::promtuz_avif_encoder_destroy(self.raw.as_ptr()) };
+    }
+}
+
 impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe { promtuz_avif_sys::promtuz_avif_decoder_destroy(self.raw.as_ptr()) };
@@ -197,14 +282,14 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use ravif::{Encoder, Img};
+    use ravif::{Encoder as RavifEncoder, Img};
     use rgb::FromSlice;
 
     #[test]
     fn decodes_ravif_output() {
         let pixels = [255_u8, 0, 0, 255, 0, 255, 0, 128];
         let encoded =
-            Encoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
+            RavifEncoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
         let decoded = decode_first(&encoded, DecodeLimits::default()).unwrap();
         assert_eq!((decoded.width, decoded.height), (2, 1));
         assert_eq!(decoded.rgba16().len(), 8);
@@ -223,7 +308,7 @@ mod tests {
     fn enforces_decode_limits_before_allocating_pixels() {
         let pixels = [255_u8, 0, 0, 255, 0, 255, 0, 255];
         let encoded =
-            Encoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
+            RavifEncoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
         assert!(matches!(
             decode_first(&encoded, DecodeLimits { max_pixels: 1, ..DecodeLimits::default() }),
             Err(DecodeError::LimitExceeded)
@@ -232,7 +317,7 @@ mod tests {
 
     #[test]
     fn opens_a_private_file_without_loading_the_container_in_rust() {
-        let encoded = Encoder::new()
+        let encoded = RavifEncoder::new()
             .encode_rgba(Img::new([255_u8, 0, 0, 255].as_rgba(), 1, 1))
             .unwrap()
             .avif_file;
@@ -241,5 +326,30 @@ mod tests {
         std::fs::File::create(&path).unwrap().write_all(&encoded).unwrap();
         let mut decoder = Decoder::open_file(&path, DecodeLimits::default()).unwrap();
         assert_eq!(decoder.decode_next().unwrap().unwrap().rgba16().len(), 4);
+    }
+
+    #[test]
+    fn writes_a_still_with_the_pinned_libavif_encoder() {
+        let mut encoder = Encoder::new(2, 1, EncodeConfig::default()).unwrap();
+        encoder.add_rgba(&[255, 0, 0, 255, 0, 255, 0, 128], 1).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let decoded = decode_first(&encoded, DecodeLimits::default()).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert!(decoded.has_alpha);
+    }
+
+    #[test]
+    fn writes_an_avif_sequence_with_the_pinned_libavif_encoder() {
+        let mut encoder =
+            Encoder::new(16, 16, EncodeConfig { animated: true, ..EncodeConfig::default() })
+                .unwrap();
+        encoder.add_rgba(&[255, 0, 0, 255].repeat(16 * 16), 100).unwrap();
+        encoder.add_rgba(&[0, 255, 0, 255].repeat(16 * 16), 100).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let mut decoder = Decoder::open(&encoded, DecodeLimits::default()).unwrap();
+        assert_eq!(decoder.info.frame_count, 2);
+        assert_eq!(decoder.decode_next().unwrap().unwrap().duration_ms, 100);
+        assert_eq!(decoder.decode_next().unwrap().unwrap().duration_ms, 100);
+        assert!(decoder.decode_next().unwrap().is_none());
     }
 }
