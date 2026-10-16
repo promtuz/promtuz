@@ -275,26 +275,22 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
     }))
 }
 
-/// Inspect AVIF without re-encoding it, or convert the complete GIF sequence to AVIF.
-/// The host runs this on its media worker and retains the original until preparation succeeds.
+/// Temporary byte-source entry point for older callers. New platform ingress uses
+/// a bounded source lease through [`MediaImport`] instead.
 #[uniffi::export]
 pub fn prepare_encoded_image(
     bytes: Vec<u8>, sticker: bool,
 ) -> Result<PreparedImageRecord, CoreError> {
-    let policy = if sticker {
-        crate::media::MediaPolicy {
-            max_bytes: common::proto::sticker::STICKER_MAX_BYTES,
-            max_edge: common::proto::sticker::STICKER_EDGE,
-        }
+    let request = if sticker {
+        crate::media::MediaRequest::Sticker { trim: None }
     } else {
-        crate::media::MediaPolicy { max_bytes: 32 * 1024 * 1024, max_edge: 16_384 }
+        crate::media::MediaRequest::ChatImage { hd_enabled: false }
     };
-    let image = crate::media::process_encoded_image(&bytes, policy)
-        .map_err(|e| CoreError::Refused { msg: e.to_string() })?
-        .ok_or_else(|| anyhow::anyhow!("This image format cannot be prepared as AVIF."))?;
+    let image = crate::media::image::prepare_image(&bytes, request)
+        .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
     Ok(PreparedImageRecord {
         bytes: image.bytes,
-        mime: image.mime.into(),
+        mime: "image/avif".into(),
         width: image.width,
         height: image.height,
         animated: image.animated,

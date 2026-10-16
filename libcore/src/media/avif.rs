@@ -789,30 +789,9 @@ mod tests {
     }
 
     #[test]
-    fn preserve_source_does_not_rewrite_colour_or_unknown_metadata() {
-        let rgba = vec![120; 8 * 8 * 4];
-        let mut source = crate::media::encode_avif(&rgba, 8, 8, 60.0).unwrap();
-        source.extend_from_slice(&[0, 0, 0, 12, b'f', b'r', b'e', b'e', 9, 8, 7, 6]);
-        let prepared = crate::media::process_encoded_image(
-            &source,
-            crate::media::MediaPolicy { max_bytes: source.len(), max_edge: 8 },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(prepared.bytes, source);
-        assert!(
-            crate::media::process_encoded_image(
-                &source,
-                crate::media::MediaPolicy { max_bytes: source.len() - 1, max_edge: 8 }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn clean_aperture_cannot_hide_coded_image_or_auxiliary_allocation() {
         // A crafted container advertises a 4096px colour+alpha image cropped to
-        // a 512px sticker. Both images share ispe, as ordinary ravif output does.
+        // a 512px sticker. Both images share ispe, as an ordinary AVIF encoder does.
         let rgba = vec![120; 16 * 16 * 4];
         let mut source = crate::media::encode_avif(&rgba, 16, 16, 60.0).unwrap();
         let top = boxes(&source, 0).unwrap();
@@ -869,12 +848,5 @@ mod tests {
         assert_eq!((info.width, info.height), (512, 512));
         assert_eq!(info.max_coded_edge, 4096);
         assert_eq!(info.decoded_pixel_count, 2 * 4096 * 4096);
-        assert!(
-            crate::media::process_encoded_image(
-                &source,
-                crate::media::MediaPolicy { max_bytes: 256 * 1024, max_edge: 512 }
-            )
-            .is_err()
-        );
     }
 }

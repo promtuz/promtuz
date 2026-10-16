@@ -63,16 +63,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # Core-owned decoders for ordinary still and animated image formats. HEIF/JXL
 # stay platform ports because their platform support is materially better.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-# `threading` = parallel encode (rayon). Base dep skips `asm` so x86_64
-# (emulator, CI) never needs nasm; aarch64 layers it on below.
-ravif = { version = "0.11", default-features = false, features = ["threading"] }
-# Already used by ravif; the sequence path needs a persistent encoder context
-# and its AV1 configuration instead of encoding every frame as a still image.
-rav1e = { version = "0.7", default-features = false, features = ["threading"] }
-avif-serialize = "0.8"
-# ravif's pixel types; `FromSlice` casts &[u8]→&[RGBA8] copy-free. Already
-# in the tree via ravif — direct line pulls zero new code.
-rgb = "0.8"
 promtuz-avif = { path = "../media/avif" }
 tempfile = "3"
 
@@ -103,11 +93,6 @@ opus = "0.4"
 turn = "0.17"
 stun = "0.17"
 webrtc-util = "0.17"
-
-# aarch64 (real phones) gets rav1e's NEON asm; it builds with `cc` from the
-# NDK, not nasm (nasm is x86-only). Cargo unions this with the base dep.
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-ravif = { version = "0.11", default-features = false, features = ["threading", "asm"] }
 
 # openmls `test-utils` gates `MlsMessageOut::into_welcome()`, which the fixtures need.
 [dev-dependencies]

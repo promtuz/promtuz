@@ -32,7 +32,6 @@ use common::proto::sticker::ManifestSticker;
 use common::proto::sticker::PACK_MAX_STICKERS;
 use common::proto::sticker::PACK_NAME_MAX;
 use common::proto::sticker::STICKER_EDGE;
-use common::proto::sticker::STICKER_MAX_BYTES;
 use common::proto::sticker::StickerRef;
 use common::proto::sticker::StoreReject;
 use common::proto::sticker::StoreRequest;
@@ -477,11 +476,10 @@ async fn publish(
         let mut position = known.len() as u32;
         for img in images {
             let (avif, width, height) = if let Some(bytes) = img.encoded {
-                let image = crate::media::process_encoded_image(
+                let image = crate::media::image::prepare_image(
                     &bytes,
-                    crate::media::MediaPolicy { max_bytes: STICKER_MAX_BYTES, max_edge: STICKER_EDGE },
-                ).map_err(|e| Refused(e.to_string()))?
-                    .ok_or_else(|| Refused("Choose an AVIF, GIF, or still image.".into()))?;
+                    crate::media::MediaRequest::Sticker { trim: None },
+                ).map_err(|e| Refused(e.to_string()))?;
                 (image.bytes, image.width as u16, image.height as u16)
             } else {
                 let (bytes, width, height) = crate::media::compress_sticker(&img.rgba, img.width, img.height)?;

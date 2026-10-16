@@ -225,6 +225,10 @@ pub fn prepare_sdr_image_with_crop(
 /// profile decides whether an animation is retained.
 pub fn prepare_image(bytes: &[u8], request: MediaRequest) -> Result<PreparedImage> {
     request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(
+        u64::try_from(bytes.len())? <= MediaRequest::resource_limits().source_bytes,
+        "The image exceeds the 100 MiB import limit."
+    );
     let kind = inspect(bytes)?;
     let animation = request.animation_profile();
     let profile = request

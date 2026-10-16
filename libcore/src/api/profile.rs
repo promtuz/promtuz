@@ -31,7 +31,7 @@ pub fn prepare_avatar_image(
         .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
     Ok(super::media::PreparedImageRecord {
         bytes: image.bytes,
-        mime: image.mime.into(),
+        mime: "image/avif".into(),
         width: image.width,
         height: image.height,
         animated: image.animated,

@@ -7,14 +7,12 @@
 mod avatar;
 mod avif;
 pub mod frames;
-mod gif;
 #[path = "image.rs"]
 pub mod image;
 pub mod import;
 mod job;
 mod policy;
 pub mod ports;
-mod sequence;
 pub(crate) mod video;
 
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
@@ -36,55 +34,8 @@ fn encode_avif(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
     image::encode_sdr_avif(rgba, w, h, quality)
 }
 
-/// Processing limits belong to the caller's media use, not the input format.
-#[derive(Clone, Copy)]
-pub struct MediaPolicy {
-    pub max_bytes: usize,
-    pub max_edge: u32,
-}
-
-pub struct PreparedImage {
-    pub bytes: Vec<u8>,
-    pub mime: &'static str,
-    pub width: u32,
-    pub height: u32,
-    pub animated: bool,
-}
-
-pub const MAX_ENCODED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 16_384;
-
-/// `None` means another format must be handled by its platform decoder. A
-/// recognized malformed or over-limit source is an error, never a still fallback.
-pub fn process_encoded_image(bytes: &[u8], policy: MediaPolicy) -> Result<Option<PreparedImage>> {
-    anyhow::ensure!(policy.max_bytes > 0 && policy.max_edge > 0, "invalid media limits");
-    anyhow::ensure!(
-        bytes.len() <= MAX_ENCODED_SOURCE_BYTES,
-        "Image exceeds the 32 MiB import limit"
-    );
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return gif::prepare(bytes, policy).map(Some);
-    }
-    let Some(info) = inspect_avif(bytes)? else { return Ok(None) };
-    anyhow::ensure!(
-        info.width.max(info.height) <= policy.max_edge && info.max_coded_edge <= policy.max_edge,
-        "This AVIF exceeds the {} pixel limit. Its animation and colour data cannot be resized safely yet",
-        policy.max_edge
-    );
-    anyhow::ensure!(
-        bytes.len() <= policy.max_bytes,
-        "This AVIF exceeds the {} byte limit. Its animation and colour data cannot be recompressed safely yet",
-        policy.max_bytes
-    );
-    Ok(Some(PreparedImage {
-        bytes: bytes.to_vec(),
-        mime: "image/avif",
-        width: info.width,
-        height: info.height,
-        animated: info.animated,
-    }))
-}
 
 fn validate_dimensions(width: u32, height: u32) -> Result<()> {
     anyhow::ensure!(width > 0 && height > 0, "zero image dimension");
@@ -106,30 +57,13 @@ fn validate_rgba(rgba: &[u8], width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
-fn fit_dimensions(width: u32, height: u32, edge: u32) -> (u32, u32) {
-    let scale = (f64::from(edge) / f64::from(width.max(height))).min(1.0);
-    (
-        ((f64::from(width) * scale).round() as u32).max(1),
-        ((f64::from(height) * scale).round() as u32).max(1),
-    )
-}
-
-/// SDR still stickers use the same precision rules as photos and GIF frames.
 pub fn compress_sticker(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, u32, u32)> {
     validate_rgba(rgba, width, height)?;
-    let img = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(width, height, rgba)
-        .expect("validated RGBA");
-    let mut edge = 512;
-    for quality in [78.0, 62.0, 48.0] {
-        let (w, h) = fit_dimensions(width, height, edge);
-        let scaled = ::image::imageops::resize(&img, w, h, ::image::imageops::FilterType::Lanczos3);
-        let out = encode_avif(scaled.as_raw(), w, h, quality)?;
-        if out.len() <= 256 * 1024 {
-            return Ok((out, w, h));
-        }
-        edge = (edge * 3 / 4).max(128);
-    }
-    bail!("Picture would not fit a sticker")
+    let image = image::encode_sdr_still(
+        image::DecodedStill { rgba: rgba.to_vec(), width, height },
+        policy::STICKER.image,
+    )?;
+    Ok((image.bytes, image.width, image.height))
 }
 
 /// Returns `(avif, width, height)` under `max_bytes`, downscaling when the full size overshoots.

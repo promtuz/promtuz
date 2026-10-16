@@ -282,20 +282,6 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use ravif::{Encoder as RavifEncoder, Img};
-    use rgb::FromSlice;
-
-    #[test]
-    fn decodes_ravif_output() {
-        let pixels = [255_u8, 0, 0, 255, 0, 255, 0, 128];
-        let encoded =
-            RavifEncoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
-        let decoded = decode_first(&encoded, DecodeLimits::default()).unwrap();
-        assert_eq!((decoded.width, decoded.height), (2, 1));
-        assert_eq!(decoded.rgba16().len(), 8);
-        assert!(decoded.has_alpha);
-    }
-
     #[test]
     fn rejects_malformed_data() {
         assert!(matches!(
@@ -306,9 +292,9 @@ mod tests {
 
     #[test]
     fn enforces_decode_limits_before_allocating_pixels() {
-        let pixels = [255_u8, 0, 0, 255, 0, 255, 0, 255];
-        let encoded =
-            RavifEncoder::new().encode_rgba(Img::new(pixels.as_rgba(), 2, 1)).unwrap().avif_file;
+        let mut encoder = Encoder::new(2, 1, EncodeConfig::default()).unwrap();
+        encoder.add_rgba(&[255, 0, 0, 255, 0, 255, 0, 255], 1).unwrap();
+        let encoded = encoder.finish().unwrap();
         assert!(matches!(
             decode_first(&encoded, DecodeLimits { max_pixels: 1, ..DecodeLimits::default() }),
             Err(DecodeError::LimitExceeded)
@@ -317,10 +303,9 @@ mod tests {
 
     #[test]
     fn opens_a_private_file_without_loading_the_container_in_rust() {
-        let encoded = RavifEncoder::new()
-            .encode_rgba(Img::new([255_u8, 0, 0, 255].as_rgba(), 1, 1))
-            .unwrap()
-            .avif_file;
+        let mut encoder = Encoder::new(1, 1, EncodeConfig::default()).unwrap();
+        encoder.add_rgba(&[255, 0, 0, 255], 1).unwrap();
+        let encoded = encoder.finish().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("image.avif");
         std::fs::File::create(&path).unwrap().write_all(&encoded).unwrap();
