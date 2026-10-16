@@ -94,10 +94,7 @@ impl Default for Stickers {
 }
 
 pub struct SourceImage {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub encoded: Option<Vec<u8>>,
+    pub avif: Vec<u8>,
 }
 
 pub struct PackView {
@@ -475,16 +472,12 @@ async fn publish(
         let mut out = Vec::with_capacity(images.len());
         let mut position = known.len() as u32;
         for img in images {
-            let (avif, width, height) = if let Some(bytes) = img.encoded {
-                let image = crate::media::image::prepare_image(
-                    &bytes,
-                    crate::media::MediaRequest::Sticker { trim: None },
-                ).map_err(|e| Refused(e.to_string()))?;
-                (image.bytes, image.width as u16, image.height as u16)
-            } else {
-                let (bytes, width, height) = crate::media::compress_sticker(&img.rgba, img.width, img.height)?;
-                (bytes, width as u16, height as u16)
-            };
+            let image = crate::media::image::prepare_image(
+                &img.avif,
+                crate::media::MediaRequest::Sticker { trim: None },
+            )
+            .map_err(|e| Refused(e.to_string()))?;
+            let (avif, width, height) = (image.bytes, image.width as u16, image.height as u16);
             let id = *blake3::hash(&avif).as_bytes();
             if known.contains(&id) || out.iter().any(|(r, _): &Encoded| r.sticker_id == id) {
                 continue; // the same picture twice is one sticker

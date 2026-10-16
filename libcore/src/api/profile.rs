@@ -8,36 +8,6 @@ use crate::data::identity::Identity;
 use crate::platform::CoreError;
 use crate::state::core;
 
-/// Crop coordinates relative to the original source, with zoom from 1 to 5.
-#[derive(uniffi::Record)]
-pub struct AvatarCropRecord {
-    pub center_x: f64,
-    pub center_y: f64,
-    pub zoom: f64,
-}
-
-/// Prepares an encoded preview without changing the saved profile. GIF cropping
-/// applies to every frame; an AVIF original is kept intact with `crop = None`.
-#[uniffi::export]
-pub fn prepare_avatar_image(
-    bytes: Vec<u8>, crop: Option<AvatarCropRecord>,
-) -> Result<super::media::PreparedImageRecord, CoreError> {
-    let crop = crop.map(|crop| crate::media::AvatarCrop {
-        center_x: crop.center_x,
-        center_y: crop.center_y,
-        zoom: crop.zoom,
-    });
-    let image = crate::media::prepare_avatar_image(&bytes, crop)
-        .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
-    Ok(super::media::PreparedImageRecord {
-        bytes: image.bytes,
-        mime: "image/avif".into(),
-        width: image.width,
-        height: image.height,
-        animated: image.animated,
-    })
-}
-
 #[uniffi::export]
 pub fn profile_identity() -> Vec<u8> { Identity::get().map(|i| i.ipk().to_vec()).unwrap_or_default() }
 
@@ -51,16 +21,6 @@ pub fn profile_picture() -> Option<Vec<u8>> {
     Identity::get().and_then(|i| i.avatar())
 }
 
-/// Takes platform-decoded RGBA and encodes AVIF here so every platform ships the same bytes.
-/// Blocks on the encode; profile publication runs separately.
-#[uniffi::export]
-pub fn set_profile_picture(rgba: Vec<u8>, width: u32, height: u32) -> Result<(), CoreError> {
-    let avif = crate::media::avatar_from_rgba(&rgba, width, height)?;
-    save_profile_picture(Some(avif))
-}
-
-/// Saves exactly the prepared AVIF shown by the editor, including its animation
-/// and colour metadata. Validation completes before storage changes.
 #[uniffi::export]
 pub fn set_profile_picture_encoded(avif: Vec<u8>) -> Result<(), CoreError> {
     let image = crate::media::validate_avatar_avif(&avif)
@@ -151,16 +111,6 @@ pub fn group_picture(conversation_id: Vec<u8>) -> Result<Option<Vec<u8>>, CoreEr
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn set_group_picture(
-    conversation_id: Vec<u8>, rgba: Option<Vec<u8>>, width: u32, height: u32,
-) -> Result<(), CoreError> {
-    update_group_picture(conversation_id, move || {
-        Ok(rgba.map(|bytes| crate::media::avatar_from_rgba(&bytes, width, height)).transpose()?)
-    })
-    .await
-}
-
-#[uniffi::export(async_runtime = "tokio")]
 pub async fn set_group_picture_encoded(
     conversation_id: Vec<u8>, avif: Vec<u8>,
 ) -> Result<(), CoreError> {
@@ -170,6 +120,11 @@ pub async fn set_group_picture_encoded(
         Ok(Some(image.bytes))
     })
     .await
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn clear_group_picture(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    update_group_picture(conversation_id, || Ok(None)).await
 }
 
 /// Both input routes share the permission check, serialized revision allocation

@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.StickerRef
@@ -16,8 +17,7 @@ import com.promtuz.chat.domain.model.toRecord
 import com.promtuz.chat.domain.model.toRef
 import com.promtuz.chat.domain.model.toUi
 import com.promtuz.chat.utils.extensions.fromHex
-import com.promtuz.chat.utils.media.pickImageSource
-import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.decodeDownscaled
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.CancellationException
@@ -39,7 +39,7 @@ data class UiPackPreview(
 )
 
 @Immutable
-data class PickedSticker(val uri: Uri, val preview: ImageBitmap?, val encoded: ByteArray? = null)
+data class PickedSticker(val uri: Uri, val preview: ImageBitmap?)
 
 class StickersVM(private val application: Application) : ViewModel() {
     val packs: StateFlow<List<UiStickerPack>> =
@@ -89,13 +89,15 @@ class StickersVM(private val application: Application) : ViewModel() {
         viewModelScope.launch {
             try {
                 val decoded = fresh.map { uri ->
-                    val image = pickImageSource(application, uri, STICKER_EDGE, sticker = true)
-                    if (image.preserveOriginal) throw ImagePreparationException("Use an AVIF to keep this image’s HDR or colors in a sticker.")
-                    PickedSticker(uri, image.preview, image.encoded?.takeIf { it.size <= 1024 * 1024 })
+                    PickedSticker(
+                        uri,
+                        decodeDownscaled(application, uri, STICKER_EDGE)?.asImageBitmap()
+                            ?: throw UnreadableImage(),
+                    )
                 }
                 picks += decoded
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = (e as? ImagePreparationException)?.message ?: "Couldn’t open the selected images. Try choosing them again." }
+            catch (e: Exception) { error = "Couldn’t open the selected images. Try choosing them again." }
             finally { decoding = false }
         }
     }
@@ -117,7 +119,6 @@ class StickersVM(private val application: Application) : ViewModel() {
                 error = when (e) {
                     is uniffi.core.CoreException.Refused -> e.msg
                     is UnreadableImage -> "Couldn’t open an image. Remove it and try again."
-                    is ImagePreparationException -> e.message
                     else -> "Couldn’t publish. Check your connection and try again."
                 }
             } finally { publishing = false }
@@ -130,10 +131,8 @@ class StickersVM(private val application: Application) : ViewModel() {
 
     private suspend fun sources(uris: List<Uri>): List<StickerSource> = withContext(Dispatchers.IO) {
         uris.map { uri ->
-            val image = pickImageSource(application, uri, STICKER_EDGE, sticker = true)
-            if (image.preserveOriginal) throw ImagePreparationException("Use an AVIF to keep this image’s HDR or colors in a sticker.")
-            val prepared = image.encoded?.let { CoreBridge.prepareEncodedImage(it, sticker = true) }
-            StickerSource(image.rgba ?: ByteArray(0), image.width.toUInt(), image.height.toUInt(), prepared?.bytes)
+            val prepared = CoreBridge.prepareImportedSticker(application, uri)
+            StickerSource(prepared.bytes)
         }
     }
 

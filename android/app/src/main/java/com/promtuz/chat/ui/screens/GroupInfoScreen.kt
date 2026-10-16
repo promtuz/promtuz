@@ -161,7 +161,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 })
                 if (picture != null) add(MenuAction("Remove group photo", com.promtuz.chat.R.drawable.oi_trash, destructive = true) {
                     scope.launch {
-                        runCatching { com.promtuz.core.CoreBridge.setGroupPicture(conversation.fromHex(), null) }
+                        runCatching { com.promtuz.core.CoreBridge.clearGroupPicture(conversation.fromHex()) }
                             .onFailure { snackbar.showSnackbar("Couldn't remove group photo") }
                     }
                 })

@@ -340,28 +340,6 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
     }))
 }
 
-/// Temporary byte-source entry point for older callers. New platform ingress uses
-/// a bounded source lease through [`MediaImport`] instead.
-#[uniffi::export]
-pub fn prepare_encoded_image(
-    bytes: Vec<u8>, sticker: bool,
-) -> Result<PreparedImageRecord, CoreError> {
-    let request = if sticker {
-        crate::media::MediaRequest::Sticker { trim: None }
-    } else {
-        crate::media::MediaRequest::ChatImage { hd_enabled: false }
-    };
-    let image = crate::media::image::prepare_image(&bytes, request)
-        .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
-    Ok(PreparedImageRecord {
-        bytes: image.bytes,
-        mime: "image/avif".into(),
-        width: image.width,
-        height: image.height,
-        animated: image.animated,
-    })
-}
-
 /// Eligibility for recipient uploads only. Unknown/lost/metered networks
 /// must report false; this never restricts the original sender's transfers.
 #[uniffi::export]

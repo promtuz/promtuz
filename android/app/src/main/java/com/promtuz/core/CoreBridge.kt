@@ -62,7 +62,6 @@ import uniffi.core.escrowSecret as ffiEscrowSecret
 import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
 import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
 import uniffi.core.StagedRecord
-import uniffi.core.stageImage as ffiStageImage
 import uniffi.core.stageAttachment as ffiStageAttachment
 import uniffi.core.discardStaged as ffiDiscardStaged
 import uniffi.core.stagedItems as ffiStagedItems
@@ -114,7 +113,6 @@ import uniffi.core.updateIsInstallable as ffiUpdateIsInstallable
 import uniffi.core.updateIsRequired as ffiUpdateIsRequired
 import uniffi.core.profileName as ffiProfileName
 import uniffi.core.profilePicture as ffiProfilePicture
-import uniffi.core.setProfilePicture as ffiSetProfilePicture
 import uniffi.core.clearProfilePicture as ffiClearProfilePicture
 import uniffi.core.avatarOf as ffiAvatarOf
 import uniffi.core.avatarGeneration as ffiAvatarGeneration
@@ -200,16 +198,12 @@ object CoreBridge {
     suspend fun personProfile(ipk: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.personProfile(ipk) }
     suspend fun setContactNickname(ipk: ByteArray, name: String) = withContext(Dispatchers.IO) { uniffi.core.setContactNickname(ipk, name) }
     suspend fun groupPicture(conv: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.groupPicture(conv) }
-    suspend fun setGroupPicture(conv: ByteArray, rgba: ByteArray?, width: Int = 0, height: Int = 0) =
-        uniffi.core.setGroupPicture(conv, rgba, width.toUInt(), height.toUInt())
+    suspend fun clearGroupPicture(conv: ByteArray) = uniffi.core.clearGroupPicture(conv)
 
     suspend fun setGroupPictureEncoded(conv: ByteArray, avif: ByteArray) =
         uniffi.core.setGroupPictureEncoded(conv, avif)
 
     suspend fun profilePicture(): ByteArray? = withContext(Dispatchers.IO) { ffiProfilePicture() }
-
-    suspend fun setProfilePicture(rgba: ByteArray, width: Int, height: Int) =
-        withContext(Dispatchers.IO) { ffiSetProfilePicture(rgba, width.toUInt(), height.toUInt()) }
 
     suspend fun setProfilePictureEncoded(avif: ByteArray) =
         withContext(Dispatchers.IO) { uniffi.core.setProfilePictureEncoded(avif) }
@@ -312,10 +306,6 @@ object CoreBridge {
     suspend fun sendMessage(conversationId: ByteArray, content: String, replyTo: ByteArray? = null) =
         withContext(Dispatchers.IO) { ffiSendMessage(conversationId, content, replyTo) }
 
-    // Staged items encode at pick time and ring the doorbell under "staging".
-    suspend fun stageImage(rgba: ByteArray, width: Int, height: Int): ULong =
-        withContext(Dispatchers.IO) { ffiStageImage(rgba, width.toUInt(), height.toUInt()) }
-
     /** Core owns this opaque URI lease until the media job is finished or cancelled. */
     suspend fun importMedia(context: Context, uri: Uri): MediaImport =
         withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.open(context, uri)) }
@@ -324,22 +314,16 @@ object CoreBridge {
         importMedia(context, uri).beginChatImage(false).stage()
     }
 
-    suspend fun prepareEncodedImage(bytes: ByteArray, sticker: Boolean = false): uniffi.core.PreparedImageRecord =
-        withContext(Dispatchers.Default) { uniffi.core.prepareEncodedImage(bytes, sticker) }
-
-    suspend fun prepareAvatarImage(bytes: ByteArray, crop: uniffi.core.AvatarCropRecord? = null): uniffi.core.PreparedImageRecord =
-        withContext(Dispatchers.Default) { uniffi.core.prepareAvatarImage(bytes, crop) }
-
     suspend fun prepareImportedAvatar(
         context: Context, uri: Uri, crop: uniffi.core.ImageCropRecord,
     ): uniffi.core.PreparedImageRecord = withContext(Dispatchers.IO) {
         importMedia(context, uri).beginAvatar(crop).prepare()
     }
 
-    fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
+    suspend fun prepareImportedSticker(context: Context, uri: Uri): uniffi.core.PreparedImageRecord =
+        withContext(Dispatchers.IO) { importMedia(context, uri).beginSticker().prepare() }
 
-    suspend fun stageEncodedImage(bytes: ByteArray): ULong =
-        withContext(Dispatchers.IO) { uniffi.core.stageEncodedImage(bytes) }
+    fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
 
     /** The blur is ready when this returns; the hash comes later. */
     suspend fun stageAttachment(

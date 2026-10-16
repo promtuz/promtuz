@@ -148,46 +148,6 @@ fn blank(kind: u8) -> Staged {
     }
 }
 
-pub fn stage_image(rgba: Vec<u8>, width: u32, height: u32) -> u64 {
-    let mut s = blank(KIND_IMAGE);
-    s.mime = "image/avif".into();
-    s.width = width;
-    s.height = height;
-    let id = insert(s);
-
-    core().spawn_blocking(move || {
-        match crate::media::compress_image(&rgba, width, height, 256 * 1024) {
-            Ok((avif, w, h)) => finish(id, |s| {
-                s.size = avif.len() as u64;
-                s.blob = Some(avif);
-                s.width = w;
-                s.height = h;
-                s.state = READY;
-            }),
-            Err(e) => finish(id, |s| {
-                s.state = FAILED;
-                s.error = Some(e.to_string());
-            }),
-        }
-    });
-    id
-}
-
-pub fn stage_encoded_image(bytes: Vec<u8>) -> Result<u64> {
-    let image = crate::media::image::prepare_image(
-        &bytes,
-        crate::media::MediaRequest::ChatImage { hd_enabled: false },
-    )?;
-    let mut s = blank(KIND_IMAGE);
-    s.mime = "image/avif".into();
-    s.size = image.bytes.len() as u64;
-    s.width = image.width;
-    s.height = image.height;
-    s.blob = Some(image.bytes);
-    s.state = READY;
-    Ok(insert(s))
-}
-
 /// A media job has already normalized and validated this fresh AVIF. Staging
 /// only takes ownership; it never reinterprets an original container.
 pub fn stage_prepared_image(image: crate::media::image::PreparedImage) -> u64 {

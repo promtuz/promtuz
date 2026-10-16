@@ -1,8 +1,4 @@
 //! Source-aware image processing shared by photos, stickers and avatars.
-//!
-//! Encoded AVIF bypasses pixel conversion so its animation, precision, colour
-//! profile and gain map remain intact. GIF is composited and encoded as an AVIF
-//! sequence. Platform-decoded RGBA is explicitly an eight-bit SDR input.
 
 mod avatar;
 mod avif;
@@ -15,14 +11,13 @@ mod policy;
 pub mod ports;
 pub(crate) mod video;
 
-pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
+pub use avatar::validate_avatar_avif;
 pub use avif::{AvifInfo, inspect_avif};
 pub use job::{MediaJob, PreparedMedia, StagedImage};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
 use crate::state::core;
-use anyhow::{Result, bail};
-use common::proto::mls_wire::MAX_AVATAR_BYTES;
+use anyhow::Result;
 
 pub(crate) fn alert(alert: crate::platform::MediaAlert) {
     if let Some(events) = core().events.get() {
@@ -55,31 +50,6 @@ fn validate_rgba(rgba: &[u8], width: u32, height: u32) -> Result<()> {
         "rgba len mismatch"
     );
     Ok(())
-}
-
-pub fn compress_sticker(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, u32, u32)> {
-    validate_rgba(rgba, width, height)?;
-    let image = image::encode_sdr_still(
-        image::DecodedStill { rgba: rgba.to_vec(), width, height },
-        policy::STICKER.image,
-    )?;
-    Ok((image.bytes, image.width, image.height))
-}
-
-/// Returns `(avif, width, height)` under `max_bytes`, downscaling when the full size overshoots.
-pub fn compress_image(
-    rgba: &[u8], width: u32, height: u32, max_bytes: usize,
-) -> Result<(Vec<u8>, u32, u32)> {
-    validate_rgba(rgba, width, height)?;
-    let image = image::encode_sdr_still(
-        image::DecodedStill { rgba: rgba.to_vec(), width, height },
-        policy::ImageProfile {
-            max_edge: width.max(height),
-            max_bytes: u64::try_from(max_bytes)?,
-            emergency_edge: 64,
-        },
-    )?;
-    Ok((image.bytes, image.width, image.height))
 }
 
 /// A blurred placeholder of a few KB, 48 px on the longest side.
@@ -134,34 +104,4 @@ pub fn attachment_thumb(mime: &str, rgba: &[u8], width: u32, height: u32) -> Res
     } else {
         blur_thumb(rgba, width, height)
     }
-}
-
-/// Longest side of a profile picture; it travels inside an MLS frame to every chat we are in.
-pub const AVATAR_EDGE: u32 = 256;
-
-/// Centre-crop to a square of at most [`AVATAR_EDGE`] and encode under [`MAX_AVATAR_BYTES`];
-/// quality steps down before size, and a picture that fits at no quality is refused.
-pub fn avatar_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-    validate_rgba(rgba, width, height)?;
-    let img =
-        ::image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
-
-    let side = width.min(height);
-    let square =
-        ::image::imageops::crop_imm(&img, (width - side) / 2, (height - side) / 2, side, side)
-            .to_image();
-    let edge = side.min(AVATAR_EDGE);
-    let scaled = if edge == side {
-        square
-    } else {
-        ::image::imageops::resize(&square, edge, edge, ::image::imageops::FilterType::Lanczos3)
-    };
-
-    for quality in [65.0, 45.0, 30.0] {
-        let out = encode_avif(scaled.as_raw(), edge, edge, quality)?;
-        if out.len() <= MAX_AVATAR_BYTES {
-            return Ok(out);
-        }
-    }
-    bail!("could not encode the picture under {MAX_AVATAR_BYTES} bytes");
 }

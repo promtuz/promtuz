@@ -43,13 +43,9 @@ pub struct StickerPackPreview {
     pub stickers: Vec<StickerRecord>,
 }
 
-/// Either tightly packed SDR RGBA or the original encoded AVIF/GIF.
 #[derive(uniffi::Record)]
 pub struct StickerSource {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub encoded: Option<Vec<u8>>,
+    pub avif: Vec<u8>,
 }
 
 pub(crate) fn record(row: &StickerRow, token: &[u8; 32], store: u16) -> StickerRecord {
@@ -156,10 +152,7 @@ fn log_publish(e: &anyhow::Error) {
 pub async fn create_sticker_pack(
     name: String, images: Vec<StickerSource>,
 ) -> Result<Vec<u8>, CoreError> {
-    let images = images
-        .into_iter()
-        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height, encoded: i.encoded })
-        .collect();
+    let images = images.into_iter().map(|i| SourceImage { avif: i.avif }).collect();
     let id =
         on_runtime(
             async move { crate::stickers::create(name, images).await.inspect_err(log_publish) },
@@ -173,10 +166,7 @@ pub async fn add_to_sticker_pack(
     pack: Vec<u8>, images: Vec<StickerSource>,
 ) -> Result<(), CoreError> {
     let pack = fixed::<16>(&pack, "dispatch_id")?;
-    let images = images
-        .into_iter()
-        .map(|i| SourceImage { rgba: i.rgba, width: i.width, height: i.height, encoded: i.encoded })
-        .collect();
+    let images = images.into_iter().map(|i| SourceImage { avif: i.avif }).collect();
     on_runtime(async move { crate::stickers::append(pack, images).await.inspect_err(log_publish) })
         .await
 }

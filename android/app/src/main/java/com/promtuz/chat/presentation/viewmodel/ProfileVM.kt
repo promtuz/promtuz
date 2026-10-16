@@ -70,7 +70,7 @@ class ProfileVM(private val group: String? = null) : ViewModel() {
     }
 
     fun removePicture() = change {
-        if (group == null) CoreBridge.clearProfilePicture() else CoreBridge.setGroupPicture(group.fromHex(), null)
+        if (group == null) CoreBridge.clearProfilePicture() else CoreBridge.clearGroupPicture(group.fromHex())
     }
 
     fun saveDetails(name: String, bio: String, onSaved: () -> Unit) = change(onSaved) {
