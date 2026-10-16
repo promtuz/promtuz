@@ -320,6 +320,10 @@ object CoreBridge {
     suspend fun importMedia(context: Context, uri: Uri): MediaImport =
         withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaSource.open(context.contentResolver, uri)) }
 
+    suspend fun stageImportedChatImage(context: Context, uri: Uri): ULong = withContext(Dispatchers.IO) {
+        importMedia(context, uri).beginChatImage(false).stage().id
+    }
+
     suspend fun prepareEncodedImage(bytes: ByteArray, sticker: Boolean = false): uniffi.core.PreparedImageRecord =
         withContext(Dispatchers.Default) { uniffi.core.prepareEncodedImage(bytes, sticker) }
 

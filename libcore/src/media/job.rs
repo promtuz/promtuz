@@ -37,6 +37,9 @@ impl MediaJob {
     }
 
     pub fn stage(&mut self) -> Result<u64> {
+        if !matches!(self.request, MediaRequest::ChatImage { .. }) {
+            bail!("Only chat images can be staged as message media.");
+        }
         match self.run()? {
             PreparedMedia::Image(image) => Ok(crate::staging::stage_prepared_image(image)),
         }

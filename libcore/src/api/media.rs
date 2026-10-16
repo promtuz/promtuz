@@ -46,6 +46,18 @@ pub struct MediaImport {
     source: parking_lot::Mutex<Option<crate::media::import::ImportedSource>>,
 }
 
+/// An owned chat-image job. The private import moves here and cannot be used
+/// again, including when Kotlin abandons the object.
+#[derive(uniffi::Object)]
+pub struct MediaImageJob {
+    job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+}
+
+#[derive(uniffi::Record)]
+pub struct StagedImageRecord {
+    pub id: u64,
+}
+
 #[uniffi::export]
 impl MediaImport {
     #[uniffi::constructor]
@@ -76,6 +88,38 @@ impl MediaImport {
 
     pub fn discard(&self) {
         self.source.lock().take();
+    }
+
+    pub fn begin_chat_image(&self, hd_enabled: bool) -> Result<Arc<MediaImageJob>, CoreError> {
+        let source = self.source.lock().take().ok_or_else(|| CoreError::Refused {
+            msg: "This media import was already used or discarded.".into(),
+        })?;
+        let job = crate::media::MediaJob::new(
+            source,
+            crate::media::MediaRequest::ChatImage { hd_enabled },
+        )?;
+        Ok(Arc::new(MediaImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+    }
+}
+
+#[uniffi::export]
+impl MediaImageJob {
+    pub fn stage(&self) -> Result<StagedImageRecord, CoreError> {
+        let mut job = self.job.lock();
+        let id = job
+            .as_mut()
+            .ok_or_else(|| CoreError::Refused {
+                msg: "This media job is finished or cancelled.".into(),
+            })?
+            .stage()?;
+        job.take();
+        Ok(StagedImageRecord { id })
+    }
+
+    pub fn cancel(&self) {
+        if let Some(mut job) = self.job.lock().take() {
+            job.cancel();
+        }
     }
 }
 
@@ -140,24 +184,39 @@ pub struct AvifMasteringDisplayRecord {
 #[uniffi::export]
 pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError> {
     Ok(crate::media::inspect_avif(&bytes)?.map(|info| AvifInfoRecord {
-        width: info.width, height: info.height, animated: info.animated, bit_depth: info.bit_depth,
-        frame_count: info.frame_count, duration_ms: info.duration_ms,
-        has_alpha: info.has_alpha, chroma_subsampling: info.chroma_subsampling,
-        color_primaries: info.color_primaries, transfer_characteristics: info.transfer_characteristics,
-        matrix_coefficients: info.matrix_coefficients, full_range: info.full_range,
-        has_gain_map: info.has_gain_map, has_icc: info.has_icc,
-        rotation_quarter_turns: info.rotation_quarter_turns, mirror_axis: info.mirror_axis,
-        decoded_pixel_count: info.decoded_pixel_count, max_coded_edge: info.max_coded_edge,
+        width: info.width,
+        height: info.height,
+        animated: info.animated,
+        bit_depth: info.bit_depth,
+        frame_count: info.frame_count,
+        duration_ms: info.duration_ms,
+        has_alpha: info.has_alpha,
+        chroma_subsampling: info.chroma_subsampling,
+        color_primaries: info.color_primaries,
+        transfer_characteristics: info.transfer_characteristics,
+        matrix_coefficients: info.matrix_coefficients,
+        full_range: info.full_range,
+        has_gain_map: info.has_gain_map,
+        has_icc: info.has_icc,
+        rotation_quarter_turns: info.rotation_quarter_turns,
+        mirror_axis: info.mirror_axis,
+        decoded_pixel_count: info.decoded_pixel_count,
+        max_coded_edge: info.max_coded_edge,
         content_light_level: info.content_light_level.map(|light| AvifContentLightLevelRecord {
             max_content_light_level: light.max_content_light_level,
             max_frame_average_light_level: light.max_frame_average_light_level,
         }),
         mastering_display: info.mastering_display.map(|display| AvifMasteringDisplayRecord {
-            red_x: display.red_x, red_y: display.red_y,
-            green_x: display.green_x, green_y: display.green_y,
-            blue_x: display.blue_x, blue_y: display.blue_y,
-            white_x: display.white_x, white_y: display.white_y,
-            max_luminance: display.max_luminance, min_luminance: display.min_luminance,
+            red_x: display.red_x,
+            red_y: display.red_y,
+            green_x: display.green_x,
+            green_y: display.green_y,
+            blue_x: display.blue_x,
+            blue_y: display.blue_y,
+            white_x: display.white_x,
+            white_y: display.white_y,
+            max_luminance: display.max_luminance,
+            min_luminance: display.min_luminance,
         }),
     }))
 }
@@ -165,7 +224,9 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
 /// Inspect AVIF without re-encoding it, or convert the complete GIF sequence to AVIF.
 /// The host runs this on its media worker and retains the original until preparation succeeds.
 #[uniffi::export]
-pub fn prepare_encoded_image(bytes: Vec<u8>, sticker: bool) -> Result<PreparedImageRecord, CoreError> {
+pub fn prepare_encoded_image(
+    bytes: Vec<u8>, sticker: bool,
+) -> Result<PreparedImageRecord, CoreError> {
     let policy = if sticker {
         crate::media::MediaPolicy {
             max_bytes: common::proto::sticker::STICKER_MAX_BYTES,
@@ -220,9 +281,11 @@ pub struct TransferDiagnostics {
 pub fn get_transfer_diagnostics() -> TransferDiagnostics {
     let snapshot = crate::p2p::diagnostics::snapshot();
     TransferDiagnostics {
-        events: snapshot.events.into_iter().map(|(at_ms, event)| TransferDiagnosticEvent {
-            at_ms, category: format!("{event:?}"),
-        }).collect(),
+        events: snapshot
+            .events
+            .into_iter()
+            .map(|(at_ms, event)| TransferDiagnosticEvent { at_ms, category: format!("{event:?}") })
+            .collect(),
         direct_datagram_bytes_sent: snapshot.direct_sent,
         relay_datagram_bytes_sent: snapshot.relay_sent,
         tcp_queue_datagrams_dropped: snapshot.tcp_queue_drops,
@@ -318,7 +381,9 @@ pub fn get_media(conversation_id: Vec<u8>, limit: u32) -> Result<Vec<MediaRecord
 }
 
 #[uniffi::export]
-pub fn get_message_media(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<Option<MediaRecord>, CoreError> {
+pub fn get_message_media(
+    conversation_id: Vec<u8>, dispatch_id: Vec<u8>,
+) -> Result<Option<MediaRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let did = fixed::<16>(&dispatch_id, "dispatch_id")?;
     Ok(crate::data::media::get(&conv, &did)?.map(|r| media_record(did, r)))
@@ -327,12 +392,13 @@ pub fn get_message_media(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Resu
 fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
     use crate::transfer::store;
     let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
-    let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
+    let (transfer_state, transfer_have, transfer_total, local_path) = match fid
+        .and_then(store::partial_get)
+    {
         Some(p) => {
             // A DONE row can outlive its bytes; report it PENDING so a tap re-pulls the file.
             let complete = p.is_complete();
-            let state =
-                if p.state == store::DONE && !complete { store::PENDING } else { p.state };
+            let state = if p.state == store::DONE && !complete { store::PENDING } else { p.state };
             (
                 state,
                 store::verified_count(&p),
@@ -354,11 +420,11 @@ fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
         use common::proto::pack::Unpacker;
         let s = common::proto::sticker::StickerRef::deser(b).ok()?;
         Some(crate::api::stickers::StickerRecord {
-            pack:   s.pack.to_vec(),
-            id:     s.id.to_vec(),
-            token:  s.token.to_vec(),
-            store:  s.store,
-            width:  r.width,
+            pack: s.pack.to_vec(),
+            id: s.id.to_vec(),
+            token: s.token.to_vec(),
+            store: s.store,
+            width: r.width,
             height: r.height,
         })
     });
@@ -404,15 +470,36 @@ pub fn shared_media(conversation_id: Vec<u8>) -> Result<Vec<SharedMediaItem>, Co
             let mut query = db.prepare("SELECT mm.dispatch_id, mm.kind, mm.name, mm.mime, mm.size, m.timestamp, m.sender_ipk, m.outgoing
                 FROM message_media mm JOIN messages m ON m.conversation_id=mm.conversation_id AND m.dispatch_id=mm.dispatch_id
                 WHERE m.conversation_id=?1 AND m.deleted=0 ORDER BY m.id DESC")?;
-            query.query_map([conv.as_slice()], |r| Ok((SharedMediaItem {
-                sender_name: String::new(), dispatch_id: r.get(0)?, kind: r.get(1)?, name: r.get(2)?, mime: r.get(3)?, size: r.get(4)?, timestamp: r.get(5)?
-            }, r.get::<_, Option<[u8; 32]>>(6)?, r.get::<_, bool>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            query
+                .query_map([conv.as_slice()], |r| {
+                    Ok((
+                        SharedMediaItem {
+                            sender_name: String::new(),
+                            dispatch_id: r.get(0)?,
+                            kind: r.get(1)?,
+                            name: r.get(2)?,
+                            mime: r.get(3)?,
+                            size: r.get(4)?,
+                            timestamp: r.get(5)?,
+                        },
+                        r.get::<_, Option<[u8; 32]>>(6)?,
+                        r.get::<_, bool>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         // Name resolution owns its own locks. Never call it under the messages lock.
-        Ok(rows.into_iter().map(|(mut row, sender, outgoing)| {
-            row.sender_name = if outgoing { "You".into() } else { sender.map(|who| crate::data::peer_name::resolve(&who)).unwrap_or_default() };
-            row
-        }).collect::<Vec<_>>())
+        Ok(rows
+            .into_iter()
+            .map(|(mut row, sender, outgoing)| {
+                row.sender_name = if outgoing {
+                    "You".into()
+                } else {
+                    sender.map(|who| crate::data::peer_name::resolve(&who)).unwrap_or_default()
+                };
+                row
+            })
+            .collect::<Vec<_>>())
     })();
     result.map_err(Into::into)
 }
