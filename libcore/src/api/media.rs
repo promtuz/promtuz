@@ -113,6 +113,16 @@ pub struct MediaPreparedImageJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
 }
 
+#[derive(uniffi::Object)]
+pub struct MediaStickerJob {
+    job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+}
+
+#[derive(uniffi::Object)]
+pub struct StickerArtifact {
+    image: parking_lot::Mutex<Option<crate::media::image::PreparedImage>>,
+}
+
 #[derive(uniffi::Record)]
 pub struct ImageCropRecord {
     pub center_x: f32,
@@ -124,6 +134,14 @@ pub struct ImageCropRecord {
 pub struct StagedImageRecord {
     pub id: u64,
     pub avif: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct PreparedStickerRecord {
+    pub artifact: Arc<StickerArtifact>,
     pub width: u32,
     pub height: u32,
     pub animated: bool,
@@ -168,9 +186,9 @@ impl MediaImport {
         Ok(Arc::new(MediaPreparedImageJob { job: parking_lot::Mutex::new(Some(job)) }))
     }
 
-    pub fn begin_sticker(&self) -> Result<Arc<MediaPreparedImageJob>, CoreError> {
+    pub fn begin_sticker(&self) -> Result<Arc<MediaStickerJob>, CoreError> {
         let job = take_import_job(self, crate::media::MediaRequest::Sticker { trim: None })?;
-        Ok(Arc::new(MediaPreparedImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+        Ok(Arc::new(MediaStickerJob { job: parking_lot::Mutex::new(Some(job)) }))
     }
 }
 
@@ -239,6 +257,41 @@ impl MediaPreparedImageJob {
         if let Some(mut job) = self.job.lock().take() {
             job.cancel();
         }
+    }
+}
+
+#[uniffi::export]
+impl MediaStickerJob {
+    pub fn prepare(&self) -> Result<PreparedStickerRecord, CoreError> {
+        let mut job = self.job.lock();
+        let image = job
+            .as_mut()
+            .ok_or_else(|| CoreError::Refused {
+                msg: "This media job is finished or cancelled.".into(),
+            })?
+            .run();
+        job.take();
+        let crate::media::PreparedMedia::Image(image) = image?;
+        Ok(PreparedStickerRecord {
+            width: image.width,
+            height: image.height,
+            animated: image.animated,
+            artifact: Arc::new(StickerArtifact { image: parking_lot::Mutex::new(Some(image)) }),
+        })
+    }
+
+    pub fn cancel(&self) {
+        if let Some(mut job) = self.job.lock().take() {
+            job.cancel();
+        }
+    }
+}
+
+impl StickerArtifact {
+    pub(crate) fn take(&self) -> Result<crate::media::image::PreparedImage, CoreError> {
+        self.image.lock().take().ok_or_else(|| CoreError::Refused {
+            msg: "This prepared sticker was already used.".into(),
+        })
     }
 }
 
@@ -345,6 +398,26 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
 #[uniffi::export]
 pub fn set_attachment_sharing_network(unmetered_wifi: bool) {
     crate::transfer::sharing::set_network(core(), unmetered_wifi);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sticker_artifact_is_consumed_once() {
+        let artifact = StickerArtifact {
+            image: parking_lot::Mutex::new(Some(crate::media::image::PreparedImage {
+                bytes: vec![1],
+                width: 1,
+                height: 1,
+                animated: false,
+                animation_fallback: false,
+            })),
+        };
+        assert_eq!(artifact.take().unwrap().bytes, [1]);
+        assert!(artifact.take().is_err());
+    }
 }
 
 /// Process-local debug events with fixed categories only, never peer or file identifiers.

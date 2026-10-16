@@ -1,5 +1,7 @@
 //! Platform API for sticker packs, messages and cached images.
 
+use std::sync::Arc;
+
 use common::proto::pack::Packer;
 use common::proto::sticker::StickerRef;
 use common::types::bytes::fixed;
@@ -45,7 +47,7 @@ pub struct StickerPackPreview {
 
 #[derive(uniffi::Record)]
 pub struct StickerSource {
-    pub avif: Vec<u8>,
+    pub artifact: Arc<super::media::StickerArtifact>,
 }
 
 pub(crate) fn record(row: &StickerRow, token: &[u8; 32], store: u16) -> StickerRecord {
@@ -152,7 +154,10 @@ fn log_publish(e: &anyhow::Error) {
 pub async fn create_sticker_pack(
     name: String, images: Vec<StickerSource>,
 ) -> Result<Vec<u8>, CoreError> {
-    let images = images.into_iter().map(|i| SourceImage { avif: i.avif }).collect();
+    let images = images
+        .into_iter()
+        .map(|i| i.artifact.take().map(|image| SourceImage { image }))
+        .collect::<Result<_, _>>()?;
     let id =
         on_runtime(
             async move { crate::stickers::create(name, images).await.inspect_err(log_publish) },
@@ -166,7 +171,10 @@ pub async fn add_to_sticker_pack(
     pack: Vec<u8>, images: Vec<StickerSource>,
 ) -> Result<(), CoreError> {
     let pack = fixed::<16>(&pack, "dispatch_id")?;
-    let images = images.into_iter().map(|i| SourceImage { avif: i.avif }).collect();
+    let images = images
+        .into_iter()
+        .map(|i| i.artifact.take().map(|image| SourceImage { image }))
+        .collect::<Result<_, _>>()?;
     on_runtime(async move { crate::stickers::append(pack, images).await.inspect_err(log_publish) })
         .await
 }

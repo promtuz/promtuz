@@ -132,7 +132,7 @@ class StickersVM(private val application: Application) : ViewModel() {
     private suspend fun sources(uris: List<Uri>): List<StickerSource> = withContext(Dispatchers.IO) {
         uris.map { uri ->
             val prepared = CoreBridge.prepareImportedSticker(application, uri)
-            StickerSource(prepared.bytes)
+            StickerSource(prepared.artifact)
         }
     }
 

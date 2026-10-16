@@ -320,7 +320,7 @@ object CoreBridge {
         importMedia(context, uri).beginAvatar(crop).prepare()
     }
 
-    suspend fun prepareImportedSticker(context: Context, uri: Uri): uniffi.core.PreparedImageRecord =
+    suspend fun prepareImportedSticker(context: Context, uri: Uri): uniffi.core.PreparedStickerRecord =
         withContext(Dispatchers.IO) { importMedia(context, uri).beginSticker().prepare() }
 
     fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
