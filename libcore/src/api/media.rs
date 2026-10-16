@@ -111,6 +111,10 @@ pub struct MediaImageJob {
 #[derive(uniffi::Record)]
 pub struct StagedImageRecord {
     pub id: u64,
+    pub avif: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
 }
 
 #[uniffi::export]
@@ -150,14 +154,20 @@ impl MediaImport {
 impl MediaImageJob {
     pub fn stage(&self) -> Result<StagedImageRecord, CoreError> {
         let mut job = self.job.lock();
-        let id = job
+        let image = job
             .as_mut()
             .ok_or_else(|| CoreError::Refused {
                 msg: "This media job is finished or cancelled.".into(),
             })?
             .stage()?;
         job.take();
-        Ok(StagedImageRecord { id })
+        Ok(StagedImageRecord {
+            id: image.id,
+            avif: image.avif,
+            width: image.width,
+            height: image.height,
+            animated: image.animated,
+        })
     }
 
     pub fn cancel(&self) {

@@ -9,14 +9,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
-import java.io.File
-import java.util.UUID
 
 /** Original containers reach core before a still-image decoder can discard their frames or color. */
 data class PickedImageSource(
@@ -35,57 +29,10 @@ private const val EncodedImageMaxBytes = 32 * 1024 * 1024
 
 data class StagedPickedImage(val id: ULong, val preview: ImageBitmap?)
 
-/** Shared by the composer, camera, and Android's share sheet. Core owns a file after staging. */
-suspend fun stagePickedImage(context: Context, uri: Uri, allowAttachment: Boolean = true): StagedPickedImage {
-    val source = pickImageSource(context, uri, 1600)
-    val prepared = source.encoded?.let { CoreBridge.prepareEncodedImage(it) }
-    val info = prepared?.let { withContext(Dispatchers.Default) { CoreBridge.inspectAvif(it.bytes) } }
-    val extendedColor = info?.let {
-        it.hasGainMap || it.hasIcc || it.transferCharacteristics?.toInt() in setOf(16, 18) ||
-            (it.colorPrimaries?.toInt()?.let { primaries -> primaries !in setOf(1, 2) } == true)
-    } == true
-    val attachment = source.preserveOriginal || (prepared != null && (prepared.bytes.size > 256 * 1024 || extendedColor))
-    if (attachment && !allowAttachment) {
-        throw ImagePreparationException("Send this image as a new message to keep its animation and colors.")
-    }
-    val preview = source.preview ?: prepared?.let { withContext(Dispatchers.Default) { decodeEncodedPoster(it.bytes, 192) } }
-    val caller = currentCoroutineContext()
-    caller.ensureActive()
-    var staged: ULong? = null
-    try {
-        // No cancellation gap between creating a private file, handing it to core, and recording
-        // its staging id. If the caller goes away meanwhile, discard releases core's retention.
-        return withContext(NonCancellable + Dispatchers.IO) {
-            val id = when {
-                attachment -> {
-                    val file = if (prepared == null) resolvePickedFile(context, uri)
-                        ?: throw ImagePreparationException("Couldn’t open this image.")
-                    else {
-                        val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
-                        val privateCopy = File(dir, "${UUID.randomUUID()}_image.avif")
-                        try { privateCopy.writeBytes(prepared.bytes) }
-                        catch (e: Exception) { privateCopy.delete(); throw e }
-                        PickedFile(privateCopy.absolutePath, "image.avif", prepared.mime)
-                    }
-                    try {
-                        val poster = preview?.asAndroidBitmap()
-                        CoreBridge.stageAttachment(file.path, file.name, file.mime, poster?.toRgba(), poster?.width ?: 0, poster?.height ?: 0)
-                    } catch (e: Exception) {
-                        File(file.path).delete()
-                        throw e
-                    }
-                }
-                prepared != null -> CoreBridge.stageEncodedImage(prepared.bytes)
-                else -> CoreBridge.stageImage(source.rgba!!, source.width, source.height)
-            }
-            staged = id
-            StagedPickedImage(id, preview)
-        }
-    } finally {
-        if (!caller.isActive) staged?.let { id ->
-            withContext(NonCancellable) { CoreBridge.discardStaged(id) }
-        }
-    }
+/** Shared by the composer, camera, and Android's share sheet. Core writes the only sendable copy. */
+suspend fun stagePickedImage(context: Context, uri: Uri): StagedPickedImage = withContext(Dispatchers.IO) {
+    val staged = CoreBridge.stageImportedChatImage(context, uri)
+    StagedPickedImage(staged.id, decodeEncodedPoster(staged.avif, 192))
 }
 
 suspend fun pickImageSource(

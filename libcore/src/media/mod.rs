@@ -19,7 +19,7 @@ pub(crate) mod video;
 
 pub use avif::{AvifInfo, inspect_avif};
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
-pub use job::{MediaJob, PreparedMedia};
+pub use job::{MediaJob, PreparedMedia, StagedImage};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
 use crate::state::core;

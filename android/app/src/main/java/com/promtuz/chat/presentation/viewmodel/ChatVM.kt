@@ -619,9 +619,7 @@ class ChatVM(
     }
 
     private suspend fun stagePhoto(uri: Uri) {
-        val editing = composerAction.value as? ComposerAction.Edit
-        val staged = stagePickedImage(application, uri,
-            allowAttachment = editing == null || editing.msg.content.acceptsStaged(com.promtuz.chat.domain.model.STAGED_ATTACHMENT))
+        val staged = stagePickedImage(application, uri)
         own(staged.id)
         staged.preview?.let { rememberPreview(staged.id, it) }
     }

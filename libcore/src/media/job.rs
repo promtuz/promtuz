@@ -21,6 +21,14 @@ pub enum PreparedMedia {
     Image(image::PreparedImage),
 }
 
+pub struct StagedImage {
+    pub id: u64,
+    pub avif: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+}
+
 impl MediaJob {
     pub fn new(source: ImportedSource, request: MediaRequest) -> Result<Self> {
         request.validate().map_err(|error| anyhow::anyhow!(error))?;
@@ -70,12 +78,21 @@ impl MediaJob {
         }
     }
 
-    pub fn stage(&mut self) -> Result<u64> {
+    pub fn stage(&mut self) -> Result<StagedImage> {
         if !matches!(self.request, MediaRequest::ChatImage { .. }) {
             bail!("Only chat images can be staged as message media.");
         }
         match self.run()? {
-            PreparedMedia::Image(image) => Ok(crate::staging::stage_prepared_image(image)),
+            PreparedMedia::Image(image) => {
+                let staged = StagedImage {
+                    avif: image.bytes.clone(),
+                    width: image.width,
+                    height: image.height,
+                    animated: image.animated,
+                    id: crate::staging::stage_prepared_image(image),
+                };
+                Ok(staged)
+            },
         }
     }
 }
