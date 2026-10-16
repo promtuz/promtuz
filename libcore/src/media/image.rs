@@ -251,11 +251,15 @@ pub fn prepare_image_path(path: &Path, request: MediaRequest) -> Result<Prepared
         ImageKind::Png => {
             ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?.is_apng()?
         },
-        ImageKind::Avif => bail!("AVIF file decoding has not been configured."),
+        ImageKind::Avif => decode_avif_path(path)?.frame_count > 1,
         _ => false,
     };
     if animated && let Some(animation) = animation {
-        return prepare_animation_frames(decode_animation_path(path)?, animation);
+        let frames = match kind {
+            ImageKind::Avif => decode_avif_animation_path(path)?,
+            _ => decode_animation_path(path)?,
+        };
+        return prepare_animation_frames(frames, animation);
     }
     let crop = match request {
         MediaRequest::Avatar { crop } => Some(crop),
@@ -325,7 +329,23 @@ fn prepare_sdr_image_path(
             let frame = frames.frame(0)?;
             (DecodedStill { rgba: frame.pixels, width: frame.width, height: frame.height }, true)
         },
-        ImageKind::Avif => bail!("AVIF file decoding has not been configured."),
+        ImageKind::Avif => {
+            let decoded = decode_avif_path(path)?;
+            ensure!(
+                !matches!(decoded.color.transfer, 16 | 18),
+                "HDR AVIF needs tone mapping before SDR conversion."
+            );
+            let rgba = decoded
+                .frame
+                .pixels
+                .chunks_exact(2)
+                .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
+                .collect();
+            (
+                DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height },
+                decoded.frame_count > 1,
+            )
+        },
         ImageKind::Platform => bail!("This image format needs a platform decoder."),
     };
     let still = match crop {
@@ -343,7 +363,16 @@ fn prepare_sdr_image_path(
 }
 
 fn decode_avif_animation(bytes: &[u8]) -> Result<DecodedFrames> {
-    let (first, mut source) = decode_avif_frames(bytes)?;
+    let (first, source) = decode_avif_frames(bytes)?;
+    normalize_avif_frames(first, source)
+}
+
+fn decode_avif_animation_path(path: &Path) -> Result<DecodedFrames> {
+    let (first, source) = decode_avif_frames_path(path)?;
+    normalize_avif_frames(first, source)
+}
+
+fn normalize_avif_frames(first: DecodedAvif, mut source: FrameStore) -> Result<DecodedFrames> {
     ensure!(
         !matches!(first.color.transfer, 16 | 18),
         "HDR AVIF needs tone mapping before SDR conversion."
@@ -499,16 +528,31 @@ fn fit_dimensions(width: u32, height: u32, edge: u32) -> (u32, u32) {
 }
 
 pub fn decode_avif(bytes: &[u8]) -> Result<DecodedAvif> {
+    let decoder = promtuz_avif::Decoder::open(bytes, avif_limits()?)
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    decode_avif_decoder(decoder)
+}
+
+pub fn decode_avif_path(path: &Path) -> Result<DecodedAvif> {
+    let decoder = promtuz_avif::Decoder::open_file(path, avif_limits()?)
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    decode_avif_decoder(decoder)
+}
+
+fn avif_limits() -> Result<promtuz_avif::DecodeLimits> {
     let limits = MediaRequest::resource_limits();
-    let image = promtuz_avif::decode_first(
-        bytes,
-        promtuz_avif::DecodeLimits {
-            max_pixels: u32::try_from(limits.source_pixels)?,
-            max_edge: 8_192,
-            max_frames: limits.animation_frames,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    Ok(promtuz_avif::DecodeLimits {
+        max_pixels: u32::try_from(limits.source_pixels)?,
+        max_edge: 8_192,
+        max_frames: limits.animation_frames,
+    })
+}
+
+fn decode_avif_decoder(mut decoder: promtuz_avif::Decoder) -> Result<DecodedAvif> {
+    let image = decoder
+        .decode_next()
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?
+        .ok_or_else(|| anyhow::anyhow!("AVIF contains no frames"))?;
     let pixels = image.rgba16().iter().flat_map(|pixel| pixel.to_ne_bytes()).collect();
     Ok(DecodedAvif {
         frame: Frame::new(pixels, image.width, image.height, PixelFormat::Rgba16, 0)?,
@@ -521,16 +565,21 @@ pub fn decode_avif(bytes: &[u8]) -> Result<DecodedAvif> {
 }
 
 pub fn decode_avif_frames(bytes: &[u8]) -> Result<(DecodedAvif, FrameStore)> {
+    let decoder = promtuz_avif::Decoder::open(bytes, avif_limits()?)
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    decode_avif_frames_decoder(decoder)
+}
+
+pub fn decode_avif_frames_path(path: &Path) -> Result<(DecodedAvif, FrameStore)> {
+    let decoder = promtuz_avif::Decoder::open_file(path, avif_limits()?)
+        .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
+    decode_avif_frames_decoder(decoder)
+}
+
+fn decode_avif_frames_decoder(
+    mut decoder: promtuz_avif::Decoder,
+) -> Result<(DecodedAvif, FrameStore)> {
     let limits = MediaRequest::resource_limits();
-    let mut decoder = promtuz_avif::Decoder::open(
-        bytes,
-        promtuz_avif::DecodeLimits {
-            max_pixels: u32::try_from(limits.source_pixels)?,
-            max_edge: 8_192,
-            max_frames: limits.animation_frames,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
     let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
     let mut first = None;
     while let Some(image) = decoder
@@ -605,6 +654,19 @@ mod tests {
         File::create(&path).unwrap().write_all(&png).unwrap();
         assert_eq!(inspect_path(&path).unwrap(), ImageKind::Png);
         assert_eq!(decode_sdr_still_path(&path).unwrap().rgba, vec![1, 2, 3, 4]);
+        let prepared =
+            prepare_image_path(&path, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
+        assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
+    }
+
+    #[test]
+    fn private_avif_import_is_reencoded_from_libavif_file_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("picked.avif");
+        File::create(&path)
+            .unwrap()
+            .write_all(&super::super::encode_avif(&[1, 2, 3, 4], 1, 1, 60.0).unwrap())
+            .unwrap();
         let prepared =
             prepare_image_path(&path, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
         assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
