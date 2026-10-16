@@ -7,8 +7,6 @@ use std::{
 
 use ::image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use anyhow::{Result, bail, ensure};
-use ravif::{BitDepth, Encoder, Img};
-use rgb::FromSlice;
 
 use super::{
     frames::{Frame, FrameStore, PixelFormat},
@@ -561,13 +559,7 @@ pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<
         let (width, height) = fit_dimensions(decoded.width, decoded.height, edge);
         let scaled = resize_linear_srgb(&image, width, height);
         for quality in [72.0, 58.0, 44.0] {
-            let bytes = Encoder::new()
-                .with_quality(quality)
-                .with_alpha_quality(85.0)
-                .with_speed(8)
-                .with_bit_depth(BitDepth::Eight)
-                .encode_rgba(Img::new(scaled.as_raw().as_rgba(), width as usize, height as usize))?
-                .avif_file;
+            let bytes = encode_sdr_avif(scaled.as_raw(), width, height, quality)?;
             if bytes.len() as u64 <= profile.max_bytes {
                 return Ok(PreparedStill { bytes, width, height });
             }
@@ -575,6 +567,22 @@ pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<
         ensure!(edge > profile.emergency_edge, "This image cannot fit within the send limit.");
         edge = (edge * 3 / 4).max(profile.emergency_edge);
     }
+}
+
+pub(super) fn encode_sdr_avif(
+    rgba: &[u8], width: u32, height: u32, quality: f32,
+) -> Result<Vec<u8>> {
+    let quantizer = ((100.0 - quality.clamp(0.0, 100.0)) * 63.0 / 100.0).round() as u8;
+    let mut encoder = promtuz_avif::Encoder::new(
+        width,
+        height,
+        promtuz_avif::EncodeConfig { quantizer, ..promtuz_avif::EncodeConfig::default() },
+    )
+    .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))?;
+    encoder
+        .add_rgba(rgba, 1)
+        .map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))?;
+    encoder.finish().map_err(|error| anyhow::anyhow!("AVIF encoder rejected the image: {error:?}"))
 }
 
 pub(super) fn resize_linear_srgb(

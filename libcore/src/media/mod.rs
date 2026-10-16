@@ -4,8 +4,8 @@
 //! profile and gain map remain intact. GIF is composited and encoded as an AVIF
 //! sequence. Platform-decoded RGBA is explicitly an eight-bit SDR input.
 
-mod avif;
 mod avatar;
+mod avif;
 pub mod frames;
 mod gif;
 #[path = "image.rs"]
@@ -17,16 +17,14 @@ pub mod ports;
 mod sequence;
 pub(crate) mod video;
 
-pub use avif::{AvifInfo, inspect_avif};
 pub use avatar::{AvatarCrop, prepare_avatar_image, validate_avatar_avif};
+pub use avif::{AvifInfo, inspect_avif};
 pub use job::{MediaJob, PreparedMedia, StagedImage};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
 use crate::state::core;
 use anyhow::{Result, bail};
 use common::proto::mls_wire::MAX_AVATAR_BYTES;
-use ravif::{BitDepth, Encoder, Img};
-use rgb::FromSlice;
 
 pub(crate) fn alert(alert: crate::platform::MediaAlert) {
     if let Some(events) = core().events.get() {
@@ -35,12 +33,7 @@ pub(crate) fn alert(alert: crate::platform::MediaAlert) {
 }
 
 fn encode_avif(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
-    Ok(Encoder::new()
-        .with_quality(quality)
-        .with_speed(8)
-        .with_bit_depth(BitDepth::Eight)
-        .encode_rgba(Img::new(rgba.as_rgba(), w as usize, h as usize))?
-        .avif_file)
+    image::encode_sdr_avif(rgba, w, h, quality)
 }
 
 /// Processing limits belong to the caller's media use, not the input format.
@@ -130,13 +123,7 @@ pub fn compress_sticker(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>
     for quality in [78.0, 62.0, 48.0] {
         let (w, h) = fit_dimensions(width, height, edge);
         let scaled = ::image::imageops::resize(&img, w, h, ::image::imageops::FilterType::Lanczos3);
-        let out = Encoder::new()
-            .with_quality(quality)
-            .with_alpha_quality(85.0)
-            .with_speed(7)
-            .with_bit_depth(BitDepth::Eight)
-            .encode_rgba(Img::new(scaled.as_raw().as_rgba(), w as usize, h as usize))?
-            .avif_file;
+        let out = encode_avif(scaled.as_raw(), w, h, quality)?;
         if out.len() <= 256 * 1024 {
             return Ok((out, w, h));
         }
@@ -196,7 +183,8 @@ pub fn poster_thumb(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
             ((width as f32 * scale).round() as u32).max(1),
             ((height as f32 * scale).round() as u32).max(1),
         );
-        let small = ::image::imageops::resize(&img, tw, th, ::image::imageops::FilterType::Triangle);
+        let small =
+            ::image::imageops::resize(&img, tw, th, ::image::imageops::FilterType::Triangle);
         let out = encode_avif(small.as_raw(), tw, th, 50.0)?;
         if out.len() <= MAX_POSTER_BYTES || edge <= 96 {
             return Ok(out);
@@ -221,7 +209,8 @@ pub const AVATAR_EDGE: u32 = 256;
 /// quality steps down before size, and a picture that fits at no quality is refused.
 pub fn avatar_from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     validate_rgba(rgba, width, height)?;
-    let img = ::image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
+    let img =
+        ::image::RgbaImage::from_raw(width, height, rgba.to_vec()).expect("len checked above");
 
     let side = width.min(height);
     let square =
