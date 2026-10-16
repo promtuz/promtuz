@@ -251,6 +251,16 @@ pub fn prepare_image(bytes: &[u8], request: MediaRequest) -> Result<PreparedImag
     prepare_animation(bytes, kind, animation.expect("checked above"))
 }
 
+pub fn validate_avatar_avif(bytes: &[u8]) -> Result<PreparedImage> {
+    ensure!(inspect(bytes)? == ImageKind::Avif, "Profile pictures must be prepared as AVIF before saving");
+    prepare_image(
+        bytes,
+        MediaRequest::Avatar {
+            crop: NormalizedCrop { center_x: 0.5, center_y: 0.5, zoom: 1.0 },
+        },
+    )
+}
+
 /// File-backed counterpart of [`prepare_image`]. It is used only after the
 /// source lease has become a bounded, private core import.
 pub fn prepare_image_path(path: &Path, request: MediaRequest) -> Result<PreparedImage> {

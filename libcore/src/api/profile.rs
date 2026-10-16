@@ -23,7 +23,7 @@ pub fn profile_picture() -> Option<Vec<u8>> {
 
 #[uniffi::export]
 pub fn set_profile_picture_encoded(avif: Vec<u8>) -> Result<(), CoreError> {
-    let image = crate::media::validate_avatar_avif(&avif)
+    let image = crate::media::image::validate_avatar_avif(&avif)
         .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
     save_profile_picture(Some(image.bytes))
 }
@@ -115,7 +115,7 @@ pub async fn set_group_picture_encoded(
     conversation_id: Vec<u8>, avif: Vec<u8>,
 ) -> Result<(), CoreError> {
     update_group_picture(conversation_id, move || {
-        let image = crate::media::validate_avatar_avif(&avif)
+        let image = crate::media::image::validate_avatar_avif(&avif)
             .map_err(|e| CoreError::Refused { msg: e.to_string() })?;
         Ok(Some(image.bytes))
     })

@@ -1,6 +1,5 @@
 //! Source-aware image processing shared by photos, stickers and avatars.
 
-mod avatar;
 mod avif;
 pub mod frames;
 #[path = "image.rs"]
@@ -11,7 +10,6 @@ mod policy;
 pub mod ports;
 pub(crate) mod video;
 
-pub use avatar::validate_avatar_avif;
 pub use avif::{AvifInfo, inspect_avif};
 pub use job::{MediaJob, PreparedMedia, StagedImage};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
