@@ -447,16 +447,7 @@ impl FrameOutput<'_> {
         );
         let rgba = ::image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels)
             .ok_or_else(|| anyhow!("invalid normalized animation frame"))?;
-        let rgba = if (rgba.width(), rgba.height()) == (self.width, self.height) {
-            rgba
-        } else {
-            ::image::imageops::resize(
-                &rgba,
-                self.width,
-                self.height,
-                ::image::imageops::FilterType::Triangle,
-            )
-        };
+        let rgba = super::image::resize_linear_srgb(&rgba, self.width, self.height);
         self.colour.feed(&rgba, false)?;
         if let Some(alpha) = self.alpha {
             alpha.feed(&rgba, true)?;

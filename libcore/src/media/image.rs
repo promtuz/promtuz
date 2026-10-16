@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{BufReader, Cursor, Read},
     path::Path,
+    sync::OnceLock,
 };
 
 use ::image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader};
@@ -558,16 +559,7 @@ pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<
     let mut edge = decoded.width.max(decoded.height).min(profile.max_edge);
     loop {
         let (width, height) = fit_dimensions(decoded.width, decoded.height, edge);
-        let scaled = if (width, height) == (decoded.width, decoded.height) {
-            image.clone()
-        } else {
-            ::image::imageops::resize(
-                &image,
-                width,
-                height,
-                ::image::imageops::FilterType::Lanczos3,
-            )
-        };
+        let scaled = resize_linear_srgb(&image, width, height);
         for quality in [72.0, 58.0, 44.0] {
             let bytes = Encoder::new()
                 .with_quality(quality)
@@ -583,6 +575,75 @@ pub fn encode_sdr_still(decoded: DecodedStill, profile: ImageProfile) -> Result<
         ensure!(edge > profile.emergency_edge, "This image cannot fit within the send limit.");
         edge = (edge * 3 / 4).max(profile.emergency_edge);
     }
+}
+
+pub(super) fn resize_linear_srgb(
+    image: &::image::RgbaImage, target_width: u32, target_height: u32,
+) -> ::image::RgbaImage {
+    if (image.width(), image.height()) == (target_width, target_height) {
+        return image.clone();
+    }
+    let mut output = vec![0; target_width as usize * target_height as usize * 4];
+    let decode = srgb_decode_table();
+    let x_scale = image.width() as f32 / target_width as f32;
+    let y_scale = image.height() as f32 / target_height as f32;
+    for target_y in 0..target_height {
+        let (y0, y1, y_weight) = sample_axis(target_y, y_scale, image.height());
+        for target_x in 0..target_width {
+            let (x0, x1, x_weight) = sample_axis(target_x, x_scale, image.width());
+            let pixels = [
+                image.get_pixel(x0, y0).0,
+                image.get_pixel(x1, y0).0,
+                image.get_pixel(x0, y1).0,
+                image.get_pixel(x1, y1).0,
+            ];
+            let weights = [
+                (1.0 - x_weight) * (1.0 - y_weight),
+                x_weight * (1.0 - y_weight),
+                (1.0 - x_weight) * y_weight,
+                x_weight * y_weight,
+            ];
+            let mut rgba = [0.0; 4];
+            for (pixel, weight) in pixels.iter().zip(weights) {
+                let alpha = f32::from(pixel[3]) / 255.0;
+                rgba[0] += decode[pixel[0] as usize] * alpha * weight;
+                rgba[1] += decode[pixel[1] as usize] * alpha * weight;
+                rgba[2] += decode[pixel[2] as usize] * alpha * weight;
+                rgba[3] += alpha * weight;
+            }
+            let offset = ((target_y * target_width + target_x) * 4) as usize;
+            output[offset + 3] = (rgba[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+            if rgba[3] > f32::EPSILON {
+                output[offset] = linear_to_srgb(rgba[0] / rgba[3]);
+                output[offset + 1] = linear_to_srgb(rgba[1] / rgba[3]);
+                output[offset + 2] = linear_to_srgb(rgba[2] / rgba[3]);
+            }
+        }
+    }
+    ::image::RgbaImage::from_raw(target_width, target_height, output).expect("valid output shape")
+}
+
+fn sample_axis(target: u32, scale: f32, source_length: u32) -> (u32, u32, f32) {
+    let source = ((target as f32 + 0.5) * scale - 0.5).clamp(0.0, source_length as f32 - 1.0);
+    let first = source.floor() as u32;
+    (first, (first + 1).min(source_length - 1), source - first as f32)
+}
+
+fn srgb_decode_table() -> &'static [f32; 256] {
+    static TABLE: OnceLock<[f32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|value| {
+            let value = value as f32 / 255.0;
+            if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+        })
+    })
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let encoded =
+        if value <= 0.003_130_8 { value * 12.92 } else { 1.055 * value.powf(1.0 / 2.4) - 0.055 };
+    (encoded * 255.0).round() as u8
 }
 
 fn fit_dimensions(width: u32, height: u32, edge: u32) -> (u32, u32) {
@@ -789,5 +850,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!((cropped.width, cropped.height, cropped.rgba.len()), (2, 2, 16));
+    }
+
+    #[test]
+    fn resize_interpolates_premultiplied_linear_pixels() {
+        let source =
+            ::image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 0, 0, 0, 255, 255]).unwrap();
+        let scaled = resize_linear_srgb(&source, 1, 1);
+        assert_eq!(scaled.as_raw()[3], 128);
+        assert!(scaled.as_raw()[2] >= 254);
+        assert_eq!(&scaled.as_raw()[..2], &[0, 0]);
     }
 }
