@@ -15,7 +15,10 @@ pub struct ImportedSource {
 
 impl ImportedSource {
     pub fn from_source(source: Box<dyn MediaSource>, directory: &Path) -> Result<Self> {
-        let mut source = SourceLease::open(source)?;
+        Self::from_lease(SourceLease::open(source)?, directory)
+    }
+
+    pub fn from_lease(mut source: SourceLease, directory: &Path) -> Result<Self> {
         fs::create_dir_all(directory).context("create media import directory")?;
 
         for _ in 0..4 {

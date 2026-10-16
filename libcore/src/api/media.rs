@@ -1,6 +1,5 @@
 //! Media FFI: platform source adapters, images, attachments, voice notes and transfer state.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use common::types::bytes::fixed;
@@ -9,11 +8,15 @@ use crate::platform::CoreError;
 use crate::state::core;
 
 /// The host keeps URI, browser-file, or platform bookmark details on its side.
-/// Core only asks for bounded ranges, then owns a private copy before decoding.
+/// Core owns the lease lifetime and requests bounded reads or platform frames.
 #[uniffi::export(with_foreign)]
 pub trait MediaSourceAdapter: Send + Sync {
     fn length(&self) -> Result<Option<u64>, CoreError>;
     fn read(&self, offset: u64, max_bytes: u32) -> Result<Vec<u8>, CoreError>;
+    fn inspect_image(&self) -> Result<ImageProbeRecord, CoreError>;
+    fn decode_image(
+        &self, request: ImageFrameRequestRecord,
+    ) -> Result<DecodedImageFrameRecord, CoreError>;
     fn release(&self);
 }
 
@@ -31,6 +34,36 @@ impl crate::media::ports::MediaSource for SourceAdapter {
     fn release(&mut self) {
         self.0.release();
     }
+
+    fn inspect_image(&mut self) -> anyhow::Result<crate::media::ports::ImageProbe> {
+        let probe = self.0.inspect_image().map_err(source_error)?;
+        Ok(crate::media::ports::ImageProbe {
+            width: probe.width,
+            height: probe.height,
+            animated: probe.animated,
+            source_is_hdr: probe.source_is_hdr,
+        })
+    }
+
+    fn decode_image(
+        &mut self, request: crate::media::ports::ImageFrameRequest,
+    ) -> anyhow::Result<crate::media::ports::DecodedImageFrame> {
+        let frame = self
+            .0
+            .decode_image(ImageFrameRequestRecord { max_edge: request.max_edge })
+            .map_err(source_error)?;
+        Ok(crate::media::ports::DecodedImageFrame {
+            pixels: frame.pixels,
+            width: frame.width,
+            height: frame.height,
+            format: if frame.rgba16 {
+                crate::media::frames::PixelFormat::Rgba16
+            } else {
+                crate::media::frames::PixelFormat::Rgba8
+            },
+            source_is_hdr: frame.source_is_hdr,
+        })
+    }
 }
 
 fn source_error(error: CoreError) -> anyhow::Error {
@@ -40,13 +73,35 @@ fn source_error(error: CoreError) -> anyhow::Error {
     }
 }
 
-/// Owns a private source copy while a media job chooses and creates its rendition.
+/// Owns one opaque source lease until a media job consumes or discards it.
 #[derive(uniffi::Object)]
 pub struct MediaImport {
-    source: parking_lot::Mutex<Option<crate::media::import::ImportedSource>>,
+    source: parking_lot::Mutex<Option<crate::media::ports::SourceLease>>,
 }
 
-/// An owned chat-image job. The private import moves here and cannot be used
+#[derive(uniffi::Record)]
+pub struct ImageProbeRecord {
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+    pub source_is_hdr: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct ImageFrameRequestRecord {
+    pub max_edge: u32,
+}
+
+#[derive(uniffi::Record)]
+pub struct DecodedImageFrameRecord {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba16: bool,
+    pub source_is_hdr: bool,
+}
+
+/// An owned chat-image job. Its source lease moves here and cannot be used
 /// again, including when Kotlin abandons the object.
 #[derive(uniffi::Object)]
 pub struct MediaImageJob {
@@ -62,27 +117,15 @@ pub struct StagedImageRecord {
 impl MediaImport {
     #[uniffi::constructor]
     pub fn from_source(source: Arc<dyn MediaSourceAdapter>) -> Result<Arc<Self>, CoreError> {
-        let directory = core().db.files_dir("media-imports");
-        let imported = crate::media::import::ImportedSource::from_source(
-            Box::new(SourceAdapter(source)),
-            Path::new(&directory),
-        )?;
-        Ok(Arc::new(Self { source: parking_lot::Mutex::new(Some(imported)) }))
-    }
-
-    pub fn source_path(&self) -> Result<String, CoreError> {
-        let source = self.source.lock();
-        let source = source
-            .as_ref()
-            .ok_or_else(|| CoreError::Refused { msg: "This media import was discarded.".into() })?;
-        Ok(source.path().to_string_lossy().into_owned())
+        let source = crate::media::ports::SourceLease::open(Box::new(SourceAdapter(source)))?;
+        Ok(Arc::new(Self { source: parking_lot::Mutex::new(Some(source)) }))
     }
 
     pub fn size(&self) -> Result<u64, CoreError> {
         let source = self.source.lock();
         source
             .as_ref()
-            .map(crate::media::import::ImportedSource::size)
+            .and_then(crate::media::ports::SourceLease::known_length)
             .ok_or_else(|| CoreError::Refused { msg: "This media import was discarded.".into() })
     }
 
@@ -94,9 +137,10 @@ impl MediaImport {
         let source = self.source.lock().take().ok_or_else(|| CoreError::Refused {
             msg: "This media import was already used or discarded.".into(),
         })?;
-        let job = crate::media::MediaJob::new(
+        let job = crate::media::MediaJob::from_source(
             source,
             crate::media::MediaRequest::ChatImage { hd_enabled },
+            core().db.files_dir("media-imports").into(),
         )?;
         Ok(Arc::new(MediaImageJob { job: parking_lot::Mutex::new(Some(job)) }))
     }

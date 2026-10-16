@@ -1,11 +1,36 @@
 use std::fs::File;
 use std::io::Write;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 
-use super::policy::MAX_SOURCE_BYTES;
+use super::{frames::PixelFormat, policy::MAX_SOURCE_BYTES};
 
 pub const READ_CHUNK_BYTES: u32 = 1024 * 1024;
+
+/// The platform receives a core-selected decode target, never a quality or
+/// output-format decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageFrameRequest {
+    pub max_edge: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageProbe {
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+    pub source_is_hdr: bool,
+}
+
+/// A single oriented platform-decoded frame. Animated platform formats fall
+/// back to their first displayed frame until their frame source is available.
+pub struct DecodedImageFrame {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub source_is_hdr: bool,
+}
 
 pub trait MediaSource: Send {
     /// A known length lets core refuse an over-limit source before reading it.
@@ -13,6 +38,14 @@ pub trait MediaSource: Send {
     fn length(&self) -> Result<Option<u64>>;
     fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>>;
     fn release(&mut self);
+
+    fn inspect_image(&mut self) -> Result<ImageProbe> {
+        bail!("This image format needs a platform decoder.")
+    }
+
+    fn decode_image(&mut self, _request: ImageFrameRequest) -> Result<DecodedImageFrame> {
+        bail!("This image format needs a platform decoder.")
+    }
 }
 
 pub struct SourceLease {
@@ -81,6 +114,18 @@ impl SourceLease {
             ensure!(copied == length, "source ended before its reported length");
         }
         Ok(copied)
+    }
+
+    pub fn decode_image(&mut self, request: ImageFrameRequest) -> Result<DecodedImageFrame> {
+        self.source.as_deref_mut().expect("released source").decode_image(request)
+    }
+
+    pub fn inspect_image(&mut self) -> Result<ImageProbe> {
+        self.source.as_deref_mut().expect("released source").inspect_image()
+    }
+
+    pub fn known_length(&self) -> Option<u64> {
+        self.length
     }
 
     pub fn release(mut self) {

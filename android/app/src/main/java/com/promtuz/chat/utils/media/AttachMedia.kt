@@ -43,17 +43,18 @@ fun Bitmap.toRgba(): ByteArray {
 }
 
 suspend fun decodeDownscaled(context: Context, uri: Uri, maxEdge: Int): Bitmap? =
-    withContext(Dispatchers.IO) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) runCatching {
-            val src = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
-                // getPixels needs a readable (non-HARDWARE) bitmap; ImageDecoder applies EXIF itself.
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                val (w, h) = fit(info.size.width, info.size.height, maxEdge)
-                decoder.setTargetSize(w, h)
-            }
-        }.getOrNull() else decodeLegacy(context, uri, maxEdge)
-    }
+    withContext(Dispatchers.IO) { decodeDownscaledBlocking(context, uri, maxEdge) }
+
+internal fun decodeDownscaledBlocking(context: Context, uri: Uri, maxEdge: Int): Bitmap? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) runCatching {
+        val src = ImageDecoder.createSource(context.contentResolver, uri)
+        ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+            // getPixels needs a readable (non-HARDWARE) bitmap; ImageDecoder applies EXIF itself.
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val (w, h) = fit(info.size.width, info.size.height, maxEdge)
+            decoder.setTargetSize(w, h)
+        }
+    }.getOrNull() else decodeLegacy(context, uri, maxEdge)
 
 suspend fun videoPoster(context: Context, uri: Uri, maxEdge: Int): Pair<Bitmap, Long>? =
     withContext(Dispatchers.IO) {

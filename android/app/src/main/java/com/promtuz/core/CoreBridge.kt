@@ -3,7 +3,7 @@ package com.promtuz.core
 import android.content.Context
 import android.net.Uri
 import com.promtuz.chat.presentation.state.ConnectionState
-import com.promtuz.chat.utils.media.AndroidMediaSource
+import com.promtuz.chat.utils.media.AndroidMediaAdapter
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
@@ -316,9 +316,9 @@ object CoreBridge {
     suspend fun stageImage(rgba: ByteArray, width: Int, height: Int): ULong =
         withContext(Dispatchers.IO) { ffiStageImage(rgba, width.toUInt(), height.toUInt()) }
 
-    /** Core takes a private bounded copy; URI access ends before any media job starts. */
+    /** Core owns this opaque URI lease until the media job is finished or cancelled. */
     suspend fun importMedia(context: Context, uri: Uri): MediaImport =
-        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaSource.open(context.contentResolver, uri)) }
+        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.open(context, uri)) }
 
     suspend fun stageImportedChatImage(context: Context, uri: Uri): ULong = withContext(Dispatchers.IO) {
         importMedia(context, uri).beginChatImage(false).stage().id

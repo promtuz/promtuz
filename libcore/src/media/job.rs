@@ -1,12 +1,20 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 
-use super::{MediaRequest, image, import::ImportedSource};
+use super::{MediaRequest, image, import::ImportedSource, ports::SourceLease};
 
 /// A media import is consumed exactly once. Its private source disappears when
 /// the job completes, is cancelled, or is dropped.
 pub struct MediaJob {
-    source: Option<ImportedSource>,
+    source: Option<JobSource>,
     request: MediaRequest,
+    import_directory: PathBuf,
+}
+
+enum JobSource {
+    Lease(SourceLease),
+    Private(ImportedSource),
 }
 
 pub enum PreparedMedia {
@@ -16,7 +24,18 @@ pub enum PreparedMedia {
 impl MediaJob {
     pub fn new(source: ImportedSource, request: MediaRequest) -> Result<Self> {
         request.validate().map_err(|error| anyhow::anyhow!(error))?;
-        Ok(Self { source: Some(source), request })
+        Ok(Self {
+            source: Some(JobSource::Private(source)),
+            request,
+            import_directory: PathBuf::new(),
+        })
+    }
+
+    pub fn from_source(
+        source: SourceLease, request: MediaRequest, import_directory: PathBuf,
+    ) -> Result<Self> {
+        request.validate().map_err(|error| anyhow::anyhow!(error))?;
+        Ok(Self { source: Some(JobSource::Lease(source)), request, import_directory })
     }
 
     pub fn cancel(&mut self) {
@@ -26,6 +45,21 @@ impl MediaJob {
     pub fn run(&mut self) -> Result<PreparedMedia> {
         let source =
             self.source.take().ok_or_else(|| anyhow::anyhow!("This media job is finished."))?;
+        let source = match source {
+            JobSource::Private(source) => source,
+            JobSource::Lease(mut source) => {
+                let header = source.read_chunk(0, 64)?;
+                match image::inspect(&header)? {
+                    image::ImageKind::Platform => {
+                        return Ok(PreparedMedia::Image(image::prepare_platform_image(
+                            &mut source,
+                            self.request,
+                        )?));
+                    },
+                    _ => ImportedSource::from_lease(source, &self.import_directory)?,
+                }
+            },
+        };
         match self.request {
             MediaRequest::ChatImage { .. }
             | MediaRequest::Avatar { .. }
@@ -54,7 +88,10 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::media::ports::MediaSource;
+    use crate::media::{
+        frames::PixelFormat,
+        ports::{DecodedImageFrame, ImageFrameRequest, ImageProbe, MediaSource},
+    };
 
     struct Source {
         bytes: Vec<u8>,
@@ -74,6 +111,39 @@ mod tests {
 
         fn release(&mut self) {
             *self.released.lock().unwrap() += 1;
+        }
+    }
+
+    struct PlatformSource {
+        released: Arc<Mutex<u32>>,
+    }
+
+    impl MediaSource for PlatformSource {
+        fn length(&self) -> Result<Option<u64>> {
+            Ok(Some(24))
+        }
+
+        fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
+            Ok(b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec())
+        }
+
+        fn release(&mut self) {
+            *self.released.lock().unwrap() += 1;
+        }
+
+        fn inspect_image(&mut self) -> Result<ImageProbe> {
+            Ok(ImageProbe { width: 1, height: 1, animated: false, source_is_hdr: false })
+        }
+
+        fn decode_image(&mut self, request: ImageFrameRequest) -> Result<DecodedImageFrame> {
+            assert_eq!(request.max_edge, 1);
+            Ok(DecodedImageFrame {
+                pixels: vec![1, 2, 3, 4],
+                width: 1,
+                height: 1,
+                format: PixelFormat::Rgba8,
+                source_is_hdr: false,
+            })
         }
     }
 
@@ -111,5 +181,36 @@ mod tests {
         let PreparedMedia::Image(image) = job.run().unwrap();
         assert_eq!(image::inspect(&image.bytes).unwrap(), image::ImageKind::Avif);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn platform_image_decode_uses_the_opaque_lease_until_the_job_finishes() {
+        let releases = Arc::new(Mutex::new(0));
+        let lease =
+            SourceLease::open(Box::new(PlatformSource { released: releases.clone() })).unwrap();
+        let mut job = MediaJob::from_source(
+            lease,
+            MediaRequest::ChatImage { hd_enabled: false },
+            tempfile::tempdir().unwrap().keep(),
+        )
+        .unwrap();
+        let PreparedMedia::Image(image) = job.run().unwrap();
+        assert_eq!(image::inspect(&image.bytes).unwrap(), image::ImageKind::Avif);
+        assert_eq!(*releases.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn cancelling_an_unread_platform_source_releases_its_lease() {
+        let releases = Arc::new(Mutex::new(0));
+        let lease =
+            SourceLease::open(Box::new(PlatformSource { released: releases.clone() })).unwrap();
+        let mut job = MediaJob::from_source(
+            lease,
+            MediaRequest::ChatImage { hd_enabled: false },
+            tempfile::tempdir().unwrap().keep(),
+        )
+        .unwrap();
+        job.cancel();
+        assert_eq!(*releases.lock().unwrap(), 1);
     }
 }

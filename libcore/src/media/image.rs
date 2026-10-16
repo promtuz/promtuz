@@ -12,6 +12,7 @@ use rgb::FromSlice;
 use super::{
     frames::{Frame, FrameStore, PixelFormat},
     policy::{ImageProfile, MediaRequest, NormalizedCrop},
+    ports::{ImageFrameRequest, SourceLease},
 };
 
 pub struct DecodedAvif {
@@ -101,9 +102,7 @@ fn is_isobmff(header: &[u8]) -> bool {
 }
 
 fn has_avif_brand(header: &[u8]) -> bool {
-    header[8..]
-        .chunks_exact(4)
-        .any(|brand| matches!(brand, b"avif" | b"avis"))
+    header[8..].chunks_exact(4).any(|brand| matches!(brand, b"avif" | b"avis"))
 }
 
 /// Decodes a core-owned SDR still with orientation baked into pixels. Animated
@@ -279,6 +278,60 @@ pub fn prepare_image_path(path: &Path, request: MediaRequest) -> Result<Prepared
         _ => None,
     };
     prepare_sdr_image_path(path, kind, profile, crop)
+}
+
+/// Normalizes a platform-only image format without letting the platform choose
+/// the product profile or the AVIF output.
+pub fn prepare_platform_image(
+    source: &mut SourceLease, request: MediaRequest,
+) -> Result<PreparedImage> {
+    request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let profile = request
+        .image_profile()
+        .or_else(|| request.animation_profile().map(|profile| profile.image))
+        .ok_or_else(|| anyhow::anyhow!("This request expects video input."))?;
+    let probe = source.inspect_image()?;
+    validate_dimensions(probe.width, probe.height)?;
+    let crop = match request {
+        MediaRequest::Avatar { crop } => Some(crop),
+        _ => None,
+    };
+    let decoded = source.decode_image(ImageFrameRequest {
+        max_edge: platform_decode_edge(profile, crop, probe.width, probe.height),
+    })?;
+    validate_dimensions(decoded.width, decoded.height)?;
+    ensure!(
+        decoded.format == PixelFormat::Rgba8,
+        "This device cannot convert the image to SDR pixels."
+    );
+    if probe.source_is_hdr || decoded.source_is_hdr {
+        super::alert(crate::platform::MediaAlert::HdrConvertedToSdr);
+    }
+    if probe.animated {
+        super::alert(crate::platform::MediaAlert::AnimationSimplified);
+    }
+    let still = DecodedStill { rgba: decoded.pixels, width: decoded.width, height: decoded.height };
+    let still = match crop {
+        Some(crop) => crop_still(still, crop)?,
+        None => still,
+    };
+    let still = encode_sdr_still(still, profile)?;
+    Ok(PreparedImage {
+        bytes: still.bytes,
+        width: still.width,
+        height: still.height,
+        animated: false,
+        animation_fallback: probe.animated,
+    })
+}
+
+fn platform_decode_edge(
+    profile: ImageProfile, crop: Option<NormalizedCrop>, source_width: u32, source_height: u32,
+) -> u32 {
+    let edge = crop
+        .map(|crop| (profile.max_edge as f32 * crop.zoom).ceil() as u32)
+        .unwrap_or(profile.max_edge);
+    edge.clamp(1, source_width.max(source_height))
 }
 
 fn prepare_animation(
