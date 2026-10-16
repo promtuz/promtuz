@@ -35,6 +35,12 @@ impl MediaJob {
             MediaRequest::ChatVideo { .. } => bail!("Video preparation has not been configured."),
         }
     }
+
+    pub fn stage(&mut self) -> Result<u64> {
+        match self.run()? {
+            PreparedMedia::Image(image) => Ok(crate::staging::stage_prepared_image(image)),
+        }
+    }
 }
 
 #[cfg(test)]

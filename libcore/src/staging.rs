@@ -188,6 +188,19 @@ pub fn stage_encoded_image(bytes: Vec<u8>) -> Result<u64> {
     Ok(insert(s))
 }
 
+/// A media job has already normalized and validated this fresh AVIF. Staging
+/// only takes ownership; it never reinterprets an original container.
+pub fn stage_prepared_image(image: crate::media::image::PreparedImage) -> u64 {
+    let mut staged = blank(KIND_IMAGE);
+    staged.mime = "image/avif".into();
+    staged.size = image.bytes.len() as u64;
+    staged.width = image.width;
+    staged.height = image.height;
+    staged.blob = Some(image.bytes);
+    staged.state = READY;
+    insert(staged)
+}
+
 pub fn stage_attachment(
     source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
     thumb_h: u32,
