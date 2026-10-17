@@ -31,27 +31,33 @@ fn inventory(c: &Core) -> anyhow::Result<Vec<StoredMedia>> {
     let rows = all(&db,
         "SELECT mm.conversation_id, mm.dispatch_id, mm.kind, mm.name,
                 substr(m.content, 1, 120), m.timestamp,
-                coalesce(length(mm.blob), 0) + coalesce(length(mm.thumb), 0), mm.file_id
+                coalesce(length(mm.blob), 0) + coalesce(length(mm.thumb), 0)
          FROM message_media mm JOIN messages m
          ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
          WHERE m.deleted = 0 AND NOT (m.outgoing = 1 AND m.status IN (0, 2))",
-        [], |r| Ok((StoredMedia {
+        [], |r| Ok(StoredMedia {
             conversation_id: r.get(0)?, dispatch_id: r.get(1)?, kind: r.get(2)?,
             name: r.get(3)?, caption: r.get(4)?, timestamp: r.get(5)?, local_bytes: r.get(6)?,
-        }, r.get::<_, Option<Vec<u8>>>(7)?)))?;
+        }))?;
     let mut result = Vec::new();
-    for (mut item, fid) in rows {
-        if let Some(fid) = fid.and_then(|f| <[u8; 32]>::try_from(f).ok()) {
+    for mut item in rows {
+        let file_ids = crate::data::media::file_ids_tx(
+            &db, &item.conversation_id.as_slice().try_into().expect("stored conversation id"),
+            &item.dispatch_id,
+        )?;
+        let mut active = false;
+        for fid in file_ids.as_slice() {
             let transfers = c.db.transfers().lock();
-            let partial = store::partial_get_tx(&transfers, &fid);
+            let partial = store::partial_get_tx(&transfers, fid);
             // An in-progress transfer is not a storage-cleanup candidate.
-            if partial.as_ref().is_some_and(|p| !p.is_complete()) { continue; }
+            if partial.as_ref().is_some_and(|p| !p.is_complete()) { active = true; break; }
             let path = partial.map(|p| p.path).or_else(||
-                store::retention_get_tx(&transfers, &fid).map(|r| r.path));
+                store::retention_get_tx(&transfers, fid).map(|r| r.path));
             if let Some(path) = path {
                 item.local_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             }
         }
+        if active { continue; }
         if item.local_bytes > 0 { result.push(item); }
     }
     result.sort_by_key(|m| std::cmp::Reverse(m.local_bytes));
@@ -103,15 +109,13 @@ fn remove(c: &Core, targets: Vec<StorageTarget>) -> anyhow::Result<u32> {
              AND m.deleted = 0 AND NOT (m.outgoing = 1 AND m.status IN (0, 2))",
             (conv.as_slice(), did.as_slice()), MessageRow::from_row)?;
         let Some(row) = row else { continue; };
-        let fid: Option<Vec<u8>> = tx.query_row(
-            "SELECT file_id FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
-            (conv.as_slice(), did.as_slice()), |r| r.get(0))?;
-        if let Some(fid) = fid.and_then(|f| <[u8; 32]>::try_from(f).ok())
-            && (crate::staging::holds(c, &fid) || store::partial_get_tx(&c.db.transfers().lock(), &fid)
+        let file_ids = crate::data::media::file_ids_tx(&tx, &conv, &did)?;
+        if file_ids.as_slice().iter().any(|fid|
+            crate::staging::holds(c, fid) || store::partial_get_tx(&c.db.transfers().lock(), fid)
                 .is_some_and(|p| !p.is_complete())) { continue; }
         tx.execute("DELETE FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conv.as_slice(), did.as_slice()))?;
-        if let Some(fid) = crate::data::media::drop_row_tx(&tx, &conv, &did)? { orphans.push(fid); }
+        orphans.extend(crate::data::media::drop_row_tx(&tx, &conv, &did)?.as_ref());
         removed.push((conv, row));
     }
     tx.commit()?;
@@ -156,6 +160,7 @@ mod tests {
             thumb:       Some(vec![1; 8]),
             file_id:     Some(fid.to_vec()),
             sticker:     None,
+            hd:          None,
         };
         let save = |conv: &[u8; 16], did: u8, caption: &str, row: &MediaRow| {
             media::save_incoming_with_media(conv, &sender, &[did; 16], caption, 10, None, row)

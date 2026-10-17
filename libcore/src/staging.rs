@@ -56,6 +56,7 @@ impl Staged {
             file_id:  self.file_id.map(|f| f.to_vec()),
             duration_ms: 0,
             sticker: None,
+            hd: None,
         })
     }
 }
@@ -295,6 +296,7 @@ pub fn body_of(id: u64, caption: String) -> Result<common::proto::mls_wire::Body
             width: s.width,
             height: s.height,
             data: s.blob.clone().ok_or_else(|| anyhow!("ready image with no bytes"))?,
+            hd: None,
         },
         KIND_ATTACHMENT => Body::Attachment {
             caption,

@@ -160,38 +160,7 @@ impl Message {
         }
     }
 
-    /// `own` and `author` guard authorship, since peers know our dispatch ids from the wire.
-    pub fn apply_edit(
-        conversation_id: &[u8; 16], dispatch_id: &[u8], content: &str, own: bool,
-        author: Option<&[u8; 32]>,
-    ) -> Option<MessageRow> {
-        let conn = core().db.messages().lock();
-        let n = conn
-            .execute(
-                "UPDATE messages SET content = ?1, edited = 1 \
-                 WHERE conversation_id = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0 \
-                   AND (?5 IS NULL OR sender_ipk = ?5)",
-                (
-                    content,
-                    conversation_id.as_slice(),
-                    dispatch_id,
-                    own,
-                    author.map(|a| a.as_slice()),
-                ),
-            )
-            .ok()?;
-        if n == 0 {
-            return None;
-        }
-        conn.query_row(
-            "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
-            (conversation_id.as_slice(), dispatch_id),
-            MessageRow::from_row,
-        )
-        .ok()
-    }
-
-    /// Delete for everyone, media included, under the same guard as [`Self::apply_edit`].
+    /// Delete for everyone, media included, under the same authorship guard as revisions.
     pub fn apply_delete(
         conversation_id: &[u8; 16], dispatch_id: &[u8], own: bool, author: Option<&[u8; 32]>,
     ) -> Option<MessageRow> {
@@ -240,7 +209,7 @@ impl Message {
     fn receive_delete_tx(
         tx: &rusqlite::Transaction<'_>, conversation_id: &[u8; 16], dispatch_id: &[u8; 16],
         author: &[u8; 32],
-    ) -> Result<(Option<MessageRow>, Option<[u8; 32]>)> {
+    ) -> Result<(Option<MessageRow>, crate::data::media::MediaFileIds)> {
         tx.execute(
             "INSERT OR IGNORE INTO message_deletions (conversation_id, sender_ipk, dispatch_id)
              VALUES (?1, ?2, ?3)",
@@ -253,7 +222,7 @@ impl Message {
             (conversation_id.as_slice(), dispatch_id.as_slice(), author.as_slice()),
         )?;
         if n == 0 {
-            return Ok((None, None));
+            return Ok((None, Default::default()));
         }
         let orphan = crate::data::media::drop_row_tx(tx, conversation_id, dispatch_id)?;
         let row = tx.query_row(

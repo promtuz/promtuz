@@ -10,6 +10,7 @@ pub const KIND_IMAGE: u8 = 1;
 pub const KIND_ATTACHMENT: u8 = 2;
 pub const KIND_VOICE: u8 = 3;
 pub const KIND_STICKER: u8 = 4;
+pub const RENDITION_HD_IMAGE: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaRow {
@@ -28,22 +29,55 @@ pub struct MediaRow {
     pub file_id: Option<Vec<u8>>,
     /// Serialized `StickerRef` for sending and downloading. Image bytes live in the cache.
     pub sticker: Option<Vec<u8>>,
+    pub hd: Option<common::proto::mls_wire::ImageRendition>,
 }
 
-from_row!(MediaRow {
-    kind, group_id, mime, name, size, width, height, duration_ms, blob, thumb, file_id, sticker
-});
+impl MediaRow {
+    pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            kind: row.get("kind")?, group_id: row.get("group_id")?, mime: row.get("mime")?,
+            name: row.get("name")?, size: row.get("size")?, width: row.get("width")?,
+            height: row.get("height")?, duration_ms: row.get("duration_ms")?,
+            blob: row.get("blob")?, thumb: row.get("thumb")?, file_id: row.get("file_id")?,
+            sticker: row.get("sticker")?, hd: None,
+        })
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MediaFileIds(Vec<[u8; 32]>);
+
+impl MediaFileIds {
+    pub(crate) fn as_slice(&self) -> &[[u8; 32]] { &self.0 }
+
+    fn push(&mut self, file_id: Option<Vec<u8>>) {
+        if let Some(file_id) = file_id.and_then(|id| id.try_into().ok()) {
+            self.0.push(file_id);
+        }
+    }
+
+    pub(crate) fn extend(&mut self, file_ids: impl IntoIterator<Item = Vec<u8>>) {
+        for file_id in file_ids {
+            self.push(Some(file_id));
+        }
+    }
+}
+
+impl AsRef<[[u8; 32]]> for MediaFileIds {
+    fn as_ref(&self) -> &[[u8; 32]] { &self.0 }
+}
 
 /// Lock order: the messages lock (held), then the transfers or the staging lock; nothing takes
 /// the messages lock while holding either. A file stays while a media row or the composer names it.
 pub(crate) fn unlink_orphaned(
-    c: &crate::state::Core, conn: &rusqlite::Connection, file_ids: &[[u8; 32]],
+    c: &crate::state::Core, conn: &rusqlite::Connection, file_ids: impl AsRef<[[u8; 32]]>,
 ) {
-    for fid in file_ids {
+    for fid in file_ids.as_ref() {
         if crate::staging::holds(c, fid) {
             continue;
         }
-        let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
+        let sql = "SELECT 1 FROM message_media WHERE file_id = ?1
+                   UNION ALL SELECT 1 FROM message_media_renditions WHERE file_id = ?1 LIMIT 1";
         // Only a missing row permits deletion; a failed read must retain the file.
         if let Err(rusqlite::Error::QueryReturnedNoRows) = conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
             crate::transfer::store::forget_file(c, fid)
@@ -51,23 +85,37 @@ pub(crate) fn unlink_orphaned(
     }
 }
 
-/// Returns the `file_id` for the caller to [`unlink_orphaned`] after its write commits.
+/// Returns every transfer-store file the caller may unlink after its write commits.
 pub(crate) fn drop_row_tx(
     conn: &rusqlite::Connection, conv: &[u8; 16], dispatch_id: &[u8],
-) -> Result<Option<[u8; 32]>> {
-    let fid: Option<Vec<u8>> = conn
+) -> Result<MediaFileIds> {
+    let file_ids = file_ids_tx(conn, conv, dispatch_id)?;
+    conn.execute(
+        "DELETE FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
+        (conv.as_slice(), dispatch_id),
+    )?;
+    Ok(file_ids)
+}
+
+pub(crate) fn file_ids_tx(
+    conn: &rusqlite::Connection, conv: &[u8; 16], dispatch_id: &[u8],
+) -> Result<MediaFileIds> {
+    let mut file_ids = MediaFileIds::default();
+    file_ids.push(conn
         .query_row(
             "SELECT file_id FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conv.as_slice(), dispatch_id),
             |r| r.get(0),
         )
         .optional()?
-        .flatten();
-    conn.execute(
-        "DELETE FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
+        .flatten());
+    file_ids.extend(all(
+        conn,
+        "SELECT file_id FROM message_media_renditions WHERE conversation_id = ?1 AND dispatch_id = ?2",
         (conv.as_slice(), dispatch_id),
-    )?;
-    Ok(fid.and_then(|f| f.try_into().ok()))
+        |row| row.get(0),
+    )?);
+    Ok(file_ids)
 }
 
 pub fn save(conv: &[u8; 16], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()> {
@@ -86,6 +134,21 @@ pub fn save_tx(
             r.mime, r.name, r.size, r.width, r.height, r.blob, r.thumb, r.file_id, r.duration_ms,
             r.sticker],
     )?;
+    conn.execute(
+        "DELETE FROM message_media_renditions WHERE conversation_id = ?1 AND dispatch_id = ?2",
+        (conv.as_slice(), dispatch_id.as_slice()),
+    )?;
+    if let Some(hd) = &r.hd {
+        conn.execute(
+            "INSERT INTO message_media_renditions
+             (conversation_id, dispatch_id, rendition, mime, width, height, size, file_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                conv.as_slice(), dispatch_id.as_slice(), RENDITION_HD_IMAGE, hd.mime, hd.width,
+                hd.height, hd.size, hd.file_id.as_slice(),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -150,7 +213,7 @@ pub fn apply_revise(
         crate::db::messages::MessageRow::from_row,
     )?;
     tx.commit()?;
-    unlink_orphaned(core(), &db, old.as_slice());
+    unlink_orphaned(core(), &db, old);
     Ok(Some(row))
 }
 
@@ -201,12 +264,25 @@ pub fn kind(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Option<u8> {
 }
 
 pub fn get(conv: &[u8; 16], dispatch_id: &[u8; 16]) -> Result<Option<MediaRow>> {
-    Ok(one(
+    let mut media = one(
         &core().db.messages().lock(),
         "SELECT * FROM message_media WHERE conversation_id=?1 AND dispatch_id=?2",
         rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
         MediaRow::from_row,
-    )?)
+    )?;
+    if let Some(media) = &mut media {
+        media.hd = one(
+            &core().db.messages().lock(),
+            "SELECT mime, width, height, size, file_id FROM message_media_renditions
+             WHERE conversation_id = ?1 AND dispatch_id = ?2 AND rendition = ?3",
+            rusqlite::params![conv.as_slice(), dispatch_id.as_slice(), RENDITION_HD_IMAGE],
+            |row| Ok(common::proto::mls_wire::ImageRendition {
+                mime: row.get(0)?, width: row.get(1)?, height: row.get(2)?, size: row.get(3)?,
+                file_id: row.get::<_, Vec<u8>>(4)?.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+            }),
+        )?;
+    }
+    Ok(media)
 }
 
 /// The sender to pull from and the size they offered; the pull rejects a manifest that disagrees.
@@ -217,7 +293,11 @@ pub(crate) fn attachment_offer_tx(
         conn,
         "SELECT m.sender_ipk, mm.size FROM message_media mm
            JOIN messages m ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
-         WHERE mm.file_id = ?1 AND m.outgoing = 0 AND m.sender_ipk IS NOT NULL LIMIT 1",
+         WHERE mm.file_id = ?1 AND m.outgoing = 0 AND m.sender_ipk IS NOT NULL
+         UNION ALL
+         SELECT m.sender_ipk, hd.size FROM message_media_renditions hd
+           JOIN messages m ON m.conversation_id = hd.conversation_id AND m.dispatch_id = hd.dispatch_id
+         WHERE hd.file_id = ?1 AND m.outgoing = 0 AND m.sender_ipk IS NOT NULL LIMIT 1",
         [file_id.as_slice()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
@@ -297,6 +377,7 @@ pub struct MediaBackupRow {
     pub thumb: Option<Vec<u8>>,
     pub file_id: Option<Vec<u8>>,
     pub duration_ms: u32,
+    pub hd: Option<common::proto::mls_wire::ImageRendition>,
 }
 
 /// Inline bytes a backup carries, newest first; older rows keep only their thumb and metadata, so
@@ -305,7 +386,14 @@ const INLINE_MEDIA_BUDGET: usize = 16 << 20;
 
 pub fn dump_all_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MediaBackupRow>> {
     let (mut spent, mut dropped) = (0usize, 0usize);
-    let rows = all(conn, "SELECT * FROM message_media ORDER BY rowid DESC", [], |r| {
+    let rows = all(conn, "SELECT mm.*, hd.mime AS hd_mime, hd.width AS hd_width,
+                          hd.height AS hd_height, hd.size AS hd_size, hd.file_id AS hd_file_id
+                       FROM message_media mm
+                       LEFT JOIN message_media_renditions hd
+                         ON hd.conversation_id = mm.conversation_id
+                        AND hd.dispatch_id = mm.dispatch_id
+                        AND hd.rendition = 1
+                      ORDER BY mm.rowid DESC", [], |r| {
         let blob = match r.get::<_, Option<Vec<u8>>>("blob")? {
             Some(b) if spent + b.len() <= INLINE_MEDIA_BUDGET => {
                 spent += b.len();
@@ -331,6 +419,16 @@ pub fn dump_all_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MediaBac
             thumb: r.get("thumb")?,
             file_id: r.get("file_id")?,
             duration_ms: r.get("duration_ms")?,
+            hd: r.get::<_, Option<String>>("hd_mime")?.map(|mime| {
+                Ok::<_, rusqlite::Error>(common::proto::mls_wire::ImageRendition {
+                    mime,
+                    width: r.get("hd_width")?,
+                    height: r.get("hd_height")?,
+                    size: r.get("hd_size")?,
+                    file_id: r.get::<_, Vec<u8>>("hd_file_id")?
+                        .try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            }).transpose()?,
         })
     })?;
     if dropped > 0 {
@@ -366,6 +464,47 @@ pub fn import_rows_tx(conn: &rusqlite::Connection, rows: &[MediaBackupRow]) -> R
                 r.duration_ms,
             ],
         )?;
+        if let Some(hd) = &r.hd {
+            n += conn.execute(
+                "INSERT OR IGNORE INTO message_media_renditions
+                 (conversation_id, dispatch_id, rendition, mime, width, height, size, file_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    r.conversation_id.as_slice(), r.dispatch_id.as_slice(), RENDITION_HD_IMAGE,
+                    hd.mime, hd.width, hd.height, hd.size, hd.file_id.as_slice(),
+                ],
+            )?;
+        }
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::data::open;
+
+    #[test]
+    fn hd_rendition_is_transactional_with_its_image_row() {
+        let conn = open(crate::db::messages::migrate);
+        let conv = [1; 16];
+        let did = [2; 16];
+        let hd = common::proto::mls_wire::ImageRendition {
+            mime: "image/avif".into(), width: 2560, height: 1440, size: 1234, file_id: [3; 32],
+        };
+        let row = MediaRow {
+            kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(), name: String::new(),
+            size: 12, width: 16, height: 9, duration_ms: 0, blob: Some(vec![1; 12]), thumb: None,
+            file_id: None, sticker: None, hd: Some(hd.clone()),
+        };
+        save_tx(&conn, &conv, &did, &row).unwrap();
+        let stored: (String, u32, u32, u64, Vec<u8>) = conn.query_row(
+            "SELECT mime, width, height, size, file_id FROM message_media_renditions",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).unwrap();
+        assert_eq!(stored, (hd.mime, hd.width, hd.height, hd.size, hd.file_id.to_vec()));
+        assert_eq!(drop_row_tx(&conn, &conv, &did).unwrap().as_slice(), [[3; 32]]);
+        let count: u32 = conn.query_row("SELECT COUNT(*) FROM message_media_renditions", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
 }

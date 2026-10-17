@@ -562,6 +562,20 @@ const MIGRATION_ARRAY: &[M] = &[
         DROP TABLE retained_message_audiences;
         DROP TABLE retained_message_recipients;
         DROP TABLE retained_incoming_receipts;"),
+    M::up("CREATE TABLE message_media_renditions (
+            conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+            dispatch_id BLOB NOT NULL,
+            rendition INTEGER NOT NULL CHECK(rendition = 1),
+            mime TEXT NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            file_id BLOB NOT NULL CHECK(length(file_id) = 32),
+            PRIMARY KEY (conversation_id, dispatch_id, rendition),
+            FOREIGN KEY (conversation_id, dispatch_id)
+                REFERENCES message_media(conversation_id, dispatch_id) ON DELETE CASCADE
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_media_rendition_file ON message_media_renditions(file_id);"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -576,6 +590,7 @@ pub(super) const WATCHED: &[&str] = &[
     "incoming_receipts",
     "reactions",
     "message_media",
+    "message_media_renditions",
     "conversations",
     "conversation_members",
     "peer_names",

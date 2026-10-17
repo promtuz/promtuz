@@ -451,16 +451,25 @@ impl Conversation {
 
     /// Returns the dropped `file_id`s, to unlink only after commit. `seen_dispatch` and
     /// `message_deletions` survive: a redelivery must not decrypt twice, nor a deleted post return.
-    pub fn clear_history_tx(conn: &Connection, id: &[u8; 16]) -> Result<Vec<[u8; 32]>> {
+    pub(crate) fn clear_history_tx(
+        conn: &Connection, id: &[u8; 16],
+    ) -> Result<crate::data::media::MediaFileIds> {
         // These rows are the only pointer at a received attachment's bytes, and the transfer GC
         // reaps only failed or held partials.
-        let orphaned: Vec<[u8; 32]> = all(
+        let mut orphaned = crate::data::media::MediaFileIds::default();
+        orphaned.extend(crate::db::all(
             conn,
             "SELECT DISTINCT file_id FROM message_media \
              WHERE conversation_id = ?1 AND file_id IS NOT NULL",
             [id.as_slice()],
             |r| r.get(0),
-        )?;
+        )?);
+        orphaned.extend(crate::db::all(
+            conn,
+            "SELECT DISTINCT file_id FROM message_media_renditions WHERE conversation_id = ?1",
+            [id.as_slice()],
+            |r| r.get(0),
+        )?);
 
         for table in [
             "messages",
@@ -712,11 +721,12 @@ mod tests {
             thumb:       None,
             file_id:     Some(file.to_vec()),
             sticker:     None,
+            hd:          None,
         };
         crate::data::media::save_tx(&conn, &group, &[1; 16], &media).unwrap();
 
-        assert_eq!(Conversation::clear_history_tx(&conn, &group).unwrap(), vec![file]);
-        assert!(Conversation::clear_history_tx(&conn, &group).unwrap().is_empty());
+        assert_eq!(Conversation::clear_history_tx(&conn, &group).unwrap().as_ref(), [file]);
+        assert!(Conversation::clear_history_tx(&conn, &group).unwrap().as_ref().is_empty());
         assert!(Conversation::get_tx(&conn, &group).is_some(), "clearing keeps the chat");
     }
 }

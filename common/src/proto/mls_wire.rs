@@ -15,17 +15,11 @@ use crate::types::bytes::Bytes;
 pub const MLS_WIRE_VERSION: u16 = 12;
 
 /// The decrypted MLS plaintext. `target` and `reply_to` name messages by dispatch_id.
-/// Ordinals are wire format: append only, and retired variants keep their slots.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AppPayload {
-    Text(String),
     Receipt {
         kind: ReceiptKind,
         upto: [u8; 16],
-    },
-    Edit {
-        target:  [u8; 16],
-        content: String,
     },
     Delete {
         target: [u8; 16],
@@ -36,10 +30,6 @@ pub enum AppPayload {
         emoji:  String,
         add:    bool,
     },
-    Reply {
-        reply_to: [u8; 16],
-        content:  String,
-    },
     /// The invitee's first message after accepting a Welcome; arriving at all proves the pair.
     PairAck,
     /// Retired: keeps its ordinal, and receivers ignore it.
@@ -49,33 +39,14 @@ pub enum AppPayload {
         token:      [u8; 16],
         disco_key:  [u8; 32],
     },
-    Image {
-        caption:  String,
-        group_id: Option<[u8; 16]>,
-        mime:     String,
-        width:    u32,
-        height:   u32,
-        data:     Vec<u8>,
-    },
-    Attachment {
-        caption:  String,
-        group_id: Option<[u8; 16]>,
-        mime:     String,
-        name:     String,
-        size:     u64,
-        thumb:    Vec<u8>,
-        file_id:  [u8; 32],
-    },
     /// Asks an offline sender to come online and serve `file_id`. Routed, never stored.
     FileWant {
         file_id: [u8; 32],
     },
-    /// Supersedes `Text`, `Reply`, `Image` and `Attachment`.
     Post {
         reply_to: Option<[u8; 16]>,
         body:     Body,
     },
-    /// Supersedes `Edit`; libcore decides which body swaps are legal.
     Revise {
         target: [u8; 16],
         body:   Body,
@@ -462,6 +433,7 @@ pub enum Body {
         width:    u32,
         height:   u32,
         data:     Vec<u8>,
+        hd:       Option<ImageRendition>,
     },
     /// Metadata and a blurred thumbnail; the bytes are fetched device-to-device by `file_id`.
     Attachment {
@@ -490,6 +462,16 @@ pub enum Body {
         waveform:    Vec<u8>,
         data:        Vec<u8>,
     },
+}
+
+/// An optional full-resolution companion to an inline image.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImageRendition {
+    pub mime:    String,
+    pub width:   u32,
+    pub height:  u32,
+    pub size:    u64,
+    pub file_id: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

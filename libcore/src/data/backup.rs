@@ -36,7 +36,7 @@ use crate::state::core;
 
 const MAGIC: &[u8; 4] = b"PZBK";
 /// A reshaped row needs a new version: postcard would decode an old blob into garbage.
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct BackupPayload {

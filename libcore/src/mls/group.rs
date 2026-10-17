@@ -415,13 +415,7 @@ impl MlsGroupHandle {
         }
         let state = meta.effective();
         match payload {
-            AppPayload::Post { .. }
-            | AppPayload::Text(_)
-            | AppPayload::Reply { .. }
-            | AppPayload::Image { .. }
-            | AppPayload::Attachment { .. }
-            | AppPayload::Edit { .. }
-            | AppPayload::Revise { .. } => state.may_send(author),
+            AppPayload::Post { .. } | AppPayload::Revise { .. } => state.may_send(author),
             AppPayload::GroupPicture { .. } | AppPayload::System(SystemEvent::Titled { .. }) => {
                 state.may_edit(author)
             },

@@ -479,31 +479,11 @@ fn encodings_match_what_deployed_peers_expect() {
     let mut corpus = vec!["AppPayload".to_owned()];
     let mut names = vec![];
     for payload in [
-        P::Text(s()),
         P::Receipt { kind: ReceiptKind::Delivered, upto: id },
-        P::Edit { target: id, content: s() },
         P::Delete { target: id },
         P::React { target: id, emoji: s(), add: true },
-        P::Reply { reply_to: id, content: s() },
         P::PairAck,
         P::P2p { candidates: vec![addr], relay: None, token: id, disco_key: file },
-        P::Image {
-            caption:  s(),
-            group_id: None,
-            mime:     s(),
-            width:    1,
-            height:   2,
-            data:     vec![3],
-        },
-        P::Attachment {
-            caption:  s(),
-            group_id: Some(id),
-            mime:     s(),
-            name:     s(),
-            size:     1,
-            thumb:    vec![],
-            file_id:  file,
-        },
         P::FileWant { file_id: file },
         P::Post { reply_to: None, body: Body::Text(s()) },
         P::Revise { target: id, body: Body::Text(s()) },

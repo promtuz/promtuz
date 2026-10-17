@@ -93,6 +93,7 @@ pub(crate) fn attachment(file_id: [u8; 32], size: u64) -> MediaRow {
         thumb: None,
         file_id: Some(file_id.to_vec()),
         sticker: None,
+        hd: None,
     }
 }
 

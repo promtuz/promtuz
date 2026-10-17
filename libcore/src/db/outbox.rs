@@ -89,6 +89,9 @@ const MIGRATION_ARRAY: &[M] = &[
         ) WITHOUT ROWID;
     "#,
     ),
+    // A relay protocol bump invalidates every serialized envelope. Message rows are rebuilt with
+    // the current protocol; controls have no recoverable source and are deliberately dropped.
+    M::up("DELETE FROM outbox; DELETE FROM commit_left;"),
 ];
 pub(super) const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

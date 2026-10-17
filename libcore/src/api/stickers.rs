@@ -200,6 +200,7 @@ pub fn send_sticker(
         thumb: None,
         file_id: None,
         sticker: Some(r.ser().map_err(|e| anyhow::anyhow!("encode sticker ref: {e}"))?),
+        hd: None,
     };
     let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
     let _ = db::touch_recent(&r.pack, &r.id, now_secs());

@@ -706,6 +706,7 @@ pub fn send_voice(
         thumb: (!waveform.is_empty()).then_some(waveform),
         file_id: None,
         sticker: None,
+        hd: None,
     };
     let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
     core().spawn(async move {

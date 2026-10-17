@@ -83,8 +83,8 @@ pub fn discard_message_replay(
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, payload) in rows {
-            let related = matches!(AppPayload::deser(&payload), Ok(AppPayload::Edit { target: t, .. }
-                | AppPayload::Revise { target: t, .. } | AppPayload::React { target: t, .. }) if t == *target);
+            let related = matches!(AppPayload::deser(&payload), Ok(AppPayload::Revise { target: t, .. }
+                | AppPayload::React { target: t, .. }) if t == *target);
             if id == *target || related {
                 tx.execute(
                     "DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2",

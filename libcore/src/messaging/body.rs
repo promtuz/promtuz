@@ -42,7 +42,7 @@ fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
 
     match body {
         Body::Text(content) => (content, None),
-        Body::Image { caption, group_id, mime, width, height, data } => (
+        Body::Image { caption, group_id, mime, width, height, data, hd } => (
             caption,
             Some(MediaRow {
                 kind: KIND_IMAGE,
@@ -57,6 +57,7 @@ fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
                 file_id: None,
                 duration_ms: 0,
                 sticker: None,
+                hd,
             }),
         ),
         Body::Attachment { caption, group_id, mime, name, size, thumb, file_id } => (
@@ -74,6 +75,7 @@ fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
                 file_id: Some(file_id.to_vec()),
                 duration_ms: 0,
                 sticker: None,
+                hd: None,
             }),
         ),
         Body::Voice { mime, duration_ms, waveform, data } => (
@@ -91,6 +93,7 @@ fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
                 thumb: (!waveform.is_empty()).then_some(waveform),
                 file_id: None,
                 sticker: None,
+                hd: None,
             }),
         ),
         Body::Sticker { pack, id, token, store, width, height } => {
@@ -111,6 +114,7 @@ fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
                     thumb: None,
                     file_id: None,
                     sticker: r.ser().ok(),
+                    hd: None,
                 }),
             )
         },
@@ -137,21 +141,6 @@ pub(crate) fn apply_revise_body(
         author,
     )?
     .map(|row| (row, content)))
-}
-
-/// A pre-v12 content payload as a [`Body`] and quote target; `None` for anything but content.
-pub(crate) fn legacy_body(p: AppPayload) -> Option<(Option<[u8; 16]>, Body)> {
-    Some(match p {
-        AppPayload::Text(content) => (None, Body::Text(content)),
-        AppPayload::Reply { reply_to, content } => (Some(reply_to), Body::Text(content)),
-        AppPayload::Image { caption, group_id, mime, width, height, data } => {
-            (None, Body::Image { caption, group_id, mime, width, height, data })
-        },
-        AppPayload::Attachment { caption, group_id, mime, name, size, thumb, file_id } => {
-            (None, Body::Attachment { caption, group_id, mime, name, size, thumb, file_id })
-        },
-        _ => return None,
-    })
 }
 
 /// Storage keeps a media side-row kind rather than a [`Body`], so the revision rule is expressed
@@ -231,6 +220,7 @@ fn join_body(content: String, media: Option<crate::data::media::MediaRow>) -> Re
                 width: m.width,
                 height: m.height,
                 data,
+                hd: m.hd,
             }
         },
         Some(m) if m.kind == crate::data::media::KIND_VOICE => Body::Voice {
@@ -312,6 +302,9 @@ mod tests {
             width:    4,
             height:   3,
             data:     vec![7, 8, 9],
+            hd:       Some(common::proto::mls_wire::ImageRendition {
+                mime: "image/avif".into(), width: 8, height: 6, size: 42, file_id: [9; 32],
+            }),
         };
         let attachment = Body::Attachment {
             caption:  String::new(),

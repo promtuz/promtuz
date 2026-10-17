@@ -25,14 +25,16 @@ pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8
     let paired = crate::data::contact::Contact::is_paired_tx(&c.db.contacts().lock(), peer);
     let db = c.db.messages().lock();
     db.query_row(
-        "SELECT 1 FROM message_media mm
-           JOIN messages m
-             ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
-           JOIN conversations c ON c.id = mm.conversation_id
-           JOIN conversation_members cm ON cm.conversation_id = mm.conversation_id
+        "SELECT 1 FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
            LEFT JOIN conversation_members mine
-             ON mine.conversation_id = mm.conversation_id AND mine.member_ipk = ?3
-          WHERE mm.file_id = ?1 AND cm.member_ipk = ?2 AND cm.active = 1 AND m.outgoing = 1
+             ON mine.conversation_id = m.conversation_id AND mine.member_ipk = ?3
+          WHERE (EXISTS(SELECT 1 FROM message_media mm WHERE mm.conversation_id = m.conversation_id
+                         AND mm.dispatch_id = m.dispatch_id AND mm.file_id = ?1)
+              OR EXISTS(SELECT 1 FROM message_media_renditions hd WHERE hd.conversation_id = m.conversation_id
+                         AND hd.dispatch_id = m.dispatch_id AND hd.file_id = ?1))
+            AND cm.member_ipk = ?2 AND cm.active = 1 AND m.outgoing = 1
             AND m.deleted = 0
             AND ((c.kind = ?4 AND mine.active = 1) OR (c.kind = ?5 AND ?6))
           LIMIT 1",

@@ -576,22 +576,7 @@ pub(crate) fn receive_application_content(
     }
     match payload {
         Ok(AppPayload::GroupAdmins { .. }) => {},
-        // `Post` carries the quote target beside the body; older payloads convert to the same pair.
-        Ok(
-            p @ (AppPayload::Post { .. }
-            | AppPayload::Text(..)
-            | AppPayload::Reply { .. }
-            | AppPayload::Image { .. }
-            | AppPayload::Attachment { .. }),
-        ) => {
-            let pair = match p {
-                AppPayload::Post { reply_to, body } => Some((reply_to, body)),
-                other => crate::messaging::body::legacy_body(other),
-            };
-            let Some((reply_to, body)) = pair else {
-                warn!("MESSAGE: content payload with no body from {}", hex::encode(&author[..4]));
-                bail!("bad content payload");
-            };
+        Ok(AppPayload::Post { reply_to, body }) => {
             let did = dispatch_id;
             let timestamp = accepted_at_secs(accepted_at_ms);
             let auto = match &body {
@@ -663,11 +648,7 @@ pub(crate) fn receive_application_content(
         Ok(payload @ (AppPayload::Receipt { .. } | AppPayload::ReceiptDetails(_))) => {
             crate::data::receipts::receive(&conv, &author, payload)?;
         },
-        Ok(
-            payload @ (AppPayload::Edit { .. }
-            | AppPayload::Revise { .. }
-            | AppPayload::Delete { .. }),
-        ) => {
+        Ok(payload @ (AppPayload::Revise { .. } | AppPayload::Delete { .. })) => {
             receive_message_mutation(&conv, &author, payload)?;
         },
         Ok(AppPayload::React { target, emoji, add }) => {
@@ -808,11 +789,6 @@ pub(crate) fn receive_message_mutation(
     conversation: &[u8; 16], author: &[u8; 32], payload: AppPayload,
 ) -> Result<()> {
     match payload {
-        AppPayload::Edit { target, content } => {
-            if let Some(row) = Message::apply_edit(conversation, &target, &content, false, Some(author)) {
-                MessageEv::Edited { id: row.id, conversation: *conversation, content }.emit();
-            }
-        },
         AppPayload::Revise { target, body } => {
             crate::transfer::sharing::revoke(conversation, author, &target)?;
             if let Some((row, content)) = apply_revise_body(conversation, &target, body, false, Some(author))? {
@@ -1152,7 +1128,7 @@ mod tests {
             (AppPayload::AttachmentSharing(grant), &bob, id()),
             (AppPayload::Post { reply_to: None, body: attachment("file", file) }, &alice, post),
             (AppPayload::Revise { target: revised, body: revision }, &carol, id()),
-            (AppPayload::Edit { target: edited, content: "edited".into() }, &carol, id()),
+            (AppPayload::Revise { target: edited, body: Body::Text("edited".into()) }, &carol, id()),
             (AppPayload::Delete { target: deleted }, &carol, id()),
             (AppPayload::Delete { target: foreign }, &alice, id()),
             (AppPayload::ReceiptDetails(ReceiptDetails { entries: vec![receipt] }), &carol, id()),
