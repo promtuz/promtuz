@@ -36,7 +36,6 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import java.io.File
 import java.io.IOException
-import java.nio.file.Files
 import java.util.concurrent.ExecutionException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -49,9 +48,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import uniffi.core.VideoAudioProbe
-import uniffi.core.VideoEncodingPlan
-import uniffi.core.VideoProbe
+import uniffi.core.VideoAudioProbeRecord
+import uniffi.core.VideoEncodingPlanRecord
+import uniffi.core.VideoProbeRecord
 
 class VideoPreparationException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -59,9 +58,9 @@ private val videoExports = Mutex()
 
 /** Android media facts only. Core owns compression policy, result acceptance and candidate files. */
 @androidx.annotation.OptIn(UnstableApi::class)
-suspend fun inspectVideo(context: Context, file: File): VideoProbe {
+suspend fun inspectVideo(context: Context, uri: Uri): VideoProbeRecord {
     try {
-        return MetadataRetriever.Builder(context.applicationContext, MediaItem.fromUri(Uri.fromFile(file)))
+        return MetadataRetriever.Builder(context.applicationContext, MediaItem.fromUri(uri))
             .build().use { retriever ->
                 val groupsFuture = retriever.retrieveTrackGroups()
                 val durationFuture = retriever.retrieveDurationUs()
@@ -79,7 +78,7 @@ suspend fun inspectVideo(context: Context, file: File): VideoProbe {
                     val video = videos.firstOrNull()
                         ?: throw VideoPreparationException("The video's picture track could not be read.")
                     val audio = audios.firstOrNull()
-                    val platform = withContext(Dispatchers.IO) { platformVideoMetadata(file) }
+                    val platform = withContext(Dispatchers.IO) { platformVideoMetadata(context, uri) }
                     val signal = parseVideoSignal(video, platform?.video)
                     val color = video.colorInfo
                     val transfer = color?.colorTransfer?.takeIf { it > 0 }
@@ -111,7 +110,7 @@ suspend fun inspectVideo(context: Context, file: File): VideoProbe {
                     val depth = signal?.bitDepth ?: color?.let {
                         minOf(it.lumaBitdepth, it.chromaBitdepth).takeIf { bits -> bits > 0 }
                     }
-                    VideoProbe(
+                    VideoProbeRecord(
                         containerMime = video.containerMimeType ?: platform?.containerMime,
                         videoMime = mime,
                         videoTracks = videos.size.toUInt(),
@@ -126,7 +125,7 @@ suspend fun inspectVideo(context: Context, file: File): VideoProbe {
                         videoBitrate = video.averageBitrate.takeIf { it > 0 }?.toUInt()
                             ?: platform?.video?.int(MediaFormat.KEY_BIT_RATE)?.takeIf { it > 0 }?.toUInt(),
                         audio = audio?.let {
-                            VideoAudioProbe(
+                            VideoAudioProbeRecord(
                                 mime = it.sampleMimeType.orEmpty(),
                                 // Per-track durations are not comparable after edits, gapless
                                 // trimming and AAC encoder priming. Leave them unknown.
@@ -164,14 +163,8 @@ suspend fun inspectVideo(context: Context, file: File): VideoProbe {
  * core can safely clean up its source/candidate files.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
-suspend fun encodeVideo(context: Context, source: File, output: File, input: VideoProbe, plan: VideoEncodingPlan) {
+suspend fun encodeVideo(context: Context, source: Uri, output: File, input: VideoProbeRecord, plan: VideoEncodingPlanRecord) {
     videoExports.withLock {
-        withContext(Dispatchers.IO) {
-            if (source.canonicalFile == output.canonicalFile ||
-                (output.exists() && Files.isSameFile(source.toPath(), output.toPath()))) {
-                throw VideoPreparationException("The video encoder needs a separate output file.")
-            }
-        }
         val selector = EncoderSelector { mime ->
             val candidates = if (mime == plan.videoMime) EncoderUtil.getSupportedEncoders(mime) else emptyList()
             ImmutableList.copyOf(candidates.sortedByDescending { EncoderUtil.isHardwareAccelerated(it, mime) })
@@ -243,12 +236,14 @@ suspend fun encodeVideo(context: Context, source: File, output: File, input: Vid
                 val effects = if (width != input.displayWidth.roundToInt() || height != input.displayHeight.roundToInt()) {
                     listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT))
                 } else emptyList()
-                val item = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(source)))
+                val item = EditedMediaItem.Builder(MediaItem.fromUri(source))
                     .setFrameRate(maxFrameRate)
                     .setEffects(Effects(emptyList(), effects))
                     .build()
                 val composition = Composition.Builder(
-                    EditedMediaItemSequence.Builder().addItem(item).build(),
+                    EditedMediaItemSequence.Builder(
+                        ImmutableSet.of(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO),
+                    ).addItem(item).build(),
                 ).setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL).build()
                 transformer.start(composition, output.absolutePath)
                 completion.await()
@@ -273,12 +268,12 @@ suspend fun encodeVideo(context: Context, source: File, output: File, input: Vid
 private data class PlatformVideoMetadata(val containerMime: String?, val video: MediaFormat?, val audio: MediaFormat?)
 
 /** Optional platform details supplement Media3 facts; platform decoder support is not required. */
-private fun platformVideoMetadata(file: File): PlatformVideoMetadata? = runCatching {
+private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMetadata? = runCatching {
     val extractor = MediaExtractor()
     var video: MediaFormat? = null
     var audio: MediaFormat? = null
     try {
-        extractor.setDataSource(file.absolutePath)
+        extractor.setDataSource(context, uri, emptyMap())
         for (index in 0 until extractor.trackCount) {
             val format = extractor.getTrackFormat(index)
             val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
@@ -291,7 +286,7 @@ private fun platformVideoMetadata(file: File): PlatformVideoMetadata? = runCatch
     val containerMime = runCatching {
         val retriever = PlatformMetadataRetriever()
         try {
-            retriever.setDataSource(file.absolutePath)
+            retriever.setDataSource(context, uri)
             retriever.extractMetadata(PlatformMetadataRetriever.METADATA_KEY_MIMETYPE)
         } finally { retriever.release() }
     }.getOrNull()

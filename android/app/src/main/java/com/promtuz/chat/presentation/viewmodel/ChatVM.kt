@@ -30,7 +30,6 @@ import com.promtuz.chat.utils.media.stageCapturedVideo
 import com.promtuz.chat.utils.media.stagePickedAttachment
 import com.promtuz.chat.utils.media.stagePickedImage
 import com.promtuz.chat.utils.media.ImagePreparationException
-import com.promtuz.chat.utils.media.VideoPreparationException
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Dispatchers
@@ -598,11 +597,7 @@ class ChatVM(
 
     /** The album id is minted at send time, so a later pick still joins the same album. */
     fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
-        val cr = application.contentResolver
-        selected.forEach { uri ->
-            if (cr.getType(uri)?.startsWith("image/") == true) stagePhoto(uri)
-            else stagePickedFile(uri)
-        }
+        selected.forEach { uri -> stagePickedFile(uri) }
     }
 
     fun attachCaptured(file: java.io.File, video: Boolean) {
@@ -654,7 +649,6 @@ class ChatVM(
             catch (e: Exception) {
                 composerError.value = when (e) {
                     is ImagePreparationException -> e.message
-                    is VideoPreparationException -> e.message
                     is uniffi.core.CoreException.Refused -> e.msg
                     else -> "Couldn’t prepare the media. Try again."
                 }

@@ -17,6 +17,10 @@ pub trait MediaSourceAdapter: Send + Sync {
     fn decode_image(
         &self, request: ImageFrameRequestRecord,
     ) -> Result<DecodedImageFrameRecord, CoreError>;
+    fn inspect_video(&self) -> Result<VideoProbeRecord, CoreError>;
+    fn render_video(
+        &self, request: VideoRenderRequestRecord,
+    ) -> Result<VideoRenderReportRecord, CoreError>;
     fn release(&self);
 }
 
@@ -64,6 +68,37 @@ impl crate::media::ports::MediaSource for SourceAdapter {
             source_is_hdr: frame.source_is_hdr,
         })
     }
+
+    fn inspect_video(&mut self) -> anyhow::Result<crate::media::video::VideoProbe> {
+        self.0.inspect_video().map(VideoProbeRecord::into_core).map_err(source_error)
+    }
+
+    fn render_video(
+        &mut self, request: crate::media::ports::VideoRenderRequest,
+    ) -> anyhow::Result<crate::media::ports::VideoRenderReport> {
+        let report = self
+            .0
+            .render_video(VideoRenderRequestRecord {
+                output_path: request.output.to_string_lossy().into_owned(),
+                plan: VideoEncodingPlanRecord::from_core(request.plan),
+            })
+            .map_err(source_error)?;
+        Ok(crate::media::ports::VideoRenderReport {
+            output: report.output.into_core(),
+            poster: crate::media::ports::DecodedImageFrame {
+                pixels: report.poster.pixels,
+                width: report.poster.width,
+                height: report.poster.height,
+                format: if report.poster.rgba16 {
+                    crate::media::frames::PixelFormat::Rgba16
+                } else {
+                    crate::media::frames::PixelFormat::Rgba8
+                },
+                source_is_hdr: report.poster.source_is_hdr,
+            },
+            audio_removed: report.audio_removed,
+        })
+    }
 }
 
 fn source_error(error: CoreError) -> anyhow::Error {
@@ -101,10 +136,114 @@ pub struct DecodedImageFrameRecord {
     pub source_is_hdr: bool,
 }
 
+#[derive(uniffi::Record)]
+pub struct VideoRenderRequestRecord {
+    pub output_path: String,
+    pub plan: VideoEncodingPlanRecord,
+}
+
+#[derive(uniffi::Record)]
+pub struct VideoRenderReportRecord {
+    pub output: VideoProbeRecord,
+    pub poster: DecodedImageFrameRecord,
+    pub audio_removed: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct VideoAudioProbeRecord {
+    pub mime: String,
+    pub duration_us: Option<u64>,
+    pub bitrate: Option<u32>,
+    pub channels: Option<u32>,
+}
+
+#[derive(uniffi::Record)]
+pub struct VideoProbeRecord {
+    pub container_mime: Option<String>,
+    pub video_mime: String,
+    pub video_tracks: u32,
+    pub audio_tracks: u32,
+    pub display_width: f64,
+    pub display_height: f64,
+    pub duration_us: u64,
+    pub frame_rate: Option<f64>,
+    pub video_bitrate: Option<u32>,
+    pub audio: Option<VideoAudioProbeRecord>,
+    pub hdr: bool,
+    pub dynamic_hdr: bool,
+    pub color_primaries: Option<u16>,
+    pub color_transfer: Option<u16>,
+    pub full_range: Option<bool>,
+    pub bit_depth: Option<u8>,
+    pub hdr_static_metadata: Option<Vec<u8>>,
+}
+
+#[derive(uniffi::Record)]
+pub struct VideoEncodingPlanRecord {
+    pub width: u32,
+    pub height: u32,
+    pub max_frame_rate: u32,
+    pub video_bitrate: u32,
+    pub audio_bitrate: u32,
+    pub video_mime: String,
+    pub audio_mime: String,
+    pub keep_hdr: bool,
+}
+
+impl VideoProbeRecord {
+    fn into_core(self) -> crate::media::video::VideoProbe {
+        crate::media::video::VideoProbe {
+            container_mime: self.container_mime,
+            video_mime: self.video_mime,
+            video_tracks: self.video_tracks,
+            audio_tracks: self.audio_tracks,
+            display_width: self.display_width,
+            display_height: self.display_height,
+            duration_us: self.duration_us,
+            frame_rate: self.frame_rate,
+            video_bitrate: self.video_bitrate,
+            audio: self.audio.map(|audio| crate::media::video::VideoAudioProbe {
+                mime: audio.mime,
+                duration_us: audio.duration_us,
+                bitrate: audio.bitrate,
+                channels: audio.channels,
+            }),
+            hdr: self.hdr,
+            dynamic_hdr: self.dynamic_hdr,
+            color_primaries: self.color_primaries,
+            color_transfer: self.color_transfer,
+            full_range: self.full_range,
+            bit_depth: self.bit_depth,
+            hdr_static_metadata: self.hdr_static_metadata,
+        }
+    }
+}
+
+impl VideoEncodingPlanRecord {
+    fn from_core(plan: crate::media::video::VideoEncodingPlan) -> Self {
+        Self {
+            width: plan.width,
+            height: plan.height,
+            max_frame_rate: plan.max_frame_rate,
+            video_bitrate: plan.video_bitrate,
+            audio_bitrate: plan.audio_bitrate,
+            video_mime: plan.video_mime,
+            audio_mime: plan.audio_mime,
+            keep_hdr: plan.keep_hdr,
+        }
+    }
+
+}
+
 /// An owned chat-image job. Its source lease moves here and cannot be used
 /// again, including when Kotlin abandons the object.
 #[derive(uniffi::Object)]
 pub struct MediaImageJob {
+    job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+}
+
+#[derive(uniffi::Object)]
+pub struct MediaVideoJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
 }
 
@@ -140,6 +279,14 @@ pub struct StagedImageRecord {
 }
 
 #[derive(uniffi::Record)]
+pub struct StagedVideoRecord {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub poster: Vec<u8>,
+}
+
+#[derive(uniffi::Record)]
 pub struct PreparedStickerRecord {
     pub artifact: Arc<StickerArtifact>,
     pub width: u32,
@@ -167,9 +314,30 @@ impl MediaImport {
         self.source.lock().take();
     }
 
+    /// `0` is a non-media file, `1` an image, and `2` a video. The decision
+    /// comes from bounded content inspection, never the picker MIME type.
+    pub fn media_kind(&self) -> u8 {
+        let mut source = self.source.lock();
+        let Some(source) = source.as_mut() else { return 0 };
+        let Ok(header) = source.read_chunk(0, 64) else { return 0 };
+        match crate::media::image::inspect(&header) {
+            Ok(crate::media::image::ImageKind::Platform) => {
+                if source.inspect_image().is_ok() { 1 } else if source.inspect_video().is_ok() { 2 } else { 0 }
+            },
+            Ok(_) => 1,
+            Err(_) if source.inspect_video().is_ok() => 2,
+            Err(_) => 0,
+        }
+    }
+
     pub fn begin_chat_image(&self, hd_enabled: bool) -> Result<Arc<MediaImageJob>, CoreError> {
         let job = take_import_job(self, crate::media::MediaRequest::ChatImage { hd_enabled })?;
         Ok(Arc::new(MediaImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+    }
+
+    pub fn begin_chat_video(&self) -> Result<Arc<MediaVideoJob>, CoreError> {
+        let job = take_import_job(self, crate::media::MediaRequest::ChatVideo { trim: None })?;
+        Ok(Arc::new(MediaVideoJob { job: parking_lot::Mutex::new(Some(job)) }))
     }
 
     pub fn begin_avatar(
@@ -233,6 +401,32 @@ impl MediaImageJob {
 }
 
 #[uniffi::export]
+impl MediaVideoJob {
+    pub fn stage(&self) -> Result<StagedVideoRecord, CoreError> {
+        let mut job = self.job.lock();
+        let video = job
+            .as_mut()
+            .ok_or_else(|| CoreError::Refused {
+                msg: "This media job is finished or cancelled.".into(),
+            })?
+            .stage_video()?;
+        job.take();
+        Ok(StagedVideoRecord {
+            id: video.id,
+            width: video.width,
+            height: video.height,
+            poster: video.poster,
+        })
+    }
+
+    pub fn cancel(&self) {
+        if let Some(mut job) = self.job.lock().take() {
+            job.cancel();
+        }
+    }
+}
+
+#[uniffi::export]
 impl MediaPreparedImageJob {
     pub fn prepare(&self) -> Result<PreparedImageRecord, CoreError> {
         let mut job = self.job.lock();
@@ -243,7 +437,9 @@ impl MediaPreparedImageJob {
             })?
             .run();
         job.take();
-        let crate::media::PreparedMedia::Image(image) = image?;
+        let crate::media::PreparedMedia::Image(image) = image? else {
+            unreachable!("avatar job cannot prepare video")
+        };
         Ok(PreparedImageRecord {
             bytes: image.bytes,
             mime: "image/avif".into(),
@@ -271,7 +467,9 @@ impl MediaStickerJob {
             })?
             .run();
         job.take();
-        let crate::media::PreparedMedia::Image(image) = image?;
+        let crate::media::PreparedMedia::Image(image) = image? else {
+            unreachable!("sticker job cannot prepare video")
+        };
         Ok(PreparedStickerRecord {
             width: image.width,
             height: image.height,

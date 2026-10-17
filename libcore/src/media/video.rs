@@ -1,13 +1,19 @@
 //! Outgoing video policy. Platform adapters report media facts and execute the returned plan;
 //! codec choice, size/quality limits and acceptance rules have one owner here.
 
+use std::path::PathBuf;
+
 use anyhow::{Result, bail, ensure};
 
-use super::policy::VIDEO;
+use super::{
+    image::{self, DecodedStill, PreparedImage},
+    policy::{POSTER, VIDEO},
+    ports::{SourceLease, VideoRenderRequest},
+};
 
 /// Facts read from the media itself, with rotation/crop/pixel aspect already applied to display
 /// dimensions. Missing optional metadata stays unknown rather than becoming a failed encode.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug)]
 pub struct VideoProbe {
     pub container_mime: Option<String>,
     pub video_mime: String,
@@ -30,7 +36,7 @@ pub struct VideoProbe {
     pub hdr_static_metadata: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug)]
 pub struct VideoAudioProbe {
     pub mime: String,
     pub duration_us: Option<u64>,
@@ -38,7 +44,7 @@ pub struct VideoAudioProbe {
     pub channels: Option<u32>,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug)]
 pub struct VideoEncodingPlan {
     pub width: u32,
     pub height: u32,
@@ -50,16 +56,38 @@ pub struct VideoEncodingPlan {
     pub keep_hdr: bool,
 }
 
+/// A validated private MP4 and poster. Dropping an un-staged value removes
+/// only its exact candidate file.
+pub struct PreparedVideo {
+    path: Option<PathBuf>,
+    pub width: u32,
+    pub height: u32,
+    pub poster: PreparedImage,
+}
+
+impl PreparedVideo {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.path.as_deref().expect("prepared video already staged")
+    }
+
+    pub(crate) fn release_path(&mut self) {
+        self.path.take();
+    }
+}
+
+impl Drop for PreparedVideo {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 const MAX_LONG_EDGE: u32 = VIDEO.max_width;
 const MAX_SHORT_EDGE: u32 = VIDEO.max_height;
 const MAX_FRAME_RATE: u32 = VIDEO.max_fps;
 const VIDEO_BITRATE: u32 = VIDEO.video_bitrate;
 const AUDIO_BITRATE: u32 = 96_000;
-
-pub(crate) fn plan(input: &VideoProbe, source_bytes: u64) -> Result<Option<VideoEncodingPlan>> {
-    let mut candidates = plans(input, source_bytes)?;
-    Ok(Some(candidates.remove(0)))
-}
 
 pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEncodingPlan>> {
     validate_probe(input)?;
@@ -96,14 +124,78 @@ pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEn
     Ok(candidates)
 }
 
+pub(crate) fn prepare_video(
+    source: &mut SourceLease, import_directory: &std::path::Path,
+) -> Result<PreparedVideo> {
+    let source_bytes = source
+        .known_length()
+        .ok_or_else(|| anyhow::anyhow!("The selected video's size could not be read."))?;
+    let input = source.inspect_video()?;
+    let mut last_error = None;
+
+    for plan in plans(&input, source_bytes)? {
+        let output = reserve_candidate(import_directory)?;
+        let result = (|| {
+            let report = source.render_video(VideoRenderRequest { plan: plan.clone(), output: output.clone() })?;
+            validate_output_with_audio_fallback(&input, &report.output, &plan, report.audio_removed)?;
+            let size = std::fs::metadata(&output)?.len();
+            ensure!(size > 0 && size <= VIDEO.max_bytes, "The compressed video exceeds the send limit.");
+            let poster = image::encode_sdr_still(
+                DecodedStill {
+                    rgba: report.poster.pixels,
+                    width: report.poster.width,
+                    height: report.poster.height,
+                },
+                POSTER,
+            )?;
+            if report.audio_removed {
+                super::alert(crate::platform::MediaAlert::VideoAudioRemoved);
+            }
+            Ok(PreparedVideo {
+                path: Some(output.clone()),
+                width: report.output.display_width.round() as u32,
+                height: report.output.display_height.round() as u32,
+                poster: PreparedImage {
+                    bytes: poster.bytes,
+                    width: poster.width,
+                    height: poster.height,
+                    animated: false,
+                    animation_fallback: false,
+                },
+            })
+        })();
+        match result {
+            Ok(video) => return Ok(video),
+            Err(error) => {
+                let _ = std::fs::remove_file(&output);
+                last_error = Some(error);
+            },
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("This video could not be compressed.")))
+}
+
+fn reserve_candidate(directory: &std::path::Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    for _ in 0..4 {
+        let path = directory.join(format!("{}.mp4", uuid::Uuid::now_v7()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("Could not reserve a private video output.")
+}
+
 fn fit(width: f64, height: f64, max_width: u32, max_height: u32) -> (u32, u32) {
     let scale = 1.0_f64.min(f64::from(max_width) / width).min(f64::from(max_height) / height);
     let even = |edge: f64| ((edge * scale) as u32 / 2 * 2).max(2);
     (even(width), even(height))
 }
 
-pub(crate) fn validate_output(
-    input: &VideoProbe, output: &VideoProbe, plan: &VideoEncodingPlan,
+fn validate_output_with_audio_fallback(
+    input: &VideoProbe, output: &VideoProbe, plan: &VideoEncodingPlan, audio_removed: bool,
 ) -> Result<()> {
     validate_probe(output)?;
     ensure!(
@@ -164,6 +256,7 @@ pub(crate) fn validate_output(
             }
         },
         (None, None) => {},
+        (Some(_), None) if audio_removed => {},
         (Some(_), None) => bail!("The compressed video is missing its audio."),
         (None, Some(_)) => bail!("The encoder added an unexpected audio track."),
     }
@@ -205,6 +298,13 @@ fn validate_probe(probe: &VideoProbe) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::media::{
+        frames::PixelFormat,
+        ports::{DecodedImageFrame, MediaSource, SourceLease, VideoRenderReport},
+    };
+
     use super::*;
 
     fn source() -> VideoProbe {
@@ -232,35 +332,35 @@ mod tests {
     #[test]
     fn portrait_codec_alignment_is_accepted_but_rotation_and_oversizing_are_not() {
         let source = source();
-        let plan = plan(&source, 10_000_000).unwrap().unwrap();
+        let plan = plans(&source, 10_000_000).unwrap().remove(0);
         assert_eq!((plan.width, plan.height), (332, 720));
         let mut encoded = source.clone();
         encoded.display_width = 336.0;
         encoded.display_height = 720.0;
-        validate_output(&source, &encoded, &plan).unwrap();
+        validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.display_width = 720.0;
         encoded.display_height = 336.0;
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
         encoded.display_width = 1080.0;
         encoded.display_height = 2340.0;
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
     }
 
     #[test]
     fn short_clip_frame_rate_rounding_does_not_accept_a_60_fps_output() {
         let mut source = source();
         source.duration_us = 1_000_000;
-        let plan = plan(&source, 1_000_000).unwrap().unwrap();
+        let plan = plans(&source, 1_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.display_width = 336.0;
         encoded.display_height = 720.0;
         encoded.frame_rate = Some(31.0);
-        validate_output(&source, &encoded, &plan).unwrap();
+        validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.frame_rate = Some(60.0);
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
         encoded.frame_rate = Some(30.0);
         encoded.duration_us = 400_000;
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
     }
 
     #[test]
@@ -273,18 +373,19 @@ mod tests {
             channels: Some(2),
         });
         source.audio_tracks = 1;
-        let plan = plan(&source, 10_000_000).unwrap().unwrap();
+        let plan = plans(&source, 10_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.display_width = 336.0;
         encoded.display_height = 720.0;
         encoded.audio.as_mut().unwrap().channels = None;
-        validate_output(&source, &encoded, &plan).unwrap();
+        validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.audio = None;
         encoded.audio_tracks = 0;
         assert_eq!(
-            validate_output(&source, &encoded, &plan).unwrap_err().to_string(),
+            validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap_err().to_string(),
             "The compressed video is missing its audio."
         );
+        validate_output_with_audio_fallback(&source, &encoded, &plan, true).unwrap();
     }
 
     #[test]
@@ -296,7 +397,7 @@ mod tests {
         source.color_primaries = Some(9);
         source.bit_depth = Some(10);
         source.hdr_static_metadata = Some(vec![0, 1, 2, 3]);
-        let plan = plan(&source, 10_000_000).unwrap().unwrap();
+        let plan = plans(&source, 10_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.video_mime = "video/avc".into();
         encoded.display_width = 336.0;
@@ -306,12 +407,12 @@ mod tests {
         encoded.color_transfer = Some(1);
         encoded.color_primaries = Some(1);
         encoded.hdr_static_metadata = None;
-        validate_output(&source, &encoded, &plan).unwrap();
+        validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.hdr = true;
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
         encoded.hdr = false;
         encoded.bit_depth = Some(10);
-        assert!(validate_output(&source, &encoded, &plan).is_err());
+        assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
     }
 
     #[test]
@@ -320,5 +421,66 @@ mod tests {
         assert_eq!(plans.first().unwrap().video_bitrate, VIDEO_BITRATE);
         assert_eq!(plans.last().unwrap().video_bitrate, VIDEO.emergency_video_bitrate);
         assert!(plans.iter().all(|plan| !plan.keep_hdr && plan.video_mime == "video/avc"));
+    }
+
+    struct RenderingSource {
+        renders: Arc<Mutex<u32>>,
+    }
+
+    impl MediaSource for RenderingSource {
+        fn length(&self) -> Result<Option<u64>> {
+            Ok(Some(1_024))
+        }
+
+        fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn release(&mut self) {}
+
+        fn inspect_video(&mut self) -> Result<VideoProbe> {
+            Ok(source())
+        }
+
+        fn render_video(&mut self, request: VideoRenderRequest) -> Result<VideoRenderReport> {
+            std::fs::write(&request.output, [7_u8; 64])?;
+            let mut output = source();
+            output.container_mime = Some("video/mp4".into());
+            output.display_width = request.plan.width.into();
+            output.display_height = request.plan.height.into();
+            output.video_bitrate = Some(request.plan.video_bitrate);
+            let attempt = {
+                let mut renders = self.renders.lock().unwrap();
+                *renders += 1;
+                *renders
+            };
+            if attempt == 1 {
+                output.duration_us /= 2;
+            }
+            Ok(VideoRenderReport {
+                output,
+                poster: DecodedImageFrame {
+                    pixels: vec![3, 4, 5, 255],
+                    width: 1,
+                    height: 1,
+                    format: PixelFormat::Rgba8,
+                    source_is_hdr: false,
+                },
+                audio_removed: false,
+            })
+        }
+    }
+
+    #[test]
+    fn preparation_retries_rejected_rungs_and_owns_only_the_accepted_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let renders = Arc::new(Mutex::new(0));
+        let mut source = SourceLease::open(Box::new(RenderingSource { renders: renders.clone() })).unwrap();
+        let video = prepare_video(&mut source, directory.path()).unwrap();
+        assert_eq!(*renders.lock().unwrap(), 2);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(video.poster.width, 1);
+        drop(video);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

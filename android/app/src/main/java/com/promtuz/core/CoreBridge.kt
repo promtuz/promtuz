@@ -123,6 +123,8 @@ import com.promtuz.core.adapter.PresenceSignal
 
 /** Sends and pairing return once queued; their outcome arrives through [dbChanged]. */
 object CoreBridge {
+    data class StagedImportedMedia(val id: ULong, val preview: ByteArray, val image: Boolean)
+
     fun onForeground() = ffiOnForeground()
 
     fun onNetworkChanged() = ffiOnNetworkChanged()
@@ -312,6 +314,22 @@ object CoreBridge {
 
     suspend fun stageImportedChatImage(context: Context, uri: Uri): uniffi.core.StagedImageRecord = withContext(Dispatchers.IO) {
         importMedia(context, uri).beginChatImage(false).stage()
+    }
+
+    suspend fun stageImportedChatVideo(context: Context, uri: Uri): uniffi.core.StagedVideoRecord = withContext(Dispatchers.IO) {
+        importMedia(context, uri).beginChatVideo().stage()
+    }
+
+    suspend fun stageImportedChatMedia(context: Context, uri: Uri): StagedImportedMedia? = withContext(Dispatchers.IO) {
+        val media = importMedia(context, uri)
+        when (media.mediaKind().toInt()) {
+            1 -> media.beginChatImage(false).stage().let { StagedImportedMedia(it.id, it.avif, true) }
+            2 -> media.beginChatVideo().stage().let { StagedImportedMedia(it.id, it.poster, false) }
+            else -> {
+                media.discard()
+                null
+            }
+        }
     }
 
     suspend fun prepareImportedAvatar(

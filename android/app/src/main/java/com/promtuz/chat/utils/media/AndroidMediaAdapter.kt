@@ -6,12 +6,18 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import uniffi.core.CoreException
 import uniffi.core.DecodedImageFrameRecord
 import uniffi.core.ImageFrameRequestRecord
 import uniffi.core.ImageProbeRecord
 import uniffi.core.MediaSourceAdapter
+import uniffi.core.VideoProbeRecord
+import uniffi.core.VideoRenderReportRecord
+import uniffi.core.VideoRenderRequestRecord
+import java.io.File
 import java.nio.ByteBuffer
+import kotlinx.coroutines.runBlocking
 
 /** A bounded URI lease and platform decoder. Core still owns media policy and output. */
 class AndroidMediaAdapter private constructor(
@@ -23,6 +29,9 @@ class AndroidMediaAdapter private constructor(
     private val lock = Any()
     private var released = false
     private val sourceSize = descriptor.statSize.takeIf { it >= 0 }?.toULong()
+        ?: context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0).takeIf { it >= 0 }?.toULong() else null
+        }
 
     override fun length(): ULong? = synchronized(lock) {
         checkOpen()
@@ -92,15 +101,59 @@ class AndroidMediaAdapter private constructor(
         }
     }
 
-    override fun release() = synchronized(lock) {
-        if (released) return
-        released = true
-        runCatching { input.close() }
-        Unit
+    override fun inspectVideo(): VideoProbeRecord {
+        synchronized(lock) { checkOpen() }
+        return codecCall { inspectVideo(context, uri) }
+    }
+
+    override fun renderVideo(request: VideoRenderRequestRecord): VideoRenderReportRecord {
+        synchronized(lock) { checkOpen() }
+        return codecCall {
+            val input = inspectVideo(context, uri)
+            val output = File(request.outputPath)
+            encodeVideo(context, uri, output, input, request.plan)
+            val probe = inspectVideo(context, Uri.fromFile(output))
+            val poster = videoPoster(context, Uri.fromFile(output), 320)
+                ?: throw CoreException.Refused("The prepared video has no readable poster frame.")
+            val bitmap = poster.first
+            try {
+                VideoRenderReportRecord(
+                    probe,
+                    DecodedImageFrameRecord(
+                        bitmap.toRgba(),
+                        bitmap.width.toUInt(),
+                        bitmap.height.toUInt(),
+                        false,
+                        false,
+                    ),
+                    input.audio != null && probe.audio == null,
+                )
+            } finally {
+                bitmap.recycle()
+            }
+        }
+    }
+
+    override fun release() {
+        synchronized(lock) {
+            if (released) return
+            released = true
+            runCatching { input.close() }
+        }
     }
 
     private fun checkOpen() {
         if (released) throw CoreException.Refused("The selected file is no longer available.")
+    }
+
+    private fun <T> codecCall(block: suspend () -> T): T = try {
+        runBlocking { block() }
+    } catch (error: VideoPreparationException) {
+        throw CoreException.Refused(error.message ?: "This video could not be prepared.")
+    } catch (error: CoreException) {
+        throw error
+    } catch (error: Exception) {
+        throw CoreException.Refused("This video could not be prepared.")
     }
 
     companion object {

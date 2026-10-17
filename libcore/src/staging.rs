@@ -161,20 +161,48 @@ pub fn stage_prepared_image(image: crate::media::image::PreparedImage) -> u64 {
     insert(staged)
 }
 
+/// Transfers a validated private MP4 and its already encoded AVIF poster. No
+/// original metadata or source pixels reach the attachment store.
+pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo) -> Result<u64> {
+    let id = stage_attachment_with_thumb(
+        video.path().to_string_lossy().into_owned(),
+        "video.mp4".into(),
+        "video/mp4".into(),
+        video.poster.bytes.clone(),
+        video.width,
+        video.height,
+    )?;
+    video.release_path();
+    Ok(id)
+}
+
 pub fn stage_attachment(
     source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
     thumb_h: u32,
 ) -> Result<u64> {
+    if mime.starts_with("image/") || mime.starts_with("video/") {
+        bail!("Images and videos must be prepared through the media pipeline.");
+    }
+    let thumb = thumb_rgba
+        .map(|rgba| crate::media::attachment_thumb(&mime, &rgba, thumb_w, thumb_h))
+        .transpose()?;
+    stage_attachment_with_thumb(source_path, name, mime, thumb.unwrap_or_default(), 0, 0)
+}
+
+fn stage_attachment_with_thumb(
+    source_path: String, name: String, mime: String, thumb: Vec<u8>, width: u32, height: u32,
+) -> Result<u64> {
     let size = std::fs::metadata(&source_path)
         .map_err(|e| anyhow!("stat {source_path}: {e}"))?
         .len();
-    let thumb = thumb_rgba.map(|r| crate::media::attachment_thumb(&mime, &r, thumb_w, thumb_h)).transpose()?;
 
     let mut s = blank(KIND_ATTACHMENT);
     s.mime = mime;
     s.name = name;
     s.size = size;
-    s.thumb = thumb;
+    s.width = width;
+    s.height = height;
+    s.thumb = (!thumb.is_empty()).then_some(thumb);
     let id = insert(s);
 
     let path = source_path.clone();

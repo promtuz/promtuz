@@ -113,22 +113,14 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
                 for (uri in uris) {
                     ensureActive()
                     val context = getApplication<Application>()
-                    val mime = context.contentResolver.getType(uri).orEmpty()
-                    // Preparation stays cancellable; each helper protects just the core handoff.
-                    // Record its returned ID without suspension before preparing the next item.
-                    if (mime.startsWith("image/")) {
-                        val image = stagePickedImage(context, uri)
-                        owned.add(SharedPick(image.id, "Photo", image.preview))
-                    } else {
-                        val attachment = stagePickedAttachment(context, uri)
-                        owned.add(SharedPick(attachment.id, attachment.name, attachment.preview))
-                    }
+                    // Content inspection decides whether this is image, video, or a raw file.
+                    val attachment = stagePickedAttachment(context, uri)
+                    owned.add(SharedPick(attachment.id, attachment.name, attachment.preview))
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 val reason = when (e) {
                     is ImagePreparationException -> e.message
-                    is VideoPreparationException -> e.message
                     is uniffi.core.CoreException.Refused -> e.msg
                     else -> null
                 }

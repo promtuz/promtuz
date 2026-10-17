@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use super::{MediaRequest, image, import::ImportedSource, ports::SourceLease};
+use super::{MediaRequest, image, import::ImportedSource, ports::SourceLease, video};
 
 /// A media import is consumed exactly once. Its private source disappears when
 /// the job completes, is cancelled, or is dropped.
@@ -19,6 +19,7 @@ enum JobSource {
 
 pub enum PreparedMedia {
     Image(image::PreparedImage),
+    Video(video::PreparedVideo),
 }
 
 pub struct StagedImage {
@@ -27,6 +28,13 @@ pub struct StagedImage {
     pub width: u32,
     pub height: u32,
     pub animated: bool,
+}
+
+pub struct StagedVideo {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub poster: Vec<u8>,
 }
 
 impl MediaJob {
@@ -53,16 +61,22 @@ impl MediaJob {
     pub fn run(&mut self) -> Result<PreparedMedia> {
         let source =
             self.source.take().ok_or_else(|| anyhow::anyhow!("This media job is finished."))?;
+        if matches!(self.request, MediaRequest::ChatVideo { .. }) {
+            return match source {
+                JobSource::Lease(mut source) => Ok(PreparedMedia::Video(video::prepare_video(
+                    &mut source,
+                    &self.import_directory,
+                )?)),
+                JobSource::Private(_) => bail!("Video input needs a platform source lease."),
+            };
+        }
         let source = match source {
             JobSource::Private(source) => source,
             JobSource::Lease(mut source) => {
                 let header = source.read_chunk(0, 64)?;
                 match image::inspect(&header)? {
                     image::ImageKind::Platform => {
-                        return Ok(PreparedMedia::Image(image::prepare_platform_image(
-                            &mut source,
-                            self.request,
-                        )?));
+                        return Ok(PreparedMedia::Image(image::prepare_platform_image(&mut source, self.request)?));
                     },
                     _ => ImportedSource::from_lease(source, &self.import_directory)?,
                 }
@@ -74,7 +88,7 @@ impl MediaJob {
             | MediaRequest::Sticker { .. } => {
                 Ok(PreparedMedia::Image(image::prepare_image_path(source.path(), self.request)?))
             },
-            MediaRequest::ChatVideo { .. } => bail!("Video preparation has not been configured."),
+            MediaRequest::ChatVideo { .. } => unreachable!("handled before image import"),
         }
     }
 
@@ -93,7 +107,20 @@ impl MediaJob {
                 };
                 Ok(staged)
             },
+            PreparedMedia::Video(_) => unreachable!("chat image request cannot prepare video"),
         }
+    }
+
+    pub fn stage_video(&mut self) -> Result<StagedVideo> {
+        if !matches!(self.request, MediaRequest::ChatVideo { .. }) {
+            bail!("Only chat videos can be staged as video media.");
+        }
+        let PreparedMedia::Video(mut video) = self.run()? else {
+            unreachable!("chat video request cannot prepare an image")
+        };
+        let poster = video.poster.bytes.clone();
+        let id = crate::staging::stage_prepared_video(&mut video)?;
+        Ok(StagedVideo { id, width: video.width, height: video.height, poster })
     }
 }
 
@@ -195,7 +222,7 @@ mod tests {
         .unwrap();
         let path = source.path().to_owned();
         let mut job = MediaJob::new(source, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
-        let PreparedMedia::Image(image) = job.run().unwrap();
+        let PreparedMedia::Image(image) = job.run().unwrap() else { unreachable!() };
         assert_eq!(image::inspect(&image.bytes).unwrap(), image::ImageKind::Avif);
         assert!(!path.exists());
     }
@@ -211,7 +238,7 @@ mod tests {
             tempfile::tempdir().unwrap().keep(),
         )
         .unwrap();
-        let PreparedMedia::Image(image) = job.run().unwrap();
+        let PreparedMedia::Image(image) = job.run().unwrap() else { unreachable!() };
         assert_eq!(image::inspect(&image.bytes).unwrap(), image::ImageKind::Avif);
         assert_eq!(*releases.lock().unwrap(), 1);
     }
