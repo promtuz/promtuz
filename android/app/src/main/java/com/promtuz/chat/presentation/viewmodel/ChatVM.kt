@@ -28,7 +28,6 @@ import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
 import com.promtuz.chat.utils.media.stageCapturedVideo
 import com.promtuz.chat.utils.media.stagePickedAttachment
-import com.promtuz.chat.utils.media.stagePickedImage
 import com.promtuz.chat.utils.media.ImagePreparationException
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -614,7 +613,8 @@ class ChatVM(
     }
 
     private suspend fun stagePhoto(uri: Uri) {
-        val staged = stagePickedImage(application, uri)
+        val staged = stagePickedAttachment(application, uri)
+        if (!staged.image) throw ImagePreparationException("This file is not an image.")
         own(staged.id)
         staged.preview?.let { rememberPreview(staged.id, it) }
     }

@@ -6,7 +6,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import com.promtuz.core.CoreBridge
 import java.io.File
 
-data class StagedPickedAttachment(val id: ULong, val name: String, val preview: ImageBitmap?)
+data class StagedPickedAttachment(
+    val id: ULong,
+    val name: String,
+    val preview: ImageBitmap?,
+    val image: Boolean,
+)
 
 /** Generic picker/share URIs remain untouched; processing owns an independent private copy. */
 suspend fun stagePickedAttachment(context: Context, uri: Uri): StagedPickedAttachment {
@@ -15,6 +20,7 @@ suspend fun stagePickedAttachment(context: Context, uri: Uri): StagedPickedAttac
             media.id,
             if (media.image) "Photo" else "video.mp4",
             decodeEncodedPoster(media.preview, 192),
+            media.image,
         )
     }
     val copy = resolvePickedFile(context, uri)
@@ -37,7 +43,7 @@ private suspend fun stageRawAttachment(context: Context, picked: PickedFile): St
             stage = { CoreBridge.stageRawAttachment(original.absolutePath, picked.name, mime) },
             discard = { CoreBridge.discardStaged(it) },
         )
-        return StagedPickedAttachment(id, picked.name, null)
+        return StagedPickedAttachment(id, picked.name, null, false)
     } finally {
         pending.forEach { it.delete() }
     }
@@ -47,5 +53,5 @@ private suspend fun stagePickedVideo(context: Context, uri: Uri): StagedPickedAt
     val media = CoreBridge.stageImportedChatMedia(context, uri)
         ?: throw ImagePreparationException("This file is not a video.")
     if (media.image) throw ImagePreparationException("This file is not a video.")
-    return StagedPickedAttachment(media.id, "video.mp4", decodeEncodedPoster(media.preview, 192))
+    return StagedPickedAttachment(media.id, "video.mp4", decodeEncodedPoster(media.preview, 192), false)
 }

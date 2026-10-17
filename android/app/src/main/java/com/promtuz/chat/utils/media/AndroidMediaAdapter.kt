@@ -19,6 +19,8 @@ import java.io.File
 import java.nio.ByteBuffer
 import kotlinx.coroutines.runBlocking
 
+class ImagePreparationException(message: String) : Exception(message)
+
 /** A bounded URI lease and platform decoder. Core still owns media policy and output. */
 class AndroidMediaAdapter private constructor(
     private val context: Context,

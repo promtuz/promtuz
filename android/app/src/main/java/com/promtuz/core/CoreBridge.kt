@@ -312,10 +312,6 @@ object CoreBridge {
     suspend fun importMedia(context: Context, uri: Uri): MediaImport =
         withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.open(context, uri)) }
 
-    suspend fun stageImportedChatImage(context: Context, uri: Uri): uniffi.core.StagedImageRecord = withContext(Dispatchers.IO) {
-        importMedia(context, uri).beginChatImage(false).stage()
-    }
-
     suspend fun stageImportedChatVideo(context: Context, uri: Uri): uniffi.core.StagedVideoRecord = withContext(Dispatchers.IO) {
         importMedia(context, uri).beginChatVideo().stage()
     }
