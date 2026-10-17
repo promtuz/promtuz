@@ -1,9 +1,13 @@
-use std::fs::File;
+use std::{fs::File, path::PathBuf};
 use std::io::Write;
 
 use anyhow::{Result, bail, ensure};
 
-use super::{frames::PixelFormat, policy::MAX_SOURCE_BYTES};
+use super::{
+    frames::PixelFormat,
+    policy::MAX_SOURCE_BYTES,
+    video::{VideoEncodingPlan, VideoProbe},
+};
 
 pub const READ_CHUNK_BYTES: u32 = 1024 * 1024;
 
@@ -32,6 +36,22 @@ pub struct DecodedImageFrame {
     pub source_is_hdr: bool,
 }
 
+/// Core owns the requested rendition and output lease. The adapter receives no
+/// source path: it renders from the source lease it already owns.
+#[derive(Clone, Debug)]
+pub struct VideoRenderRequest {
+    pub plan: VideoEncodingPlan,
+    pub output: PathBuf,
+}
+
+/// The adapter must inspect the MP4 it just wrote and decode its displayed
+/// poster frame. Core validates both before either artifact can be staged.
+pub struct VideoRenderReport {
+    pub output: VideoProbe,
+    pub poster: DecodedImageFrame,
+    pub audio_removed: bool,
+}
+
 pub trait MediaSource: Send {
     /// A known length lets core refuse an over-limit source before reading it.
     /// Providers that cannot know it stream until EOF under the same hard cap.
@@ -45,6 +65,14 @@ pub trait MediaSource: Send {
 
     fn decode_image(&mut self, _request: ImageFrameRequest) -> Result<DecodedImageFrame> {
         bail!("This image format needs a platform decoder.")
+    }
+
+    fn inspect_video(&mut self) -> Result<VideoProbe> {
+        bail!("This video format needs a platform decoder.")
+    }
+
+    fn render_video(&mut self, _request: VideoRenderRequest) -> Result<VideoRenderReport> {
+        bail!("This device cannot prepare video.")
     }
 }
 
@@ -122,6 +150,14 @@ impl SourceLease {
 
     pub fn inspect_image(&mut self) -> Result<ImageProbe> {
         self.source.as_deref_mut().expect("released source").inspect_image()
+    }
+
+    pub fn inspect_video(&mut self) -> Result<VideoProbe> {
+        self.source.as_deref_mut().expect("released source").inspect_video()
+    }
+
+    pub fn render_video(&mut self, request: VideoRenderRequest) -> Result<VideoRenderReport> {
+        self.source.as_deref_mut().expect("released source").render_video(request)
     }
 
     pub fn known_length(&self) -> Option<u64> {
