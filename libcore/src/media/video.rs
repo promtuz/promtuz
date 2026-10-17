@@ -188,7 +188,12 @@ fn reserve_candidate(directory: &std::path::Path) -> Result<PathBuf> {
     bail!("Could not reserve a private video output.")
 }
 
-fn fit(width: f64, height: f64, max_width: u32, max_height: u32) -> (u32, u32) {
+fn fit(width: f64, height: f64, max_long_edge: u32, max_short_edge: u32) -> (u32, u32) {
+    let (max_width, max_height) = if width >= height {
+        (max_long_edge, max_short_edge)
+    } else {
+        (max_short_edge, max_long_edge)
+    };
     let scale = 1.0_f64.min(f64::from(max_width) / width).min(f64::from(max_height) / height);
     let even = |edge: f64| ((edge * scale) as u32 / 2 * 2).max(2);
     (even(width), even(height))
@@ -244,8 +249,8 @@ fn validate_output_with_audio_fallback(
                 after.mime == plan.audio_mime,
                 "The compressed video's audio format is unsupported."
             );
-            if let (Some(original), Some(encoded)) = (before.channels, after.channels) {
-                ensure!(original == encoded, "The encoder changed the video's audio channels.");
+            if let Some(encoded) = after.channels {
+                ensure!((1..=2).contains(&encoded), "The encoder produced unsupported audio channels.");
             }
             // These durations are optional presentation durations, never unadjusted mdhd values.
             if let (Some(original), Some(encoded)) = (before.duration_us, after.duration_us) {
@@ -333,13 +338,13 @@ mod tests {
     fn portrait_codec_alignment_is_accepted_but_rotation_and_oversizing_are_not() {
         let source = source();
         let plan = plans(&source, 10_000_000).unwrap().remove(0);
-        assert_eq!((plan.width, plan.height), (332, 720));
+        assert_eq!((plan.width, plan.height), (590, 1280));
         let mut encoded = source.clone();
-        encoded.display_width = 336.0;
-        encoded.display_height = 720.0;
+        encoded.display_width = 592.0;
+        encoded.display_height = 1280.0;
         validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
-        encoded.display_width = 720.0;
-        encoded.display_height = 336.0;
+        encoded.display_width = 1280.0;
+        encoded.display_height = 592.0;
         assert!(validate_output_with_audio_fallback(&source, &encoded, &plan, false).is_err());
         encoded.display_width = 1080.0;
         encoded.display_height = 2340.0;
@@ -352,8 +357,8 @@ mod tests {
         source.duration_us = 1_000_000;
         let plan = plans(&source, 1_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
-        encoded.display_width = 336.0;
-        encoded.display_height = 720.0;
+        encoded.display_width = 592.0;
+        encoded.display_height = 1280.0;
         encoded.frame_rate = Some(31.0);
         validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.frame_rate = Some(60.0);
@@ -375,8 +380,8 @@ mod tests {
         source.audio_tracks = 1;
         let plan = plans(&source, 10_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
-        encoded.display_width = 336.0;
-        encoded.display_height = 720.0;
+        encoded.display_width = 592.0;
+        encoded.display_height = 1280.0;
         encoded.audio.as_mut().unwrap().channels = None;
         validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap();
         encoded.audio = None;
@@ -400,8 +405,8 @@ mod tests {
         let plan = plans(&source, 10_000_000).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.video_mime = "video/avc".into();
-        encoded.display_width = 336.0;
-        encoded.display_height = 720.0;
+        encoded.display_width = 592.0;
+        encoded.display_height = 1280.0;
         encoded.hdr = false;
         encoded.bit_depth = Some(8);
         encoded.color_transfer = Some(1);
@@ -421,6 +426,15 @@ mod tests {
         assert_eq!(plans.first().unwrap().video_bitrate, VIDEO_BITRATE);
         assert_eq!(plans.last().unwrap().video_bitrate, VIDEO.emergency_video_bitrate);
         assert!(plans.iter().all(|plan| !plan.keep_hdr && plan.video_mime == "video/avc"));
+    }
+
+    #[test]
+    fn portrait_video_keeps_the_profile_long_edge() {
+        let mut portrait = source();
+        portrait.display_width = 1_080.0;
+        portrait.display_height = 1_920.0;
+        let plan = plans(&portrait, 10_000_000).unwrap().remove(0);
+        assert_eq!((plan.width, plan.height), (720, 1280));
     }
 
     struct RenderingSource {
