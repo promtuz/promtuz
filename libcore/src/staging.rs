@@ -176,17 +176,11 @@ pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo) -> R
     Ok(id)
 }
 
-pub fn stage_attachment(
-    source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
-    thumb_h: u32,
-) -> Result<u64> {
+pub fn stage_raw_attachment(source_path: String, name: String, mime: String) -> Result<u64> {
     if mime.starts_with("image/") || mime.starts_with("video/") {
         bail!("Images and videos must be prepared through the media pipeline.");
     }
-    let thumb = thumb_rgba
-        .map(|rgba| crate::media::attachment_thumb(&mime, &rgba, thumb_w, thumb_h))
-        .transpose()?;
-    stage_attachment_with_thumb(source_path, name, mime, thumb.unwrap_or_default(), 0, 0)
+    stage_attachment_with_thumb(source_path, name, mime, Vec::new(), 0, 0)
 }
 
 fn stage_attachment_with_thumb(

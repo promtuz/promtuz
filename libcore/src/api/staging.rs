@@ -43,11 +43,10 @@ impl From<crate::staging::Staged> for StagedRecord {
 
 /// The blurred preview is ready when this returns; the manifest hash runs off-thread.
 #[uniffi::export]
-pub fn stage_attachment(
-    source_path: String, name: String, mime: String, thumb_rgba: Option<Vec<u8>>, thumb_w: u32,
-    thumb_h: u32,
+pub fn stage_raw_attachment(
+    source_path: String, name: String, mime: String,
 ) -> Result<u64, CoreError> {
-    Ok(crate::staging::stage_attachment(source_path, name, mime, thumb_rgba, thumb_w, thumb_h)?)
+    Ok(crate::staging::stage_raw_attachment(source_path, name, mime)?)
 }
 
 /// Safe mid-prepare: the running pass finds the id gone and drops its result.

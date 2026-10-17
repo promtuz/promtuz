@@ -34,8 +34,7 @@ private suspend fun stageRawAttachment(context: Context, picked: PickedFile): St
         val mime = picked.mime.takeUnless { it.startsWith("image/") || it.startsWith("video/") }
             ?: "application/octet-stream"
         val id = stageOwnedFile(original,
-            stage = { CoreBridge.stageAttachment(original.absolutePath, picked.name, mime,
-                null, 0, 0) },
+            stage = { CoreBridge.stageRawAttachment(original.absolutePath, picked.name, mime) },
             discard = { CoreBridge.discardStaged(it) },
         )
         return StagedPickedAttachment(id, picked.name, null)

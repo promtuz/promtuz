@@ -62,7 +62,7 @@ import uniffi.core.escrowSecret as ffiEscrowSecret
 import uniffi.core.exportRecoveryPhrase as ffiExportRecoveryPhrase
 import uniffi.core.restoreFromPhrase as ffiRestoreFromPhrase
 import uniffi.core.StagedRecord
-import uniffi.core.stageAttachment as ffiStageAttachment
+import uniffi.core.stageRawAttachment as ffiStageRawAttachment
 import uniffi.core.discardStaged as ffiDiscardStaged
 import uniffi.core.stagedItems as ffiStagedItems
 import uniffi.core.reviseWithStaged as ffiReviseWithStaged
@@ -343,13 +343,10 @@ object CoreBridge {
 
     fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
 
-    /** The blur is ready when this returns; the hash comes later. */
-    suspend fun stageAttachment(
-        sourcePath: String, name: String, mime: String,
-        thumbRgba: ByteArray?, thumbW: Int, thumbH: Int,
-    ): ULong = withContext(Dispatchers.IO) {
-        ffiStageAttachment(sourcePath, name, mime, thumbRgba, thumbW.toUInt(), thumbH.toUInt())
-    }
+    suspend fun stageRawAttachment(sourcePath: String, name: String, mime: String): ULong =
+        withContext(Dispatchers.IO) {
+            ffiStageRawAttachment(sourcePath, name, mime)
+        }
 
     /** Safe mid-encode: the running pass discards its result. */
     suspend fun discardStaged(id: ULong) = withContext(Dispatchers.IO) { ffiDiscardStaged(id) }
