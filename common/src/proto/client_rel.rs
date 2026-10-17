@@ -420,23 +420,29 @@ mod tests {
                 dispatch_sig_message(PROTOCOL_VERSION, &[1; 32], &[2; 32], &[3; 16], b"payload"),
                 activity_sig_message(&[1; 32], &[2; 32], &[3; 32], 0x0102, 0x0304),
             ],
-            "b784a6c7ee42b34603c07eddccd6eda1f0830755ccad8b9fe8dad5f1453862f8
-             3db888a1b396d726a8ab4186fc1fc441ffa66ab6b6524a635aa479b8aa76418e
-             363343bbafd645880d89d826eb2eea80ecdcbca5de46c4a1202efed33c066bd7",
+            "ecddaefe015dba7b392756b623203180633a1f2ae079007050fae37c08f2a335
+             23e4d9e325a51d4bf019e22480ba46ed98b152a477547d950fdc1afc6ee6aa77
+             a0d04907f3e941839754172c7e87e004e1daa9bc73d0c56d9e0ab3ae86471a26",
         );
     }
 
     #[test]
-    fn dispatches_signed_under_an_accepted_version_verify() {
+    fn dispatches_must_use_the_current_protocol_version() {
         use ed25519_dalek::Signer;
         let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
         let from = key.verifying_key().to_bytes();
-        let transcript = |v| dispatch_sig_message(v, &[2; 32], &from, &[3; 16], b"payload");
         let verifies = |signed_at: u16| {
-            let sig = key.sign(&transcript(signed_at)).to_bytes();
-            crate::crypto::verify_versioned(&from, &sig, transcript).is_ok()
+            let sig = key
+                .sign(&dispatch_sig_message(signed_at, &[2; 32], &from, &[3; 16], b"payload"))
+                .to_bytes();
+            crate::crypto::verify_ed25519(
+                &from,
+                &dispatch_sig_message(PROTOCOL_VERSION, &[2; 32], &from, &[3; 16], b"payload"),
+                &sig,
+            )
+            .is_ok()
         };
-        for (version, accepted) in [(PROTOCOL_VERSION, true), (10, true), (9, false), (12, false)] {
+        for (version, accepted) in [(PROTOCOL_VERSION, true), (11, false), (10, false)] {
             assert_eq!(verifies(version), accepted, "signed under version {version}");
         }
     }

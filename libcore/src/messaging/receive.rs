@@ -3,7 +3,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::ensure;
 use common::crypto::verify_ed25519;
-use common::crypto::verify_versioned;
 use common::proto::client_rel::DeliverP;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::mls_wire::AppPayload;
@@ -59,9 +58,11 @@ pub(crate) fn accepted_at_secs(accepted_at_ms: u64) -> u64 {
 /// The signature covers `to`, `from`, `id` and the payload, so a relay can neither re-address a
 /// captured dispatch at us nor mint one under a contact's IPK.
 fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
-    verify_versioned(&msg.from, &msg.sig.0, |v| {
-        dispatch_sig_message(v, our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload)
-    })
+    verify_ed25519(
+        &msg.from,
+        &dispatch_sig_message(common::PROTOCOL_VERSION, our_ipk.as_bytes(), &msg.from, &msg.id.0, &msg.payload),
+        &msg.sig.0,
+    )
         .map_err(|e| anyhow!("dispatch signature: {e}"))
 }
 
@@ -341,9 +342,13 @@ pub fn process_application_inbound_for<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], our_ipk: &[u8; 32], env: MlsApplicationEnvelopeP,
     accepted_at_ms: u64, dispatch_id: [u8; 16],
 ) -> Result<InboundDecoded> {
-    verify_versioned(&sender_ipk, &env.sender_sig.0, |v| {
-        envelope_signing_input(v, our_ipk, &env.group_id.0, env.epoch, &env.mls_message.0)
-    })
+    verify_ed25519(
+        &sender_ipk,
+        &envelope_signing_input(
+            common::PROTOCOL_VERSION, our_ipk, &env.group_id.0, env.epoch, &env.mls_message.0,
+        ),
+        &env.sender_sig.0,
+    )
         .map_err(|_| anyhow!("application envelope sig invalid"))?;
 
     // A recovery-enabled group must publish every ratchet and commit through

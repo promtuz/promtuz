@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use common::crypto::verify_ed25519;
-use common::crypto::verify_versioned;
+use common::crypto::verify_ed25519;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::activity_sig_message;
@@ -175,9 +175,13 @@ fn build_signed_forward(dht: &Dht, dispatch: DispatchP, timestamp: u64) -> Forwa
 
 /// Checked at ingress and again at each home: `Forward::verify` covers only the relay's signature.
 pub(crate) fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
-    verify_versioned(&dispatch.from.0, &dispatch.sig.0, |v| {
-        dispatch_sig_message(v, &dispatch.to.0, &dispatch.from.0, &dispatch.id.0, &dispatch.payload)
-    })
+    verify_ed25519(
+        &dispatch.from.0,
+        &dispatch_sig_message(
+            common::PROTOCOL_VERSION, &dispatch.to.0, &dispatch.from.0, &dispatch.id.0, &dispatch.payload,
+        ),
+        &dispatch.sig.0,
+    )
     .is_ok()
 }
 

@@ -702,17 +702,17 @@ mod tests {
                 queue_fetch_signing_input(&[1; 32], &relay, 0x0102),
                 queue_fetch_ack_signing_input(&[1; 32], &relay, &[[2; 16], [3; 16]], 0x0102),
             ],
-            "55722476e11ed826ca585dce9070676953f79858c3365d47e6d5a17d4d79a0d4
-             e9c847d67652e43ae5f49d69d4d27874ea49d630f0fcb2cd759e1cee12311aa0
-             f3ba4410100a76adf3076cbe824c8f1560aa7c4b6b9154f9d844d189b88d062b
-             0e2261eae89f81ffa6c2d52ad6d867d691489281a560c983708160886c800b5a
-             866211ece7aaef3ec839487062c4c81116a6980d1cfcb1903de161d8b6b24c79
-             70f3f8cdfa33932902adb21b8e124f4e83fe7366dc33c78b5fc89ad674ece2ab
-             6c623594ed54c9d556e7eca753117b577baeb68e8d02b7ae5fe7be04fdcd0ec8
-             d1aab7f715fec04ad9025ae70f0ba4b1dd431dbb45b18be49f30de554e3fd8ab
-             1f84cf1610ed6d2f29b45d66aa2175f196eae67809f83a75fb28078b0e6e1c9b
-             eda7c915e8fe7329325d81f10ddde6fbda93565be917874ff1afdd5aac17d727
-             b4819d29afe3baaad7f3db70d090faf3cf77a714deaa4d26d596ce182b2045a8",
+            "de7cc5f86defdc4c8b69b080d5bc9cb0328bd031125f4fc82f2b0e0b9a7f5fb4
+             a5146050937b414fd2f838104b530f9a6d607c7346a449999cf875168a4e43bc
+             8ae6efcfdd14ace12e760b3fd4ffb285ef9b5cd28ad8bc8cf9f20e3e873c07de
+             7206f677a0fd01bf90f1780fee17deccaf31a78ee003170e91899494c7ac2213
+             215c71962a7a7c75569a969b6cf93b383a366be5c90c5c360be724dc6c86fa7f
+             7924b699846c597518ac331faf94b963d4a2f0221f01273c03a2792ab5f498b0
+             6b609f93523042d4ffb3bc2be1df89e2d1fd45ff9a1e18c0ee8021f4bbe14219
+             774765298f90b9a0b86fe6bf3064700f2ecb7ff6efa6a4411dcefeb355d274dd
+             3ca03e6f87960bdaaea77e2752cc1f758894af75370bf7c7709040c36c7211ca
+             14f65bc686892a837bfc0d3338ad1cd038f576c9ca44ddfac75500bea76781fc
+             870990d721dc880ce06351d15ad60c171d3849bfdc35fb6965e01ddd9a709e61",
         );
     }
 }
