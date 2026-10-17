@@ -9,7 +9,6 @@ import android.media.metrics.LogSessionId
 import android.net.Uri
 import android.os.Looper
 import androidx.media3.common.C
-import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -22,6 +21,7 @@ import androidx.media3.transformer.Codec
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.EncoderSelector
 import androidx.media3.transformer.EncoderUtil
@@ -172,18 +172,12 @@ suspend fun encodeVideo(context: Context, source: File, output: File, input: Vid
                 throw VideoPreparationException("The video encoder needs a separate output file.")
             }
         }
-        val hdrColor = if (plan.keepHdr) input.hdrColorInfo()
-            ?: throw VideoPreparationException("The video encoder cannot represent this HDR format.") else null
         val selector = EncoderSelector { mime ->
-            val candidates = if (mime != plan.videoMime) emptyList() else if (plan.keepHdr) {
-                EncoderUtil.getSupportedEncodersForHdrEditing(mime, hdrColor)
-            } else EncoderUtil.getSupportedEncoders(mime)
-            ImmutableList.copyOf(candidates.filter { EncoderUtil.isHardwareAccelerated(it, mime) })
+            val candidates = if (mime == plan.videoMime) EncoderUtil.getSupportedEncoders(mime) else emptyList()
+            ImmutableList.copyOf(candidates.sortedByDescending { EncoderUtil.isHardwareAccelerated(it, mime) })
         }
         val supported = withContext(Dispatchers.Default) { selector.selectEncoderInfos(plan.videoMime).isNotEmpty() }
-        if (!supported) throw VideoPreparationException(if (plan.keepHdr) {
-            "This device cannot encode the requested video format while preserving HDR."
-        } else "This device cannot encode the requested video format.")
+        if (!supported) throw VideoPreparationException("This device cannot encode the requested video format.")
 
         withContext(Dispatchers.Main.immediate) {
             val completion = CompletableDeferred<Unit>()
@@ -233,14 +227,14 @@ suspend fun encodeVideo(context: Context, source: File, output: File, input: Vid
                         override fun onFallbackApplied(composition: Composition,
                             originalTransformationRequest: TransformationRequest,
                             fallbackTransformationRequest: TransformationRequest) {
-                            // KEEP_HDR itself permits automatic tone mapping. An adapter must not
-                            // change the requested codec or color behavior when hardware fails.
-                            if (fallbackTransformationRequest.hdrMode != Composition.HDR_MODE_KEEP_HDR ||
+                            if (fallbackTransformationRequest.hdrMode !in listOf(
+                                    Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL,
+                                    Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC,
+                                ) ||
                                 fallbackTransformationRequest.videoMimeType != plan.videoMime ||
                                 fallbackTransformationRequest.audioMimeType != plan.audioMime) {
                                 completion.completeExceptionally(VideoPreparationException(
-                                    if (plan.keepHdr) "This device cannot encode this video while preserving HDR."
-                                    else "This device cannot produce the requested video format.",
+                                    "This device cannot produce the requested video format.",
                                 ))
                             }
                         }
@@ -253,8 +247,10 @@ suspend fun encodeVideo(context: Context, source: File, output: File, input: Vid
                     .setFrameRate(maxFrameRate)
                     .setEffects(Effects(emptyList(), effects))
                     .build()
-                // Single-item exports keep existing tracks, including no audio for silent clips.
-                transformer.start(item, output.absolutePath)
+                val composition = Composition.Builder(
+                    EditedMediaItemSequence.Builder().addItem(item).build(),
+                ).setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL).build()
+                transformer.start(composition, output.absolutePath)
                 completion.await()
             } catch (error: Throwable) {
                 failure = error
@@ -369,16 +365,6 @@ private fun isoTransfer(value: Int): UShort? = when (value) {
     C.COLOR_TRANSFER_ST2084 -> 16u
     C.COLOR_TRANSFER_HLG -> 18u
     else -> null
-}
-
-@androidx.annotation.OptIn(UnstableApi::class)
-private fun VideoProbe.hdrColorInfo(): ColorInfo? {
-    val transfer = colorTransfer?.toInt()?.let(ColorInfo::isoTransferCharacteristicsToColorTransfer)
-    val space = colorPrimaries?.toInt()?.let(ColorInfo::isoColorPrimariesToColorSpace)
-    if (transfer !in setOf(C.COLOR_TRANSFER_HLG, C.COLOR_TRANSFER_ST2084) || space == null || space <= 0) return null
-    return ColorInfo.Builder().setColorTransfer(transfer!!).setColorSpace(space)
-        .setColorRange(if (fullRange == true) C.COLOR_RANGE_FULL else C.COLOR_RANGE_LIMITED)
-        .setHdrStaticInfo(hdrStaticMetadata).build()
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)

@@ -3,6 +3,8 @@
 
 use anyhow::{Result, bail, ensure};
 
+use super::policy::VIDEO;
+
 /// Facts read from the media itself, with rotation/crop/pixel aspect already applied to display
 /// dimensions. Missing optional metadata stays unknown rather than becoming a failed encode.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -48,66 +50,56 @@ pub struct VideoEncodingPlan {
     pub keep_hdr: bool,
 }
 
-const MAX_LONG_EDGE: u32 = 1280;
-const MAX_SHORT_EDGE: u32 = 720;
-const MAX_FRAME_RATE: u32 = 30;
-const VIDEO_BITRATE: u32 = 1_500_000;
+const MAX_LONG_EDGE: u32 = VIDEO.max_width;
+const MAX_SHORT_EDGE: u32 = VIDEO.max_height;
+const MAX_FRAME_RATE: u32 = VIDEO.max_fps;
+const VIDEO_BITRATE: u32 = VIDEO.video_bitrate;
 const AUDIO_BITRATE: u32 = 96_000;
 
 pub(crate) fn plan(input: &VideoProbe, source_bytes: u64) -> Result<Option<VideoEncodingPlan>> {
+    let mut candidates = plans(input, source_bytes)?;
+    Ok(Some(candidates.remove(0)))
+}
+
+pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEncodingPlan>> {
     validate_probe(input)?;
     ensure!(source_bytes > 0, "The selected video is empty.");
-    let long = input.display_width.max(input.display_height);
-    let short = input.display_width.min(input.display_height);
-    let overall_bitrate = source_bytes as f64 * 8_000_000.0 / input.duration_us as f64;
-    let video_bitrate = input.video_bitrate.map(f64::from).unwrap_or(overall_bitrate);
-    let efficient_codec = if input.hdr {
-        matches!(input.video_mime.as_str(), "video/hevc" | "video/dolby-vision")
-    } else {
-        input.video_mime == "video/avc"
-    };
-    let efficient_audio = input.audio.as_ref().is_none_or(|audio| {
-        audio.mime == "audio/mp4a-latm" && audio.bitrate.is_some_and(|b| b <= AUDIO_BITRATE)
-    });
-    if is_mp4(input)
-        && efficient_codec
-        && efficient_audio
-        && long <= f64::from(MAX_LONG_EDGE)
-        && short <= f64::from(MAX_SHORT_EDGE)
-        && input.frame_rate.is_some_and(|fps| fps <= f64::from(MAX_FRAME_RATE))
-        && video_bitrate <= f64::from(VIDEO_BITRATE)
-    {
-        return Ok(None);
+    let mut candidates = Vec::new();
+    for (width, height, fps, bitrate) in [
+        (MAX_LONG_EDGE, MAX_SHORT_EDGE, MAX_FRAME_RATE, VIDEO_BITRATE),
+        (MAX_LONG_EDGE, MAX_SHORT_EDGE, MAX_FRAME_RATE, 1_500_000),
+        (MAX_LONG_EDGE, MAX_SHORT_EDGE, MAX_FRAME_RATE, 1_000_000),
+        (960, 540, MAX_FRAME_RATE, 1_000_000),
+        (960, 540, 24, 800_000),
+        (VIDEO.emergency_width, VIDEO.emergency_height, VIDEO.emergency_fps, VIDEO.emergency_video_bitrate),
+    ] {
+        let (width, height) = fit(input.display_width, input.display_height, width, height);
+        let candidate = VideoEncodingPlan {
+            width,
+            height,
+            max_frame_rate: fps,
+            video_bitrate: bitrate,
+            audio_bitrate: AUDIO_BITRATE,
+            video_mime: "video/avc".into(),
+            audio_mime: "audio/mp4a-latm".into(),
+            keep_hdr: false,
+        };
+        if candidates.last().is_none_or(|previous: &VideoEncodingPlan| {
+            previous.width != candidate.width
+                || previous.height != candidate.height
+                || previous.max_frame_rate != candidate.max_frame_rate
+                || previous.video_bitrate != candidate.video_bitrate
+        }) {
+            candidates.push(candidate);
+        }
     }
-    ensure!(
-        !input.dynamic_hdr,
-        "This HDR video cannot be compressed without losing its HDR metadata."
-    );
-    if input.hdr {
-        ensure!(
-            matches!(input.color_transfer, Some(16 | 18)) && input.color_primaries.is_some(),
-            "The video's HDR format could not be identified."
-        );
-    }
-    let scale = 1.0_f64.min(f64::from(MAX_LONG_EDGE) / long).min(f64::from(MAX_SHORT_EDGE) / short);
-    // This is the requested picture box. Hardware encoders may align it slightly; that is
-    // checked separately from a real resize/aspect error when accepting the output.
+    Ok(candidates)
+}
+
+fn fit(width: f64, height: f64, max_width: u32, max_height: u32) -> (u32, u32) {
+    let scale = 1.0_f64.min(f64::from(max_width) / width).min(f64::from(max_height) / height);
     let even = |edge: f64| ((edge * scale) as u32 / 2 * 2).max(2);
-    Ok(Some(VideoEncodingPlan {
-        width: even(input.display_width),
-        height: even(input.display_height),
-        max_frame_rate: MAX_FRAME_RATE,
-        video_bitrate: input.video_bitrate.unwrap_or(VIDEO_BITRATE).min(VIDEO_BITRATE),
-        audio_bitrate: input
-            .audio
-            .as_ref()
-            .and_then(|a| a.bitrate)
-            .unwrap_or(AUDIO_BITRATE)
-            .min(AUDIO_BITRATE),
-        video_mime: if input.hdr { "video/hevc" } else { "video/avc" }.into(),
-        audio_mime: "audio/mp4a-latm".into(),
-        keep_hdr: input.hdr,
-    }))
+    (even(width), even(height))
 }
 
 pub(crate) fn validate_output(
@@ -175,21 +167,11 @@ pub(crate) fn validate_output(
         (Some(_), None) => bail!("The compressed video is missing its audio."),
         (None, Some(_)) => bail!("The encoder added an unexpected audio track."),
     }
-    if input.hdr {
-        ensure!(
-            output.hdr
-                && output.bit_depth.is_some_and(|depth| depth >= 10)
-                && output.color_transfer == input.color_transfer
-                && output.color_primaries == input.color_primaries
-                && input
-                    .hdr_static_metadata
-                    .as_ref()
-                    .is_none_or(|m| Some(m) == output.hdr_static_metadata.as_ref()),
-            "The compressed video did not preserve its HDR data."
-        );
-    } else {
-        ensure!(!output.hdr, "The encoder unexpectedly changed the video to HDR.");
-    }
+    ensure!(!output.hdr, "The encoder did not tone-map the video to SDR.");
+    ensure!(
+        output.bit_depth.is_none_or(|depth| depth == 8),
+        "The encoder did not produce eight-bit video."
+    );
     Ok(())
 }
 
@@ -251,13 +233,13 @@ mod tests {
     fn portrait_codec_alignment_is_accepted_but_rotation_and_oversizing_are_not() {
         let source = source();
         let plan = plan(&source, 10_000_000).unwrap().unwrap();
-        assert_eq!((plan.width, plan.height), (590, 1280));
+        assert_eq!((plan.width, plan.height), (332, 720));
         let mut encoded = source.clone();
-        encoded.display_width = 592.0;
-        encoded.display_height = 1280.0;
+        encoded.display_width = 336.0;
+        encoded.display_height = 720.0;
         validate_output(&source, &encoded, &plan).unwrap();
-        encoded.display_width = 1280.0;
-        encoded.display_height = 592.0;
+        encoded.display_width = 720.0;
+        encoded.display_height = 336.0;
         assert!(validate_output(&source, &encoded, &plan).is_err());
         encoded.display_width = 1080.0;
         encoded.display_height = 2340.0;
@@ -270,8 +252,8 @@ mod tests {
         source.duration_us = 1_000_000;
         let plan = plan(&source, 1_000_000).unwrap().unwrap();
         let mut encoded = source.clone();
-        encoded.display_width = 590.0;
-        encoded.display_height = 1280.0;
+        encoded.display_width = 336.0;
+        encoded.display_height = 720.0;
         encoded.frame_rate = Some(31.0);
         validate_output(&source, &encoded, &plan).unwrap();
         encoded.frame_rate = Some(60.0);
@@ -293,8 +275,8 @@ mod tests {
         source.audio_tracks = 1;
         let plan = plan(&source, 10_000_000).unwrap().unwrap();
         let mut encoded = source.clone();
-        encoded.display_width = 590.0;
-        encoded.display_height = 1280.0;
+        encoded.display_width = 336.0;
+        encoded.display_height = 720.0;
         encoded.audio.as_mut().unwrap().channels = None;
         validate_output(&source, &encoded, &plan).unwrap();
         encoded.audio = None;
@@ -306,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn hdr_output_must_retain_precision_color_and_declared_metadata() {
+    fn hdr_input_is_tone_mapped_to_eight_bit_sdr() {
         let mut source = source();
         source.hdr = true;
         source.video_mime = "video/hevc".into();
@@ -316,13 +298,27 @@ mod tests {
         source.hdr_static_metadata = Some(vec![0, 1, 2, 3]);
         let plan = plan(&source, 10_000_000).unwrap().unwrap();
         let mut encoded = source.clone();
-        encoded.display_width = 590.0;
-        encoded.display_height = 1280.0;
-        validate_output(&source, &encoded, &plan).unwrap();
+        encoded.video_mime = "video/avc".into();
+        encoded.display_width = 336.0;
+        encoded.display_height = 720.0;
+        encoded.hdr = false;
         encoded.bit_depth = Some(8);
-        assert!(validate_output(&source, &encoded, &plan).is_err());
-        encoded.bit_depth = Some(10);
+        encoded.color_transfer = Some(1);
+        encoded.color_primaries = Some(1);
         encoded.hdr_static_metadata = None;
+        validate_output(&source, &encoded, &plan).unwrap();
+        encoded.hdr = true;
         assert!(validate_output(&source, &encoded, &plan).is_err());
+        encoded.hdr = false;
+        encoded.bit_depth = Some(10);
+        assert!(validate_output(&source, &encoded, &plan).is_err());
+    }
+
+    #[test]
+    fn plans_are_ordered_from_target_to_emergency() {
+        let plans = plans(&source(), 10_000_000).unwrap();
+        assert_eq!(plans.first().unwrap().video_bitrate, VIDEO_BITRATE);
+        assert_eq!(plans.last().unwrap().video_bitrate, VIDEO.emergency_video_bitrate);
+        assert!(plans.iter().all(|plan| !plan.keep_hdr && plan.video_mime == "video/avc"));
     }
 }
