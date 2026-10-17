@@ -105,16 +105,16 @@ class AndroidMediaAdapter private constructor(
 
     override fun inspectVideo(): VideoProbeRecord {
         synchronized(lock) { checkOpen() }
-        return codecCall { inspectVideo(context, uri) }
+        return codecCall { AndroidVideoAdapter.inspect(context, uri) }
     }
 
     override fun renderVideo(request: VideoRenderRequestRecord): VideoRenderReportRecord {
         synchronized(lock) { checkOpen() }
         return codecCall {
-            val input = inspectVideo(context, uri)
+            val input = AndroidVideoAdapter.inspect(context, uri)
             val output = File(request.outputPath)
-            encodeVideo(context, uri, output, input, request.plan)
-            val probe = inspectVideo(context, Uri.fromFile(output))
+            AndroidVideoAdapter.render(context, uri, output, input, request.plan)
+            val probe = AndroidVideoAdapter.inspect(context, Uri.fromFile(output))
             val poster = videoPoster(context, Uri.fromFile(output), 320)
                 ?: throw CoreException.Refused("The prepared video has no readable poster frame.")
             val bitmap = poster.first

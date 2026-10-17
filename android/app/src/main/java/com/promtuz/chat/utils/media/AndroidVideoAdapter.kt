@@ -57,9 +57,10 @@ class VideoPreparationException(message: String, cause: Throwable? = null) : IOE
 
 private val videoExports = Mutex()
 
-/** Android media facts only. Core owns compression policy, result acceptance and candidate files. */
+/** Android codec implementation used only by [AndroidMediaAdapter]. */
+internal object AndroidVideoAdapter {
 @androidx.annotation.OptIn(UnstableApi::class)
-suspend fun inspectVideo(context: Context, uri: Uri): VideoProbeRecord {
+suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
     try {
         return MetadataRetriever.Builder(context.applicationContext, MediaItem.fromUri(uri))
             .build().use { retriever ->
@@ -164,7 +165,7 @@ suspend fun inspectVideo(context: Context, uri: Uri): VideoProbeRecord {
  * core can safely clean up its source/candidate files.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
-suspend fun encodeVideo(context: Context, source: Uri, output: File, input: VideoProbeRecord, plan: VideoEncodingPlanRecord) {
+suspend fun render(context: Context, source: Uri, output: File, input: VideoProbeRecord, plan: VideoEncodingPlanRecord) {
     videoExports.withLock {
         val selector = EncoderSelector { mime ->
             val candidates = if (mime == plan.videoMime) EncoderUtil.getSupportedEncoders(mime) else emptyList()
@@ -264,6 +265,7 @@ suspend fun encodeVideo(context: Context, source: Uri, output: File, input: Vide
             }
         }
     }
+}
 }
 
 private data class PlatformVideoMetadata(val containerMime: String?, val video: MediaFormat?, val audio: MediaFormat?)
