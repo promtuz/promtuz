@@ -174,7 +174,7 @@ private fun PickTile(pick: PickedSticker, enabled: Boolean, onRemove: () -> Unit
             contentAlignment = Alignment.Center,
         ) {
             EncodedImage(
-                bytes = pick.encoded, poster = pick.preview, contentDescription = null,
+                poster = pick.preview, contentDescription = null,
                 modifier = Modifier.fillMaxSize().padding(6.dp), contentScale = ContentScale.Fit,
                 maxEdge = 512,
             )

@@ -96,6 +96,7 @@ class AndroidMediaAdapter private constructor(
         if (released) return
         released = true
         runCatching { input.close() }
+        Unit
     }
 
     private fun checkOpen() {
@@ -103,7 +104,7 @@ class AndroidMediaAdapter private constructor(
     }
 
     companion object {
-        private const val READ_CHUNK_BYTES = 1024 * 1024u
+        private val READ_CHUNK_BYTES = 1_048_576u
 
         fun open(context: Context, uri: Uri): AndroidMediaAdapter {
             val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
