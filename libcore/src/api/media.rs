@@ -567,6 +567,28 @@ pub struct AvifInfoRecord {
     pub mastering_display: Option<AvifMasteringDisplayRecord>,
 }
 
+/// Stateful libavif decoder for renderers that need sequential AVIF frames.
+/// The returned pixels are native-endian RGBA16 samples; the platform owns only
+/// bitmap allocation and presentation.
+#[derive(uniffi::Object)]
+pub struct AvifDecoder {
+    decoder: parking_lot::Mutex<promtuz_avif::Decoder>,
+}
+
+#[derive(uniffi::Record)]
+pub struct AvifFrameRecord {
+    pub rgba16: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u32,
+    pub source_depth: u32,
+    pub color_primaries: u16,
+    pub transfer_characteristics: u16,
+    pub matrix_coefficients: u16,
+    pub full_range: bool,
+    pub has_alpha: bool,
+}
+
 /// Source content light bounds in nits. A declared zero means unspecified;
 /// absence of the metadata is represented by None on AvifInfoRecord.
 #[derive(uniffi::Record)]
@@ -631,6 +653,36 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
     }))
 }
 
+#[uniffi::export]
+impl AvifDecoder {
+    #[uniffi::constructor]
+    pub fn open(bytes: Vec<u8>) -> Result<Arc<Self>, CoreError> {
+        let decoder = promtuz_avif::Decoder::open(&bytes, promtuz_avif::DecodeLimits::default())
+            .map_err(|_| CoreError::Refused { msg: "This AVIF cannot be decoded safely.".into() })?;
+        Ok(Arc::new(Self { decoder: parking_lot::Mutex::new(decoder) }))
+    }
+
+    pub fn next_frame(&self) -> Result<Option<AvifFrameRecord>, CoreError> {
+        let frame = self
+            .decoder
+            .lock()
+            .decode_next()
+            .map_err(|_| CoreError::Refused { msg: "This AVIF frame cannot be decoded.".into() })?;
+        Ok(frame.map(|frame| AvifFrameRecord {
+            rgba16: frame.rgba16().iter().flat_map(|sample| sample.to_ne_bytes()).collect(),
+            width: frame.width,
+            height: frame.height,
+            duration_ms: frame.duration_ms,
+            source_depth: frame.source_depth,
+            color_primaries: frame.color.primaries,
+            transfer_characteristics: frame.color.transfer,
+            matrix_coefficients: frame.color.matrix,
+            full_range: frame.color.full_range,
+            has_alpha: frame.has_alpha,
+        }))
+    }
+}
+
 /// Eligibility for recipient uploads only. Unknown/lost/metered networks
 /// must report false; this never restricts the original sender's transfers.
 #[uniffi::export]
@@ -655,6 +707,22 @@ mod tests {
         };
         assert_eq!(artifact.take().unwrap().bytes, [1]);
         assert!(artifact.take().is_err());
+    }
+
+    #[test]
+    fn avif_decoder_exposes_each_frame_once() {
+        let mut encoder = promtuz_avif::Encoder::new(
+            16,
+            16,
+            promtuz_avif::EncodeConfig { animated: true, ..Default::default() },
+        )
+        .unwrap();
+        encoder.add_rgba(&[255, 0, 0, 255].repeat(16 * 16), 40).unwrap();
+        encoder.add_rgba(&[0, 255, 0, 255].repeat(16 * 16), 60).unwrap();
+        let decoder = AvifDecoder::open(encoder.finish().unwrap()).unwrap();
+        assert_eq!(decoder.next_frame().unwrap().unwrap().duration_ms, 40);
+        assert_eq!(decoder.next_frame().unwrap().unwrap().duration_ms, 60);
+        assert!(decoder.next_frame().unwrap().is_none());
     }
 }
 

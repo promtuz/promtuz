@@ -34,8 +34,14 @@ pub struct Image {
 
 pub struct Decoder {
     raw: NonNull<promtuz_avif_sys::Decoder>,
+    _input: Option<Vec<u8>>,
     pub info: ImageInfo,
 }
+
+// libavif's decoder state has no thread-affine resources. Callers still need
+// exclusive access for every decode operation; the public FFI session enforces
+// that with a mutex.
+unsafe impl Send for Decoder {}
 
 pub struct Encoder {
     raw: NonNull<promtuz_avif_sys::Encoder>,
@@ -84,6 +90,7 @@ pub fn decode_first(input: &[u8], limits: DecodeLimits) -> Result<Image, DecodeE
 
 impl Decoder {
     pub fn open(input: &[u8], limits: DecodeLimits) -> Result<Self, DecodeError> {
+        let input = input.to_vec();
         let mut raw = std::ptr::null_mut();
         let mut info = MaybeUninit::<promtuz_avif_sys::ImageInfo>::zeroed();
         let result = unsafe {
@@ -105,7 +112,7 @@ impl Decoder {
         }
         let raw = NonNull::new(raw).ok_or(DecodeError::Decoder(-2))?;
         let info = unsafe { info.assume_init() };
-        Ok(Self { raw, info: image_info(info) })
+        Ok(Self { raw, _input: Some(input), info: image_info(info) })
     }
 
     pub fn open_file(path: &Path, limits: DecodeLimits) -> Result<Self, DecodeError> {
@@ -130,7 +137,7 @@ impl Decoder {
             return Err(DecodeError::Decoder(result));
         }
         let raw = NonNull::new(raw).ok_or(DecodeError::Decoder(-2))?;
-        Ok(Self { raw, info: image_info(unsafe { info.assume_init() }) })
+        Ok(Self { raw, _input: None, info: image_info(unsafe { info.assume_init() }) })
     }
 
     pub fn decode_next(&mut self) -> Result<Option<Image>, DecodeError> {
