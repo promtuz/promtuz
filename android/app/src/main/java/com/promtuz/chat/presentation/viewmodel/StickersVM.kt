@@ -18,6 +18,7 @@ import com.promtuz.chat.domain.model.toRef
 import com.promtuz.chat.domain.model.toUi
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.media.decodeDownscaled
+import com.promtuz.chat.utils.media.videoPoster
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.CancellationException
@@ -79,7 +80,7 @@ class StickersVM(private val application: Application) : ViewModel() {
     var error by mutableStateOf<String?>(null)
         private set
 
-    fun pickImages(uris: List<Uri>, room: Int) {
+    fun pickMedia(uris: List<Uri>, room: Int) {
         if (decoding || publishing) return
         val known = picks.map { it.uri }.toSet()
         val fresh = uris.distinct().filter { it !in known }.take((room - picks.size).coerceAtLeast(0))
@@ -91,13 +92,14 @@ class StickersVM(private val application: Application) : ViewModel() {
                 val decoded = fresh.map { uri ->
                     PickedSticker(
                         uri,
-                        decodeDownscaled(application, uri, STICKER_EDGE)?.asImageBitmap()
-                            ?: throw UnreadableImage(),
+                        (decodeDownscaled(application, uri, STICKER_EDGE)
+                            ?: videoPoster(application, uri, STICKER_EDGE)?.first)
+                            ?.asImageBitmap() ?: throw UnreadableImage(),
                     )
                 }
                 picks += decoded
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = "Couldn’t open the selected images. Try choosing them again." }
+            catch (e: Exception) { error = "Couldn’t open the selected media. Try choosing it again." }
             finally { decoding = false }
         }
     }

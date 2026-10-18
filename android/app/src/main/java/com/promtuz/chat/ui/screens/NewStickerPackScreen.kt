@@ -78,9 +78,9 @@ fun NewStickerPackScreen(
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-        viewModel.pickImages(uris, room)
+        viewModel.pickMedia(uris, room)
     }
-    val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+    val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
 
     val nameLength = name.codePointCount(0, name.length)
     val ready = !publishing && !decoding && picks.isNotEmpty() &&
