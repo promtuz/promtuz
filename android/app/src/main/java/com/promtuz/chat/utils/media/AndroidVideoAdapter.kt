@@ -12,11 +12,8 @@ import android.os.Looper
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.container.NalUnitUtil
 import androidx.media3.effect.Presentation
-import androidx.media3.inspector.MetadataRetriever
 import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Codec
 import androidx.media3.transformer.Composition
@@ -33,21 +30,14 @@ import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.google.common.collect.ImmutableList
 import com.google.common.collect.ImmutableSet
-import com.google.common.util.concurrent.Futures
-import com.google.common.util.concurrent.ListenableFuture
-import com.google.common.util.concurrent.MoreExecutors
-import java.io.File
 import java.io.Closeable
+import java.io.File
 import java.io.IOException
-import java.util.concurrent.ExecutionException
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -64,94 +54,48 @@ internal object AndroidVideoAdapter {
 @androidx.annotation.OptIn(UnstableApi::class)
 suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
     try {
-        return MetadataRetriever.Builder(context.applicationContext, MediaItem.fromUri(uri))
-            .build().use { retriever ->
-                val groupsFuture = retriever.retrieveTrackGroups()
-                val durationFuture = retriever.retrieveDurationUs()
-                try {
-                    val groups = groupsFuture.awaitVideoMetadata()
-                    val durationUs = durationFuture.awaitVideoMetadata()
-                    val formats = buildList {
-                        for (index in 0 until groups.length) {
-                            val group = groups[index]
-                            for (track in 0 until group.length) add(group.getFormat(track))
-                        }
-                    }
-                    val videos = formats.filter { MimeTypes.isVideo(it.sampleMimeType) }
-                    val audios = formats.filter { MimeTypes.isAudio(it.sampleMimeType) }
-                    val video = videos.firstOrNull()
-                        ?: throw VideoPreparationException("The video's picture track could not be read.")
-                    val audio = audios.firstOrNull()
-                    val platform = withContext(Dispatchers.IO) { platformVideoMetadata(context, uri) }
-                    val signal = parseVideoSignal(video, platform?.video)
-                    val color = video.colorInfo
-                    val transfer = color?.colorTransfer?.takeIf { it > 0 }
-                        ?: platform?.video?.int(MediaFormat.KEY_COLOR_TRANSFER)?.takeIf { it > 0 }
-                        ?: signal?.colorTransfer?.takeIf { it > 0 }
-                    val primaries = color?.colorSpace?.takeIf { it > 0 }
-                        ?: platform?.video?.int(MediaFormat.KEY_COLOR_STANDARD)?.takeIf { it > 0 }
-                        ?: signal?.colorSpace?.takeIf { it > 0 }
-                    val range = color?.colorRange?.takeIf { it > 0 }
-                        ?: platform?.video?.int(MediaFormat.KEY_COLOR_RANGE)?.takeIf { it > 0 }
-                        ?: signal?.colorRange?.takeIf { it > 0 }
-                    val staticHdr = color?.hdrStaticInfo ?: platform?.video?.bytes(MediaFormat.KEY_HDR_STATIC_INFO)
-                    val profile = platform?.video?.int(MediaFormat.KEY_PROFILE)
-                    val mime = video.sampleMimeType ?: throw VideoPreparationException("The video format is unavailable.")
-                    val hdr10Plus = hasHdr10PlusProfile(mime, profile) ||
-                        platform?.video?.containsKey(MediaFormat.KEY_HDR10_PLUS_INFO) == true
-                    val hdr = transfer == C.COLOR_TRANSFER_HLG || transfer == C.COLOR_TRANSFER_ST2084 ||
-                        staticHdr != null || hdr10Plus || hasHdrProfile(mime, profile) || mime == MimeTypes.VIDEO_DOLBY_VISION
-                    val crop = platform?.video?.cropSize()
-                    // SPS dimensions apply AVC cropping / HEVC conformance windows. A container or
-                    // codec's padded width/height alone need not describe the displayed picture.
-                    val width = crop?.first ?: signal?.width ?: video.width
-                    val height = crop?.second ?: signal?.height ?: video.height
-                    val ratio = video.pixelWidthHeightRatio.toDouble().takeIf { it.isFinite() && it > 0 }
-                        ?: signal?.pixelRatio ?: 1.0
-                    val rotation = ((video.rotationDegrees % 360) + 360) % 360
-                    if (rotation % 90 != 0) throw VideoPreparationException("The video's orientation could not be read.")
-                    val pixelWidth = width * ratio
-                    val depth = signal?.bitDepth ?: color?.let {
-                        minOf(it.lumaBitdepth, it.chromaBitdepth).takeIf { bits -> bits > 0 }
-                    }
-                    VideoProbeRecord(
-                        containerMime = video.containerMimeType ?: platform?.containerMime,
-                        videoMime = mime,
-                        videoTracks = videos.size.toUInt(),
-                        audioTracks = audios.size.toUInt(),
-                        displayWidth = if (rotation % 180 == 0) pixelWidth else height.toDouble(),
-                        displayHeight = if (rotation % 180 == 0) height.toDouble() else pixelWidth,
-                        // Use Media3's presentation timeline, including supported edit lists, as
-                        // Transformer does. Never substitute raw per-track mdhd durations.
-                        durationUs = durationUs.coerceAtLeast(0).toULong(),
-                        frameRate = video.frameRate.toDouble().takeIf { it.isFinite() && it > 0 }
-                            ?: platform?.video?.number(MediaFormat.KEY_FRAME_RATE)?.takeIf { it.isFinite() && it > 0 },
-                        videoBitrate = video.averageBitrate.takeIf { it > 0 }?.toUInt()
-                            ?: platform?.video?.int(MediaFormat.KEY_BIT_RATE)?.takeIf { it > 0 }?.toUInt(),
-                        audio = audio?.let {
-                            VideoAudioProbeRecord(
-                                mime = it.sampleMimeType.orEmpty(),
-                                // Per-track durations are not comparable after edits, gapless
-                                // trimming and AAC encoder priming. Leave them unknown.
-                                durationUs = null,
-                                bitrate = it.averageBitrate.takeIf { bitrate -> bitrate > 0 }?.toUInt()
-                                    ?: platform?.audio?.int(MediaFormat.KEY_BIT_RATE)?.takeIf { bitrate -> bitrate > 0 }?.toUInt(),
-                                channels = it.channelCount.takeIf { count -> count > 0 }?.toUInt(),
-                            )
-                        },
-                        hdr = hdr,
-                        dynamicHdr = hdr10Plus || mime == MimeTypes.VIDEO_DOLBY_VISION,
-                        colorPrimaries = primaries?.let(::isoPrimaries),
-                        colorTransfer = transfer?.let(::isoTransfer),
-                        fullRange = when (range) { C.COLOR_RANGE_FULL -> true; C.COLOR_RANGE_LIMITED -> false; else -> null },
-                        bitDepth = depth?.takeIf { it in 1..255 }?.toUByte(),
-                        hdrStaticMetadata = staticHdr,
-                    )
-                } finally {
-                    groupsFuture.cancel(false)
-                    durationFuture.cancel(false)
-                }
-            }
+        val metadata = withContext(Dispatchers.IO) { platformVideoMetadata(context, uri) }
+        val video = metadata.video
+        val mime = video.getString(MediaFormat.KEY_MIME)
+            ?: throw VideoPreparationException("The video format is unavailable.")
+        val transfer = video.int(MediaFormat.KEY_COLOR_TRANSFER)?.takeIf { it > 0 }
+        val primaries = video.int(MediaFormat.KEY_COLOR_STANDARD)?.takeIf { it > 0 }
+        val range = video.int(MediaFormat.KEY_COLOR_RANGE)?.takeIf { it > 0 }
+        val staticHdr = video.bytes(MediaFormat.KEY_HDR_STATIC_INFO)
+        val profile = video.int(MediaFormat.KEY_PROFILE)
+        val hdr10Plus = hasHdr10PlusProfile(mime, profile) || video.containsKey(MediaFormat.KEY_HDR10_PLUS_INFO)
+        val hdr = transfer == C.COLOR_TRANSFER_HLG || transfer == C.COLOR_TRANSFER_ST2084 ||
+            staticHdr != null || hdr10Plus || hasHdrProfile(mime, profile) || mime == "video/dolby-vision"
+        val (width, height) = video.cropSize()
+            ?: (video.int(MediaFormat.KEY_WIDTH) ?: 0) to (video.int(MediaFormat.KEY_HEIGHT) ?: 0)
+        val rotation = ((video.int(MediaFormat.KEY_ROTATION) ?: 0) % 360 + 360) % 360
+        if (rotation % 90 != 0) throw VideoPreparationException("The video's orientation could not be read.")
+        return VideoProbeRecord(
+            containerMime = metadata.containerMime,
+            videoMime = mime,
+            videoTracks = metadata.videoTracks.toUInt(),
+            audioTracks = metadata.audioTracks.toUInt(),
+            displayWidth = if (rotation % 180 == 0) width.toDouble() else height.toDouble(),
+            displayHeight = if (rotation % 180 == 0) height.toDouble() else width.toDouble(),
+            durationUs = metadata.durationUs.toULong(),
+            frameRate = video.number(MediaFormat.KEY_FRAME_RATE)?.takeIf { it.isFinite() && it > 0 },
+            videoBitrate = video.int(MediaFormat.KEY_BIT_RATE)?.takeIf { it > 0 }?.toUInt(),
+            audio = metadata.audio?.let {
+                VideoAudioProbeRecord(
+                    mime = it.getString(MediaFormat.KEY_MIME).orEmpty(),
+                    durationUs = null,
+                    bitrate = it.int(MediaFormat.KEY_BIT_RATE)?.takeIf { bitrate -> bitrate > 0 }?.toUInt(),
+                    channels = it.int(MediaFormat.KEY_CHANNEL_COUNT)?.takeIf { channels -> channels > 0 }?.toUInt(),
+                )
+            },
+            hdr = hdr,
+            dynamicHdr = hdr10Plus || mime == "video/dolby-vision",
+            colorPrimaries = primaries?.let(::isoPrimaries),
+            colorTransfer = transfer?.let(::isoTransfer),
+            fullRange = when (range) { C.COLOR_RANGE_FULL -> true; C.COLOR_RANGE_LIMITED -> false; else -> null },
+            bitDepth = video.int("bit-depth")?.takeIf { it in 1..255 }?.toUByte(),
+            hdrStaticMetadata = staticHdr,
+        )
     } catch (error: CancellationException) {
         throw error
     } catch (error: VideoPreparationException) {
@@ -309,20 +253,34 @@ suspend fun render(context: Context, source: Uri, output: File, input: VideoProb
 }
 }
 
-private data class PlatformVideoMetadata(val containerMime: String?, val video: MediaFormat?, val audio: MediaFormat?)
+private data class PlatformVideoMetadata(
+    val containerMime: String?,
+    val video: MediaFormat,
+    val audio: MediaFormat?,
+    val videoTracks: Int,
+    val audioTracks: Int,
+    val durationUs: Long,
+)
 
-/** Optional platform details supplement Media3 facts; platform decoder support is not required. */
-private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMetadata? = runCatching {
+private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMetadata {
     val extractor = MediaExtractor()
     var video: MediaFormat? = null
     var audio: MediaFormat? = null
+    var videoTracks = 0
+    var audioTracks = 0
     try {
         extractor.setDataSource(context, uri, emptyMap())
         for (index in 0 until extractor.trackCount) {
             val format = extractor.getTrackFormat(index)
             val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
-            if (video == null && mime.startsWith("video/")) video = format
-            if (audio == null && mime.startsWith("audio/")) audio = format
+            if (mime.startsWith("video/")) {
+                videoTracks += 1
+                if (video == null) video = format
+            }
+            if (mime.startsWith("audio/")) {
+                audioTracks += 1
+                if (audio == null) audio = format
+            }
         }
     } finally {
         extractor.release()
@@ -334,44 +292,20 @@ private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMeta
             retriever.extractMetadata(PlatformMetadataRetriever.METADATA_KEY_MIMETYPE)
         } finally { retriever.release() }
     }.getOrNull()
-    PlatformVideoMetadata(containerMime, video, audio)
-}.getOrNull()
-
-private data class VideoSignal(val width: Int, val height: Int, val bitDepth: Int, val colorSpace: Int,
-    val colorRange: Int, val colorTransfer: Int, val pixelRatio: Double)
-
-@androidx.annotation.OptIn(UnstableApi::class)
-private fun parseVideoSignal(format: Format, platform: MediaFormat?): VideoSignal? {
-    val mime = format.sampleMimeType
-    if (mime != MimeTypes.VIDEO_H264 && mime != MimeTypes.VIDEO_H265) return null
-    val buffers = format.initializationData.ifEmpty { listOfNotNull(platform?.bytes("csd-0")) }
-    for (data in buffers) {
-        if (data.size !in 1..1_048_576) continue
-        val signal = runCatching {
-            val flags = BooleanArray(3)
-            var offset = NalUnitUtil.findNalUnit(data, 0, data.size, flags)
-            while (offset + 3 < data.size) {
-                flags.fill(false)
-                val end = NalUnitUtil.findNalUnit(data, offset + 3, data.size, flags)
-                if (mime == MimeTypes.VIDEO_H265 && NalUnitUtil.getH265NalUnitType(data, offset) == 33) {
-                    val sps = NalUnitUtil.parseH265SpsNalUnit(data, offset + 3, end, null)
-                    return@runCatching VideoSignal(sps.width, sps.height,
-                        8 + minOf(sps.bitDepthLumaMinus8, sps.bitDepthChromaMinus8),
-                        sps.colorSpace, sps.colorRange, sps.colorTransfer, sps.pixelWidthHeightRatio.toDouble())
+    val source = video ?: throw VideoPreparationException("The video's picture track could not be read.")
+    val durationUs = runCatching {
+        val retriever = PlatformMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            retriever.extractMetadata(PlatformMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()?.let { milliseconds ->
+                    milliseconds.coerceAtMost(Long.MAX_VALUE / 1_000) * 1_000
                 }
-                if (mime == MimeTypes.VIDEO_H264 && (data[offset + 3].toInt() and 31) == 7) {
-                    val sps = NalUnitUtil.parseSpsNalUnit(data, offset + 3, end)
-                    return@runCatching VideoSignal(sps.width, sps.height,
-                        8 + minOf(sps.bitDepthLumaMinus8, sps.bitDepthChromaMinus8),
-                        sps.colorSpace, sps.colorRange, sps.colorTransfer, sps.pixelWidthHeightRatio.toDouble())
-                }
-                offset = end
-            }
-            null
-        }.getOrNull()
-        if (signal != null) return signal
-    }
-    return null
+        } finally {
+            retriever.release()
+        }
+    }.getOrNull() ?: source.long(MediaFormat.KEY_DURATION) ?: 0
+    return PlatformVideoMetadata(containerMime, source, audio, videoTracks, audioTracks, durationUs)
 }
 
 private fun MediaFormat.cropSize(): Pair<Int, Int>? {
@@ -408,29 +342,18 @@ private fun isoTransfer(value: Int): UShort? = when (value) {
 
 @androidx.annotation.OptIn(UnstableApi::class)
 private fun hasHdr10PlusProfile(mime: String, profile: Int?): Boolean = when (mime) {
-    MimeTypes.VIDEO_H265 -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus
-    MimeTypes.VIDEO_VP9 -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus)
-    MimeTypes.VIDEO_AV1 -> profile == MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus
+    "video/hevc" -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus
+    "video/x-vnd.on2.vp9" -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus)
+    "video/av01" -> profile == MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus
     else -> false
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 private fun hasHdrProfile(mime: String, profile: Int?): Boolean = when (mime) {
-    MimeTypes.VIDEO_H265 -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10
-    MimeTypes.VIDEO_VP9 -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR)
-    MimeTypes.VIDEO_AV1 -> profile == MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10
+    "video/hevc" -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10
+    "video/x-vnd.on2.vp9" -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR)
+    "video/av01" -> profile == MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10
     else -> false
-}
-
-private suspend fun <T> ListenableFuture<T>.awaitVideoMetadata(): T = suspendCancellableCoroutine { continuation ->
-    continuation.invokeOnCancellation { cancel(false) }
-    addListener({
-        // A ListenableFuture listener runs only after completion; getDone never blocks.
-        try { continuation.resume(Futures.getDone(this)) }
-        catch (error: ExecutionException) { continuation.resumeWithException(error.cause ?: error) }
-        catch (error: CancellationException) { continuation.cancel(error) }
-        catch (error: Exception) { continuation.resumeWithException(error) }
-    }, MoreExecutors.directExecutor())
 }
 
 private fun UInt.codecInt(): Int {
@@ -439,6 +362,7 @@ private fun UInt.codecInt(): Int {
 }
 
 private fun MediaFormat.int(key: String): Int? = runCatching { if (containsKey(key)) getInteger(key) else null }.getOrNull()
+private fun MediaFormat.long(key: String): Long? = runCatching { if (containsKey(key)) getLong(key) else null }.getOrNull()
 private fun MediaFormat.number(key: String): Double? = runCatching { if (containsKey(key)) getFloat(key).toDouble() else null }
     .getOrElse { int(key)?.toDouble() }
 private fun MediaFormat.bytes(key: String): ByteArray? = runCatching {
