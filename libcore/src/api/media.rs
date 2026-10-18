@@ -358,8 +358,10 @@ impl MediaImport {
                     1
                 } else if source.inspect_video().is_ok() {
                     2
-                } else {
+                } else if crate::media::image::platform_image_candidate(&header) {
                     3
+                } else {
+                    0
                 }
             },
             Ok(_) => 1,

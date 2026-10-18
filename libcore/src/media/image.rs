@@ -80,6 +80,12 @@ pub fn inspect(bytes: &[u8]) -> Result<ImageKind> {
     }
 }
 
+/// Formats core deliberately delegates to an image adapter. This excludes
+/// generic ISO-BMFF containers so an audio-only MP4 can remain a raw file.
+pub fn platform_image_candidate(header: &[u8]) -> bool {
+    is_jxl(header) || is_heif(header)
+}
+
 /// The private import is the only file path media decoding accepts. Picker URIs
 /// never reach this layer, and ordinary formats stream from that private copy.
 pub fn inspect_path(path: &Path) -> Result<ImageKind> {
@@ -106,6 +112,13 @@ fn is_isobmff(header: &[u8]) -> bool {
 fn is_jxl(header: &[u8]) -> bool {
     header.starts_with(&[0xff, 0x0a])
         || header.starts_with(&[0, 0, 0, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a])
+}
+
+fn is_heif(header: &[u8]) -> bool {
+    is_isobmff(header)
+        && header[8..].chunks_exact(4).any(|brand| {
+            matches!(brand, b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"mif1" | b"msf1")
+        })
 }
 
 fn has_avif_brand(header: &[u8]) -> bool {
@@ -911,6 +924,7 @@ mod tests {
             inspect(&[0, 0, 0, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a]).unwrap(),
             ImageKind::Platform
         );
+        assert!(!platform_image_candidate(b"\0\0\0\x18ftypM4A \0\0\0\0isom"));
     }
 
     #[test]
