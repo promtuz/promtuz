@@ -2,42 +2,29 @@ package com.promtuz.chat.utils.media
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
+import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever as PlatformMetadataRetriever
-import android.media.metrics.LogSessionId
+import android.media.MediaMuxer
 import android.net.Uri
-import android.os.Looper
-import androidx.media3.common.C
-import androidx.media3.common.Format
-import androidx.media3.common.MediaItem
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.Presentation
-import androidx.media3.transformer.AudioEncoderSettings
-import androidx.media3.transformer.Codec
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.DefaultEncoderFactory
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.Effects
-import androidx.media3.transformer.EncoderSelector
-import androidx.media3.transformer.EncoderUtil
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.TransformationRequest
-import androidx.media3.transformer.Transformer
-import androidx.media3.transformer.VideoEncoderSettings
-import com.google.common.collect.ImmutableList
-import com.google.common.collect.ImmutableSet
+import android.opengl.EGL14
+import android.opengl.EGLExt
+import android.opengl.GLES11Ext
+import android.opengl.GLES20
+import android.view.Surface
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.FloatBuffer
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -51,7 +38,6 @@ private val videoExports = Mutex()
 
 /** Android codec implementation used only by [AndroidMediaAdapter]. */
 internal object AndroidVideoAdapter {
-@androidx.annotation.OptIn(UnstableApi::class)
 suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
     try {
         val metadata = withContext(Dispatchers.IO) { platformVideoMetadata(context, uri) }
@@ -64,7 +50,7 @@ suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
         val staticHdr = video.bytes(MediaFormat.KEY_HDR_STATIC_INFO)
         val profile = video.int(MediaFormat.KEY_PROFILE)
         val hdr10Plus = hasHdr10PlusProfile(mime, profile) || video.containsKey(MediaFormat.KEY_HDR10_PLUS_INFO)
-        val hdr = transfer == C.COLOR_TRANSFER_HLG || transfer == C.COLOR_TRANSFER_ST2084 ||
+        val hdr = transfer == MediaFormat.COLOR_TRANSFER_HLG || transfer == MediaFormat.COLOR_TRANSFER_ST2084 ||
             staticHdr != null || hdr10Plus || hasHdrProfile(mime, profile) || mime == "video/dolby-vision"
         val (width, height) = video.cropSize()
             ?: (video.int(MediaFormat.KEY_WIDTH) ?: 0) to (video.int(MediaFormat.KEY_HEIGHT) ?: 0)
@@ -92,7 +78,7 @@ suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
             dynamicHdr = hdr10Plus || mime == "video/dolby-vision",
             colorPrimaries = primaries?.let(::isoPrimaries),
             colorTransfer = transfer?.let(::isoTransfer),
-            fullRange = when (range) { C.COLOR_RANGE_FULL -> true; C.COLOR_RANGE_LIMITED -> false; else -> null },
+            fullRange = when (range) { MediaFormat.COLOR_RANGE_FULL -> true; MediaFormat.COLOR_RANGE_LIMITED -> false; else -> null },
             bitDepth = video.int("bit-depth")?.takeIf { it in 1..255 }?.toUByte(),
             hdrStaticMetadata = staticHdr,
         )
@@ -144,113 +130,424 @@ internal class VideoFrameDecoder private constructor(
     }
 }
 
-/**
- * Executes core's plan without choosing settings, validating a result, or deleting files. All codec
- * calls and callbacks share the main looper. Cancellation releases the codec before returning so
- * core can safely clean up its source/candidate files.
- */
-@androidx.annotation.OptIn(UnstableApi::class)
 suspend fun render(context: Context, source: Uri, output: File, input: VideoProbeRecord, plan: VideoEncodingPlanRecord) {
     videoExports.withLock {
-        val selector = EncoderSelector { mime ->
-            val candidates = if (mime == plan.videoMime) EncoderUtil.getSupportedEncoders(mime) else emptyList()
-            ImmutableList.copyOf(candidates.sortedByDescending { EncoderUtil.isHardwareAccelerated(it, mime) })
-        }
-        val supported = withContext(Dispatchers.Default) { selector.selectEncoderInfos(plan.videoMime).isNotEmpty() }
-        if (!supported) throw VideoPreparationException("This device cannot encode the requested video format.")
-
-        withContext(Dispatchers.Main.immediate) {
-            val completion = CompletableDeferred<Unit>()
-            var transformer: Transformer? = null
-            var failure: Throwable? = null
-            try {
-                val maxFrameRate = plan.maxFrameRate.codecInt()
-                val width = plan.width.codecInt()
-                val height = plan.height.codecInt()
-                val defaultFactory = DefaultEncoderFactory.Builder(context.applicationContext)
-                    .setVideoEncoderSelector(selector)
-                    .setEnableFallback(true)
-                    // Alignment is a hardware constraint; core checks the resulting dimensions.
-                    .setEnableFormatFallback(true)
-                    // Non-default encoder settings force re-encoding of matching H.264/AAC inputs.
-                    .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(plan.videoBitrate.codecInt()).build())
-                    .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(plan.audioBitrate.codecInt()).build())
-                    .build()
-                val factory = object : Codec.EncoderFactory by defaultFactory {
-                    override fun createForVideoEncoding(format: Format, logSessionId: LogSessionId?): Codec {
-                        // Media3 drops frames separately but otherwise forwards the input FPS to
-                        // the codec. Keep its declared frame rate consistent with core's ceiling.
-                        val frameRate = format.frameRate.takeIf { it > 0 && it.isFinite() }
-                            ?.coerceAtMost(maxFrameRate.toFloat()) ?: maxFrameRate.toFloat()
-                        return defaultFactory.createForVideoEncoding(format.buildUpon().setFrameRate(frameRate).build(), logSessionId)
-                    }
-                }
-                transformer = Transformer.Builder(context.applicationContext)
-                    .setLooper(Looper.getMainLooper())
-                    .setUsePlatformDiagnostics(false)
-                    .setEncoderFactory(factory)
-                    .setVideoMimeType(plan.videoMime)
-                    .setAudioMimeType(plan.audioMime)
-                    .addListener(object : Transformer.Listener {
-                        override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                            // Encoder names/frame statistics are telemetry, not file validity.
-                            completion.complete(Unit)
-                        }
-
-                        override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                            completion.completeExceptionally(VideoPreparationException(
-                                if (plan.keepHdr) "This device could not encode the video while preserving HDR."
-                                else "The video could not be encoded.", exportException,
-                            ))
-                        }
-
-                        override fun onFallbackApplied(composition: Composition,
-                            originalTransformationRequest: TransformationRequest,
-                            fallbackTransformationRequest: TransformationRequest) {
-                            if (fallbackTransformationRequest.hdrMode !in listOf(
-                                    Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL,
-                                    Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC,
-                                ) ||
-                                fallbackTransformationRequest.videoMimeType != plan.videoMime ||
-                                fallbackTransformationRequest.audioMimeType != plan.audioMime) {
-                                completion.completeExceptionally(VideoPreparationException(
-                                    "This device cannot produce the requested video format.",
-                                ))
-                            }
-                        }
-                    })
-                    .build()
-                val effects = if (width != input.displayWidth.roundToInt() || height != input.displayHeight.roundToInt()) {
-                    listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT))
-                } else emptyList()
-                val item = EditedMediaItem.Builder(MediaItem.fromUri(source))
-                    .setFrameRate(maxFrameRate)
-                    .setEffects(Effects(emptyList(), effects))
-                    .build()
-                val composition = Composition.Builder(
-                    EditedMediaItemSequence.Builder(
-                        ImmutableSet.of(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO),
-                    ).addItem(item).build(),
-                ).setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL).build()
-                transformer.start(composition, output.absolutePath)
-                completion.await()
-            } catch (error: Throwable) {
-                failure = error
-                throw error
-            } finally {
-                completion.cancel()
-                try {
-                    withContext(NonCancellable + Dispatchers.Main.immediate) {
-                        // Media3 1.11.1 blocks here until its internal codecs and muxer release.
-                        transformer?.cancel()
-                    }
-                } catch (error: Exception) {
-                    failure?.addSuppressed(error) ?: throw error
-                }
-            }
+        withContext(Dispatchers.Default) {
+            PlatformVideoTranscoder(context, source, output, input, plan).run()
         }
     }
 }
+}
+
+private class PlatformVideoTranscoder(
+    private val context: Context,
+    private val source: Uri,
+    private val output: File,
+    private val input: VideoProbeRecord,
+    private val plan: VideoEncodingPlanRecord,
+) {
+    fun run() {
+        val extractor = MediaExtractor()
+        var decoder: MediaCodec? = null
+        var encoder: MediaCodec? = null
+        var bridge: CodecSurfaceBridge? = null
+        var muxer: MediaMuxer? = null
+        try {
+            extractor.setDataSource(context, source, emptyMap())
+            val track = extractor.videoTrack()
+            val sourceFormat = extractor.getTrackFormat(track)
+            val sourceMime = sourceFormat.getString(MediaFormat.KEY_MIME)
+                ?: throw VideoPreparationException("The video's picture format is unavailable.")
+            val audio = encodeAudio()
+            val width = plan.width.codecInt()
+            val height = plan.height.codecInt()
+            val encoderFormat = MediaFormat.createVideoFormat(plan.videoMime, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, plan.videoBitrate.codecInt())
+                setInteger(MediaFormat.KEY_FRAME_RATE, plan.maxFrameRate.codecInt())
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+            }
+            encoder = MediaCodec.createEncoderByType(plan.videoMime)
+            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            bridge = CodecSurfaceBridge(encoder.createInputSurface(), width, height, sourceFormat.rotation())
+            decoder = MediaCodec.createDecoderByType(sourceMime)
+            if (input.hdr) sourceFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            decoder.configure(sourceFormat, bridge.decoderSurface, null, 0)
+            muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            extractor.selectTrack(track)
+            decoder.start()
+            encoder.start()
+            transcode(extractor, decoder, encoder, bridge, muxer, plan.maxFrameRate.codecInt(), audio)
+            muxer.stop()
+        } catch (error: VideoPreparationException) {
+            throw error
+        } catch (error: Exception) {
+            throw VideoPreparationException("The video could not be encoded on this device.", error)
+        } finally {
+            runCatching { decoder?.stop() }
+            runCatching { encoder?.stop() }
+            runCatching { decoder?.release() }
+            runCatching { encoder?.release() }
+            runCatching { bridge?.close() }
+            runCatching { muxer?.release() }
+            extractor.release()
+        }
+    }
+
+    private fun transcode(
+        extractor: MediaExtractor,
+        decoder: MediaCodec,
+        encoder: MediaCodec,
+        bridge: CodecSurfaceBridge,
+        muxer: MediaMuxer,
+        maxFrameRate: Int,
+        audio: EncodedAudio?,
+    ) {
+        val decoderInfo = MediaCodec.BufferInfo()
+        val encoderInfo = MediaCodec.BufferInfo()
+        var inputDone = false
+        var decoderDone = false
+        var encoderDone = false
+        var muxerStarted = false
+        var videoTrack = -1
+        var lastRenderedUs = Long.MIN_VALUE
+        val minFrameDurationUs = 1_000_000L / maxFrameRate
+
+        while (!encoderDone) {
+            if (!inputDone) {
+                val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                if (index >= 0) {
+                    val buffer = decoder.getInputBuffer(index)
+                        ?: throw VideoPreparationException("The video decoder did not provide input memory.")
+                    val size = extractor.readSampleData(buffer, 0)
+                    if (size < 0) {
+                        decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputDone = true
+                    } else {
+                        decoder.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
+                        extractor.advance()
+                    }
+                }
+            }
+
+            while (!decoderDone) {
+                when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                    else -> if (index >= 0) {
+                        val eos = decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        val render = decoderInfo.size > 0 &&
+                            (lastRenderedUs == Long.MIN_VALUE || decoderInfo.presentationTimeUs - lastRenderedUs >= minFrameDurationUs)
+                        decoder.releaseOutputBuffer(index, render)
+                        if (render) {
+                            bridge.awaitFrame()
+                            bridge.drawFrame(decoderInfo.presentationTimeUs)
+                            lastRenderedUs = decoderInfo.presentationTimeUs
+                        }
+                        if (eos) {
+                            encoder.signalEndOfInputStream()
+                            decoderDone = true
+                        }
+                    }
+                }
+            }
+
+            while (!encoderDone) {
+                when (val index = encoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        if (muxerStarted) throw VideoPreparationException("The video encoder changed format twice.")
+                        videoTrack = muxer.addTrack(encoder.outputFormat)
+                        val audioTrack = audio?.let { muxer.addTrack(it.format) }
+                        muxer.start()
+                        muxerStarted = true
+                        if (audioTrack != null) audio.samples.forEach { sample ->
+                            muxer.writeSampleData(audioTrack, ByteBuffer.wrap(sample.data), sample.info())
+                        }
+                    }
+                    else -> if (index >= 0) {
+                        val buffer = encoder.getOutputBuffer(index)
+                            ?: throw VideoPreparationException("The video encoder did not provide output memory.")
+                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && encoderInfo.size > 0) {
+                            if (!muxerStarted) throw VideoPreparationException("The video encoder produced samples before its format.")
+                            buffer.position(encoderInfo.offset)
+                            buffer.limit(encoderInfo.offset + encoderInfo.size)
+                            muxer.writeSampleData(videoTrack, buffer, encoderInfo)
+                        }
+                        encoder.releaseOutputBuffer(index, false)
+                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
+                    }
+                }
+            }
+        }
+        if (!muxerStarted) throw VideoPreparationException("The video encoder produced no output.")
+    }
+
+    private fun encodeAudio(): EncodedAudio? = try {
+        val extractor = MediaExtractor()
+        var decoder: MediaCodec? = null
+        var encoder: MediaCodec? = null
+        try {
+            extractor.setDataSource(context, source, emptyMap())
+            val track = (0 until extractor.trackCount).firstOrNull { index ->
+                extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+            } ?: return null
+            val input = extractor.getTrackFormat(track)
+            val inputMime = input.getString(MediaFormat.KEY_MIME)
+                ?: return null
+            extractor.selectTrack(track)
+            decoder = MediaCodec.createDecoderByType(inputMime).apply { configure(input, null, null, 0); start() }
+            val decoderInfo = MediaCodec.BufferInfo()
+            val encoderInfo = MediaCodec.BufferInfo()
+            val samples = mutableListOf<EncodedSample>()
+            var sampleBytes = 0L
+            var format: MediaFormat? = null
+            var decoderInputDone = false
+            var decoderDone = false
+            var encoderDone = false
+            while (!encoderDone) {
+                if (!decoderInputDone) {
+                    val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    if (index >= 0) {
+                        val buffer = decoder.getInputBuffer(index) ?: return null
+                        val size = extractor.readSampleData(buffer, 0)
+                        if (size < 0) {
+                            decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            decoderInputDone = true
+                        } else {
+                            decoder.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                while (!decoderDone) when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val pcm = decoder.outputFormat
+                        val rate = pcm.int(MediaFormat.KEY_SAMPLE_RATE) ?: return null
+                        val channels = pcm.int(MediaFormat.KEY_CHANNEL_COUNT) ?: return null
+                        if (rate !in 8_000..48_000 || channels !in 1..2) return null
+                        encoder = MediaCodec.createEncoderByType(plan.audioMime).apply {
+                            configure(MediaFormat.createAudioFormat(plan.audioMime, rate, channels).apply {
+                                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                                setInteger(MediaFormat.KEY_BIT_RATE, plan.audioBitrate.codecInt())
+                                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
+                            }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                            start()
+                        }
+                    }
+                    else -> if (index >= 0) {
+                        val eos = decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        if (decoderInfo.size > 0) {
+                            val audioEncoder = encoder ?: return null
+                            val inputIndex = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                            if (inputIndex < 0) continue
+                            val encoded = audioEncoder.getInputBuffer(inputIndex) ?: return null
+                            val decoded = decoder.getOutputBuffer(index) ?: return null
+                            decoded.position(decoderInfo.offset)
+                            decoded.limit(decoderInfo.offset + decoderInfo.size)
+                            encoded.put(decoded)
+                            audioEncoder.queueInputBuffer(inputIndex, 0, decoderInfo.size, decoderInfo.presentationTimeUs, 0)
+                        }
+                        decoder.releaseOutputBuffer(index, false)
+                        if (eos) {
+                            encoder?.let { audioEncoder ->
+                                val inputIndex = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                                if (inputIndex >= 0) audioEncoder.queueInputBuffer(inputIndex, 0, 0, decoderInfo.presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            }
+                            decoderDone = true
+                        }
+                    }
+                }
+                val audioEncoder = encoder
+                if (audioEncoder != null) while (!encoderDone) when (val index = audioEncoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> format = audioEncoder.outputFormat
+                    else -> if (index >= 0) {
+                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && encoderInfo.size > 0) {
+                            val buffer = audioEncoder.getOutputBuffer(index) ?: return null
+                            buffer.position(encoderInfo.offset)
+                            buffer.limit(encoderInfo.offset + encoderInfo.size)
+                            val size = buffer.remaining()
+                            if (sampleBytes + size > MAX_CACHED_AUDIO_BYTES) return null
+                            samples += EncodedSample(ByteArray(size).also(buffer::get), encoderInfo.presentationTimeUs, encoderInfo.flags)
+                            sampleBytes += size
+                        }
+                        audioEncoder.releaseOutputBuffer(index, false)
+                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
+                    }
+                }
+            }
+            format?.let { EncodedAudio(it, samples) }
+        } finally {
+            runCatching { decoder?.stop() }; runCatching { encoder?.stop() }
+            runCatching { decoder?.release() }; runCatching { encoder?.release() }; extractor.release()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private data class EncodedAudio(val format: MediaFormat, val samples: List<EncodedSample>)
+    private data class EncodedSample(val data: ByteArray, val presentationTimeUs: Long, val flags: Int) {
+        fun info() = MediaCodec.BufferInfo().also { it.set(0, data.size, presentationTimeUs, flags) }
+    }
+
+    private fun MediaExtractor.videoTrack(): Int = (0 until trackCount).firstOrNull { index ->
+        getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+    } ?: throw VideoPreparationException("The selected file has no readable video track.")
+
+    private fun MediaFormat.rotation(): Int = (int(MediaFormat.KEY_ROTATION) ?: 0).let { (it % 360 + 360) % 360 }
+
+    private companion object {
+        const val CODEC_TIMEOUT_US = 10_000L
+        const val MAX_CACHED_AUDIO_BYTES = 32L * 1024 * 1024
+    }
+}
+
+private class CodecSurfaceBridge(
+    encoderSurface: Surface,
+    width: Int,
+    height: Int,
+    rotation: Int,
+) : Closeable {
+    val decoderSurface: Surface
+    private val texture: Int
+    private val surfaceTexture: SurfaceTexture
+    private val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+    private val context: android.opengl.EGLContext
+    private val window: android.opengl.EGLSurface
+    private val program: Int
+    private val position: Int
+    private val textureCoordinate: Int
+    private val transform: Int
+    private val textureMatrix = FloatArray(16)
+    private val vertices = vertexData()
+    private val textureCoordinates = textureData(rotation)
+    private val frames = Semaphore(0)
+
+    init {
+        check(display != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
+        val version = IntArray(2)
+        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "Could not initialize EGL" }
+        val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+        val count = IntArray(1)
+        check(EGL14.eglChooseConfig(display, intArrayOf(
+            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+            EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL_RECORDABLE_ANDROID, 1, EGL14.EGL_NONE,
+        ), 0, configs, 0, 1, count, 0) && count[0] == 1) { "No recordable EGL config" }
+        context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create EGL context" }
+        window = EGL14.eglCreateWindowSurface(display, configs[0], encoderSurface,
+            intArrayOf(EGL14.EGL_NONE), 0)
+        check(window != EGL14.EGL_NO_SURFACE) { "Could not create EGL encoder surface" }
+        makeCurrent()
+        GLES20.glViewport(0, 0, width, height)
+        texture = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        surfaceTexture = SurfaceTexture(texture).also { image ->
+            image.setOnFrameAvailableListener { frames.release() }
+        }
+        decoderSurface = Surface(surfaceTexture)
+        program = program(VERTEX_SHADER, FRAGMENT_SHADER)
+        position = GLES20.glGetAttribLocation(program, "aPosition")
+        textureCoordinate = GLES20.glGetAttribLocation(program, "aTextureCoordinate")
+        transform = GLES20.glGetUniformLocation(program, "uTextureTransform")
+    }
+
+    fun awaitFrame() {
+        if (!frames.tryAcquire(FRAME_WAIT_MS, TimeUnit.MILLISECONDS)) {
+            throw VideoPreparationException("The video decoder stopped producing frames.")
+        }
+    }
+
+    fun drawFrame(presentationTimeUs: Long) {
+        makeCurrent()
+        surfaceTexture.updateTexImage()
+        surfaceTexture.getTransformMatrix(textureMatrix)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
+        GLES20.glUniformMatrix4fv(transform, 1, false, textureMatrix, 0)
+        GLES20.glEnableVertexAttribArray(position)
+        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 4 * Float.SIZE_BYTES, vertices)
+        GLES20.glEnableVertexAttribArray(textureCoordinate)
+        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false, 4 * Float.SIZE_BYTES, textureCoordinates)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        EGLExt.eglPresentationTimeANDROID(display, window, presentationTimeUs * 1_000)
+        check(EGL14.eglSwapBuffers(display, window)) { "Could not submit a video frame" }
+    }
+
+    private fun makeCurrent() {
+        check(EGL14.eglMakeCurrent(display, window, window, context)) { "Could not make EGL context current" }
+    }
+
+    override fun close() {
+        runCatching { decoderSurface.release() }
+        runCatching { surfaceTexture.release() }
+        runCatching { GLES20.glDeleteProgram(program) }
+        runCatching { GLES20.glDeleteTextures(1, intArrayOf(texture), 0) }
+        runCatching { EGL14.eglDestroySurface(display, window) }
+        runCatching { EGL14.eglDestroyContext(display, context) }
+        runCatching { EGL14.eglTerminate(display) }
+    }
+
+    private companion object {
+        const val EGL_RECORDABLE_ANDROID = 0x3142
+        const val FRAME_WAIT_MS = 2_500L
+        const val VERTEX_SHADER = """
+            attribute vec4 aPosition;
+            attribute vec4 aTextureCoordinate;
+            varying vec2 vTextureCoordinate;
+            uniform mat4 uTextureTransform;
+            void main() { gl_Position = aPosition; vTextureCoordinate = (uTextureTransform * aTextureCoordinate).xy; }
+        """
+        const val FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTextureCoordinate;
+            uniform samplerExternalOES sTexture;
+            void main() { gl_FragColor = texture2D(sTexture, vTextureCoordinate); }
+        """
+
+        fun program(vertex: String, fragment: String): Int {
+            fun shader(type: Int, source: String) = GLES20.glCreateShader(type).also { shader ->
+                GLES20.glShaderSource(shader, source)
+                GLES20.glCompileShader(shader)
+                check(IntArray(1).also { GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, it, 0) }[0] == GLES20.GL_TRUE) {
+                    GLES20.glGetShaderInfoLog(shader)
+                }
+            }
+            return GLES20.glCreateProgram().also { program ->
+                GLES20.glAttachShader(program, shader(GLES20.GL_VERTEX_SHADER, vertex))
+                GLES20.glAttachShader(program, shader(GLES20.GL_FRAGMENT_SHADER, fragment))
+                GLES20.glLinkProgram(program)
+                check(IntArray(1).also { GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, it, 0) }[0] == GLES20.GL_TRUE) {
+                    GLES20.glGetProgramInfoLog(program)
+                }
+            }
+        }
+
+        fun vertexData(): FloatBuffer = floatBuffer(floatArrayOf(
+            -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f,
+        ))
+
+        fun textureData(rotation: Int): FloatBuffer = floatBuffer(when (rotation) {
+            90 -> floatArrayOf(0f, 0f, 0f, 1f, 1f, 0f, 1f, 1f)
+            180 -> floatArrayOf(1f, 0f, 0f, 0f, 1f, 1f, 0f, 1f)
+            270 -> floatArrayOf(1f, 1f, 1f, 0f, 0f, 1f, 0f, 0f)
+            else -> floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
+        })
+
+        fun floatBuffer(values: FloatArray): FloatBuffer = ByteBuffer.allocateDirect(values.size * Float.SIZE_BYTES)
+            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
+    }
 }
 
 private data class PlatformVideoMetadata(
@@ -320,27 +617,27 @@ private fun MediaFormat.cropSize(): Pair<Int, Int>? {
     } else null
 }
 
-@androidx.annotation.OptIn(UnstableApi::class)
 private fun isoPrimaries(value: Int): UShort? = when (value) {
-    C.COLOR_SPACE_BT709 -> 1u
-    C.COLOR_SPACE_BT601 -> 5u
+    MediaFormat.COLOR_STANDARD_BT709 -> 1u
+    MediaFormat.COLOR_STANDARD_BT601_PAL -> 5u
     MediaFormat.COLOR_STANDARD_BT601_NTSC -> 6u
-    C.COLOR_SPACE_BT2020 -> 9u
+    MediaFormat.COLOR_STANDARD_BT2020 -> 9u
     else -> null
 }
 
-@androidx.annotation.OptIn(UnstableApi::class)
+private const val COLOR_TRANSFER_GAMMA_2_2 = 4
+private const val COLOR_TRANSFER_SRGB = 7
+
 private fun isoTransfer(value: Int): UShort? = when (value) {
-    C.COLOR_TRANSFER_LINEAR -> 8u
-    C.COLOR_TRANSFER_SRGB -> 13u
-    C.COLOR_TRANSFER_SDR -> 1u
-    C.COLOR_TRANSFER_GAMMA_2_2 -> 4u
-    C.COLOR_TRANSFER_ST2084 -> 16u
-    C.COLOR_TRANSFER_HLG -> 18u
+    MediaFormat.COLOR_TRANSFER_LINEAR -> 8u
+    COLOR_TRANSFER_SRGB -> 13u
+    MediaFormat.COLOR_TRANSFER_SDR_VIDEO -> 1u
+    COLOR_TRANSFER_GAMMA_2_2 -> 4u
+    MediaFormat.COLOR_TRANSFER_ST2084 -> 16u
+    MediaFormat.COLOR_TRANSFER_HLG -> 18u
     else -> null
 }
 
-@androidx.annotation.OptIn(UnstableApi::class)
 private fun hasHdr10PlusProfile(mime: String, profile: Int?): Boolean = when (mime) {
     "video/hevc" -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus
     "video/x-vnd.on2.vp9" -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus)
@@ -348,7 +645,6 @@ private fun hasHdr10PlusProfile(mime: String, profile: Int?): Boolean = when (mi
     else -> false
 }
 
-@androidx.annotation.OptIn(UnstableApi::class)
 private fun hasHdrProfile(mime: String, profile: Int?): Boolean = when (mime) {
     "video/hevc" -> profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10
     "video/x-vnd.on2.vp9" -> profile in setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR, MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR)

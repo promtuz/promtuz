@@ -278,10 +278,8 @@ fn validate_output_with_audio_fallback(
         "The compressed video has an unsupported format."
     );
 
-    // Media3 asks the codec for its closest supported resolution. For example a 1080×2340
-    // picture fits 590×1280, while an encoder aligned to 16 pixels can produce 592×1280.
-    // The old target+1 comparison rejected that valid result. Allow one alignment block's
-    // rounding while still enforcing our output ceiling and rejecting changed orientation.
+    // Encoders may align a requested size upward. Accept one alignment block while
+    // still enforcing our output ceiling and preserving orientation.
     const ALIGNMENT_ROUNDING: f64 = 15.0;
     ensure!(
         output.display_width <= f64::from(plan.width) + ALIGNMENT_ROUNDING
