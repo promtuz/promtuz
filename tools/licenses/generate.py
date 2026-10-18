@@ -136,7 +136,7 @@ def rust_libraries(artifacts):
         raise ValueError("Rust license inventory needs buildRustCore artifacts for both Android targets")
     for manifest in sorted(manifests):
         directory = manifest.parent
-        if directory in (ROOT / "libcore", ROOT / "common"):
+        if directory in (ROOT / "libcore", ROOT / "common", ROOT / "media" / "avif"):
             continue
         package = tomllib.loads(manifest.read_text())["package"]
         version, _ = package_field(package, "version", directory)
