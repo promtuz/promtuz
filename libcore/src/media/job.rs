@@ -145,7 +145,8 @@ mod tests {
     use super::*;
     use crate::media::{
         frames::PixelFormat,
-        ports::{DecodedImageFrame, ImageFrameRequest, ImageProbe, MediaSource},
+        ports::{DecodedImageFrame, ImageFrameRequest, ImageProbe, MediaSource, VideoFrameRequest},
+        video::VideoProbe,
     };
 
     struct Source {
@@ -267,5 +268,46 @@ mod tests {
         .unwrap();
         job.cancel();
         assert_eq!(*releases.lock().unwrap(), 1);
+    }
+
+    struct VideoStickerSource;
+
+    impl MediaSource for VideoStickerSource {
+        fn length(&self) -> Result<Option<u64>> { Ok(Some(24)) }
+
+        fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
+            Ok(b"\0\0\0\x18ftypmp42\0\0\0\0isommp42".to_vec())
+        }
+
+        fn release(&mut self) {}
+
+        fn inspect_video(&mut self) -> Result<VideoProbe> {
+            Ok(VideoProbe {
+                container_mime: Some("video/mp4".into()), video_mime: "video/avc".into(),
+                video_tracks: 1, audio_tracks: 0, display_width: 32.0, display_height: 32.0,
+                duration_us: 100_000, frame_rate: Some(30.0), video_bitrate: Some(1_000),
+                audio: None, hdr: false, dynamic_hdr: false, color_primaries: Some(1),
+                color_transfer: Some(1), full_range: Some(false), bit_depth: Some(8), hdr_static_metadata: None,
+            })
+        }
+
+        fn open_video_frame(&mut self, request: VideoFrameRequest) -> Result<DecodedImageFrame> {
+            Ok(DecodedImageFrame {
+                pixels: vec![request.timestamp_us as u8, 0, 0, 255].repeat(32 * 32),
+                width: 32, height: 32, format: PixelFormat::Rgba8, source_is_hdr: false,
+            })
+        }
+    }
+
+    #[test]
+    fn sticker_job_routes_video_sources_through_the_animated_image_pipeline() {
+        let lease = SourceLease::open(Box::new(VideoStickerSource)).unwrap();
+        let mut job = MediaJob::from_source(
+            lease, MediaRequest::Sticker { trim: None }, tempfile::tempdir().unwrap().keep(),
+        )
+        .unwrap();
+        let PreparedMedia::Image(sticker) = job.run().unwrap() else { unreachable!() };
+        assert!(sticker.animated);
+        assert_eq!(image::inspect(&sticker.bytes).unwrap(), image::ImageKind::Avif);
     }
 }
