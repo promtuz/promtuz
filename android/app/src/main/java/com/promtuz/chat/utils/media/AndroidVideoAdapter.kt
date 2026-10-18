@@ -37,6 +37,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import java.io.File
+import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.ExecutionException
 import kotlin.coroutines.resume
@@ -161,31 +162,43 @@ suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
 }
 
 /** Decodes one displayed frame for core's bounded sticker timeline. */
-suspend fun frame(context: Context, uri: Uri, timestampUs: ULong, maxEdge: Int): Bitmap =
-    withContext(Dispatchers.IO) {
+internal class VideoFrameDecoder private constructor(
+    private val retriever: PlatformMetadataRetriever,
+) : Closeable {
+    suspend fun frame(timestampUs: ULong, maxEdge: Int): Bitmap = withContext(Dispatchers.IO) {
         if (timestampUs > Long.MAX_VALUE.toULong() || maxEdge <= 0) {
             throw VideoPreparationException("The video frame request is invalid.")
         }
         try {
-            val retriever = PlatformMetadataRetriever()
-            try {
-                retriever.setDataSource(context, uri)
-                val frame = retriever.getFrameAtTime(
-                    timestampUs.toLong(),
-                    PlatformMetadataRetriever.OPTION_CLOSEST,
-                ) ?: throw VideoPreparationException("A frame from this video could not be decoded.")
-                val (width, height) = fit(frame.width, frame.height, maxEdge)
-                if (width == frame.width && height == frame.height) frame
-                else Bitmap.createScaledBitmap(frame, width, height, true).also { frame.recycle() }
-            } finally {
-                retriever.release()
-            }
+            val frame = retriever.getFrameAtTime(
+                timestampUs.toLong(),
+                PlatformMetadataRetriever.OPTION_CLOSEST,
+            ) ?: throw VideoPreparationException("A frame from this video could not be decoded.")
+            val (width, height) = fit(frame.width, frame.height, maxEdge)
+            if (width == frame.width && height == frame.height) frame
+            else Bitmap.createScaledBitmap(frame, width, height, true).also { frame.recycle() }
         } catch (error: VideoPreparationException) {
             throw error
         } catch (error: Exception) {
             throw VideoPreparationException("A frame from this video could not be decoded.", error)
         }
     }
+
+    override fun close() = retriever.release()
+
+    companion object {
+        suspend fun open(context: Context, uri: Uri): VideoFrameDecoder = withContext(Dispatchers.IO) {
+            val retriever = PlatformMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                VideoFrameDecoder(retriever)
+            } catch (error: Exception) {
+                retriever.release()
+                throw VideoPreparationException("The video frames could not be opened.", error)
+            }
+        }
+    }
+}
 
 /**
  * Executes core's plan without choosing settings, validating a result, or deleting files. All codec

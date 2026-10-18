@@ -31,6 +31,7 @@ class AndroidMediaAdapter private constructor(
 ) : MediaSourceAdapter {
     private val lock = Any()
     private var released = false
+    private var videoFrames: AndroidVideoAdapter.VideoFrameDecoder? = null
     private val sourceSize = descriptor.statSize.takeIf { it >= 0 }?.toULong()
         ?: context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0).takeIf { it >= 0 }?.toULong() else null
@@ -109,11 +110,13 @@ class AndroidMediaAdapter private constructor(
         return codecCall { AndroidVideoAdapter.inspect(context, uri) }
     }
 
-    override fun openVideoFrame(request: VideoFrameRequestRecord): DecodedImageFrameRecord {
-        synchronized(lock) { checkOpen() }
+    override fun openVideoFrame(request: VideoFrameRequestRecord): DecodedImageFrameRecord = synchronized(lock) {
+        checkOpen()
         if (request.maxEdge == 0u) throw CoreException.Internal("invalid video frame request")
-        return codecCall {
-            val bitmap = AndroidVideoAdapter.frame(context, uri, request.timestampUs, request.maxEdge.toInt())
+        codecCall {
+            val decoder = videoFrames ?: AndroidVideoAdapter.VideoFrameDecoder.open(context, uri)
+                .also { videoFrames = it }
+            val bitmap = decoder.frame(request.timestampUs, request.maxEdge.toInt())
             try {
                 DecodedImageFrameRecord(
                     bitmap.toRgba(),
@@ -157,11 +160,15 @@ class AndroidMediaAdapter private constructor(
     }
 
     override fun release() {
-        synchronized(lock) {
+        val frames = synchronized(lock) {
             if (released) return
             released = true
+            val frames = videoFrames
+            videoFrames = null
             runCatching { input.close() }
+            frames
         }
+        runCatching { frames?.close() }
     }
 
     private fun checkOpen() {
