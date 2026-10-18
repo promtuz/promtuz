@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail, ensure};
 
 use super::{
-    image::{self, DecodedStill, PreparedImage},
-    policy::{POSTER, VIDEO},
-    ports::{SourceLease, VideoRenderRequest},
+    frames::{Frame, FrameStore, PixelFormat},
+    image::{self, DecodedFrames, DecodedStill, PreparedImage},
+    policy::{POSTER, STICKER, VIDEO},
+    ports::{SourceLease, VideoFrameRequest, VideoRenderRequest},
 };
 
 /// Facts read from the media itself, with rotation/crop/pixel aspect already applied to display
@@ -65,6 +66,63 @@ pub struct PreparedVideo {
     pub poster: PreparedImage,
 }
 
+/// Decodes a bounded, evenly sampled video timeline for sticker encoding. The
+/// same image normalizer and AVIF sequence writer then own the output.
+pub fn prepare_video_sticker(source: &mut SourceLease) -> Result<PreparedImage> {
+    let probe = source.inspect_video()?;
+    validate_probe(&probe)?;
+    ensure!(
+        probe.duration_us <= 5 * 60 * 1_000_000,
+        "This video is too long to turn into a sticker."
+    );
+    if probe.hdr {
+        super::alert(crate::platform::MediaAlert::HdrConvertedToSdr);
+    }
+
+    let frame_count =
+        ((probe.duration_us.saturating_mul(u64::from(STICKER.max_fps)).saturating_add(999_999)
+            / 1_000_000)
+            .clamp(2, 600)) as u32;
+    let frame_duration_ms = (probe.duration_us / u64::from(frame_count) / 1_000).max(10) as u32;
+    let limits = crate::media::MediaRequest::resource_limits();
+    // A 512px RGBA frame is 1 MiB. Long sticker timelines still need to fit
+    // the same bounded FrameStore, so choose the largest edge that can hold
+    // every requested frame before the adapter allocates pixels.
+    let frame_bytes = limits.job_bytes / u64::from(frame_count);
+    let bounded_edge = ((frame_bytes / 4) as f64).sqrt() as u32;
+    let max_edge = STICKER.image.max_edge.min(bounded_edge.max(STICKER.image.emergency_edge));
+    let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
+    let mut dimensions = None;
+    for index in 0..frame_count {
+        let timestamp_us =
+            probe.duration_us.saturating_mul(u64::from(index)) / u64::from(frame_count);
+        let frame = source.open_video_frame(VideoFrameRequest { timestamp_us, max_edge })?;
+        ensure!(
+            frame.format == PixelFormat::Rgba8,
+            "This device cannot convert video frames to SDR pixels."
+        );
+        crate::media::validate_dimensions(frame.width, frame.height)?;
+        if let Some((width, height)) = dimensions {
+            ensure!(
+                (frame.width, frame.height) == (width, height),
+                "The video decoder changed frame dimensions."
+            );
+        } else {
+            dimensions = Some((frame.width, frame.height));
+        }
+        frames.push(Frame::new(
+            frame.pixels,
+            frame.width,
+            frame.height,
+            PixelFormat::Rgba8,
+            frame_duration_ms,
+        )?)?;
+    }
+    let (width, height) =
+        dimensions.ok_or_else(|| anyhow::anyhow!("The video has no readable frames."))?;
+    image::prepare_animation_frames(DecodedFrames { width, height, frames }, STICKER)
+}
+
 impl PreparedVideo {
     pub(crate) fn path(&self) -> &std::path::Path {
         self.path.as_deref().expect("prepared video already staged")
@@ -99,7 +157,12 @@ pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEn
         (MAX_LONG_EDGE, MAX_SHORT_EDGE, MAX_FRAME_RATE, 1_000_000),
         (960, 540, MAX_FRAME_RATE, 1_000_000),
         (960, 540, 24, 800_000),
-        (VIDEO.emergency_width, VIDEO.emergency_height, VIDEO.emergency_fps, VIDEO.emergency_video_bitrate),
+        (
+            VIDEO.emergency_width,
+            VIDEO.emergency_height,
+            VIDEO.emergency_fps,
+            VIDEO.emergency_video_bitrate,
+        ),
     ] {
         let (width, height) = fit(input.display_width, input.display_height, width, height);
         let candidate = VideoEncodingPlan {
@@ -136,10 +199,19 @@ pub(crate) fn prepare_video(
     for plan in plans(&input, source_bytes)? {
         let output = reserve_candidate(import_directory)?;
         let result = (|| {
-            let report = source.render_video(VideoRenderRequest { plan: plan.clone(), output: output.clone() })?;
-            validate_output_with_audio_fallback(&input, &report.output, &plan, report.audio_removed)?;
+            let report = source
+                .render_video(VideoRenderRequest { plan: plan.clone(), output: output.clone() })?;
+            validate_output_with_audio_fallback(
+                &input,
+                &report.output,
+                &plan,
+                report.audio_removed,
+            )?;
             let size = std::fs::metadata(&output)?.len();
-            ensure!(size > 0 && size <= VIDEO.max_bytes, "The compressed video exceeds the send limit.");
+            ensure!(
+                size > 0 && size <= VIDEO.max_bytes,
+                "The compressed video exceeds the send limit."
+            );
             let poster = image::encode_sdr_still(
                 DecodedStill {
                     rgba: report.poster.pixels,
@@ -250,7 +322,10 @@ fn validate_output_with_audio_fallback(
                 "The compressed video's audio format is unsupported."
             );
             if let Some(encoded) = after.channels {
-                ensure!((1..=2).contains(&encoded), "The encoder produced unsupported audio channels.");
+                ensure!(
+                    (1..=2).contains(&encoded),
+                    "The encoder produced unsupported audio channels."
+                );
             }
             // These durations are optional presentation durations, never unadjusted mdhd values.
             if let (Some(original), Some(encoded)) = (before.duration_us, after.duration_us) {
@@ -278,10 +353,14 @@ fn is_mp4(probe: &VideoProbe) -> bool {
 }
 
 fn validate_probe(probe: &VideoProbe) -> Result<()> {
-    ensure!(probe.video_tracks == 1 && probe.audio_tracks <= 1,
-        "This video's tracks are not supported for compression.");
-    ensure!((probe.audio_tracks == 1) == probe.audio.is_some(),
-        "The video's audio details could not be read.");
+    ensure!(
+        probe.video_tracks == 1 && probe.audio_tracks <= 1,
+        "This video's tracks are not supported for compression."
+    );
+    ensure!(
+        (probe.audio_tracks == 1) == probe.audio.is_some(),
+        "The video's audio details could not be read."
+    );
     ensure!(
         probe.display_width.is_finite()
             && probe.display_height.is_finite()
@@ -387,7 +466,9 @@ mod tests {
         encoded.audio = None;
         encoded.audio_tracks = 0;
         assert_eq!(
-            validate_output_with_audio_fallback(&source, &encoded, &plan, false).unwrap_err().to_string(),
+            validate_output_with_audio_fallback(&source, &encoded, &plan, false)
+                .unwrap_err()
+                .to_string(),
             "The compressed video is missing its audio."
         );
         validate_output_with_audio_fallback(&source, &encoded, &plan, true).unwrap();
@@ -489,12 +570,68 @@ mod tests {
     fn preparation_retries_rejected_rungs_and_owns_only_the_accepted_candidate() {
         let directory = tempfile::tempdir().unwrap();
         let renders = Arc::new(Mutex::new(0));
-        let mut source = SourceLease::open(Box::new(RenderingSource { renders: renders.clone() })).unwrap();
+        let mut source =
+            SourceLease::open(Box::new(RenderingSource { renders: renders.clone() })).unwrap();
         let video = prepare_video(&mut source, directory.path()).unwrap();
         assert_eq!(*renders.lock().unwrap(), 2);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert_eq!(video.poster.width, 1);
         drop(video);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    struct StickerSource {
+        opened: Arc<Mutex<u32>>,
+    }
+
+    impl MediaSource for StickerSource {
+        fn length(&self) -> Result<Option<u64>> {
+            Ok(Some(1_024))
+        }
+
+        fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn release(&mut self) {}
+
+        fn inspect_video(&mut self) -> Result<VideoProbe> {
+            let mut probe = source();
+            probe.duration_us = 100_000;
+            Ok(probe)
+        }
+
+        fn open_video_frame(&mut self, request: VideoFrameRequest) -> Result<DecodedImageFrame> {
+            assert_eq!(request.max_edge, STICKER.image.max_edge);
+            *self.opened.lock().unwrap() += 1;
+            Ok(DecodedImageFrame {
+                pixels: vec![request.timestamp_us as u8, 0, 0, 255].repeat(32 * 32),
+                width: 32,
+                height: 32,
+                format: PixelFormat::Rgba8,
+                source_is_hdr: false,
+            })
+        }
+    }
+
+    #[test]
+    fn video_sticker_samples_frames_before_writing_an_animated_avif() {
+        let opened = Arc::new(Mutex::new(0));
+        let mut source =
+            SourceLease::open(Box::new(StickerSource { opened: opened.clone() })).unwrap();
+        let sticker = prepare_video_sticker(&mut source).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 2);
+        assert!(sticker.animated);
+        assert_eq!(image::inspect(&sticker.bytes).unwrap(), image::ImageKind::Avif);
+    }
+
+    #[test]
+    fn long_video_sticker_reduces_the_decode_edge_before_frame_storage() {
+        let frame_count = 600_u32;
+        let limits = crate::media::MediaRequest::resource_limits();
+        let frame_bytes = limits.job_bytes / u64::from(frame_count);
+        let edge = ((frame_bytes / 4) as f64).sqrt() as u32;
+        assert!(edge < STICKER.image.max_edge);
+        assert!(edge >= STICKER.image.emergency_edge);
     }
 }

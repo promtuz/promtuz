@@ -115,7 +115,7 @@ suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? {
     }
 }
 
-private fun fit(w: Int, h: Int, maxEdge: Int): Pair<Int, Int> {
+internal fun fit(w: Int, h: Int, maxEdge: Int): Pair<Int, Int> {
     val longest = maxOf(w, h)
     if (longest <= maxEdge) return w to h
     val s = maxEdge.toFloat() / longest

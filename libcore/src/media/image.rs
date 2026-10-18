@@ -252,12 +252,13 @@ pub fn prepare_image(bytes: &[u8], request: MediaRequest) -> Result<PreparedImag
 }
 
 pub fn validate_avatar_avif(bytes: &[u8]) -> Result<PreparedImage> {
-    ensure!(inspect(bytes)? == ImageKind::Avif, "Profile pictures must be prepared as AVIF before saving");
+    ensure!(
+        inspect(bytes)? == ImageKind::Avif,
+        "Profile pictures must be prepared as AVIF before saving"
+    );
     prepare_image(
         bytes,
-        MediaRequest::Avatar {
-            crop: NormalizedCrop { center_x: 0.5, center_y: 0.5, zoom: 1.0 },
-        },
+        MediaRequest::Avatar { crop: NormalizedCrop { center_x: 0.5, center_y: 0.5, zoom: 1.0 } },
     )
 }
 
@@ -357,7 +358,7 @@ fn prepare_animation(
     prepare_animation_frames(frames, profile)
 }
 
-fn prepare_animation_frames(
+pub(crate) fn prepare_animation_frames(
     mut frames: DecodedFrames, profile: super::policy::AnimationProfile,
 ) -> Result<PreparedImage> {
     let fallback = frames.frames.frame(0)?;

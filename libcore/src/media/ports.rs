@@ -1,5 +1,5 @@
-use std::{fs::File, path::PathBuf};
 use std::io::Write;
+use std::{fs::File, path::PathBuf};
 
 use anyhow::{Result, bail, ensure};
 
@@ -44,6 +44,14 @@ pub struct VideoRenderRequest {
     pub output: PathBuf,
 }
 
+/// One bounded, displayed video frame. Core chooses the sampling timeline and
+/// output edge; the platform only decodes pixels from its opaque source lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoFrameRequest {
+    pub timestamp_us: u64,
+    pub max_edge: u32,
+}
+
 /// The adapter must inspect the MP4 it just wrote and decode its displayed
 /// poster frame. Core validates both before either artifact can be staged.
 pub struct VideoRenderReport {
@@ -69,6 +77,10 @@ pub trait MediaSource: Send {
 
     fn inspect_video(&mut self) -> Result<VideoProbe> {
         bail!("This video format needs a platform decoder.")
+    }
+
+    fn open_video_frame(&mut self, _request: VideoFrameRequest) -> Result<DecodedImageFrame> {
+        bail!("This device cannot decode video frames.")
     }
 
     fn render_video(&mut self, _request: VideoRenderRequest) -> Result<VideoRenderReport> {
@@ -154,6 +166,10 @@ impl SourceLease {
 
     pub fn inspect_video(&mut self) -> Result<VideoProbe> {
         self.source.as_deref_mut().expect("released source").inspect_video()
+    }
+
+    pub fn open_video_frame(&mut self, request: VideoFrameRequest) -> Result<DecodedImageFrame> {
+        self.source.as_deref_mut().expect("released source").open_video_frame(request)
     }
 
     pub fn render_video(&mut self, request: VideoRenderRequest) -> Result<VideoRenderReport> {

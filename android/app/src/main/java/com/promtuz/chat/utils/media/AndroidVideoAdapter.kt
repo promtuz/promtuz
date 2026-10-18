@@ -1,6 +1,7 @@
 package com.promtuz.chat.utils.media
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -158,6 +159,33 @@ suspend fun inspect(context: Context, uri: Uri): VideoProbeRecord {
         throw VideoPreparationException("The video's media information could not be read.", error)
     }
 }
+
+/** Decodes one displayed frame for core's bounded sticker timeline. */
+suspend fun frame(context: Context, uri: Uri, timestampUs: ULong, maxEdge: Int): Bitmap =
+    withContext(Dispatchers.IO) {
+        if (timestampUs > Long.MAX_VALUE.toULong() || maxEdge <= 0) {
+            throw VideoPreparationException("The video frame request is invalid.")
+        }
+        try {
+            val retriever = PlatformMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                val frame = retriever.getFrameAtTime(
+                    timestampUs.toLong(),
+                    PlatformMetadataRetriever.OPTION_CLOSEST,
+                ) ?: throw VideoPreparationException("A frame from this video could not be decoded.")
+                val (width, height) = fit(frame.width, frame.height, maxEdge)
+                if (width == frame.width && height == frame.height) frame
+                else Bitmap.createScaledBitmap(frame, width, height, true).also { frame.recycle() }
+            } finally {
+                retriever.release()
+            }
+        } catch (error: VideoPreparationException) {
+            throw error
+        } catch (error: Exception) {
+            throw VideoPreparationException("A frame from this video could not be decoded.", error)
+        }
+    }
 
 /**
  * Executes core's plan without choosing settings, validating a result, or deleting files. All codec

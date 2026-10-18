@@ -18,6 +18,9 @@ pub trait MediaSourceAdapter: Send + Sync {
         &self, request: ImageFrameRequestRecord,
     ) -> Result<DecodedImageFrameRecord, CoreError>;
     fn inspect_video(&self) -> Result<VideoProbeRecord, CoreError>;
+    fn open_video_frame(
+        &self, request: VideoFrameRequestRecord,
+    ) -> Result<DecodedImageFrameRecord, CoreError>;
     fn render_video(
         &self, request: VideoRenderRequestRecord,
     ) -> Result<VideoRenderReportRecord, CoreError>;
@@ -71,6 +74,29 @@ impl crate::media::ports::MediaSource for SourceAdapter {
 
     fn inspect_video(&mut self) -> anyhow::Result<crate::media::video::VideoProbe> {
         self.0.inspect_video().map(VideoProbeRecord::into_core).map_err(source_error)
+    }
+
+    fn open_video_frame(
+        &mut self, request: crate::media::ports::VideoFrameRequest,
+    ) -> anyhow::Result<crate::media::ports::DecodedImageFrame> {
+        let frame = self
+            .0
+            .open_video_frame(VideoFrameRequestRecord {
+                timestamp_us: request.timestamp_us,
+                max_edge: request.max_edge,
+            })
+            .map_err(source_error)?;
+        Ok(crate::media::ports::DecodedImageFrame {
+            pixels: frame.pixels,
+            width: frame.width,
+            height: frame.height,
+            format: if frame.rgba16 {
+                crate::media::frames::PixelFormat::Rgba16
+            } else {
+                crate::media::frames::PixelFormat::Rgba8
+            },
+            source_is_hdr: frame.source_is_hdr,
+        })
     }
 
     fn render_video(
@@ -140,6 +166,12 @@ pub struct DecodedImageFrameRecord {
 pub struct VideoRenderRequestRecord {
     pub output_path: String,
     pub plan: VideoEncodingPlanRecord,
+}
+
+#[derive(uniffi::Record)]
+pub struct VideoFrameRequestRecord {
+    pub timestamp_us: u64,
+    pub max_edge: u32,
 }
 
 #[derive(uniffi::Record)]
@@ -232,7 +264,6 @@ impl VideoEncodingPlanRecord {
             keep_hdr: plan.keep_hdr,
         }
     }
-
 }
 
 /// An owned chat-image job. Its source lease moves here and cannot be used
@@ -322,7 +353,13 @@ impl MediaImport {
         let Ok(header) = source.read_chunk(0, 64) else { return 0 };
         match crate::media::image::inspect(&header) {
             Ok(crate::media::image::ImageKind::Platform) => {
-                if source.inspect_image().is_ok() { 1 } else if source.inspect_video().is_ok() { 2 } else { 0 }
+                if source.inspect_image().is_ok() {
+                    1
+                } else if source.inspect_video().is_ok() {
+                    2
+                } else {
+                    0
+                }
             },
             Ok(_) => 1,
             Err(_) if source.inspect_video().is_ok() => 2,

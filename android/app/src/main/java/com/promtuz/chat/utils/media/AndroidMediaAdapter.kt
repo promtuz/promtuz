@@ -13,6 +13,7 @@ import uniffi.core.ImageFrameRequestRecord
 import uniffi.core.ImageProbeRecord
 import uniffi.core.MediaSourceAdapter
 import uniffi.core.VideoProbeRecord
+import uniffi.core.VideoFrameRequestRecord
 import uniffi.core.VideoRenderReportRecord
 import uniffi.core.VideoRenderRequestRecord
 import java.io.File
@@ -106,6 +107,25 @@ class AndroidMediaAdapter private constructor(
     override fun inspectVideo(): VideoProbeRecord {
         synchronized(lock) { checkOpen() }
         return codecCall { AndroidVideoAdapter.inspect(context, uri) }
+    }
+
+    override fun openVideoFrame(request: VideoFrameRequestRecord): DecodedImageFrameRecord {
+        synchronized(lock) { checkOpen() }
+        if (request.maxEdge == 0u) throw CoreException.Internal("invalid video frame request")
+        return codecCall {
+            val bitmap = AndroidVideoAdapter.frame(context, uri, request.timestampUs, request.maxEdge.toInt())
+            try {
+                DecodedImageFrameRecord(
+                    bitmap.toRgba(),
+                    bitmap.width.toUInt(),
+                    bitmap.height.toUInt(),
+                    false,
+                    bitmapHasHdr(bitmap),
+                )
+            } finally {
+                bitmap.recycle()
+            }
+        }
     }
 
     override fun renderVideo(request: VideoRenderRequestRecord): VideoRenderReportRecord {

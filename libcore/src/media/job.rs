@@ -76,7 +76,18 @@ impl MediaJob {
                 let header = source.read_chunk(0, 64)?;
                 match image::inspect(&header)? {
                     image::ImageKind::Platform => {
-                        return Ok(PreparedMedia::Image(image::prepare_platform_image(&mut source, self.request)?));
+                        if source.inspect_image().is_ok() {
+                            return Ok(PreparedMedia::Image(image::prepare_platform_image(
+                                &mut source,
+                                self.request,
+                            )?));
+                        }
+                        if matches!(self.request, MediaRequest::Sticker { .. }) {
+                            return Ok(PreparedMedia::Image(video::prepare_video_sticker(
+                                &mut source,
+                            )?));
+                        }
+                        bail!("This image format is not supported on this device.");
                     },
                     _ => ImportedSource::from_lease(source, &self.import_directory)?,
                 }
