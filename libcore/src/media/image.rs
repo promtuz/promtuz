@@ -440,18 +440,21 @@ fn avif_still_to_sdr(decoded: DecodedAvif) -> DecodedStill {
     if hdr {
         super::alert(crate::platform::MediaAlert::HdrConvertedToSdr);
     }
-    let rgba = decoded
-        .frame
-        .pixels
+    let rgba = rgba16_to_sdr(&decoded.frame.pixels, decoded.color.transfer);
+    DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height }
+}
+
+fn rgba16_to_sdr(pixels: &[u8], transfer: u16) -> Vec<u8> {
+    let hdr = matches!(transfer, 16 | 18);
+    pixels
         .chunks_exact(8)
         .flat_map(|pixel| {
             let channel = |index| u16::from_ne_bytes([pixel[index], pixel[index + 1]]) as f32 / 65_535.0;
             let (r, g, b) = (channel(0), channel(2), channel(4));
-            let (r, g, b) = if hdr { hdr_to_sdr(r, g, b, decoded.color.transfer) } else { (r, g, b) };
+            let (r, g, b) = if hdr { hdr_to_sdr(r, g, b, transfer) } else { (r, g, b) };
             [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b), (channel(6) * 255.0).round() as u8]
         })
-        .collect();
-    DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height }
+        .collect()
 }
 
 fn hdr_to_sdr(r: f32, g: f32, b: f32, transfer: u16) -> (f32, f32, f32) {
@@ -503,19 +506,14 @@ fn decode_avif_animation_path(path: &Path) -> Result<DecodedFrames> {
 }
 
 fn normalize_avif_frames(first: DecodedAvif, mut source: FrameStore) -> Result<DecodedFrames> {
-    ensure!(
-        !matches!(first.color.transfer, 16 | 18),
-        "HDR AVIF needs tone mapping before SDR conversion."
-    );
+    if matches!(first.color.transfer, 16 | 18) {
+        super::alert(crate::platform::MediaAlert::HdrConvertedToSdr);
+    }
     let limits = MediaRequest::resource_limits();
     let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
     for index in 0..source.len() {
         let frame = source.frame(index)?;
-        let pixels = frame
-            .pixels
-            .chunks_exact(2)
-            .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
-            .collect();
+        let pixels = rgba16_to_sdr(&frame.pixels, first.color.transfer);
         frames.push(Frame::new(
             pixels,
             frame.width,
