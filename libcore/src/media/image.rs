@@ -61,6 +61,9 @@ pub struct DecodedFrames {
 
 /// Content classification is deliberately independent of picker MIME types.
 pub fn inspect(bytes: &[u8]) -> Result<ImageKind> {
+    if is_jxl(bytes) {
+        return Ok(ImageKind::Platform);
+    }
     if is_isobmff(bytes) {
         return Ok(if has_avif_brand(bytes) { ImageKind::Avif } else { ImageKind::Platform });
     }
@@ -83,7 +86,7 @@ pub fn inspect_path(path: &Path) -> Result<ImageKind> {
     let mut header = [0_u8; 64];
     let used = File::open(path)?.read(&mut header)?;
     let header = &header[..used];
-    if is_isobmff(header) {
+    if is_jxl(header) || is_isobmff(header) {
         return Ok(if has_avif_brand(header) { ImageKind::Avif } else { ImageKind::Platform });
     }
     match ::image::guess_format(header) {
@@ -98,6 +101,11 @@ pub fn inspect_path(path: &Path) -> Result<ImageKind> {
 
 fn is_isobmff(header: &[u8]) -> bool {
     header.len() >= 16 && &header[4..8] == b"ftyp"
+}
+
+fn is_jxl(header: &[u8]) -> bool {
+    header.starts_with(&[0xff, 0x0a])
+        || header.starts_with(&[0, 0, 0, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a])
 }
 
 fn has_avif_brand(header: &[u8]) -> bool {
@@ -894,6 +902,15 @@ mod tests {
         let mut heif = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
         heif.resize(64, 0);
         assert_eq!(inspect(&heif).unwrap(), ImageKind::Platform);
+    }
+
+    #[test]
+    fn jxl_is_a_platform_media_candidate_not_a_raw_attachment() {
+        assert_eq!(inspect(&[0xff, 0x0a]).unwrap(), ImageKind::Platform);
+        assert_eq!(
+            inspect(&[0, 0, 0, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a]).unwrap(),
+            ImageKind::Platform
+        );
     }
 
     #[test]

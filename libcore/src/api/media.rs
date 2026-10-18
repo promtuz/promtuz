@@ -345,8 +345,9 @@ impl MediaImport {
         self.source.lock().take();
     }
 
-    /// `0` is a non-media file, `1` an image, and `2` a video. The decision
-    /// comes from bounded content inspection, never the picker MIME type.
+    /// `0` is a non-media file, `1` an image, `2` a video, and `3` recognized
+    /// media unsupported by this device. The decision comes from bounded
+    /// content inspection, never the picker MIME type.
     pub fn media_kind(&self) -> u8 {
         let mut source = self.source.lock();
         let Some(source) = source.as_mut() else { return 0 };
@@ -358,7 +359,7 @@ impl MediaImport {
                 } else if source.inspect_video().is_ok() {
                     2
                 } else {
-                    0
+                    3
                 }
             },
             Ok(_) => 1,

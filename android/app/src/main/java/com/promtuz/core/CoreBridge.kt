@@ -317,6 +317,10 @@ object CoreBridge {
         when (media.mediaKind().toInt()) {
             1 -> media.beginChatImage(false).stage().let { StagedImportedMedia(it.id, it.avif, true) }
             2 -> media.beginChatVideo().stage().let { StagedImportedMedia(it.id, it.poster, false) }
+            3 -> {
+                media.discard()
+                throw uniffi.core.CoreException.Refused("This media format is not supported on this device.")
+            }
             else -> {
                 media.discard()
                 null
