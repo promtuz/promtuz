@@ -30,7 +30,7 @@ suspend fun stagePickedAttachment(context: Context, uri: Uri): StagedPickedAttac
 
 /** Called only with a finalized clip created by CameraOverlay, transferring its ownership. */
 suspend fun stageCapturedVideo(context: Context, file: File): StagedPickedAttachment =
-    try { stagePickedVideo(context, Uri.fromFile(file)) } finally { file.delete() }
+    try { stagePickedAttachment(context, Uri.fromFile(file)) } finally { file.delete() }
 
 private suspend fun stageRawAttachment(context: Context, picked: PickedFile): StagedPickedAttachment {
     val original = File(picked.path)
@@ -47,11 +47,4 @@ private suspend fun stageRawAttachment(context: Context, picked: PickedFile): St
     } finally {
         pending.forEach { it.delete() }
     }
-}
-
-private suspend fun stagePickedVideo(context: Context, uri: Uri): StagedPickedAttachment {
-    val media = CoreBridge.stageImportedChatMedia(context, uri)
-        ?: throw ImagePreparationException("This file is not a video.")
-    if (media.image) throw ImagePreparationException("This file is not a video.")
-    return StagedPickedAttachment(media.id, "video.mp4", decodeEncodedPoster(media.preview, 192), false)
 }
