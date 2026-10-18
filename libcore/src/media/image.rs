@@ -210,20 +210,8 @@ pub fn prepare_sdr_image_with_crop(
         },
         ImageKind::Avif => {
             let decoded = decode_avif(bytes)?;
-            ensure!(
-                !matches!(decoded.color.transfer, 16 | 18),
-                "HDR AVIF needs tone mapping before SDR conversion."
-            );
-            let rgba = decoded
-                .frame
-                .pixels
-                .chunks_exact(2)
-                .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
-                .collect();
-            (
-                DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height },
-                decoded.frame_count > 1,
-            )
+            let animated = decoded.frame_count > 1;
+            (avif_still_to_sdr(decoded), animated)
         },
         ImageKind::Platform => bail!("This image format needs a platform decoder."),
     };
@@ -428,20 +416,8 @@ fn prepare_sdr_image_path(
         },
         ImageKind::Avif => {
             let decoded = decode_avif_path(path)?;
-            ensure!(
-                !matches!(decoded.color.transfer, 16 | 18),
-                "HDR AVIF needs tone mapping before SDR conversion."
-            );
-            let rgba = decoded
-                .frame
-                .pixels
-                .chunks_exact(2)
-                .map(|channel| (u16::from_ne_bytes([channel[0], channel[1]]) >> 8) as u8)
-                .collect();
-            (
-                DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height },
-                decoded.frame_count > 1,
-            )
+            let animated = decoded.frame_count > 1;
+            (avif_still_to_sdr(decoded), animated)
         },
         ImageKind::Platform => bail!("This image format needs a platform decoder."),
     };
@@ -457,6 +433,63 @@ fn prepare_sdr_image_path(
         animated: false,
         animation_fallback,
     })
+}
+
+fn avif_still_to_sdr(decoded: DecodedAvif) -> DecodedStill {
+    let hdr = matches!(decoded.color.transfer, 16 | 18);
+    if hdr {
+        super::alert(crate::platform::MediaAlert::HdrConvertedToSdr);
+    }
+    let rgba = decoded
+        .frame
+        .pixels
+        .chunks_exact(8)
+        .flat_map(|pixel| {
+            let channel = |index| u16::from_ne_bytes([pixel[index], pixel[index + 1]]) as f32 / 65_535.0;
+            let (r, g, b) = (channel(0), channel(2), channel(4));
+            let (r, g, b) = if hdr { hdr_to_sdr(r, g, b, decoded.color.transfer) } else { (r, g, b) };
+            [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b), (channel(6) * 255.0).round() as u8]
+        })
+        .collect();
+    DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height }
+}
+
+fn hdr_to_sdr(r: f32, g: f32, b: f32, transfer: u16) -> (f32, f32, f32) {
+    let decode = match transfer {
+        16 => pq_to_nits,
+        18 => hlg_to_nits,
+        _ => unreachable!(),
+    };
+    // libavif gives Rec.2020 RGB for HDR AVIF. Convert to linear sRGB before
+    // the SDR shoulder so saturated highlights retain their hue.
+    let (r, g, b) = (decode(r), decode(g), decode(b));
+    let (r, g, b) = (
+        1.6605 * r - 0.5876 * g - 0.0728 * b,
+        -0.1246 * r + 1.1329 * g - 0.0083 * b,
+        -0.0182 * r - 0.1006 * g + 1.1187 * b,
+    );
+    let shoulder = |nits: f32| {
+        let relative = (nits / 203.0).max(0.0);
+        relative / (relative + 0.25)
+    };
+    (shoulder(r), shoulder(g), shoulder(b))
+}
+
+fn pq_to_nits(encoded: f32) -> f32 {
+    let encoded = encoded.clamp(0.0, 1.0);
+    let p = encoded.powf(1.0 / 78.84375);
+    let linear = ((p - 0.8359375).max(0.0) / (18.8515625 - 18.6875 * p)).powf(1.0 / 0.15930176);
+    linear * 10_000.0
+}
+
+fn hlg_to_nits(encoded: f32) -> f32 {
+    let encoded = encoded.clamp(0.0, 1.0);
+    let linear = if encoded <= 0.5 {
+        encoded * encoded / 3.0
+    } else {
+        (((encoded - 0.55991073) / 0.17883277).exp() + 0.28466892) / 12.0
+    };
+    linear * 1_000.0
 }
 
 fn decode_avif_animation(bytes: &[u8]) -> Result<DecodedFrames> {
@@ -925,6 +958,18 @@ mod tests {
             ImageKind::Platform
         );
         assert!(!platform_image_candidate(b"\0\0\0\x18ftypM4A \0\0\0\0isom"));
+    }
+
+    #[test]
+    fn hdr_transfer_functions_produce_finite_sdr_pixels() {
+        assert!(pq_to_nits(0.0).abs() < f32::EPSILON);
+        assert!((9_000.0..=10_000.0).contains(&pq_to_nits(1.0)));
+        assert!((999.0..=1_001.0).contains(&hlg_to_nits(1.0)));
+        for transfer in [16, 18] {
+            let pixel = hdr_to_sdr(1.0, 0.5, 0.25, transfer);
+            assert!(pixel.0.is_finite() && pixel.1.is_finite() && pixel.2.is_finite());
+            assert!((0.0..=1.0).contains(&pixel.0));
+        }
     }
 
     #[test]
