@@ -156,6 +156,35 @@ impl SourceLease {
         Ok(copied)
     }
 
+    /// Resolves an unknown provider length through the same bounded reads used
+    /// for import. URI adapters are random-access leases, so this does not
+    /// consume a stream needed by a later platform decoder.
+    pub fn measure(&mut self) -> Result<u64> {
+        if let Some(length) = self.length {
+            return Ok(length);
+        }
+        let mut length = 0_u64;
+        loop {
+            if length == MAX_SOURCE_BYTES {
+                ensure!(
+                    self.read_chunk(length, 1)?.is_empty(),
+                    "The selected file exceeds the 100 MiB import limit."
+                );
+                break;
+            }
+            let bytes = self.read_chunk(length, READ_CHUNK_BYTES)?;
+            if bytes.is_empty() {
+                break;
+            }
+            length = length
+                .checked_add(u64::try_from(bytes.len())?)
+                .ok_or_else(|| anyhow::anyhow!("source length overflow"))?;
+        }
+        ensure!(length > 0, "The selected file is empty.");
+        self.length = Some(length);
+        Ok(length)
+    }
+
     pub fn decode_image(&mut self, request: ImageFrameRequest) -> Result<DecodedImageFrame> {
         self.source.as_deref_mut().expect("released source").decode_image(request)
     }
@@ -275,5 +304,24 @@ mod tests {
         let path = directory.path().join("source");
         let mut lease = SourceLease::open(Box::new(Endless)).unwrap();
         assert!(lease.copy_to(&mut File::create(path).unwrap()).is_err());
+    }
+
+    #[test]
+    fn unknown_length_can_be_measured_without_an_unbounded_read() {
+        struct Unknown(Vec<u8>);
+
+        impl MediaSource for Unknown {
+            fn length(&self) -> Result<Option<u64>> { Ok(None) }
+            fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
+                let start = usize::try_from(offset)?;
+                let end = (start + max_bytes as usize).min(self.0.len());
+                Ok(self.0[start..end].to_vec())
+            }
+            fn release(&mut self) {}
+        }
+
+        let mut lease = SourceLease::open(Box::new(Unknown(vec![1; READ_CHUNK_BYTES as usize + 1]))).unwrap();
+        assert_eq!(lease.measure().unwrap(), u64::from(READ_CHUNK_BYTES) + 1);
+        assert_eq!(lease.known_length(), Some(u64::from(READ_CHUNK_BYTES) + 1));
     }
 }

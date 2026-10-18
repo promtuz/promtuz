@@ -190,9 +190,7 @@ pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEn
 pub(crate) fn prepare_video(
     source: &mut SourceLease, import_directory: &std::path::Path,
 ) -> Result<PreparedVideo> {
-    let source_bytes = source
-        .known_length()
-        .ok_or_else(|| anyhow::anyhow!("The selected video's size could not be read."))?;
+    let source_bytes = source.measure()?;
     let input = source.inspect_video()?;
     let mut last_error = None;
 
