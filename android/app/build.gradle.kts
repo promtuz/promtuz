@@ -101,6 +101,7 @@ android {
         targetSdk = 37
         versionCode = publishedVersionCode
         versionName = publishedVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "RESOLVER_SEEDS", "\"$resolverSeedsLiteral\"")
     }
@@ -315,6 +316,21 @@ tasks.register<Exec>("generateUniffiBindings") {
     )
 }
 
+val verifyRelease16kPageAlignment = tasks.register<Exec>("verifyRelease16kPageAlignment") {
+    val verifier = repoRoot.resolve("tools/scripts/verify_android_16k.py")
+    inputs.file(verifier)
+    inputs.file(layout.buildDirectory.file("outputs/apk/release/app-arm64-v8a-release.apk"))
+    commandLine(
+        pythonExecutable,
+        verifier.absolutePath,
+        layout.buildDirectory.file("outputs/apk/release/app-arm64-v8a-release.apk").get().asFile.absolutePath,
+    )
+}
+
+tasks.configureEach {
+    if (name == "assembleRelease") finalizedBy(verifyRelease16kPageAlignment)
+}
+
 tasks.named("preBuild") { dependsOn("generateUniffiBindings") }
 
 dependencies {
@@ -333,6 +349,8 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
     debugImplementation(libs.androidx.ui.tooling)
 
     implementation(libs.androidx.navigation3.ui)
@@ -384,5 +402,4 @@ dependencies {
     implementation(libs.firebase.messaging)
 
     implementation(variantOf(libs.jna) { artifactType("aar") })
-    implementation(libs.avif)
 }
