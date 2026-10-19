@@ -45,11 +45,6 @@ pub struct StickerPackPreview {
     pub stickers: Vec<StickerRecord>,
 }
 
-#[derive(uniffi::Record)]
-pub struct StickerSource {
-    pub artifact: Arc<super::media::StickerArtifact>,
-}
-
 pub(crate) fn record(row: &StickerRow, token: &[u8; 32], store: u16) -> StickerRecord {
     StickerRecord {
         pack: row.pack_id.to_vec(),
@@ -152,11 +147,11 @@ fn log_publish(e: &anyhow::Error) {
 /// Returns the pack id once the store has every object; the pack is also kept locally.
 #[uniffi::export]
 pub async fn create_sticker_pack(
-    name: String, images: Vec<StickerSource>,
+    name: String, images: Vec<Arc<super::media::StickerArtifact>>,
 ) -> Result<Vec<u8>, CoreError> {
     let images = images
         .into_iter()
-        .map(|i| i.artifact.take().map(|image| SourceImage { image }))
+        .map(|artifact| artifact.take().map(|image| SourceImage { image }))
         .collect::<Result<_, _>>()?;
     let id =
         on_runtime(
@@ -168,12 +163,12 @@ pub async fn create_sticker_pack(
 
 #[uniffi::export]
 pub async fn add_to_sticker_pack(
-    pack: Vec<u8>, images: Vec<StickerSource>,
+    pack: Vec<u8>, images: Vec<Arc<super::media::StickerArtifact>>,
 ) -> Result<(), CoreError> {
     let pack = fixed::<16>(&pack, "dispatch_id")?;
     let images = images
         .into_iter()
-        .map(|i| i.artifact.take().map(|image| SourceImage { image }))
+        .map(|artifact| artifact.take().map(|image| SourceImage { image }))
         .collect::<Result<_, _>>()?;
     on_runtime(async move { crate::stickers::append(pack, images).await.inspect_err(log_publish) })
         .await

@@ -28,7 +28,8 @@ import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
 import com.promtuz.chat.utils.media.stageCapturedVideo
 import com.promtuz.chat.utils.media.stagePickedAttachment
-import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.MediaPreparationException
+import com.promtuz.chat.utils.media.StagedPickedAttachment
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.Dispatchers
@@ -603,8 +604,7 @@ class ChatVM(
         val uri = Uri.fromFile(file)
         if (video) prepareMedia(listOf(uri), photos = false, onRejected = { file.delete() }) {
             val staged = stageCapturedVideo(application, file)
-            own(staged.id)
-            staged.preview?.let { rememberPreview(staged.id, it) }
+            acceptStaged(staged)
         }
         else prepareMedia(listOf(uri), photos = true, onRejected = { file.delete() }) {
             // Camera callbacks transfer their completed output; image staging takes its own copy.
@@ -614,9 +614,11 @@ class ChatVM(
 
     private suspend fun stagePhoto(uri: Uri) {
         val staged = stagePickedAttachment(application, uri)
-        if (!staged.image) throw ImagePreparationException("This file is not an image.")
-        own(staged.id)
-        staged.preview?.let { rememberPreview(staged.id, it) }
+        if (!staged.image) {
+            CoreBridge.discardStaged(staged.id)
+            throw MediaPreparationException("This file is not an image.")
+        }
+        acceptStaged(staged)
     }
 
     fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected -> selected.forEach { stagePickedFile(it) } }
@@ -630,9 +632,7 @@ class ChatVM(
         }
         val editing = composerAction.value as? ComposerAction.Edit
         if (editing != null) {
-            val kind = if (photos) com.promtuz.chat.domain.model.STAGED_IMAGE else com.promtuz.chat.domain.model.STAGED_ATTACHMENT
-            if (!editing.msg.content.acceptsStaged(kind) || uris.size != 1 || _staged.value.isNotEmpty() ||
-                (photos && uris.any { application.contentResolver.getType(it)?.startsWith("video/") == true })) {
+            if (uris.size != 1 || _staged.value.isNotEmpty()) {
                 composerError.value = "Choose one compatible replacement for this message."
                 onRejected()
                 return
@@ -648,7 +648,7 @@ class ChatVM(
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) {
                 composerError.value = when (e) {
-                    is ImagePreparationException -> e.message
+                    is MediaPreparationException -> e.message
                     is uniffi.core.CoreException.Refused -> e.msg
                     else -> "Couldn’t prepare the media. Try again."
                 }
@@ -760,11 +760,18 @@ class ChatVM(
     }
 
     private suspend fun stagePickedFile(uri: Uri) {
-        val editing = composerAction.value as? ComposerAction.Edit
-        if (editing != null && !editing.msg.content.acceptsStaged(com.promtuz.chat.domain.model.STAGED_ATTACHMENT)) {
-            throw ImagePreparationException("Choose one compatible replacement for this message.")
-        }
         val staged = stagePickedAttachment(application, uri)
+        acceptStaged(staged)
+    }
+
+    private suspend fun acceptStaged(staged: StagedPickedAttachment) {
+        val editing = composerAction.value as? ComposerAction.Edit
+        val kind = if (staged.image) com.promtuz.chat.domain.model.STAGED_IMAGE
+        else com.promtuz.chat.domain.model.STAGED_ATTACHMENT
+        if (editing != null && !editing.msg.content.acceptsStaged(kind)) {
+            CoreBridge.discardStaged(staged.id)
+            throw MediaPreparationException("Choose one compatible replacement for this message.")
+        }
         own(staged.id)
         staged.preview?.let { rememberPreview(staged.id, it) }
     }

@@ -43,7 +43,6 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import org.aomedia.avif.android.AvifDecoder
 import timber.log.Timber
 import java.io.File
 import java.util.WeakHashMap
@@ -155,61 +154,39 @@ internal fun ImageWindowColorMode(image: ImageBitmap?, active: Boolean, hdr: Boo
  */
 private suspend fun playAvif(source: AvifAnimationSource, onFrame: (ImageBitmap) -> Unit) {
     val (width, height) = scaledDimensions(source.width, source.height, 1024)
-    val pixelBytes = if (source.config == Bitmap.Config.RGBA_F16) 8 else 4
-    // Include AV1 reference pictures, working planes, two RGB frames and the encoded buffer.
-    val estimatedBytes = source.decodedPixelCount * (if (source.depth > 8) 64 else 32) +
-        width.toLong() * height * pixelBytes * 2 + source.encoded.capacity()
+    val estimatedBytes = source.decodedPixelCount * 32 + width.toLong() * height * 8 + source.encoded.size
     try {
         AvifPlaybackBudget.withBudget(estimatedBytes) {
             withContext(Dispatchers.Default) {
-                val encoded = source.encoded.duplicate().apply { rewind() }
-                val decoder = imageDecodeWork.withPermit { AvifDecoder.create(encoded, 1) }
-                    ?: return@withContext
+                var decoder = uniffi.core.AvifDecoder.open(source.encoded)
                 try {
-                    if (decoder.frameCount !in 2..600) return@withContext
-                    val durations = decoder.frameDurations
-                    var index = 0
-                    var completedRepeats = 0
                     var nextPresentation = SystemClock.elapsedRealtimeNanos()
                     while (true) {
                         currentCoroutineContext().ensureActive()
-                        val bitmap = imageDecodeWork.withPermit {
-                            val target = Bitmap.createBitmap(width, height, source.config,
-                                source.alpha, source.colorSpace)
-                            val result = if (index == 0) decoder.nthFrame(0, target) else decoder.nextFrame(target)
-                            if (result != 0) {
-                                target.recycle()
-                                error("AVIF frame decode failed: ${AvifDecoder.resultToString(result)}")
-                            }
-                            orientAvifBitmap(target, source.rotationQuarterTurns, source.mirrorAxis)
+                        val frame = imageDecodeWork.withPermit { decoder.nextSdrFrame() }
+                        if (frame == null) {
+                            decoder.close()
+                            decoder = uniffi.core.AvifDecoder.open(source.encoded)
+                            continue
                         }
+                        val bitmap = bitmapFromRgba(frame.pixels, frame.width.toInt(), frame.height.toInt())
                         currentCoroutineContext().ensureActive()
                         val waitNanos = nextPresentation - SystemClock.elapsedRealtimeNanos()
                         if (waitNanos > 0) delay(ceil(waitNanos / 1_000_000.0).toLong())
                         withContext(Dispatchers.Main.immediate) {
-                            withFrameNanos { onFrame(bitmap.asImageBitmap()) }
+                            withFrameNanos { onFrame(bitmap) }
                         }
-                        val duration = durations.getOrNull(index)?.takeIf { it.isFinite() && it > 0 } ?: 0.1
-                        // A malformed duration cannot create a busy loop. Valid fast animations
-                        // remain synchronized to display frames without queuing decoded frames.
-                        val durationNanos = (duration * 1_000_000_000).toLong().coerceIn(8_000_000L, 300_000_000_000L)
+                        val durationNanos = (frame.durationMs.toLong() * 1_000_000)
+                            .coerceIn(8_000_000L, 300_000_000_000L)
                         nextPresentation = maxOf(nextPresentation, SystemClock.elapsedRealtimeNanos()) + durationNanos
-                        index++
-                        if (index == decoder.frameCount) {
-                            if (decoder.repetitionCount != -1 && completedRepeats >= decoder.repetitionCount) break
-                            completedRepeats++
-                            index = 0
-                        }
                     }
                 } finally {
-                    decoder.release()
+                    decoder.close()
                 }
             }
         }
     } catch (error: CancellationException) {
         throw error
-    } catch (error: LinkageError) {
-        Timber.tag("MediaImage").w(error, "AVIF playback unavailable")
     } catch (error: Exception) {
         Timber.tag("MediaImage").d(error, "AVIF playback stopped")
     }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use super::ports::{MediaSource, SourceLease};
+use super::ports::SourceLease;
 
 /// A private, bounded copy of a platform-owned source. It is deleted unless a
 /// later media job explicitly takes it over.
@@ -14,10 +14,6 @@ pub struct ImportedSource {
 }
 
 impl ImportedSource {
-    pub fn from_source(source: Box<dyn MediaSource>, directory: &Path) -> Result<Self> {
-        Self::from_lease(SourceLease::open(source)?, directory)
-    }
-
     pub fn from_lease(mut source: SourceLease, directory: &Path) -> Result<Self> {
         fs::create_dir_all(directory).context("create media import directory")?;
 
@@ -63,6 +59,7 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
+    use crate::media::ports::MediaSource;
 
     struct Source {
         bytes: Vec<u8>,
@@ -89,11 +86,10 @@ mod tests {
     fn import_is_private_bounded_copy_and_releases_source() {
         let directory = tempfile::tempdir().unwrap();
         let releases = Arc::new(Mutex::new(0));
-        let imported = ImportedSource::from_source(
-            Box::new(Source { bytes: vec![4; 12], releases: releases.clone() }),
-            directory.path(),
-        )
-        .unwrap();
+        let lease = SourceLease::open(Box::new(Source {
+            bytes: vec![4; 12], releases: releases.clone(),
+        })).unwrap();
+        let imported = ImportedSource::from_lease(lease, directory.path()).unwrap();
         assert_eq!(imported.size(), 12);
         assert_eq!(std::fs::read(imported.path()).unwrap(), vec![4; 12]);
         assert_eq!(*releases.lock().unwrap(), 1);

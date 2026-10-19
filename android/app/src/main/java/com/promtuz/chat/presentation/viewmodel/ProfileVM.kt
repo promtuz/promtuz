@@ -6,7 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.utils.media.PhotoCrop
 import com.promtuz.chat.utils.media.AvatarPicture
 import com.promtuz.chat.utils.media.AvatarSource
-import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.MediaPreparationException
 import com.promtuz.chat.utils.media.prepareAvatar
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
@@ -93,7 +93,7 @@ class ProfileVM(private val group: String? = null) : ViewModel() {
                 Timber.tag("Profile").w(e, "Picture change failed")
                 val reason = when (e) {
                     is uniffi.core.CoreException.Refused -> e.msg
-                    is ImagePreparationException -> e.message
+                    is MediaPreparationException -> e.message
                     else -> null
                 }
                 _work.value = ProfileWork.Failed(reason ?: "Couldn't save your changes. Try again.")

@@ -1,0 +1,10 @@
+[package]
+name = "media-bench"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+[dependencies]
+blake3 = "1.8.5"
+promtuz-avif = { path = "../../media/avif" }

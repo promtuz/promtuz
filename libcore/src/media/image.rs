@@ -444,15 +444,21 @@ fn avif_still_to_sdr(decoded: DecodedAvif) -> DecodedStill {
     DecodedStill { rgba, width: decoded.frame.width, height: decoded.frame.height }
 }
 
-fn rgba16_to_sdr(pixels: &[u8], transfer: u16) -> Vec<u8> {
+pub(crate) fn rgba16_to_sdr(pixels: &[u8], transfer: u16) -> Vec<u8> {
     let hdr = matches!(transfer, 16 | 18);
     pixels
         .chunks_exact(8)
         .flat_map(|pixel| {
-            let channel = |index| u16::from_ne_bytes([pixel[index], pixel[index + 1]]) as f32 / 65_535.0;
+            let channel =
+                |index| u16::from_ne_bytes([pixel[index], pixel[index + 1]]) as f32 / 65_535.0;
             let (r, g, b) = (channel(0), channel(2), channel(4));
             let (r, g, b) = if hdr { hdr_to_sdr(r, g, b, transfer) } else { (r, g, b) };
-            [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b), (channel(6) * 255.0).round() as u8]
+            [
+                linear_to_srgb(r),
+                linear_to_srgb(g),
+                linear_to_srgb(b),
+                (channel(6) * 255.0).round() as u8,
+            ]
         })
         .collect()
 }
@@ -827,6 +833,20 @@ pub fn decode_avif(bytes: &[u8]) -> Result<DecodedAvif> {
     decode_avif_decoder(decoder)
 }
 
+/// Decode an AVIF display frame through the same SDR normalization used for
+/// imported media. Renderers receive bounded pixels, never a platform decoder.
+pub fn decode_avif_sdr(bytes: &[u8], max_edge: u32) -> Result<DecodedStill> {
+    ensure!(max_edge > 0, "invalid AVIF display edge");
+    let still = avif_still_to_sdr(decode_avif(bytes)?);
+    let (width, height) = fit_dimensions(still.width, still.height, max_edge);
+    if (width, height) == (still.width, still.height) {
+        return Ok(still);
+    }
+    let image = ::image::RgbaImage::from_raw(still.width, still.height, still.rgba)
+        .ok_or_else(|| anyhow::anyhow!("invalid AVIF display pixels"))?;
+    Ok(DecodedStill { rgba: resize_linear_srgb(&image, width, height).into_raw(), width, height })
+}
+
 pub fn decode_avif_path(path: &Path) -> Result<DecodedAvif> {
     let decoder = promtuz_avif::Decoder::open_file(path, avif_limits()?)
         .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
@@ -906,6 +926,9 @@ mod tests {
 
     use super::*;
 
+    const ANIMATED_AVIF: &[u8] = include_bytes!("../../testdata/media/animated.avif");
+    const ANIMATED_EXIF_XMP_AVIF: &[u8] = include_bytes!("../../testdata/media/animated-exif-xmp.avif");
+
     #[test]
     fn avif_decode_preserves_16_bit_frame_shape_and_color_description() {
         let encoded =
@@ -919,11 +942,37 @@ mod tests {
     }
 
     #[test]
+    fn avif_display_decode_normalizes_and_bounds_the_frame() {
+        let mut encoder = promtuz_avif::Encoder::new(16, 8, Default::default()).unwrap();
+        encoder.add_rgba(&[20, 40, 60, 255].repeat(16 * 8), 1).unwrap();
+        let image = decode_avif_sdr(&encoder.finish().unwrap(), 4).unwrap();
+        assert_eq!((image.width, image.height), (4, 2));
+        assert_eq!(image.rgba.len(), 4 * 2 * 4);
+    }
+
+    #[test]
     fn avif_frames_share_the_bounded_frame_store() {
         let encoded = super::super::encode_avif(&[255, 0, 0, 255], 1, 1, 60.0).unwrap();
         let (first, mut frames) = decode_avif_frames(&encoded).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames.frame(0).unwrap(), first.frame);
+    }
+
+    #[test]
+    fn real_avif_sequence_is_reencoded_without_source_metadata() {
+        let (_, mut frames) = decode_avif_frames(ANIMATED_AVIF).unwrap();
+        assert!(frames.len() > 1);
+        assert!(frames.frame(0).unwrap().duration_ms > 0);
+
+        assert!(ANIMATED_EXIF_XMP_AVIF.windows(4).any(|bytes| bytes == b"Exif"));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("picked.avif");
+        File::create(&path).unwrap().write_all(ANIMATED_EXIF_XMP_AVIF).unwrap();
+        let prepared = prepare_image_path(&path, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
+        assert!(prepared.animated);
+        assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
+        assert!(!prepared.bytes.windows(4).any(|bytes| bytes == b"Exif"));
+        assert!(!prepared.bytes.windows(3).any(|bytes| bytes == b"XMP"));
     }
 
     #[test]
@@ -1005,6 +1054,37 @@ mod tests {
         let mut decoded = decode_animation(GIF).unwrap();
         assert_eq!((decoded.width, decoded.height, decoded.frames.len()), (1, 1, 1));
         assert_eq!(decoded.frames.frame(0).unwrap().duration_ms, 10);
+    }
+
+    #[test]
+    fn animated_gif_composites_disposal_and_timing() {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut encoded, 2, 1, &[]).unwrap();
+            let mut first = gif::Frame::from_rgba_speed(
+                2, 1, &mut [255, 0, 0, 255, 255, 0, 0, 255], 1,
+            );
+            first.delay = 2;
+            encoder.write_frame(&first).unwrap();
+
+            let mut second = gif::Frame::from_rgba_speed(1, 1, &mut [0, 255, 0, 255], 1);
+            second.delay = 3;
+            second.dispose = gif::DisposalMethod::Background;
+            encoder.write_frame(&second).unwrap();
+
+            let mut third = gif::Frame::from_rgba_speed(1, 1, &mut [0, 0, 255, 255], 1);
+            third.left = 1;
+            third.delay = 4;
+            encoder.write_frame(&third).unwrap();
+        }
+
+        let mut decoded = decode_animation(&encoded).unwrap();
+        assert_eq!(decoded.frames.len(), 3);
+        assert_eq!(decoded.frames.frame(0).unwrap().duration_ms, 20);
+        assert_eq!(decoded.frames.frame(1).unwrap().duration_ms, 30);
+        assert_eq!(decoded.frames.frame(2).unwrap().duration_ms, 40);
+        assert_eq!(decoded.frames.frame(1).unwrap().pixels, vec![0, 255, 0, 255, 255, 0, 0, 255]);
+        assert_eq!(decoded.frames.frame(2).unwrap().pixels, vec![0, 0, 0, 0, 0, 0, 255, 255]);
     }
 
     #[test]

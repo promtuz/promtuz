@@ -26,7 +26,7 @@ import com.promtuz.chat.ui.components.AVATAR_RADIUS_RATIO
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.utils.media.PhotoCrop
 import com.promtuz.chat.utils.media.AvatarSource
-import com.promtuz.chat.utils.media.ImagePreparationException
+import com.promtuz.chat.utils.media.MediaPreparationException
 import com.promtuz.chat.utils.media.pickAvatarSource
 import kotlinx.coroutines.CancellationException
 import java.util.UUID
@@ -58,7 +58,7 @@ fun ProfilePhotoScreen(uri: String, viewModel: ProfileVM, onSaved: () -> Unit) {
         } catch (e: Exception) {
             loadError = when (e) {
                 is uniffi.core.CoreException.Refused -> e.msg
-                is ImagePreparationException -> e.message
+                is MediaPreparationException -> e.message
                 else -> null
             }
             null

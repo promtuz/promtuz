@@ -152,6 +152,7 @@ pub const CHAT_IMAGE: ImageProfile =
 pub const HD_IMAGE: ImageProfile =
     ImageProfile { max_edge: 2_560, max_bytes: 2 * 1024 * 1024, emergency_edge: 640 };
 
+/// Enable only with a deliberate delivery and UI rollout; the wire/storage shape is already live.
 pub const HD_IMAGE_ENABLED: bool = false;
 
 pub const CHAT_ANIMATION: AnimationProfile = AnimationProfile {

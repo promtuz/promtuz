@@ -5,7 +5,8 @@ use anyhow::{Result, bail, ensure};
 
 use super::{
     frames::PixelFormat,
-    policy::MAX_SOURCE_BYTES,
+    policy::{MAX_SOURCE_BYTES, TimeRange},
+    job::MediaCancellation,
     video::{VideoEncodingPlan, VideoProbe},
 };
 
@@ -42,6 +43,7 @@ pub struct DecodedImageFrame {
 pub struct VideoRenderRequest {
     pub plan: VideoEncodingPlan,
     pub output: PathBuf,
+    pub trim: Option<TimeRange>,
 }
 
 /// One bounded, displayed video frame. Core chooses the sampling timeline and
@@ -91,6 +93,7 @@ pub trait MediaSource: Send {
 pub struct SourceLease {
     source: Option<Box<dyn MediaSource>>,
     length: Option<u64>,
+    cancellation: Option<MediaCancellation>,
 }
 
 impl SourceLease {
@@ -103,10 +106,20 @@ impl SourceLease {
                 "The selected file exceeds the 100 MiB import limit."
             );
         }
-        Ok(Self { source: Some(source), length })
+        Ok(Self { source: Some(source), length, cancellation: None })
+    }
+
+    pub(crate) fn set_cancellation(&mut self, cancellation: MediaCancellation) {
+        self.cancellation = Some(cancellation);
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        if let Some(cancellation) = &self.cancellation { cancellation.check()? }
+        Ok(())
     }
 
     pub fn read_chunk(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
+        self.check_cancelled()?;
         if let Some(length) = self.length {
             ensure!(offset <= length, "source offset is out of range");
         }
@@ -186,22 +199,27 @@ impl SourceLease {
     }
 
     pub fn decode_image(&mut self, request: ImageFrameRequest) -> Result<DecodedImageFrame> {
+        self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").decode_image(request)
     }
 
     pub fn inspect_image(&mut self) -> Result<ImageProbe> {
+        self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").inspect_image()
     }
 
     pub fn inspect_video(&mut self) -> Result<VideoProbe> {
+        self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").inspect_video()
     }
 
     pub fn open_video_frame(&mut self, request: VideoFrameRequest) -> Result<DecodedImageFrame> {
+        self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").open_video_frame(request)
     }
 
     pub fn render_video(&mut self, request: VideoRenderRequest) -> Result<VideoRenderReport> {
+        self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").render_video(request)
     }
 
@@ -289,9 +307,7 @@ mod tests {
         struct Endless;
 
         impl MediaSource for Endless {
-            fn length(&self) -> Result<Option<u64>> {
-                Ok(None)
-            }
+        fn length(&self) -> Result<Option<u64>> { Ok(None) }
 
             fn read(&mut self, _offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
                 Ok(vec![0; max_bytes as usize])
@@ -311,7 +327,9 @@ mod tests {
         struct Unknown(Vec<u8>);
 
         impl MediaSource for Unknown {
-            fn length(&self) -> Result<Option<u64>> { Ok(None) }
+            fn length(&self) -> Result<Option<u64>> {
+                Ok(None)
+            }
             fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
                 let start = usize::try_from(offset)?;
                 let end = (start + max_bytes as usize).min(self.0.len());

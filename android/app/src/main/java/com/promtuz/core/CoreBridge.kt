@@ -72,7 +72,7 @@ import uniffi.core.sendVoice as ffiSendVoice
 import uniffi.core.StickerPackPreview
 import uniffi.core.StickerPackRecord
 import uniffi.core.StickerRecord
-import uniffi.core.StickerSource
+import uniffi.core.StickerArtifact
 import uniffi.core.stickerPacks as ffiStickerPacks
 import uniffi.core.recentStickers as ffiRecentStickers
 import uniffi.core.stickerImage as ffiStickerImage
@@ -312,11 +312,15 @@ object CoreBridge {
     suspend fun importMedia(context: Context, uri: Uri): MediaImport =
         withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.open(context, uri)) }
 
+    /** Clipboard bytes become an opaque adapter lease; they never cross UniFFI as one file. */
+    suspend fun importMedia(context: Context, bytes: ByteArray): MediaImport =
+        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.openBytes(context, bytes)) }
+
     suspend fun stageImportedChatMedia(context: Context, uri: Uri): StagedImportedMedia? = withContext(Dispatchers.IO) {
         val media = importMedia(context, uri)
         when (media.mediaKind().toInt()) {
             1 -> media.beginChatImage(false).stage().let { StagedImportedMedia(it.id, it.avif, true) }
-            2 -> media.beginChatVideo().stage().let { StagedImportedMedia(it.id, it.poster, false) }
+            2 -> media.beginChatVideo(null).stage().let { StagedImportedMedia(it.id, it.poster, false) }
             3 -> {
                 media.discard()
                 throw uniffi.core.CoreException.Refused("This media format is not supported on this device.")
@@ -335,9 +339,12 @@ object CoreBridge {
     }
 
     suspend fun prepareImportedSticker(context: Context, uri: Uri): uniffi.core.PreparedStickerRecord =
-        withContext(Dispatchers.IO) { importMedia(context, uri).beginSticker().prepare() }
+        withContext(Dispatchers.IO) { importMedia(context, uri).beginSticker(null).prepare() }
 
     fun inspectAvif(bytes: ByteArray): uniffi.core.AvifInfoRecord? = uniffi.core.inspectAvif(bytes)
+
+    fun decodeAvifSdr(bytes: ByteArray, maxEdge: UInt): uniffi.core.DecodedImageFrameRecord =
+        uniffi.core.decodeAvifSdr(bytes, maxEdge)
 
     suspend fun stageRawAttachment(sourcePath: String, name: String, mime: String): ULong =
         withContext(Dispatchers.IO) {
@@ -405,10 +412,10 @@ object CoreBridge {
     suspend fun removeStickerPack(pack: ByteArray) = withContext(Dispatchers.IO) { ffiRemoveStickerPack(pack) }
 
     /** Returns the pack id once the store holds every object. */
-    suspend fun createStickerPack(name: String, images: List<StickerSource>): ByteArray =
+    suspend fun createStickerPack(name: String, images: List<StickerArtifact>): ByteArray =
         ffiCreateStickerPack(name, images)
 
-    suspend fun addToStickerPack(pack: ByteArray, images: List<StickerSource>) = ffiAddToStickerPack(pack, images)
+    suspend fun addToStickerPack(pack: ByteArray, images: List<StickerArtifact>) = ffiAddToStickerPack(pack, images)
 
     suspend fun sendSticker(conversationId: ByteArray, sticker: StickerRecord, replyTo: ByteArray? = null) =
         withContext(Dispatchers.IO) { ffiSendSticker(conversationId, sticker, replyTo) }

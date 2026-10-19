@@ -8,7 +8,8 @@ use anyhow::{Result, bail, ensure};
 use super::{
     frames::{Frame, FrameStore, PixelFormat},
     image::{self, DecodedFrames, DecodedStill, PreparedImage},
-    policy::{POSTER, STICKER, VIDEO},
+    job::MediaCancellation,
+    policy::{POSTER, STICKER, TimeRange, VIDEO},
     ports::{SourceLease, VideoFrameRequest, VideoRenderRequest},
 };
 
@@ -68,9 +69,13 @@ pub struct PreparedVideo {
 
 /// Decodes a bounded, evenly sampled video timeline for sticker encoding. The
 /// same image normalizer and AVIF sequence writer then own the output.
-pub fn prepare_video_sticker(source: &mut SourceLease) -> Result<PreparedImage> {
-    let probe = source.inspect_video()?;
+pub fn prepare_video_sticker(
+    source: &mut SourceLease, trim: Option<TimeRange>, cancellation: &MediaCancellation,
+) -> Result<PreparedImage> {
+    let mut probe = source.inspect_video()?;
     validate_probe(&probe)?;
+    let (start_us, end_us) = trim_range(probe.duration_us, trim)?;
+    probe.duration_us = end_us - start_us;
     ensure!(
         probe.duration_us <= 5 * 60 * 1_000_000,
         "This video is too long to turn into a sticker."
@@ -94,8 +99,9 @@ pub fn prepare_video_sticker(source: &mut SourceLease) -> Result<PreparedImage> 
     let mut frames = FrameStore::new(limits.frame_store_memory, limits.job_bytes);
     let mut dimensions = None;
     for index in 0..frame_count {
+        cancellation.check()?;
         let timestamp_us =
-            probe.duration_us.saturating_mul(u64::from(index)) / u64::from(frame_count);
+            start_us + probe.duration_us.saturating_mul(u64::from(index)) / u64::from(frame_count);
         let frame = source.open_video_frame(VideoFrameRequest { timestamp_us, max_edge })?;
         ensure!(
             frame.format == PixelFormat::Rgba8,
@@ -188,17 +194,25 @@ pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEn
 }
 
 pub(crate) fn prepare_video(
-    source: &mut SourceLease, import_directory: &std::path::Path,
+    source: &mut SourceLease, import_directory: &std::path::Path, trim: Option<TimeRange>,
+    cancellation: &MediaCancellation,
 ) -> Result<PreparedVideo> {
     let source_bytes = source.measure()?;
-    let input = source.inspect_video()?;
+    let mut input = source.inspect_video()?;
+    let (start_us, end_us) = trim_range(input.duration_us, trim)?;
+    input.duration_us = end_us - start_us;
     let mut last_error = None;
 
     for plan in plans(&input, source_bytes)? {
+        cancellation.check()?;
         let output = reserve_candidate(import_directory)?;
         let result = (|| {
-            let report = source
-                .render_video(VideoRenderRequest { plan: plan.clone(), output: output.clone() })?;
+            let report = source.render_video(VideoRenderRequest {
+                plan: plan.clone(),
+                output: output.clone(),
+                trim,
+            })?;
+            cancellation.check()?;
             validate_output_with_audio_fallback(
                 &input,
                 &report.output,
@@ -235,7 +249,10 @@ pub(crate) fn prepare_video(
             })
         })();
         match result {
-            Ok(video) => return Ok(video),
+            Ok(video) => {
+                cancellation.check()?;
+                return Ok(video);
+            },
             Err(error) => {
                 let _ = std::fs::remove_file(&output);
                 last_error = Some(error);
@@ -243,6 +260,20 @@ pub(crate) fn prepare_video(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("This video could not be compressed.")))
+}
+
+fn trim_range(duration_us: u64, trim: Option<TimeRange>) -> Result<(u64, u64)> {
+    let Some(trim) = trim else { return Ok((0, duration_us)) };
+    let start_us = trim
+        .start_ms
+        .checked_mul(1_000)
+        .ok_or_else(|| anyhow::anyhow!("The selected trim is invalid."))?;
+    let end_us = trim
+        .end_ms
+        .checked_mul(1_000)
+        .ok_or_else(|| anyhow::anyhow!("The selected trim is invalid."))?;
+    ensure!(start_us < end_us && end_us <= duration_us, "The selected trim is outside this video.");
+    Ok((start_us, end_us))
 }
 
 fn reserve_candidate(directory: &std::path::Path) -> Result<PathBuf> {
@@ -410,6 +441,13 @@ mod tests {
     }
 
     #[test]
+    fn trim_is_bounded_by_the_source_presentation_timeline() {
+        assert_eq!(trim_range(10_000_000, Some(TimeRange { start_ms: 2_000, end_ms: 7_500 })).unwrap(), (2_000_000, 7_500_000));
+        assert!(trim_range(10_000_000, Some(TimeRange { start_ms: 7_500, end_ms: 10_001 })).is_err());
+        assert!(trim_range(10_000_000, Some(TimeRange { start_ms: 1_000, end_ms: 1_000 })).is_err());
+    }
+
+    #[test]
     fn portrait_codec_alignment_is_accepted_but_rotation_and_oversizing_are_not() {
         let source = source();
         let plan = plans(&source, 10_000_000).unwrap().remove(0);
@@ -568,7 +606,7 @@ mod tests {
         let renders = Arc::new(Mutex::new(0));
         let mut source =
             SourceLease::open(Box::new(RenderingSource { renders: renders.clone() })).unwrap();
-        let video = prepare_video(&mut source, directory.path()).unwrap();
+        let video = prepare_video(&mut source, directory.path(), None, &MediaCancellation::default()).unwrap();
         assert_eq!(*renders.lock().unwrap(), 2);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert_eq!(video.poster.width, 1);
@@ -615,7 +653,7 @@ mod tests {
         let opened = Arc::new(Mutex::new(0));
         let mut source =
             SourceLease::open(Box::new(StickerSource { opened: opened.clone() })).unwrap();
-        let sticker = prepare_video_sticker(&mut source).unwrap();
+        let sticker = prepare_video_sticker(&mut source, None, &MediaCancellation::default()).unwrap();
         assert_eq!(*opened.lock().unwrap(), 2);
         assert!(sticker.animated);
         assert_eq!(image::inspect(&sticker.bytes).unwrap(), image::ImageKind::Avif);

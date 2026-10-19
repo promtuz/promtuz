@@ -24,7 +24,7 @@ suspend fun stagePickedAttachment(context: Context, uri: Uri): StagedPickedAttac
         )
     }
     val copy = resolvePickedFile(context, uri)
-        ?: throw ImagePreparationException("Couldn’t open this attachment.")
+        ?: throw MediaPreparationException("Couldn’t open this attachment.")
     return stageRawAttachment(context, copy)
 }
 

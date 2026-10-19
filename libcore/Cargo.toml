@@ -101,3 +101,4 @@ openmls = { version = "0.8.1", features = ["test-utils"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 x509-parser = "0.18.1"
 expect-test = "1.5.1"
+gif = "0.14.2"

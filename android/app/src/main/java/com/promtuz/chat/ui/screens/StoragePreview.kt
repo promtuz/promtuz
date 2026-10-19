@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.screens
 
-import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.os.Build
 import android.util.LruCache
@@ -14,7 +13,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -28,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import org.aomedia.avif.android.AvifDecoder
 import java.nio.ByteBuffer
 
 // Keep scrolling independent of image decoding. Full-size fallback decoding is
@@ -55,15 +52,7 @@ internal class StoragePreviews {
                     (info.size.height * scale).toInt().coerceAtLeast(1))
             }.asImageBitmap()
         }.getOrNull()?.let { return it }
-        val buffer = ByteBuffer.allocateDirect(bytes.size).put(bytes).apply { rewind() }
-        val info = AvifDecoder.Info()
-        if (!AvifDecoder.getInfo(buffer, bytes.size, info) || info.width.toLong() * info.height > 16_000_000) return null
-        val full = decodeAvif(bytes)?.asAndroidBitmap() ?: return null
-        val scale = 96f / maxOf(full.width, full.height).coerceAtLeast(96)
-        val small = Bitmap.createScaledBitmap(full, (full.width * scale).toInt().coerceAtLeast(1),
-            (full.height * scale).toInt().coerceAtLeast(1), true)
-        if (small !== full) full.recycle()
-        return small.asImageBitmap()
+        return decodeAvif(bytes, 96)
     }
 }
 

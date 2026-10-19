@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.core.StickerSource
+import uniffi.core.StickerArtifact
 
 @Immutable
 data class UiPackPreview(
@@ -131,10 +131,9 @@ class StickersVM(private val application: Application) : ViewModel() {
 
     private class UnreadableImage : Exception()
 
-    private suspend fun sources(uris: List<Uri>): List<StickerSource> = withContext(Dispatchers.IO) {
+    private suspend fun sources(uris: List<Uri>): List<StickerArtifact> = withContext(Dispatchers.IO) {
         uris.map { uri ->
-            val prepared = CoreBridge.prepareImportedSticker(application, uri)
-            StickerSource(prepared.artifact)
+            CoreBridge.prepareImportedSticker(application, uri).artifact
         }
     }
 

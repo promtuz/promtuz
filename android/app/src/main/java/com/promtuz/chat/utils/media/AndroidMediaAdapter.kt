@@ -18,9 +18,10 @@ import uniffi.core.VideoRenderReportRecord
 import uniffi.core.VideoRenderRequestRecord
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 
-class ImagePreparationException(message: String) : Exception(message)
+class MediaPreparationException(message: String) : Exception(message)
 
 /** A bounded URI lease and platform decoder. Core still owns media policy and output. */
 class AndroidMediaAdapter private constructor(
@@ -28,8 +29,10 @@ class AndroidMediaAdapter private constructor(
     private val uri: Uri,
     descriptor: ParcelFileDescriptor,
     private val input: ParcelFileDescriptor.AutoCloseInputStream,
+    private val privateSource: File? = null,
 ) : MediaSourceAdapter {
     private val lock = Any()
+    private val cancelled = AtomicBoolean(false)
     private var released = false
     private var videoFrames: AndroidVideoAdapter.VideoFrameDecoder? = null
     private val sourceSize = descriptor.statSize.takeIf { it >= 0 }?.toULong()
@@ -136,7 +139,9 @@ class AndroidMediaAdapter private constructor(
         return codecCall {
             val input = AndroidVideoAdapter.inspect(context, uri)
             val output = File(request.outputPath)
-            AndroidVideoAdapter.render(context, uri, output, input, request.plan)
+            AndroidVideoAdapter.render(
+                context, uri, output, input, request.plan, request.trim, cancelled::get,
+            )
             val probe = AndroidVideoAdapter.inspect(context, Uri.fromFile(output))
             val poster = videoPoster(context, Uri.fromFile(output), 320)
                 ?: throw CoreException.Refused("The prepared video has no readable poster frame.")
@@ -169,6 +174,11 @@ class AndroidMediaAdapter private constructor(
             frames
         }
         runCatching { frames?.close() }
+        privateSource?.delete()
+    }
+
+    override fun cancel() {
+        cancelled.set(true)
     }
 
     private fun checkOpen() {
@@ -189,19 +199,42 @@ class AndroidMediaAdapter private constructor(
         private val READ_CHUNK_BYTES = 1_048_576u
 
         fun open(context: Context, uri: Uri): AndroidMediaAdapter {
+            return open(context, uri, null)
+        }
+
+        /** Makes clipboard bytes an owned platform source; core still reads it in bounded chunks. */
+        fun openBytes(context: Context, bytes: ByteArray): AndroidMediaAdapter {
+            if (bytes.size > MAX_BYTE_SOURCE_BYTES) {
+                throw MediaPreparationException("This media is too large.")
+            }
+            val privateSource = File.createTempFile("media-import-", ".source", context.cacheDir)
+            return try {
+                privateSource.outputStream().use { it.write(bytes) }
+                open(context, Uri.fromFile(privateSource), privateSource)
+            } catch (error: Exception) {
+                privateSource.delete()
+                throw MediaPreparationException("Couldn’t open this media.")
+            }
+        }
+
+        private fun open(context: Context, uri: Uri, privateSource: File?): AndroidMediaAdapter {
             val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-                ?: throw ImagePreparationException("Couldn’t open this media.")
+                ?: throw MediaPreparationException("Couldn’t open this media.")
             return try {
                 AndroidMediaAdapter(
                     context.applicationContext,
                     uri,
                     descriptor,
                     ParcelFileDescriptor.AutoCloseInputStream(descriptor),
+                    privateSource,
                 )
             } catch (_: Exception) {
                 descriptor.close()
-                throw ImagePreparationException("Couldn’t open this media.")
+                privateSource?.delete()
+                throw MediaPreparationException("Couldn’t open this media.")
             }
         }
+
+        private const val MAX_BYTE_SOURCE_BYTES = 100 * 1024 * 1024
     }
 }

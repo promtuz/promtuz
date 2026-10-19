@@ -14,6 +14,6 @@ data class AvatarSource(val uri: Uri, val bitmap: Bitmap) {
 
 suspend fun pickAvatarSource(context: Context, uri: Uri): AvatarSource {
     val bitmap = decodeDownscaled(context, uri, 1024)
-        ?: throw ImagePreparationException("Couldn’t open this photo.")
+        ?: throw MediaPreparationException("Couldn’t open this photo.")
     return AvatarSource(uri, bitmap)
 }

@@ -24,6 +24,7 @@ pub trait MediaSourceAdapter: Send + Sync {
     fn render_video(
         &self, request: VideoRenderRequestRecord,
     ) -> Result<VideoRenderReportRecord, CoreError>;
+    fn cancel(&self);
     fn release(&self);
 }
 
@@ -107,6 +108,7 @@ impl crate::media::ports::MediaSource for SourceAdapter {
             .render_video(VideoRenderRequestRecord {
                 output_path: request.output.to_string_lossy().into_owned(),
                 plan: VideoEncodingPlanRecord::from_core(request.plan),
+                trim: request.trim.map(TimeRangeRecord::from_core),
             })
             .map_err(source_error)?;
         Ok(crate::media::ports::VideoRenderReport {
@@ -138,6 +140,7 @@ fn source_error(error: CoreError) -> anyhow::Error {
 #[derive(uniffi::Object)]
 pub struct MediaImport {
     source: parking_lot::Mutex<Option<crate::media::ports::SourceLease>>,
+    cancellation: crate::media::MediaCancellation,
 }
 
 #[derive(uniffi::Record)]
@@ -166,6 +169,23 @@ pub struct DecodedImageFrameRecord {
 pub struct VideoRenderRequestRecord {
     pub output_path: String,
     pub plan: VideoEncodingPlanRecord,
+    pub trim: Option<TimeRangeRecord>,
+}
+
+#[derive(uniffi::Record)]
+pub struct TimeRangeRecord {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl TimeRangeRecord {
+    fn from_core(range: crate::media::TimeRange) -> Self {
+        Self { start_ms: range.start_ms, end_ms: range.end_ms }
+    }
+
+    fn into_core(self) -> crate::media::TimeRange {
+        crate::media::TimeRange { start_ms: self.start_ms, end_ms: self.end_ms }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -271,21 +291,25 @@ impl VideoEncodingPlanRecord {
 #[derive(uniffi::Object)]
 pub struct MediaImageJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+    cancellation: crate::media::MediaCancellation,
 }
 
 #[derive(uniffi::Object)]
 pub struct MediaVideoJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+    cancellation: crate::media::MediaCancellation,
 }
 
 #[derive(uniffi::Object)]
 pub struct MediaPreparedImageJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+    cancellation: crate::media::MediaCancellation,
 }
 
 #[derive(uniffi::Object)]
 pub struct MediaStickerJob {
     job: parking_lot::Mutex<Option<crate::media::MediaJob>>,
+    cancellation: crate::media::MediaCancellation,
 }
 
 #[derive(uniffi::Object)]
@@ -329,8 +353,14 @@ pub struct PreparedStickerRecord {
 impl MediaImport {
     #[uniffi::constructor]
     pub fn from_source(source: Arc<dyn MediaSourceAdapter>) -> Result<Arc<Self>, CoreError> {
+        let cancellation = crate::media::MediaCancellation::with_callback({
+            let source = source.clone();
+            Arc::new(move || source.cancel())
+        });
         let source = crate::media::ports::SourceLease::open(Box::new(SourceAdapter(source)))?;
-        Ok(Arc::new(Self { source: parking_lot::Mutex::new(Some(source)) }))
+        Ok(Arc::new(Self {
+            source: parking_lot::Mutex::new(Some(source)), cancellation,
+        }))
     }
 
     pub fn size(&self) -> Result<u64, CoreError> {
@@ -372,12 +402,21 @@ impl MediaImport {
 
     pub fn begin_chat_image(&self, hd_enabled: bool) -> Result<Arc<MediaImageJob>, CoreError> {
         let job = take_import_job(self, crate::media::MediaRequest::ChatImage { hd_enabled })?;
-        Ok(Arc::new(MediaImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+        Ok(Arc::new(MediaImageJob {
+            cancellation: job.cancellation(), job: parking_lot::Mutex::new(Some(job)),
+        }))
     }
 
-    pub fn begin_chat_video(&self) -> Result<Arc<MediaVideoJob>, CoreError> {
-        let job = take_import_job(self, crate::media::MediaRequest::ChatVideo { trim: None })?;
-        Ok(Arc::new(MediaVideoJob { job: parking_lot::Mutex::new(Some(job)) }))
+    pub fn begin_chat_video(
+        &self, trim: Option<TimeRangeRecord>,
+    ) -> Result<Arc<MediaVideoJob>, CoreError> {
+        let job = take_import_job(
+            self,
+            crate::media::MediaRequest::ChatVideo { trim: trim.map(TimeRangeRecord::into_core) },
+        )?;
+        Ok(Arc::new(MediaVideoJob {
+            cancellation: job.cancellation(), job: parking_lot::Mutex::new(Some(job)),
+        }))
     }
 
     pub fn begin_avatar(
@@ -391,12 +430,21 @@ impl MediaImport {
         .validate()
         .map_err(anyhow::Error::msg)?;
         let job = take_import_job(self, crate::media::MediaRequest::Avatar { crop })?;
-        Ok(Arc::new(MediaPreparedImageJob { job: parking_lot::Mutex::new(Some(job)) }))
+        Ok(Arc::new(MediaPreparedImageJob {
+            cancellation: job.cancellation(), job: parking_lot::Mutex::new(Some(job)),
+        }))
     }
 
-    pub fn begin_sticker(&self) -> Result<Arc<MediaStickerJob>, CoreError> {
-        let job = take_import_job(self, crate::media::MediaRequest::Sticker { trim: None })?;
-        Ok(Arc::new(MediaStickerJob { job: parking_lot::Mutex::new(Some(job)) }))
+    pub fn begin_sticker(
+        &self, trim: Option<TimeRangeRecord>,
+    ) -> Result<Arc<MediaStickerJob>, CoreError> {
+        let job = take_import_job(
+            self,
+            crate::media::MediaRequest::Sticker { trim: trim.map(TimeRangeRecord::into_core) },
+        )?;
+        Ok(Arc::new(MediaStickerJob {
+            cancellation: job.cancellation(), job: parking_lot::Mutex::new(Some(job)),
+        }))
     }
 }
 
@@ -406,10 +454,11 @@ fn take_import_job(
     let source = import.source.lock().take().ok_or_else(|| CoreError::Refused {
         msg: "This media import was already used or discarded.".into(),
     })?;
-    Ok(crate::media::MediaJob::from_source(
+    Ok(crate::media::MediaJob::from_source_with_cancellation(
         source,
         request,
         core().db.files_dir("media-imports").into(),
+        import.cancellation.clone(),
     )?)
 }
 
@@ -434,7 +483,8 @@ impl MediaImageJob {
     }
 
     pub fn cancel(&self) {
-        if let Some(mut job) = self.job.lock().take() {
+        self.cancellation.cancel();
+        if let Some(mut job) = self.job.try_lock().and_then(|mut job| job.take()) {
             job.cancel();
         }
     }
@@ -460,7 +510,8 @@ impl MediaVideoJob {
     }
 
     pub fn cancel(&self) {
-        if let Some(mut job) = self.job.lock().take() {
+        self.cancellation.cancel();
+        if let Some(mut job) = self.job.try_lock().and_then(|mut job| job.take()) {
             job.cancel();
         }
     }
@@ -490,7 +541,8 @@ impl MediaPreparedImageJob {
     }
 
     pub fn cancel(&self) {
-        if let Some(mut job) = self.job.lock().take() {
+        self.cancellation.cancel();
+        if let Some(mut job) = self.job.try_lock().and_then(|mut job| job.take()) {
             job.cancel();
         }
     }
@@ -519,7 +571,8 @@ impl MediaStickerJob {
     }
 
     pub fn cancel(&self) {
-        if let Some(mut job) = self.job.lock().take() {
+        self.cancellation.cancel();
+        if let Some(mut job) = self.job.try_lock().and_then(|mut job| job.take()) {
             job.cancel();
         }
     }
@@ -576,17 +629,11 @@ pub struct AvifDecoder {
 }
 
 #[derive(uniffi::Record)]
-pub struct AvifFrameRecord {
-    pub rgba16: Vec<u8>,
+pub struct AvifAnimationFrameRecord {
+    pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub duration_ms: u32,
-    pub source_depth: u32,
-    pub color_primaries: u16,
-    pub transfer_characteristics: u16,
-    pub matrix_coefficients: u16,
-    pub full_range: bool,
-    pub has_alpha: bool,
 }
 
 /// Source content light bounds in nits. A declared zero means unspecified;
@@ -654,31 +701,46 @@ pub fn inspect_avif(bytes: Vec<u8>) -> Result<Option<AvifInfoRecord>, CoreError>
 }
 
 #[uniffi::export]
+pub fn decode_avif_sdr(
+    bytes: Vec<u8>, max_edge: u32,
+) -> Result<DecodedImageFrameRecord, CoreError> {
+    let frame = crate::media::image::decode_avif_sdr(&bytes, max_edge)
+        .map_err(|_| CoreError::Refused { msg: "This AVIF cannot be decoded safely.".into() })?;
+    Ok(DecodedImageFrameRecord {
+        pixels: frame.rgba,
+        width: frame.width,
+        height: frame.height,
+        rgba16: false,
+        source_is_hdr: false,
+    })
+}
+
+#[uniffi::export]
 impl AvifDecoder {
     #[uniffi::constructor]
     pub fn open(bytes: Vec<u8>) -> Result<Arc<Self>, CoreError> {
         let decoder = promtuz_avif::Decoder::open(&bytes, promtuz_avif::DecodeLimits::default())
-            .map_err(|_| CoreError::Refused { msg: "This AVIF cannot be decoded safely.".into() })?;
+            .map_err(|_| CoreError::Refused {
+                msg: "This AVIF cannot be decoded safely.".into(),
+            })?;
         Ok(Arc::new(Self { decoder: parking_lot::Mutex::new(decoder) }))
     }
 
-    pub fn next_frame(&self) -> Result<Option<AvifFrameRecord>, CoreError> {
-        let frame = self
-            .decoder
-            .lock()
+    pub fn next_sdr_frame(&self) -> Result<Option<AvifAnimationFrameRecord>, CoreError> {
+        let mut decoder = self.decoder.lock();
+        let transfer = decoder.info.color.transfer;
+        let frame = decoder
             .decode_next()
             .map_err(|_| CoreError::Refused { msg: "This AVIF frame cannot be decoded.".into() })?;
-        Ok(frame.map(|frame| AvifFrameRecord {
-            rgba16: frame.rgba16().iter().flat_map(|sample| sample.to_ne_bytes()).collect(),
-            width: frame.width,
-            height: frame.height,
-            duration_ms: frame.duration_ms,
-            source_depth: frame.source_depth,
-            color_primaries: frame.color.primaries,
-            transfer_characteristics: frame.color.transfer,
-            matrix_coefficients: frame.color.matrix,
-            full_range: frame.color.full_range,
-            has_alpha: frame.has_alpha,
+        Ok(frame.map(|frame| {
+            let rgba16 =
+                frame.rgba16().iter().flat_map(|sample| sample.to_ne_bytes()).collect::<Vec<_>>();
+            AvifAnimationFrameRecord {
+                pixels: crate::media::image::rgba16_to_sdr(&rgba16, transfer),
+                width: frame.width,
+                height: frame.height,
+                duration_ms: frame.duration_ms,
+            }
         }))
     }
 }
@@ -720,9 +782,9 @@ mod tests {
         encoder.add_rgba(&[255, 0, 0, 255].repeat(16 * 16), 40).unwrap();
         encoder.add_rgba(&[0, 255, 0, 255].repeat(16 * 16), 60).unwrap();
         let decoder = AvifDecoder::open(encoder.finish().unwrap()).unwrap();
-        assert_eq!(decoder.next_frame().unwrap().unwrap().duration_ms, 40);
-        assert_eq!(decoder.next_frame().unwrap().unwrap().duration_ms, 60);
-        assert!(decoder.next_frame().unwrap().is_none());
+        assert_eq!(decoder.next_sdr_frame().unwrap().unwrap().duration_ms, 40);
+        assert_eq!(decoder.next_sdr_frame().unwrap().unwrap().duration_ms, 60);
+        assert!(decoder.next_sdr_frame().unwrap().is_none());
     }
 }
 

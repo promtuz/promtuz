@@ -120,7 +120,7 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 val reason = when (e) {
-                    is ImagePreparationException -> e.message
+                    is MediaPreparationException -> e.message
                     is uniffi.core.CoreException.Refused -> e.msg
                     else -> null
                 }

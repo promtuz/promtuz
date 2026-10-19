@@ -11,7 +11,8 @@ pub mod ports;
 pub(crate) mod video;
 
 pub use avif::{AvifInfo, inspect_avif};
-pub use job::{MediaJob, PreparedMedia, StagedImage, StagedVideo};
+pub(crate) use job::MediaCancellation;
+pub(crate) use job::{MediaJob, PreparedMedia};
 pub use policy::{MediaRequest, NormalizedCrop, TimeRange};
 
 use crate::state::core;

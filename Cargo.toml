@@ -7,6 +7,7 @@ members = [
     "libcore",
     "media/avif-sys",
     "media/avif",
+    "tools/media-bench",
     "tools/uniffi-bindgen",
 ]
 resolver = "2"

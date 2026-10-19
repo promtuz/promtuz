@@ -10,6 +10,8 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever as PlatformMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Handler
+import android.os.HandlerThread
 import android.opengl.EGL14
 import android.opengl.EGLExt
 import android.opengl.GLES11Ext
@@ -31,6 +33,7 @@ import kotlinx.coroutines.withContext
 import uniffi.core.VideoAudioProbeRecord
 import uniffi.core.VideoEncodingPlanRecord
 import uniffi.core.VideoProbeRecord
+import uniffi.core.TimeRangeRecord
 
 class VideoPreparationException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -130,10 +133,16 @@ internal class VideoFrameDecoder private constructor(
     }
 }
 
-suspend fun render(context: Context, source: Uri, output: File, input: VideoProbeRecord, plan: VideoEncodingPlanRecord) {
+suspend fun render(
+    context: Context, source: Uri, output: File, input: VideoProbeRecord,
+    plan: VideoEncodingPlanRecord, trim: TimeRangeRecord?, cancelled: () -> Boolean,
+) {
     videoExports.withLock {
         withContext(Dispatchers.Default) {
-            PlatformVideoTranscoder(context, source, output, input, plan).run()
+            val duration = input.durationUs.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+                ?: throw VideoPreparationException("The video's duration is invalid.")
+            val range = trim?.toRangeUs(duration) ?: 0L..duration
+            PlatformVideoTranscoder(context, source, output, input, plan, range, cancelled).run()
         }
     }
 }
@@ -145,6 +154,8 @@ private class PlatformVideoTranscoder(
     private val output: File,
     private val input: VideoProbeRecord,
     private val plan: VideoEncodingPlanRecord,
+    private val trim: LongRange,
+    private val cancelled: () -> Boolean,
 ) {
     fun run() {
         val extractor = MediaExtractor()
@@ -153,6 +164,7 @@ private class PlatformVideoTranscoder(
         var bridge: CodecSurfaceBridge? = null
         var muxer: MediaMuxer? = null
         try {
+            checkCancelled()
             extractor.setDataSource(context, source, emptyMap())
             val track = extractor.videoTrack()
             val sourceFormat = extractor.getTrackFormat(track)
@@ -177,6 +189,7 @@ private class PlatformVideoTranscoder(
             decoder.configure(sourceFormat, bridge.decoderSurface, null, 0)
             muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             extractor.selectTrack(track)
+            extractor.seekTo(trim.first, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             decoder.start()
             encoder.start()
             transcode(extractor, decoder, encoder, bridge, muxer, plan.maxFrameRate.codecInt(), audio)
@@ -216,13 +229,14 @@ private class PlatformVideoTranscoder(
         val minFrameDurationUs = 1_000_000L / maxFrameRate
 
         while (!encoderDone) {
+            checkCancelled()
             if (!inputDone) {
                 val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
                 if (index >= 0) {
                     val buffer = decoder.getInputBuffer(index)
                         ?: throw VideoPreparationException("The video decoder did not provide input memory.")
                     val size = extractor.readSampleData(buffer, 0)
-                    if (size < 0) {
+                    if (size < 0 || extractor.sampleTime >= trim.last) {
                         decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         inputDone = true
                     } else {
@@ -233,17 +247,19 @@ private class PlatformVideoTranscoder(
             }
 
             while (!decoderDone) {
+                checkCancelled()
                 when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> break
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                     else -> if (index >= 0) {
                         val eos = decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        val render = decoderInfo.size > 0 &&
-                            (lastRenderedUs == Long.MIN_VALUE || decoderInfo.presentationTimeUs - lastRenderedUs >= minFrameDurationUs)
+                        val render = decoderInfo.size > 0 && shouldRenderVideoFrame(
+                            decoderInfo.presentationTimeUs, trim.first, lastRenderedUs, minFrameDurationUs,
+                        )
                         decoder.releaseOutputBuffer(index, render)
                         if (render) {
                             bridge.awaitFrame()
-                            bridge.drawFrame(decoderInfo.presentationTimeUs)
+                            bridge.drawFrame(decoderInfo.presentationTimeUs - trim.first)
                             lastRenderedUs = decoderInfo.presentationTimeUs
                         }
                         if (eos) {
@@ -255,6 +271,7 @@ private class PlatformVideoTranscoder(
             }
 
             while (!encoderDone) {
+                checkCancelled()
                 when (val index = encoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> break
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -298,6 +315,7 @@ private class PlatformVideoTranscoder(
             val inputMime = input.getString(MediaFormat.KEY_MIME)
                 ?: return null
             extractor.selectTrack(track)
+            extractor.seekTo(trim.first, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             decoder = MediaCodec.createDecoderByType(inputMime).apply { configure(input, null, null, 0); start() }
             val decoderInfo = MediaCodec.BufferInfo()
             val encoderInfo = MediaCodec.BufferInfo()
@@ -307,13 +325,52 @@ private class PlatformVideoTranscoder(
             var decoderInputDone = false
             var decoderDone = false
             var encoderDone = false
+            fun drainEncoder(audioEncoder: MediaCodec): Boolean {
+                when (val index = audioEncoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> format = audioEncoder.outputFormat
+                    else -> if (index >= 0) {
+                        try {
+                            if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && encoderInfo.size > 0) {
+                                val buffer = audioEncoder.getOutputBuffer(index)
+                                    ?: throw IOException("The audio encoder did not provide output memory.")
+                                buffer.position(encoderInfo.offset)
+                                buffer.limit(encoderInfo.offset + encoderInfo.size)
+                                val size = buffer.remaining()
+                                if (sampleBytes + size > MAX_CACHED_AUDIO_BYTES) {
+                                    throw IOException("The prepared audio is too large to stage.")
+                                }
+                                samples += EncodedSample(
+                                    ByteArray(size).also(buffer::get), encoderInfo.presentationTimeUs, encoderInfo.flags,
+                                )
+                                sampleBytes += size
+                            }
+                        } finally {
+                            audioEncoder.releaseOutputBuffer(index, false)
+                        }
+                        return encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    }
+                }
+                return false
+            }
+            fun inputBuffer(audioEncoder: MediaCodec): Int {
+                while (true) {
+                    checkCancelled()
+                    val index = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    if (index >= 0) return index
+                    if (drainEncoder(audioEncoder)) {
+                        throw IOException("The audio encoder ended before accepting its input.")
+                    }
+                }
+            }
             while (!encoderDone) {
+                checkCancelled()
                 if (!decoderInputDone) {
                     val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
                     if (index >= 0) {
                         val buffer = decoder.getInputBuffer(index) ?: return null
                         val size = extractor.readSampleData(buffer, 0)
-                        if (size < 0) {
+                        if (size < 0 || extractor.sampleTime >= trim.last) {
                             decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             decoderInputDone = true
                         } else {
@@ -322,7 +379,9 @@ private class PlatformVideoTranscoder(
                         }
                     }
                 }
-                while (!decoderDone) when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
+                while (!decoderDone) {
+                    checkCancelled()
+                    when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> break
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         val pcm = decoder.outputFormat
@@ -340,51 +399,39 @@ private class PlatformVideoTranscoder(
                     }
                     else -> if (index >= 0) {
                         val eos = decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        if (decoderInfo.size > 0) {
+                        if (decoderInfo.size > 0 && decoderInfo.presentationTimeUs >= trim.first) {
                             val audioEncoder = encoder ?: return null
-                            val inputIndex = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
-                            if (inputIndex < 0) continue
+                            val inputIndex = inputBuffer(audioEncoder)
                             val encoded = audioEncoder.getInputBuffer(inputIndex) ?: return null
                             val decoded = decoder.getOutputBuffer(index) ?: return null
                             decoded.position(decoderInfo.offset)
                             decoded.limit(decoderInfo.offset + decoderInfo.size)
                             encoded.put(decoded)
-                            audioEncoder.queueInputBuffer(inputIndex, 0, decoderInfo.size, decoderInfo.presentationTimeUs, 0)
+                            audioEncoder.queueInputBuffer(inputIndex, 0, decoderInfo.size, decoderInfo.presentationTimeUs - trim.first, 0)
                         }
                         decoder.releaseOutputBuffer(index, false)
                         if (eos) {
-                            encoder?.let { audioEncoder ->
-                                val inputIndex = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
-                                if (inputIndex >= 0) audioEncoder.queueInputBuffer(inputIndex, 0, 0, decoderInfo.presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            }
+                            val audioEncoder = encoder ?: return null
+                            audioEncoder.queueInputBuffer(
+                                inputBuffer(audioEncoder), 0, 0,
+                                (decoderInfo.presentationTimeUs - trim.first).coerceAtLeast(0),
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                            )
                             decoderDone = true
                         }
                     }
-                }
-                val audioEncoder = encoder
-                if (audioEncoder != null) while (!encoderDone) when (val index = audioEncoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
-                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
-                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> format = audioEncoder.outputFormat
-                    else -> if (index >= 0) {
-                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && encoderInfo.size > 0) {
-                            val buffer = audioEncoder.getOutputBuffer(index) ?: return null
-                            buffer.position(encoderInfo.offset)
-                            buffer.limit(encoderInfo.offset + encoderInfo.size)
-                            val size = buffer.remaining()
-                            if (sampleBytes + size > MAX_CACHED_AUDIO_BYTES) return null
-                            samples += EncodedSample(ByteArray(size).also(buffer::get), encoderInfo.presentationTimeUs, encoderInfo.flags)
-                            sampleBytes += size
-                        }
-                        audioEncoder.releaseOutputBuffer(index, false)
-                        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
                     }
                 }
+                val audioEncoder = encoder
+                if (audioEncoder != null) encoderDone = drainEncoder(audioEncoder)
             }
             format?.let { EncodedAudio(it, samples) }
         } finally {
             runCatching { decoder?.stop() }; runCatching { encoder?.stop() }
             runCatching { decoder?.release() }; runCatching { encoder?.release() }; extractor.release()
         }
+    } catch (error: VideoPreparationException) {
+        throw error
     } catch (_: Exception) {
         null
     }
@@ -400,11 +447,21 @@ private class PlatformVideoTranscoder(
 
     private fun MediaFormat.rotation(): Int = (int(MediaFormat.KEY_ROTATION) ?: 0).let { (it % 360 + 360) % 360 }
 
+    private fun checkCancelled() {
+        if (cancelled()) throw VideoPreparationException("Media preparation was cancelled.")
+    }
+
     private companion object {
         const val CODEC_TIMEOUT_US = 10_000L
         const val MAX_CACHED_AUDIO_BYTES = 32L * 1024 * 1024
     }
 }
+
+internal fun shouldRenderVideoFrame(
+    presentationTimeUs: Long, firstPresentationTimeUs: Long, lastRenderedUs: Long,
+    minimumFrameDurationUs: Long,
+): Boolean = presentationTimeUs >= firstPresentationTimeUs &&
+    (lastRenderedUs == Long.MIN_VALUE || presentationTimeUs - lastRenderedUs >= minimumFrameDurationUs)
 
 private class CodecSurfaceBridge(
     encoderSurface: Surface,
@@ -426,6 +483,8 @@ private class CodecSurfaceBridge(
     private val vertices = vertexData()
     private val textureCoordinates = textureData(rotation)
     private val frames = Semaphore(0)
+    private val callbackThread = HandlerThread("promtuz-video-frame").apply { start() }
+    private val callbackHandler = Handler(callbackThread.looper)
 
     init {
         check(display != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
@@ -451,7 +510,7 @@ private class CodecSurfaceBridge(
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         surfaceTexture = SurfaceTexture(texture).also { image ->
-            image.setOnFrameAvailableListener { frames.release() }
+            image.setOnFrameAvailableListener({ frames.release() }, callbackHandler)
         }
         decoderSurface = Surface(surfaceTexture)
         program = program(VERTEX_SHADER, FRAGMENT_SHADER)
@@ -496,6 +555,8 @@ private class CodecSurfaceBridge(
         runCatching { EGL14.eglDestroySurface(display, window) }
         runCatching { EGL14.eglDestroyContext(display, context) }
         runCatching { EGL14.eglTerminate(display) }
+        callbackThread.quitSafely()
+        runCatching { callbackThread.join() }
     }
 
     private companion object {
@@ -655,6 +716,19 @@ private fun hasHdrProfile(mime: String, profile: Int?): Boolean = when (mime) {
 private fun UInt.codecInt(): Int {
     if (this == 0u || this > Int.MAX_VALUE.toUInt()) throw VideoPreparationException("The video encoder cannot represent the requested settings.")
     return toInt()
+}
+
+private fun TimeRangeRecord.toRangeUs(durationUs: Long): LongRange {
+    val start = startMs.toLong().takeIf { startMs <= Long.MAX_VALUE.toULong() }
+        ?.let { Math.multiplyExact(it, 1_000) }
+        ?: throw VideoPreparationException("The selected trim is invalid.")
+    val end = endMs.toLong().takeIf { endMs <= Long.MAX_VALUE.toULong() }
+        ?.let { Math.multiplyExact(it, 1_000) }
+        ?: throw VideoPreparationException("The selected trim is invalid.")
+    if (start < 0 || start >= end || end > durationUs) {
+        throw VideoPreparationException("The selected trim is outside this video.")
+    }
+    return start..end
 }
 
 private fun MediaFormat.int(key: String): Int? = runCatching { if (containsKey(key)) getInteger(key) else null }.getOrNull()
