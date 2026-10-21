@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use common::crypto::verify_ed25519;
-use common::crypto::verify_ed25519;
 use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::DispatchP;
 use common::proto::client_rel::activity_sig_message;
