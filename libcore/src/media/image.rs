@@ -445,20 +445,23 @@ fn avif_still_to_sdr(decoded: DecodedAvif) -> DecodedStill {
 }
 
 pub(crate) fn rgba16_to_sdr(pixels: &[u8], transfer: u16) -> Vec<u8> {
-    let hdr = matches!(transfer, 16 | 18);
     pixels
         .chunks_exact(8)
         .flat_map(|pixel| {
             let channel =
                 |index| u16::from_ne_bytes([pixel[index], pixel[index + 1]]) as f32 / 65_535.0;
             let (r, g, b) = (channel(0), channel(2), channel(4));
-            let (r, g, b) = if hdr { hdr_to_sdr(r, g, b, transfer) } else { (r, g, b) };
-            [
-                linear_to_srgb(r),
-                linear_to_srgb(g),
-                linear_to_srgb(b),
-                (channel(6) * 255.0).round() as u8,
-            ]
+            let rgb = match transfer {
+                16 | 18 => {
+                    let (r, g, b) = hdr_to_sdr(r, g, b, transfer);
+                    [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b)]
+                },
+                // libavif converts YUV to RGB but preserves the source transfer curve.
+                // SDR AVIF output is already display-encoded; only linear input needs encoding.
+                8 => [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b)],
+                _ => [r, g, b].map(|channel| (channel * 255.0).round() as u8),
+            };
+            [rgb[0], rgb[1], rgb[2], (channel(6) * 255.0).round() as u8]
         })
         .collect()
 }
@@ -948,6 +951,17 @@ mod tests {
         let image = decode_avif_sdr(&encoder.finish().unwrap(), 4).unwrap();
         assert_eq!((image.width, image.height), (4, 2));
         assert_eq!(image.rgba.len(), 4 * 2 * 4);
+    }
+
+    #[test]
+    fn sdr_avif_channels_are_not_gamma_encoded_twice() {
+        let pixel = [0x8080u16, 0x4040, 0x2020, u16::MAX]
+            .into_iter()
+            .flat_map(u16::to_ne_bytes)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rgba16_to_sdr(&pixel, 13), vec![128, 64, 32, 255]);
+        assert_eq!(rgba16_to_sdr(&pixel, 8), vec![188, 137, 99, 255]);
     }
 
     #[test]
