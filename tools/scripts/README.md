@@ -137,7 +137,8 @@ Do:
 - Group the entries under a few headings that name an area: Calls, Media, Fixes.
 - Say what the person can now do, in their words, one line each.
 - Lead with the change that matters most and keep the list short.
-- Fold several commits into the single sentence that describes their result.
+- Describe the net change from the previous published release, folding all
+  intermediate commits into that result.
 - Say what a fix means for them, not what was wrong in the code.
 
 Don't:
