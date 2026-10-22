@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -63,12 +62,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
 
     LifecycleResumeEffect(viewModel) {
         viewModel.setScreenVisible(true)
-        val current = viewModel.state.value
-        if (current is UpdateState.PermissionNeeded && context.packageManager.canRequestPackageInstalls()) {
-            viewModel.install(current.manifest, current.apk)
-        } else {
-            viewModel.check()
-        }
+        viewModel.check()
         onPauseOrDispose { viewModel.setScreenVisible(false) }
     }
 
@@ -79,8 +73,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
         ) {
             if (option != channel) {
                 when (state) {
-                    is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.Installing,
-                    is UpdateState.PermissionNeeded -> pendingChannel = option
+                    is UpdateState.Downloading, is UpdateState.Ready -> pendingChannel = option
                     else -> viewModel.switchChannel(option)
                 }
             }
@@ -141,7 +134,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                             is UpdateState.Available -> {
                                 UpdateTitle("Update available")
                                 UpdateDetail(versionLine(context, shown.manifest))
-                                UpdateAction("Download update", active) { viewModel.download(shown.manifest) }
+                                UpdateAction("Download", active) { viewModel.download(shown.manifest) }
                             }
                             is UpdateState.Downloading -> {
                                 UpdateTitle("Downloading update")
@@ -153,18 +146,8 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                             is UpdateState.Ready -> {
                                 UpdateTitle("Ready to install")
                                 UpdateDetail(versionLine(context, shown.manifest))
-                                UpdateDetail("Promtuz closes while the update installs.")
-                                UpdateAction("Install update", active) { viewModel.install(shown.manifest, shown.apk) }
-                            }
-                            is UpdateState.Installing -> {
-                                UpdateTitle("Installing update")
-                                UpdateDetail(versionLine(context, shown.manifest))
-                                LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
-                            }
-                            is UpdateState.PermissionNeeded -> {
-                                UpdateTitle("Allow installs")
-                                UpdateDetail("Allow Promtuz to install updates in Android settings.")
-                                UpdateAction("Open settings", active, viewModel::requestInstallPermission)
+                                UpdateDetail("Confirm the update in Android's installer.")
+                                UpdateAction("Install", active) { viewModel.install(shown.manifest, shown.apk) }
                             }
                             is UpdateState.Error -> {
                                 UpdateTitle("Couldn't update Promtuz")
@@ -193,6 +176,8 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
         }
     }
 
+    UpdateInstallPermissionDialog(state, viewModel)
+
     pendingChannel?.let { selected ->
         AppAlertDialog(
             onDismissRequest = { pendingChannel = null },
@@ -204,6 +189,18 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
             dismissButton = { TextButton({ pendingChannel = null }) { Text("Cancel") } },
         )
     }
+}
+
+@Composable
+internal fun UpdateInstallPermissionDialog(state: UpdateState, viewModel: UpdateVM) {
+    if (state !is UpdateState.Ready || !state.needsInstallPermission) return
+    AppAlertDialog(
+        onDismissRequest = viewModel::dismissInstallPermission,
+        title = { Text("Allow updates") },
+        text = { Text("Android needs your permission to install updates from Promtuz. You can allow this in system settings.") },
+        confirmButton = { TextButton(viewModel::requestInstallPermission) { Text("Settings") } },
+        dismissButton = { TextButton(viewModel::dismissInstallPermission) { Text("Not now") } },
+    )
 }
 
 @Composable

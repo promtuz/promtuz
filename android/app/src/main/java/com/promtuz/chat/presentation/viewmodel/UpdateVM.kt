@@ -16,5 +16,6 @@ class UpdateVM(private val updates: UpdateRepository) : ViewModel() {
     fun download(manifest: UpdateManifest) = updates.download(manifest)
     fun cancelDownload() = updates.cancelDownload()
     fun install(manifest: UpdateManifest, apk: File) = updates.install(manifest, apk)
+    fun dismissInstallPermission() = updates.dismissInstallPermission()
     fun requestInstallPermission() = updates.requestInstallPermission()
 }

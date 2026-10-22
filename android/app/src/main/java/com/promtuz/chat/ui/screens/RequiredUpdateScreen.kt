@@ -74,10 +74,6 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
     BackHandler { }
     LifecycleResumeEffect(viewModel) {
         viewModel.setScreenVisible(true)
-        val current = viewModel.state.value
-        if (current is UpdateState.PermissionNeeded && context.packageManager.canRequestPackageInstalls()) {
-            viewModel.install(current.manifest, current.apk)
-        }
         onPauseOrDispose { viewModel.setScreenVisible(false) }
     }
 
@@ -136,16 +132,8 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
                         Detail("Downloading · ${(shown.progress * 100).toInt()}% of ${Formatter.formatShortFileSize(context, shown.manifest.size)}")
                     }
                     is UpdateState.Ready -> {
-                        Detail("Promtuz closes while the update installs.")
+                        Detail("Confirm the update in Android's installer.")
                         Action("Install", active) { viewModel.install(shown.manifest, shown.apk) }
-                    }
-                    is UpdateState.Installing -> {
-                        LinearProgressIndicator(Modifier.fillMaxWidth())
-                        Detail("Installing")
-                    }
-                    is UpdateState.PermissionNeeded -> {
-                        Detail("Allow Promtuz to install updates in Android settings.")
-                        Action("Open settings", active, viewModel::requestInstallPermission)
                     }
                     is UpdateState.Error -> {
                         Detail(shown.message)
@@ -156,6 +144,7 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
             }
         }
     } }
+    UpdateInstallPermissionDialog(state, viewModel)
 }
 
 @Composable
