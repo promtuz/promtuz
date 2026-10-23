@@ -184,6 +184,7 @@ pub const VIDEO: VideoProfile = VideoProfile {
 pub const POSTER: ImageProfile =
     ImageProfile { max_edge: 320, max_bytes: 32 * 1024, emergency_edge: 160 };
 
+/// Encoded image import limit; video sources stay in the streaming adapter.
 pub const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_SOURCE_PIXELS: u64 = 32_000_000;
 pub const MAX_ANIMATION_FRAMES: u32 = 600;

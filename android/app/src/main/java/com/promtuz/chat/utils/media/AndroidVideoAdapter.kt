@@ -166,7 +166,8 @@ private class PlatformVideoTranscoder(
         try {
             checkCancelled()
             extractor.setDataSource(context, source, emptyMap())
-            val track = extractor.videoTrack()
+            val track = extractor.videoTracks().firstOrNull()
+                ?: throw VideoPreparationException("The selected file has no readable video track.")
             val sourceFormat = extractor.getTrackFormat(track)
             val sourceMime = sourceFormat.getString(MediaFormat.KEY_MIME)
                 ?: throw VideoPreparationException("The video's picture format is unavailable.")
@@ -180,13 +181,21 @@ private class PlatformVideoTranscoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
                 setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
             }
             encoder = MediaCodec.createEncoderByType(plan.videoMime)
             encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             bridge = CodecSurfaceBridge(encoder.createInputSurface(), width, height, sourceFormat.rotation())
             decoder = MediaCodec.createDecoderByType(sourceMime)
+            // The texture coordinates own rotation; do not also rotate in the decoder.
+            sourceFormat.setInteger(MediaFormat.KEY_ROTATION, 0)
             if (input.hdr) sourceFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
             decoder.configure(sourceFormat, bridge.decoderSurface, null, 0)
+            if (input.hdr && decoder.inputFormat.int(MediaFormat.KEY_COLOR_TRANSFER_REQUEST) != MediaFormat.COLOR_TRANSFER_SDR_VIDEO) {
+                throw VideoPreparationException("This device could not convert the HDR video to SDR.")
+            }
             muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             extractor.selectTrack(track)
             extractor.seekTo(trim.first, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
@@ -230,9 +239,11 @@ private class PlatformVideoTranscoder(
 
         while (!encoderDone) {
             checkCancelled()
+            var inputQueued = false
             if (!inputDone) {
-                val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                val index = decoder.dequeueInputBuffer(0)
                 if (index >= 0) {
+                    inputQueued = true
                     val buffer = decoder.getInputBuffer(index)
                         ?: throw VideoPreparationException("The video decoder did not provide input memory.")
                     val size = extractor.readSampleData(buffer, 0)
@@ -246,10 +257,10 @@ private class PlatformVideoTranscoder(
                 }
             }
 
-            while (!decoderDone) {
+            if (!decoderDone) {
                 checkCancelled()
-                when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
-                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                when (val index = decoder.dequeueOutputBuffer(decoderInfo, if (inputQueued) 0 else CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                     else -> if (index >= 0) {
                         val eos = decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
@@ -272,7 +283,7 @@ private class PlatformVideoTranscoder(
 
             while (!encoderDone) {
                 checkCancelled()
-                when (val index = encoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
+                when (val index = encoder.dequeueOutputBuffer(encoderInfo, if (decoderDone) CODEC_TIMEOUT_US else 0)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> break
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         if (muxerStarted) throw VideoPreparationException("The video encoder changed format twice.")
@@ -325,8 +336,8 @@ private class PlatformVideoTranscoder(
             var decoderInputDone = false
             var decoderDone = false
             var encoderDone = false
-            fun drainEncoder(audioEncoder: MediaCodec): Boolean {
-                when (val index = audioEncoder.dequeueOutputBuffer(encoderInfo, CODEC_TIMEOUT_US)) {
+            fun drainEncoder(audioEncoder: MediaCodec, timeoutUs: Long = 0): Boolean {
+                when (val index = audioEncoder.dequeueOutputBuffer(encoderInfo, timeoutUs)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> format = audioEncoder.outputFormat
                     else -> if (index >= 0) {
@@ -356,18 +367,20 @@ private class PlatformVideoTranscoder(
             fun inputBuffer(audioEncoder: MediaCodec): Int {
                 while (true) {
                     checkCancelled()
-                    val index = audioEncoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    val index = audioEncoder.dequeueInputBuffer(0)
                     if (index >= 0) return index
-                    if (drainEncoder(audioEncoder)) {
+                    if (drainEncoder(audioEncoder, CODEC_TIMEOUT_US)) {
                         throw IOException("The audio encoder ended before accepting its input.")
                     }
                 }
             }
             while (!encoderDone) {
                 checkCancelled()
+                var inputQueued = false
                 if (!decoderInputDone) {
-                    val index = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    val index = decoder.dequeueInputBuffer(0)
                     if (index >= 0) {
+                        inputQueued = true
                         val buffer = decoder.getInputBuffer(index) ?: return null
                         val size = extractor.readSampleData(buffer, 0)
                         if (size < 0 || extractor.sampleTime >= trim.last) {
@@ -379,10 +392,10 @@ private class PlatformVideoTranscoder(
                         }
                     }
                 }
-                while (!decoderDone) {
+                if (!decoderDone) {
                     checkCancelled()
-                    when (val index = decoder.dequeueOutputBuffer(decoderInfo, CODEC_TIMEOUT_US)) {
-                    MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    when (val index = decoder.dequeueOutputBuffer(decoderInfo, if (inputQueued) 0 else CODEC_TIMEOUT_US)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         val pcm = decoder.outputFormat
                         val rate = pcm.int(MediaFormat.KEY_SAMPLE_RATE) ?: return null
@@ -423,7 +436,7 @@ private class PlatformVideoTranscoder(
                     }
                 }
                 val audioEncoder = encoder
-                if (audioEncoder != null) encoderDone = drainEncoder(audioEncoder)
+                if (audioEncoder != null) encoderDone = drainEncoder(audioEncoder, if (decoderDone) CODEC_TIMEOUT_US else 0)
             }
             format?.let { EncodedAudio(it, samples) }
         } finally {
@@ -441,10 +454,6 @@ private class PlatformVideoTranscoder(
         fun info() = MediaCodec.BufferInfo().also { it.set(0, data.size, presentationTimeUs, flags) }
     }
 
-    private fun MediaExtractor.videoTrack(): Int = (0 until trackCount).firstOrNull { index ->
-        getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-    } ?: throw VideoPreparationException("The selected file has no readable video track.")
-
     private fun MediaFormat.rotation(): Int = (int(MediaFormat.KEY_ROTATION) ?: 0).let { (it % 360 + 360) % 360 }
 
     private fun checkCancelled() {
@@ -461,7 +470,9 @@ internal fun shouldRenderVideoFrame(
     presentationTimeUs: Long, firstPresentationTimeUs: Long, lastRenderedUs: Long,
     minimumFrameDurationUs: Long,
 ): Boolean = presentationTimeUs >= firstPresentationTimeUs &&
-    (lastRenderedUs == Long.MIN_VALUE || presentationTimeUs - lastRenderedUs >= minimumFrameDurationUs)
+    (lastRenderedUs == Long.MIN_VALUE ||
+        (presentationTimeUs - firstPresentationTimeUs) / minimumFrameDurationUs >
+        (lastRenderedUs - firstPresentationTimeUs) / minimumFrameDurationUs)
 
 private class CodecSurfaceBridge(
     encoderSurface: Surface,
@@ -535,9 +546,9 @@ private class CodecSurfaceBridge(
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
         GLES20.glUniformMatrix4fv(transform, 1, false, textureMatrix, 0)
         GLES20.glEnableVertexAttribArray(position)
-        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 4 * Float.SIZE_BYTES, vertices)
+        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, vertices)
         GLES20.glEnableVertexAttribArray(textureCoordinate)
-        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false, 4 * Float.SIZE_BYTES, textureCoordinates)
+        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false, 0, textureCoordinates)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         EGLExt.eglPresentationTimeANDROID(display, window, presentationTimeUs * 1_000)
         check(EGL14.eglSwapBuffers(display, window)) { "Could not submit a video frame" }
@@ -600,10 +611,10 @@ private class CodecSurfaceBridge(
         ))
 
         fun textureData(rotation: Int): FloatBuffer = floatBuffer(when (rotation) {
-            90 -> floatArrayOf(0f, 0f, 0f, 1f, 1f, 0f, 1f, 1f)
-            180 -> floatArrayOf(1f, 0f, 0f, 0f, 1f, 1f, 0f, 1f)
-            270 -> floatArrayOf(1f, 1f, 1f, 0f, 0f, 1f, 0f, 0f)
-            else -> floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
+            90 -> floatArrayOf(1f, 0f, 1f, 1f, 0f, 0f, 0f, 1f)
+            180 -> floatArrayOf(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f)
+            270 -> floatArrayOf(0f, 1f, 0f, 0f, 1f, 1f, 1f, 0f)
+            else -> floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
         })
 
         fun floatBuffer(values: FloatArray): FloatBuffer = ByteBuffer.allocateDirect(values.size * Float.SIZE_BYTES)
@@ -620,6 +631,16 @@ private data class PlatformVideoMetadata(
     val durationUs: Long,
 )
 
+private fun MediaExtractor.videoTracks(): List<Int> = (0 until trackCount)
+    .filter { getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true }
+    .groupBy { getTrackFormat(it).int(MediaFormat.KEY_TRACK_ID) ?: -(it + 1) }
+    .values.map { alternatives ->
+        // Dolby Vision can expose its compatible base layer with the same track ID.
+        alternatives.firstOrNull {
+            getTrackFormat(it).getString(MediaFormat.KEY_MIME) != "video/dolby-vision"
+        } ?: alternatives.first()
+    }
+
 private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMetadata {
     val extractor = MediaExtractor()
     var video: MediaFormat? = null
@@ -628,13 +649,12 @@ private fun platformVideoMetadata(context: Context, uri: Uri): PlatformVideoMeta
     var audioTracks = 0
     try {
         extractor.setDataSource(context, uri, emptyMap())
+        val tracks = extractor.videoTracks()
+        videoTracks = tracks.size
+        video = tracks.firstOrNull()?.let(extractor::getTrackFormat)
         for (index in 0 until extractor.trackCount) {
             val format = extractor.getTrackFormat(index)
             val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
-            if (mime.startsWith("video/")) {
-                videoTracks += 1
-                if (video == null) video = format
-            }
             if (mime.startsWith("audio/")) {
                 audioTracks += 1
                 if (audio == null) audio = format
@@ -687,7 +707,7 @@ private fun isoPrimaries(value: Int): UShort? = when (value) {
 }
 
 private const val COLOR_TRANSFER_GAMMA_2_2 = 4
-private const val COLOR_TRANSFER_SRGB = 7
+private const val COLOR_TRANSFER_SRGB = 2
 
 private fun isoTransfer(value: Int): UShort? = when (value) {
     MediaFormat.COLOR_TRANSFER_LINEAR -> 8u

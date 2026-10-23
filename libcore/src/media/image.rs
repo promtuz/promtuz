@@ -309,6 +309,7 @@ pub fn prepare_platform_image(
     source: &mut SourceLease, request: MediaRequest,
 ) -> Result<PreparedImage> {
     request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    source.image_size()?;
     let profile = request
         .image_profile()
         .or_else(|| request.animation_profile().map(|profile| profile.image))

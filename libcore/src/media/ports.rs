@@ -63,8 +63,8 @@ pub struct VideoRenderReport {
 }
 
 pub trait MediaSource: Send {
-    /// A known length lets core refuse an over-limit source before reading it.
-    /// Providers that cannot know it stream until EOF under the same hard cap.
+    /// The encoded length when known. Image imports are capped; video stays
+    /// in the adapter and need not be copied or scanned by core.
     fn length(&self) -> Result<Option<u64>>;
     fn read(&mut self, offset: u64, max_bytes: u32) -> Result<Vec<u8>>;
     fn release(&mut self);
@@ -101,10 +101,6 @@ impl SourceLease {
         let length = source.length()?;
         if let Some(length) = length {
             ensure!(length > 0, "The selected file is empty.");
-            ensure!(
-                length <= MAX_SOURCE_BYTES,
-                "The selected file exceeds the 100 MiB import limit."
-            );
         }
         Ok(Self { source: Some(source), length, cancellation: None })
     }
@@ -137,8 +133,11 @@ impl SourceLease {
         Ok(bytes)
     }
 
-    /// Copies the source in bounded reads. `path` must be a new private file.
+    /// Copies an image in bounded reads. `file` must be a new private file.
     pub fn copy_to(&mut self, file: &mut File) -> Result<u64> {
+        if let Some(length) = self.length {
+            ensure!(length <= MAX_SOURCE_BYTES, "The image exceeds the 100 MiB import limit.");
+        }
         let mut copied = 0_u64;
         loop {
             if self.length == Some(copied) {
@@ -169,11 +168,11 @@ impl SourceLease {
         Ok(copied)
     }
 
-    /// Resolves an unknown provider length through the same bounded reads used
-    /// for import. URI adapters are random-access leases, so this does not
-    /// consume a stream needed by a later platform decoder.
-    pub fn measure(&mut self) -> Result<u64> {
+    /// Enforces the image input limit, including platform-decoded images that
+    /// do not need a private copy. Never scan a video just to learn its size.
+    pub fn image_size(&mut self) -> Result<u64> {
         if let Some(length) = self.length {
+            ensure!(length <= MAX_SOURCE_BYTES, "The image exceeds the 100 MiB import limit.");
             return Ok(length);
         }
         let mut length = 0_u64;
@@ -185,7 +184,8 @@ impl SourceLease {
                 );
                 break;
             }
-            let bytes = self.read_chunk(length, READ_CHUNK_BYTES)?;
+            let requested = (MAX_SOURCE_BYTES - length).min(u64::from(READ_CHUNK_BYTES)) as u32;
+            let bytes = self.read_chunk(length, requested)?;
             if bytes.is_empty() {
                 break;
             }
@@ -310,7 +310,7 @@ mod tests {
         fn length(&self) -> Result<Option<u64>> { Ok(None) }
 
             fn read(&mut self, _offset: u64, max_bytes: u32) -> Result<Vec<u8>> {
-                Ok(vec![0; max_bytes as usize])
+                Ok(vec![0; (max_bytes as usize / 2).max(1)])
             }
 
             fn release(&mut self) {}
@@ -319,7 +319,28 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source");
         let mut lease = SourceLease::open(Box::new(Endless)).unwrap();
+        assert!(lease.image_size().is_err());
         assert!(lease.copy_to(&mut File::create(path).unwrap()).is_err());
+    }
+
+    #[test]
+    fn oversized_image_import_is_refused_before_copying() {
+        struct Large;
+
+        impl MediaSource for Large {
+            fn length(&self) -> Result<Option<u64>> { Ok(Some(MAX_SOURCE_BYTES + 1)) }
+            fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
+                panic!("An oversized image must be refused before reading it.")
+            }
+            fn release(&mut self) {}
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image");
+        let mut lease = SourceLease::open(Box::new(Large)).unwrap();
+        assert!(lease.image_size().is_err());
+        assert!(lease.copy_to(&mut File::create(&path).unwrap()).is_err());
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
     }
 
     #[test]
@@ -339,7 +360,7 @@ mod tests {
         }
 
         let mut lease = SourceLease::open(Box::new(Unknown(vec![1; READ_CHUNK_BYTES as usize + 1]))).unwrap();
-        assert_eq!(lease.measure().unwrap(), u64::from(READ_CHUNK_BYTES) + 1);
+        assert_eq!(lease.image_size().unwrap(), u64::from(READ_CHUNK_BYTES) + 1);
         assert_eq!(lease.known_length(), Some(u64::from(READ_CHUNK_BYTES) + 1));
     }
 }

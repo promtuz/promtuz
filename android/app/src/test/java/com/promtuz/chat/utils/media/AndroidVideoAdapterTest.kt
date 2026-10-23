@@ -23,6 +23,17 @@ class AndroidVideoAdapterTest {
 
         assertEquals((0..9).map { it * 100_000L }, rendered.take(10))
         assertEquals(15, rendered.drop(10).size)
-        assertTrue(rendered.zipWithNext().all { (before, after) -> after - before >= 1_000_000L / 15 })
+        assertTrue(rendered.zipWithNext().all { (before, after) -> after > before })
+    }
+
+    @Test fun nearSixtyFpsDoesNotDropToTwentyFps() {
+        var lastRenderedUs = Long.MIN_VALUE
+        val rendered = (0 until 120).count { index ->
+            val timestampUs = index * 16_633L
+            shouldRenderVideoFrame(timestampUs, 0, lastRenderedUs, 1_000_000L / 30).also {
+                if (it) lastRenderedUs = timestampUs
+            }
+        }
+        assertEquals(60, rendered)
     }
 }

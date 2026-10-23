@@ -153,9 +153,8 @@ const MAX_FRAME_RATE: u32 = VIDEO.max_fps;
 const VIDEO_BITRATE: u32 = VIDEO.video_bitrate;
 const AUDIO_BITRATE: u32 = 96_000;
 
-pub(crate) fn plans(input: &VideoProbe, source_bytes: u64) -> Result<Vec<VideoEncodingPlan>> {
+pub(crate) fn plans(input: &VideoProbe) -> Result<Vec<VideoEncodingPlan>> {
     validate_probe(input)?;
-    ensure!(source_bytes > 0, "The selected video is empty.");
     let mut candidates = Vec::new();
     for (width, height, fps, bitrate) in [
         (MAX_LONG_EDGE, MAX_SHORT_EDGE, MAX_FRAME_RATE, VIDEO_BITRATE),
@@ -197,13 +196,12 @@ pub(crate) fn prepare_video(
     source: &mut SourceLease, import_directory: &std::path::Path, trim: Option<TimeRange>,
     cancellation: &MediaCancellation,
 ) -> Result<PreparedVideo> {
-    let source_bytes = source.measure()?;
     let mut input = source.inspect_video()?;
     let (start_us, end_us) = trim_range(input.duration_us, trim)?;
     input.duration_us = end_us - start_us;
     let mut last_error = None;
 
-    for plan in plans(&input, source_bytes)? {
+    for plan in plans(&input)? {
         cancellation.check()?;
         let output = reserve_candidate(import_directory)?;
         let result = (|| {
@@ -450,7 +448,7 @@ mod tests {
     #[test]
     fn portrait_codec_alignment_is_accepted_but_rotation_and_oversizing_are_not() {
         let source = source();
-        let plan = plans(&source, 10_000_000).unwrap().remove(0);
+        let plan = plans(&source).unwrap().remove(0);
         assert_eq!((plan.width, plan.height), (590, 1280));
         let mut encoded = source.clone();
         encoded.display_width = 592.0;
@@ -468,7 +466,7 @@ mod tests {
     fn short_clip_frame_rate_rounding_does_not_accept_a_60_fps_output() {
         let mut source = source();
         source.duration_us = 1_000_000;
-        let plan = plans(&source, 1_000_000).unwrap().remove(0);
+        let plan = plans(&source).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.display_width = 592.0;
         encoded.display_height = 1280.0;
@@ -491,7 +489,7 @@ mod tests {
             channels: Some(2),
         });
         source.audio_tracks = 1;
-        let plan = plans(&source, 10_000_000).unwrap().remove(0);
+        let plan = plans(&source).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.display_width = 592.0;
         encoded.display_height = 1280.0;
@@ -517,7 +515,7 @@ mod tests {
         source.color_primaries = Some(9);
         source.bit_depth = Some(10);
         source.hdr_static_metadata = Some(vec![0, 1, 2, 3]);
-        let plan = plans(&source, 10_000_000).unwrap().remove(0);
+        let plan = plans(&source).unwrap().remove(0);
         let mut encoded = source.clone();
         encoded.video_mime = "video/avc".into();
         encoded.display_width = 592.0;
@@ -537,7 +535,7 @@ mod tests {
 
     #[test]
     fn plans_are_ordered_from_target_to_emergency() {
-        let plans = plans(&source(), 10_000_000).unwrap();
+        let plans = plans(&source()).unwrap();
         assert_eq!(plans.first().unwrap().video_bitrate, VIDEO_BITRATE);
         assert_eq!(plans.last().unwrap().video_bitrate, VIDEO.emergency_video_bitrate);
         assert!(plans.iter().all(|plan| !plan.keep_hdr && plan.video_mime == "video/avc"));
@@ -548,21 +546,22 @@ mod tests {
         let mut portrait = source();
         portrait.display_width = 1_080.0;
         portrait.display_height = 1_920.0;
-        let plan = plans(&portrait, 10_000_000).unwrap().remove(0);
+        let plan = plans(&portrait).unwrap().remove(0);
         assert_eq!((plan.width, plan.height), (720, 1280));
     }
 
     struct RenderingSource {
         renders: Arc<Mutex<u32>>,
+        length: Option<u64>,
     }
 
     impl MediaSource for RenderingSource {
         fn length(&self) -> Result<Option<u64>> {
-            Ok(Some(1_024))
+            Ok(self.length)
         }
 
         fn read(&mut self, _offset: u64, _max_bytes: u32) -> Result<Vec<u8>> {
-            Ok(Vec::new())
+            bail!("Video preparation must not scan or copy the encoded source.")
         }
 
         fn release(&mut self) {}
@@ -602,16 +601,19 @@ mod tests {
 
     #[test]
     fn preparation_retries_rejected_rungs_and_owns_only_the_accepted_candidate() {
-        let directory = tempfile::tempdir().unwrap();
-        let renders = Arc::new(Mutex::new(0));
-        let mut source =
-            SourceLease::open(Box::new(RenderingSource { renders: renders.clone() })).unwrap();
-        let video = prepare_video(&mut source, directory.path(), None, &MediaCancellation::default()).unwrap();
-        assert_eq!(*renders.lock().unwrap(), 2);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-        assert_eq!(video.poster.width, 1);
-        drop(video);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        for length in [Some(4 * 1024 * 1024 * 1024), None] {
+            let directory = tempfile::tempdir().unwrap();
+            let renders = Arc::new(Mutex::new(0));
+            let mut source = SourceLease::open(Box::new(RenderingSource {
+                renders: renders.clone(), length,
+            })).unwrap();
+            let video = prepare_video(&mut source, directory.path(), None, &MediaCancellation::default()).unwrap();
+            assert_eq!(*renders.lock().unwrap(), 2);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+            assert_eq!(video.poster.width, 1);
+            drop(video);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
     }
 
     struct StickerSource {
