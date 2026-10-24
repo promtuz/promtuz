@@ -50,6 +50,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Promtuz">
 
+        <profileable android:shell="true" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
