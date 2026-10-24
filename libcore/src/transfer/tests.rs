@@ -196,7 +196,7 @@ async fn group_media_without_pairing_is_scoped_and_revocable() {
     let history = progress::Activities::default().details(&s.core.db, file.file_id()).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!((history[0].peer, history[0].bytes), (receiver.ipk, file.total_size));
-    assert_eq!(history[0].groups, vec![2; file.chunks.len()]);
+    assert!(history[0].groups.iter().all(|group| group.completed == group.total));
 
     let unavailable =
         async |file| pull(r.core, &link.client, file, &receiver).await.unwrap_err().kind;

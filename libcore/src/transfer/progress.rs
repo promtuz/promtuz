@@ -34,6 +34,12 @@ struct Activity {
     active: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ChunkGroup {
+    pub completed: u32,
+    pub total: u32,
+}
+
 pub(crate) struct Snapshot {
     pub file: [u8; 32],
     pub peer: [u8; 32],
@@ -43,8 +49,7 @@ pub(crate) struct Snapshot {
     pub bytes: u64,
     pub bytes_per_second: u64,
     pub elapsed_ms: u64,
-    /// 0 = missing, 1 = partly complete, 2 = complete. Adjacent chunks share a group.
-    pub groups: Vec<u8>,
+    pub groups: Vec<ChunkGroup>,
 }
 
 #[derive(Default)]
@@ -316,7 +321,7 @@ pub(crate) fn verified_bytes(bits: &[u8], chunks: usize, chunk_size: u32, total:
         .min(total)
 }
 
-pub(crate) fn groups(bits: &[u8], chunks: usize) -> Vec<u8> {
+pub(crate) fn groups(bits: &[u8], chunks: usize) -> Vec<ChunkGroup> {
     let count = chunks.min(GROUPS);
     (0..count)
         .map(|group| {
@@ -327,13 +332,7 @@ pub(crate) fn groups(bits: &[u8], chunks: usize) -> Vec<u8> {
                     bits.get(index / 8).is_some_and(|byte| byte & (1 << (index % 8)) != 0)
                 })
                 .count();
-            if have == 0 {
-                0
-            } else if have == end - start {
-                2
-            } else {
-                1
-            }
+            ChunkGroup { completed: have as u32, total: (end - start) as u32 }
         })
         .collect()
 }
@@ -341,6 +340,21 @@ pub(crate) fn groups(bits: &[u8], chunks: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_progress_preserves_every_chunk_and_the_short_last_group() {
+        assert!(groups(&[], 0).is_empty());
+        let mut bits = vec![0; 1153_usize.div_ceil(8)];
+        bits[0] = 0b101;
+        bits[144] = 1;
+        let grouped = groups(&bits, 1153);
+        assert_eq!(grouped.len(), GROUPS);
+        assert_eq!(grouped[0], ChunkGroup { completed: 2, total: 12 });
+        assert_eq!(grouped[95], ChunkGroup { completed: 1, total: 13 });
+        assert_eq!(grouped.iter().map(|g| g.total).sum::<u32>(), 1153);
+        assert_eq!(grouped.iter().map(|g| g.completed).sum::<u32>(), 3);
+        assert!(groups(&[255], 3).iter().all(|g| g.completed == 1 && g.total == 1));
+    }
 
     #[test]
     fn overlapping_streams_count_unique_progress_and_release_activity_independently() {
@@ -355,7 +369,7 @@ mod tests {
         let row = activities.snapshots().remove(0);
         assert!(row.active);
         assert_eq!(row.bytes, 5);
-        assert_eq!(activities.read(Some([1; 32]))[0].groups, vec![2, 0, 2]);
+        assert_eq!(activities.read(Some([1; 32]))[0].groups, groups(&[0b101], 3));
         drop(second);
         assert!(!activities.snapshots()[0].active);
     }
@@ -429,7 +443,7 @@ mod tests {
             let rows = fresh.details(&reopened, file).unwrap();
             let row = rows.iter().find(|row| row.peer == [2; 32]).unwrap();
             assert_eq!((row.bytes, row.total, row.active, row.bytes_per_second), (5, 9, false, 0));
-            assert_eq!(row.groups, vec![2, 0, 2]);
+            assert_eq!(row.groups, groups(&[0b101], 3));
         }
         let db = Stores::open(path.clone(), path);
         let activities = Activities::default();
@@ -459,6 +473,6 @@ mod tests {
         resent.record(2, 1).unwrap();
         let restored = Activities::default().details(&dev.core.db, file).unwrap();
         assert_eq!(restored[0].bytes, 1, "a new offer cannot inherit forgotten history");
-        assert_eq!(restored[0].groups, vec![0, 0, 2]);
+        assert_eq!(restored[0].groups, groups(&[0b100], 3));
     }
 }

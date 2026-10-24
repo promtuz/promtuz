@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -298,7 +299,7 @@ private fun AttachmentTransferSheet(
                     Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }
                         .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
                         .padding(vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Technical details", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                        Text("File parts", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                         MorphIcon(if (expanded) MorphGlyph.ChevronUp else MorphGlyph.ChevronDown,
                             null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                     }
@@ -382,7 +383,6 @@ private fun TransferProgress(feedback: AttachmentFeedback, row: AttachmentTransf
 @Composable
 private fun ChunkMap(row: AttachmentTransferRecord) {
     val colors = MaterialTheme.colorScheme
-    val palette = listOf(colors.outlineVariant, colors.primary.copy(alpha = 0.4f), colors.primary)
     val description = if (row.outgoing) "File parts sent to the connection" else "Verified file parts"
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BoxWithConstraints {
@@ -390,22 +390,31 @@ private fun ChunkMap(row: AttachmentTransferRecord) {
             val height = ((row.groups.size + columns - 1) / columns * 12).dp
             Canvas(Modifier.fillMaxWidth().height(height).semantics {
                 contentDescription = description
-                stateDescription = "${row.groups.count { it.toInt() == 2 }} complete, " +
-                    "${row.groups.count { it.toInt() == 1 }} partial, ${row.groups.count { it.toInt() == 0 }} missing blocks"
+                stateDescription = "${row.groups.sumOf { it.completed.toLong() }} of " +
+                    "${row.groups.sumOf { it.total.toLong() }} parts ${if (row.outgoing) "sent" else "verified"}"
             }) {
                 val step = size.width / columns
                 row.groups.forEachIndexed { index, group ->
-                    drawRoundRect(palette[group.toInt().coerceIn(0, 2)],
-                        topLeft = androidx.compose.ui.geometry.Offset(index % columns * step, (index / columns * 12).dp.toPx()),
-                        size = androidx.compose.ui.geometry.Size(step - 3.dp.toPx(), 9.dp.toPx()),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+                    val left = index % columns * step
+                    val top = (index / columns * 12).dp.toPx()
+                    val cell = androidx.compose.ui.geometry.Size((step - 3.dp.toPx()).coerceAtLeast(0f), 9.dp.toPx())
+                    val origin = androidx.compose.ui.geometry.Offset(left, top)
+                    val radius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
+                    drawRoundRect(colors.outlineVariant, origin, cell, radius)
+                    val fraction = if (group.total == 0u) 0f else
+                        (group.completed.toFloat() / group.total.toFloat()).coerceIn(0f, 1f)
+                    clipRect(left, top, left + cell.width * fraction, top + cell.height) {
+                        drawRoundRect(colors.primary, origin, cell, radius)
+                    }
                 }
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(if (row.outgoing) "Sent" else "Verified", "Partial", "Missing").forEachIndexed { index, label ->
+            listOf((if (row.outgoing) "Sent" else "Verified") to 1f, "Partial" to 0.5f, "Missing" to 0f).forEach { (label, fraction) ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(palette[2 - index]))
+                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(colors.outlineVariant)) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(colors.primary))
+                    }
                     Text(label, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 }
             }
