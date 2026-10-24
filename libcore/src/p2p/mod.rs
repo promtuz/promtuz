@@ -305,12 +305,17 @@ impl Drop for OfferGuard {
 #[derive(Clone)]
 pub struct PeerLink {
     pub(crate) conn: Connection,
+    pub(crate) requests: Arc<tokio::sync::Semaphore>,
     dialer: bool,
     disclosure: Disclosure,
     pub ipk: [u8; 32],
 }
 
 impl PeerLink {
+    fn new(conn: Connection, dialer: bool, disclosure: Disclosure, ipk: [u8; 32]) -> Self {
+        Self { conn, requests: Arc::new(tokio::sync::Semaphore::new(protocol::STREAMS_PER_LINK)), dialer, disclosure, ipk }
+    }
+
     fn still_permitted(&self) -> bool {
         match consent::may_connect(&self.ipk) {
             consent::Decision::Direct => true,
@@ -356,7 +361,7 @@ impl PeerLink {
 /// A direct loopback connection as a link, without the punch choreography.
 #[cfg(test)]
 pub(crate) fn test_link(conn: Connection, ipk: [u8; 32]) -> PeerLink {
-    PeerLink { conn, dialer: false, disclosure: Disclosure::RelayOnly, ipk }
+    PeerLink::new(conn, false, Disclosure::RelayOnly, ipk)
 }
 
 /// `link` matches this error text to wait for the winning dial instead of failing.

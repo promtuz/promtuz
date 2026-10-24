@@ -906,6 +906,83 @@ pub fn download_attachment(file_id: Vec<u8>) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[derive(uniffi::Record)]
+pub struct AttachmentTransferRecord {
+    pub file_id: Vec<u8>,
+    pub peer: Vec<u8>,
+    pub peer_name: String,
+    pub outgoing: bool,
+    pub active: bool,
+    pub total: u64,
+    pub bytes: u64,
+    pub bytes_per_second: u64,
+    pub remaining_seconds: Option<u64>,
+    pub elapsed_ms: u64,
+    pub groups: Vec<u8>,
+}
+
+impl From<crate::transfer::progress::Snapshot> for AttachmentTransferRecord {
+    fn from(s: crate::transfer::progress::Snapshot) -> Self {
+        Self {
+            file_id: s.file.to_vec(), peer: s.peer.to_vec(), peer_name: String::new(),
+            outgoing: s.outgoing, active: s.active, total: s.total, bytes: s.bytes,
+            bytes_per_second: s.bytes_per_second,
+            remaining_seconds: (s.active && s.bytes_per_second > 0 && s.bytes < s.total)
+                .then(|| (s.total - s.bytes).div_ceil(s.bytes_per_second)),
+            elapsed_ms: s.elapsed_ms, groups: s.groups,
+        }
+    }
+}
+
+/// One cheap memory snapshot shared by visible attachment controls. No polling of the message DB.
+#[uniffi::export]
+pub fn attachment_transfers() -> Vec<AttachmentTransferRecord> {
+    core().transfers.activity.snapshots().into_iter().map(Into::into).collect()
+}
+
+#[uniffi::export]
+pub fn attachment_transfer_details(
+    file_id: Vec<u8>, outgoing: bool,
+) -> Result<Vec<AttachmentTransferRecord>, CoreError> {
+    use crate::transfer::{progress, store};
+    let file = fixed::<32>(&file_id, "file_id")?;
+    let mut records: Vec<AttachmentTransferRecord> = core().transfers.activity.details(&core().db, file)?
+        .into_iter().filter(|row| row.file == file && row.outgoing == outgoing)
+        .map(Into::into).collect();
+    if !outgoing {
+        // Durable receiver progress is authoritative across retries, providers and restarts.
+        let db = core().db.transfers().lock();
+        if let Some(p) = store::partial_get_tx(&db, &file) {
+            let chunks = p.total.div_ceil(u64::from(p.chunk_size.max(1))) as usize;
+            if p.chunk_size == 0 || chunks > 8 * 1024 * 1024 / 32 {
+                return Err(anyhow::anyhow!("invalid attachment manifest").into());
+            }
+            let mut bits = store::verified_bitmap_tx(&db, &file).map_err(anyhow::Error::from)?.unwrap_or_else(|| {
+                let mut bits = vec![0; chunks.div_ceil(8)];
+                for index in 0..(p.have as usize).min(chunks) { bits[index / 8] |= 1 << (index % 8); }
+                bits
+            });
+            if bits.len() != chunks.div_ceil(8) || store::verified_count_tx(&db, &p) == 0 {
+                bits = vec![0; chunks.div_ceil(8)];
+            }
+            let active = records.iter().position(|row| row.active && row.peer == p.source_ipk);
+            let mut row = active.map(|index| records.swap_remove(index)).unwrap_or(AttachmentTransferRecord {
+                file_id: file.to_vec(), peer: p.source_ipk.to_vec(), peer_name: String::new(),
+                outgoing: false, active: false, total: p.total, bytes: 0, bytes_per_second: 0,
+                remaining_seconds: None, elapsed_ms: 0, groups: Vec::new(),
+            });
+            row.bytes = progress::verified_bytes(&bits, chunks, p.chunk_size, p.total);
+            row.groups = progress::groups(&bits, chunks);
+            records = vec![row];
+        }
+    }
+    for row in &mut records {
+        row.peer_name = crate::data::peer_name::resolve(&fixed::<32>(&row.peer, "peer")?);
+    }
+    records.sort_by(|a, b| b.active.cmp(&a.active).then(a.peer_name.cmp(&b.peer_name)));
+    Ok(records)
+}
+
 /// Transfer progress counts chunks. `local_path` appears only once the download is complete; the
 /// `.part` file holds unverified bytes no platform should open.
 #[uniffi::export]

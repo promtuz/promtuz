@@ -4,3 +4,5 @@
 // Frozen: deriving it from PROTOCOL_VERSION would break attachment compatibility on an
 // unrelated version bump.
 pub(crate) const ALPN: &[u8] = b"promtuz-attachment/2";
+
+pub(crate) const STREAMS_PER_LINK: usize = 4;

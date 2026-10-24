@@ -107,6 +107,7 @@ fn prefix(bits: &[u8], chunks: usize) -> u32 {
 }
 
 impl Receiver {
+    pub(crate) fn verified(&self) -> &[u8] { &self.verified }
 
     pub(crate) async fn open_async(
         c: &'static Core, file_id: [u8; 32], peer: [u8; 32], manifest: wire::Manifest,

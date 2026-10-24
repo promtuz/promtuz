@@ -30,10 +30,20 @@ fn protocol_failure(message: &'static str) -> Failure {
     Failure::new(FailureKind::InvalidData, wire::InvalidFrame(message.into()))
 }
 
-pub(super) struct PullGuard(pub(super) &'static Core, pub(super) [u8; 32]);
+#[derive(Default)]
+pub(super) struct ActiveDownload {
+    pending: Option<DownloadTrigger>,
+    changed: tokio_util::sync::CancellationToken,
+}
+
+pub(super) struct PullGuard {
+    pub(super) core: &'static Core,
+    pub(super) file: [u8; 32],
+    pub(super) registered: bool,
+}
 impl Drop for PullGuard {
     fn drop(&mut self) {
-        self.0.transfers.downloading.lock().remove(&self.1);
+        if self.registered { self.core.transfers.downloading.lock().remove(&self.file); }
     }
 }
 
@@ -42,23 +52,85 @@ pub(super) enum DownloadTrigger {
     Requested,
     Reconnect,
     NetworkChange,
+    PeerOnline,
     WakeResponse,
 }
 
 pub(super) async fn download_with_policy(
     c: &'static Core, file_id: [u8; 32], trigger: DownloadTrigger,
 ) -> anyhow::Result<()> {
-    if !c.transfers.downloading.lock().insert(file_id) {
-        return Ok(());
+    schedule_download(c, file_id, trigger, |trigger| download_episode(c, file_id, trigger)).await
+}
+
+async fn schedule_download<F, Fut>(
+    c: &'static Core, file_id: [u8; 32], trigger: DownloadTrigger, mut episode: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(DownloadTrigger) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let mut changed = {
+        let mut active = c.transfers.downloading.lock();
+        if let Some(job) = active.get_mut(&file_id) {
+            match trigger {
+                DownloadTrigger::NetworkChange => {
+                    job.pending = Some(trigger);
+                    job.changed.cancel();
+                },
+                DownloadTrigger::PeerOnline => {
+                    if job.pending != Some(DownloadTrigger::NetworkChange) {
+                        job.pending = Some(trigger);
+                    }
+                    if store::partial_get_tx(&c.db.transfers().lock(), &file_id)
+                        .is_some_and(|p| matches!(p.state, store::CONNECTING | store::HELD)) {
+                        job.changed.cancel();
+                    }
+                },
+                DownloadTrigger::WakeResponse if job.pending.is_none() => job.pending = Some(trigger),
+                _ => {},
+            }
+            return Ok(());
+        }
+        let job = ActiveDownload::default();
+        let changed = job.changed.clone();
+        active.insert(file_id, job);
+        changed
+    };
+    let mut guard = PullGuard { core: c, file: file_id, registered: true };
+    let mut trigger = trigger;
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = changed.cancelled() => Ok(()),
+            result = episode(trigger) => result,
+        };
+        let mut active = c.transfers.downloading.lock();
+        let job = active.get_mut(&file_id).expect("registered download");
+        match job.pending.take() {
+            Some(next) => {
+                trigger = next;
+                job.changed = tokio_util::sync::CancellationToken::new();
+                changed = job.changed.clone();
+            },
+            None => {
+                active.remove(&file_id);
+                guard.registered = false;
+                return result;
+            },
+        }
     }
-    let _guard = PullGuard(c, file_id);
+}
+
+async fn download_episode(
+    c: &'static Core, file_id: [u8; 32], trigger: DownloadTrigger,
+) -> anyhow::Result<()> {
     // Recheck after owning the writer slot, since another worker may have just finished. Only a
     // requested download retries a FAILED file.
     let current = store::partial_get_tx(&c.db.transfers().lock(), &file_id);
     if current.as_ref().is_some_and(|p| p.is_complete()) {
         return Ok(());
     }
-    if matches!(trigger, DownloadTrigger::Reconnect | DownloadTrigger::NetworkChange) {
+    if matches!(trigger, DownloadTrigger::Reconnect | DownloadTrigger::NetworkChange | DownloadTrigger::PeerOnline) {
         if current.as_ref().is_none_or(|p| p.state == store::FAILED) {
             return Ok(());
         }
@@ -128,11 +200,10 @@ pub(super) async fn download_with_policy(
         }
         original?
     };
-    // Release the writer before sending FileWant. A fast dial-back can now
-    // start its pull immediately instead of losing on_link_ready to our guard.
+    // Release the file before FileWant. A fast dial-back is queued by the scheduler until
+    // this episode exits, so its ready event cannot lose to the single-writer guard.
     drop(_slot);
     drop(lease);
-    drop(_guard);
     if held
         && wake_original
         && trigger != DownloadTrigger::WakeResponse
@@ -313,8 +384,12 @@ fn coordinator_failure(error: anyhow::Error) -> Failure {
 pub(super) async fn open_v2_request(
     link: &crate::p2p::PeerLink, local: &wire::Auth,
 ) -> Result<(TransferSend, quinn::RecvStream, v2::Limits), Failure> {
+    // Match the peer's serving bound across files, not just within one download. Queueing
+    // locally does not consume a remote stream or its handshake deadline.
+    let slot = link.requests.clone().acquire_owned().await.map_err(Failure::storage)?;
     let (s, mut r) = bounded(CONTROL_TIMEOUT, link.open_stream()).await?;
     let mut s = TransferSend::new(s);
+    s._request = Some(slot);
     bounded(CONTROL_TIMEOUT, auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local)).await?;
     let limits = bounded(CONTROL_TIMEOUT, v2::exchange_hello(&mut s, &mut r)).await?;
     Ok((s, r, limits))
@@ -351,51 +426,49 @@ async fn pull_v2_from(
         _ => return Err(protocol_failure("invalid manifest completion")),
     }
     expect_fin(&mut r).await?;
+    drop(s);
     let mut receiver =
         ranges::Receiver::open_async(c, file_id, link.ipk, manifest.clone(), offered_size, lease)
             .await
             .map_err(coordinator_failure)?;
-    while receiver.prefix() < manifest.chunks.len() as u32 {
-        let (mut s, mut r, limits) = open_v2_request(link, local).await?;
-        if let Some(id) = &grant
-            && (!limits.sharing || sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_none())
-        {
-            return Err(remote_failure(v2::ErrorCode::Unavailable));
-        }
-        let requested = receiver.missing(limits.max_ranges as usize, limits.max_chunks as u32);
-        let expected = v2::validate_ranges(&requested, &manifest, limits).map_err(Failure::wire)?;
-        let mut pending: Vec<u32> =
-            requested.iter().flat_map(|range| range.start..range.end).collect();
-        pending.reverse();
-        let request = match grant {
-            Some(grant) => v2::Frame::PullShared { file_id, grant, ranges: requested },
-            None => v2::Frame::Pull { file_id, ranges: requested },
-        };
-        bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &request)).await?;
-        s.finish().map_err(|e| Failure::wire(e.into()))?;
-        while let Some(expected_index) = pending.pop() {
-            match bounded(CHUNK_DEADLINE, v2::read_frame_for(&mut r, v2::ReadPhase::Chunk)).await? {
-                v2::Frame::Chunk { index, bytes } if index == expected_index => {
-                    if grant.as_ref().is_some_and(|id| sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_none()) {
-                        return Err(remote_failure(v2::ErrorCode::Unavailable));
-                    }
-                    receiver.commit(index, &bytes, lease).map_err(coordinator_failure)?;
-                    diagnostics::received_verified(bytes.len() as u64);
-                },
-                v2::Frame::Error(code) => return Err(remote_failure(code)),
-                _ => {
-                    return Err(protocol_failure(
-                        "unexpected, duplicate or missing attachment chunk",
-                    ));
-                },
+    let activity = c.transfers.activity.start(file_id, link.ipk, false, &manifest, Some(receiver.verified()));
+    // Bounded streams share one writer. Refill each freed slot immediately rather than
+    // waiting for the slowest range; assignments skip every already-verified chunk.
+    let missing = receiver.missing(manifest.chunks.len(), manifest.chunks.len() as u32);
+    let mut indices = missing.into_iter().flat_map(|range| range.start..range.end).peekable();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut workers = tokio::task::JoinSet::new();
+    let parallelism = if grant.is_some() { super::HELPING_STREAMS } else { crate::p2p::protocol::STREAMS_PER_LINK };
+    while indices.peek().is_some() || !workers.is_empty() {
+        while workers.len() < parallelism && indices.peek().is_some() {
+            let mut requested: Vec<ranges::ChunkRange> = Vec::new();
+            for _ in 0..limits.max_chunks.min(16) {
+                let Some(&index) = indices.peek() else { break };
+                if requested.len() == limits.max_ranges as usize
+                    && requested.last().is_some_and(|range| range.end != index) { break; }
+                indices.next();
+                match requested.last_mut() {
+                    Some(range) if range.end == index => range.end += 1,
+                    _ => requested.push(ranges::ChunkRange { start: index, end: index + 1 }),
+                }
             }
+            v2::validate_ranges(&requested, &manifest, limits).map_err(Failure::wire)?;
+            let (link, local, tx) = (link.clone(), local.clone(), tx.clone());
+            workers.spawn(c.tasks.track_future(async move {
+                pull_ranges(c, &link, file_id, &local, requested, grant, tx).await
+            }));
         }
-        match bounded(CONTROL_TIMEOUT, v2::read_frame_for(&mut r, v2::ReadPhase::Complete)).await? {
-            v2::Frame::Complete { chunks_sent } if chunks_sent == expected => {},
-            v2::Frame::Error(code) => return Err(remote_failure(code)),
-            _ => return Err(protocol_failure("invalid range completion")),
+        tokio::select! {
+            biased;
+            Some((index, bytes)) = rx.recv() => {
+                receiver.commit(index, &bytes, lease).map_err(coordinator_failure)?;
+                activity.record(index, bytes.len()).map_err(Failure::storage)?;
+                diagnostics::received_verified(bytes.len() as u64);
+            },
+            result = workers.join_next() => {
+                result.expect("range worker").map_err(Failure::storage)??;
+            },
         }
-        expect_fin(&mut r).await?;
     }
     if grant.as_ref().is_some_and(|id| sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_none()) {
         return Err(remote_failure(v2::ErrorCode::Unavailable));
@@ -403,4 +476,122 @@ async fn pull_v2_from(
     receiver.finish(lease).map_err(coordinator_failure)?;
     store::defer_retry_tx(&c.db.transfers().lock(), &file_id, 0).map_err(Failure::storage)?;
     Ok(())
+}
+
+async fn pull_ranges(
+    c: &Core, link: &crate::p2p::PeerLink, file_id: [u8; 32], local: &wire::Auth,
+    requested: Vec<ranges::ChunkRange>, grant: Option<[u8; 32]>,
+    tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+) -> Result<(), Failure> {
+    let (mut s, mut r, limits) = open_v2_request(link, local).await?;
+    let permitted = || grant.as_ref().is_none_or(|id| limits.sharing
+        && sharing::permitted(c, id, &file_id, &local.ipk, &link.ipk).is_some());
+    if !permitted() { return Err(remote_failure(v2::ErrorCode::Unavailable)); }
+    let pending: Vec<u32> = requested.iter().flat_map(|range| range.start..range.end).collect();
+    let expected = pending.len() as u32;
+    if requested.len() > limits.max_ranges as usize || expected > u32::from(limits.max_chunks) {
+        return Err(protocol_failure("inconsistent attachment range limits"));
+    }
+    let request = match grant {
+        Some(grant) => v2::Frame::PullShared { file_id, grant, ranges: requested },
+        None => v2::Frame::Pull { file_id, ranges: requested },
+    };
+    bounded(CONTROL_TIMEOUT, v2::write_frame(&mut s, &request)).await?;
+    s.finish().map_err(|e| Failure::wire(e.into()))?;
+    for expected_index in pending {
+        match bounded(CHUNK_DEADLINE, v2::read_frame_for(&mut r, v2::ReadPhase::Chunk)).await? {
+            v2::Frame::Chunk { index, bytes } if index == expected_index => {
+                if !permitted() { return Err(remote_failure(v2::ErrorCode::Unavailable)); }
+                tx.send((index, bytes)).await.map_err(|_| Failure::new(FailureKind::Cancelled, store::Cancelled))?;
+            },
+            v2::Frame::Error(code) => return Err(remote_failure(code)),
+            _ => return Err(protocol_failure("unexpected, duplicate or missing attachment chunk")),
+        }
+    }
+    match bounded(CONTROL_TIMEOUT, v2::read_frame_for(&mut r, v2::ReadPhase::Complete)).await? {
+        v2::Frame::Complete { chunks_sent } if chunks_sent == expected => {},
+        v2::Frame::Error(code) => return Err(remote_failure(code)),
+        _ => return Err(protocol_failure("invalid range completion")),
+    }
+    expect_fin(&mut r).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn route_change_interrupts_the_old_path_and_coalesces_into_one_new_episode() {
+        let device = crate::test_support::transfer::device();
+        let c = device.core;
+        let file = [21; 32];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(schedule_download(c, file, DownloadTrigger::Requested, move |trigger| {
+            tx.send(trigger).unwrap();
+            async move {
+                if trigger == DownloadTrigger::Requested { std::future::pending::<()>().await; }
+                Ok(())
+            }
+        }));
+        assert!(rx.recv().await == Some(DownloadTrigger::Requested));
+        for trigger in [DownloadTrigger::PeerOnline, DownloadTrigger::NetworkChange,
+            DownloadTrigger::WakeResponse, DownloadTrigger::NetworkChange] {
+            download_with_policy(c, file, trigger).await.unwrap();
+        }
+        task.await.unwrap().unwrap();
+        assert!(rx.recv().await == Some(DownloadTrigger::NetworkChange));
+        assert!(rx.recv().await.is_none());
+        assert!(c.transfers.downloading.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_ready_signal_at_episode_exit_is_not_lost_or_allowed_to_interrupt_healthy_work() {
+        let device = crate::test_support::transfer::device();
+        let c = device.core;
+        let file = [22; 32];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let wait = gate.clone();
+        let task = tokio::spawn(schedule_download(c, file, DownloadTrigger::Requested, move |trigger| {
+            tx.send(trigger).unwrap();
+            let gate = wait.clone();
+            async move {
+                if trigger == DownloadTrigger::Requested { gate.notified().await; }
+                Ok(())
+            }
+        }));
+        assert!(rx.recv().await == Some(DownloadTrigger::Requested));
+        download_with_policy(c, file, DownloadTrigger::WakeResponse).await.unwrap();
+        download_with_policy(c, file, DownloadTrigger::PeerOnline).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err(), "presence must not restart a healthy stream");
+        gate.notify_one();
+        task.await.unwrap().unwrap();
+        assert!(rx.recv().await == Some(DownloadTrigger::PeerOnline));
+        assert!(rx.recv().await.is_none());
+        assert!(c.transfers.downloading.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_returning_sender_interrupts_retry_backoff_without_spending_a_wake() {
+        let device = crate::test_support::transfer::device();
+        let c = device.core;
+        let file = [23; 32];
+        let lease = store::receiver_lease(c, file);
+        set_state(c, &file, [24; 32], store::HELD, &lease).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(schedule_download(c, file, DownloadTrigger::Reconnect, move |trigger| {
+            tx.send(trigger).unwrap();
+            async move {
+                if trigger == DownloadTrigger::Reconnect { std::future::pending::<()>().await; }
+                Ok(())
+            }
+        }));
+        assert!(rx.recv().await == Some(DownloadTrigger::Reconnect));
+        download_with_policy(c, file, DownloadTrigger::PeerOnline).await.unwrap();
+        timeout(Duration::from_secs(1), task).await.unwrap().unwrap().unwrap();
+        assert!(rx.recv().await == Some(DownloadTrigger::PeerOnline));
+        assert!(rx.recv().await.is_none());
+        assert!(!store::claim_ready_retry_tx(&c.db.transfers().lock(), &file).unwrap());
+    }
 }

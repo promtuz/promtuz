@@ -1,6 +1,6 @@
 //! Attachment transfer: chunked-manifest pulls over a [`crate::p2p`] link, not store-and-forward.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ use serve::offered_to;
 use serve::serve_streams;
 
 pub mod auth;
+pub(crate) mod progress;
 mod pull;
 pub(crate) mod ranges;
 mod serve;
@@ -34,11 +35,14 @@ const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const CHUNK_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const HELPING_STREAMS: usize = 2;
 
 pub(crate) struct Transfers {
+    pub(crate) activity: progress::Activities,
     receivers:      store::Receivers,
     /// Pulls in flight, so two `download`s of one file never co-write its partial.
-    downloading:    Mutex<HashSet<[u8; 32]>>,
+    downloading:    Mutex<HashMap<[u8; 32], pull::ActiveDownload>>,
+    online:         Mutex<HashSet<[u8; 32]>>,
     pulling:        Semaphore,
     serving:        Semaphore,
     helping:        Semaphore,
@@ -50,11 +54,13 @@ pub(crate) struct Transfers {
 impl Default for Transfers {
     fn default() -> Self {
         Self {
+            activity: Default::default(),
             receivers:      Default::default(),
             downloading:    Default::default(),
+            online:         Default::default(),
             pulling:        Semaphore::new(4),
             serving:        Semaphore::new(16),
-            helping:        Semaphore::new(2),
+            helping:        Semaphore::new(HELPING_STREAMS),
             recovery_scans: Arc::new(Semaphore::new(2)),
             policy:         Default::default(),
         }
@@ -118,10 +124,11 @@ fn remote_failure(code: v2::ErrorCode) -> Failure {
 struct TransferSend {
     stream: quinn::SendStream,
     finished: bool,
+    _request: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl TransferSend {
     fn new(stream: quinn::SendStream) -> Self {
-        Self { stream, finished: false }
+        Self { stream, finished: false, _request: None }
     }
     fn finish(&mut self) -> Result<(), quinn::ClosedStream> {
         self.stream.finish()?;
@@ -244,11 +251,18 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
 }
 
 /// `peer` became reachable; without this, held pulls wait for our own next reconnect.
-pub fn resume_for_peer(peer: [u8; 32]) {
+pub fn peer_presence(peer: [u8; 32], online: bool) {
+    let changed = if online {
+        core().transfers.online.lock().insert(peer)
+    } else {
+        core().transfers.online.lock().remove(&peer);
+        false
+    };
+    if !changed { return; }
     let files = store::incomplete_file_ids_for_tx(&core().db.transfers().lock(), &peer);
     for file_id in files {
         core().spawn(async move {
-            let trigger = DownloadTrigger::Reconnect;
+            let trigger = DownloadTrigger::PeerOnline;
             if let Err(e) = download_with_policy(core(), file_id, trigger).await {
                 log::warn!("transfer: resume {} failed: {e}", hex::encode(&file_id[..4]));
             }
@@ -257,9 +271,9 @@ pub fn resume_for_peer(peer: [u8; 32]) {
 }
 
 pub fn on_link_ready(peer: [u8; 32]) {
-    // One early resume after a claimed wake; otherwise the cooldown holds, so failing files do
-    // not restart one another on every reconnect of the shared link.
-    let files = store::incomplete_file_ids_for_tx(&core().db.transfers().lock(), &peer);
+    // A claimed wake permits one early resume. Links alone never replenish retry budgets,
+    // otherwise two failed downloads could keep restarting one another.
+    let files = store::ready_file_ids_for_tx(&core().db.transfers().lock(), &peer);
     for file_id in files {
         core().spawn(async move {
             let trigger = DownloadTrigger::WakeResponse;

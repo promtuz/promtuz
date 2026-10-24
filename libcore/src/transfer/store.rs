@@ -82,6 +82,17 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up("ALTER TABLE partials ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 0;"),
     // NULL marks an older prefix-only partial; its bytes are rechecked before any bitmap.
     M::up("ALTER TABLE partials ADD COLUMN verified BLOB;"),
+    M::up(
+        "CREATE TABLE served (
+          file_id BLOB NOT NULL CHECK(length(file_id) = 32),
+          peer BLOB NOT NULL CHECK(length(peer) = 32),
+          total INTEGER NOT NULL,
+          chunk_size INTEGER NOT NULL,
+          sent BLOB NOT NULL CHECK(length(sent) <= 32768),
+          PRIMARY KEY(file_id, peer)
+        ) WITHOUT ROWID;",
+    )
+    .down("DROP TABLE served;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -399,6 +410,13 @@ pub(crate) fn gc_dead_partials_tx(
         conn.execute("DELETE FROM partials WHERE path = ?1", params![p])
             .expect("gc_dead_partials delete");
     }
+    conn.execute(
+        "DELETE FROM served WHERE NOT EXISTS
+           (SELECT 1 FROM retention WHERE retention.file_id = served.file_id)
+         AND NOT EXISTS (SELECT 1 FROM partials WHERE partials.file_id = served.file_id)",
+        [],
+    )
+    .expect("gc served progress");
     paths
 }
 
@@ -411,6 +429,9 @@ pub fn forget_file(c: &Core, file_id: &[u8; 32]) {
     }
     forget_row_tx(&conn, "partials", file_id, Some(partial_path(&c.db, file_id)));
     forget_row_tx(&conn, "retention", file_id, None);
+    if let Err(e) = conn.execute("DELETE FROM served WHERE file_id = ?1", params![file_id]) {
+        log::warn!("transfer: served progress for a forgotten file survives: {e}");
+    }
 }
 
 fn forget_row_tx(conn: &Connection, table: &str, file_id: &[u8; 32], fallback: Option<String>) {
@@ -457,6 +478,16 @@ pub(crate) fn incomplete_file_ids_for_tx(conn: &Connection, peer: &[u8; 32]) -> 
         .expect("incomplete_file_ids_for query")
         .collect::<rusqlite::Result<_>>()
         .expect("incomplete_file_ids_for rows")
+}
+
+pub(crate) fn ready_file_ids_for_tx(conn: &Connection, peer: &[u8; 32]) -> Vec<[u8; 32]> {
+    let mut stmt = conn.prepare(
+        "SELECT file_id FROM partials WHERE source_ipk=?1 AND state=?2 AND wake_pending=1",
+    ).expect("ready_file_ids_for prepare");
+    stmt.query_map(params![peer.as_slice(), HELD], |r| r.get(0))
+        .expect("ready_file_ids_for query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("ready_file_ids_for rows")
 }
 
 #[cfg(test)]
@@ -506,6 +537,28 @@ mod tests {
             (1, 110, 170, Some(vec![1])),
             "a state change keeps retry and range history"
         );
+    }
+
+    #[test]
+    fn served_migration_and_rollback_preserve_existing_transfers() {
+        let mut db = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut db, MIGRATION_ARRAY.len() - 1).unwrap();
+        let file = [0xc2; 32];
+        let partial = row(file, HELD, "/not-opened", 100);
+        partial_put_locked(&db, &partial).unwrap();
+        retention_put_tx(&db, &file, "/not-opened", 5, 5, b"manifest", u64::MAX).unwrap();
+        db.execute("UPDATE partials SET verified = x'01', retry_after = 170", []).unwrap();
+        MIGRATIONS.to_latest(&mut db).unwrap();
+        db.execute("INSERT INTO served VALUES (?1, ?2, 5, 5, x'01')", params![file, [9u8; 32]])
+            .unwrap();
+        MIGRATIONS.to_version(&mut db, MIGRATION_ARRAY.len() - 1).unwrap();
+        assert_eq!(partial_get_tx(&db, &file).unwrap().have, 1);
+        assert_eq!(verified_bitmap_tx(&db, &file).unwrap(), Some(vec![1]));
+        assert_eq!(retry_after_tx(&db, &file), 170);
+        assert_eq!(retention_get_tx(&db, &file).unwrap().manifest, b"manifest");
+        MIGRATIONS.to_latest(&mut db).unwrap();
+        let count: u64 = db.query_row("SELECT count(*) FROM served", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "rollback removes only derived serving history");
     }
 
     #[test]

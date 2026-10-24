@@ -361,7 +361,7 @@ impl Session {
                 .and_then(|r| r.map_err(Into::into))
                 .inspect_err(|_| diagnostics::record(Event::HandshakeFailed))?;
             hold_route_while_open(ep.clone(), conn.clone(), vec![guards], vec![upgrade]);
-            return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "relay"));
+            return Ok((PeerLink::new(conn, true, disclosure, peer), "relay"));
         }
 
         // Both remaining roles need the peer's offer: punch targets, or the dialer's secrets.
@@ -402,7 +402,7 @@ impl Session {
                 .inspect_err(|_| diagnostics::record(Event::HandshakeFailed))?;
             diagnostics::record(Event::DirectReady);
             hold_route_while_open(ep.clone(), conn.clone(), vec![], vec![]);
-            return Ok((PeerLink { conn, dialer: true, disclosure, ipk: peer }, "direct"));
+            return Ok((PeerLink::new(conn, true, disclosure, peer), "direct"));
         }
 
         let key = DiscoKey::new(&offer.disco_key, self.chan);
@@ -477,6 +477,6 @@ impl Session {
             })??;
         drop(inbound_guard);
         hold_route_while_open(ep.clone(), conn.clone(), routes, vec![upgrade]);
-        Ok((PeerLink { conn, dialer: false, disclosure, ipk: peer }, "inbound"))
+        Ok((PeerLink::new(conn, false, disclosure, peer), "inbound"))
     }
 }

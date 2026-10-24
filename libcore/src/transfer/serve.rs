@@ -17,8 +17,6 @@ use super::wire;
 use crate::p2p::diagnostics;
 use crate::state::Core;
 
-const SERVES_PER_LINK: usize = 4;
-
 /// Retention is keyed by content hash alone, so the outgoing message row scopes a pull to whom
 /// the file was sent: in a group, every active member of that conversation.
 pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32]) -> bool {
@@ -56,7 +54,7 @@ pub(super) async fn serve_streams(c: &'static Core, link: crate::p2p::PeerLink, 
     loop {
         tokio::select! {
             _ = streams.join_next(), if !streams.is_empty() => {},
-            accepted = link.accept_stream(), if streams.len() < SERVES_PER_LINK => {
+            accepted = link.accept_stream(), if streams.len() < crate::p2p::protocol::STREAMS_PER_LINK => {
                 let Ok((mut s, mut r)) = accepted else { break };
                 // Never queue work: a busy stream resets, and its caller retries within its budget.
                 let Ok(slot) = c.transfers.serving.try_acquire() else {
@@ -175,6 +173,8 @@ async fn serve_v2_file(
         Ok(count) => count,
         Err(_) => return v2_error(s, v2::ErrorCode::InvalidRequest).await,
     };
+    let activity = c.transfers.activity.start_serving(&c.db, file_id, link.ipk, &manifest)
+        .map_err(Failure::storage)?;
     use std::io::{Read, Seek, SeekFrom};
     let mut file = match std::fs::File::open(&retained.path) {
         Ok(file) => file,
@@ -199,11 +199,16 @@ async fn serve_v2_file(
                 return v2_error(s, v2::ErrorCode::Storage).await;
             }
             bounded(CHUNK_DEADLINE, v2::write_frame(s, &v2::Frame::Chunk { index, bytes })).await?;
+            activity.record(index, len).map_err(Failure::storage)?;
             diagnostics::sent_content(len as u64);
         }
     }
     bounded(CONTROL_TIMEOUT, v2::write_frame(s, &v2::Frame::Complete { chunks_sent: count }))
         .await?;
     s.finish().map_err(|e| Failure::wire(e.into()))?;
+    bounded(CHUNK_DEADLINE, async {
+        anyhow::ensure!(s.stopped().await?.is_none(), "recipient stopped the transfer");
+        Ok(())
+    }).await?;
     Ok(())
 }

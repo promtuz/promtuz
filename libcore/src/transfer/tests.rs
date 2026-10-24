@@ -64,6 +64,122 @@ fn ranges(start: u32, end: u32) -> Vec<ChunkRange> {
 }
 
 #[tokio::test]
+async fn parallel_ranges_are_disjoint_and_commit_before_the_slowest_stream() {
+    let (sender, receiver) = (identity(71), identity(72));
+    let r = device();
+    let bytes = content(71, 65);
+    let file = manifest(&bytes, 1024);
+    let link = linked(&sender, &receiver).await;
+    let (server, local, m, b) = (link.server.clone(), sender.clone(), file.clone(), bytes.clone());
+    let core = r.core;
+    let serve = tokio::spawn(async move {
+        describe(&server, &local, &m).await;
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            let (s, rx, frame) = request(&server, &local).await;
+            let Frame::Pull { file_id, ranges } = frame else { panic!("expected pull") };
+            assert_eq!(file_id, m.file_id());
+            requests.push((s, rx, ranges));
+        }
+        requests.sort_by_key(|(_, _, ranges)| ranges[0].start);
+        let indices: Vec<_> = requests.iter().flat_map(|(_, _, ranges)|
+            ranges.iter().flat_map(|range| range.start..range.end)).collect();
+        assert_eq!(indices, (0..64).collect::<Vec<_>>());
+        for (mut s, _rx, ranges) in requests.into_iter().rev() {
+            if ranges[0].start == 0 {
+                timeout(Duration::from_secs(2), async {
+                    while {
+                        let db = core.db.transfers().lock();
+                        let partial = store::partial_get_tx(&db, &m.file_id()).unwrap();
+                        store::verified_count_tx(&db, &partial) < 48
+                    } {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+            }
+            let mut sent = 0;
+            for index in ranges.iter().flat_map(|range| range.start..range.end) {
+                v2::write_frame(&mut s, &chunk(&m, &b, index)).await.unwrap();
+                sent += 1;
+            }
+            v2::write_frame(&mut s, &Frame::Complete { chunks_sent: sent }).await.unwrap();
+            s.finish().unwrap();
+        }
+        let (mut s, _rx, frame) = request(&server, &local).await;
+        assert_eq!(frame, Frame::Pull { file_id: m.file_id(), ranges: ranges(64, 65) });
+        v2::write_frame(&mut s, &chunk(&m, &b, 64)).await.unwrap();
+        v2::write_frame(&mut s, &Frame::Complete { chunks_sent: 1 }).await.unwrap();
+        s.finish().unwrap();
+    });
+    let result = timeout(Duration::from_secs(3), pull(r.core, &link.client, &file, &receiver)).await;
+    if result.is_err() { serve.abort(); }
+    result.expect("receiver must open four range streams without waiting for the first").unwrap();
+    serve.await.unwrap();
+    let done = r.partial(&file.file_id()).unwrap();
+    assert!(done.is_complete());
+    assert_eq!(std::fs::read(done.path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn interrupted_parallel_download_refetches_only_missing_chunks_on_a_new_link() {
+    let (sender, receiver) = (identity(73), identity(74));
+    let r = device();
+    let bytes = content(73, 64);
+    let file = manifest(&bytes, 1024);
+    let link = linked(&sender, &receiver).await;
+    let (server, local, m, b) = (link.server.clone(), sender.clone(), file.clone(), bytes.clone());
+    let core = r.core;
+    let serve = tokio::spawn(async move {
+        describe(&server, &local, &m).await;
+        let mut broken = None;
+        for _ in 0..4 {
+            let (mut s, rx, frame) = request(&server, &local).await;
+            let Frame::Pull { ranges, .. } = frame else { panic!("expected pull") };
+            if ranges[0].start == 0 {
+                broken = Some((s, rx));
+                continue;
+            }
+            let mut sent = 0;
+            for index in ranges.iter().flat_map(|range| range.start..range.end) {
+                v2::write_frame(&mut s, &chunk(&m, &b, index)).await.unwrap();
+                sent += 1;
+            }
+            v2::write_frame(&mut s, &Frame::Complete { chunks_sent: sent }).await.unwrap();
+            s.finish().unwrap();
+        }
+        timeout(Duration::from_secs(2), async {
+            while {
+                let db = core.db.transfers().lock();
+                store::verified_count_tx(&db, &store::partial_get_tx(&db, &m.file_id()).unwrap()) < 48
+            } { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        broken.unwrap().0.reset(1u32.into()).unwrap();
+    });
+    let failed = timeout(Duration::from_secs(3), pull(r.core, &link.client, &file, &receiver))
+        .await.unwrap().unwrap_err();
+    assert_eq!(failed.kind, FailureKind::Transport);
+    serve.await.unwrap();
+    assert_eq!(r.verified(&file.file_id()), 48);
+    assert_eq!(r.partial(&file.file_id()).unwrap().have, 0);
+
+    let link = linked(&sender, &receiver).await;
+    let (server, local, m, b) = (link.server.clone(), sender.clone(), file.clone(), bytes.clone());
+    let serve = tokio::spawn(async move {
+        describe(&server, &local, &m).await;
+        let (mut s, _rx, frame) = request(&server, &local).await;
+        assert_eq!(frame, Frame::Pull { file_id: m.file_id(), ranges: ranges(0, 16) });
+        for index in 0..16 { v2::write_frame(&mut s, &chunk(&m, &b, index)).await.unwrap(); }
+        v2::write_frame(&mut s, &Frame::Complete { chunks_sent: 16 }).await.unwrap();
+        s.finish().unwrap();
+    });
+    pull(r.core, &link.client, &file, &receiver).await.unwrap();
+    serve.await.unwrap();
+    let done = r.partial(&file.file_id()).unwrap();
+    assert!(done.is_complete());
+    assert_eq!(std::fs::read(done.path).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn group_media_without_pairing_is_scoped_and_revocable() {
     let (sender, receiver) = (identity(81), identity(82));
     let (s, r) = (device(), device());
@@ -77,6 +193,10 @@ async fn group_media_without_pairing_is_scoped_and_revocable() {
     let done = r.partial(&file.file_id()).unwrap();
     assert!(done.is_complete());
     assert_eq!(std::fs::read(&done.path).unwrap(), content(1, 3));
+    let history = progress::Activities::default().details(&s.core.db, file.file_id()).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!((history[0].peer, history[0].bytes), (receiver.ipk, file.total_size));
+    assert_eq!(history[0].groups, vec![2; file.chunks.len()]);
 
     let unavailable =
         async |file| pull(r.core, &link.client, file, &receiver).await.unwrap_err().kind;
@@ -420,11 +540,16 @@ async fn only_transport_failures_retry_and_automatic_resumes_respect_the_outcome
     let lease = store::receiver_lease(r.core, fid);
     set_state(r.core, &fid, peer, store::HELD, &lease).unwrap();
     drop(lease);
+    assert!(store::ready_file_ids_for_tx(&r.core.db.transfers().lock(), &peer).is_empty(),
+        "an ordinary link must not queue a response to a wake we have not sent yet");
     assert!(store::claim_wake_tx(&mut r.core.db.transfers().lock(), &fid, now_secs(), 60).unwrap());
-    assert!(r.core.transfers.downloading.lock().insert(fid));
-    let writer = PullGuard(r.core, fid);
+    assert!(store::ready_file_ids_for_tx(&r.core.db.transfers().lock(), &peer).contains(&fid));
+    assert!(r.core.transfers.downloading.lock().insert(fid, Default::default()).is_none());
+    let writer = PullGuard { core: r.core, file: fid, registered: true };
     download_with_policy(r.core, fid, DownloadTrigger::WakeResponse).await.unwrap();
     let claimed = store::claim_ready_retry_tx(&r.core.db.transfers().lock(), &fid).unwrap();
     assert!(claimed, "a second download of a file being pulled spends nothing");
+    assert!(!store::ready_file_ids_for_tx(&r.core.db.transfers().lock(), &peer).contains(&fid),
+        "a ready response cannot renew its own budget");
     drop(writer);
 }

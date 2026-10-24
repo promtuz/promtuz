@@ -351,9 +351,7 @@ pub(crate) fn handle_presence(list: Vec<common::proto::client_rel::PresenceP>) {
         }
         // A contact coming online is the moment a held download can move:
         // the sender we could not reach is reachable now.
-        if matches!(e.state, PresenceState::Online) {
-            crate::transfer::resume_for_peer(e.who.0);
-        }
+        crate::transfer::peer_presence(e.who.0, matches!(e.state, PresenceState::Online));
         let presence = match e.state {
             PresenceState::Online => Presence::Online,
             PresenceState::Idle { since } => Presence::Idle { since },
