@@ -178,9 +178,6 @@ pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo) -> R
 }
 
 pub fn stage_raw_attachment(source_path: String, name: String, mime: String) -> Result<u64> {
-    if mime.starts_with("image/") || mime.starts_with("video/") {
-        bail!("Images and videos must be prepared through the media pipeline.");
-    }
     stage_attachment_with_thumb(source_path, name, mime, Vec::new(), 0, 0)
 }
 
@@ -318,6 +315,50 @@ mod tests {
     use super::*;
     use crate::test_support::ScopedCore;
 
+    #[test]
+    fn documents_preserve_media_bytes_mime_and_shared_ownership() {
+        let scoped = std::sync::Arc::new(std::sync::OnceLock::new());
+        let threads = scoped.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(move || crate::state::SCOPED.set(Some(*threads.get().unwrap())))
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let scope = ScopedCore::new();
+        scoped.set(scope.core).ok().unwrap();
+        let bytes = include_bytes!("../testdata/media/animated-exif-xmp.avif");
+        let mut ids = Vec::new();
+        for (index, mime) in
+            ["image/avif", "video/mp4", "application/octet-stream"].iter().enumerate()
+        {
+            let path = format!("{}/original-{index}", scope.core.db.files_dir("picked"));
+            std::fs::write(&path, bytes).unwrap();
+            ids.push(stage_raw_attachment(path, "original.avif".into(), (*mime).into()).unwrap());
+        }
+        scope.core.tasks.close();
+        runtime.block_on(scope.core.tasks.wait());
+
+        let staged = list();
+        let file = staged[0].file_id.unwrap();
+        let kept = crate::transfer::store::retention_get(&file).unwrap();
+        assert_eq!(std::fs::read(&kept.path).unwrap(), bytes);
+        assert_eq!(crate::transfer::wire::Manifest::from_file(&kept.path).unwrap().file_id(), file);
+        for (item, mime) in
+            staged.iter().zip(["image/avif", "video/mp4", "application/octet-stream"])
+        {
+            assert_eq!((item.state, item.kind), (READY, KIND_ATTACHMENT));
+            assert_eq!((item.mime.as_str(), item.name.as_str()), (mime, "original.avif"));
+            assert_eq!(item.file_id, Some(file));
+            assert!(item.blob.is_none() && item.thumb.is_none());
+            discard(item.id);
+            if item.id != *ids.last().unwrap() {
+                assert!(Path::new(&kept.path).exists(), "another document still owns it");
+            }
+        }
+        assert!(!Path::new(&kept.path).exists());
+    }
+
     /// Retention is one row per content hash, so two chips from one document share a file.
     #[test]
     fn a_file_stays_held_while_any_chip_still_names_it() {
@@ -348,7 +389,7 @@ mod tests {
         };
 
         // A message with the same content is deleted before the chip lands.
-        crate::data::media::unlink_orphaned(scope.core, &db.messages().lock(), &[file_id]);
+        crate::data::media::unlink_orphaned(scope.core, &db.messages().lock(), [file_id]);
         let kept = retained().expect("the chip keeps its retention");
         assert!(Path::new(&kept).exists());
         discard(id);

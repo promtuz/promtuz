@@ -23,28 +23,20 @@ suspend fun stagePickedAttachment(context: Context, uri: Uri): StagedPickedAttac
             media.image,
         )
     }
-    val copy = resolvePickedFile(context, uri)
+    return stagePickedDocument(context, uri)
+}
+
+suspend fun stagePickedDocument(context: Context, uri: Uri): StagedPickedAttachment {
+    val picked = resolvePickedFile(context, uri)
         ?: throw MediaPreparationException("Couldn’t open this attachment.")
-    return stageRawAttachment(context, copy)
+    val original = File(picked.path)
+    val id = stageOwnedFile(original,
+        stage = { CoreBridge.stageRawAttachment(original.absolutePath, picked.name, picked.mime) },
+        discard = { CoreBridge.discardStaged(it) },
+    )
+    return StagedPickedAttachment(id, picked.name, null, false)
 }
 
 /** Called only with a finalized clip created by CameraOverlay, transferring its ownership. */
 suspend fun stageCapturedVideo(context: Context, file: File): StagedPickedAttachment =
     try { stagePickedAttachment(context, Uri.fromFile(file)) } finally { file.delete() }
-
-private suspend fun stageRawAttachment(context: Context, picked: PickedFile): StagedPickedAttachment {
-    val original = File(picked.path)
-    val pending = linkedSetOf(original)
-    try {
-        pending.remove(original) // stageOwnedFile owns it from this call onward, including failures.
-        val mime = picked.mime.takeUnless { it.startsWith("image/") || it.startsWith("video/") }
-            ?: "application/octet-stream"
-        val id = stageOwnedFile(original,
-            stage = { CoreBridge.stageRawAttachment(original.absolutePath, picked.name, mime) },
-            discard = { CoreBridge.discardStaged(it) },
-        )
-        return StagedPickedAttachment(id, picked.name, null, false)
-    } finally {
-        pending.forEach { it.delete() }
-    }
-}

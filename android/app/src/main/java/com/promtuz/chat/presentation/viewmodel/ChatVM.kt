@@ -28,6 +28,7 @@ import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
 import com.promtuz.chat.utils.media.stageCapturedVideo
 import com.promtuz.chat.utils.media.stagePickedAttachment
+import com.promtuz.chat.utils.media.stagePickedDocument
 import com.promtuz.chat.utils.media.MediaPreparationException
 import com.promtuz.chat.utils.media.StagedPickedAttachment
 import com.promtuz.core.CoreBridge
@@ -597,7 +598,7 @@ class ChatVM(
 
     /** The album id is minted at send time, so a later pick still joins the same album. */
     fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
-        selected.forEach { uri -> stagePickedFile(uri) }
+        selected.forEach { uri -> acceptStaged(stagePickedAttachment(application, uri)) }
     }
 
     fun attachCaptured(file: java.io.File, video: Boolean) {
@@ -621,7 +622,9 @@ class ChatVM(
         acceptStaged(staged)
     }
 
-    fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected -> selected.forEach { stagePickedFile(it) } }
+    fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected ->
+        selected.forEach { uri -> acceptStaged(stagePickedDocument(application, uri)) }
+    }
 
     private fun prepareMedia(
         uris: List<Uri>, photos: Boolean, onRejected: () -> Unit = {}, prepare: suspend (List<Uri>) -> Unit,
@@ -757,11 +760,6 @@ class ChatVM(
             previews.clear()
         }
         super.onCleared()
-    }
-
-    private suspend fun stagePickedFile(uri: Uri) {
-        val staged = stagePickedAttachment(application, uri)
-        acceptStaged(staged)
     }
 
     private suspend fun acceptStaged(staged: StagedPickedAttachment) {

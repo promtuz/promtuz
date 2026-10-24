@@ -41,7 +41,7 @@ impl From<crate::staging::Staged> for StagedRecord {
     }
 }
 
-/// The blurred preview is ready when this returns; the manifest hash runs off-thread.
+/// Sends a document unchanged, including images/videos. Hashing runs off-thread.
 #[uniffi::export]
 pub fn stage_raw_attachment(
     source_path: String, name: String, mime: String,
