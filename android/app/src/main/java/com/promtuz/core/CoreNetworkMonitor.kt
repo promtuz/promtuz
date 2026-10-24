@@ -23,10 +23,13 @@ internal object CoreNetworkMonitor {
             private var currentNetwork: Network? = null
             private var currentRoute: Route? = null
             private var deliveredRoute: Route? = null
+            private var validated = false
+            private var becameUsable = false
             private val deliver = Runnable {
                 val route = currentRoute
-                if (route != null && route != deliveredRoute) {
+                if (route != null && (route != deliveredRoute || becameUsable)) {
                     deliveredRoute = route
+                    becameUsable = false
                     CoreBridge.onNetworkChanged()
                 }
             }
@@ -37,6 +40,8 @@ internal object CoreNetworkMonitor {
                 CoreBridge.setAttachmentSharingNetwork(false)
                 currentRoute = null
                 deliveredRoute = null
+                validated = false
+                becameUsable = false
                 handler.removeCallbacks(deliver)
                 // On API 26+, onLinkPropertiesChanged follows onAvailable.
                 // Use those properties; synchronous queries here can be stale.
@@ -49,7 +54,7 @@ internal object CoreNetworkMonitor {
                     properties.interfaceName,
                     properties.linkAddresses.map { it.toString() }.toSet(),
                     properties.routes.map { it.toString() }.toSet(),
-                    properties.mtu,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) properties.mtu else 0,
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) properties.nat64Prefix?.toString() else null,
                 )
                 if (route == currentRoute) return
@@ -61,6 +66,14 @@ internal object CoreNetworkMonitor {
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                 if (network != currentNetwork) return
+                val usable = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                if (usable && !validated) {
+                    becameUsable = true
+                    handler.removeCallbacks(deliver)
+                    handler.postDelayed(deliver, 400)
+                }
+                validated = usable
                 // This controls uploads from recipient copies, independently
                 // of route changes. Loss of eligibility is never debounced.
                 CoreBridge.setAttachmentSharingNetwork(
@@ -78,6 +91,8 @@ internal object CoreNetworkMonitor {
                 currentNetwork = null
                 currentRoute = null
                 deliveredRoute = null
+                validated = false
+                becameUsable = false
                 handler.removeCallbacks(deliver)
                 // Retry once a network is usable, including a return to the same route.
             }
