@@ -218,7 +218,7 @@ fun MessageBubble(
                         content is MessageContent.Attachment ->
                             AttachmentBlock(
                                 content, textColor, appearance.type.fontScale,
-                                metaLabel, peerName, outgoing, onDownload, onOpen,
+                                metaLabel, outgoing, onDownload, onOpen,
                             )
                         content is MessageContent.Voice ->
                             VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
@@ -256,15 +256,25 @@ fun MessageBubble(
                 .then(if (bare) Modifier else Modifier.clip(shape))
                 .onGloballyPositioned { coords.bubble = it }
                 .then(
+                    if (onDoubleTap == null && onTap == null) Modifier
+                    else Modifier.pointerInput(onDoubleTap, onTap) {
+                        detectTapGestures(
+                            onDoubleTap = onDoubleTap?.let { cb -> { cb() } },
+                            onTap = onTap?.let { cb -> { if (!coords.longPressed) cb() } },
+                        )
+                    }
+                )
+                .then(
                     if (onLongPress == null) Modifier
                     else Modifier.pointerInput(menuState) {
                         awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
+                            // Children get first refusal, before the bubble's tap detector consumes down.
+                            val down = awaitFirstDown()
                             coords.longPressed = false
                             if (linkGestures.owns(down)) return@awaitEachGesture
                             if (menuState?.isOpen == true) return@awaitEachGesture
                             awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
-                            // The tap detector below sees this same release later and
+                            // The tap detector sees this same release later and
                             // must not treat it as a tap on top of the menu.
                             coords.longPressed = true
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -276,17 +286,6 @@ fun MessageBubble(
                                 { menuState.hovered = it }, menuState::pick,
                             )
                         }
-                    }
-                )
-                .then(
-                    // One detector for both, so a sticker's tap waits out the
-                    // double-tap window instead of stealing it.
-                    if (onDoubleTap == null && onTap == null) Modifier
-                    else Modifier.pointerInput(onDoubleTap, onTap) {
-                        detectTapGestures(
-                            onDoubleTap = onDoubleTap?.let { cb -> { cb() } },
-                            onTap = onTap?.let { cb -> { if (!coords.longPressed) cb() } },
-                        )
                     }
                 )
                 .padding(

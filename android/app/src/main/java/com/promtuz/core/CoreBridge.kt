@@ -6,6 +6,12 @@ import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.utils.media.AndroidMediaAdapter
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -123,6 +129,17 @@ import com.promtuz.core.adapter.PresenceSignal
 
 /** Sends and pairing return once queued; their outcome arrives through [dbChanged]. */
 object CoreBridge {
+    private val transferReader = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val attachmentTransfers = flow {
+        while (true) {
+            emit(uniffi.core.attachmentTransfers())
+            delay(500)
+        }
+    }.stateIn(transferReader, SharingStarted.WhileSubscribed(0, 0), emptyList())
+
+    suspend fun attachmentTransferDetails(fileId: ByteArray, outgoing: Boolean) =
+        withContext(Dispatchers.IO) { uniffi.core.attachmentTransferDetails(fileId, outgoing) }
+
     data class StagedImportedMedia(val id: ULong, val preview: ByteArray, val image: Boolean)
 
     fun onForeground() = ffiOnForeground()

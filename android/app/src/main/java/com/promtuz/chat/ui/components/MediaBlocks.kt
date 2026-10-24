@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.components
 
-import android.text.format.Formatter
 import com.promtuz.chat.ui.text.EmojiText
 import com.promtuz.chat.ui.text.clock
 
@@ -24,7 +23,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -151,7 +149,7 @@ fun AlbumBlock(
                                 onFrameChanged = { frame.image = it },
                             )
                             is MessageContent.Attachment -> MediaTileContent(
-                                content, textColor, outgoing, item.dispatchIdHex, onDownload,
+                                content, textColor, outgoing, item.dispatchIdHex, onDownload, open,
                                 onFrameChanged = { frame.image = it },
                             )
                             else -> Unit
@@ -204,20 +202,12 @@ fun AttachmentBlock(
     textColor: Color,
     fontScale: Float,
     metaLabel: String,
-    peerName: String,
     outgoing: Boolean,
     onDownload: ((String) -> Unit)?,
     onOpen: ((String) -> Unit)?,
 ) {
-    val size = Formatter.formatShortFileSize(LocalContext.current, att.size)
-    // Outgoing shows plain size: retry and waiting states are receiver-side.
-    val subtitle = if (outgoing) size else when (att.transferState) {
-        1 -> if (att.transferTotal > 0) "$size · ${att.transferHave * 100 / att.transferTotal}%" else size
-        3 -> "Tap to retry"
-        4 -> if (peerName.isNotBlank()) "Waiting for $peerName…" else "Waiting…"
-        5 -> "Connecting…"
-        else -> size
-    }
+    val feedback = rememberAttachmentFeedback(att, outgoing, onDownload,
+        onOpen?.let { open -> { att.localPath?.let(open) } })
     Column {
         Row(
             Modifier
@@ -243,9 +233,13 @@ fun AttachmentBlock(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = textColor.copy(alpha = 0.6f))
+                TransferStatus(att, feedback, textColor.copy(alpha = 0.6f))
             }
-            TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
+            TransferControl(feedback, textColor) {
+                IconButton({ att.localPath?.let { onOpen?.invoke(it) } }) {
+                    MorphIcon(MorphGlyph.Check, "Open attachment", Modifier.size(20.dp), tint = textColor)
+                }
+            }
         }
         Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = false)
     }
@@ -272,7 +266,8 @@ fun MediaTileBlock(
                 .then(if (ready && onOpen != null) Modifier.tapOnly(onOpen) else Modifier)
                 .background(textColor.copy(alpha = 0.10f)),
         ) {
-            MediaTileContent(att, textColor, outgoing, originKey, onDownload, onFrameChanged = { frame.image = it })
+            MediaTileContent(att, textColor, outgoing, originKey, onDownload, onOpen,
+                onFrameChanged = { frame.image = it })
         }
         if (att.caption.isNotEmpty()) Caption(att.caption, textColor, fontScale, metaLabel, outgoing, inset = true)
     }
@@ -282,18 +277,13 @@ fun MediaTileBlock(
 @Composable
 private fun BoxScope.MediaTileContent(
     att: MessageContent.Attachment, textColor: Color, outgoing: Boolean,
-    originKey: String?, onDownload: ((String) -> Unit)?,
+    originKey: String?, onDownload: ((String) -> Unit)?, onOpen: (() -> Unit)?,
     onFrameChanged: ((ImageBitmap?) -> Unit)? = null,
 ) {
     val thumb = att.thumb
     val video = att.mime.startsWith("video/") && thumb != null
     val ready = att.transferState == 2 && att.localPath != null
-    // Until the bytes land only the ring is a control, so a tap never lights the whole picture.
-    val download: (() -> Unit)? = when {
-        ready || outgoing -> null
-        att.transferState == 1 || att.transferState == 4 -> null
-        else -> onDownload?.let { { it(att.fileIdHex) } }
-    }
+    val feedback = rememberAttachmentFeedback(att, outgoing, onDownload, onOpen)
     if (thumb != null) EncodedImage(
         filePath = att.localPath.takeIf { ready && att.mime.startsWith("image/") }, poster = thumb, contentDescription = null,
         modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
@@ -318,31 +308,20 @@ private fun BoxScope.MediaTileContent(
         LaunchedEffect(player.ended) { if (player.ended) InlinePlayback.stop() }
         VideoSurface(player, MediaItem(originKey, playingThumb, playingThumb.width, playingThumb.height), Modifier.fillMaxSize())
     }
-    if (!ready) Box(
-        Modifier.align(Alignment.Center)
-            .then(if (download != null) Modifier.pressScale(download) else Modifier)
-            .size(44.dp).clip(RoundedCornerShape(22.dp))
-            .background(Color.Black.copy(alpha = 0.45f)),
+    if (!ready || (video && !playingHere)) Box(
+        Modifier.align(Alignment.Center).clip(RoundedCornerShape(24.dp))
+            .then(if (!ready) Modifier.background(Color.Black.copy(alpha = 0.45f)) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        if (outgoing || att.transferState == 1) {
-            if (att.transferTotal > 0) CircularProgressIndicator(
-                progress = { att.transferHave.toFloat() / att.transferTotal },
-                modifier = Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp,
-            ) else CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
-        } else Image(painterResource(R.drawable.ic_media_download), "Download", Modifier.size(24.dp))
-    } else if (video && !playingHere) Image(
-        painterResource(R.drawable.ic_media_play_badge), "Play",
-        Modifier.align(Alignment.Center)
-            .then(if (originKey != null) Modifier.pressScale({ InlinePlayback.play(originKey) }) else Modifier)
-            .size(48.dp),
-    )
-    Text(
-        if (att.transferState == 4) "Waiting…" else Formatter.formatShortFileSize(LocalContext.current, att.size),
-        style = MaterialTheme.typography.labelSmall, color = Color.White,
-        modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+        TransferControl(feedback, Color.White) {
+            if (video && !playingHere) Image(painterResource(R.drawable.ic_media_play_badge), "Play",
+                Modifier.size(48.dp).then(if (originKey != null)
+                    Modifier.pressScale({ InlinePlayback.play(originKey) }) else Modifier))
+        }
+    }
+    TransferStatus(att, feedback, Color.White,
+        Modifier.align(Alignment.TopStart).padding(6.dp)
             .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
-            .padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
 
@@ -434,42 +413,6 @@ private fun Waveform(samples: ByteArray, lit: Float, color: Color, modifier: Mod
                 strokeWidth = stroke,
                 cap = StrokeCap.Round,
             )
-        }
-    }
-}
-
-@Composable
-private fun TransferAffordance(
-    att: MessageContent.Attachment,
-    textColor: Color,
-    outgoing: Boolean,
-    onDownload: ((String) -> Unit)?,
-    onOpen: ((String) -> Unit)?,
-) {
-    // An outgoing file is still sending until state 2; there is nothing to download.
-    if (outgoing && att.transferState != 2) {
-        CircularProgressIndicator(Modifier.size(20.dp), color = textColor, strokeWidth = 2.dp)
-        return
-    }
-    when (att.transferState) {
-        // A tap re-drives download(), which no-ops a live pull and resumes a stalled one.
-        1, 5 -> {
-            val ring = Modifier.size(26.dp).clickable { onDownload?.invoke(att.fileIdHex) }
-            if (att.transferState == 1 && att.transferTotal > 0)
-                CircularProgressIndicator(
-                    progress = { att.transferHave.toFloat() / att.transferTotal },
-                    modifier = ring,
-                    color = textColor,
-                    strokeWidth = 2.dp,
-                )
-            else CircularProgressIndicator(ring, color = textColor, strokeWidth = 2.dp)
-        }
-        2 -> IconButton({ att.localPath?.let { onOpen?.invoke(it) } }) {
-            MorphIcon(MorphGlyph.Check, null, Modifier.size(20.dp), tint = textColor)
-        }
-        else -> IconButton({ onDownload?.invoke(att.fileIdHex) }) {
-            val tint = if (att.transferState == 3) MaterialTheme.colorScheme.error else textColor
-            DrawableIcon(R.drawable.i_download, Modifier.size(20.dp), tint = tint)
         }
     }
 }
