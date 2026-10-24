@@ -131,6 +131,7 @@ pub enum AppPayload {
         welcome: Vec<u8>,
         history: Vec<u8>,
     },
+    Media(crate::proto::media::MediaUpdate),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

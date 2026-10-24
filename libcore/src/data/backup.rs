@@ -60,6 +60,7 @@ struct Suffixes {
     avatar:   Option<Vec<u8>>,
     groups:   Vec<crate::data::group_picture::Backup>,
     receipts: crate::data::receipts::Backup,
+    preparations: Vec<crate::data::media::PreparationBackup>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,8 +92,8 @@ fn backup_key(isk: &[u8; 32]) -> [u8; 32] {
 }
 
 fn encode(key: &[u8; 32], payload: &BackupPayload, suffixes: &Suffixes) -> Result<Vec<u8>> {
-    let Suffixes { stickers, avatar, groups, receipts } = suffixes;
-    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts))
+    let Suffixes { stickers, avatar, groups, receipts, preparations } = suffixes;
+    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts, preparations))
         .map_err(|e| anyhow!("encode: {e}"))?;
     let compressed = lz4_flex::compress_prepend_size(&plain);
     drop(plain);
@@ -146,6 +147,7 @@ fn split(plain: &[u8]) -> Result<(BackupPayload, Suffixes)> {
         avatar:   next(&mut rest, "avatar")?,
         groups:   next(&mut rest, "groups")?,
         receipts: next(&mut rest, "receipts")?,
+        preparations: next(&mut rest, "media preparations")?,
     };
     Ok((payload, suffixes))
 }
@@ -199,6 +201,7 @@ fn export_from(db: &Stores, key: &[u8; 32]) -> Result<Vec<u8>> {
         avatar:   identity.avatar,
         groups:   crate::data::group_picture::dump_tx(&conn)?,
         receipts: crate::data::receipts::dump_tx(&conn)?,
+        preparations: crate::data::media::dump_preparations_tx(&conn)?,
     };
     drop(conn);
     encode(key, &payload, &suffixes)
@@ -258,6 +261,7 @@ fn import_into(
     let reactions = Reaction::import_rows_tx(&tx, &payload.reactions, replace)?;
     let media = crate::data::media::import_rows_tx(&tx, &payload.media)?;
     crate::data::media::import_sticker_refs_tx(&tx, &suffixes.stickers.0)?;
+    crate::data::media::restore_preparations_tx(&tx, &suffixes.preparations)?;
     crate::data::stickers::import_rows_tx(&tx, &suffixes.stickers.1)?;
     crate::data::message::import_read_state_tx(&tx, &payload.read_state, &payload.member_read)?;
     crate::data::receipts::backfill_tx(&tx)?;
@@ -314,6 +318,58 @@ mod tests {
     use super::*;
     use crate::test_support::data::identity;
     use crate::test_support::data::stores;
+
+    #[tokio::test]
+    async fn a_preparing_message_keeps_its_attempt_and_can_complete_after_backup_restore() {
+        use common::proto::{media::{CompletedMedia, MediaAttempt, MediaPresentation, MediaUpdate, PreparingMedia},
+            mls_wire::{AppPayload, Body}, pack::Packer};
+        use crate::messaging::receive::receive_application_content;
+        use crate::test_support::ScopedCore;
+
+        let original = ScopedCore::new();
+        let key = [7; 32];
+        let me = identity(&original.core.db.identity().lock(), 7).verifying_key().to_bytes();
+        let author = [2; 32];
+        let conversation = Conversation::join_group(&author, &[author, me]).unwrap();
+        let pending = PreparingMedia {
+            target: [3; 16], attempt: MediaAttempt { generation: 2, id: [4; 16] },
+            reply_to: None, caption: "clip".into(), group_id: None,
+            mime: "video/mp4".into(), name: "video.mp4".into(), thumb: vec![],
+            presentation: MediaPresentation { width: 480, height: 854, duration_ms: 2_000 },
+        };
+        let payload = AppPayload::Media(MediaUpdate::Preparing(pending.clone())).ser().unwrap();
+        receive_application_content(conversation, author, [9; 16], 100_000, &payload).unwrap();
+        let blob = export_from(&original.core.db, &key).unwrap();
+
+        let restored = ScopedCore::new();
+        identity(&restored.core.db.identity().lock(), 7);
+        import_into(&restored.core.db, &key, &blob, false).unwrap();
+        let details: Vec<u8> = restored.core.db.messages().lock().query_row(
+            "SELECT details FROM message_media_preparations", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(postcard::from_bytes::<PreparingMedia>(&details).unwrap(), pending);
+
+        let body = Body::Attachment {
+            caption: pending.caption.clone(), group_id: None, mime: pending.mime.clone(),
+            name: pending.name.clone(), size: 12, thumb: vec![], file_id: [5; 32],
+        };
+        let completed = CompletedMedia {
+            target: pending.target, attempt: pending.attempt, reply_to: None,
+            presentation: pending.presentation, body: body.clone(),
+        };
+        let payload = AppPayload::Media(MediaUpdate::Complete(completed)).ser().unwrap();
+        receive_application_content(conversation, author, [10; 16], 200_000, &payload).unwrap();
+        let payload = AppPayload::Post { reply_to: None, body }.ser().unwrap();
+        receive_application_content(conversation, author, pending.target, 200_000, &payload).unwrap();
+        let counts: (u32, u32) = restored.core.db.messages().lock().query_row(
+            "SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM message_media_preparations)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(counts, (1, 0));
+        let media = crate::data::media::get(&conversation, &pending.target).unwrap().unwrap();
+        assert_eq!(media.file_id, Some(vec![5; 32]));
+        assert_eq!(media.duration_ms, 2_000);
+    }
 
     /// The plaintext a released build writes, every row type filled once. It must keep decoding;
     /// a reshaped row needs a new `VERSION` instead.

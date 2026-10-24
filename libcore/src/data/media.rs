@@ -152,6 +152,37 @@ pub fn save_tx(
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PreparationBackup {
+    conversation_id: [u8; 16],
+    author: [u8; 32],
+    details: Vec<u8>,
+}
+
+pub fn dump_preparations_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<PreparationBackup>> {
+    all(conn, "SELECT p.conversation_id, m.sender_ipk, p.details
+        FROM message_media_preparations p JOIN messages m
+          ON m.conversation_id = p.conversation_id AND m.dispatch_id = p.dispatch_id
+        WHERE m.outgoing = 0 AND m.deleted = 0", [], |row| Ok(PreparationBackup {
+            conversation_id: row.get(0)?, author: row.get(1)?, details: row.get(2)?,
+        }))
+}
+
+pub fn restore_preparations_tx(conn: &rusqlite::Connection, rows: &[PreparationBackup]) -> Result<()> {
+    for row in rows {
+        let pending: common::proto::media::PreparingMedia = postcard::from_bytes(&row.details)?;
+        conn.execute("INSERT OR IGNORE INTO message_media_preparations (conversation_id, dispatch_id, details)
+            SELECT ?1, ?2, ?3 FROM messages m JOIN message_media mm
+              ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
+            WHERE m.conversation_id = ?1 AND m.dispatch_id = ?2 AND m.sender_ipk = ?4
+              AND m.outgoing = 0 AND m.deleted = 0 AND mm.kind = 2 AND mm.file_id IS NULL
+              AND mm.mime = ?5 AND m.content = ?6",
+            (row.conversation_id.as_slice(), pending.target.as_slice(), &row.details,
+                row.author.as_slice(), &pending.mime, &pending.caption))?;
+    }
+    Ok(())
+}
+
 /// Caption and media commit together: the ratchet is spent by now, so a partial could never heal.
 pub fn save_incoming_with_media(
     conv: &[u8; 16], sender: &[u8; 32], dispatch_id: &[u8; 16], caption: &str, timestamp: u64,

@@ -33,7 +33,7 @@ pub(crate) fn save_inbound_body(
 
 /// The text to surface and the media side row, if any. A sticker stores only its reference; the
 /// picture is fetched by it and cached under the pack.
-fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
+pub(super) fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
     use crate::data::media::KIND_ATTACHMENT;
     use crate::data::media::KIND_IMAGE;
     use crate::data::media::KIND_STICKER;

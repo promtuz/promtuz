@@ -576,6 +576,20 @@ const MIGRATION_ARRAY: &[M] = &[
                 REFERENCES message_media(conversation_id, dispatch_id) ON DELETE CASCADE
         ) WITHOUT ROWID;
         CREATE INDEX idx_media_rendition_file ON message_media_renditions(file_id);"),
+    M::up("CREATE TABLE message_media_preparations (
+            conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 16),
+            dispatch_id BLOB NOT NULL CHECK(length(dispatch_id) = 16),
+            details BLOB NOT NULL,
+            PRIMARY KEY (conversation_id, dispatch_id),
+            FOREIGN KEY (conversation_id, dispatch_id)
+                REFERENCES message_media(conversation_id, dispatch_id) ON DELETE CASCADE
+        ) WITHOUT ROWID;").down("CREATE TEMP TABLE media_preparations_rollback_guard (
+            pending INTEGER CHECK(pending = 0)
+        );
+        INSERT INTO media_preparations_rollback_guard
+            SELECT count(*) FROM message_media_preparations;
+        DROP TABLE media_preparations_rollback_guard;
+        DROP TABLE message_media_preparations;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -591,6 +605,7 @@ pub(super) const WATCHED: &[&str] = &[
     "reactions",
     "message_media",
     "message_media_renditions",
+    "message_media_preparations",
     "conversations",
     "conversation_members",
     "peer_names",
@@ -613,6 +628,32 @@ pub fn migrate(conn: &mut Connection) {
 mod tests {
     use super::*;
     use crate::test_support::data::ulid;
+
+    #[test]
+    fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
+        let previous = MIGRATION_ARRAY.len() - 1;
+        let mut conn = migrate_from(previous, |conn| {
+            conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
+                timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",
+                (ulid(1), &[1u8; 16], &[2u8; 32], &[3u8; 16])).unwrap();
+            conn.execute("INSERT INTO message_media (conversation_id, dispatch_id, kind, mime, name,
+                size, width, height) VALUES (?1, ?2, 2, 'video/mp4', 'video.mp4', 0, 480, 854)",
+                (&[1u8; 16], &[3u8; 16])).unwrap();
+        });
+        conn.execute("INSERT INTO message_media_preparations VALUES (?1, ?2, ?3)",
+            (&[1u8; 16], &[3u8; 16], &[0u8])).unwrap();
+        assert!(MIGRATIONS.to_version(&mut conn, previous).is_err());
+        let count: u32 = conn.query_row("SELECT count(*) FROM message_media_preparations", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        // The test models a completed job; rollback itself must never remove an active one.
+        conn.execute("DELETE FROM message_media_preparations", []).unwrap();
+        MIGRATIONS.to_version(&mut conn, previous).unwrap();
+        let content: String = conn.query_row("SELECT content FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(content, "existing");
+        migrate(&mut conn);
+        let count: u32 = conn.query_row("SELECT count(*) FROM message_media_preparations", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
 
     /// A database a release left at schema `version`, holding what `seed` wrote, upgraded.
     fn migrate_from(version: usize, seed: impl FnOnce(&Connection)) -> Connection {

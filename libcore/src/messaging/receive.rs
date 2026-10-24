@@ -575,6 +575,9 @@ pub(crate) fn receive_application_content(
         return Ok(());
     }
     match payload {
+        Ok(AppPayload::Media(update)) => {
+            super::preparation::receive(conv, author, accepted_at_secs(accepted_at_ms), update)?;
+        },
         Ok(AppPayload::GroupAdmins { .. }) => {},
         Ok(AppPayload::Post { reply_to, body }) => {
             let did = dispatch_id;

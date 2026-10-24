@@ -2,6 +2,12 @@
 /// is a flag day for every node and client at once.
 pub const PROTOCOL_VERSION: u16 = 12;
 
+// Remove the shims in common/PROTOCOL_COMPAT.md before retiring this guard.
+const _: () = assert!(
+    PROTOCOL_VERSION == 12,
+    "Protocol changed: remove temporary fallbacks listed in common/PROTOCOL_COMPAT.md"
+);
+
 #[cfg(feature = "contracts")]
 pub mod contracts;
 
