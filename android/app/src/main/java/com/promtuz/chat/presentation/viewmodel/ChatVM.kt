@@ -898,4 +898,5 @@ private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): Messa
         transferHave = transferHave.toInt(),
         transferTotal = transferTotal.toInt(),
         localPath = localPath,
+        durationMs = durationMs.toLong(),
     )

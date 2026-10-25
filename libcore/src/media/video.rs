@@ -64,6 +64,7 @@ pub struct PreparedVideo {
     path: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
+    pub duration_ms: u32,
     pub poster: PreparedImage,
 }
 
@@ -237,6 +238,7 @@ pub(crate) fn prepare_video(
                 path: Some(output.clone()),
                 width: report.output.display_width.round() as u32,
                 height: report.output.display_height.round() as u32,
+                duration_ms: (report.output.duration_us / 1_000).min(u64::from(u32::MAX)) as u32,
                 poster: PreparedImage {
                     bytes: poster.bytes,
                     width: poster.width,
@@ -611,6 +613,7 @@ mod tests {
             assert_eq!(*renders.lock().unwrap(), 2);
             assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
             assert_eq!(video.poster.width, 1);
+            assert_eq!(video.duration_ms, 10_000);
             drop(video);
             assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
         }

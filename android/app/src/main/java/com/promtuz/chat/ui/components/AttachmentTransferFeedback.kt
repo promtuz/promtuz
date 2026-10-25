@@ -148,7 +148,10 @@ internal fun TransferStatus(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val duration by produceState<Long?>(null, att.localPath, att.mime) {
+    val knownDuration = att.durationMs.takeIf { it > 0 && att.mime.startsWith("video/") }
+    val duration by produceState(knownDuration, att.localPath, att.mime, knownDuration) {
+        value = knownDuration
+        if (knownDuration != null) return@produceState
         if (!att.mime.startsWith("video/") || att.localPath == null) return@produceState
         value = withContext(Dispatchers.IO) {
             runCatching {

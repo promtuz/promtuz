@@ -277,6 +277,25 @@ pub(super) async fn send_payload<C: DhtClient>(
             )?);
         }
     }
+    if let Ok(post) = AppPayload::deser(&payload_bytes)
+        && let Some(completed) = super::preparation::completion_for_post(&conversation, &id, &post)?
+    {
+        let control = blake3::hash(&[b"promtuz media completion v1".as_slice(), &id].concat());
+        copies.extend(queue_application(
+            core().db.outbox(),
+            ctx.provider,
+            gid,
+            control.as_bytes()[..16].try_into().expect("16-byte completion id"),
+            AppPayload::Media(common::proto::media::MediaUpdate::Complete(completed)).ser()?,
+            &recipients,
+            &ipk_signer,
+            OpType::Control,
+            Wake::No,
+            0,
+            true,
+        )?);
+    }
+    // COMPAT(v12): media-completion. Old clients still need the unchanged attachment Post.
     let queued = queue_application(
         core().db.outbox(),
         ctx.provider,
@@ -356,6 +375,71 @@ mod tests {
     use crate::test_support::net::Device;
     use crate::test_support::net::FakeDhtClient;
     use crate::test_support::net::pair;
+
+    #[tokio::test]
+    async fn prepared_video_queues_presentation_and_the_old_post_before_dispatch() {
+        let scope = crate::test_support::ScopedCore::new();
+        let signer = crate::test_support::data::identity(&scope.core.db.identity().lock(), 61);
+        let bob = Device::new(62);
+        let dht = FakeDhtClient::default();
+        bob.publish_keypackage(&dht).await;
+        let conversation = Conversation::for_peer(&bob.ipk).unwrap();
+        let mut media = crate::test_support::transfer::attachment([4; 32], 12);
+        media.mime = "video/mp4".into();
+        media.width = 480;
+        media.height = 854;
+        media.duration_ms = 2_000;
+        let message = crate::data::media::save_outgoing_with_media(&conversation, "clip", None, &media).unwrap();
+        let target: [u8; 16] = message.inner.dispatch_id.as_slice().try_into().unwrap();
+        let provider = PromtuzMlsProvider::shared();
+        let stash = crate::mls::KeyPackageStash::new(scope.core.db.mls());
+        let buffer = crate::mls::EpochCatchupBuffer::new(scope.core.db.mls());
+        let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
+        attempt_send(&ctx, conversation, message.clone()).await.unwrap();
+
+        let welcome = dht.welcomes_pending.lock().pop().unwrap();
+        let mut joined = crate::mls::process_welcome(&bob.provider, &welcome.envelope).unwrap();
+        let frames: Vec<Vec<u8>> = {
+            let db = scope.core.db.outbox().lock();
+            db.prepare("SELECT payload FROM outbox ORDER BY rowid").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(frames.len(), 2);
+        let mut payloads = Vec::new();
+        let mut ids = Vec::new();
+        for frame in &frames {
+            let CRelayPacket::Dispatch(dispatch) = CRelayPacket::deser(&frame[4..]).unwrap() else {
+                panic!("expected dispatch");
+            };
+            assert_eq!(dispatch.to.0, bob.ipk);
+            assert_eq!(dispatch.from.0, signer.verifying_key().to_bytes());
+            ids.push(dispatch.id.0);
+            let MlsEnvelopeP::Application(env) = MlsEnvelopeP::deser(&dispatch.payload).unwrap() else {
+                panic!("expected MLS application");
+            };
+            let packet = MlsMessageIn::tls_deserialize_exact(&env.mls_message.0).unwrap()
+                .try_into_protocol_message().unwrap();
+            let ProcessedMessageContent::ApplicationMessage(plain) =
+                joined.process_incoming(&bob.provider, packet).unwrap().content else {
+                    panic!("expected application content");
+                };
+            payloads.push(AppPayload::deser(&plain.into_bytes()).unwrap());
+        }
+        let AppPayload::Media(common::proto::media::MediaUpdate::Complete(completed)) = &payloads[0] else {
+            panic!("expected presentation control");
+        };
+        assert_eq!(completed.target, target);
+        assert_eq!(completed.presentation.duration_ms, 2_000);
+        assert_eq!(payloads[1], AppPayload::Post { reply_to: None, body: completed.body.clone() });
+        assert_eq!(ids[1], target);
+        assert_ne!(ids[0], target);
+        attempt_send(&ctx, conversation, message).await.unwrap();
+        let saved: Vec<Vec<u8>> = scope.core.db.outbox().lock()
+            .prepare("SELECT id FROM outbox ORDER BY id").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(saved.len(), 2, "retry must reuse both dispatch identities");
+        assert!(ids.iter().all(|id| saved.contains(&id.to_vec())));
+    }
 
     /// Concurrent sends on one pair never share a ratchet step: the peer decrypts every copy in
     /// the order the outbox queued them.

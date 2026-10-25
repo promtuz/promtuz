@@ -54,6 +54,7 @@ sealed interface MessageContent {
         val transferHave: Int,
         val transferTotal: Int,
         val localPath: String?,
+        val durationMs: Long,
     ) : MessageContent
 
     data class Sticker(val sticker: StickerRef) : MessageContent

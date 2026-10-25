@@ -74,6 +74,7 @@ pub fn clear_replay(provider: &PromtuzMlsProvider, gid: &[u8; 32], through: u64)
 pub fn discard_message_replay(
     provider: &PromtuzMlsProvider, gid: &[u8; 32], target: &[u8; 16],
 ) -> Result<()> {
+    use common::proto::media::MediaUpdate;
     use common::proto::mls_wire::AppPayload;
     use common::proto::pack::Unpacker;
     provider.storage().with_tx(|tx| {
@@ -83,8 +84,14 @@ pub fn discard_message_replay(
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, payload) in rows {
-            let related = matches!(AppPayload::deser(&payload), Ok(AppPayload::Revise { target: t, .. }
-                | AppPayload::React { target: t, .. }) if t == *target);
+            let related = match AppPayload::deser(&payload) {
+                Ok(AppPayload::Revise { target: t, .. } | AppPayload::React { target: t, .. }) => {
+                    t == *target
+                },
+                Ok(AppPayload::Media(MediaUpdate::Preparing(pending))) => pending.target == *target,
+                Ok(AppPayload::Media(MediaUpdate::Complete(completed))) => completed.target == *target,
+                _ => false,
+            };
             if id == *target || related {
                 tx.execute(
                     "DELETE FROM mls_replay WHERE group_id=?1 AND dispatch_id=?2",

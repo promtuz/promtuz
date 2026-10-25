@@ -1,8 +1,10 @@
 //! One message from preparation through completion, including reordered v12 fallback posts.
 
 use anyhow::{Result, ensure};
-use common::proto::media::{CompletedMedia, MediaPresentation, MediaUpdate, PreparingMedia};
-use common::proto::mls_wire::Body;
+use common::proto::media::{
+    CompletedMedia, MediaAttempt, MediaPresentation, MediaUpdate, PreparingMedia,
+};
+use common::proto::mls_wire::{AppPayload, Body};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::data::{
@@ -16,6 +18,40 @@ use crate::state::core;
 struct Stored {
     message: Message,
     first: bool,
+}
+
+pub(super) fn completion_for_post(
+    conversation: &[u8; 16], target: &[u8; 16], post: &AppPayload,
+) -> Result<Option<CompletedMedia>> {
+    let AppPayload::Post { reply_to, body: body @ Body::Attachment { mime, file_id, .. } } = post else {
+        return Ok(None);
+    };
+    if mime != "video/mp4" {
+        return Ok(None);
+    }
+    let Some(media) = media::get(conversation, target)? else { return Ok(None) };
+    if media.kind != media::KIND_ATTACHMENT
+        || media.mime != *mime
+        || media.file_id.as_deref() != Some(file_id.as_slice())
+        || media.width == 0
+        || media.height == 0
+        || media.duration_ms == 0
+    {
+        return Ok(None);
+    }
+    let presentation = MediaPresentation {
+        width: media.width,
+        height: media.height,
+        duration_ms: media.duration_ms,
+    };
+    validate_presentation(presentation)?;
+    Ok(Some(CompletedMedia {
+        target: *target,
+        attempt: MediaAttempt { generation: 0, id: *target },
+        reply_to: *reply_to,
+        presentation,
+        body: body.clone(),
+    }))
 }
 
 pub(super) fn receive(
@@ -348,6 +384,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_video_presentation_is_bound_to_the_exact_post_and_survives_retries() {
+        let _scope = ScopedCore::new();
+        let finished = completed(0);
+        fallback().unwrap().unwrap();
+        let post = AppPayload::Post { reply_to: None, body: finished.body.clone() };
+        assert!(completion_for_post(&CONVERSATION, &finished.target, &post).unwrap().is_none(),
+            "an original document has no processed presentation");
+        let mut row = media::get(&CONVERSATION, &finished.target).unwrap().unwrap();
+        row.width = 480;
+        row.height = 854;
+        row.duration_ms = 2_000;
+        media::save_tx(&core().db.messages().lock(), &CONVERSATION, &finished.target, &row).unwrap();
+        let first = completion_for_post(&CONVERSATION, &finished.target, &post).unwrap().unwrap();
+        assert_eq!(first.presentation, finished.presentation);
+        assert_eq!(first.target, finished.target);
+        assert_eq!(first.attempt.generation, 0);
+        assert_eq!(first.attempt.id, finished.target);
+        assert_eq!(first.body, finished.body);
+        assert_eq!(Some(first), completion_for_post(&CONVERSATION, &finished.target, &post).unwrap());
+        row.file_id = Some(vec![9; 32]);
+        media::save_tx(&core().db.messages().lock(), &CONVERSATION, &finished.target, &row).unwrap();
+        assert!(completion_for_post(&CONVERSATION, &finished.target, &post).unwrap().is_none(),
+            "a stale post must not acquire a replacement file's presentation");
+    }
+
+    #[tokio::test]
     async fn every_preparation_completion_fallback_order_keeps_one_finished_message() {
         for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
             let _scope = ScopedCore::new();
@@ -410,6 +472,40 @@ mod tests {
             assert!(media::get(&CONVERSATION, &pending(0).target).unwrap().is_none());
             assert_eq!(counts().1, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_message_discards_its_media_replay_without_affecting_other_messages() {
+        use crate::mls::{PromtuzMlsProvider, recovery};
+        use common::proto::pack::Packer;
+
+        let scope = ScopedCore::new();
+        let provider = PromtuzMlsProvider::shared();
+        let target = pending(0).target;
+        let gid = [7; 32];
+        let mut unrelated = completed(0);
+        unrelated.target = [8; 16];
+        let payloads = [
+            (gid, target, AppPayload::Post { reply_to: None, body: completed(0).body }),
+            (gid, [4; 16], AppPayload::Media(MediaUpdate::Preparing(pending(0)))),
+            (gid, [5; 16], AppPayload::Media(MediaUpdate::Complete(completed(0)))),
+            (gid, [6; 16], AppPayload::Media(MediaUpdate::Complete(unrelated))),
+            ([9; 32], [5; 16], AppPayload::Media(MediaUpdate::Complete(completed(0)))),
+        ];
+        for (group, id, payload) in payloads {
+            scope.core.db.mls().lock().execute(
+                "INSERT INTO mls_replay(group_id,dispatch_id,branch,payload,recipients,wake,kind)
+                 VALUES (?1,?2,?3,?4,X'',0,0)",
+                rusqlite::params![group, id, [0u8; 32], payload.ser().unwrap()],
+            ).unwrap();
+        }
+        recovery::discard_message_replay(&provider, &gid, &target).unwrap();
+        let remaining: Vec<([u8; 32], [u8; 16])> = scope.core.db.mls().lock()
+            .prepare("SELECT group_id,dispatch_id FROM mls_replay ORDER BY group_id").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(remaining, [(gid, [6; 16]), ([9; 32], [5; 16])]);
+        recovery::discard_message_replay(&provider, &gid, &target).unwrap();
     }
 
     #[tokio::test]

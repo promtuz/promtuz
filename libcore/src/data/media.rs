@@ -21,7 +21,7 @@ pub struct MediaRow {
     pub size: u64,
     pub width: u32,
     pub height: u32,
-    /// Voice only.
+    /// Playback duration for voice and video.
     pub duration_ms: u32,
     pub blob: Option<Vec<u8>>,
     /// A blurred picture for an attachment, the loudness waveform for a voice note.

@@ -9,7 +9,7 @@ Mark each temporary branch `COMPAT(v12): <id>` so its callers can be found with
 Reserved wire ordinals are not fallback branches and must not be deleted casually.
 Local database migrations and backup readers are independent of protocol versions.
 
-## `media-completion` — receiver implemented, sender pending
+## `media-completion` — ready videos implemented, lazy producer pending
 
 **Purpose:** let older v12 clients receive an ordinary completed attachment when
 the sender supports preparation and partial delivery. No global protocol bump.
@@ -25,8 +25,14 @@ the sender supports preparation and partial delivery. No global protocol bump.
   is attempt-bound; a fallback Post cannot finalize an active preparation.
 - Wire-format proof: `common/src/proto/media.rs::tests` pins the old Post bytes.
 - Lifecycle/order proofs: `libcore/src/messaging/preparation.rs::tests`.
-- Sender emission, partial delivery and processing recovery are not implemented.
-  Add their shim paths here when they land.
+- Sender: `libcore/src/messaging/send.rs::send_payload` queues authenticated
+  completion metadata for ready videos and the unchanged Post to the same audience.
+  Both use stable dispatch identities across retries; the completion names the Post's
+  target. `completion_for_post` binds presentation to the exact stored file.
+- `libcore/src/mls/recovery.rs::discard_message_replay` removes media controls with their target
+  so group recovery cannot replay deleted content.
+- Durable preparation jobs, incremental delivery and encoder recovery remain
+  unimplemented. Add their sender shim paths here when they land.
 
 **Remove at the next protocol bump:** the old-recipient completed-attachment
 fallback and any negotiation/state used only by it. Keep authenticated attempt

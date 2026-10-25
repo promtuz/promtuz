@@ -31,6 +31,7 @@ pub struct Staged {
     pub size:    u64,
     pub width:   u32,
     pub height:  u32,
+    pub duration_ms: u32,
     /// AVIF bytes of an image.
     pub blob:    Option<Vec<u8>>,
     pub thumb:   Option<Vec<u8>>,
@@ -54,7 +55,7 @@ impl Staged {
             blob:     self.blob.clone(),
             thumb:    self.thumb.clone(),
             file_id:  self.file_id.map(|f| f.to_vec()),
-            duration_ms: 0,
+            duration_ms: self.duration_ms,
             sticker: None,
             hd: None,
         })
@@ -142,6 +143,7 @@ fn blank(kind: u8) -> Staged {
         size: 0,
         width: 0,
         height: 0,
+        duration_ms: 0,
         blob: None,
         thumb: None,
         file_id: None,
@@ -172,17 +174,19 @@ pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo) -> R
         video.poster.bytes.clone(),
         video.width,
         video.height,
+        video.duration_ms,
     )?;
     video.release_path();
     Ok(id)
 }
 
 pub fn stage_raw_attachment(source_path: String, name: String, mime: String) -> Result<u64> {
-    stage_attachment_with_thumb(source_path, name, mime, Vec::new(), 0, 0)
+    stage_attachment_with_thumb(source_path, name, mime, Vec::new(), 0, 0, 0)
 }
 
 fn stage_attachment_with_thumb(
     source_path: String, name: String, mime: String, thumb: Vec<u8>, width: u32, height: u32,
+    duration_ms: u32,
 ) -> Result<u64> {
     let size = std::fs::metadata(&source_path)
         .map_err(|e| anyhow!("stat {source_path}: {e}"))?
@@ -194,6 +198,7 @@ fn stage_attachment_with_thumb(
     s.size = size;
     s.width = width;
     s.height = height;
+    s.duration_ms = duration_ms;
     s.thumb = (!thumb.is_empty()).then_some(thumb);
     let id = insert(s);
 
