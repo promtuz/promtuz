@@ -63,6 +63,57 @@ fn ranges(start: u32, end: u32) -> Vec<ChunkRange> {
     vec![ChunkRange { start, end }]
 }
 
+/// Run the release test binary in an isolated netns; set PROMTUZ_BENCH_STREAMS to 1 or 4.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual 16 MiB transfer benchmark; requires loopback networking"]
+async fn benchmark_request_parallelism() {
+    use std::io::Write;
+
+    let slots: usize = std::env::var("PROMTUZ_BENCH_STREAMS")
+        .unwrap_or_else(|_| "4".into()).parse().unwrap();
+    assert!(matches!(slots, 1 | 4));
+    let (sender, receiver) = (identity(79), identity(80));
+    let (s, r) = (device(), device());
+    let path = s.dir.path().join("benchmark.bin");
+    let mut output = std::fs::File::create(&path).unwrap();
+    let mut block = vec![0; wire::CHUNK_SIZE];
+    for index in 0..64u8 {
+        block.fill(index);
+        output.write_all(&block).unwrap();
+    }
+    output.sync_all().unwrap();
+    drop(output);
+    drop(block);
+    let file = wire::Manifest::from_file(path.to_str().unwrap()).unwrap();
+    store::retention_put_tx(
+        &s.core.db.transfers().lock(), &file.file_id(), path.to_str().unwrap(),
+        file.total_size, file.chunk_size, &postcard::to_allocvec(&file).unwrap(), u64::MAX,
+    ).unwrap();
+    let group = s.group(&[sender.ipk, receiver.ipk]);
+    s.offer(sender.ipk, group, &file);
+    let mut link = linked(&sender, &receiver).await;
+    link.client.requests = std::sync::Arc::new(tokio::sync::Semaphore::new(slots));
+    let serving = tokio::spawn(serve_streams(s.core, link.server.clone(), sender));
+    let start = std::time::Instant::now();
+    timeout(Duration::from_secs(180), pull(r.core, &link.client, &file, &receiver))
+        .await.unwrap().unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    let done = r.partial(&file.file_id()).unwrap();
+    assert!(done.is_complete());
+    assert_eq!(wire::Manifest::from_file(&done.path).unwrap(), file);
+    serving.abort();
+    let _ = serving.await;
+    println!("BENCH streams={slots} bytes={} seconds={elapsed:.6} mib_s={:.3}",
+        file.total_size, file.total_size as f64 / (1024.0 * 1024.0) / elapsed);
+    for line in std::fs::read_to_string("/proc/self/status").unwrap().lines()
+        .filter(|line| line.starts_with("VmHWM:") || line.starts_with("VmRSS:"))
+    {
+        println!("BENCH {line}");
+    }
+    println!("BENCH io {}", std::fs::read_to_string("/proc/self/io").unwrap().replace('\n', "; "));
+}
+
 #[tokio::test]
 async fn parallel_ranges_are_disjoint_and_commit_before_the_slowest_stream() {
     let (sender, receiver) = (identity(71), identity(72));
