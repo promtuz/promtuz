@@ -439,7 +439,7 @@ async fn pull_v2_from(
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let mut workers = tokio::task::JoinSet::new();
     let parallelism = if grant.is_some() { super::HELPING_STREAMS } else { crate::p2p::protocol::STREAMS_PER_LINK };
-    while indices.peek().is_some() || !workers.is_empty() {
+    while indices.peek().is_some() || !workers.is_empty() || !rx.is_empty() {
         while workers.len() < parallelism && indices.peek().is_some() {
             let mut requested: Vec<ranges::ChunkRange> = Vec::new();
             for _ in 0..limits.max_chunks.min(16) {
@@ -465,7 +465,7 @@ async fn pull_v2_from(
                 activity.record(index, bytes.len()).map_err(Failure::storage)?;
                 diagnostics::received_verified(bytes.len() as u64);
             },
-            result = workers.join_next() => {
+            result = workers.join_next(), if !workers.is_empty() => {
                 result.expect("range worker").map_err(Failure::storage)??;
             },
         }

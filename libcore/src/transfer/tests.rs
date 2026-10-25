@@ -120,6 +120,42 @@ async fn parallel_ranges_are_disjoint_and_commit_before_the_slowest_stream() {
     assert_eq!(std::fs::read(done.path).unwrap(), bytes);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_range_workers_leave_no_unverified_tail_in_the_queue() {
+    let (sender, receiver) = (identity(81), identity(82));
+    let r = device();
+    let link = linked(&sender, &receiver).await;
+    let (server, local) = (link.server.clone(), sender.clone());
+    let serve = tokio::spawn(async move {
+        for seed in 0..128 {
+            let bytes = content(seed, 1 + usize::from(seed % 4));
+            let file = manifest(&bytes, 1024);
+            describe(&server, &local, &file).await;
+            let (mut s, _rx, frame) = request(&server, &local).await;
+            assert_eq!(frame, Frame::Pull {
+                file_id: file.file_id(), ranges: ranges(0, file.chunks.len() as u32),
+            });
+            for index in 0..file.chunks.len() as u32 {
+                v2::write_frame(&mut s, &chunk(&file, &bytes, index)).await.unwrap();
+            }
+            v2::write_frame(&mut s, &Frame::Complete {
+                chunks_sent: file.chunks.len() as u32,
+            }).await.unwrap();
+            s.finish().unwrap();
+        }
+    });
+    for seed in 0..128 {
+        let bytes = content(seed, 1 + usize::from(seed % 4));
+        let file = manifest(&bytes, 1024);
+        timeout(Duration::from_secs(5), pull(r.core, &link.client, &file, &receiver))
+            .await.unwrap().unwrap();
+        let done = r.partial(&file.file_id()).unwrap();
+        assert!(done.is_complete());
+        assert_eq!(std::fs::read(done.path).unwrap(), bytes);
+    }
+    serve.await.unwrap();
+}
+
 #[tokio::test]
 async fn interrupted_parallel_download_refetches_only_missing_chunks_on_a_new_link() {
     let (sender, receiver) = (identity(73), identity(74));
