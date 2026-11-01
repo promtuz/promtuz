@@ -4,9 +4,7 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.draw.clipToBounds
 import com.promtuz.chat.ui.constants.Tweens
-import com.promtuz.chat.ui.animation.ContentProgression
-import com.promtuz.chat.ui.animation.QueuedAnimatedContent
-import com.promtuz.chat.ui.animation.queuedVerticalTransition
+import com.promtuz.chat.ui.animation.QueuedAnimatedNumber
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -90,10 +88,8 @@ fun SearchableHeader(
                             if (selectionCount != null) SideEffect { lastCount = selectionCount }
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.semantics(mergeDescendants = true) {}) {
-                                QueuedAnimatedContent(selectionCount ?: lastCount,
-                                    progression = ContentProgression.Integers, transitionSpec = {
-                                    queuedVerticalTransition(it, clip = false)
-                                }, label = "selected count") { Text("$it", style = titleStyle) }
+                                QueuedAnimatedNumber(selectionCount ?: lastCount,
+                                    label = "selected count", style = titleStyle)
                                 Text(" selected", style = titleStyle)
                             }
                         } else if (close) Text(title, style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)

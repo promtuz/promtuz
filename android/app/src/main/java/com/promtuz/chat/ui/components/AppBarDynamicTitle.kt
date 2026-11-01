@@ -46,7 +46,7 @@ internal fun AnimatedBarLabel(
 @Composable
 fun AppBarDynamicTitle(titles: StateFlow<String>, modifier: Modifier = Modifier, baseDuration: Int = 300) {
     val title by titles.collectAsState()
-    AnimatedBarLabel(title, modifier.fillMaxWidth(), alignment = Alignment.Center, duration = baseDuration)
+    AnimatedBarLabel(title, modifier.fillMaxWidth(), alignment = Alignment.CenterStart, duration = baseDuration)
 }
 
 @Composable
