@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.theme.DepthPalette
 
 /** Which lighting layers to draw. Every layer assumes light from the top left. */
 data class AvatarLayers(
@@ -104,19 +105,11 @@ val SquircleShape: Shape = GenericShape { size, _ ->
     addSquircle(0f, 0f, size.width, size.height)
 }
 
-private class Palette(hue: Float) {
-    private fun wrap(h: Float) = ((h % 360f) + 360f) % 360f
-    val light = Color.hsl(wrap(hue - 6f), 0.88f, 0.68f)
-    val dark = Color.hsl(wrap(hue + 14f), 0.82f, 0.40f)
-    val flat = Color.hsl(wrap(hue), 0.68f, 0.52f)
-    val shade = Color.hsl(wrap(hue + 14f), 0.75f, 0.20f)
-    val tint = Color.hsl(wrap(hue - 6f), 0.90f, 0.86f)
-}
-
 /**
  * [size] is the full footprint including room for the drop shadow.
  * The squircle itself is 78% of it, offset slightly upward, unless [fillBounds] is true.
  * Embedded avatars use [fillBounds] to retain their image bounds and badge alignment.
+ * [baseColor] keeps the identity palette's actual color; [hue] remains a standalone fallback.
  */
 @Composable
 fun SquircleAvatar(
@@ -126,6 +119,7 @@ fun SquircleAvatar(
     hue: Float = 205f,
     layers: AvatarLayers = AvatarLayers.All,
     fillBounds: Boolean = false,
+    baseColor: Color = Color.Unspecified,
 ) {
     Box(
         modifier
@@ -138,7 +132,9 @@ fun SquircleAvatar(
                 val cx = left + side / 2f
                 val cy = top + side / 2f
                 val u = side / 192f // 1 unit of the original 192-unit design
-                val pal = Palette(hue)
+                val source = if (baseColor != Color.Unspecified) baseColor else
+                    Color.hsl(((hue % 360f) + 360f) % 360f, 0.5f, 0.5f)
+                val pal = DepthPalette(source)
 
                 val shape = Path().apply { addSquircle(left, top, side, side) }
 
@@ -162,7 +158,7 @@ fun SquircleAvatar(
 
                     val baseBrush = if (layers.base) {
                         Brush.linearGradient(
-                            colors = listOf(pal.light, pal.dark),
+                            0f to pal.light, 0.5f to pal.flat, 1f to pal.dark,
                             start = Offset(left + 0.15f * side, top),
                             end = Offset(left + 0.85f * side, top + side),
                         )
@@ -216,7 +212,7 @@ fun SquircleAvatar(
                         drawPath(
                             shape,
                             Brush.radialGradient(
-                                colors = listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0f)),
+                                colors = listOf(pal.tint.copy(alpha = pal.highlightAlpha), pal.tint.copy(alpha = 0f)),
                                 center = Offset(left + 0.3f * side, top + 0.08f * side),
                                 radius = 0.65f * side,
                             ),
@@ -252,7 +248,7 @@ fun SquircleAvatar(
     )
 }
 
-private fun applyGlyphFill(paint: Paint, lighting: Boolean, pal: Palette, top: Float, bottom: Float, u: Float) {
+private fun applyGlyphFill(paint: Paint, lighting: Boolean, pal: DepthPalette, top: Float, bottom: Float, u: Float) {
     if (lighting) {
         paint.shader = LinearGradient(
             0f, top, 0f, bottom,

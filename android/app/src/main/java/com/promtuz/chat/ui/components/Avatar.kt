@@ -17,7 +17,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -62,7 +61,7 @@ fun Avatar(
         if (fallbackChars.isEmpty()) AvatarGlyph.None
         else AvatarGlyph.Letter(fallbackChars, sizeFraction = 1f / 2.6f)
     }
-    val hue = remember(identityKey) { avatarHue(identityKey) }
+    val baseColor = remember(identityKey) { avatarColor(identityKey) }
     val interactionSource = remember { MutableInteractionSource() }
     val frame = remember(identityKey, image) { MediaFrame() }
 
@@ -91,7 +90,7 @@ fun Avatar(
                 glyph = glyph,
                 modifier = Modifier.semantics { contentDescription = name },
                 size = size,
-                hue = hue,
+                baseColor = baseColor,
                 layers = EmbeddedAvatarLayers,
                 fillBounds = true,
             )
@@ -137,14 +136,14 @@ fun GroupAvatar(
 
     val clip = if (clipRatio == AVATAR_RADIUS_RATIO) SquircleShape else RoundedCornerShape(size / clipRatio)
     val pair = members.take(2)
-    val hue = remember(conversation, title) { avatarHue(conversation ?: title) }
+    val baseColor = remember(conversation, title) { avatarColor(conversation ?: title) }
     Box(
         Modifier
             .size(size)
             .clip(clip)
             .clickable(enabled = onClick != null) { onClick?.invoke() },
     ) {
-        SquircleAvatar(AvatarGlyph.None, size = size, hue = hue,
+        SquircleAvatar(AvatarGlyph.None, size = size, baseColor = baseColor,
             layers = EmbeddedAvatarLayers, fillBounds = true)
         if (pair.isEmpty()) {
             Text(
@@ -175,11 +174,4 @@ fun avatarColor(identityKey: String): Color {
     val palette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
         0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)
     return Color(palette[Math.floorMod(identityKey.hashCode(), palette.size)])
-}
-
-/** Keep identity-based palette assignments while letting the lighting component shade that hue. */
-private fun avatarHue(identityKey: String): Float {
-    val hsv = FloatArray(3)
-    android.graphics.Color.colorToHSV(avatarColor(identityKey).toArgb(), hsv)
-    return hsv[0]
 }
