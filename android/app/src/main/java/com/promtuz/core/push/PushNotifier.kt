@@ -139,7 +139,7 @@ object PushNotifier {
         // Subscribe before core starts. Alerts come from durable message state,
         // so a cold start or a dropped transient event cannot lose an arrival.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it }
+            CoreEventBus.dbChanged.filter { "messages" in it || "contacts" in it || "prefs" in it || "message_media" in it || "private_conversations" in it }
                 .debounce(150L).collect { reconcileSafely() }
         }
         scope.launch { reconcileSafely() }
@@ -164,6 +164,9 @@ object PushNotifier {
         ) return
 
         val nm = app.getSystemService(NotificationManager::class.java)
+        val hidden = CoreBridge.privateConversationIds().map { it.toHex() }
+        hidden.forEach { nm.cancel(notifId(it)); rendered.remove(it) }
+        if (hidden.isNotEmpty()) ShortcutManagerCompat.removeDynamicShortcuts(app, hidden)
 
         val enabled = ChatPrefs.notifEnabled
         if (!enabled) {

@@ -3,6 +3,14 @@ package com.promtuz.chat
 import androidx.compose.foundation.layout.fillMaxSize
 
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.os.PowerManager
+import android.view.WindowManager
+import androidx.lifecycle.lifecycleScope
+import com.promtuz.chat.security.PrivateChatSession
+import kotlinx.coroutines.launch
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -35,10 +43,72 @@ class LauncherActivity : ComponentActivity() {
     private val viewModel: AppVM by inject()
     private val updates: UpdateRepository by inject()
 
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                PrivateChatSession.screenOff()
+                enforcePrivateExit()
+            }
+        }
+    }
+    private var exitVersion = PrivateChatSession.exits.value
+
+    private fun enforcePrivateExit() {
+        if (exitVersion == PrivateChatSession.exits.value) return
+        exitVersion = PrivateChatSession.exits.value
+        // Cover synchronously before another frame or a task snapshot can render old content.
+        window.decorView.visibility = android.view.View.INVISIBLE
+        viewModel.clearPrivateSummary()
+        com.promtuz.chat.ui.media.MediaViewer.close()
+        com.promtuz.chat.utils.media.VoicePlayer.stop()
+        com.promtuz.chat.utils.media.clearDecodedImageCache()
+        viewModel.navigator.reset(Routes.App)
+        finishAndRemoveTask()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        PrivateChatSession.resumed(getSystemService(PowerManager::class.java).isInteractive)
+        enforcePrivateExit()
+    }
+
+    override fun onPause() {
+        PrivateChatSession.paused()
+        enforcePrivateExit()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        unregisterReceiver(screenReceiver)
+        // Rotation must not keep a private capability alive through activity reconstruction.
+        if (isChangingConfigurations) PrivateChatSession.lock()
+        super.onDestroy()
+    }
+
+    override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+        PrivateChatSession.beginHandoff()
+        try { super.startActivityForResult(intent, requestCode, options) }
+        catch (error: RuntimeException) { PrivateChatSession.clear(); throw error }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        lifecycleScope.launch {
+            PrivateChatSession.exits.collect { enforcePrivateExit() }
+        }
+        lifecycleScope.launch {
+            PrivateChatSession.secure.collect { secure ->
+                if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                // Retain protection until this Activity is destroyed. Clearing it while a
+                // private screen exits could expose its last frame to task snapshots.
+            }
+        }
         enableEdgeToEdge()
         consumeContactCard(intent)
         consumeInvite(intent)
@@ -106,7 +176,7 @@ class LauncherActivity : ComponentActivity() {
         val name = intent.getStringExtra(PushNotifier.EXTRA_CONV_NAME).orEmpty()
         intent.removeExtra(PushNotifier.EXTRA_CONVERSATION) // not replayed on recreation
         intent.removeExtra(PushNotifier.EXTRA_CONV_NAME)
-        if (CoreBridge.shouldLaunchApp()) viewModel.navigator.openExternal(Routes.Chat(convHex, name))
+        if (CoreBridge.shouldLaunchApp()) viewModel.openChat(convHex, name)
     }
 }
 

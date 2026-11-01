@@ -93,15 +93,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private fun openAttachment(context: Context, path: String) {
-    runCatching {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
-        val mime = URLConnection.guessContentTypeFromName(path) ?: "*/*"
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, mime)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    }
+    runCatching { com.promtuz.chat.utils.media.openMediaPath(context, path) }
 }
 
 @Composable
@@ -134,7 +126,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val calendar = rememberChatCalendar()
     var selectedDate by remember { mutableStateOf<java.time.LocalDate?>(null) }
 
-    NotificationPrimer()
+    if (com.promtuz.chat.security.PrivateChatSession.active.value != viewModel.conversationHex) NotificationPrimer()
 
     var groupingNow by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(messages.firstOrNull()?.key, typingMembers, mergeWindowMs, calendar) {
@@ -462,7 +454,13 @@ private fun menuActionsFor(
         if (!msg.deleted && text.isNotBlank())
             add(MenuAction("Copy", R.drawable.oi_copy) {
                 scope.launch {
-                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", text)))
+                    val clip = ClipData.newPlainText("message", text)
+                    if (com.promtuz.chat.security.PrivateChatSession.active.value == viewModel.conversationHex) {
+                        clip.description.extras = android.os.PersistableBundle().apply {
+                            putBoolean("android.content.extra.IS_SENSITIVE", true)
+                        }
+                    }
+                    clipboard.setClipEntry(ClipEntry(clip))
                 }
                 close()
             })

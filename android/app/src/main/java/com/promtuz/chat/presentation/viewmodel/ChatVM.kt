@@ -38,6 +38,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.cancel
+import com.promtuz.chat.security.PrivateChatSession
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -63,8 +65,12 @@ class ChatVM(
     val conversationHex: String,
 ) : ViewModel() {
     private val conversation = conversationHex.fromHex()
+    private val privateSession = PrivateChatSession.sessionId.takeIf { PrivateChatSession.active.value == conversationHex }
+    private fun sessionValid(): Boolean = privateSession == null ||
+        (PrivateChatSession.active.value == conversationHex && PrivateChatSession.sessionId == privateSession)
     // Seed before composition, without waiting for the initial database query.
     private val initialSummary = app.chats.value.firstOrNull { it.conversationHex == conversationHex }
+        ?: app.privateSummary.value?.takeIf { it.conversationHex == conversationHex }
     /** Everyone but us; presence and typing key off people, not the conversation. */
     private var others: List<ByteArray> = emptyList()
     private var started = false
@@ -284,6 +290,25 @@ class ChatVM(
     fun init() {
         if (started) return
         started = true
+        if (privateSession != null) viewModelScope.launch {
+            PrivateChatSession.revision.collect {
+                if (!sessionValid()) {
+                    cancelRecording()
+                    _messages.value = null
+                    input.value = ""
+                    composerAction.value = null
+                    savedDraft = null
+                    editDrafts.clear()
+                    previews.clear()
+                    _staged.value = emptyList()
+                    searchQuery.value = null
+                    _hits.value = emptyList()
+                    releaseStaging()
+                    // Cancel pending loads before they can republish decrypted messages.
+                    viewModelScope.cancel()
+                }
+            }
+        }
         syncTyping()
 
         var incomingLoaded = false
@@ -298,8 +323,14 @@ class ChatVM(
                     "conversations", "conversation_members", "contacts",
                 ),
             ) {
-                resolveRoster()
-                load()
+                if (!app.canOpenChat(conversationHex)) emptyList()
+                else try {
+                    resolveRoster()
+                    load()
+                } catch (error: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (!app.canOpenChat(conversationHex)) emptyList() else throw error
+                }
             }.collect { list ->
                 // Their message inherits the typing bubble. The handoff is set before the list so
                 // one recomposition sees both.
@@ -423,18 +454,24 @@ class ChatVM(
         val rows = CoreBridge.messages(conversation, want)                   // oldest-first
         exhausted = rows.size < want
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
-        val media = CoreBridge.getMedia(conversation, want).associateBy { it.dispatchId.toHex() }
+        val media = CoreBridge.getMedia(conversation, want).map { it.copy(localPath = com.promtuz.chat.utils.media.PrivateMediaAccess.path(conversationHex, it)) }.associateBy { it.dispatchId.toHex() }
         // Quotes resolve within the loaded window; one outside it shows as unavailable.
         val byDid = rows.associateBy { it.dispatchId.toHex() }
         // toUi decodes AVIF, so this maps off the main thread.
+        val cacheImages = !CoreBridge.privateConversationIds().any { it.contentEquals(conversation) }
         val loaded = withContext(Dispatchers.Default) {
             // Core folds pictures sent together onto the album's head row and marks the rest.
             rows.asReversed()
                 .filterNot { it.inAlbum }
-                .map { it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value) }
+                .map {
+                    currentCoroutineContext().ensureActive()
+                    it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value,
+                        cacheImages = cacheImages)
+                }
         }
         // A date/search jump can widen the window while this read is decoding.
         // Never publish that older, narrower snapshot over the requested window.
+        if (!sessionValid()) throw kotlinx.coroutines.CancellationException("Chat is locked")
         return if (want < limit) load() else loaded
     }
 
@@ -456,6 +493,7 @@ class ChatVM(
         if (composerBusy.value || pickingMedia) return
         val text = input.value.trim()
         val items = _staged.value
+        if (items.isNotEmpty() && !allowMedia()) return
         val action = composerAction.value
         val editing = action as? ComposerAction.Edit
         val canClearCaption = editing?.msg?.content is MessageContent.Image ||
@@ -596,25 +634,25 @@ class ChatVM(
     fun react(dispatchIdHex: String, emoji: String, add: Boolean) =
         fire { CoreBridge.react(conversation, dispatchIdHex.fromHex(), emoji, add) }
 
-    /** The album id is minted at send time, so a later pick still joins the same album. */
-    fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
-        selected.forEach { uri -> acceptStaged(stagePickedAttachment(application, uri)) }
+    fun allowMedia(): Boolean {
+        if (!sessionValid()) return false
+        if (CoreBridge.privateConversationIds().none { it.contentEquals(conversation) }) return true
+        return PrivateChatSession.active.value == conversationHex && CoreBridge.isPrivateConversationUnlocked(conversation)
     }
 
-    fun attachCaptured(file: java.io.File, video: Boolean) {
-        val uri = Uri.fromFile(file)
-        if (video) prepareMedia(listOf(uri), photos = false, onRejected = { file.delete() }) {
-            val staged = stageCapturedVideo(application, file)
-            acceptStaged(staged)
-        }
-        else prepareMedia(listOf(uri), photos = true, onRejected = { file.delete() }) {
-            // Camera callbacks transfer their completed output; image staging takes its own copy.
-            try { stagePhoto(uri) } finally { file.delete() }
+    /** The album id is minted at send time, so a later pick still joins the same album. */
+    fun attachPhotos(uris: List<Uri>) = prepareMedia(uris, photos = true) { selected ->
+        selected.forEach { uri -> acceptStaged(stagePickedAttachment(application, uri, conversation)) }
+    }
+
+    fun attachCaptured(capture: com.promtuz.chat.ui.camera.CapturedMedia, video: Boolean) {
+        prepareMedia(listOf(capture.uri), photos = !video, onRejected = capture::close) {
+            try { acceptStaged(stagePickedAttachment(application, capture.uri, conversation)) } finally { capture.close() }
         }
     }
 
     private suspend fun stagePhoto(uri: Uri) {
-        val staged = stagePickedAttachment(application, uri)
+        val staged = stagePickedAttachment(application, uri, conversation)
         if (!staged.image) {
             CoreBridge.discardStaged(staged.id)
             throw MediaPreparationException("This file is not an image.")
@@ -623,12 +661,13 @@ class ChatVM(
     }
 
     fun attachFiles(uris: List<Uri>) = prepareMedia(uris, photos = false) { selected ->
-        selected.forEach { uri -> acceptStaged(stagePickedDocument(application, uri)) }
+        selected.forEach { uri -> acceptStaged(stagePickedDocument(application, uri, conversation)) }
     }
 
     private fun prepareMedia(
         uris: List<Uri>, photos: Boolean, onRejected: () -> Unit = {}, prepare: suspend (List<Uri>) -> Unit,
     ) {
+        if (!allowMedia()) { onRejected(); return }
         if (!viewModelScope.isActive || composerBusy.value || pickingMedia || uris.isEmpty()) {
             onRejected()
             return
@@ -686,7 +725,10 @@ class ChatVM(
                 height = r.height.toInt(),
                 // An image's tile comes from the pick; an attachment's is core's blurred thumb.
                 preview = previews[r.id]
-                    ?: r.thumb?.let { decodeAvifCached("staged-${r.id}", it) },
+                    ?: r.thumb?.let {
+                        if (privateSession == null) decodeAvifCached("staged-${r.id}", it)
+                        else com.promtuz.chat.utils.media.decodeAvif(it)
+                    },
                 error = r.error,
             )
         }
@@ -703,10 +745,11 @@ class ChatVM(
 
     /** The caller already holds the mic permission. */
     fun startRecording(): Boolean {
+        if (!allowMedia()) return false
         if (composerBusy.value || pickingMedia || composerAction.value is ComposerAction.Edit || input.value.isNotBlank() || _staged.value.isNotEmpty()) return false
         if (recorder.isRecording) return true
         VoicePlayer.stop()
-        if (!recorder.start(onLimit = { finishRecording() })) return false
+        if (!recorder.start(privateConversation = conversationHex.takeIf { PrivateChatSession.active.value == it }, onLimit = { finishRecording() })) return false
         _recording.value = Recording(0, 0f)
         recordingTicker = viewModelScope.launch {
             while (recorder.isRecording) {
@@ -735,6 +778,7 @@ class ChatVM(
     }
 
     fun sendSticker(ref: StickerRef) {
+        if (!allowMedia()) return
         if (composerAction.value is ComposerAction.Edit) return
         val to = conversation
         val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.let { it.dispatchIdHex.fromHex() }
@@ -744,21 +788,28 @@ class ChatVM(
 
     fun setChoosingSticker(active: Boolean) = outgoingActivity.setChoosingSticker(active)
 
-    override fun onCleared() {
-        cancelRecording()
+    private var releasingStaging: Job? = null
+
+    private fun releaseStaging() {
+        if (releasingStaging != null) return
         val preparing = prepareJob
         val sending = sendJob
         preparing?.cancel()
         sending?.cancel()
-        // A prepare helper may be finishing its brief ownership handoff despite cancellation.
-        // Join it before reading the Main-confined ledger, so the final returned ID is included.
-        kotlinx.coroutines.CoroutineScope(Dispatchers.Main.immediate).launch {
+        // This owner survives viewModelScope cancellation and waits for in-flight acceptance.
+        releasingStaging = kotlinx.coroutines.CoroutineScope(Dispatchers.Main.immediate).launch {
             preparing?.join()
             sending?.join()
             owned.toList().forEach { runCatching { CoreBridge.discardStaged(it) } }
             owned.clear()
             previews.clear()
+            _staged.value = emptyList()
         }
+    }
+
+    override fun onCleared() {
+        cancelRecording()
+        releaseStaging()
         super.onCleared()
     }
 
@@ -818,6 +869,7 @@ private fun MessageRecord.toUi(
     mediaByDid: Map<String, MediaRecord>,
     memberNames: Map<String, String> = emptyMap(),
     isGroup: Boolean = false,
+    cacheImages: Boolean = true,
 ): UiMessage {
     val didHex = dispatchId.toHex()
     val reactions = reactionsByMsg[didHex]
@@ -847,10 +899,10 @@ private fun MessageRecord.toUi(
             caption = content,
             items = albumItems.asReversed().map { did ->
                 val h = did.toHex()
-                AlbumItem(h, mediaByDid[h]?.toContent(h, "") ?: MessageContent.Text(""))
+                AlbumItem(h, mediaByDid[h]?.toContent(h, "", cacheImages) ?: MessageContent.Text(""))
             },
         )
-        else -> mediaByDid[didHex]?.toContent(didHex, content) ?: MessageContent.Text(content)
+        else -> mediaByDid[didHex]?.toContent(didHex, content, cacheImages) ?: MessageContent.Text(content)
     }
     return UiMessage(
         key = didHex,
@@ -870,10 +922,10 @@ private fun MessageRecord.toUi(
 }
 
 /** kind: 1 = inline Image (blob), 3 = inline Voice (blob), 4 = Sticker (reference), else P2P Attachment (thumb + transfer progress). */
-private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): MessageContent =
+private fun MediaRecord.toContent(dispatchIdHex: String, caption: String, cacheImages: Boolean = true): MessageContent =
     if (kind.toInt() == 1) MessageContent.Image(
         caption = caption,
-        bitmap = blob?.let { decodeAvifCached(dispatchIdHex, it) },
+        bitmap = blob?.let { if (cacheImages) decodeAvifCached(dispatchIdHex, it) else com.promtuz.chat.utils.media.decodeAvif(it) },
         width = width.toInt(),
         height = height.toInt(),
         encoded = blob,
@@ -892,7 +944,7 @@ private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): Messa
         name = name,
         size = size.toLong(),
         mime = mime,
-        thumb = thumb?.let { decodeAvifCached(dispatchIdHex, it) },
+        thumb = thumb?.let { if (cacheImages) decodeAvifCached(dispatchIdHex, it) else com.promtuz.chat.utils.media.decodeAvif(it) },
         fileIdHex = fileId?.toHex().orEmpty(),
         transferState = transferState.toInt(),
         transferHave = transferHave.toInt(),

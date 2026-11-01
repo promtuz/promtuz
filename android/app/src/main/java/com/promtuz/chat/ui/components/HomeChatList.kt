@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
@@ -27,11 +28,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.Activity
+import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 
+internal const val HomeSearchItemKey = "home-search"
+
 @Composable
-fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: HomeMenuState) {
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: HomeMenuState,
+    listState: LazyListState,
+) {
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
     val arrivals by appViewModel.unseenOnHome.collectAsState()
@@ -44,7 +49,8 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         }
     }
     val all by appViewModel.chats.collectAsState()
-    val chats = androidx.compose.runtime.remember(all) { all.filterNot { it.request } }
+    val justHidden = appViewModel.newlyHidden
+    val chats = androidx.compose.runtime.remember(all, justHidden) { all.filterNot { it.request || it.conversationHex in justHidden } }
     val requests = androidx.compose.runtime.remember(all) { all.filter { it.request } }
     val pins = remember(chats) { chats.associate { it.conversationHex to it.pinned } }
     var previousPins by remember { mutableStateOf(pins) }
@@ -59,16 +65,18 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByChat.collectAsState()
 
-    if (chats.isEmpty() && requests.isEmpty()) {
-        HomeEmpty(innerPadding)
-        return
-    }
-
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = innerPadding.listPadding(0.dp, 0.dp, 24.dp),
     ) {
+
+        item(key = HomeSearchItemKey) {
+            HomeSearchBar { appViewModel.navigator.push(Routes.Search) }
+        }
+        if (chats.isEmpty() && requests.isEmpty()) item(key = "empty") {
+            HomeEmpty(Modifier.fillParentMaxHeight(0.65f))
+        }
 
         if (requests.isNotEmpty()) item(key = "message-requests") {
             androidx.compose.material3.ListItem(
@@ -111,12 +119,9 @@ private fun requesters(requests: List<com.promtuz.chat.domain.model.ChatSummary>
 }
 
 @Composable
-private fun HomeEmpty(innerPadding: PaddingValues) {
+private fun HomeEmpty(modifier: Modifier) {
     Box(
-        Modifier
-            .fillMaxSize()
-            .padding(innerPadding)
-            .padding(32.dp),
+        modifier.padding(32.dp),
         contentAlignment = Alignment.Center,
     ) {
         Column(

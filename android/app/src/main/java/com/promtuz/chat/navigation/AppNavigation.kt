@@ -1,5 +1,6 @@
 package com.promtuz.chat.navigation
 
+import com.promtuz.chat.utils.extensions.fromHex
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -13,27 +14,7 @@ import com.promtuz.chat.ui.screens.ProfilePhotoScreen
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
-import com.promtuz.chat.ui.screens.GroupInfoScreen
-import com.promtuz.chat.ui.screens.AboutScreen
-import com.promtuz.chat.ui.screens.UpdateScreen
-import com.promtuz.chat.ui.screens.OpenSourceLicensesScreen
-import com.promtuz.chat.ui.screens.LibraryLicenseScreen
-import com.promtuz.chat.ui.screens.BackupRestoreScreen
-import com.promtuz.chat.ui.screens.ChatAppearanceScreen
-import com.promtuz.chat.ui.screens.ChatScreen
-import com.promtuz.chat.ui.screens.ContactsScreen
-import com.promtuz.chat.ui.screens.HomeScreen
-import com.promtuz.chat.ui.screens.LogsScreen
-import com.promtuz.chat.ui.screens.NewStickerPackScreen
-import com.promtuz.chat.ui.screens.NotificationsSettingsScreen
-import com.promtuz.chat.ui.screens.StickersScreen
-import com.promtuz.chat.ui.screens.RecoveryPhraseScreen
-import com.promtuz.chat.ui.screens.IdentityKeysScreen
-import com.promtuz.chat.ui.screens.RelaysScreen
-import com.promtuz.chat.ui.screens.RestorePhraseScreen
-import com.promtuz.chat.ui.screens.SettingsScreen
-import com.promtuz.chat.ui.screens.ShareIdentityScreen
-import com.promtuz.chat.ui.screens.WelcomeScreen
+import com.promtuz.chat.ui.screens.*
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 
@@ -52,6 +33,7 @@ fun AppNavigation(
         modifier = Modifier.background(MaterialTheme.colorScheme.background),
         entryProvider = entryProvider {
             entry<Routes.App> { HomeScreen(appViewModel) }
+            entry<Routes.Search> { HomeSearchScreen(appViewModel) }
             entry<Routes.Welcome> {
                 WelcomeScreen(
                     koinViewModel<WelcomeVM>(),
@@ -70,20 +52,30 @@ fun AppNavigation(
             }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
+                val hidden = com.promtuz.core.CoreBridge.privateConversationIds().any {
+                    it.contentEquals(key.conversation.fromHex())
+                }
+                val session = com.promtuz.chat.security.PrivateChatSession
+                if (!appViewModel.canOpenChat(key.conversation) ||
+                    (hidden && (session.active.value != key.conversation || key.sessionId == null || key.sessionId != session.sessionId))) {
+                    LaunchedEffect(key) { appViewModel.navigator.reset(Routes.App) }
+                    return@entry
+                }
                 val chatVM = koinViewModel<ChatVM>(parameters = { parametersOf(key.conversation) })
                 LaunchedEffect(key.conversation) {
                     chatVM.init()
                 }
                 ChatScreen(key.name, chatVM)
             }
-            entry<Routes.ContactCard> { key -> com.promtuz.chat.ui.screens.ContactCardScreen(key) }
-            entry<Routes.MessageRequests> { com.promtuz.chat.ui.screens.MessageRequestsScreen() }
-            entry<Routes.PrivacySettings> { com.promtuz.chat.ui.screens.PrivacySettingsScreen() }
-            entry<Routes.ContactInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(key.conversation, key.peer) }
-            entry<Routes.PersonInfo> { key -> com.promtuz.chat.ui.screens.ContactInfoScreen(null, key.peer, key.name) }
-            entry<Routes.SharedMedia> { key -> com.promtuz.chat.ui.screens.SharedMediaScreen(key.conversation, key.name) }
+            entry<Routes.ContactCard> { key -> ContactCardScreen(key) }
+            entry<Routes.MessageRequests> { MessageRequestsScreen() }
+            entry<Routes.PrivacySettings> { PrivacySettingsScreen() }
+            entry<Routes.ResetLockedChats> { ResetLockedChatsScreen() }
+            entry<Routes.ContactInfo> { key -> ContactInfoScreen(key.conversation, key.peer) }
+            entry<Routes.PersonInfo> { key -> ContactInfoScreen(null, key.peer, key.name) }
+            entry<Routes.SharedMedia> { key -> SharedMediaScreen(key.conversation, key.name) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
-            entry<Routes.GroupSettings> { key -> com.promtuz.chat.ui.screens.GroupSettingsScreen(key.conversation) }
+            entry<Routes.GroupSettings> { key -> GroupSettingsScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
                 ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
             }
@@ -91,11 +83,11 @@ fun AppNavigation(
                 onScanned = { appViewModel.showInvite(it) },
                 onShareIdentity = { appViewModel.navigator.push(Routes.ShareIdentity) },
             ) }
-            entry<Routes.Storage> { com.promtuz.chat.ui.screens.StorageScreen(
+            entry<Routes.Storage> { StorageScreen(
                 onOpenBackup = { appViewModel.navigator.push(Routes.BackupRestore) },
                 onOpenChat = { conversation, name -> appViewModel.navigator.push(Routes.StorageChat(conversation, name)) },
             ) }
-            entry<Routes.StorageChat> { key -> com.promtuz.chat.ui.screens.StorageScreen(
+            entry<Routes.StorageChat> { key -> StorageScreen(
                 conversation = key.conversation, chatName = key.name,
             ) }
             entry<Routes.Profile> {

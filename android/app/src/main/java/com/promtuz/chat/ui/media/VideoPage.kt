@@ -53,7 +53,23 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 
+object PrivateVideoPlayers {
+    private val players = mutableSetOf<VideoPlayerState>()
+    fun register(state: VideoPlayerState) {
+        if (com.promtuz.chat.security.PrivateChatSession.active.value == null) state.release() else players += state
+    }
+    fun remove(state: VideoPlayerState) { players -= state }
+    fun clear() { players.toList().forEach { it.release() }; players.clear(); InlinePlayback.stop() }
+}
+
 class VideoPlayerState(val player: ExoPlayer, val path: String) {
+    private var released = false
+    fun release() {
+        if (released) return
+        released = true
+        PrivateVideoPlayers.remove(this)
+        player.release()
+    }
     /** Set while another host is taking this player over, so the old host does not release it. */
     var handedOver = false
     var playing by mutableStateOf(false)
@@ -77,12 +93,12 @@ fun rememberVideoPlayer(path: String, active: Boolean, adopt: VideoPlayerState? 
         // The surface moves with the player; the poster covers it until the first frame lands here.
         adopt?.takeIf { it.path == path }?.also { it.handedOver = false; it.rendered = false } ?: VideoPlayerState(
             ExoPlayer.Builder(context).build().apply {
-                setMediaItem(ExoMediaItem.fromUri("file://$path"))
+                setMediaItem(ExoMediaItem.fromUri(if (path.startsWith("content://")) path else "file://$path"))
                 repeatMode = Player.REPEAT_MODE_OFF
                 prepare()
             },
             path,
-        )
+        ).also { if (com.promtuz.chat.utils.media.PrivateMediaAccess.isPrivate(path)) PrivateVideoPlayers.register(it) }
     }
     DisposableEffect(state) {
         val player = state.player
@@ -96,7 +112,7 @@ fun rememberVideoPlayer(path: String, active: Boolean, adopt: VideoPlayerState? 
             }
         }
         player.addListener(listener)
-        onDispose { player.removeListener(listener); if (!state.handedOver) player.release() }
+        onDispose { player.removeListener(listener); if (!state.handedOver) state.release() }
     }
     LaunchedEffect(active) { if (active) state.player.play() else state.player.pause() }
     LaunchedEffect(state.playing) {

@@ -11,6 +11,8 @@ import java.io.File
 class VoiceRecorder(private val context: Context) {
     private var recorder: MediaRecorder? = null
     private var file: File? = null
+    private var privateCapture: PrivateMediaAccess.Capture? = null
+    private var outputDescriptor: android.os.ParcelFileDescriptor? = null
     private var startedAt = 0L
     private val samples = ArrayList<Int>()
     val mime: String get() = if (opus) "audio/ogg" else "audio/mp4"
@@ -18,10 +20,14 @@ class VoiceRecorder(private val context: Context) {
 
     val isRecording: Boolean get() = recorder != null
 
-    fun start(onLimit: () -> Unit): Boolean {
+    fun start(privateConversation: String? = null, onLimit: () -> Unit): Boolean {
         if (recorder != null) return true
         val dir = File(context.cacheDir, "voice").apply { mkdirs() }
-        val out = File(dir, "rec_${System.nanoTime()}.${if (opus) "ogg" else "m4a"}")
+        val out = if (privateConversation == null) File(dir, "rec_${System.nanoTime()}.${if (opus) "ogg" else "m4a"}") else null
+        val capture = try { privateConversation?.let { PrivateMediaAccess.capture(context, it, "voice", mime,
+            nativeCodec = true, maxBytes = MAX_BYTES + 64 * 1024) } }
+            catch (_: Exception) { return false }
+        val descriptor = try { capture?.descriptor(context) } catch (_: Exception) { capture?.close(); return false }
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context)
                 else @Suppress("DEPRECATION") MediaRecorder()
         return runCatching {
@@ -44,15 +50,19 @@ class VoiceRecorder(private val context: Context) {
                     what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
                 ) onLimit()
             }
-            r.setOutputFile(out.absolutePath)
+            if (descriptor != null) r.setOutputFile(descriptor.fileDescriptor) else r.setOutputFile(requireNotNull(out).absolutePath)
             r.prepare()
             r.start()
         }.onFailure {
             r.release()
-            out.delete()
+            out?.delete()
+            descriptor?.close()
+            capture?.close()
         }.onSuccess {
             recorder = r
             file = out
+            privateCapture = capture
+            outputDescriptor = descriptor
             startedAt = SystemClock.elapsedRealtime()
             samples.clear()
         }.isSuccess
@@ -77,7 +87,15 @@ class VoiceRecorder(private val context: Context) {
         // A recorder that hit its own cap has already stopped and finalised
         // the file; stop() then throws, and the file is still the note.
         runCatching { r.stop() }
-        val bytes = runCatching { f?.readBytes() }.getOrNull()
+        val bytes = runCatching {
+            privateCapture?.let { capture ->
+                context.contentResolver.openInputStream(capture.uri)?.use { input ->
+                    val bytes = input.readBytes()
+                    require(bytes.size <= MAX_BYTES + 64 * 1024)
+                    bytes
+                }
+            } ?: f?.readBytes()
+        }.getOrNull()
         release()
         if (bytes == null || bytes.isEmpty() || duration < MIN_MS) return null
         return Recording(bytes, m, duration, waveformOf(samples))
@@ -94,6 +112,10 @@ class VoiceRecorder(private val context: Context) {
         recorder = null
         file?.delete()
         file = null
+        runCatching { outputDescriptor?.close() }
+        outputDescriptor = null
+        privateCapture?.close()
+        privateCapture = null
     }
 
     private fun waveformOf(raw: List<Int>): ByteArray {

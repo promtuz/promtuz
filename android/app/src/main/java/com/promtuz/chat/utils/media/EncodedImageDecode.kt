@@ -20,14 +20,24 @@ private const val MAX_SOURCE_PIXELS = 64_000_000L
 private const val MAX_SOURCE_EDGE = 16_384
 
 /** Existing image attachments can exceed the inline/native byte budget. Decode them as a file. */
-internal fun prepareLargeImageFile(file: File, targetEdge: Int): PreparedEncodedImage? = try {
+internal fun prepareLargeImageFile(file: File, targetEdge: Int): PreparedEncodedImage? =
+    prepareLargeImageSource(targetEdge, { ImageDecoder.createSource(file) }, { file.inputStream() })
+
+internal fun prepareLargeImageUri(context: android.content.Context, uri: android.net.Uri, targetEdge: Int): PreparedEncodedImage? =
+    prepareLargeImageSource(targetEdge, { ImageDecoder.createSource(context.contentResolver, uri) }, {
+        context.contentResolver.openInputStream(uri) ?: error("Image unavailable")
+    })
+
+private fun prepareLargeImageSource(
+    targetEdge: Int, source: () -> Any, stream: () -> java.io.InputStream,
+): PreparedEncodedImage? = try {
     require(targetEdge > 0)
     fun validate(width: Int, height: Int) {
         require(width in 1..MAX_SOURCE_EDGE && height in 1..MAX_SOURCE_EDGE &&
             width.toLong() * height <= MAX_SOURCE_PIXELS) { "Image dimensions exceed limit" }
     }
     val bitmap = if (Build.VERSION.SDK_INT >= 28) {
-        ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+        ImageDecoder.decodeBitmap(source() as ImageDecoder.Source) { decoder, info, _ ->
             validate(info.size.width, info.size.height)
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             val (width, height) = scaledDimensions(info.size.width, info.size.height, targetEdge)
@@ -35,7 +45,7 @@ internal fun prepareLargeImageFile(file: File, targetEdge: Int): PreparedEncoded
         }
     } else {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        stream().use { BitmapFactory.decodeStream(it, null, bounds) }
         validate(bounds.outWidth, bounds.outHeight)
         val options = BitmapFactory.Options().apply {
             var sample = 1
@@ -43,7 +53,7 @@ internal fun prepareLargeImageFile(file: File, targetEdge: Int): PreparedEncoded
             inSampleSize = sample
             inPreferredConfig = bounds.outConfig ?: Bitmap.Config.ARGB_8888
         }
-        BitmapFactory.decodeFile(file.absolutePath, options) ?: error("Image decode failed")
+        stream().use { BitmapFactory.decodeStream(it, null, options) } ?: error("Image decode failed")
     }
     PreparedEncodedImage(bitmap.asImageBitmap(), null, bitmapHasHdr(bitmap))
 } catch (error: Exception) {

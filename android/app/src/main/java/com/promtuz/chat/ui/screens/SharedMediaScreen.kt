@@ -39,7 +39,14 @@ fun SharedMediaScreen(conversation: String, name: String) {
     val scope = rememberCoroutineScope()
     var error by remember { mutableStateOf<String?>(null) }
     val rows by remember(conversation) {
-        observeQuery(setOf("messages", "message_media", "partials")) { CoreBridge.sharedMedia(conversation.fromHex()) }
+        observeQuery(setOf("messages", "message_media", "partials")) {
+            try { CoreBridge.sharedMedia(conversation.fromHex()) }
+            catch (error: Exception) {
+                val id = conversation.fromHex()
+                if (CoreBridge.privateConversationIds().any { it.contentEquals(id) } &&
+                    !CoreBridge.isPrivateConversationUnlocked(id)) emptyList() else throw error
+            }
+        }
     }.collectAsState(null)
     fun category(r: uniffi.core.SharedMediaItem) = when {
         r.kind.toInt() == 3 -> "Voice"
@@ -97,20 +104,19 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                             title = row.senderName.ifBlank { name }, mime = "image/avif", encoded = bytes,
                                             byteSize = bytes.size.toLong(), message = location,
                                         )))
-                                    } else if (media.localPath != null) {
-                                        val file = File(media.localPath!!)
+                                    } else if (PrivateMediaAccess.path(conversation, media) != null) {
+                                        val path = requireNotNull(PrivateMediaAccess.path(conversation, media))
                                         if (media.mime.startsWith("video/") || media.mime.startsWith("image/")) {
                                             val poster = thumb ?: media.thumb?.let { withContext(Dispatchers.Default) { decodeAvifThumb(it, 160) } }
                                             val (width, height) = if (media.width > 0u && media.height > 0u) {
                                                 media.width.toInt() to media.height.toInt()
                                             } else (poster?.width ?: 1) to (poster?.height ?: 1)
                                             MediaViewer.open(listOf(MediaItem(did, poster, width, height,
-                                                title = row.senderName.ifBlank { name }, subtitle = dateAndTime(context, row.timestamp.toLong() * 1000), mime = media.mime, filePath = file.absolutePath,
+                                                title = row.senderName.ifBlank { name }, subtitle = dateAndTime(context, row.timestamp.toLong() * 1000), mime = media.mime, filePath = path,
                                                 shareName = media.name, byteSize = media.size.toLong(), message = location,
-                                                videoPath = file.absolutePath.takeIf { media.mime.startsWith("video/") })))
+                                                videoPath = path.takeIf { media.mime.startsWith("video/") })))
                                         } else {
-                                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                                            context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, media.mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                                            openMediaPath(context, path, media.mime)
                                         }
                                     } else if (media.fileId != null) {
                                         CoreBridge.downloadAttachment(media.fileId!!)
@@ -130,8 +136,8 @@ fun SharedMediaScreen(conversation: String, name: String) {
                                     modifier = Modifier.size(64.dp), contentScale = ContentScale.Crop,
                                     maxEdge = 256, animate = MediaViewer.session == null,
                                 )
-                                media?.mime?.startsWith("image/") == true && media.localPath != null -> EncodedImage(
-                                    filePath = media.localPath, poster = thumb, contentDescription = null,
+                                media?.mime?.startsWith("image/") == true && PrivateMediaAccess.path(conversation, media) != null -> EncodedImage(
+                                    filePath = PrivateMediaAccess.path(conversation, media), poster = thumb, contentDescription = null,
                                     modifier = Modifier.size(64.dp), contentScale = ContentScale.Crop,
                                     maxEdge = 256, animate = MediaViewer.session == null,
                                 )

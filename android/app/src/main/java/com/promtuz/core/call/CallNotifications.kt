@@ -24,6 +24,13 @@ object CallNotifications {
     const val ONGOING_ID = 71
     private const val MISSED_ID = 72
 
+    fun clearUnavailable(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications.filter {
+            it.notification.channelId == CHANNEL || it.notification.channelId == RING_CHANNEL
+        }.forEach { manager.cancel(it.tag, it.id) }
+    }
+
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
@@ -51,11 +58,18 @@ object CallNotifications {
     }
 
     fun ringing(context: Context, ui: CallController.Ui) {
+        if (CallController.isHidden(ui.conversation)) return
         post(context, ONGOING_ID, build(context, ui, ringing = true))
     }
 
     fun ongoing(context: Context, ui: CallController.Ui) {
+        if (CallController.isHidden(ui.conversation)) return
         post(context, ONGOING_ID, build(context, ui, ringing = false))
+    }
+
+    fun clearConversation(context: Context, conversation: ByteArray) {
+        NotificationManagerCompat.from(context).cancel(conversation.toHex(), MISSED_ID)
+        if (CallController.state.value?.conversation?.contentEquals(conversation) == true) clearOngoing(context)
     }
 
     fun clearOngoing(context: Context) {
@@ -97,6 +111,7 @@ object CallNotifications {
 
     /** Tagged by chat, so a second missed call from the same person replaces the first. */
     fun missed(context: Context, conversation: ByteArray, name: String) {
+        if (CallController.isHidden(conversation)) return
         ensureChannel(context)
         val who = name.ifEmpty { "Someone" }
         val open = Intent(context, LauncherActivity::class.java)

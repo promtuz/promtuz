@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 class CallActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!CallController.AVAILABLE) { finish(); return }
         showOverLockScreen()
         enableEdgeToEdge()
         if (savedInstanceState == null) answerFrom(intent)

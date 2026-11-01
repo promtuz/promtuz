@@ -63,11 +63,24 @@ fun EncodedImage(
     animate: Boolean = true,
     onFrameChanged: ((ImageBitmap?) -> Unit)? = null,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val prepared by produceState<PreparedEncodedImage?>(null, bytes, filePath, maxEdge) {
         value = null
         try {
             val edge = if (maxEdge == Int.MAX_VALUE) 2048 else maxEdge.coerceAtMost(4096)
             if (bytes == null && filePath != null) {
+                if (PrivateMediaAccess.isPrivate(filePath)) {
+                    val uri = android.net.Uri.parse(filePath)
+                    val length = withContext(Dispatchers.IO) {
+                        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use {
+                            if (it.moveToFirst()) it.getLong(0) else 0L
+                        } ?: 0L
+                    }
+                    if (length > MAX_ENCODED_IMAGE_BYTES) {
+                        value = withContext(Dispatchers.IO) { imageDecodeWork.withPermit { prepareLargeImageUri(context, uri, edge) } }
+                        return@produceState
+                    }
+                }
                 val file = File(filePath)
                 val largeFile = withContext(Dispatchers.IO) { file.length() > MAX_ENCODED_IMAGE_BYTES }
                 if (largeFile) {
@@ -79,8 +92,22 @@ fun EncodedImage(
             }
             val source = withContext(Dispatchers.IO) {
                 bytes ?: filePath?.let { path ->
-                    val file = File(path)
-                    if (file.length() !in 1..MAX_ENCODED_IMAGE_BYTES.toLong()) null else file.readBytes()
+                    if (PrivateMediaAccess.isPrivate(path)) {
+                        context.contentResolver.openInputStream(android.net.Uri.parse(path))?.use { input ->
+                            val output = java.io.ByteArrayOutputStream()
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                require(output.size() + count <= MAX_ENCODED_IMAGE_BYTES)
+                                output.write(buffer, 0, count)
+                            }
+                            output.toByteArray()
+                        }
+                    } else {
+                        val file = File(path)
+                        if (file.length() !in 1..MAX_ENCODED_IMAGE_BYTES.toLong()) null else file.readBytes()
+                    }
                 }
             }
             if (source != null) {

@@ -29,6 +29,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -55,6 +56,16 @@ val LocalNavForeground = compositionLocalOf { true }
 /** True while a card animates off; freezeOnExit freezes live blur before the scale hits it. */
 val LocalNavCardExiting = compositionLocalOf { false }
 
+class SearchMotion {
+    var origin: Rect? = null
+    var transitioning by mutableStateOf(false)
+    // The provider changes when navigation changes phase. It must itself be observable:
+    // otherwise a skipped child keeps the first-frame constant and never observes Animatable.
+    var fraction by mutableStateOf<() -> Float>({ 1f })
+    var onBack: () -> Unit = {}
+}
+val LocalSearchMotion = compositionLocalOf { SearchMotion() }
+
 private const val FWD_DUR = 260
 private const val COMMIT_DUR = 340
 private const val CANCEL_DUR = 260
@@ -74,6 +85,8 @@ private class ExitingCard(
     val touchYFrac: Float,
     val cornerProgress: Float,
     val commit: Animatable<Float, AnimationVector1D>,
+    val search: Boolean = false,
+    val searchStart: Float = 1f,
 )
 
 /**
@@ -95,8 +108,10 @@ fun NavStage(
         ),
         entryProvider,
     )
+    val searchMotion = remember { SearchMotion() }
     val top = entries.last()
     val below = entries.getOrNull(entries.lastIndex - 1)
+    val searchTransition = backStack.lastOrNull() == Routes.Search && backStack.getOrNull(backStack.lastIndex - 1) == Routes.App
 
     val deviceRadius = deviceCornerRadius()
     val pbgCorner = maxOf(deviceRadius, PBG_CORNER)
@@ -129,7 +144,8 @@ fun NavStage(
             try {
                 // Reopening a chat whose ghost is still sliding off starts from the ghost's position.
                 val startEnter = exiting.firstOrNull { it.entry.contentKey == topKey }
-                    ?.let { 1f - it.commit.value } ?: 0f
+                    ?.let { if (it.search) it.searchStart * (1f - it.commit.value) else 1f - it.commit.value } ?: 0f
+                if (searchTransition) exiting.removeAll { it.search && it.entry.contentKey == topKey }
                 enter.snapTo(startEnter)
                 // Park offscreen until the incoming screen lays out, so its first frame doesn't eat the slide.
                 withTimeoutOrNull(250) { snapshotFlow { placed.value }.first { it } }
@@ -181,6 +197,8 @@ fun NavStage(
                 touchYFrac = (touchY / heightPx).coerceIn(0f, 1f),
                 cornerProgress = progress.value,
                 commit = Animatable(0f),
+                search = searchTransition,
+                searchStart = (1f - progress.value) * (if (showPush) enter.value else 1f),
             )
             exiting.add(leaving)
             scope.launch {
@@ -209,10 +227,11 @@ fun NavStage(
 
     // A reopened card's first frame starts at its ghost's offset, before the push effect runs.
     val firstFrameEnter = if (forward) {
-        exiting.firstOrNull { it.entry.contentKey == topKey }?.let { 1f - it.commit.value } ?: 0f
+        exiting.firstOrNull { it.entry.contentKey == topKey }?.let { if (it.search) it.searchStart * (1f - it.commit.value) else 1f - it.commit.value } ?: 0f
     } else 0f
 
     val frontMod = when {
+        searchTransition -> Modifier
         backActive -> Modifier.graphicsLayer {
             val s = lerp(1f, SCALE_TO, progress.value)
             scaleX = s
@@ -228,6 +247,28 @@ fun NavStage(
             .graphicsLayer { translationX = (1f - (if (forward) firstFrameEnter else enter.value)) * widthPx }
             .clip(restShape)
         else -> Modifier.clip(restShape)
+    }
+
+    searchMotion.transitioning = (searchTransition && (showPush || backActive)) || exiting.any { it.search }
+    searchMotion.fraction = {
+        val ghost = exiting.lastOrNull { it.search }
+        when {
+            ghost != null && !searchTransition -> ghost.searchStart * (1f - ghost.commit.value)
+            searchTransition && backActive -> (1f - progress.value) * (if (showPush) enter.value else 1f)
+            searchTransition && showPush -> if (forward) firstFrameEnter else enter.value
+            else -> 1f
+        }
+    }
+    searchMotion.onBack = {
+        if (searchTransition && exiting.none { it.entry.contentKey == topKey }) {
+            val leaving = ExitingCard(top, 1f, false, 0.5f, 0f, Animatable(0f), true, searchMotion.fraction())
+            exiting.add(leaving)
+            scope.launch {
+                try { leaving.commit.animateTo(1f, tween(FWD_DUR, easing = fwdEase)) }
+                finally { exiting.remove(leaving) }
+            }
+            onBack()
+        }
     }
 
     Box(modifier.fillMaxSize()) {
@@ -246,7 +287,7 @@ fun NavStage(
             // and a duplicate contentKey crashes it.
             exiting.forEach { ex ->
                 if (!seen.add(ex.entry.contentKey)) return@forEach
-                add(Triple(ex.entry, Modifier.graphicsLayer {
+                add(Triple(ex.entry, if (ex.search) Modifier else Modifier.graphicsLayer {
                     scaleX = ex.scale
                     scaleY = ex.scale
                     transformOrigin = TransformOrigin(if (ex.edgeRight) 0.12f else 0.88f, ex.touchYFrac)
@@ -266,10 +307,12 @@ fun NavStage(
                     Modifier
                         .fillMaxSize()
                         .then(mod)
-                        .background(MaterialTheme.colorScheme.background)
+                        .background(MaterialTheme.colorScheme.background.copy(alpha =
+                            if ((searchTransition && isTop) || exiting.any { it.search && it.entry.contentKey == entry.contentKey }) 0f else 1f))
                         .onPlaced { if (isTop) placed.value = true },
                 ) {
                     CompositionLocalProvider(
+                        LocalSearchMotion provides searchMotion,
                         LocalNavCardExiting provides exit,
                         LocalNavForeground provides (isTop && !exit && !showPush),
                     ) {
@@ -278,7 +321,7 @@ fun NavStage(
                 }
             }
             // Scrim over the revealed screen, under everything moving.
-            if (backInteraction && i == 0 && layers.size > 1) {
+            if (backInteraction && i == 0 && layers.size > 1 && !searchTransition && exiting.none { it.search }) {
                 Box(Modifier.fillMaxSize().drawBehind {
                     val a = if (backActive) SCRIM_MAX else SCRIM_MAX * (1f - (exiting.lastOrNull()?.commit?.value ?: 1f))
                     drawRect(Color.Black, alpha = a)

@@ -157,7 +157,8 @@ internal fun TransferStatus(
             runCatching {
                 val metadata = MediaMetadataRetriever()
                 try {
-                    metadata.setDataSource(att.localPath)
+                    if (att.localPath.startsWith("content://")) metadata.setDataSource(context, android.net.Uri.parse(att.localPath))
+                    else metadata.setDataSource(att.localPath)
                     metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
                 } finally { metadata.release() }
             }.getOrNull()

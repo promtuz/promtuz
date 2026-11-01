@@ -30,6 +30,7 @@ class AndroidMediaAdapter private constructor(
     descriptor: ParcelFileDescriptor,
     private val input: ParcelFileDescriptor.AutoCloseInputStream,
     private val privateSource: File? = null,
+    private val privateCapture: PrivateMediaAccess.Capture? = null,
 ) : MediaSourceAdapter {
     private val lock = Any()
     private val cancelled = AtomicBoolean(false)
@@ -175,6 +176,7 @@ class AndroidMediaAdapter private constructor(
         }
         runCatching { frames?.close() }
         privateSource?.delete()
+        privateCapture?.close()
     }
 
     override fun cancel() {
@@ -203,9 +205,16 @@ class AndroidMediaAdapter private constructor(
         }
 
         /** Makes clipboard bytes an owned platform source; core still reads it in bounded chunks. */
-        fun openBytes(context: Context, bytes: ByteArray): AndroidMediaAdapter {
+        fun openBytes(context: Context, bytes: ByteArray, privateConversation: String? = null): AndroidMediaAdapter {
             if (bytes.size > MAX_BYTE_SOURCE_BYTES) {
                 throw MediaPreparationException("This media is too large.")
+            }
+            if (privateConversation != null) {
+                val capture = PrivateMediaAccess.capture(context, privateConversation, "media", "application/octet-stream")
+                return try {
+                    ParcelFileDescriptor.AutoCloseOutputStream(capture.descriptor(context)).use { it.write(bytes) }
+                    open(context, capture.uri, null, capture)
+                } catch (error: Exception) { capture.close(); throw error }
             }
             val privateSource = File.createTempFile("media-import-", ".source", context.cacheDir)
             return try {
@@ -217,7 +226,7 @@ class AndroidMediaAdapter private constructor(
             }
         }
 
-        private fun open(context: Context, uri: Uri, privateSource: File?): AndroidMediaAdapter {
+        private fun open(context: Context, uri: Uri, privateSource: File?, privateCapture: PrivateMediaAccess.Capture? = null): AndroidMediaAdapter {
             val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
                 ?: throw MediaPreparationException("Couldn’t open this media.")
             return try {
@@ -227,10 +236,12 @@ class AndroidMediaAdapter private constructor(
                     descriptor,
                     ParcelFileDescriptor.AutoCloseInputStream(descriptor),
                     privateSource,
+                    privateCapture,
                 )
             } catch (_: Exception) {
                 descriptor.close()
                 privateSource?.delete()
+                privateCapture?.close()
                 throw MediaPreparationException("Couldn’t open this media.")
             }
         }

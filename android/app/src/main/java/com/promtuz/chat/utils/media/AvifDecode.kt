@@ -16,9 +16,20 @@ private val cache = object : LruCache<String, ImageBitmap>(64 shl 20) {
     override fun sizeOf(key: String, value: ImageBitmap) = imageAllocationBytes(value)
 }
 
+private var cacheGeneration = 0L
+
 fun decodeAvifCached(dispatchIdHex: String, bytes: ByteArray): ImageBitmap? {
     val key = "$dispatchIdHex:${bytes.contentHashCode()}"
-    return cache.get(key) ?: decodeAvif(bytes)?.also { cache.put(key, it) }
+    val generation = synchronized(cache) {
+        cache.get(key)?.let { return it }
+        cacheGeneration
+    }
+    return decodeAvif(bytes)?.also { decoded ->
+        synchronized(cache) {
+            // Native decode is not cancellable; an old worker must not repopulate a locked cache.
+            if (generation == cacheGeneration) cache.put(key, decoded)
+        }
+    }
 }
 
 /** Decode a bounded poster directly, rather than allocating a full-resolution image first. */
@@ -43,4 +54,10 @@ internal fun bitmapFromRgba(pixels: ByteArray, width: Int, height: Int): ImageBi
             (pixels[offset + 2].toInt() and 0xff)
     }
     return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888).asImageBitmap()
+}
+
+/** Drop decoded private pixels when a private session ends. */
+fun clearDecodedImageCache() = synchronized(cache) {
+    cacheGeneration++
+    cache.evictAll()
 }

@@ -19,20 +19,51 @@ import java.io.OutputStream
 
 private const val ALBUM = "Promtuz"
 
-suspend fun saveToGallery(context: Context, image: ImageBitmap, name: String): Boolean =
-    writeToGallery(context, "image/jpeg", "$name.jpg") {
-        image.asAndroidBitmap().compress(Bitmap.CompressFormat.JPEG, 92, it)
+suspend fun saveToGallery(context: Context, image: ImageBitmap, name: String): Boolean {
+    val authorize = exportAuthorization()
+    return writeToGallery(context, "image/jpeg", "$name.jpg") {
+        authorize()
+        image.asAndroidBitmap().compress(Bitmap.CompressFormat.JPEG, 92, it).also { authorize() }
     }
+}
 
 /** Copy encoded media verbatim, including every animation frame and its HDR representation. */
-suspend fun saveEncodedImageToGallery(context: Context, bytes: ByteArray, mime: String, name: String): Boolean =
-    writeToGallery(context, mime, exportName(name, mime)) { it.write(bytes); true }
-
-suspend fun saveFileToGallery(context: Context, path: String, mime: String, name: String): Boolean =
-    writeToGallery(context, mime, exportName(name, mime)) { out ->
-        File(path).inputStream().use { it.copyTo(out) }
+suspend fun saveEncodedImageToGallery(context: Context, bytes: ByteArray, mime: String, name: String): Boolean {
+    val authorize = exportAuthorization()
+    return writeToGallery(context, mime, exportName(name, mime)) { output ->
+        var offset = 0
+        while (offset < bytes.size) {
+            authorize()
+            val count = minOf(64 * 1024, bytes.size - offset)
+            output.write(bytes, offset, count)
+            offset += count
+        }
+        authorize()
         true
     }
+}
+
+private fun exportAuthorization(): () -> Unit {
+    val conversation = com.promtuz.chat.security.PrivateChatSession.active.value ?: return {}
+    val session = com.promtuz.chat.security.PrivateChatSession.sessionId
+    return {
+        check(session != null && com.promtuz.chat.security.PrivateChatSession.active.value == conversation &&
+            com.promtuz.chat.security.PrivateChatSession.sessionId == session) { "Chat is locked" }
+    }
+}
+
+suspend fun saveFileToGallery(context: Context, path: String, mime: String, name: String): Boolean {
+    val authorize = exportAuthorization()
+    return writeToGallery(context, mime, exportName(name, mime)) { out ->
+        authorize()
+        if (PrivateMediaAccess.isPrivate(path)) {
+            context.contentResolver.openInputStream(android.net.Uri.parse(path))?.use { it.copyTo(out) }
+                ?: return@writeToGallery false
+        } else File(path).inputStream().use { it.copyTo(out) }
+        authorize()
+        true
+    }
+}
 
 private suspend fun writeToGallery(
     context: Context, mime: String, name: String, write: (OutputStream) -> Boolean,
@@ -73,6 +104,10 @@ private suspend fun writeToGallery(
     }
 
 suspend fun shareEncodedImage(context: Context, bytes: ByteArray, mime: String, name: String) {
+    if (com.promtuz.chat.security.PrivateChatSession.active.value != null) {
+        launchMediaShare(context, PrivateMediaAccess.shareBytes(context, bytes, mime, exportName(name, mime)), mime)
+        return
+    }
     val file = withContext(Dispatchers.IO) {
         File(File(context.cacheDir, "images").apply { mkdirs() }, exportName(name, mime)).also { it.writeBytes(bytes) }
     }
@@ -93,6 +128,18 @@ private fun exportName(name: String, mime: String): String {
 }
 
 suspend fun sharePicture(context: Context, image: ImageBitmap, name: String) {
+    if (com.promtuz.chat.security.PrivateChatSession.active.value != null) {
+        val authorize = exportAuthorization()
+        val bytes = withContext(Dispatchers.Default) {
+            java.io.ByteArrayOutputStream().use {
+                check(image.asAndroidBitmap().compress(Bitmap.CompressFormat.JPEG, 92, it))
+                it.toByteArray()
+            }
+        }
+        try { authorize(); launchMediaShare(context, PrivateMediaAccess.shareBytes(context, bytes, "image/jpeg", "$name.jpg"), "image/jpeg") }
+        finally { bytes.fill(0) }
+        return
+    }
     val file = withContext(Dispatchers.IO) {
         File(File(context.cacheDir, "images").apply { mkdirs() }, "$name.jpg").also { f ->
             f.outputStream().use { image.asAndroidBitmap().compress(Bitmap.CompressFormat.JPEG, 92, it) }
@@ -101,9 +148,29 @@ suspend fun sharePicture(context: Context, image: ImageBitmap, name: String) {
     shareFile(context, file, "image/jpeg")
 }
 
+fun shareMediaPath(context: Context, path: String, mime: String) {
+    if (PrivateMediaAccess.isPrivate(path)) launchMediaShare(context, PrivateMediaAccess.export(context, path), mime)
+    else shareFile(context, File(path), mime)
+}
+
+fun openMediaPath(context: Context, path: String, mime: String? = null) {
+    val uri = if (PrivateMediaAccess.isPrivate(path)) PrivateMediaAccess.export(context, path)
+        else FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
+    val type = mime ?: context.contentResolver.getType(uri) ?: java.net.URLConnection.guessContentTypeFromName(path) ?: "*/*"
+    com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+    context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
 fun shareFile(context: Context, file: File, mime: String) {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    launchMediaShare(context, FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file), mime)
+}
+
+private fun launchMediaShare(context: Context, uri: android.net.Uri, mime: String) {
     val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
-        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply {
+            clipData = android.content.ClipData.newRawUri("Attachment", uri)
+        }
+    com.promtuz.chat.security.PrivateChatSession.beginHandoff()
     context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }

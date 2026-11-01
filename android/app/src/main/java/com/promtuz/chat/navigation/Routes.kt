@@ -8,11 +8,14 @@ object Routes : NavKey {
     data object App : NavKey
 
     @Serializable
+    data object Search : NavKey
+
+    @Serializable
     data object Welcome : NavKey
 
     /** `conversation` is a hex conversation id, not a peer: a group has no peer. */
     @Serializable
-    data class Chat(val conversation: String, val name: String) : NavKey
+    data class Chat(val conversation: String, val name: String, val sessionId: Long? = null) : NavKey
 
     @Serializable
     data class GroupInfo(val conversation: String) : NavKey
@@ -43,6 +46,9 @@ object Routes : NavKey {
 
     @Serializable
     data object PrivacySettings : NavKey
+
+    @Serializable
+    data object ResetLockedChats : NavKey
 
     @Serializable
     data class ContactInfo(val conversation: String, val peer: String) : NavKey

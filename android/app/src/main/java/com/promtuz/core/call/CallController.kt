@@ -15,6 +15,10 @@ import uniffi.core.CallEvent
 
 /** One call at a time, as in core: its events become [state], and the service and notifications follow. */
 object CallController {
+    // Temporarily unavailable until the calling transport is ready. Keep its implementation
+    // intact, but never show a broken call screen or ring notification.
+    const val AVAILABLE = false
+
     data class Ui(
         val callId: ByteArray,
         val peer: ByteArray,
@@ -46,10 +50,12 @@ object CallController {
 
     fun init(context: Context) {
         app = context.applicationContext
+        if (!AVAILABLE) CallNotifications.clearUnavailable(app)
     }
 
     /** Runs on a core thread, from [com.promtuz.core.adapter.CoreEventBus.onCall]. */
     fun onEvent(event: CallEvent) {
+        if (!AVAILABLE) return
         when (event) {
             is CallEvent.Outgoing -> begin(event.call, event.peer, event.conversation, outgoing = true, video = videoNow(event.call), Phase.Outgoing)
             is CallEvent.Incoming -> begin(event.call, event.peer, event.conversation, outgoing = false, video = event.video, Phase.Incoming)
@@ -77,10 +83,15 @@ object CallController {
         runCatching { CoreBridge.callCurrent()?.takeIf { it.call.contentEquals(call) }?.video }
             .getOrNull() ?: false
 
+    fun isHidden(conversation: ByteArray): Boolean = runCatching {
+        CoreBridge.privateConversationIds().any { it.contentEquals(conversation) }
+    }.getOrDefault(true)
+
     private fun begin(
         call: ByteArray, peer: ByteArray, conversation: ByteArray, outgoing: Boolean, video: Boolean,
         phase: Phase,
     ) {
+        if (isHidden(conversation)) return
         val name = runCatching { CoreBridge.contactName(peer) }.getOrNull().orEmpty()
         _state.value = Ui(call, peer, conversation, name, outgoing, video, phase, false, false, true, false, 0)
         // A ring holds no capture service; answering gets the microphone first, then starts it.

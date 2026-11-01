@@ -163,6 +163,10 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
 
     fun send(conversation: String, done: () -> Unit) {
         if (!canSend(staged.value)) return
+        if (CoreBridge.privateConversationIds().any { it.contentEquals(conversation.fromHex()) }) {
+            error = "Open this chat through home search to send a message."
+            return
+        }
         busy = true; sending = true; error = null
         sendJob = viewModelScope.launch {
             try {

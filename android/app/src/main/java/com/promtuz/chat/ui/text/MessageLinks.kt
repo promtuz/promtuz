@@ -167,6 +167,7 @@ private fun MessageLinkTarget(link: MessageLink, label: String, geometry: LinkGe
         }
     }
     val open = {
+        com.promtuz.chat.security.PrivateChatSession.beginHandoff()
         runCatching { uriHandler.openUri(link.url) }.onFailure {
             Toast.makeText(context, "Couldn't open this link", Toast.LENGTH_SHORT).show()
         }

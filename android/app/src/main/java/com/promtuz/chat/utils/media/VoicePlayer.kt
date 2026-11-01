@@ -12,9 +12,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.io.File
+import android.media.MediaDataSource
 
-/** MediaPlayer wants a file, so the note spills to one scratch file that [stop] unlinks; the database keeps the only copy. */
+/** Playback reads memory directly, so private audio never spills to a plaintext cache file. */
 object VoicePlayer {
     data class Playback(val dispatchIdHex: String, val positionMs: Int, val playing: Boolean)
 
@@ -41,7 +41,23 @@ object VoicePlayer {
             return
         }
         stop()
-        val file = spill(context, bytes, mime)
+        val privateConversation = com.promtuz.chat.security.PrivateChatSession.active.value
+        val privateSession = com.promtuz.chat.security.PrivateChatSession.sessionId
+        val source = object : MediaDataSource() {
+            private var data = bytes.copyOf()
+            @Synchronized override fun getSize(): Long = data.size.toLong()
+            @Synchronized override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+                if (privateConversation != null && (com.promtuz.chat.security.PrivateChatSession.active.value != privateConversation ||
+                    com.promtuz.chat.security.PrivateChatSession.sessionId != privateSession)) {
+                    data.fill(0); data = byteArrayOf(); return -1
+                }
+                if (position < 0 || position >= data.size) return -1
+                val count = minOf(size, data.size - position.toInt())
+                data.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+                return count
+            }
+            @Synchronized override fun close() { data.fill(0); data = byteArrayOf() }
+        }
         val mp = MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
@@ -53,29 +69,38 @@ object VoicePlayer {
             setOnErrorListener { _, _, _ -> stop(); true }
         }
         runCatching {
-            mp.setDataSource(file.absolutePath)
+            mp.setDataSource(source)
             mp.prepare()
             mp.start()
         }.onFailure {
             mp.release()
+            source.close()
             stop()
             return
         }
+        audioSource = source
         player = mp
         _state.value = Playback(dispatchIdHex, 0, true)
         tick()
+    }
+
+    /** Remove only the two obsolete playback scratch names from older app versions. */
+    fun clearLegacyScratch(context: Context) {
+        listOf("playing.m4a", "playing.ogg").forEach {
+            java.io.File(java.io.File(context.cacheDir, "voice"), it).delete()
+        }
     }
 
     fun stop() {
         ticker?.cancel()
         player?.let { runCatching { it.stop() }; it.release() }
         player = null
-        scratch?.delete()
-        scratch = null
+        audioSource?.close()
+        audioSource = null
         _state.value = null
     }
 
-    private var scratch: File? = null
+    private var audioSource: MediaDataSource? = null
 
     private fun tick() {
         ticker?.cancel()
@@ -89,12 +114,4 @@ object VoicePlayer {
         }
     }
 
-    private fun spill(context: Context, bytes: ByteArray, mime: String): File {
-        val dir = File(context.cacheDir, "voice").apply { mkdirs() }
-        val ext = if (mime == "audio/mp4") "m4a" else "ogg"
-        val f = File(dir, "playing.$ext")
-        f.writeBytes(bytes)
-        scratch = f
-        return f
-    }
 }

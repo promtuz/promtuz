@@ -69,7 +69,7 @@ object InlinePlayback {
 
     /** Whatever was handed off and never adopted is released here. */
     fun dropPending() {
-        pending?.second?.let { it.handedOver = false; it.player.release() }
+        pending?.second?.let { it.handedOver = false; it.release() }
         pending = null
     }
 }

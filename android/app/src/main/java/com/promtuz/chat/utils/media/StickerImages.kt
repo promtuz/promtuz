@@ -23,25 +23,30 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 object StickerImages {
+    private val cacheLock = Any()
+    private var generation = 0L
     private val cache = object : LruCache<String, PreparedEncodedImage>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: PreparedEncodedImage) = value.allocationBytes
     }
 
     fun peek(ref: StickerRef): ImageBitmap? = peekPrepared(ref)?.poster
 
-    internal fun peekPrepared(ref: StickerRef): PreparedEncodedImage? = cache.get(ref.key)
+    internal fun peekPrepared(ref: StickerRef): PreparedEncodedImage? = synchronized(cacheLock) { cache.get(ref.key) }
 
-    fun clear() = cache.evictAll()
+    fun clear() = synchronized(cacheLock) { generation++; cache.evictAll() }
 
     suspend fun load(ref: StickerRef): ImageBitmap? = loadPrepared(ref)?.poster
 
     internal suspend fun loadPrepared(ref: StickerRef): PreparedEncodedImage? = peekPrepared(ref) ?: withContext(Dispatchers.IO) {
+        val epoch = synchronized(cacheLock) { generation }
         try {
             val bytes = CoreBridge.stickerImage(ref.toRecord())
             withContext(Dispatchers.Default) {
                 imageDecodeWork.withPermit {
-                    peekPrepared(ref) ?: prepareEncodedImage(bytes, sourceMaxEdge = 512, targetEdge = 512)
-                        ?.also { cache.put(ref.key, it) }
+                    val prepared = peekPrepared(ref) ?: prepareEncodedImage(bytes, sourceMaxEdge = 512, targetEdge = 512)
+                    synchronized(cacheLock) {
+                        if (generation != epoch) null else prepared?.also { cache.put(ref.key, it) }
+                    }
                 }
             }
         } catch (e: CancellationException) { throw e }

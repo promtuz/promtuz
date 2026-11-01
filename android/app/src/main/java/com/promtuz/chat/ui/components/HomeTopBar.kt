@@ -20,6 +20,7 @@ import com.promtuz.chat.ui.theme.transparentTopAppBar
 @Composable
 fun HomeTopBar(
     appViewModel: AppVM,
+    showSearch: Boolean = false,
 ) {
     // Home deliberately keeps its gradient over the scrolling chat list.
     TopAppBar(
@@ -49,6 +50,6 @@ fun HomeTopBar(
         },
         actions = {
             AppUpdateIcon(onClick = { appViewModel.navigator.push(Routes.Updates) })
-            HomeMoreMenu(appViewModel)
+            HomeMoreMenu(appViewModel, showSearch = showSearch)
         })
 }

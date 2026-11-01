@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.utils.media.AndroidMediaAdapter
+import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +17,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import uniffi.core.BackupMergeReport
 import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
@@ -197,6 +201,22 @@ object CoreBridge {
     suspend fun previewInvite(bytes: ByteArray): InvitePreview =
         withContext(Dispatchers.IO) { ffiPreviewInvite(bytes) }
 
+    suspend fun hideConversation(id: ByteArray, code: String) = withContext(Dispatchers.IO) {
+        check(com.promtuz.core.call.CallController.state.value?.conversation?.contentEquals(id) != true) {
+            "End the call before hiding this chat."
+        }
+        uniffi.core.hideConversation(id, code)
+    }
+    suspend fun unlockPrivateConversation(code: String): ByteArray? = withContext(Dispatchers.IO) {
+        uniffi.core.unlockPrivateConversation(code)
+    }
+    fun lockPrivateConversations() = uniffi.core.lockPrivateConversations()
+    fun privateConversationIds(): List<ByteArray> = uniffi.core.privateConversationIds()
+    fun isPrivateConversationUnlocked(id: ByteArray): Boolean = uniffi.core.isPrivateConversationUnlocked(id)
+    suspend fun resetPrivateConversation(id: ByteArray) = withContext(Dispatchers.IO) {
+        uniffi.core.resetPrivateConversation(id)
+    }
+
     suspend fun contacts(): List<ContactInfo> = withContext(Dispatchers.IO) { ffiGetContacts() }
 
     suspend fun profileName(): String = withContext(Dispatchers.IO) { ffiProfileName() }
@@ -325,27 +345,44 @@ object CoreBridge {
     suspend fun sendMessage(conversationId: ByteArray, content: String, replyTo: ByteArray? = null) =
         withContext(Dispatchers.IO) { ffiSendMessage(conversationId, content, replyTo) }
 
-    /** Core owns this opaque URI lease until the media job is finished or cancelled. */
-    suspend fun importMedia(context: Context, uri: Uri): MediaImport =
-        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.open(context, uri)) }
+    /** The conversation is captured before dispatch; lock races cannot turn a private import into a public one. */
+    suspend fun importMedia(context: Context, uri: Uri, conversationId: ByteArray? = null): MediaImport {
+        val privateId = conversationId?.takeIf { id -> privateConversationIds().any { it.contentEquals(id) } }
+            ?: com.promtuz.chat.security.PrivateChatSession.active.value?.fromHex()
+        return withContext(Dispatchers.IO) {
+            val source = AndroidMediaAdapter.open(context, uri)
+            if (privateId != null) MediaImport.fromPrivateSource(source, privateId) else MediaImport.fromSource(source)
+        }
+    }
 
-    /** Clipboard bytes become an opaque adapter lease; they never cross UniFFI as one file. */
-    suspend fun importMedia(context: Context, bytes: ByteArray): MediaImport =
-        withContext(Dispatchers.IO) { MediaImport.fromSource(AndroidMediaAdapter.openBytes(context, bytes)) }
+    suspend fun importMedia(context: Context, bytes: ByteArray): MediaImport {
+        val privateId = com.promtuz.chat.security.PrivateChatSession.active.value?.fromHex()
+        return withContext(Dispatchers.IO) {
+            val source = AndroidMediaAdapter.openBytes(context, bytes, privateId?.toHex())
+            if (privateId != null) MediaImport.fromPrivateSource(source, privateId) else MediaImport.fromSource(source)
+        }
+    }
 
-    suspend fun stageImportedChatMedia(context: Context, uri: Uri): StagedImportedMedia? = withContext(Dispatchers.IO) {
-        val media = importMedia(context, uri)
-        when (media.mediaKind().toInt()) {
-            1 -> media.beginChatImage(false).stage().let { StagedImportedMedia(it.id, it.avif, true) }
-            2 -> media.beginChatVideo(null).stage().let { StagedImportedMedia(it.id, it.poster, false) }
-            3 -> {
-                media.discard()
-                throw uniffi.core.CoreException.Refused("This media format is not supported on this device.")
+    suspend fun stageImportedChatMedia(context: Context, uri: Uri, conversationId: ByteArray? = null): StagedImportedMedia? {
+        val caller = kotlinx.coroutines.currentCoroutineContext()
+        var accepted: StagedImportedMedia? = null
+        try {
+            val result = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                val media = importMedia(context, uri, conversationId)
+                when (media.mediaKind().toInt()) {
+                    1 -> media.beginChatImage(false).stage().let { StagedImportedMedia(it.id, it.avif, true) }
+                    2 -> media.beginChatVideo(null).stage().let { StagedImportedMedia(it.id, it.poster, false) }
+                    3 -> {
+                        media.discard()
+                        throw uniffi.core.CoreException.Refused("This media format is not supported on this device.")
+                    }
+                    else -> { media.discard(); null }
+                }.also { accepted = it }
             }
-            else -> {
-                media.discard()
-                null
-            }
+            caller.ensureActive()
+            return result
+        } finally {
+            if (!caller.isActive) accepted?.let { withContext(kotlinx.coroutines.NonCancellable) { discardStaged(it.id) } }
         }
     }
 
@@ -490,7 +527,10 @@ object CoreBridge {
 
     // Call control returns once queued, and progress arrives on CoreEvents.onCall. The audio and
     // video functions stay synchronous because they run on their own real-time threads.
-    fun callStart(peer: ByteArray, video: Boolean = false): ByteArray = uniffi.core.callStart(peer, video)
+    fun callStart(peer: ByteArray, video: Boolean = false): ByteArray {
+        check(com.promtuz.core.call.CallController.AVAILABLE) { "Calls are temporarily unavailable" }
+        return uniffi.core.callStart(peer, video)
+    }
 
     fun callSetCamera(on: Boolean) = uniffi.core.callSetCamera(on)
 

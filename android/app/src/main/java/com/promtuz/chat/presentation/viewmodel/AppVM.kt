@@ -3,6 +3,9 @@ package com.promtuz.chat.presentation.viewmodel
 import android.app.Application
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavBackStack
@@ -48,10 +51,14 @@ class AppVM(
     val messageToShow = _messageToShow.asStateFlow()
 
     fun showMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
+        if (!canOpenChat(message.conversation)) { navigator.push(Routes.Search); return }
         _messageToShow.value = message
         // Reuse the existing chat entry and its scroll/draft state when it is already in the stack.
-        val route = backStack.filterIsInstance<Routes.Chat>().lastOrNull { it.conversation == message.conversation }
-            ?: Routes.Chat(message.conversation, message.chatName)
+        val hidden = bridge.privateConversationIds().any { it.contentEquals(message.conversation.fromHex()) }
+        val privateGeneration = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null
+        val route = backStack.filterIsInstance<Routes.Chat>().lastOrNull {
+            it.conversation == message.conversation && (!hidden || it.sessionId == privateGeneration)
+        } ?: Routes.Chat(message.conversation, message.chatName, sessionId = privateGeneration)
         navigator.openExternal(route)
     }
 
@@ -154,13 +161,64 @@ class AppVM(
         private const val ACTIVITY_TTL_MS = 6_000L
     }
 
+    val privateIds = observeQuery(setOf("messages", "conversations")) {
+        bridge.privateConversationIds().map { it.toHex() }.toSet()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    var newlyHidden by mutableStateOf<Set<String>>(emptySet())
+        private set
+    fun didHideChat(id: String) { newlyHidden = newlyHidden + id }
+    fun didResetHiddenChat(id: String) { newlyHidden = newlyHidden - id }
+
+    private val _privateSummary = MutableStateFlow<ChatSummary?>(null)
+    val privateSummary = _privateSummary.asStateFlow()
+
+    suspend fun privateSearchResult(id: ByteArray): ChatSummary? {
+        val c = bridge.conversation(id) ?: return null
+        val contact = c.peer?.let { peer -> bridge.contacts().firstOrNull { it.ipk.contentEquals(peer) } }
+        val last = bridge.messages(id, 1).lastOrNull()
+        return ChatSummary(
+            conversationHex = id.toHex(), name = contact?.name?.ifBlank { c.displayName } ?: c.displayName,
+            kind = c.kind.toInt(), peerHex = c.peer?.toHex(), memberCount = c.members.size,
+            lastPreview = last?.let { preview(id, it) }, lastMessageId = last?.id,
+            lastDispatchId = last?.dispatchId?.toHex(), lastMediaKind = last?.mediaKind?.toInt() ?: 0,
+            timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
+            status = contact?.status?.toInt() ?: 1, rejectReason = contact?.rejectReason?.toInt(),
+            lastOutgoing = last?.outgoing == true, lastDeleted = last?.deleted == true,
+            lastStatus = last?.status?.toInt() ?: 1,
+            muted = true, rawTitle = c.title, amMember = c.amMember, canLeave = c.canLeave,
+            ownerIsStuck = c.ownerIsStuck, commits = c.commits, request = c.request,
+        ).also { _privateSummary.value = it }
+    }
+
+    fun clearPrivateSummary() { _privateSummary.value = null }
+
+    fun canOpenChat(conversationHex: String): Boolean {
+        val id = conversationHex.fromHex()
+        return bridge.privateConversationIds().none { it.contentEquals(id) } ||
+            bridge.isPrivateConversationUnlocked(id)
+    }
+
     fun openChat(conversationHex: String, name: String) {
-        navigator.push(Routes.Chat(conversationHex, name))
+        if (!canOpenChat(conversationHex)) {
+            navigator.push(Routes.Search)
+            return
+        }
+        val hidden = bridge.privateConversationIds().any { it.contentEquals(conversationHex.fromHex()) }
+        if (hidden && !com.promtuz.chat.security.PrivateChatSession.foreground) {
+            com.promtuz.chat.security.PrivateChatSession.clear()
+            clearPrivateSummary()
+            navigator.push(Routes.Search)
+            return
+        }
+        if (hidden) com.promtuz.chat.security.PrivateChatSession.arm(conversationHex)
+        navigator.push(Routes.Chat(conversationHex, name,
+            sessionId = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null))
     }
 
     fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {
         val conv = runCatching { bridge.conversationWith(peerHex.fromHex()) }.getOrNull() ?: return@launch
-        navigator.push(Routes.Chat(conv.toHex(), name))
+        openChat(conv.toHex(), name)
     }
 
     fun markConversationRead(conversationHex: String) = viewModelScope.launch {

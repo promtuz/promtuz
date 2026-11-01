@@ -74,6 +74,7 @@ fun HomeChatListItem(
     onLeaveAndDelete: () -> Unit,
     modifier: Modifier = Modifier,
     onRequestDecision: (RequestDecision) -> Unit = {},
+    privateChat: Boolean = false,
 ) {
     val type = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
@@ -91,8 +92,8 @@ fun HomeChatListItem(
         MenuAction("Delete", R.drawable.oi_trash, destructive = true) { confirmRequest = RequestDecision.Delete },
     )) else listOf(
         buildList {
-            add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
-            add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
+            if (!privateChat) add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
+            if (!privateChat) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
             if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
         listOf(

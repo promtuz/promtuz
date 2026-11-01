@@ -184,7 +184,7 @@ fun ChatBottomBar(
     val onMic = {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        ) beginRecording() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        ) beginRecording() else { com.promtuz.chat.security.PrivateChatSession.beginHandoff(); micPermission.launch(Manifest.permission.RECORD_AUDIO) }
     }
     BackHandler(action != null && openPanel == null && recording == null) { viewModel.cancelComposerAction() }
     BackHandler(recording != null) { viewModel.cancelRecording() }
@@ -273,8 +273,8 @@ fun ChatBottomBar(
                             stickersOpen = stickersOpen,
                             metrics = metrics,
                             field = field,
-                            onToggleAttach = { toggle(ComposerPanelKind.Attach) },
-                            onToggleStickers = { toggle(ComposerPanelKind.Stickers) },
+                            onToggleAttach = { if (viewModel.allowMedia()) toggle(ComposerPanelKind.Attach) },
+                            onToggleStickers = { if (viewModel.allowMedia()) toggle(ComposerPanelKind.Stickers) },
                             onFieldFocused = {
                                 if (openPanel != null) { closingToKeyboard = true; openPanel = null } // keyboard taking over
                             },
@@ -302,7 +302,7 @@ fun ChatBottomBar(
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onSendPhotos = { uris -> viewModel.attachPhotos(uris); closeFlat() },
                     onOpenCamera = {
-                        com.promtuz.chat.ui.camera.CameraLauncher.open { file, video ->
+                        if (viewModel.allowMedia()) com.promtuz.chat.ui.camera.CameraLauncher.open(conversation = viewModel.conversationHex) { file, video ->
                             viewModel.attachCaptured(file, video)
                             closeFlat()
                         }

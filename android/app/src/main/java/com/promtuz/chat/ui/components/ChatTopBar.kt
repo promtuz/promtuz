@@ -84,12 +84,15 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val typingMembers by chatVM.typingMembers.collectAsState()
     val headerReady by chatVM.headerReady.collectAsState()
 
-    // Delete reads the home summary's standing. Derived so another chat's message doesn't
-    // recompose this bar, and keyed on the id because it is a plain getter, not State.
+    // Private chats never enter the home flow; retain their unlocked summary for header actions.
     val chats by appVM.chats.collectAsState()
-    val summary by remember(chatVM.conversationHex) {
-        derivedStateOf { chats.firstOrNull { it.conversationHex == chatVM.conversationHex } }
+    val privateSummary by appVM.privateSummary.collectAsState()
+    val privateIds by appVM.privateIds.collectAsState()
+    val hidden = chatVM.conversationHex in privateIds || privateSummary?.conversationHex == chatVM.conversationHex
+    val summary by remember(chatVM.conversationHex, privateSummary) {
+        derivedStateOf { chats.firstOrNull { it.conversationHex == chatVM.conversationHex } ?: privateSummary?.takeIf { it.conversationHex == chatVM.conversationHex } }
     }
+    var lockChat by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
 
@@ -191,21 +194,17 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         navigationIcon = navigationIcon,
         actions = {
             if (searching) SearchActions(chatVM, searchQuery.orEmpty()) else {
-            // Calls need a working pair, which a request doesn't have yet on either side.
-            if (!isGroup && summary?.status == 1 && summary?.request != true) summary?.peerHex?.let {
-                CallButton(it, video = true)
-                CallButton(it, video = false)
-            }
             AppDropMenu(
                 anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Chat options") },
                 groups = buildList {
-                    add(
-                        listOf(
-                            MenuAction("Search", R.drawable.oi_search) { chatVM.openSearch() },
-                            MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) {
-                                chatVM.toggleMute()
-                            })
-                    )
+                    add(buildList {
+                        add(MenuAction("Search", R.drawable.oi_search) { chatVM.openSearch() })
+                        if (!hidden) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) {
+                            chatVM.toggleMute()
+                        })
+                    })
+                    if (!hidden && summary?.request != true)
+                        add(listOf(MenuAction("Lock", R.drawable.oi_lock) { lockChat = true }))
                     add(
                         buildList {
                             add(
@@ -232,6 +231,9 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 
+    if (lockChat) LockChatDialog(chatVM.conversationHex,
+        onDismiss = { lockChat = false },
+        onLocked = { lockChat = false; appVM.didHideChat(chatVM.conversationHex); appVM.clearPrivateSummary(); appVM.navigator.reset(Routes.App) })
     if (confirmClear) ClearHistoryDialog(
         name = name,
         onConfirm = { confirmClear = false; appVM.clearHistory(chatVM.conversationHex) },
@@ -280,43 +282,6 @@ internal fun ChatBarTitle(
     }
 }
 
-@Composable
-private fun CallButton(peerHex: String, video: Boolean) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val needed = if (video) {
-        arrayOf(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.CAMERA)
-    } else {
-        arrayOf(android.Manifest.permission.RECORD_AUDIO)
-    }
-    val start = {
-        runCatching { com.promtuz.core.CoreBridge.callStart(peerHex.fromHex(), video) }
-            .onFailure { android.widget.Toast.makeText(context, "Can't start call", android.widget.Toast.LENGTH_SHORT).show() }
-        Unit
-    }
-    val granted = {
-        needed.all {
-            androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-        }
-    }
-    // A cancelled prompt returns an empty result, so ask the system again instead of trusting it.
-    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
-    ) { if (granted()) start() }
-    Box(
-        Modifier.size(40.dp).clip(CircleShape).clickable {
-            if (granted()) start() else permission.launch(needed)
-        },
-        contentAlignment = Alignment.Center,
-    ) {
-        DrawableIcon(
-            if (video) R.drawable.i_video else R.drawable.i_phone,
-            Modifier.size(20.dp),
-            desc = if (video) "Video call" else "Call",
-        )
-    }
-}
-
 fun memberTally(n: Int): String = if (n == 1) "1 member" else "$n members"
 
 @Composable
@@ -329,7 +294,7 @@ private fun SearchField(chatVM: ChatVM, query: String) {
                 value = query,
                 onValueChange = { chatVM.searchQuery.value = it },
                 singleLine = true,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                textStyle = searchTextStyle().copy(color = colors.onSurface),
                 cursorBrush = SolidColor(chatTheme.accent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { chatVM.nextHit() }),
@@ -338,7 +303,7 @@ private fun SearchField(chatVM: ChatVM, query: String) {
                     Box {
                         if (query.isEmpty()) Text(
                             "Search",
-                            style = MaterialTheme.typography.bodyLarge,
+                            style = searchTextStyle(),
                             color = colors.onSurfaceVariant,
                         )
                         inner()

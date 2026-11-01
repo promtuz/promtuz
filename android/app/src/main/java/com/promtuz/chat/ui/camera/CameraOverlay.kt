@@ -15,6 +15,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.FileDescriptorOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -101,6 +102,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -188,7 +190,11 @@ private fun CameraBody(request: CameraRequest, onClose: () -> Unit) {
         granted = it
         asked = true
     }
-    LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
+    fun requestPermission() {
+        com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+        launcher.launch(Manifest.permission.CAMERA)
+    }
+    LaunchedEffect(Unit) { if (!granted) requestPermission() }
 
     when {
         granted -> LiveCamera(request, onClose)
@@ -200,7 +206,7 @@ private fun CameraBody(request: CameraRequest, onClose: () -> Unit) {
             Image(painterResource(R.drawable.ic_camera_permission), null, Modifier.size(96.dp).graphicsLayer { alpha = 0.6f })
             Text("Allow camera access to take photos here", color = Color.White,
                 style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-            Button({ launcher.launch(Manifest.permission.CAMERA) }) { Text("Allow") }
+            Button(::requestPermission) { Text("Allow") }
             CloseButton(onClose, Modifier)
         }
     }
@@ -260,49 +266,118 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
 
     fun output(ext: String) = File(File(context.cacheDir, "attachments").apply { mkdirs() }, "${System.nanoTime()}_capture.$ext")
 
+    fun secureCapture(name: String, mime: String, nativeCodec: Boolean = false): com.promtuz.chat.utils.media.PrivateMediaAccess.Capture? =
+        if (request.isPrivate) {
+            check(request.privateSession != null && com.promtuz.chat.security.PrivateChatSession.sessionId == request.privateSession &&
+                com.promtuz.chat.security.PrivateChatSession.active.value == request.conversation) { "Locked camera" }
+            com.promtuz.chat.utils.media.PrivateMediaAccess.capture(context, requireNotNull(request.conversation), name, mime,
+                nativeCodec = nativeCodec)
+        } else null
+
     fun takePhoto() {
         if (busy) return
         busy = true
         scope.launch { shutterFlash.snapTo(1f); shutterFlash.animateTo(0f, tween(220)) }
-        val file = output("jpg")
-        imageCapture.takePicture(
-            ImageCapture.OutputFileOptions.Builder(file).build(),
-            ContextCompat.getMainExecutor(context),
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    request.onCaptured(file, false)
-                    onClose()
+        val secure = runCatching { secureCapture("photo.jpg", "image/jpeg") }.getOrElse { busy = false; return }
+        val file = if (secure == null) output("jpg") else null
+        val stream = try { secure?.let { android.os.ParcelFileDescriptor.AutoCloseOutputStream(it.descriptor(context)) } }
+            catch (_: Exception) { secure?.close(); busy = false; return }
+        val captured = if (secure != null) CapturedMedia(secure.uri, secure::close)
+            else CapturedMedia(android.net.Uri.fromFile(file), { file?.delete(); Unit })
+        if (secure != null) {
+            // CameraX's file-saving callback uses an intermediate JPEG file even for an OutputStream.
+            // Capture the image in memory and write directly to the encrypted descriptor instead.
+            imageCapture.takePicture(kotlinx.coroutines.Dispatchers.IO.asExecutor(), object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
+                    var raw: android.graphics.Bitmap? = null
+                    var oriented: android.graphics.Bitmap? = null
+                    val error = runCatching {
+                        val bitmap = image.toBitmap().also { raw = it }
+                        val rotation = image.imageInfo.rotationDegrees
+                        val result = if (rotation == 0) bitmap else android.graphics.Bitmap.createBitmap(bitmap, 0, 0,
+                            bitmap.width, bitmap.height, android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }, true)
+                        oriented = result
+                        check(result.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, requireNotNull(stream)))
+                    }.exceptionOrNull()
+                    image.close()
+                    oriented?.takeIf { it !== raw }?.recycle()
+                    raw?.recycle()
+                    runCatching { stream?.close() }
+                    ContextCompat.getMainExecutor(context).execute {
+                        if (error != null || discard || CameraLauncher.request !== request) {
+                            captured.close()
+                            busy = false
+                            if (error != null && !discard) Toast.makeText(context, "Couldn’t take the photo", Toast.LENGTH_SHORT).show()
+                        } else { request.onCaptured(captured, false); onClose() }
+                    }
                 }
                 override fun onError(exception: ImageCaptureException) {
-                    busy = false
-                    Toast.makeText(context, "Couldn’t take the photo", Toast.LENGTH_SHORT).show()
+                    runCatching { stream?.close() }
+                    captured.close()
+                    ContextCompat.getMainExecutor(context).execute {
+                        busy = false
+                        if (!discard) Toast.makeText(context, "Couldn’t take the photo", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            },
-        )
+            })
+            return
+        }
+        val options = if (stream != null) ImageCapture.OutputFileOptions.Builder(stream).build()
+            else ImageCapture.OutputFileOptions.Builder(requireNotNull(file)).build()
+        imageCapture.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                runCatching { stream?.close() }
+                if (discard || CameraLauncher.request !== request) { captured.close(); return }
+                request.onCaptured(captured, false)
+                onClose()
+            }
+            override fun onError(exception: ImageCaptureException) {
+                runCatching { stream?.close() }
+                captured.close()
+                busy = false
+                if (!discard) Toast.makeText(context, "Couldn’t take the photo", Toast.LENGTH_SHORT).show()
+            }
+        })
     }
 
     fun startRecording() {
         if (busy || recording != null) return
-        val file = output("mp4")
+        val secure = runCatching { secureCapture("video.mp4", "video/mp4", nativeCodec = true) }.getOrElse { return }
+        val file = if (secure == null) output("mp4") else null
+        val descriptor = try { secure?.descriptor(context) } catch (_: Exception) { secure?.close(); return }
+        val captured = if (secure != null) CapturedMedia(secure.uri, secure::close)
+            else CapturedMedia(android.net.Uri.fromFile(file), { file?.delete(); Unit })
         val audio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        val pending = videoCapture.output.prepareRecording(context, FileOutputOptions.Builder(file).build())
-        if (audio) pending.withAudioEnabled()
-        recordingSince = System.currentTimeMillis()
-        elapsed = 0L
-        locked = false
-        recording = pending.start(ContextCompat.getMainExecutor(context)) { event ->
-            if (event is VideoRecordEvent.Finalize) {
-                recording = null
-                camera?.cameraControl?.enableTorch(false)
-                if (!discard && !event.hasError() && file.length() > 0) {
-                    request.onCaptured(file, true)
-                    onClose()
-                } else {
-                    file.delete()
-                    busy = false
-                    if (event.hasError() && !discard) Toast.makeText(context, "Couldn’t record", Toast.LENGTH_SHORT).show()
+        try {
+            val pending = if (descriptor != null) videoCapture.output.prepareRecording(context,
+                FileDescriptorOutputOptions.Builder(descriptor).setFileSizeLimit(256L * 1024 * 1024).build())
+                else videoCapture.output.prepareRecording(context, FileOutputOptions.Builder(requireNotNull(file)).build())
+            if (audio) pending.withAudioEnabled()
+            recordingSince = System.currentTimeMillis()
+            elapsed = 0L
+            locked = false
+            recording = pending.start(ContextCompat.getMainExecutor(context)) { event ->
+                if (event is VideoRecordEvent.Finalize) {
+                    recording = null
+                    runCatching { descriptor?.close() }
+                    camera?.cameraControl?.enableTorch(false)
+                    val nonempty = runCatching { secure?.size() ?: file?.length() ?: 0L }.getOrDefault(0L) > 0
+                    val usable = !event.hasError() || event.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
+                    if (!discard && CameraLauncher.request === request && usable && nonempty) {
+                        request.onCaptured(captured, true)
+                        onClose()
+                    } else {
+                        captured.close()
+                        busy = false
+                        if (event.hasError() && !discard) Toast.makeText(context, "Couldn’t record", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
+        } catch (_: Exception) {
+            runCatching { descriptor?.close() }
+            captured.close()
+            busy = false
+            if (!discard) Toast.makeText(context, "Couldn’t record", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -313,8 +388,10 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
 
     val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            com.promtuz.chat.security.PrivateChatSession.beginHandoff()
             audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     val touchSlop = LocalViewConfiguration.current.touchSlop

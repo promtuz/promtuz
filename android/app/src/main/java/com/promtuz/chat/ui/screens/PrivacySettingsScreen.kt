@@ -33,6 +33,12 @@ import uniffi.core.BlockedPerson
 
 @Composable
 fun PrivacySettingsScreen() {
+    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
+    val locked by remember {
+        observeQuery(setOf("messages", "conversations", "private_conversations")) {
+            CoreBridge.privateConversationIds()
+        }
+    }.collectAsState(emptyList())
     val scope = rememberCoroutineScope()
     var everyone by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) { everyone = runCatching { CoreBridge.messageRequestsEnabled() }.getOrDefault(true) }
@@ -63,6 +69,12 @@ fun PrivacySettingsScreen() {
                         control = { RadioButton(selected = everyone == option, onClick = null) },
                     )
                 }
+            }
+            if (locked.isNotEmpty()) {
+                SettingsSection("Locked chats")
+                GroupedActionRow("Reset a locked chat", 0, 1,
+                    onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.ResetLockedChats) },
+                    supportingText = "Delete its history if you forgot the code")
             }
             if (blocked.isNotEmpty()) {
                 SettingsSection("Blocked")

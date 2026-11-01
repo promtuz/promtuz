@@ -59,6 +59,7 @@ class Promtuz : Application() {
         AppLogger.minimumPriority = if (isDebuggable()) 2 else 4
         Timber.plant(AppLogger)
         if (isDebuggable()) Timber.plant(Timber.DebugTree())
+        com.promtuz.chat.utils.media.VoicePlayer.clearLegacyScratch(this)
         readJNILogs()
 
         // Seeds last-known presence before core starts firing deltas.

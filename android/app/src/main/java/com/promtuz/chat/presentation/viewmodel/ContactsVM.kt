@@ -22,6 +22,10 @@ class ContactsVM(private val app: AppVM) : ViewModel() {
 
     fun open(person: UiMember) = act("Couldn’t open the chat. Try again.") {
         val conversation = CoreBridge.conversationWith(person.ipkHex.fromHex())
+        if (!app.canOpenChat(conversation.toHex())) {
+            app.navigator.push(Routes.ContactInfo(conversation.toHex(), person.ipkHex))
+            return@act
+        }
         if (app.backStack.lastOrNull() == Routes.Contacts) {
             app.backStack[app.backStack.lastIndex] = Routes.Chat(conversation.toHex(), person.name)
         }

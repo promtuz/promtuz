@@ -42,6 +42,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
@@ -436,6 +437,7 @@ private fun Viewer(session: MediaSession) {
             onBottomHeight = { bottomChromePx = it },
             onBack = { close() },
             onShowInChat = { item -> item.message?.let { message -> close { app.showMessage(message) } } },
+            exportAllowed = true,
             onSave = { item ->
                 scope.launch {
                     val file = item.filePath
@@ -457,7 +459,7 @@ private fun Viewer(session: MediaSession) {
                     val bytes = item.encoded
                     try {
                         when {
-                            file != null -> shareFile(context, java.io.File(file), item.mime)
+                            file != null -> com.promtuz.chat.utils.media.shareMediaPath(context, file, item.mime)
                             bytes != null -> shareEncodedImage(context, bytes, item.mime, item.shareName)
                             else -> (item.load() ?: item.thumb)?.let { sharePicture(context, it, item.shareName) }
                         }
@@ -628,12 +630,21 @@ private fun Chrome(
     backProgress: () -> Float,
     onBottomHeight: (Int) -> Unit,
     onBack: () -> Unit,
+    exportAllowed: Boolean,
     onSave: (MediaItem) -> Unit,
     onShare: (MediaItem) -> Unit,
     onShowInChat: (MediaItem) -> Unit,
 ) {
     if (item == null || alpha == 0f) return
     var showInfo by remember(item.key) { mutableStateOf(false) }
+    var confirmSave by remember(item.key) { mutableStateOf(false) }
+    if (confirmSave) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { confirmSave = false },
+        title = { Text("Save to gallery?") },
+        text = { Text("The saved copy will be available outside this locked chat.") },
+        confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmSave = false; onSave(item) }) { Text("Save") } },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmSave = false }) { Text("Cancel") } },
+    )
     if (showInfo) MediaInfoDialog(item) { showInfo = false }
     val white = Color.White
     val slide = with(LocalDensity.current) { 40.dp.toPx() }
@@ -670,11 +681,15 @@ private fun Chrome(
                 iconSize = 20.dp,
                 anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "More", tint = white) },
                 groups = buildList {
-                    add(listOf(
-                        MenuAction("Save", R.drawable.oi_image_save) { onSave(item) },
-                        MenuAction("Share", R.drawable.oi_export) { onShare(item) },
-                        MenuAction("Info", R.drawable.oi_info) { showInfo = true },
-                    ))
+                    add(buildList {
+                        if (exportAllowed) {
+                            add(MenuAction("Save to gallery", R.drawable.oi_image_save) {
+                                if (com.promtuz.chat.security.PrivateChatSession.active.value != null) confirmSave = true else onSave(item)
+                            })
+                            add(MenuAction("Share", R.drawable.oi_export) { onShare(item) })
+                        }
+                        add(MenuAction("Info", R.drawable.oi_info) { showInfo = true })
+                    })
                     if (item.message != null) add(listOf(
                         MenuAction("Show in chat", R.drawable.oi_message_jump) { onShowInChat(item) },
                     ))

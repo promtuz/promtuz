@@ -126,6 +126,12 @@
             android:exported="false"
             android:label="@string/title_activity_manage_space" />
 
+        <provider
+            android:name=".utils.media.PrivateMediaProvider"
+            android:authorities="${applicationId}.private-media"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <!-- Message wakes and app-release hints (see push/PushService). -->
         <service
             android:name="com.promtuz.core.push.PushService"
