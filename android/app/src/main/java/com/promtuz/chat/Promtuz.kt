@@ -3,6 +3,8 @@ package com.promtuz.chat
 import android.app.Application
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import androidx.compose.ui.AndroidComposeUiFlags
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -55,7 +57,14 @@ class Promtuz : Application() {
         }
     }
 
+    @OptIn(ExperimentalComposeUiApi::class)
     override fun onCreate() {
+        // Compose 1.13.0-alpha01 can dispatch StopInput before the incoming field's StartInput,
+        // briefly hiding the IME during a focus handoff. Batch commands on the next frame.
+        // Remove with the matching R8 rule once our Compose version includes this fix:
+        // https://android.googlesource.com/platform/frameworks/support/+/f3d1e1632c81ceeec2a0cd5f14a3ef985d0f8f80
+        AndroidComposeUiFlags.isOutOfFrameSchedulerForTextInputEventsEnabled = false
+
         AppLogger.minimumPriority = if (isDebuggable()) 2 else 4
         Timber.plant(AppLogger)
         if (isDebuggable()) Timber.plant(Timber.DebugTree())

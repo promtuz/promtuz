@@ -26,3 +26,9 @@
 -keepclassmembers class * extends com.sun.jna.** { *; }
 -keep class * implements com.sun.jna.Library { *; }
 -dontwarn java.awt.**
+
+# Match the startup workaround in Promtuz: retain frame-batched IME commands so focus transfers
+# don't briefly hide the keyboard. Remove together after updating to Compose's upstream fix.
+-assumevalues class androidx.compose.ui.AndroidComposeUiFlags {
+    public static boolean isOutOfFrameSchedulerForTextInputEventsEnabled return false;
+}

@@ -18,7 +18,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.promtuz.chat.ui.components.AppTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,25 +79,26 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
             )
 
             Spacer(Modifier.height(24.dp))
-            OutlinedTextField(
+            AppTextField(
                 phrase,
                 { phrase = it; error = null },
                 Modifier.fillMaxWidth(),
-                label = { Text("Recovery phrase") },
+                label = "Recovery phrase",
+                singleLine = false,
                 minLines = 3,
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false
                 ),
                 isError = error != null,
-                supportingText = { error?.let { Text(it, color = colors.error) } },
+                supportingText = if (error != null) ({ Text(error.orEmpty()) }) else null,
             )
 
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
+            AppTextField(
                 name,
                 { name = it },
                 Modifier.fillMaxWidth(),
-                label = { Text("Display name") },
+                label = "Display name",
                 supportingText = { Text("Used if no backup is found") },
                 singleLine = true,
             )

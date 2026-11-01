@@ -119,8 +119,8 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         dismissButton = { TextButton(enabled = !busy, onClick = { resetting = false }) { Text("Cancel") } })
     nickname?.let { draft -> AppAlertDialog(onDismissRequest = { if (!busy) nickname = null }, title = { Text("Nickname") },
         text = { Column {
-            OutlinedTextField(draft, { if (it.length <= 32) nickname = it }, singleLine = true, enabled = !busy,
-                label = { Text("Name") }, supportingText = { Text("Leave empty to use their profile name.") })
+            AppTextField(draft, { if (it.length <= 32) nickname = it }, singleLine = true, enabled = !busy,
+                label = "Name", supportingText = { Text("Leave empty to use their profile name.") })
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         } },
         confirmButton = { TextButton(enabled = !busy, onClick = {

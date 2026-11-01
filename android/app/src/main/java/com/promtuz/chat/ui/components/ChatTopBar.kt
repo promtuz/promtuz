@@ -92,7 +92,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val summary by remember(chatVM.conversationHex, privateSummary) {
         derivedStateOf { chats.firstOrNull { it.conversationHex == chatVM.conversationHex } ?: privateSummary?.takeIf { it.conversationHex == chatVM.conversationHex } }
     }
-    var lockChat by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
 
@@ -204,7 +203,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                         })
                     })
                     if (!hidden && summary?.request != true)
-                        add(listOf(MenuAction("Lock", R.drawable.oi_lock) { lockChat = true }))
+                        add(listOf(MenuAction("Lock Chat", R.drawable.oi_lock_chat) { appVM.navigator.push(Routes.LockChat(chatVM.conversationHex)) }))
                     add(
                         buildList {
                             add(
@@ -231,9 +230,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 
-    if (lockChat) LockChatDialog(chatVM.conversationHex,
-        onDismiss = { lockChat = false },
-        onLocked = { lockChat = false; appVM.didHideChat(chatVM.conversationHex); appVM.clearPrivateSummary(); appVM.navigator.reset(Routes.App) })
     if (confirmClear) ClearHistoryDialog(
         name = name,
         onConfirm = { confirmClear = false; appVM.clearHistory(chatVM.conversationHex) },

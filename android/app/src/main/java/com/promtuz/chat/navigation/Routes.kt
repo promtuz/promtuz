@@ -33,6 +33,12 @@ object Routes : NavKey {
     data object Profile : NavKey
 
     @Serializable
+    data object EditProfile : NavKey
+
+    @Serializable
+    data class LockChat(val conversation: String) : NavKey
+
+    @Serializable
     data class ProfilePhoto(val uri: String, val group: String? = null) : NavKey
 
     @Serializable

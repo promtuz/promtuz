@@ -24,7 +24,7 @@ fun AppNavigation(
     appViewModel: AppVM
 ) {
     val backStack = appViewModel.backStack
-    // Profile and its photo editor share writes, including when Back interrupts a save.
+    // Profile and its editors share writes, including when Back interrupts a save.
     val profileOwner = checkNotNull(LocalViewModelStoreOwner.current)
 
     NavStage(
@@ -94,6 +94,23 @@ fun AppNavigation(
                 ProfileScreen(
                     viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
                     onChoosePhoto = { appViewModel.navigator.push(Routes.ProfilePhoto(it.toString())) },
+                )
+            }
+            entry<Routes.EditProfile> {
+                com.promtuz.chat.ui.screens.EditProfileScreen(
+                    viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
+                    onSaved = { if (backStack.lastOrNull() == Routes.EditProfile) backStack.removeLastOrNull() },
+                )
+            }
+            entry<Routes.LockChat> { key ->
+                com.promtuz.chat.ui.screens.LockChatScreen(
+                    conversation = key.conversation,
+                    onBack = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
+                    onLocked = {
+                        appViewModel.didHideChat(key.conversation)
+                        appViewModel.clearPrivateSummary()
+                        appViewModel.navigator.reset(Routes.App)
+                    },
                 )
             }
             entry<Routes.ProfilePhoto> { key ->

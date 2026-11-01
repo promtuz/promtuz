@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.screens
 
-import com.promtuz.chat.ui.components.AppAlertDialog
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -22,7 +21,6 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ProfileWork
-import androidx.compose.runtime.saveable.rememberSaveable
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.DrawableIcon
@@ -37,9 +35,6 @@ import com.promtuz.chat.ui.media.pictureItem
 @Composable
 fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
     val app = koinInject<AppVM>()
-    var editing by rememberSaveable { mutableStateOf(false) }
-    var draftName by rememberSaveable { mutableStateOf("") }
-    var draftBio by rememberSaveable { mutableStateOf("") }
     val profile by viewModel.profile.collectAsState()
     val work by viewModel.work.collectAsState()
     val busy = work == ProfileWork.Busy
@@ -104,7 +99,8 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     GroupedActionRow("Edit profile", 0, 2, enabled = !busy,
                         supportingText = "Name and bio", onClick = {
-                            draftName = profile.name; draftBio = profile.bio; editing = true
+                            viewModel.dismissError()
+                            app.navigator.push(Routes.EditProfile)
                         }) { DrawableIcon(R.drawable.i_user, size = 26.dp) }
                     GroupedActionRow("Share my identity", 1, 2,
                         supportingText = "Your QR code and invite link",
@@ -127,20 +123,4 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
             }
         }
     }
-    if (editing) AppAlertDialog(
-        onDismissRequest = { if (!busy) editing = false },
-        title = { Text("Edit profile") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(draftName, { if (it.length <= 32) draftName = it },
-                label = { Text("Name") }, singleLine = true, enabled = !busy)
-            OutlinedTextField(draftBio, { if (it.length <= 160) draftBio = it },
-                label = { Text("Bio") }, minLines = 2, maxLines = 4, enabled = !busy,
-                supportingText = { Text("${draftBio.length}/160") })
-            if (work is ProfileWork.Failed) Text((work as ProfileWork.Failed).reason, color = MaterialTheme.colorScheme.error)
-        } },
-        confirmButton = { TextButton(enabled = !busy && draftName.isNotBlank(), onClick = {
-            viewModel.saveDetails(draftName.trim(), draftBio.trim()) { editing = false }
-        }) { Text(if (busy) "Saving…" else "Save") } },
-        dismissButton = { TextButton(enabled = !busy, onClick = { editing = false }) { Text("Cancel") } },
-    )
 }

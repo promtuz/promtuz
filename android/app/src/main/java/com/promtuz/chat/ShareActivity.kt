@@ -212,8 +212,8 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
     val recipients by model.recipients.collectAsState()
     SimpleScreen({ Text("Share to…") }, connectionStatus = false) { padding ->
         Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
-            OutlinedTextField(model.query, { model.query = it }, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp),
-                label = { Text("Search chats") }, singleLine = true)
+            AppTextField(model.query, { model.query = it }, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp),
+                placeholder = "Search chats", singleLine = true)
             LazyColumn(contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 16.dp)) {
                 if (recipients.isEmpty()) item { Text("No chats yet", Modifier.padding(24.dp)) }
                 items(recipients.filter { it.name.contains(model.query, ignoreCase = true) }, key = { it.conversation }) { (conv, name, group, peer) ->
@@ -235,8 +235,8 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(start = 18.dp, end = 18.dp,
             top = padding.calculateTopPadding() + 16.dp, bottom = padding.calculateBottomPadding() + 24.dp)) {
             item { model.Picks() }
-            item { OutlinedTextField(model.text, { model.text = it }, Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                enabled = !model.busy, minLines = 3, maxLines = 8, label = { Text("Message") }) }
+            item { AppTextField(model.text, { model.text = it }, Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                enabled = !model.busy, singleLine = false, minLines = 3, maxLines = 8, placeholder = "Message") }
             if (model.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             model.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
         }

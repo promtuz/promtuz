@@ -53,7 +53,7 @@ import com.promtuz.chat.R
 import com.promtuz.chat.presentation.state.WelcomeField
 import com.promtuz.chat.presentation.state.WelcomeStatus
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
-import com.promtuz.chat.ui.components.OutlinedFormElements
+import com.promtuz.chat.ui.components.AppTextField
 import com.promtuz.chat.ui.constants.Buttonimations
 import com.promtuz.chat.ui.constants.Tweens
 import com.promtuz.chat.utils.extensions.then
@@ -98,15 +98,9 @@ fun WelcomeScreen(
 
             Spacer(Modifier.height(32.dp))
 
-            Text(
-                stringResource(R.string.welcome_screen_name_label),
-                style = typography.bodyMedium,
-                color = colors.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 10.dp)
-            )
-
-            OutlinedFormElements.TextField(
+            AppTextField(
                 value = state.name,
+                label = stringResource(R.string.welcome_screen_name_label),
                 onValueChange = { welcomeViewModel.onChange(WelcomeField.Name, it) },
                 placeholder = stringResource(R.string.welcome_screen_example_name),
                 enabled = !isTryingToContinue,
