@@ -174,10 +174,14 @@ class AppVM(
     val privateSummary = _privateSummary.asStateFlow()
 
     suspend fun privateSearchResult(id: ByteArray): ChatSummary? {
+        val generation = com.promtuz.chat.security.PrivateChatSession.generation
+        val hex = id.toHex()
+        if (com.promtuz.chat.security.PrivateChatSession.active.value != hex) return null
         val c = bridge.conversation(id) ?: return null
         val contact = c.peer?.let { peer -> bridge.contacts().firstOrNull { it.ipk.contentEquals(peer) } }
         val last = bridge.messages(id, 1).lastOrNull()
-        return ChatSummary(
+        val unread = bridge.privateConversationUnreadCount(id)
+        val summary = ChatSummary(
             conversationHex = id.toHex(), name = contact?.name?.ifBlank { c.displayName } ?: c.displayName,
             kind = c.kind.toInt(), peerHex = c.peer?.toHex(), memberCount = c.members.size,
             lastPreview = last?.let { preview(id, it) }, lastMessageId = last?.id,
@@ -186,9 +190,16 @@ class AppVM(
             status = contact?.status?.toInt() ?: 1, rejectReason = contact?.rejectReason?.toInt(),
             lastOutgoing = last?.outgoing == true, lastDeleted = last?.deleted == true,
             lastStatus = last?.status?.toInt() ?: 1,
+            unreadCount = unread,
             muted = true, rawTitle = c.title, amMember = c.amMember, canLeave = c.canLeave,
             ownerIsStuck = c.ownerIsStuck, commits = c.commits, request = c.request,
-        ).also { _privateSummary.value = it }
+        )
+        // A background transition can revoke access while the IO reads are in flight.
+        if (com.promtuz.chat.security.PrivateChatSession.generation != generation ||
+            com.promtuz.chat.security.PrivateChatSession.active.value != hex ||
+            !com.promtuz.chat.security.PrivateChatSession.foreground) return null
+        _privateSummary.value = summary
+        return summary
     }
 
     fun clearPrivateSummary() { _privateSummary.value = null }

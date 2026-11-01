@@ -213,6 +213,9 @@ object CoreBridge {
     fun lockPrivateConversations() = uniffi.core.lockPrivateConversations()
     fun privateConversationIds(): List<ByteArray> = uniffi.core.privateConversationIds()
     fun isPrivateConversationUnlocked(id: ByteArray): Boolean = uniffi.core.isPrivateConversationUnlocked(id)
+    suspend fun privateConversationUnreadCount(id: ByteArray): Int = withContext(Dispatchers.IO) {
+        uniffi.core.privateConversationUnreadCount(id).toInt()
+    }
     suspend fun resetPrivateConversation(id: ByteArray) = withContext(Dispatchers.IO) {
         uniffi.core.resetPrivateConversation(id)
     }

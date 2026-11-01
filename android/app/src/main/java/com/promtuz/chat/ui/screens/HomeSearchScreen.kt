@@ -19,9 +19,12 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.security.PrivateChatSession
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.toHex
+import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.core.CoreBridge
+import com.promtuz.core.observeQuery
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,6 +38,7 @@ fun HomeSearchScreen(app: AppVM) {
     }
     var query by remember { mutableStateOf("") }
     var revealed by remember { mutableStateOf<ChatSummary?>(null) }
+    var revealedId by remember { mutableStateOf<String?>(null) }
     val chats by app.chats.collectAsState()
     val session by PrivateChatSession.active.collectAsState()
     val focus = remember { FocusRequester() }
@@ -45,8 +49,9 @@ fun HomeSearchScreen(app: AppVM) {
     val unlockMutex = remember { Mutex() }
     LaunchedEffect(foreground) { if (foreground) focus.requestFocus() }
     LaunchedEffect(query, foreground) {
-        if (!foreground) { query = ""; revealed = null; return@LaunchedEffect }
+        if (!foreground) { query = ""; revealed = null; revealedId = null; return@LaunchedEffect }
         revealed = null
+        revealedId = null
         PrivateChatSession.clear()
         app.clearPrivateSummary()
         if (query.isEmpty()) return@LaunchedEffect
@@ -62,14 +67,30 @@ fun HomeSearchScreen(app: AppVM) {
                 if (id != null) {
                     if (currentQuery == expected && currentForeground && PrivateChatSession.foreground && PrivateChatSession.generation == epoch) {
                         PrivateChatSession.arm(id.toHex())
-                        revealed = runCatching { app.privateSearchResult(id) }.getOrNull()
+                        revealedId = id.toHex()
                         if (currentQuery != expected || !currentForeground || !PrivateChatSession.foreground || PrivateChatSession.generation != epoch) {
                             revealed = null
+                            revealedId = null
                             PrivateChatSession.clear()
                             app.clearPrivateSummary()
                         }
                     } else { PrivateChatSession.clear(); app.clearPrivateSummary() }
                 }
+            }
+        }
+    }
+    LaunchedEffect(revealedId, session, foreground) {
+        val id = revealedId ?: return@LaunchedEffect
+        if (!foreground || session != id) return@LaunchedEffect
+        val expected = query
+        val epoch = PrivateChatSession.generation
+        observeQuery(setOf("messages", "incoming_receipts", "message_media", "contacts",
+            "conversations", "conversation_members")) {
+            runCatching { app.privateSearchResult(id.fromHex()) }.getOrNull()
+        }.collect { summary ->
+            if (currentQuery == expected && currentForeground && PrivateChatSession.foreground &&
+                PrivateChatSession.active.value == id && PrivateChatSession.generation == epoch) {
+                revealed = summary
             }
         }
     }
@@ -101,7 +122,7 @@ fun HomeSearchScreen(app: AppVM) {
         Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top))) {
             Box(Modifier.zIndex(1f)) {
                 HomeSearchBar(expanded = true, query = query,
-                    onQueryChange = { query = it; revealed = null }, focusRequester = focus)
+                    onQueryChange = { query = it; revealed = null; revealedId = null }, focusRequester = focus)
             }
             LazyColumn(Modifier.fillMaxWidth().weight(1f).graphicsLayer {
                 alpha = motion.fraction().coerceIn(0f, 1f)

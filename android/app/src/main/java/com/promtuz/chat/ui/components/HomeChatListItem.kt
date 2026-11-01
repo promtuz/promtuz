@@ -169,6 +169,10 @@ fun HomeChatListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (privateChat) DrawableIcon(
+                        R.drawable.oi_lock_chat_open, size = 14.dp, desc = "Unlocked chat",
+                        tint = colors.onSurfaceVariant.copy(0.7f),
+                    )
                     if (muted) DrawableIcon(
                         R.drawable.i_volume_off, size = 14.dp, desc = "Muted",
                         tint = colors.onSurfaceVariant.copy(0.7f),

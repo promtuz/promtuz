@@ -52,6 +52,23 @@ pub fn is_private_conversation_unlocked(conversation_id: Vec<u8>) -> bool {
         .ok()
         .is_some_and(|c| core().private_sessions.read().contains_key(&c))
 }
+/// Scoped unread metadata for a code-unlocked chat. Global counts keep private chats excluded.
+#[uniffi::export]
+pub fn private_conversation_unread_count(conversation_id: Vec<u8>) -> Result<u32, CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let conn = core().db.messages().lock();
+    let sessions = core().private_sessions.read();
+    if !crate::privacy::is_private_tx(&conn, &conv)? || !sessions.contains_key(&conv) {
+        return Err(anyhow::anyhow!("Chat is locked").into());
+    }
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM incoming_receipts r JOIN messages m ON m.id=r.message_id
+         WHERE m.conversation_id=?1 AND r.is_read=0 AND m.deleted=0 AND m.system=0",
+        [conv],
+        |row| row.get::<_, u32>(0),
+    ).map_err(anyhow::Error::from)?;
+    Ok(count)
+}
 /// Deliberate privacy-settings entry for destructive reset. This exposes only current contact
 /// identities, never a preview, historical metadata, or an unlocked history capability.
 #[derive(uniffi::Record)]
