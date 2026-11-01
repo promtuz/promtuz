@@ -220,5 +220,5 @@ fn dht_unavailable() -> DhtClientError {
 }
 
 fn unexpected(reply: &SRelayPacket) -> DhtClientError {
-    DhtClientError::Protocol(format!("unexpected reply: {reply:?}"))
+    DhtClientError::Protocol(format!("unexpected reply kind={:?}", std::mem::discriminant(reply)))
 }
