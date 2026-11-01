@@ -1,87 +1,98 @@
 # Promtuz
 
-A decentralized, end-to-end encrypted messenger built from scratch in Rust and QUIC. Android client in Kotlin/Compose.
+A decentralized, end-to-end encrypted messenger built in Rust on QUIC, with an Android client in Kotlin/Compose. Your identity is an Ed25519 keypair; you don't need a phone number.
 
-This is a personal project, not an attempt to compete with Signal or Telegram. I just wanted to understand what it takes to build one of these from the ground up. No central server owns your messages, no phone number required, identity is just a keypair.
+This is a personal project, not an attempt to compete with Signal or Telegram. I just wanted to understand what it takes to build one of these from the ground up. It's still under active development.
+
+## What works
+
+- Direct and group chats support replies, edits, deletion, reactions, delivered/read receipts, typing and presence. Groups have owners, admins and configurable member permissions.
+- Exchange contacts through QR codes, invite links or contact cards, with message requests for new contacts.
+- Send still and animated AVIF images, videos, voice notes with waveforms and sticker packs. You can also turn videos into stickers. Photos, avatars and stickers go through the same processing in core; Android's codec adapter processes video.
+- Choosing File sends the original bytes, even for photos and videos, without compression or metadata stripping.
+- Larger attachments download in parallel, hash-verified 256 KiB chunks. Verified download progress and sender transfer history survive app restarts. Transfer details show each recipient's activity, speed, estimated time remaining and a map of file parts.
+- Relays queue encrypted messages for offline recipients within storage and expiry limits. Optional push wakeups let the app drain those queues in the background. Transfers retry when connectivity returns or the sender comes online.
+- Code-locked chats encrypt their local history, stay out of ordinary chat lists and silence notifications. Enter the code in home search to open them.
+- Recover your identity through a 24-word phrase or Android Block Store, and restore history from an encrypted backup.
+- Updates have signed manifests and release notes, manual download/install, a choice of channels and release history you can read offline.
 
 ## How it works
 
-There are no "servers" in the traditional sense. The network has three lightweight infrastructure roles, and everything that carries your messages is replicated, ephemeral, and replaceable.
+The network has three infrastructure roles. It works with a single relay; adding relays distributes routing and replication. Infrastructure nodes need certificates issued by the network's CA to join.
 
-**Resolver**: a stateless directory service. Relays and gateways register themselves here so the rest of the network can find them. No database, just an in-memory map of which nodes are currently online. If it dies, they reconnect to another one.
+A resolver keeps an in-memory directory of available relays and gateways. Clients find nodes through configured resolver seeds. Resolvers hold no chat history, and each keeps its own directory without synchronizing with other resolvers.
 
-**Relay**: a node in a Kademlia-style DHT. When a client connects and authenticates, its relay publishes a *presence record* ("this user is reachable through me") and replicates it across the DHT. Relays also store-and-forward the MLS handshake material (KeyPackages, Welcomes) and queued ciphertext for users who are briefly offline, and they can lend their already-open QUIC port to hole-punch assist (a STUN echo plus a blind TURN bridge), which each operator switches on per relay. Relays are stateless by design: they can crash, move hosts, or get replaced, and the DHT heals around them.
+Relays authenticate clients, publish presence and route encrypted messages. They form a Kademlia-style DHT that replicates presence, MLS KeyPackages and Welcomes. Queued ciphertext is stored on disk for offline delivery, with expiry and storage limits. Relays can also help peers connect when direct UDP traversal fails. They don't keep a permanent archive of chat history.
 
-**Gateway**: optional push infrastructure, and the only piece that speaks to a platform vendor. A device mints a random per-install pseudonym `P`, tells its home relay `IPK → P`, and separately tells a gateway `P → device token`. When a message queues for someone offline, their relay asks the gateway to wake `P`. The relay never learns a device token, the gateway never learns an identity, and a dropped wake costs nothing because the message is already durably queued.
+A gateway handles FCM push wakeups and encrypted sticker storage. For push, the relay keeps an `identity → pseudonym` mapping and the gateway keeps a separate `pseudonym → device token` mapping. A wakeup asks the app to fetch queued messages without carrying their contents.
 
-**Client (libcore)**: the core library, written in Rust and compiled to a native `.so` for Android via uniffi. Handles identity, the MLS group state, relay discovery, message delivery, media encoding, and the direct peer transport. The Android app is a thin UI layer on top of this.
+The client library, libcore, handles identity, MLS state, delivery, media policy, local storage and attachment transfers. Android calls it through UniFFI and supplies the UI, secure key storage, notifications and video codecs.
 
-The general flow: a client asks a resolver for available relays, connects to one, and authenticates with its Ed25519 identity key via challenge-response bound to the TLS session, so a proof made for one relay is good nowhere else. To message someone, you look them up in the DHT to find which relay they're homed on, fetch their published KeyPackage, and drive an MLS group; ciphertext is routed to the recipient's home relay and delivered (or queued until they reconnect).
+A client discovers a relay, then authenticates with an Ed25519 challenge-response bound to its TLS session. Messages use MLS for both direct and group conversations. Relays route ciphertext to recipients or queue it while they are offline. Small images and voice notes travel inside the encrypted message; larger attachments are fetched separately from available peers.
 
-Paired contacts can also leave the relay behind. A direct link opens through the relay's TURN bridge first, so it is usable in about one round trip, while a hole punch runs in the background; once a direct path validates, the same QUIC connection swaps its egress to raw UDP and the bytes go device to device. That path is what carries attachments too big to inline.
+Peer connections use QUIC with hole punching and optional relay forwarding. For networks that block UDP, node operators can enable a TLS/TCP fallback that also supports attachment forwarding through a relay. This needs corresponding node configuration; it is not an HTTP proxy. See the [operator guide](relay/README.md#tcp-fallback-for-phones).
 
-## Crypto
+## Security and recovery
 
-- **Identity**: an Ed25519 keypair, nothing more. On Android the private key is wrapped by the Android Keystore (AES-256-GCM) and only unwrapped momentarily for signing, then zeroized. A node's address (`NodeId`) is `BLAKE3(pubkey)`.
-- **Messaging**: [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420) via [openmls](https://github.com/openmls/openmls). This gives forward secrecy per message, and is group-native rather than bolted on. Each leaf signs with a key of its own, and its credential carries the identity key's signature over that leaf key, so a member can't seat a leaf claiming someone else; receivers re-check the founder-only membership rule on every commit rather than trusting the sender's client. Epochs advance when a member is added; nothing issues a periodic key update, so post-compromise recovery is available in the protocol but not driven yet. Relays only ever see ciphertext and signed handshake objects.
-- **Transport**: QUIC with TLS 1.3 (rustls + aws-lc-rs), split across two trust domains:
-  - *CA-hierarchical* (`client` / `relay` / `resolver` ALPNs): leaf certs signed by a root CA, verified the usual way with the `NodeId` as the SNI hostname. The CA also stamps a capability bitset (push gateway, blob store, and so on) into a custom extension inside the leaf, so what a node is allowed to offer is attested by the same signature that proves who it is, and cannot be self-asserted.
-  - *Key-as-identity* (`peer` ALPN): self-signed Ed25519 certs with no CA, pinned by SPKI to the `NodeId` the dialer expected. Trust is the key itself, not an issuing authority. This is how relays dial each other for DHT RPC, and how two clients talk over a direct link.
-- **Recovery**: the identity key exports as a 24-word BIP39 phrase, or goes to platform escrow (Android Block Store). History, contacts, and profile name are sealed separately under XChaCha20-Poly1305, keyed by HKDF-SHA256 from the identity key, so recovering the identity through either channel unlocks the backup with no second password to remember.
-- **Misc**: HKDF-SHA256 for signature/transport domain separation, BLAKE3 for hashing and the DHT XOR metric, Postcard with length-prefixed framing on the wire, CBOR for Rust↔Kotlin events.
+- Identity uses Ed25519, with `NodeId = BLAKE3(pubkey)`. Android wraps the private key using an AES-256-GCM key in Android Keystore, preferring StrongBox when available. During use, Rust caches the unwrapped secret in zeroizing memory, so the secret also exists outside secure hardware.
+- Messages use [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420) through [OpenMLS](https://github.com/openmls/openmls). Leaf signing keys are bound to identity keys, and receivers check group membership and permissions. Periodic MLS key updates aren't scheduled yet.
+- Connections use QUIC/TLS 1.3 with rustls and aws-lc-rs. Infrastructure connections validate CA-issued certificates and capabilities; peer connections pin self-signed keys to the expected node identity. Infrastructure that handles the traffic can still see routing identities, IP addresses and timing.
+- The 24-word BIP39 phrase restores your identity key. To restore history, you also need an encrypted backup, sealed with XChaCha20-Poly1305 under a key derived from that identity. Code-locked history needs its lock code too. The phrase alone cannot bring back missing messages, contacts or local attachment files.
+
+Photos and videos are resized, recompressed and stripped of privacy-sensitive metadata before sending. JPEG, PNG, GIF and WebP decoders are bundled. AVIF uses libavif, with dav1d for decoding and rav1e for encoding; other supported inputs use platform adapters. HDR images have an SDR fallback. Outgoing video currently targets SDR H.264/AAC MP4. Choosing File preserves the original metadata along with the bytes.
 
 ## Project structure
 
 ```
-common/     Shared crate: crypto, wire protocol, QUIC config, identity, DHT/MLS/push message types
-relay/      Relay node: DHT, client auth, presence + KeyPackage/Welcome replication, store-and-forward, punch assist
-resolver/   Resolver: relay and gateway discovery service
-gateway/    Push gateway: pseudonym registry and FCM dispatch
-libcore/    Client library: MLS engine, networking, media, direct transport, exposed via uniffi (Kotlin/Swift bindings)
-android/    Android app: Kotlin, Jetpack Compose, Material 3
-ios/        iOS app: Swift, SwiftUI (scaffold)
-web/        Deeplink assets for promtuz.dev invite links
-tools/      Dev tooling: uniffi-bindgen, packaging and release scripts
+common/     Shared crypto, wire types, identity and transport configuration
+libcore/    Client state, MLS, messaging, media policy, storage and transfers; UniFFI API
+media/      AVIF wrapper and native libavif/dav1d build; rav1e encoder integration
+android/    Working client: Kotlin, Jetpack Compose, Material 3 and platform adapters
+ios/        SwiftUI scaffold, not a working client
+relay/      Routing, DHT, offline queues and peer connection assistance
+resolver/   Relay and gateway discovery
+gateway/    Push registration, FCM dispatch and encrypted sticker storage
+web/        Invite-link assets, not a web messenger
+tools/      Bindings generator, media benchmark, licenses, packaging and release scripts
 ```
 
-## What works
+## Current limits
 
-- Identity generation with hardware-backed key storage, recoverable by 24-word phrase, platform escrow, or an encrypted backup blob
-- Resolver discovery and relay connection with auto-reconnect
-- Challenge-response authentication against relays
-- A Kademlia DHT between relays: routing table with liveness eviction and bucket refresh, iterative `FindNode`, presence publication, and K-closest fan-out replication with a drift sweep that re-homes records as the closest set moves
-- MLS group messaging: KeyPackage publication, Welcome delivery, and application messages
-- **End-to-end message delivery** across two independent relays over real QUIC/TLS, validated cross-continent over the public internet
-- **Direct peer links**: reflexive-address probing, UDP hole punching, and a relay-side TURN bridge, opt-in per relay, for the pairs that cannot punch, gated to paired contacts only
-- A real 1:1 chat: replies, edits, deletes (for me or for everyone), emoji reactions, delivered and read receipts, typing activity, and presence
-- Attachments: images encoded to AVIF in libcore and inlined below 256KB, larger files pulled over the direct link with a chunked manifest
-- Voice notes: Opus recorded on the device, inlined in the frame with a loudness waveform, up to two minutes
-- Offline delivery: queued at the home relay, woken through the gateway under a pseudonym, drained in the background on the device
-- Contact exchange by QR code, or by an `https://promtuz.dev/pair` invite link whose code rides the URL fragment and never reaches a server log
-- In-app updates against a manifest signed with a pinned Ed25519 key
-- Debian packages for relay, resolver, and gateway, served from an apt repo
-
-## What doesn't (yet)
-
-- **Resolver mesh**: there's still only one resolver; multiple resolvers don't sync with each other
-- **Group chats**: MLS is group-native and the stack carries the group state, but the client API and the UI are 1:1 only
-- **Multi-device**: one install per identity. A restore rebuilds history on a new device; two live devices don't stay in sync
-- **iOS**: libcore already emits Swift bindings, the app itself is still a scaffold
-- **Voice and video calls**: the call-relay capability bit is reserved, nothing is built behind it
-
-The hard parts are in place and running: networking, identity, the DHT, MLS, NAT traversal, and real delivery over the public internet. What's left is mostly breadth rather than foundations.
+- Android is the only working client: Android 8.0+ on `arm64-v8a` and `x86_64`. No working iOS, desktop or web client yet.
+- You can use one active install per identity. Restoring a backup doesn't keep two devices in sync.
+- Audio/video calling is disabled while the existing calling code is being repaired.
+- Media processing must finish before sending. You can't resume an interrupted encode or download a video that's still being processed. The HD image option is disabled.
+- An attachment can only be downloaded while a peer holding it is available. Relay message queues don't replace local media storage or backups.
 
 ## Building
 
-The relay, resolver, and gateway are standard Rust binaries (`cargo run -p relay`, `-p resolver`, `-p gateway`). The client library cross-compiles to Android targets with `cargo-ndk`, and the Android app builds it automatically via a Gradle task.
+### Android
 
-Android builds require Python 3.11 or newer to generate the bundled [open-source license notices](tools/licenses/README.md).
+Gradle cross-compiles libcore and generates the Kotlin bindings. You'll need:
 
-The infrastructure needs a root CA and node certificates. The `common` crate ships a `certgen` binary that mints them and stamps in the capability bits a node is entitled to.
+- Rust with `cargo-ndk` and the `aarch64-linux-android` / `x86_64-linux-android` targets.
+- Android SDK and NDK versions declared in [app/build.gradle.kts](android/app/build.gradle.kts), plus the Gradle daemon's [JDK toolchain](android/gradle/gradle-daemon-jvm.properties).
+- A C/C++ build toolchain, CMake, Meson and Ninja for the bundled codecs. NASM enables dav1d assembly on x86_64.
+- Python 3.11+ for the bundled [open-source license notices](tools/licenses/README.md).
 
-Deployment packages are built with `tools/scripts/build-deb.sh <crate>`, which links against an old glibc through cargo-zigbuild so the result runs on Debian 10+ and Ubuntu 18.04+. Operator docs live with each node: [relay](relay/README.md), [resolver](resolver/README.md).
+Set the SDK path in `android/local.properties` (`sdk.dir`) or `ANDROID_HOME`. Put the network's public CA certificate at `.tls/RootCA.pem`; it gets compiled into libcore.
 
-For Android releases, announcements, and server packages, see [the release tools](tools/scripts/README.md).
+You'll also need your Firebase `android/app/google-services.json`. Set `RESOLVER_SEEDS=<resolver-public-key-hex>::<host:port>` in the ignored `android/secrets.properties`, separating multiple seeds with `\n` in that value.
+
+```sh
+cargo install cargo-ndk
+rustup target add aarch64-linux-android x86_64-linux-android
+cd android
+./gradlew :app:assembleDebug
+```
+
+APKs are split by ABI under `android/app/build/outputs/apk/`. For signing, release builds and publication, see [the release tools](tools/scripts/README.md).
+
+### Infrastructure
+
+The relay, resolver and gateway are Rust binaries (`cargo run -p relay`, `-p resolver`, `-p gateway`). They need node configuration and CA-issued certificates; `common` provides the `certgen` tool. See the [relay](relay/README.md) and [resolver](resolver/README.md) operator guides.
+
+Debian packages use `tools/scripts/build-deb.sh <crate>`, which builds through cargo-zigbuild against an older glibc. Packaging, signing and announcements are documented in [the release tools](tools/scripts/README.md).
 
 ## License
 
