@@ -20,3 +20,5 @@ rustc-ice-*.txt
 
 # Finder metadata
 .DS_Store
+
+__pycache__
