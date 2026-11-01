@@ -93,7 +93,7 @@ val rustLicenseArtifacts = layout.buildDirectory.file("intermediates/licenses/ru
 android {
     namespace = "com.promtuz.chat"
     compileSdk = 37
-    ndkVersion = "30.0.15729638"
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "com.promtuz.chat"
@@ -313,6 +313,7 @@ tasks.register<Exec>("generateUniffiBindings") {
         "--library", "android/app/src/main/jniLibs/arm64-v8a/libcore.so",
         "--language", "kotlin",
         "--out-dir", outDir.absolutePath,
+        "--no-format"
     )
 }
 

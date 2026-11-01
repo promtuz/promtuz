@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.3"
+agp = "9.4.1"
 barcodeScanning = "17.3.0"
 capturable = "3.0.1"
 core = "3.5.4"
