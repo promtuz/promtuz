@@ -84,6 +84,7 @@ pub fn discard_message_replay(
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, payload) in rows {
+            let payload = super::privacy::open_payload(tx, gid, &payload)?;
             let related = match AppPayload::deser(&payload) {
                 Ok(AppPayload::Revise { target: t, .. } | AppPayload::React { target: t, .. }) => {
                     t == *target
@@ -169,6 +170,23 @@ impl Snapshot {
     }
 }
 
+/// Old snapshots contain raw OpenMLS values. Encrypt those values in place using the same
+/// provider format as live rows, preserving rollback/recovery behavior without a readable archive.
+pub(crate) fn privatize_snapshots(conn:&Connection,gid:&[u8;32],key:&[u8])->Result<()> {
+    let rows=crate::db::all(conn,"SELECT branch,snapshot FROM mls_branches WHERE group_id=?1 AND length(snapshot)>0",[gid],
+        |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?)))?;
+    for (branch,bytes) in rows {
+        let mut snapshot=Snapshot::decode(&bytes)?;
+        for row in &mut snapshot.0 {
+            if !row.value.starts_with(b"pz-private-v1:") {
+                row.value=super::privacy::seal_storage(conn,key,&row.value)?;
+            }
+        }
+        conn.execute("UPDATE mls_branches SET snapshot=?3 WHERE group_id=?1 AND branch=?2",params![gid,branch,snapshot.encode()?])?;
+    }
+    Ok(())
+}
+
 /// A dispatch signed and framed for the durable outbox. Stored beside the epoch transition, it
 /// closes the crash window between the MLS database and the outbox, separate SQLite files.
 pub struct DispatchJob {
@@ -202,7 +220,8 @@ impl Received {
     ) -> rusqlite::Result<usize> {
         conn.execute(
             "INSERT OR IGNORE INTO mls_group_received(group_id,branch,sender,dispatch_id,accepted_at_ms,payload) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![gid, branch, self.author, self.id, self.accepted_at_ms, self.payload],
+            params![gid, branch, self.author, self.id, self.accepted_at_ms,
+                super::privacy::seal_payload(conn,gid,&self.payload).map_err(|_|rusqlite::Error::InvalidQuery)?],
         )
     }
 }
@@ -317,7 +336,7 @@ impl Transaction {
             let hash: [u8; 32] = Sha256::digest(&candidate.message).into();
             tx.execute("INSERT OR IGNORE INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,commit_blob,snapshot,change_blob,proof) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![group_id, branch, parent, group.epoch(), candidate.rank, hash,
-                    candidate.message, snapshot.encode()?, candidate.change.map(|c| postcard::to_allocvec(&c)).transpose()?, candidate.proof.map(|p| postcard::to_allocvec(&p)).transpose()?])?;
+                    candidate.message, snapshot.encode()?, candidate.change.map(|c| -> Result<_> { super::privacy::seal_payload(tx,&group_id,&postcard::to_allocvec(&c)?) }).transpose()?, candidate.proof.map(|p| -> Result<_> { super::privacy::seal_payload(tx,&group_id,&postcard::to_allocvec(&p)?) }).transpose()?])?;
         } else {
             tx.execute(
                 "UPDATE mls_branches SET snapshot=?3 WHERE group_id=?1 AND branch=?2",
@@ -339,7 +358,7 @@ impl Transaction {
         if let Some(replay) = replay {
             ensure!(branch == head, "cannot send from a historical branch");
             tx.execute("INSERT INTO mls_replay(group_id,dispatch_id,branch,payload,recipients,wake,kind) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(group_id,dispatch_id) DO UPDATE SET branch=excluded.branch",
-                params![group_id, replay.id, branch, replay.payload, postcard::to_allocvec(&replay.recipients)?, replay.wake, replay.kind])?;
+                params![group_id, replay.id, branch, super::privacy::seal_payload(tx,&group_id,&replay.payload)?, postcard::to_allocvec(&replay.recipients)?, replay.wake, replay.kind])?;
         }
         for job in jobs {
             tx.execute("INSERT OR IGNORE INTO mls_dispatch_ids(group_id,dispatch_id,logical_id) VALUES(?1,?2,?3)",
@@ -393,8 +412,9 @@ fn history_in(conn: &Connection, gid: &[u8; 32], parent: Branch) -> Result<Vec<G
     let prefix: Option<Vec<u8>> = conn
         .query_row("SELECT history FROM mls_join_history WHERE group_id=?1", [gid], |r| r.get(0))
         .optional()?;
-    let mut history: Vec<GroupBranch> =
-        prefix.as_deref().map(postcard::from_bytes).transpose()?.unwrap_or_default();
+    let mut history: Vec<GroupBranch> = prefix.as_deref()
+        .map(|bytes| -> Result<_> { Ok(postcard::from_bytes(&super::privacy::open_payload(conn,gid,bytes)?)?) })
+        .transpose()?.unwrap_or_default();
     let mut ancestry = Vec::new();
     let mut branch = Some(parent);
     while let Some(current) = branch {
@@ -419,7 +439,7 @@ fn history_in(conn: &Connection, gid: &[u8; 32], parent: Branch) -> Result<Vec<G
             params![gid, branch],
             |r| r.get(0),
         )?;
-        history.push(postcard::from_bytes(&proof)?);
+        history.push(postcard::from_bytes(&super::privacy::open_payload(conn,gid,&proof)?)?);
     }
     ensure!(
         !history.is_empty() && history.last().is_some_and(|p| p.branch.0 == parent),
@@ -457,7 +477,7 @@ pub fn accept_root(
             params![gid, group.branch_id()],
         )?;
         tx.execute("INSERT INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,?4,?5,?6)",
-            params![gid,group.branch_id(),group.epoch(),proof.commit_hash.0,snapshot.encode()?,postcard::to_allocvec(proof)?])?;
+            params![gid,group.branch_id(),group.epoch(),proof.commit_hash.0,snapshot.encode()?,super::privacy::seal_payload(tx,&gid,&postcard::to_allocvec(proof)?)?])?;
         Ok(())
     })
 }
@@ -549,7 +569,7 @@ pub fn accept_welcome(
             );
             ensure!(
                 preferred_history(
-                    &postcard::from_bytes::<Vec<GroupBranch>>(&old)?,
+                    &postcard::from_bytes::<Vec<GroupBranch>>(&super::privacy::open_payload(operation.conn(),&gid,&old)?)?,
                     &history,
                     false
                 ),
@@ -578,10 +598,10 @@ pub fn accept_welcome(
         params![gid, branch],
     )?;
     tx.execute("INSERT OR IGNORE INTO mls_branches(group_id,branch,parent,epoch,rank,commit_hash,snapshot,proof) VALUES(?1,?2,NULL,?3,0,X'',?4,?5)",
-        params![gid,branch,group.epoch(),snapshot.encode()?,postcard::to_allocvec(history.last().expect("validated history"))?])?;
+        params![gid,branch,group.epoch(),snapshot.encode()?,super::privacy::seal_payload(tx,&gid,&postcard::to_allocvec(history.last().expect("validated history"))?)?])?;
     tx.execute(
         "INSERT OR REPLACE INTO mls_join_history(group_id,inviter,history) VALUES(?1,?2,?3)",
-        params![gid, envelope.sender_ipk.0, postcard::to_allocvec(&history)?],
+        params![gid, envelope.sender_ipk.0, super::privacy::seal_payload(tx,&gid,&postcard::to_allocvec(&history)?)?],
     )?;
     tx.execute(
         "UPDATE mls_keypackage_stash SET consumed=1 WHERE kp_ref=?1",
@@ -673,7 +693,7 @@ fn replay_needed_in(conn: &Connection, group: &[u8; 32]) -> Result<Vec<Replay>> 
                 .get::<_, Vec<u8>>(0)?
                 .try_into()
                 .map_err(|_| anyhow!("invalid dispatch id"))?,
-            payload:    row.get(2)?,
+            payload:    super::privacy::open_payload(conn,group,&row.get::<_,Vec<u8>>(2)?)?,
             recipients: postcard::from_bytes(&row.get::<_, Vec<u8>>(3)?)?,
             wake:       row.get(4)?,
             kind:       row.get(5)?,

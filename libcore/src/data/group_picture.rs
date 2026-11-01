@@ -1,16 +1,20 @@
 //! Versioned, admin-owned group photos.
 
 use crate::state::core;
+use rusqlite::OptionalExtension;
 
 pub(crate) fn snapshot(conv: &[u8; 16]) -> Option<(u64, Option<Vec<u8>>)> {
-    core().db.messages()
-        .lock()
-        .query_row(
-            "SELECT revision, avif FROM group_pictures WHERE conversation_id=?1",
-            [conv.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok()
+    let db = core().db.messages().lock();
+    let (revision, stored): (u64, Option<Vec<u8>>) = db.query_row(
+        "SELECT revision, avif FROM group_pictures WHERE conversation_id=?1",
+        [conv.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).ok()?;
+    let private = crate::privacy::is_private_tx(&db, conv).ok()?;
+    if private && !core().private_sessions.read().contains_key(conv) { return None; }
+    let avif = stored.map(|bytes| {
+        if private { crate::privacy::open_bytes(conv, &bytes) } else { Ok(bytes) }
+    }).transpose().ok()?;
+    Some((revision, avif))
 }
 
 pub(crate) fn receive(
@@ -46,6 +50,7 @@ fn store(
     if let Some(bytes) = &avif {
         crate::data::peer_avatar::check_avif(bytes)?;
     }
+    let avif = avif.map(|bytes| crate::privacy::seal_bytes_tx(db, conv, &bytes)).transpose()?;
     let revision = i64::try_from(revision)?;
     db.execute(
         "INSERT INTO group_pictures(conversation_id, revision, avif) VALUES (?1, ?2, ?3)
@@ -53,6 +58,17 @@ fn store(
         WHERE excluded.revision > group_pictures.revision",
         (conv.as_slice(), revision, avif),
     )?;
+    Ok(())
+}
+
+/// Runs inside the history conversion transaction, so a failed photo conversion rolls back
+/// the code record and every other row rather than leaving a readable recovery copy.
+pub(crate) fn privatize_tx(db: &rusqlite::Connection, conv: &[u8;16]) -> anyhow::Result<()> {
+    let photo:Option<Vec<u8>>=db.query_row("SELECT avif FROM group_pictures WHERE conversation_id=?1",[conv],|r|r.get::<_,Option<Vec<u8>>>(0)).optional()?.flatten();
+    if let Some(photo)=photo {
+        let protected=crate::privacy::seal_bytes_tx(db,conv,&photo)?;
+        db.execute("UPDATE group_pictures SET avif=?2 WHERE conversation_id=?1",rusqlite::params![conv,protected])?;
+    }
     Ok(())
 }
 
@@ -68,7 +84,8 @@ crate::db::from_row!(Backup { conversation, revision, avif });
 pub fn dump_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Backup>> {
     crate::db::all(
         conn,
-        "SELECT conversation_id AS conversation, revision, avif FROM group_pictures",
+        "SELECT conversation_id AS conversation, revision, avif FROM group_pictures
+         WHERE conversation_id NOT IN (SELECT conversation_id FROM private_conversations)",
         [],
         Backup::from_row,
     )
@@ -90,4 +107,46 @@ pub fn restore_tx(conn: &rusqlite::Connection, rows: &[Backup]) -> anyhow::Resul
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    #[tokio::test]
+    async fn locked_group_photo_is_code_protected_in_storage_and_backups() {
+        let scope=crate::test_support::ScopedCore::new();
+        let conv=crate::data::conversation::Conversation::create_group("Group", &[]).unwrap();
+        let photo=b"\x00\x00\x00\x14ftypavif-private-photo".to_vec();
+        receive_authorized(conv,1,Some(photo.clone())).unwrap();
+        crate::privacy::hide(&conv,"photo-secret-code").unwrap();
+        let raw:Vec<u8>=scope.core.db.messages().lock().query_row("SELECT avif FROM group_pictures WHERE conversation_id=?1",[conv],|r|r.get(0)).unwrap();
+        assert_ne!(raw,photo);
+        assert!(snapshot(&conv).is_none());
+        assert!(dump_tx(&scope.core.db.messages().lock()).unwrap().is_empty());
+        let backup=crate::data::private_backup::dump(&scope.core.db.messages().lock()).unwrap();
+        let encoded=postcard::to_allocvec(&backup).unwrap();
+        assert!(!encoded.windows(photo.len()).any(|bytes|bytes==photo));
+        crate::privacy::unlock("photo-secret-code").unwrap();
+        assert_eq!(snapshot(&conv),Some((1,Some(photo.clone()))));
+        crate::api::privacy::lock_private_conversations();
+        let restored=crate::test_support::ScopedCore::new();
+        crate::data::private_backup::restore(&restored.core.db.messages().lock(),&backup).unwrap();
+        assert!(snapshot(&conv).is_none());
+        crate::privacy::unlock("photo-secret-code").unwrap();
+        assert_eq!(snapshot(&conv),Some((1,Some(photo))));
+    }
+    #[tokio::test]
+    async fn a_photo_conversion_failure_rolls_back_the_whole_privacy_boundary() {
+        let scope=crate::test_support::ScopedCore::new();
+        let conv=crate::data::conversation::Conversation::create_group("Group", &[]).unwrap();
+        let photo=b"\x00\x00\x00\x14ftypavif-private-photo".to_vec();
+        receive_authorized(conv,1,Some(photo.clone())).unwrap();
+        crate::data::message::Message::save_incoming(conv,[151;32],&[152;16],"still ordinary",1,None).unwrap();
+        scope.core.db.messages().lock().execute_batch("CREATE TRIGGER refuse_photo_conversion BEFORE UPDATE ON group_pictures BEGIN SELECT RAISE(ABORT,'injected photo storage failure'); END").unwrap();
+        assert!(crate::privacy::hide(&conv,"photo-secret-code").is_err());
+        assert!(!crate::privacy::is_private(&conv));
+        assert_eq!(snapshot(&conv),Some((1,Some(photo))));
+        assert_eq!(crate::data::message::Message::get_messages(&conv,100,"")[0].content,"still ordinary");
+    }
+
 }

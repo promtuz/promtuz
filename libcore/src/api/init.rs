@@ -53,6 +53,8 @@ fn init_inner(
 ) -> Result<()> {
     init_logging();
     setup_crypto_provider()?;
+    crate::privacy::repair_transport()?;
+    crate::private_files::cleanup_plaintext_tx(&core().db.messages().lock())?;
 
     let core = core();
     core.secure_store.set(secure_store).map_err(|_| anyhow::anyhow!("init called twice"))?;

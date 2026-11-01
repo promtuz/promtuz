@@ -72,6 +72,44 @@ impl From<rusqlite::Error> for MlsGroupError {
 }
 
 impl MlsGroupError {
+    pub(crate) fn from_process_message(
+        error: openmls::prelude::ProcessMessageError<PromtuzMlsStorageError>,
+    ) -> Self {
+        match error {
+            openmls::prelude::ProcessMessageError::StorageError(error) => Self::Storage(error),
+            error => Self::from_openmls(error),
+        }
+    }
+
+    pub(crate) fn from_merge_commit(
+        error: openmls::prelude::MergeCommitError<PromtuzMlsStorageError>,
+    ) -> Self {
+        match error {
+            openmls::prelude::MergeCommitError::StorageError(error) => Self::Storage(error),
+            error => Self::from_openmls(error),
+        }
+    }
+
+    pub(crate) fn from_merge_pending(
+        error: openmls::prelude::MergePendingCommitError<PromtuzMlsStorageError>,
+    ) -> Self {
+        match error {
+            openmls::prelude::MergePendingCommitError::MergeCommitError(error) => Self::from_merge_commit(error),
+            error => Self::from_openmls(error),
+        }
+    }
+
+    pub(crate) fn from_welcome(
+        error: openmls::prelude::WelcomeError<PromtuzMlsStorageError>,
+    ) -> Self {
+        use openmls::prelude::{CreationFromExternalError, WelcomeError};
+        match error {
+            WelcomeError::StorageError(error)
+            | WelcomeError::PublicGroupError(CreationFromExternalError::WriteToStorageError(error)) => Self::Storage(error),
+            error => Self::from_openmls(error),
+        }
+    }
+
     /// A consumed or expired sender-ratchet secret cannot be recovered.
     pub(crate) fn is_spent_secret(&self) -> bool {
         matches!(

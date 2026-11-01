@@ -253,6 +253,7 @@ pub(super) async fn send_payload<C: DhtClient>(
         )?;
     }
     let gid = group.group_id();
+    drop(group); // Do not retain plaintext ratchet state across network awaits.
 
     // Queue the whole fan-out before the first network await: once one copy is sent the message is
     // no longer pending, so a restart must find every other copy queued.

@@ -11,6 +11,8 @@ pub mod mls;
 pub mod p2p;
 pub mod platform;
 pub mod presence;
+pub(crate) mod privacy;
+pub(crate) mod private_files;
 mod contact_card;
 mod requests;
 mod profile_sync;

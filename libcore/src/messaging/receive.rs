@@ -221,6 +221,11 @@ pub async fn process_inbound_envelope<C: DhtClient>(
         MlsEnvelopeP::ContactRequest { .. } => {},
     }
 
+    crate::mls::privacy::prepare_direct_envelope(ctx.provider, &envelope, &sender_ipk)?;
+    if crate::mls::privacy::maybe_buffer(ctx.provider, &envelope, &sender_ipk, payload, accepted_at_ms, &dispatch_id)? {
+        return Ok(InboundDecoded::ApplicationBuffered);
+    }
+    let result = async {
     match envelope {
         MlsEnvelopeP::GroupMigrationReady { .. } | MlsEnvelopeP::GroupMigrationWelcome { .. } => {
             Ok(InboundDecoded::ApplicationStale)
@@ -275,6 +280,15 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             Ok(InboundDecoded::PairDeclined)
         },
     }
+    }.await;
+    // A lock can interrupt the check before the operation lock. Welcome handling also turns
+    // refusal into a successful dropped outcome, so check every result before acknowledging.
+    // Rebuffering a completed application is safe: dispatch and ratchet identities deduplicate it.
+    let envelope = MlsEnvelopeP::deser(payload)?;
+    if crate::mls::privacy::maybe_buffer(ctx.provider, &envelope, &sender_ipk, payload, accepted_at_ms, &dispatch_id)? {
+        return Ok(InboundDecoded::ApplicationBuffered);
+    }
+    result
 }
 
 /// Verified so a malicious relay cannot forge a rejection to grief a pair.
@@ -615,7 +629,7 @@ pub(crate) fn receive_application_content(
                     let from = author;
                     // Fetch the bytes without a tap only from a paired contact over a trusted
                     // network; otherwise the UI drives the pull.
-                    if let Some((size, file_id)) = auto
+                    if !crate::privacy::is_private(&conv) && let Some((size, file_id)) = auto
                         && crate::transfer::should_auto_download(&from, size, false)
                     {
                         core().spawn(async move {
@@ -624,7 +638,7 @@ pub(crate) fn receive_application_content(
                     }
                     // A sticker is small and named by hash: fetch it now so
                     // the chat opens on the picture, not on a fetch.
-                    if let Some(r) = sticker {
+                    if !crate::privacy::is_private(&conv) && let Some(r) = sticker {
                         core().spawn(async move {
                             if let Err(e) = crate::stickers::fetch(&r).await {
                                 debug!("STICKERS: prefetch failed: {e:#}");

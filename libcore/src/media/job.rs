@@ -17,11 +17,12 @@ pub(crate) struct MediaJob {
 pub(crate) struct MediaCancellation {
     cancelled: Arc<AtomicBool>,
     on_cancel: Option<Arc<dyn Fn() + Send + Sync>>,
+    privacy: Option<([u8;16],u64)>,
 }
 
 impl MediaCancellation {
     pub(crate) fn with_callback(on_cancel: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { cancelled: Arc::new(AtomicBool::new(false)), on_cancel: Some(on_cancel) }
+        Self { cancelled: Arc::new(AtomicBool::new(false)), on_cancel: Some(on_cancel), privacy:None }
     }
 
     pub(crate) fn cancel(&self) {
@@ -30,7 +31,13 @@ impl MediaCancellation {
         }
     }
 
+    pub(crate) fn with_private(mut self,conv:[u8;16],generation:u64)->Self {self.privacy=Some((conv,generation));self}
+    pub(crate) fn privacy(&self)->Option<([u8;16],u64)> {self.privacy}
     pub(crate) fn check(&self) -> Result<()> {
+        if let Some((conv,generation))=self.privacy {
+            anyhow::ensure!(generation==crate::state::core().private_generation.load(Ordering::SeqCst),"Chat is locked");
+            crate::privacy::require_access(&conv)?;
+        }
         if self.cancelled.load(Ordering::Acquire) { bail!("Media preparation was cancelled.") }
         Ok(())
     }
@@ -137,7 +144,7 @@ impl MediaJob {
                     width: image.width,
                     height: image.height,
                     animated: image.animated,
-                    id: crate::staging::stage_prepared_image(image),
+                    id: crate::staging::stage_prepared_image(image, self.cancellation.privacy())?,
                 };
                 Ok(staged)
             },
@@ -153,7 +160,7 @@ impl MediaJob {
             unreachable!("chat video request cannot prepare an image")
         };
         let poster = video.poster.bytes.clone();
-        let id = crate::staging::stage_prepared_video(&mut video)?;
+        let id = crate::staging::stage_prepared_video(&mut video,self.cancellation.privacy())?;
         Ok(StagedVideo { id, width: video.width, height: video.height, poster })
     }
 }

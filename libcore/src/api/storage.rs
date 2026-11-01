@@ -34,7 +34,8 @@ fn inventory(c: &Core) -> anyhow::Result<Vec<StoredMedia>> {
                 coalesce(length(mm.blob), 0) + coalesce(length(mm.thumb), 0)
          FROM message_media mm JOIN messages m
          ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id
-         WHERE m.deleted = 0 AND NOT (m.outgoing = 1 AND m.status IN (0, 2))",
+         WHERE m.deleted = 0 AND NOT (m.outgoing = 1 AND m.status IN (0, 2))
+           AND NOT EXISTS(SELECT 1 FROM private_conversations pc WHERE pc.conversation_id=m.conversation_id)",
         [], |r| Ok(StoredMedia {
             conversation_id: r.get(0)?, dispatch_id: r.get(1)?, kind: r.get(2)?,
             name: r.get(3)?, caption: r.get(4)?, timestamp: r.get(5)?, local_bytes: r.get(6)?,
@@ -69,6 +70,7 @@ fn inventory(c: &Core) -> anyhow::Result<Vec<StoredMedia>> {
 pub fn storage_preview(conversation_id: Vec<u8>, dispatch_id: Vec<u8>) -> Result<Option<Vec<u8>>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let did = fixed::<16>(&dispatch_id, "dispatch_id")?;
+    if crate::privacy::is_private(&conv) { return Ok(None); }
     one(&core().db.messages().lock(),
         "SELECT CASE kind WHEN 1 THEN blob WHEN 2 THEN thumb ELSE NULL END
          FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
@@ -102,6 +104,7 @@ fn remove(c: &Core, targets: Vec<StorageTarget>) -> anyhow::Result<u32> {
     let mut removed = Vec::new();
     let mut orphans = Vec::new();
     for (conv, did) in keys {
+        if crate::privacy::is_private_tx(&tx, &conv)? { continue; }
         let row = one(&tx,
             "SELECT m.* FROM messages m JOIN message_media mm
              ON m.conversation_id = mm.conversation_id AND m.dispatch_id = mm.dispatch_id

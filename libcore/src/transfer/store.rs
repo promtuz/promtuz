@@ -306,15 +306,11 @@ pub(crate) fn verified_count_tx(conn: &Connection, p: &Partial) -> u32 {
 
 pub(crate) fn open_partial(
     db: &Stores, lease: &ReceiverLease, path: &str,
-) -> anyhow::Result<std::fs::File> {
-    let _db = db.transfers().lock();
+) -> anyhow::Result<crate::private_files::StorageFile> {
+    let _ = db;
     ensure_live(lease)?;
-    Ok(std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .read(true)
-        .open(path)?)
+    // Key lookup precedes transfers locking: the global order is messages, then transfers.
+    crate::private_files::StorageFile::open(path,true)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -422,6 +418,10 @@ pub(crate) fn gc_dead_partials_tx(
 
 /// Removes every row naming `file_id` and its bytes, once no message points at it. Deleted means
 /// gone: a peer that had not pulled it yet gets `Gone`. Best effort.
+pub(crate) fn cancel_file(c:&Core,file_id:&[u8;32]) {
+    if let Some(cancel)=c.transfers.receivers.lock().get(file_id){cancel.cancel();}
+}
+
 pub fn forget_file(c: &Core, file_id: &[u8; 32]) {
     let conn = c.db.transfers().lock();
     if let Some(cancel) = c.transfers.receivers.lock().get(file_id) {
@@ -451,12 +451,7 @@ fn forget_row_tx(conn: &Connection, table: &str, file_id: &[u8; 32], fallback: O
     {
         log::warn!("transfer: {table} row for a forgotten file survives: {e}");
     }
-    if let Some(path) = path
-        && let Err(e) = std::fs::remove_file(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        log::warn!("transfer: {path} left on disk: {e}");
-    }
+    if let Some(path) = path { crate::private_files::remove_temporary(&path); }
 }
 
 /// Resumable partials; the `downloading` set makes re-driving a live pull a no-op.

@@ -69,21 +69,29 @@ pub(super) struct Grant {
 impl Grant {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         let bytes: Vec<u8> = row.get("recipients")?;
-        let recipients = postcard::from_bytes(&bytes).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Blob, Box::new(e))
-        })?;
+        let private_offer = if bytes.starts_with(b"pz-private-v1:") {
+            let conv: [u8;16] = row.get("conversation_id")?;
+            let plain = zeroize::Zeroizing::new(crate::privacy::open_bytes(&conv,&bytes)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?);
+            Some(postcard::from_bytes::<AttachmentSharing>(&plain).map_err(|_| rusqlite::Error::InvalidQuery)?)
+        } else { None };
+        let recipients = if private_offer.is_some() { Vec::new() } else {
+            postcard::from_bytes(&bytes).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Blob, Box::new(e))
+            })?
+        };
         Ok(Self {
             id: row.get("grant_id")?,
             conversation: row.get("conversation_id")?,
             group: row.get("group_id")?,
             author: row.get("author")?,
-            offer: AttachmentSharing {
+            offer: private_offer.unwrap_or(AttachmentSharing {
                 message_id: row.get("message_id")?,
                 file_id: row.get("file_id")?,
                 size: row.get("size")?,
                 expires_at: row.get("expires_at")?,
                 recipients,
-            },
+            }),
             control_id: row.get("control_id")?,
         })
     }
@@ -116,16 +124,38 @@ fn validate(author: &[u8; 32], offer: &AttachmentSharing, now: u64) -> Result<()
 }
 
 fn insert(conn: &Connection, grant: &Grant) -> Result<()> {
+    let private = crate::privacy::is_private_tx(conn,&grant.conversation)?;
+    let recipients = if private {
+        crate::privacy::seal_bytes_tx(conn,&grant.conversation,&postcard::to_allocvec(&grant.offer)?)?
+    } else { postcard::to_allocvec(&grant.offer.recipients)? };
+    let file = if private { [0;32] } else { grant.offer.file_id };
+    let size = if private { 0 } else { grant.offer.size };
     conn.execute(
         "INSERT OR IGNORE INTO attachment_sharing
          (grant_id,conversation_id,group_id,author,message_id,file_id,size,expires_at,recipients,control_id)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![grant.id.as_slice(), grant.conversation.as_slice(), grant.group.as_slice(),
-            grant.author.as_slice(), grant.offer.message_id.as_slice(), grant.offer.file_id.as_slice(),
-            grant.offer.size, grant.offer.expires_at, postcard::to_allocvec(&grant.offer.recipients)?,
+            grant.author.as_slice(), grant.offer.message_id.as_slice(), file.as_slice(),
+            size, grant.offer.expires_at, recipients,
             grant.control_id.as_ref().map(|id| id.as_slice())],
     )?;
     Ok(())
+}
+
+/// Seal existing grants while the ordinary media descriptors are converted in the same transaction.
+pub(crate) fn privatize_tx(conn: &Connection, conversation: &[u8;16]) -> Result<()> {
+    let grants = crate::db::all(conn,"SELECT * FROM attachment_sharing WHERE conversation_id=?1",[conversation],Grant::from_row)?;
+    for grant in grants {
+        let bytes = crate::privacy::seal_bytes_tx(conn,conversation,&postcard::to_allocvec(&grant.offer)?)?;
+        conn.execute("UPDATE attachment_sharing SET file_id=zeroblob(32),size=0,recipients=?2 WHERE grant_id=?1",(grant.id,bytes))?;
+    }
+    Ok(())
+}
+
+fn media_matches(conn:&Connection,conversation:&[u8;16],message:&[u8;16],file:&[u8;32],size:u64)->Result<bool> {
+    let row = crate::db::one(conn,"SELECT * FROM message_media WHERE conversation_id=?1 AND dispatch_id=?2",
+        (conversation,message),crate::data::media::MediaRow::from_row)?;
+    Ok(row.is_some_and(|row| row.kind == crate::data::media::KIND_ATTACHMENT && row.file_id.as_deref() == Some(file.as_slice()) && row.size == size))
 }
 
 /// Freezes the audience before any dispatch and reuses the control id and offer across retries.
@@ -135,7 +165,8 @@ pub(crate) fn for_outgoing(
     file_id: [u8; 32], size: u64, recipients: &[[u8; 32]], roster: &[[u8; 32]],
 ) -> Result<Option<([u8; 16], AttachmentSharing)>> {
     let now = now_secs();
-    let retained_until = super::store::retention_get(&file_id).map_or(0, |r| r.expires_at);
+    let ordinary = super::store::retention_get(&file_id);
+    let retained_until = ordinary.or_else(|| crate::private_files::retention_tx(&core().db.messages().lock(),conversation,&file_id).ok().flatten()).map_or(0, |r| r.expires_at);
     outgoing_tx(
         &mut core().db.messages().lock(),
         conversation,
@@ -186,11 +217,11 @@ fn outgoing_tx(
         "SELECT EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
          JOIN message_media mm ON mm.conversation_id=m.conversation_id AND mm.dispatch_id=m.dispatch_id
          WHERE m.conversation_id=?1 AND m.dispatch_id=?2 AND m.outgoing=1 AND m.deleted=0 AND m.edited=0
-           AND c.kind=?3 AND c.mls_group_id=?4 AND mm.file_id=?5 AND mm.size=?6)",
-        params![conversation.as_slice(), message_id.as_slice(), KIND_GROUP, group.as_slice(), file_id.as_slice(), size],
+           AND c.kind=?3 AND c.mls_group_id=?4)",
+        params![conversation.as_slice(), message_id.as_slice(), KIND_GROUP, group.as_slice()],
         |r| r.get(0),
     )?;
-    if !live || !roster.contains(author) {
+    if !live || !media_matches(&tx,conversation,&message_id,&file_id,size)? || !roster.contains(author) {
         tx.commit()?;
         return Ok(None);
     }
@@ -299,21 +330,20 @@ fn authorized(
     {
         return Ok(false);
     }
-    Ok(conn.query_row(
+    let live = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM conversations c
          JOIN messages m ON m.conversation_id=c.id
          JOIN message_media mm ON mm.conversation_id=m.conversation_id AND mm.dispatch_id=m.dispatch_id
          WHERE c.id=?1 AND c.mls_group_id=?2 AND c.kind=?3
            AND m.sender_ipk=?4 AND m.dispatch_id=?5 AND m.outgoing=0 AND m.deleted=0 AND m.edited=0
-           AND mm.file_id=?6 AND mm.size=?7 AND mm.kind=?8
            AND NOT EXISTS(SELECT 1 FROM attachment_sharing_revocations r WHERE r.conversation_id=c.id AND r.author=?4 AND r.message_id=?5)
            AND EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=c.id AND member_ipk=?4 AND active=1)
-           AND EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=c.id AND member_ipk=?9 AND active=1)
-           AND EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=c.id AND member_ipk=?10 AND active=1))",
+           AND EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=c.id AND member_ipk=?6 AND active=1)
+           AND EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=c.id AND member_ipk=?7 AND active=1))",
         params![grant.conversation.as_slice(), grant.group.as_slice(), KIND_GROUP, grant.author.as_slice(),
-            grant.offer.message_id.as_slice(), grant.offer.file_id.as_slice(), grant.offer.size,
-            crate::data::media::KIND_ATTACHMENT, me.as_slice(), peer.as_slice()], |r| r.get(0),
-    )?)
+            grant.offer.message_id.as_slice(), me.as_slice(), peer.as_slice()], |r| r.get::<_,bool>(0),
+    )?;
+    Ok(live && media_matches(conn,&grant.conversation,&grant.offer.message_id,&grant.offer.file_id,grant.offer.size)?)
 }
 
 pub(super) fn permitted(
@@ -322,12 +352,12 @@ pub(super) fn permitted(
     let conn = c.db.messages().lock();
     let grant = conn
         .query_row(
-            "SELECT * FROM attachment_sharing WHERE grant_id=?1 AND file_id=?2",
-            (id.as_slice(), file.as_slice()),
+            "SELECT * FROM attachment_sharing WHERE grant_id=?1",
+            [id.as_slice()],
             Grant::from_row,
         )
         .ok()?;
-    authorized(&conn, &grant, me, peer, now_secs()).ok()?.then_some(grant)
+    (grant.offer.file_id == *file && authorized(&conn, &grant, me, peer, now_secs()).ok()?).then_some(grant)
 }
 
 pub(super) fn candidates(
@@ -339,16 +369,18 @@ pub(super) fn candidates(
         (file.as_slice(), original.as_slice(), now_secs()),
         Grant::from_row,
     )?;
+    let mut available = grants.collect::<rusqlite::Result<Vec<_>>>()?;
+    // Private file ids exist only inside the code-bound offer. Scan the unlocked chats rather
+    // than restoring a globally searchable plaintext file index.
+    for conversation in c.private_sessions.read().keys().copied().collect::<Vec<_>>() {
+        available.extend(crate::db::all(&conn,"SELECT * FROM attachment_sharing WHERE conversation_id=?1 AND author=?2 AND control_id IS NULL AND expires_at>?3",
+            (conversation,original,now_secs()),Grant::from_row)?);
+    }
     let mut out = Vec::new();
-    for grant in grants {
-        let grant = grant?;
+    for grant in available.into_iter().filter(|grant| grant.offer.file_id == *file) {
         for peer in &grant.offer.recipients {
-            if out.iter().any(|(p, _)| p == peer) {
-                continue;
-            }
-            if authorized(&conn, &grant, me, peer, now_secs())? {
-                out.push((*peer, grant.id));
-            }
+            if out.iter().any(|(p, _)| p == peer) { continue; }
+            if authorized(&conn, &grant, me, peer, now_secs())? { out.push((*peer, grant.id)); }
         }
     }
     // A local nonce rotates which members get the bounded attempts.
@@ -432,6 +464,35 @@ mod tests {
         Message::save_incoming_tx(db, conv, grant.author, &id, "file", 1000, None).unwrap();
         let row = attachment(grant.offer.file_id, grant.offer.size);
         crate::data::media::save_tx(db, &conv, &id, &row).unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_grants_seal_media_details_and_follow_unlock_and_membership() {
+        let scope = crate::test_support::ScopedCore::new();
+        let members = [[31;32],[32;32],[33;32]]; let group = [34;32];
+        let now = now_secs();
+        let mut db = scope.core.db.messages().lock();
+        let conv = Conversation::join_group_tx(&db,&members[0],&members).unwrap();
+        Conversation::bind_group_tx(&db,&conv,&group).unwrap();
+        let offer = AttachmentSharing { message_id:[35;16],file_id:[36;32],size:123,
+            expires_at:now+3600,recipients:members[1..].to_vec() };
+        receive_tx(&mut db,conv,members[0],members[1],offer.clone(),now).unwrap();
+        let grant = db.query_row("SELECT * FROM attachment_sharing",[],Grant::from_row).unwrap();
+        post(&db,&grant); drop(db);
+        crate::privacy::hide(&conv,"helper-code").unwrap();
+        let (file,size,bytes): (Vec<u8>,u64,Vec<u8>) = scope.core.db.messages().lock().query_row(
+            "SELECT file_id,size,recipients FROM attachment_sharing",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(file,vec![0;32]); assert_eq!(size,0); assert!(bytes.starts_with(b"pz-private-v1:"));
+        assert!(!bytes.windows(32).any(|window|window==offer.file_id));
+        assert!(permitted(scope.core,&grant.id,&offer.file_id,&members[1],&members[2]).is_none());
+        assert!(candidates(scope.core,&offer.file_id,&members[0],&members[1]).unwrap().is_empty());
+        crate::privacy::unlock("helper-code").unwrap();
+        assert!(permitted(scope.core,&grant.id,&offer.file_id,&members[1],&members[2]).is_some());
+        assert_eq!(candidates(scope.core,&offer.file_id,&members[0],&members[1]).unwrap(),vec![(members[2],grant.id)]);
+        Conversation::deactivate_member_tx(&scope.core.db.messages().lock(),&conv,&members[2]).unwrap();
+        assert!(permitted(scope.core,&grant.id,&offer.file_id,&members[1],&members[2]).is_none());
+        crate::api::privacy::lock_private_conversations();
+        assert!(candidates(scope.core,&offer.file_id,&members[0],&members[1]).unwrap().is_empty());
     }
 
     #[test]

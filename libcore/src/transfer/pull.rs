@@ -127,8 +127,18 @@ async fn download_episode(
     // Recheck after owning the writer slot, since another worker may have just finished. Only a
     // requested download retries a FAILED file.
     let current = store::partial_get_tx(&c.db.transfers().lock(), &file_id);
-    if current.as_ref().is_some_and(|p| p.is_complete()) {
-        return Ok(());
+    if let Some(partial)=current.as_ref().filter(|p|p.is_complete()) {
+        if !crate::state::owns_stores(&c.db) || !crate::private_files::is_private_path(&partial.path)? {
+            return Ok(())
+        }
+        // Only the owning unlocked chat may reuse a private partial. An ordinary duplicate
+        // downloads its own copy instead of gaining a private-file capability.
+        let conn=c.db.messages().lock();
+        let ordinary:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM message_media WHERE file_id=?1) OR EXISTS(SELECT 1 FROM message_media_renditions WHERE file_id=?1)",[file_id],|r|r.get(0))?;
+        drop(conn);
+        if !ordinary {
+            if crate::private_files::available_retention(&file_id)?.is_some() { return Ok(()) }
+        }
     }
     if matches!(trigger, DownloadTrigger::Reconnect | DownloadTrigger::NetworkChange | DownloadTrigger::PeerOnline) {
         if current.as_ref().is_none_or(|p| p.state == store::FAILED) {

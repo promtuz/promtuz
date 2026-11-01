@@ -107,6 +107,7 @@ pub fn set_contact_nickname(ipk: Vec<u8>, nickname: String) -> Result<(), CoreEr
 #[uniffi::export]
 pub fn group_picture(conversation_id: Vec<u8>) -> Result<Option<Vec<u8>>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     Ok(crate::data::group_picture::snapshot(&conv).and_then(|(_, avif)| avif))
 }
 
@@ -134,6 +135,7 @@ async fn update_group_picture(
 ) -> Result<(), CoreError> {
     let _one = core().groups.picture_write.lock().await;
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let me = Identity::local_ipk().ok_or_else(|| anyhow::anyhow!("no identity"))?;
     if !crate::data::conversation::Conversation::may_edit(&conv, &me) {
         return Err(anyhow::anyhow!("only admins can change the group's photo").into());

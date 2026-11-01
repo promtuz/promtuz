@@ -57,6 +57,7 @@ pub(super) fn completion_for_post(
 pub(super) fn receive(
     conversation: [u8; 16], author: [u8; 32], timestamp: u64, update: MediaUpdate,
 ) -> Result<()> {
+    let private = crate::privacy::is_private(&conversation);
     let auto = match &update {
         MediaUpdate::Complete(CompletedMedia {
             body: Body::Attachment { size, file_id, .. },
@@ -83,7 +84,7 @@ pub(super) fn receive(
             MessageEv::Edited { id: row.id, conversation, content: row.content }.emit();
         }
         crate::data::receipts::schedule();
-        if let Some((size, file_id)) = auto
+        if !private && let Some((size, file_id)) = auto
             && crate::transfer::should_auto_download(&author, size, false)
         {
             core().spawn(async move {
@@ -119,7 +120,10 @@ fn current(
             |row| row.get(0),
         )
         .optional()?;
-    bytes.map(|bytes| postcard::from_bytes(&bytes).map_err(Into::into)).transpose()
+    bytes.map(|bytes| {
+        let bytes=if crate::privacy::is_private_tx(db,conversation)? {crate::privacy::open_bytes(conversation,&bytes)?}else{bytes};
+        postcard::from_bytes(&bytes).map_err(Into::into)
+    }).transpose()
 }
 
 fn prepare(
@@ -156,7 +160,7 @@ fn prepare(
         );
         tx.execute(
             "UPDATE messages SET content = ?3 WHERE conversation_id = ?1 AND dispatch_id = ?2",
-            (conversation.as_slice(), pending.target.as_slice(), &pending.caption),
+            (conversation.as_slice(), pending.target.as_slice(), crate::privacy::seal_tx(&tx, conversation, &pending.caption)?),
         )?;
         Message {
             inner: tx.query_row(
@@ -203,7 +207,7 @@ fn prepare(
     tx.execute(
         "INSERT INTO message_media_preparations (conversation_id, dispatch_id, details)
                 VALUES (?1, ?2, ?3)",
-        (conversation.as_slice(), pending.target.as_slice(), postcard::to_allocvec(&pending)?),
+        (conversation.as_slice(), pending.target.as_slice(), crate::privacy::seal_bytes_tx(&tx,conversation,&postcard::to_allocvec(&pending)?)?),
     )?;
     tx.commit()?;
     Ok(Some(Stored { message, first }))
@@ -241,7 +245,7 @@ fn complete(
         );
         tx.execute(
             "UPDATE messages SET content = ?3 WHERE conversation_id = ?1 AND dispatch_id = ?2",
-            (conversation.as_slice(), target.as_slice(), &caption),
+            (conversation.as_slice(), target.as_slice(), crate::privacy::seal_tx(&tx, conversation, &caption)?),
         )?;
         Message {
             inner: tx.query_row(

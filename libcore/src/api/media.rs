@@ -28,14 +28,24 @@ pub trait MediaSourceAdapter: Send + Sync {
     fn release(&self);
 }
 
-struct SourceAdapter(Arc<dyn MediaSourceAdapter>);
+struct SourceAdapter(Arc<dyn MediaSourceAdapter>,Option<([u8;16],u64)>);
+impl SourceAdapter {
+    fn check(&self)->anyhow::Result<()> {
+        if let Some((conv,generation))=self.1 {
+            if generation!=core().private_generation.load(std::sync::atomic::Ordering::SeqCst) {return Err(anyhow::anyhow!("Chat is locked").into())}
+            crate::privacy::require_access(&conv)?;
+        } Ok(())
+    }
+}
 
 impl crate::media::ports::MediaSource for SourceAdapter {
     fn length(&self) -> anyhow::Result<Option<u64>> {
+        self.check()?;
         self.0.length().map_err(source_error)
     }
 
     fn read(&mut self, offset: u64, max_bytes: u32) -> anyhow::Result<Vec<u8>> {
+        self.check()?;
         self.0.read(offset, max_bytes).map_err(source_error)
     }
 
@@ -44,6 +54,7 @@ impl crate::media::ports::MediaSource for SourceAdapter {
     }
 
     fn inspect_image(&mut self) -> anyhow::Result<crate::media::ports::ImageProbe> {
+        self.check()?;
         let probe = self.0.inspect_image().map_err(source_error)?;
         Ok(crate::media::ports::ImageProbe {
             width: probe.width,
@@ -56,6 +67,7 @@ impl crate::media::ports::MediaSource for SourceAdapter {
     fn decode_image(
         &mut self, request: crate::media::ports::ImageFrameRequest,
     ) -> anyhow::Result<crate::media::ports::DecodedImageFrame> {
+        self.check()?;
         let frame = self
             .0
             .decode_image(ImageFrameRequestRecord { max_edge: request.max_edge })
@@ -74,12 +86,14 @@ impl crate::media::ports::MediaSource for SourceAdapter {
     }
 
     fn inspect_video(&mut self) -> anyhow::Result<crate::media::video::VideoProbe> {
+        self.check()?;
         self.0.inspect_video().map(VideoProbeRecord::into_core).map_err(source_error)
     }
 
     fn open_video_frame(
         &mut self, request: crate::media::ports::VideoFrameRequest,
     ) -> anyhow::Result<crate::media::ports::DecodedImageFrame> {
+        self.check()?;
         let frame = self
             .0
             .open_video_frame(VideoFrameRequestRecord {
@@ -103,6 +117,7 @@ impl crate::media::ports::MediaSource for SourceAdapter {
     fn render_video(
         &mut self, request: crate::media::ports::VideoRenderRequest,
     ) -> anyhow::Result<crate::media::ports::VideoRenderReport> {
+        self.check()?;
         let report = self
             .0
             .render_video(VideoRenderRequestRecord {
@@ -357,10 +372,29 @@ impl MediaImport {
             let source = source.clone();
             Arc::new(move || source.cancel())
         });
-        let source = crate::media::ports::SourceLease::open(Box::new(SourceAdapter(source)))?;
+        let source = crate::media::ports::SourceLease::open(Box::new(SourceAdapter(source,None)))?;
         Ok(Arc::new(Self {
             source: parking_lot::Mutex::new(Some(source)), cancellation,
         }))
+    }
+
+    #[uniffi::constructor]
+    pub fn from_private_source(source:Arc<dyn MediaSourceAdapter>,conversation_id:Vec<u8>)->Result<Arc<Self>,CoreError> {
+        let conv=fixed::<16>(&conversation_id,"conversation id")?;
+        if let Err(error)=crate::privacy::require_access(&conv) {source.release();return Err(error.into())}
+        if !crate::privacy::is_private(&conv) {source.release();return Err(anyhow::anyhow!("Chat is not hidden").into())}
+        let generation=core().private_generation.load(std::sync::atomic::Ordering::SeqCst);
+        let cancellation=crate::media::MediaCancellation::with_callback({let source=source.clone();Arc::new(move||source.cancel())}).with_private(conv,generation);
+        let source=crate::media::ports::SourceLease::open(Box::new(SourceAdapter(source.clone(),Some((conv,generation))))).map_err(|error| {source.release();error})?;
+        Ok(Arc::new(Self{source:parking_lot::Mutex::new(Some(source)),cancellation}))
+    }
+
+    /// Documents stream directly into encrypted staging, without an intermediate plaintext file.
+    pub fn stage_attachment(&self,name:String,mime:String)->Result<u64,CoreError> {
+        self.cancellation.check()?;
+        let source=self.source.lock().take().ok_or_else(||anyhow::anyhow!("This media import was discarded"))?;
+        let id=crate::staging::stage_source_attachment(source,name,mime,self.cancellation.privacy())?;
+        Ok(id)
     }
 
     pub fn size(&self) -> Result<u64, CoreError> {
@@ -451,6 +485,7 @@ impl MediaImport {
 fn take_import_job(
     import: &MediaImport, request: crate::media::MediaRequest,
 ) -> Result<crate::media::MediaJob, CoreError> {
+    import.cancellation.check()?;
     let source = import.source.lock().take().ok_or_else(|| CoreError::Refused {
         msg: "This media import was already used or discarded.".into(),
     })?;
@@ -1000,8 +1035,10 @@ pub fn attachment_transfer_details(
 #[uniffi::export]
 pub fn get_media(conversation_id: Vec<u8>, limit: u32) -> Result<Vec<MediaRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
+    let private = crate::privacy::is_private(&conv);
     let rows = crate::data::media::for_conversation(&conv, limit)?;
-    Ok(rows.into_iter().map(|(did, r)| media_record(did, r)).collect())
+    Ok(rows.into_iter().map(|(did, r)| media_record(conv,did, r, private)).collect())
 }
 
 #[uniffi::export]
@@ -1010,35 +1047,43 @@ pub fn get_message_media(
 ) -> Result<Option<MediaRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let did = fixed::<16>(&dispatch_id, "dispatch_id")?;
-    Ok(crate::data::media::get(&conv, &did)?.map(|r| media_record(did, r)))
+    crate::privacy::require_access(&conv)?;
+    let private = crate::privacy::is_private(&conv);
+    Ok(crate::data::media::get(&conv, &did)?.map(|r| media_record(conv,did, r, private)))
 }
 
-fn media_record(did: [u8; 16], r: crate::data::media::MediaRow) -> MediaRecord {
+fn media_record(conv:[u8;16], did: [u8; 16], r: crate::data::media::MediaRow, private: bool) -> MediaRecord {
     use crate::transfer::store;
     let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
-    let (transfer_state, transfer_have, transfer_total, local_path) = match fid
-        .and_then(store::partial_get)
-    {
-        Some(p) => {
-            // A DONE row can outlive its bytes; report it PENDING so a tap re-pulls the file.
-            let complete = p.is_complete();
-            let state = if p.state == store::DONE && !complete { store::PENDING } else { p.state };
-            (
-                state,
-                store::verified_count(&p),
-                p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
-                complete.then(|| p.path.clone()),
-            )
-        },
-        // No receiver partial: it may be our own sent attachment, kept in `retention` by file id.
-        None => match fid.and_then(store::retention_get) {
+    let (transfer_state, transfer_have, transfer_total, local_path) = if private {
+        let ret=fid.and_then(|fid|crate::private_files::retention_tx(&core().db.messages().lock(),&conv,fid).ok().flatten());
+        let partial=fid.and_then(store::partial_get);
+        match ret {
             Some(ret) => {
-                let chunks = ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
-                let present = std::fs::metadata(&ret.path).is_ok();
-                (store::DONE, chunks, chunks, present.then_some(ret.path))
+                let done=fid.is_some_and(|file|crate::private_files::complete_tx(&core().db.messages().lock(),&conv,file).unwrap_or(false));
+                let total=ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
+                if let Some(p)=partial.filter(|p|p.path==ret.path) {
+                    let present=p.is_complete();
+                    (if p.state==store::DONE && !present {store::PENDING}else{p.state},store::verified_count(&p),total,None)
+                } else if done && std::path::Path::new(&ret.path).exists() {(store::DONE,total,total,None)}
+                else {(store::PENDING,0,total,None)}
             },
-            None => (store::PENDING, 0, 0, None),
-        },
+            None => (store::PENDING,0,0,None),
+        }
+    } else {
+        match fid.and_then(store::partial_get).filter(|p|!crate::private_files::is_private_path(&p.path).unwrap_or(true)) {
+            Some(p) => {
+                let complete=p.is_complete();
+                (if p.state==store::DONE && !complete {store::PENDING}else{p.state},store::verified_count(&p),
+                    p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,complete.then_some(p.path))
+            },
+            None => match fid.and_then(store::retention_get) {
+                Some(ret) => {let chunks=ret.size.div_ceil(ret.chunk_size.max(1) as u64) as u32;
+                    let present=std::path::Path::new(&ret.path).exists();
+                    (store::DONE,chunks,chunks,present.then_some(ret.path))},
+                None => (store::PENDING,0,0,None),
+            },
+        }
     };
     let sticker = r.sticker.as_deref().and_then(|b| {
         use common::proto::pack::Unpacker;
@@ -1088,26 +1133,25 @@ pub struct SharedMediaItem {
 #[uniffi::export]
 pub fn shared_media(conversation_id: Vec<u8>) -> Result<Vec<SharedMediaItem>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let result = (|| -> anyhow::Result<_> {
         let rows = {
             let db = core().db.messages().lock();
-            let mut query = db.prepare("SELECT mm.dispatch_id, mm.kind, mm.name, mm.mime, mm.size, m.timestamp, m.sender_ipk, m.outgoing
+            let mut query = db.prepare("SELECT mm.*, m.timestamp AS message_timestamp, m.sender_ipk AS message_sender, m.outgoing AS message_outgoing
                 FROM message_media mm JOIN messages m ON m.conversation_id=mm.conversation_id AND m.dispatch_id=mm.dispatch_id
                 WHERE m.conversation_id=?1 AND m.deleted=0 ORDER BY m.id DESC")?;
             query
                 .query_map([conv.as_slice()], |r| {
+                    let media = crate::data::media::MediaRow::from_row(r)?;
                     Ok((
                         SharedMediaItem {
                             sender_name: String::new(),
-                            dispatch_id: r.get(0)?,
-                            kind: r.get(1)?,
-                            name: r.get(2)?,
-                            mime: r.get(3)?,
-                            size: r.get(4)?,
-                            timestamp: r.get(5)?,
+                            dispatch_id: r.get("dispatch_id")?, kind: media.kind,
+                            name: media.name, mime: media.mime, size: media.size,
+                            timestamp: r.get("message_timestamp")?,
                         },
-                        r.get::<_, Option<[u8; 32]>>(6)?,
-                        r.get::<_, bool>(7)?,
+                        r.get::<_, Option<[u8; 32]>>("message_sender")?,
+                        r.get::<_, bool>("message_outgoing")?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -1126,4 +1170,46 @@ pub fn shared_media(conversation_id: Vec<u8>) -> Result<Vec<SharedMediaItem>, Co
             .collect::<Vec<_>>())
     })();
     result.map_err(Into::into)
+}
+
+/// A random-access plaintext view whose capability expires on every private-session lock.
+/// No decrypted temporary path or long-lived file key crosses the host boundary.
+#[derive(uniffi::Object)]
+pub struct PrivateMediaReader {
+    file: parking_lot::Mutex<crate::private_files::StorageFile>,
+    generation: u64,
+    conversation: [u8;16],
+}
+#[uniffi::export]
+impl PrivateMediaReader {
+    pub fn size(&self)->u64 { self.file.lock().len() }
+    pub fn read(&self,offset:u64,max_bytes:u32)->Result<Vec<u8>,CoreError> {
+        use std::io::{Read,Seek,SeekFrom};
+        if max_bytes>1024*1024 {return Err(anyhow::anyhow!("Read exceeds media window").into())}
+        let check=|| -> anyhow::Result<()> {
+            anyhow::ensure!(self.generation==core().private_generation.load(std::sync::atomic::Ordering::SeqCst),"Chat is locked");
+            crate::privacy::require_access(&self.conversation)
+        };
+        check()?;
+        let mut file=self.file.lock();file.seek(SeekFrom::Start(offset)).map_err(anyhow::Error::from)?;
+        let size=(file.len().saturating_sub(offset)).min(max_bytes as u64) as usize;
+        let mut bytes=vec![0;size];file.read_exact(&mut bytes).map_err(anyhow::Error::from)?;
+        check()?;Ok(bytes)
+    }
+}
+#[uniffi::export]
+pub fn open_private_media(conversation_id:Vec<u8>,file_id:Vec<u8>)->Result<Arc<PrivateMediaReader>,CoreError> {
+    let conv=fixed::<16>(&conversation_id,"conversation id")?;let file=fixed::<32>(&file_id,"file id")?;
+    let generation=core().private_generation.load(std::sync::atomic::Ordering::SeqCst);
+    crate::privacy::require_access(&conv)?;
+    if !crate::privacy::is_private(&conv) {return Err(anyhow::anyhow!("Chat is not hidden").into())}
+    let conn=core().db.messages().lock();
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM private_file_refs WHERE conversation_id=?1 AND file_id=?2)",(conv.as_slice(),file.as_slice()),|r|r.get::<_,bool>(0)).map_err(anyhow::Error::from)? {return Err(anyhow::anyhow!("Media is unavailable").into())}
+    crate::private_files::protect_tx(&conn,&conv,&file)?;
+    if !crate::private_files::complete_tx(&conn,&conv,&file)? {return Err(anyhow::anyhow!("Media is not downloaded").into())}
+    let ret=crate::private_files::retention_tx(&conn,&conv,&file)?.ok_or_else(||anyhow::anyhow!("Media is not downloaded"))?;
+    drop(conn);
+    let reader=crate::private_files::StorageFile::open(&ret.path,false)?;
+    if generation!=core().private_generation.load(std::sync::atomic::Ordering::SeqCst) {return Err(anyhow::anyhow!("Chat is locked").into())}
+    Ok(Arc::new(PrivateMediaReader{file:parking_lot::Mutex::new(reader),generation,conversation:conv}))
 }

@@ -56,7 +56,7 @@ pub(crate) struct ChunkRange {
 
 pub(crate) struct Receiver {
     db: &'static Stores,
-    file: File,
+    file: crate::private_files::StorageFile,
     manifest: wire::Manifest,
     partial: store::Partial,
     verified: Vec<u8>,
@@ -133,7 +133,7 @@ impl Receiver {
         check_cancelled()?;
         validate_manifest(&manifest, &file_id, offered_size)?;
         let previous = store::partial_get_tx(&db.transfers().lock(), &file_id);
-        let (path, saved_file_exists) = match previous.as_ref() {
+        let (mut path, mut saved_file_exists) = match previous.as_ref() {
             Some(p) => match std::fs::metadata(&p.path) {
                 Ok(_) => (p.path.clone(), true),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -143,6 +143,13 @@ impl Receiver {
             },
             None => (store::partial_path(db, &file_id), false),
         };
+        if let Some(private_path)=crate::private_files::download_path(db,&file_id,&manifest)? {
+            saved_file_exists = previous.as_ref().is_some_and(|p|p.path==private_path) && std::path::Path::new(&private_path).exists();
+            path=private_path;
+        }else if crate::state::owns_stores(db) && crate::private_files::is_private_path(&path)? {
+            // An ordinary offer cannot inherit another chat's private capability or its partial.
+            path=store::partial_path(db,&file_id);saved_file_exists=false;
+        }
         let chunks = manifest.chunks.len();
         let mut verified = vec![0; chunks.div_ceil(8)];
         // A fresh manifest does not vouch for old metadata of a different file or chunk geometry.
@@ -317,6 +324,7 @@ impl Receiver {
             &self.verified,
             lease,
         )?;
+        if crate::state::owns_stores(self.db) {crate::private_files::mark_complete(&self.partial.path)?;}
         self.partial.state = store::DONE;
         self.partial.updated_at = updated_at;
         Ok(())
@@ -433,6 +441,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_conversion_resumes_verified_ranges_and_lock_revokes_the_writer() {
+        let scope = crate::test_support::ScopedCore::new();
+        let conv = [73;16]; let did = [74;16]; let peer = [75;32];
+        scope.core.db.messages().lock().execute("INSERT INTO conversations(id) VALUES(?1)",[conv]).unwrap();
+        let bytes = (0..35).collect::<Vec<u8>>();
+        let manifest = manifest(&bytes, 8); let file = manifest.file_id();
+        let first = store::receiver_lease(scope.core, file);
+        let open = |lease: &store::ReceiverLease| Receiver::open_inner(&scope.core.db,file,peer,manifest.clone(),35,lease,None).unwrap();
+        let mut ordinary = open(&first);
+        ordinary.commit(0,&bytes[..8],&first).unwrap(); ordinary.commit(3,&bytes[24..32],&first).unwrap();
+        let old = store::partial_get(&file).unwrap().path;
+        let row = crate::data::media::MediaRow { kind: crate::data::media::KIND_ATTACHMENT, group_id: None,
+            mime: "application/octet-stream".into(), name: "private.bin".into(), size:35,
+            width:0,height:0,duration_ms:0,blob:None,thumb:None,file_id:Some(file.to_vec()),sticker:None,hd:None };
+        crate::data::media::save(&conv,&did,&row).unwrap();
+        crate::privacy::hide(&conv,"resume-code").unwrap();
+        assert!(first.cancel.is_cancelled()); assert!(!std::path::Path::new(&old).exists());
+        crate::privacy::unlock("resume-code").unwrap();
+        let second = store::receiver_lease(scope.core,file); let mut private = open(&second);
+        assert!(private.contains(0) && private.contains(3)); assert!(!private.contains(1));
+        private.commit(2,&bytes[16..24],&second).unwrap();
+        crate::api::privacy::lock_private_conversations();
+        assert!(private.commit(1,&bytes[8..16],&second).is_err());
+        crate::privacy::unlock("resume-code").unwrap();
+        let third = store::receiver_lease(scope.core,file); let mut resumed = open(&third);
+        assert!(resumed.contains(0) && resumed.contains(2) && resumed.contains(3));
+        resumed.commit(1,&bytes[8..16],&third).unwrap(); resumed.commit(4,&bytes[32..],&third).unwrap(); resumed.finish(&third).unwrap();
+        let host = crate::api::media::open_private_media(conv.to_vec(),file.to_vec()).unwrap();
+        assert_eq!(host.read(0,1024).unwrap(),bytes);
+        let ciphertext = std::fs::read(store::partial_get(&file).unwrap().path).unwrap();
+        assert!(!ciphertext.windows(bytes.len()).any(|chunk| chunk == bytes));
+    }
+
+    #[tokio::test]
     async fn reopening_rechecks_every_saved_chunk_and_refetches_only_what_fails() {
         let corrupt = |b: &mut Vec<u8>, at: usize| b[at] ^= 0xff;
         let keep = |_: &mut wire::Manifest| {};
@@ -516,7 +558,7 @@ mod tests {
         receiver.commit(0, f.chunk(0), &f.lease).unwrap();
         assert_eq!((receiver.prefix(), f.bitmap()), (1, Some(vec![0b101])), "a retry commits once");
 
-        receiver.file = File::open(&f.path).unwrap();
+        receiver.file = crate::private_files::StorageFile::plain(File::open(&f.path).unwrap()).unwrap();
         assert!(receiver.commit(1, f.chunk(1), &f.lease).unwrap_err().is::<std::io::Error>());
         assert!(!receiver.contains(1));
         assert_eq!(f.bitmap(), Some(vec![0b101]));

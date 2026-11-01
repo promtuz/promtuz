@@ -61,6 +61,7 @@ struct Suffixes {
     groups:   Vec<crate::data::group_picture::Backup>,
     receipts: crate::data::receipts::Backup,
     preparations: Vec<crate::data::media::PreparationBackup>,
+    private_history: Vec<crate::data::private_backup::History>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,8 +93,8 @@ fn backup_key(isk: &[u8; 32]) -> [u8; 32] {
 }
 
 fn encode(key: &[u8; 32], payload: &BackupPayload, suffixes: &Suffixes) -> Result<Vec<u8>> {
-    let Suffixes { stickers, avatar, groups, receipts, preparations } = suffixes;
-    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts, preparations))
+    let Suffixes { stickers, avatar, groups, receipts, preparations, private_history } = suffixes;
+    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts, preparations, private_history))
         .map_err(|e| anyhow!("encode: {e}"))?;
     let compressed = lz4_flex::compress_prepend_size(&plain);
     drop(plain);
@@ -148,6 +149,7 @@ fn split(plain: &[u8]) -> Result<(BackupPayload, Suffixes)> {
         groups:   next(&mut rest, "groups")?,
         receipts: next(&mut rest, "receipts")?,
         preparations: next(&mut rest, "media preparations")?,
+        private_history: next(&mut rest,"private history")?,
     };
     Ok((payload, suffixes))
 }
@@ -174,8 +176,13 @@ fn export_from(db: &Stores, key: &[u8; 32]) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("no identity"))?;
     let contacts = Contact::dump_all_tx(&db.contacts().lock())?;
     let conn = db.messages().lock();
-    let (conversations, members) = Conversation::dump_all_tx(&conn)?;
-    let (read_state, member_read) = crate::data::message::dump_read_state_tx(&conn)?;
+    let private = crate::privacy::ids_tx(&conn)?;
+    let (mut conversations, mut members) = Conversation::dump_all_tx(&conn)?;
+    conversations.retain(|r| !private.contains(&r.id));
+    members.retain(|r| !private.contains(&r.conversation_id));
+    let (mut read_state, mut member_read) = crate::data::message::dump_read_state_tx(&conn)?;
+    read_state.retain(|r| !private.contains(&r.conversation_id));
+    member_read.retain(|r| !private.contains(&r.conversation_id));
     let mut prefs = crate::data::app_prefs::dump_all_tx(&conn)?;
     // A restored device has no KeyPackage private keys, and a pre-backup refresh nonce
     // could ask peers for an already-consumed Welcome, so refresh state stays behind.
@@ -202,6 +209,7 @@ fn export_from(db: &Stores, key: &[u8; 32]) -> Result<Vec<u8>> {
         groups:   crate::data::group_picture::dump_tx(&conn)?,
         receipts: crate::data::receipts::dump_tx(&conn)?,
         preparations: crate::data::media::dump_preparations_tx(&conn)?,
+        private_history: crate::data::private_backup::dump(&conn)?,
     };
     drop(conn);
     encode(key, &payload, &suffixes)
@@ -254,6 +262,7 @@ fn import_into(
     };
     let mut conn = db.messages().lock();
     let tx = conn.transaction()?;
+    crate::data::private_backup::restore(&tx,&suffixes.private_history)?;
     // Conversations first: everything below hangs off them.
     let conversations =
         Conversation::import_rows_tx(&tx, &payload.conversations, &payload.members)?;
@@ -318,6 +327,30 @@ mod tests {
     use super::*;
     use crate::test_support::data::identity;
     use crate::test_support::data::stores;
+
+    #[tokio::test]
+    async fn private_history_roundtrip_preserves_the_code_boundary_even_when_exported_unlocked() {
+        let source=crate::test_support::ScopedCore::new();
+        identity(&source.core.db.identity().lock(),77);
+        let peer=[78u8;32];
+        Contact::save(peer,"Keep this contact".into()).unwrap();
+        let conv=Conversation::for_peer(&peer).unwrap();
+        Message::save_incoming(conv,peer,&[79;16],"code-only backup history",1,None).unwrap();
+        crate::privacy::hide(&conv,"backup passphrase").unwrap();
+        crate::privacy::unlock("backup passphrase").unwrap();
+        let key=[80u8;32];
+        let blob=export_from(&source.core.db,&key).unwrap();
+        let inner=unseal(&key,&blob).unwrap();
+        assert!(!inner.windows(b"code-only backup history".len()).any(|w|w==b"code-only backup history"));
+        let dest=crate::test_support::ScopedCore::new();
+        identity(&dest.core.db.identity().lock(),77);
+        import_into(&dest.core.db,&key,&blob,false).unwrap();
+        assert!(Contact::exists(&peer));
+        assert!(crate::api::messaging::get_messages(conv.to_vec(),100,"".into()).is_err());
+        assert!(crate::privacy::unlock("wrong code").unwrap().is_none());
+        crate::privacy::unlock("backup passphrase").unwrap();
+        assert_eq!(Message::get_messages(&conv,100,"")[0].content,"code-only backup history");
+    }
 
     #[tokio::test]
     async fn a_preparing_message_keeps_its_attempt_and_can_complete_after_backup_restore() {

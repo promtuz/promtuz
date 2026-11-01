@@ -488,6 +488,11 @@ impl Session {
         // After the drain, so a commit waiting in the queue is applied
         // before we ask a committer again or take its place.
         crate::groups::on_reconnect();
+        let private=core().private_sessions.read().keys().copied().collect::<Vec<_>>();
+        for conv in private { self.spawn(async move {
+            if let Err(error)=crate::mls::privacy::drain(conv).await {log::warn!("PRIVATE: buffered inbox remains pending: {error:#}");}
+        }); }
+
 
         self.spawn(crate::transfer::resume_incomplete_downloads());
         crate::data::receipts::schedule();

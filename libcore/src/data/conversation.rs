@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use common::utils::now_secs;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use ulid::Ulid;
 
 use crate::data::identity::Identity;
@@ -166,7 +166,17 @@ impl Conversation {
     /// A group backs at most one conversation, so binding evicts any stale pointer to it first.
     pub fn bind_group(id: &[u8; 16], group_id: &[u8; 32]) -> Result<()> {
         let conn = core().db.messages().lock();
-        Self::bind_group_tx(&conn, id, group_id)
+        Self::bind_group_tx(&conn, id, group_id)?;
+        let private:Option<(Vec<u8>,Vec<u8>,Vec<u8>)>=conn.query_row(
+            "SELECT public_key,salt,wrapped_key FROM private_conversations WHERE conversation_id=?1",[id],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        drop(conn);
+        // New/recovered direct sessions must be protected before the caller can send any
+        // application payload. No messages mutex is held while opening the MLS connection.
+        if let Some((public,salt,wrapped))=private {
+            crate::mls::privacy::install(group_id,id,&public,&salt,&wrapped)?;
+        }
+        Ok(())
     }
 
     pub fn bind_group_tx(conn: &Connection, id: &[u8; 16], group_id: &[u8; 32]) -> Result<()> {
@@ -471,9 +481,16 @@ impl Conversation {
             |r| r.get(0),
         )?);
 
+        orphaned.extend(crate::db::all(
+            conn,
+            "SELECT DISTINCT file_id FROM private_file_refs WHERE conversation_id=?1",
+            [id.as_slice()], |r| r.get(0),
+        )?);
+
         for table in [
             "messages",
             "reactions",
+            "private_reactions",
             "read_state",
             "member_read_state",
             "message_media",
@@ -489,6 +506,10 @@ impl Conversation {
     }
 
     pub fn delete(id: &[u8; 16]) -> Result<()> {
+        if crate::privacy::is_private(id) {
+            crate::api::privacy::reset_private_conversation(id.to_vec())
+                .map_err(|error| anyhow::anyhow!("private history deletion failed: {error}"))?;
+        }
         let gid = Self::group_of(id);
         let _operation = gid.as_ref().map(|g| crate::mls::recovery::operation_lock(g).lock());
         let clear = crate::groups::recovery::clear_marker(id)?;

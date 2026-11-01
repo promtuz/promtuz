@@ -160,6 +160,7 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     let (kp, kp_ref_used) = fetch_verified_keypackage(ctx, to, false).await?;
 
     let group_id = mint_group_id(our_ipk);
+    crate::mls::privacy::prepare_outgoing_direct(ctx.provider, to, &group_id)?;
 
     let (leaf_kp, cwk) =
         build_self_credential(ipk_signer).map_err(|e| anyhow!("build credential: {e}"))?;
@@ -193,13 +194,20 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
 
     // On failure roll back the group, or we would keep a group the peer never got a Welcome for
     // and every later send would encrypt to a group of one.
+    // Only persisted, code-protected state crosses the network await. A lock must not leave
+    // an in-memory group ratchet parked inside a suspended delivery future.
+    drop(group);
     if let Err(e) = ctx.dht.deliver_welcome(&env).await {
-        if let Err(de) = group.delete(ctx.provider) {
+        if let Ok(Some(mut group)) = MlsGroupHandle::load(ctx.provider, &group_id)
+            && let Err(de) = group.delete(ctx.provider) {
             warn!("MLS: welcome-delivery rollback of group state failed: {de}");
         }
         return Err(anyhow!("deliver_welcome: {e}"));
     }
 
+    let mut group = MlsGroupHandle::load(ctx.provider, &group_id)
+        .map_err(|e| anyhow!("reload group: {e}"))?
+        .ok_or_else(|| anyhow!("group disappeared during Welcome delivery"))?;
     group.merge_pending_commit(ctx.provider).map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
 
     Ok(group)
@@ -210,6 +218,7 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
 pub(super) async fn group_for_conversation<C: DhtClient>(
     ctx: &MlsContext<'_, C>, conversation: &[u8; 16], our_ipk: &[u8; 32], ipk_signer: &SigningKey,
 ) -> Result<MlsGroupHandle> {
+    crate::privacy::require_access(conversation)?;
     ensure!(!crate::requests::is_request_chat(conversation), "Accept the request first");
     let lock = group_create_lock(conversation);
     let _guard = lock.lock().await;

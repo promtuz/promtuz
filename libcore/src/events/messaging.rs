@@ -38,6 +38,11 @@ pub enum MessageEv {
 
 impl Emittable for MessageEv {
     fn emit(self) {
+        let conversation=match &self {
+            Self::Received {conversation,..}|Self::Sent {conversation,..}|Self::Failed {conversation,..}|Self::Edited {conversation,..}|Self::Deleted {conversation,..}=>conversation,
+        };
+        if crate::privacy::require_access(conversation).is_err() { return; }
+
         if let Some(events) = crate::state::core().events.get() {
             events.on_message(self.into());
         }
@@ -87,6 +92,7 @@ pub struct ReactionEv {
 
 impl Emittable for ReactionEv {
     fn emit(self) {
+        if crate::privacy::require_access(&self.conversation).is_err() { return; }
         if let Some(events) = crate::state::core().events.get() {
             events.on_reaction(self.conversation.to_vec(), self.dispatch_id.to_vec(), self.reactor.to_vec(), self.emoji, self.add);
         }

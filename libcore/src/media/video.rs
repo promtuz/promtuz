@@ -62,6 +62,7 @@ pub struct VideoEncodingPlan {
 /// only its exact candidate file.
 pub struct PreparedVideo {
     path: Option<PathBuf>,
+    _anonymous: super::import::AnonymousFile,
     pub width: u32,
     pub height: u32,
     pub duration_ms: u32,
@@ -134,16 +135,12 @@ impl PreparedVideo {
     pub(crate) fn path(&self) -> &std::path::Path {
         self.path.as_deref().expect("prepared video already staged")
     }
-
-    pub(crate) fn release_path(&mut self) {
-        self.path.take();
-    }
 }
 
 impl Drop for PreparedVideo {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(path);
+            let _ = path;
         }
     }
 }
@@ -204,7 +201,9 @@ pub(crate) fn prepare_video(
 
     for plan in plans(&input)? {
         cancellation.check()?;
-        let output = reserve_candidate(import_directory)?;
+        let _=import_directory;
+        let anonymous=super::import::AnonymousFile::new()?;
+        let output=anonymous.path().to_owned();
         let result = (|| {
             let report = source.render_video(VideoRenderRequest {
                 plan: plan.clone(),
@@ -218,7 +217,7 @@ pub(crate) fn prepare_video(
                 &plan,
                 report.audio_removed,
             )?;
-            let size = std::fs::metadata(&output)?.len();
+            let size = anonymous.size()?;
             ensure!(
                 size > 0 && size <= VIDEO.max_bytes,
                 "The compressed video exceeds the send limit."
@@ -236,6 +235,7 @@ pub(crate) fn prepare_video(
             }
             Ok(PreparedVideo {
                 path: Some(output.clone()),
+                _anonymous:anonymous,
                 width: report.output.display_width.round() as u32,
                 height: report.output.display_height.round() as u32,
                 duration_ms: (report.output.duration_us / 1_000).min(u64::from(u32::MAX)) as u32,
@@ -254,7 +254,7 @@ pub(crate) fn prepare_video(
                 return Ok(video);
             },
             Err(error) => {
-                let _ = std::fs::remove_file(&output);
+                let _ = &output;
                 last_error = Some(error);
             },
         }
@@ -274,19 +274,6 @@ fn trim_range(duration_us: u64, trim: Option<TimeRange>) -> Result<(u64, u64)> {
         .ok_or_else(|| anyhow::anyhow!("The selected trim is invalid."))?;
     ensure!(start_us < end_us && end_us <= duration_us, "The selected trim is outside this video.");
     Ok((start_us, end_us))
-}
-
-fn reserve_candidate(directory: &std::path::Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(directory)?;
-    for _ in 0..4 {
-        let path = directory.join(format!("{}.mp4", uuid::Uuid::now_v7()));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    bail!("Could not reserve a private video output.")
 }
 
 fn fit(width: f64, height: f64, max_long_edge: u32, max_short_edge: u32) -> (u32, u32) {
@@ -611,7 +598,8 @@ mod tests {
             })).unwrap();
             let video = prepare_video(&mut source, directory.path(), None, &MediaCancellation::default()).unwrap();
             assert_eq!(*renders.lock().unwrap(), 2);
-            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+            assert_eq!(std::fs::read(video.path()).unwrap(), vec![7;64]);
             assert_eq!(video.poster.width, 1);
             assert_eq!(video.duration_ms, 10_000);
             drop(video);

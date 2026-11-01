@@ -166,6 +166,20 @@ const MIGRATION_ARRAY: &[M] = &[
             WHERE group_id <> X'' GROUP BY group_id;
     "#,
     ),
+    M::up(r#"
+        CREATE TABLE mls_private_conversations (
+            group_id BLOB PRIMARY KEY CHECK(length(group_id)=32),
+            storage_key BLOB NOT NULL UNIQUE,
+            conversation_id BLOB NOT NULL CHECK(length(conversation_id)=16),
+            public_key BLOB NOT NULL, salt BLOB NOT NULL, wrapped_key BLOB NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE mls_private_inbox (
+            group_id BLOB NOT NULL, sender BLOB NOT NULL, dispatch_id BLOB NOT NULL,
+            accepted_at_ms INTEGER NOT NULL, envelope BLOB NOT NULL,
+            UNIQUE(group_id,sender,dispatch_id)
+        );
+    "#),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

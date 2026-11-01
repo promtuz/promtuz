@@ -27,6 +27,9 @@ use crate::quic::dialer::ClientConfigs;
 use crate::quic::server::Session;
 
 pub struct Core {
+    pub(crate) private_configuration: Mutex<()>,
+    pub(crate) private_generation: AtomicU64,
+    pub(crate) private_sessions: parking_lot::RwLock<std::collections::HashMap<[u8; 16], zeroize::Zeroizing<Vec<u8>>>>,
     pub db: Stores,
     /// The runtime every core task runs on.
     pub runtime: Handle,
@@ -114,6 +117,9 @@ impl Core {
             groups: Default::default(),
             messaging: Default::default(),
             receipts: Default::default(),
+            private_sessions: Default::default(),
+            private_generation: AtomicU64::new(0),
+            private_configuration: Mutex::new(()),
         }
     }
 
@@ -199,6 +205,12 @@ thread_local! {
 }
 
 /// The process's core. The FFI reaches it before `init`, so it is built on first use.
+/// Storage-only fixtures are intentionally independent of the process singleton.
+pub(crate) fn owns_stores(db:&crate::db::Stores)->bool {
+    #[cfg(test)] {SCOPED.get().is_some_and(|c|std::ptr::eq(db,&c.db))}
+    #[cfg(not(test))] {std::ptr::eq(db,&core().db)}
+}
+
 pub fn core() -> &'static Core {
     #[cfg(test)]
     if let Some(core) = SCOPED.get() {

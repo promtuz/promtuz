@@ -68,7 +68,7 @@ struct StoredFrame {
 
 enum Storage {
     Memory(Vec<Frame>),
-    Spool { file: tempfile::NamedTempFile, frames: Vec<StoredFrame> },
+    Spool { file: crate::private_files::Scratch, frames: Vec<StoredFrame> },
 }
 
 pub struct FrameStore {
@@ -137,7 +137,7 @@ impl FrameStore {
         else {
             unreachable!();
         };
-        let mut file = tempfile::NamedTempFile::new()?;
+        let mut file = crate::private_files::Scratch::new(self.byte_limit)?;
         let mut stored = Vec::with_capacity(frames.len() + 1);
         for frame in frames.into_iter().chain(std::iter::once(next)) {
             let offset = file.as_file_mut().stream_position()?;
@@ -151,7 +151,7 @@ impl FrameStore {
     }
 }
 
-fn write_frame(writer: &mut std::fs::File, frame: &Frame) -> Result<()> {
+fn write_frame(writer: &mut impl Write, frame: &Frame) -> Result<()> {
     writer.write_all(&frame.width.to_le_bytes())?;
     writer.write_all(&frame.height.to_le_bytes())?;
     writer.write_all(&[frame.format.tag()])?;
@@ -161,7 +161,7 @@ fn write_frame(writer: &mut std::fs::File, frame: &Frame) -> Result<()> {
     Ok(())
 }
 
-fn read_frame(reader: &mut std::fs::File) -> Result<Frame> {
+fn read_frame(reader: &mut impl Read) -> Result<Frame> {
     let mut width = [0; 4];
     let mut height = [0; 4];
     let mut format = [0; 1];

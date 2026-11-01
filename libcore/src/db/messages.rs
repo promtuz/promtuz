@@ -49,7 +49,27 @@ pub const SYSTEM_ROLE: u8 = 6;
 /// being `add`, `edit`, `send` or `appoint`.
 pub const SYSTEM_RULES: u8 = 7;
 
-from_row!(MessageRow { id, conversation_id, sender_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted, reply_to, system });
+impl MessageRow {
+    pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let conversation_id = row.get("conversation_id")?;
+        let stored: String = row.get("content")?;
+        let encrypted: bool = row.get("content_private")?;
+        let deleted: bool = row.get("deleted")?;
+        let content = if encrypted && !(deleted && stored.is_empty()) {
+            match crate::privacy::open_content(&conversation_id, &stored) {
+                Ok(content) => content,
+                Err(error) if crate::state::core().private_sessions.read().contains_key(&conversation_id) => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(0,rusqlite::types::Type::Text,error.into()));
+                }
+                Err(_) => String::new(),
+            }
+        } else { stored };
+        Ok(Self { id: row.get("id")?, conversation_id, sender_ipk: row.get("sender_ipk")?, content,
+            outgoing: row.get("outgoing")?, timestamp: row.get("timestamp")?, status: row.get("status")?,
+            dispatch_id: row.get("dispatch_id")?, edited: row.get("edited")?, deleted: row.get("deleted")?,
+            reply_to: row.get("reply_to")?, system: row.get("system")? })
+    }
+}
 
 /// `dispatch_id` names the message and `reactor` the IPK that reacted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +610,33 @@ const MIGRATION_ARRAY: &[M] = &[
             SELECT count(*) FROM message_media_preparations;
         DROP TABLE media_preparations_rollback_guard;
         DROP TABLE message_media_preparations;"),
+    M::up("ALTER TABLE messages ADD COLUMN content_private INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE private_conversations (
+        conversation_id BLOB PRIMARY KEY CHECK(length(conversation_id)=16),
+        salt BLOB NOT NULL, public_key BLOB NOT NULL, wrapped_key BLOB NOT NULL
+    );
+    CREATE TABLE private_reactions (id INTEGER PRIMARY KEY, conversation_id BLOB NOT NULL, operation BLOB NOT NULL);
+    CREATE TRIGGER message_private_insert AFTER INSERT ON messages BEGIN
+        UPDATE messages SET content_private=EXISTS(SELECT 1 FROM private_conversations WHERE conversation_id=NEW.conversation_id) WHERE id=NEW.id;
+    END;
+    CREATE TRIGGER message_private_update AFTER UPDATE OF content ON messages BEGIN
+        UPDATE messages SET content_private=EXISTS(SELECT 1 FROM private_conversations WHERE conversation_id=NEW.conversation_id) WHERE id=NEW.id;
+    END;").down("CREATE TEMP TABLE private_rollback_guard (n INTEGER CHECK(n=0));
+        INSERT INTO private_rollback_guard SELECT count(*) FROM private_conversations;
+        DROP TABLE private_rollback_guard; DROP TRIGGER message_private_insert; DROP TRIGGER message_private_update; DROP TABLE private_reactions; DROP TABLE private_conversations; ALTER TABLE messages DROP COLUMN content_private;"),
+    M::up("CREATE TABLE private_files (
+        conversation_id BLOB NOT NULL CHECK(length(conversation_id)=16),
+        file_id BLOB NOT NULL CHECK(length(file_id)=32),
+        path TEXT NOT NULL UNIQUE, details BLOB NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(conversation_id,file_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE private_file_refs (
+        conversation_id BLOB NOT NULL, dispatch_id BLOB NOT NULL, file_id BLOB NOT NULL,
+        PRIMARY KEY(conversation_id,dispatch_id,file_id),
+        FOREIGN KEY(conversation_id,dispatch_id) REFERENCES message_media(conversation_id,dispatch_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;").down("CREATE TEMP TABLE private_files_rollback_guard (n INTEGER CHECK(n=0));
+        INSERT INTO private_files_rollback_guard SELECT count(*) FROM private_files;
+        DROP TABLE private_files_rollback_guard; DROP TABLE private_file_refs; DROP TABLE private_files;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -631,7 +678,7 @@ mod tests {
 
     #[test]
     fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
-        let previous = MIGRATION_ARRAY.len() - 1;
+        let previous = MIGRATION_ARRAY.len() - 2;
         let mut conn = migrate_from(previous, |conn| {
             conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
                 timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",

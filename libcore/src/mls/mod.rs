@@ -6,6 +6,7 @@ pub mod epoch_catchup;
 pub mod group;
 pub mod keypackage;
 pub mod policy;
+pub(crate) mod privacy;
 pub mod provider;
 pub(crate) mod recovery;
 pub mod scheduler;

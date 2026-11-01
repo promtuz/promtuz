@@ -108,6 +108,12 @@ impl Stores {
         self.mls.get_or_init(|| Arc::new(self.connect("mls", mls::migrate, &[]))).clone()
     }
 
+    /// Standalone providers used by tooling/tests must not consult an unrelated app's privacy
+    /// registry. Check identity without opening any database as a side effect.
+    pub(crate) fn owns_mls_connection(&self, connection: &Arc<Mutex<Connection>>) -> bool {
+        self.mls.get().is_some_and(|own| Arc::ptr_eq(own, connection))
+    }
+
     fn connect(
         &self, name: &str, migrate: fn(&mut Connection), watched: &[&str],
     ) -> Mutex<Connection> {
@@ -152,6 +158,8 @@ fn fatal(what: &str) -> ! {
 fn prepare(conn: &mut Connection, migrations: &Migrations) {
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    conn.pragma_update(None, "secure_delete", "ON").unwrap();
+    conn.pragma_update(None, "temp_store", "MEMORY").unwrap();
     if cfg!(target_os = "android") {
         conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
         conn.pragma_update(None, "temp_store", "MEMORY").unwrap();

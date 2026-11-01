@@ -282,7 +282,9 @@ pub(super) fn process_welcome_inbound<C: DhtClient>(
     let mut group = match accepted {
         Ok(g) => g,
         Err(e) => {
-            warn!("MLS: welcome accept failed from {}: {e}", hex::encode(&sender_ipk[..4]));
+            let error = anyhow::Error::from(e);
+            if crate::utils::is_storage_error(&error) { return Err(error); }
+            warn!("MLS: welcome accept failed from {}: {error}", hex::encode(&sender_ipk[..4]));
             return refuse();
         },
     };

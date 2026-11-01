@@ -250,7 +250,7 @@ impl MlsGroupHandle {
         &mut self, provider: &PromtuzMlsProvider, message: ProtocolMessage,
     ) -> Result<ProcessedInbound> {
         let processed = provider.storage().atomic(|| {
-            self.inner.process_message(provider, message).map_err(MlsGroupError::from_openmls)
+            self.inner.process_message(provider, message).map_err(MlsGroupError::from_process_message)
         })?;
         // The author is whoever the authenticated leaf's credential names, not the envelope
         // sender, who in a group is routinely someone else. A leaf that proves nothing is refused.
@@ -515,7 +515,7 @@ impl MlsGroupHandle {
         &mut self, provider: &PromtuzMlsProvider, staged: StagedCommit,
     ) -> Result<()> {
         provider.storage().atomic(|| {
-            self.inner.merge_staged_commit(provider, staged).map_err(MlsGroupError::from_openmls)
+            self.inner.merge_staged_commit(provider, staged).map_err(MlsGroupError::from_merge_commit)
         })
     }
 
@@ -531,7 +531,7 @@ impl MlsGroupHandle {
 
     pub fn merge_pending_commit(&mut self, provider: &PromtuzMlsProvider) -> Result<()> {
         provider.storage().atomic(|| {
-            self.inner.merge_pending_commit(provider).map_err(MlsGroupError::from_openmls)
+            self.inner.merge_pending_commit(provider).map_err(MlsGroupError::from_merge_pending)
         })
     }
 

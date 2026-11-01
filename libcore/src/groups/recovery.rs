@@ -495,7 +495,8 @@ fn deliver_with(
                 author:         r.get(0)?,
                 id:             r.get(1)?,
                 accepted_at_ms: r.get(2)?,
-                payload:        r.get(3)?,
+                payload:        crate::mls::privacy::open_payload(conn, &gid, &r.get::<_,Vec<u8>>(3)?)
+                    .map_err(|_|rusqlite::Error::InvalidQuery)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -695,6 +696,7 @@ fn restore_requests(
             .collect::<Vec<_>>()
     };
     for (branch, bytes) in lost {
+        let bytes = provider.storage().with_conn(|conn| crate::mls::privacy::open_payload(conn,&gid,&bytes))?;
         let signed: common::proto::mls_wire::SignedChange = postcard::from_bytes(&bytes)?;
         if signed.by.0 == *me
             && !matches!(

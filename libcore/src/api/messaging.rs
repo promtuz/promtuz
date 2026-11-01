@@ -149,6 +149,7 @@ pub fn send_message(
     conversation_id: Vec<u8>, content: String, reply_to: Option<Vec<u8>>,
 ) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let reply = reply_to.as_deref().map(|b| fixed::<16>(b, "dispatch_id")).transpose()?;
     let msg = Message::save_outgoing(conv, &content, reply)?;
     core().spawn(async move {
@@ -170,6 +171,7 @@ pub fn edit_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, content: String,
 ) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
     let body = crate::messaging::text_edit_body(&conv, &target, content)?;
     let applied = crate::messaging::body::apply_revise_body(&conv, &target, body.clone(), true, None)?;
@@ -193,6 +195,7 @@ pub fn edit_message(
 #[uniffi::export]
 pub fn set_activity(conversation_id: Vec<u8>, activity: u16) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     core().spawn(async move {
         let session = core().session();
         if let Err(e) = crate::presence::set_activity(session.as_deref(), conv, activity).await {
@@ -208,6 +211,7 @@ pub fn react_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, emoji: String, add: bool,
 ) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
     core().spawn(async move {
         if let Err(e) = crate::messaging::react(conv, target, emoji, add).await {
@@ -221,6 +225,7 @@ pub fn react_message(
 #[uniffi::export]
 pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let me = crate::data::identity::Identity::local_ipk();
     Ok(crate::data::reaction::Reaction::for_conversation(&conv)
         .into_iter()
@@ -239,6 +244,7 @@ pub fn reactions_for(conversation_id: Vec<u8>) -> Result<Vec<ReactionRecord>, Co
 #[uniffi::export]
 pub fn mark_read(conversation_id: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     crate::data::receipts::read(&conv, &fixed::<16>(&upto_dispatch_id, "dispatch_id")?)?;
     crate::data::receipts::schedule();
     Ok(())
@@ -247,6 +253,7 @@ pub fn mark_read(conversation_id: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<
 #[uniffi::export]
 pub fn mark_conversation_read(conversation_id: Vec<u8>) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     if let Some(upto) = Message::newest_incoming_dispatch(&conv) {
         crate::data::receipts::read(&conv, &upto)?;
         crate::data::receipts::schedule();
@@ -263,6 +270,7 @@ pub fn message_receipt_info(
         .map(|id| fixed::<16>(id, "dispatch_id"))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     Ok(crate::data::receipts::info_many(&conv, &ids)?)
 }
 
@@ -356,6 +364,7 @@ pub fn delete_message(
     conversation_id: Vec<u8>, dispatch_id: Vec<u8>, for_everyone: bool,
 ) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
     core().spawn(async move {
         if let Err(e) = crate::messaging::delete(conv, target, for_everyone).await {
@@ -378,6 +387,7 @@ pub fn search_messages(
     conversation_id: Vec<u8>, query: String, limit: u32,
 ) -> Result<Vec<SearchHit>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     Ok(Message::search(&conv, &query, limit)
         .into_iter()
         .map(|(did, newer)| SearchHit { dispatch_id: did.to_vec(), newer })
@@ -398,6 +408,7 @@ pub fn message_at_time(
     conversation_id: Vec<u8>, timestamp: u64,
 ) -> Result<Option<MessagePosition>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     Ok(Message::position_at_time(&conv, timestamp)?.map(|(id, dispatch_id, newer)| MessagePosition { id, dispatch_id, newer }))
 }
 
@@ -408,8 +419,9 @@ pub fn get_messages(
     conversation_id: Vec<u8>, limit: u32, before_id: String,
 ) -> Result<Vec<MessageRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let mut rows: Vec<MessageRecord> =
-        Message::get_messages(&conv, limit, &before_id).into_iter().map(Into::into).collect();
+        Message::get_messages_tx(&core().db.messages().lock(), &conv, limit, &before_id).map_err(anyhow::Error::from)?.into_iter().map(Into::into).collect();
     mark_albums(&conv, &mut rows);
     Ok(rows)
 }
@@ -448,7 +460,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
 pub fn list_conversations() -> Vec<ConversationRecord> {
     Conversation::list()
         .into_iter()
-        .filter(|c| !crate::groups::delete_pending(&c.id))
+        .filter(|c| !crate::groups::delete_pending(&c.id) && !crate::privacy::is_private(&c.id))
         .map(conversation_record)
         .collect()
 }
@@ -523,6 +535,7 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
 #[uniffi::export]
 pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let Some(row) = Conversation::get(&conv) else { return Ok(()) };
     if crate::groups::is_leaving(&conv) {
         crate::groups::delete_after_leave(&conv)?;
@@ -592,6 +605,7 @@ pub fn recent_incoming(
     conversation_id: Vec<u8>, limit: u32,
 ) -> Result<Vec<MessageRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    if crate::privacy::is_private(&conv) { return Ok(Vec::new()) }
     Ok(Message::recent_incoming(&conv, limit).into_iter().map(with_media_kind).collect())
 }
 
@@ -605,6 +619,7 @@ pub fn conversation_with(peer_ipk: Vec<u8>) -> Result<Vec<u8>, CoreError> {
 #[uniffi::export]
 pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    if crate::privacy::require_access(&conv).is_err() { return Ok(None) }
     Ok(Conversation::get(&conv).map(conversation_record))
 }
 
@@ -613,6 +628,7 @@ pub fn get_conversation(conversation_id: Vec<u8>) -> Result<Option<ConversationR
 #[uniffi::export]
 pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord>, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let me = crate::data::identity::Identity::local_ipk();
     Ok(Conversation::members(&conv)
         .into_iter()
@@ -635,6 +651,7 @@ pub fn conversation_members(conversation_id: Vec<u8>) -> Result<Vec<MemberRecord
 #[uniffi::export]
 pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let is_group =
         Conversation::get(&conv).is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
     let me = crate::data::identity::Identity::local_ipk().unwrap_or_default();
@@ -816,6 +833,7 @@ pub async fn add_group_members(
     conversation_id: Vec<u8>, members: Vec<Vec<u8>>,
 ) -> Result<bool, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let who = members.iter().map(|m| fixed::<32>(m, "ipk")).collect::<Result<Vec<_>, _>>()?;
     on_runtime(crate::groups::add_members(conv, who)).await
 }
@@ -826,6 +844,7 @@ pub async fn remove_group_member(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>,
 ) -> Result<bool, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let who = fixed::<32>(&member_ipk, "ipk")?;
     on_runtime(crate::groups::remove_member(conv, who)).await
 }
@@ -836,6 +855,7 @@ pub async fn set_group_role(
     conversation_id: Vec<u8>, member_ipk: Vec<u8>, role: u8,
 ) -> Result<bool, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let who = fixed::<32>(&member_ipk, "ipk")?;
     on_runtime(crate::groups::set_role(conv, who, role)).await
 }
@@ -845,6 +865,7 @@ pub async fn set_group_rules(
     conversation_id: Vec<u8>, rules: GroupRulesRecord,
 ) -> Result<bool, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     let rules = common::proto::mls_wire::GroupRules {
         members_add:    rules.members_add,
         members_edit:   rules.members_edit,
@@ -858,5 +879,6 @@ pub async fn set_group_rules(
 #[uniffi::export]
 pub async fn leave_group(conversation_id: Vec<u8>) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
     on_runtime(crate::groups::leave(conv)).await
 }

@@ -37,6 +37,7 @@ pub struct Staged {
     pub thumb:   Option<Vec<u8>>,
     pub file_id: Option<[u8; 32]>,
     pub error:   Option<String>,
+    privacy: Option<([u8;16],u64)>,
 }
 
 impl Staged {
@@ -148,12 +149,13 @@ fn blank(kind: u8) -> Staged {
         thumb: None,
         file_id: None,
         error: None,
+        privacy:None,
     }
 }
 
 /// A media job has already normalized and validated this fresh AVIF. Staging
 /// only takes ownership; it never reinterprets an original container.
-pub fn stage_prepared_image(image: crate::media::image::PreparedImage) -> u64 {
+pub fn stage_prepared_image(image: crate::media::image::PreparedImage, binding: Option<([u8;16],u64)>) -> Result<u64> {
     let mut staged = blank(KIND_IMAGE);
     staged.mime = "image/avif".into();
     staged.size = image.bytes.len() as u64;
@@ -161,23 +163,20 @@ pub fn stage_prepared_image(image: crate::media::image::PreparedImage) -> u64 {
     staged.height = image.height;
     staged.blob = Some(image.bytes);
     staged.state = READY;
-    insert(staged)
+    insert_bound(staged, binding)
 }
 
-/// Transfers a validated private MP4 and its already encoded AVIF poster. No
-/// original metadata or source pixels reach the attachment store.
-pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo) -> Result<u64> {
-    let id = stage_attachment_with_thumb(
-        video.path().to_string_lossy().into_owned(),
-        "video.mp4".into(),
-        "video/mp4".into(),
-        video.poster.bytes.clone(),
-        video.width,
-        video.height,
-        video.duration_ms,
-    )?;
-    video.release_path();
-    Ok(id)
+/// Consume the anonymous codec output before its file descriptor is released.
+pub fn stage_prepared_video(video: &mut crate::media::video::PreparedVideo, binding: Option<([u8;16],u64)>) -> Result<u64> {
+    let size = std::fs::metadata(video.path())?.len();
+    let (path, manifest) = crate::private_files::stage_reader(&mut std::fs::File::open(video.path())?, size)?;
+    let mut staged = blank(KIND_ATTACHMENT);
+    staged.mime = "video/mp4".into(); staged.name = "video.mp4".into(); staged.size = size;
+    staged.width = video.width; staged.height = video.height;
+    staged.duration_ms = video.duration_ms;
+    staged.thumb = Some(video.poster.bytes.clone()); staged.file_id = Some(manifest.file_id());
+    staged.state = READY;
+    retain_staged(staged, path, manifest, binding)
 }
 
 pub fn stage_raw_attachment(source_path: String, name: String, mime: String) -> Result<u64> {
@@ -236,6 +235,76 @@ fn hold(id: u64, file_id: [u8; 32]) {
     }
 }
 
+fn insert_bound(staged: Staged, binding: Option<([u8;16],u64)>) -> Result<u64> {
+    let id = insert_bound_inner(staged,binding)?;
+    ring();
+    Ok(id)
+}
+
+fn insert_bound_inner(mut staged: Staged, binding: Option<([u8;16],u64)>) -> Result<u64> {
+    // Hold the session read guard through publication. Locking either sees a bound item and
+    // discards it, or wins first and prevents publication entirely.
+    let sessions = core().private_sessions.read();
+    if let Some((conv, generation)) = binding {
+        anyhow::ensure!(generation == core().private_generation.load(Ordering::SeqCst)
+            && sessions.contains_key(&conv), "Chat is locked");
+    }
+    staged.privacy = binding;
+    let id = staged.id;
+    core().staging.items.lock().insert(id, staged);
+    drop(sessions);
+    Ok(id)
+}
+
+fn retain_staged(staged: Staged, path: String, manifest: crate::transfer::wire::Manifest, binding: Option<([u8;16],u64)>) -> Result<u64> {
+    let file = manifest.file_id();
+    let expires = common::utils::now_secs() + 7 * 24 * 3600;
+    // The messages lock serializes composer ownership with deletion and storage collection.
+    let messages = core().db.messages().lock();
+    let id = match insert_bound_inner(staged, binding) {
+        Ok(id) => id,
+        Err(error) => { crate::private_files::remove_temporary(&path); return Err(error) }
+    };
+    let result = (|| -> Result<()> {
+        let transfers = core().db.transfers().lock();
+        if let Some(old) = crate::transfer::store::retention_get_tx(&transfers, &file) {
+            crate::transfer::store::retention_put_tx(&transfers, &file, &old.path, old.size,
+                old.chunk_size, &old.manifest, old.expires_at.max(expires))?;
+            crate::private_files::remove_temporary(&path);
+        } else {
+            crate::transfer::store::retention_put_tx(&transfers, &file, &path, manifest.total_size,
+                manifest.chunk_size, &postcard::to_allocvec(&manifest)?, expires)?;
+        }
+        Ok(())
+    })();
+    drop(messages);
+    ring();
+    if let Err(error) = result { discard(id); crate::private_files::remove_temporary(&path); return Err(error) }
+    Ok(id)
+}
+
+pub(crate) fn lock_private() {
+    let ids=core().staging.items.lock().values().filter(|s|s.privacy.is_some()).map(|s|s.id).collect::<Vec<_>>();
+    for id in ids {discard(id);}
+}
+
+pub(crate) fn stage_source_attachment(mut source:crate::media::ports::SourceLease,name:String,mime:String,binding:Option<([u8;16],u64)>)->Result<u64> {
+    use std::io::{self,Read};
+    let size=source.attachment_size()?;
+    struct Reader<'a>{source:&'a mut crate::media::ports::SourceLease,offset:u64}
+    impl Read for Reader<'_> {
+        fn read(&mut self,out:&mut[u8])->io::Result<usize> {
+            if out.is_empty(){return Ok(0)}
+            let bytes=self.source.read_chunk(self.offset,out.len().min(256*1024) as u32).map_err(io::Error::other)?;
+            out[..bytes.len()].copy_from_slice(&bytes);self.offset+=bytes.len() as u64;Ok(bytes.len())
+        }
+    }
+    let (path,manifest)=crate::private_files::stage_reader(&mut Reader{source:&mut source,offset:0},size)?;
+    let file=manifest.file_id();let mut staged=blank(KIND_ATTACHMENT);
+    staged.mime=mime;staged.name=name;staged.size=size;staged.state=READY;staged.file_id=Some(file);
+    retain_staged(staged,path,manifest,binding)
+}
+
 /// Items leave the buffer as they commit, so a partial failure does not re-send what already went.
 /// The caption rides the first item and `reply_to` rides all of them.
 pub async fn commit(
@@ -254,6 +323,13 @@ pub async fn commit(
         bail!("staged item {} is not ready ({})", s.id, s.error.as_deref().unwrap_or("preparing"));
     }
 
+    crate::privacy::require_access(&conversation)?;
+    for item in &staged {
+        if let Some((conv,generation))=item.privacy {
+            anyhow::ensure!(conv==conversation,"This media belongs to another chat");
+            anyhow::ensure!(generation==core().private_generation.load(Ordering::SeqCst),"Chat is locked");
+        }
+    }
     // A lone item gets no group id, so it renders as a single photo, not a one-member album.
     let group_id: Option<[u8; 16]> = (staged.len() > 1).then(|| {
         use ed25519_dalek::ed25519::signature::rand_core::OsRng;
@@ -320,6 +396,21 @@ mod tests {
     use super::*;
     use crate::test_support::ScopedCore;
 
+    #[tokio::test]
+    async fn stale_private_work_cannot_publish_after_lock_or_a_later_unlock() {
+        let scope = ScopedCore::new(); let conv = [67;16];
+        scope.core.db.messages().lock().execute("INSERT INTO conversations(id) VALUES(?1)",[conv]).unwrap();
+        crate::privacy::hide(&conv,"staging-code").unwrap(); crate::privacy::unlock("staging-code").unwrap();
+        let generation = scope.core.private_generation.load(Ordering::SeqCst);
+        let image = || crate::media::image::PreparedImage { bytes: b"private pixels".to_vec(), width:1,height:1,animated:false,animation_fallback:false };
+        let id = stage_prepared_image(image(),Some((conv,generation))).unwrap();
+        assert_eq!(list()[0].id,id);
+        crate::api::privacy::lock_private_conversations(); assert!(list().is_empty());
+        assert!(stage_prepared_image(image(),Some((conv,generation))).is_err());
+        crate::privacy::unlock("staging-code").unwrap();
+        assert!(stage_prepared_image(image(),Some((conv,generation))).is_err()); assert!(list().is_empty());
+    }
+
     #[test]
     fn documents_preserve_media_bytes_mime_and_shared_ownership() {
         let scoped = std::sync::Arc::new(std::sync::OnceLock::new());
@@ -347,7 +438,10 @@ mod tests {
         let staged = list();
         let file = staged[0].file_id.unwrap();
         let kept = crate::transfer::store::retention_get(&file).unwrap();
-        assert_eq!(std::fs::read(&kept.path).unwrap(), bytes);
+        let mut logical = Vec::new();
+        std::io::Read::read_to_end(&mut crate::private_files::StorageFile::open(&kept.path, false).unwrap(), &mut logical).unwrap();
+        assert_eq!(logical, bytes);
+        assert_ne!(std::fs::read(&kept.path).unwrap(), bytes);
         assert_eq!(crate::transfer::wire::Manifest::from_file(&kept.path).unwrap().file_id(), file);
         for (item, mime) in
             staged.iter().zip(["image/avif", "video/mp4", "application/octet-stream"])

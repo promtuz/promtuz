@@ -198,6 +198,19 @@ impl SourceLease {
         Ok(length)
     }
 
+    /// Transfer manifests support up to 64 GiB; document staging preserves that contract.
+    pub(crate) fn attachment_size(&mut self)->Result<u64> {
+        const LIMIT:u64=64*1024*1024*1024;
+        if let Some(size)=self.length {ensure!(size<=LIMIT,"The file exceeds the transfer limit");return Ok(size)}
+        let mut size=0;
+        loop {
+            let bytes=self.read_chunk(size,(LIMIT-size).min(READ_CHUNK_BYTES as u64).max(1) as u32)?;
+            if bytes.is_empty(){break}
+            size+=bytes.len() as u64;ensure!(size<=LIMIT,"The file exceeds the transfer limit");
+        }
+        ensure!(size>0,"The selected file is empty");self.length=Some(size);Ok(size)
+    }
+
     pub fn decode_image(&mut self, request: ImageFrameRequest) -> Result<DecodedImageFrame> {
         self.check_cancelled()?;
         self.source.as_deref_mut().expect("released source").decode_image(request)

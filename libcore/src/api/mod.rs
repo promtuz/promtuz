@@ -20,3 +20,5 @@ use crate::data::identity::Identity;
 pub fn should_launch_app() -> bool {
     Identity::public_key().is_ok()
 }
+
+pub mod privacy;

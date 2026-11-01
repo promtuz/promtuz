@@ -41,6 +41,7 @@ impl Message {
     pub fn save_outgoing(
         conversation_id: [u8; 16], content: &str, reply_to: Option<[u8; 16]>,
     ) -> Result<Self> {
+        crate::privacy::require_access(&conversation_id)?;
         let me = super::identity::Identity::local_ipk();
         let mut conn = core().db.messages().lock();
         let tx = conn.transaction()?;
@@ -53,12 +54,13 @@ impl Message {
         conn: &rusqlite::Connection, conversation_id: [u8; 16], content: &str,
         reply_to: Option<[u8; 16]>, me: Option<[u8; 32]>,
     ) -> Result<Self> {
+        if crate::privacy::is_private_tx(conn,&conversation_id)? { anyhow::ensure!(core().private_sessions.read().contains_key(&conversation_id),"Chat is locked"); }
         let id = Ulid::new();
         let timestamp = now_secs();
         let dispatch_id = next_dispatch_id();
         conn.execute(
             "INSERT INTO messages (id, conversation_id, content, outgoing, timestamp, status, dispatch_id, reply_to) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)",
-            (&id.to_string(), conversation_id.as_slice(), content, timestamp, STATUS_PENDING, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
+            (&id.to_string(), conversation_id.as_slice(), crate::privacy::seal_tx(conn, &conversation_id, content)?, timestamp, STATUS_PENDING, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
         // Snapshot failure must roll the message back, not freeze an empty
@@ -116,7 +118,7 @@ impl Message {
              WHERE NOT EXISTS (SELECT 1 FROM message_deletions
                  WHERE conversation_id = ?2 AND sender_ipk = ?3 AND dispatch_id = ?7)
              ON CONFLICT(conversation_id, dispatch_id) DO NOTHING",
-            (&id.to_string(), conversation_id.as_slice(), sender.as_slice(), content, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
+            (&id.to_string(), conversation_id.as_slice(), sender.as_slice(), crate::privacy::seal_tx(conn, &conversation_id, content)?, timestamp, STATUS_SENT, dispatch_id.as_slice(), reply_to.as_ref().map(|r| r.as_slice())),
         )?;
 
         if changed == 0 {
@@ -351,7 +353,7 @@ impl Message {
                 &id.to_string(),
                 conversation_id.as_slice(),
                 actor.as_slice(),
-                target,
+                crate::privacy::seal_tx(conn, &conversation_id, target)?,
                 outgoing,
                 timestamp,
                 STATUS_SENT,
@@ -382,7 +384,7 @@ impl Message {
     }
 
     pub fn dump_all_tx(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MessageRow>> {
-        all(conn, "SELECT * FROM messages ORDER BY id ASC", [], MessageRow::from_row)
+        all(conn, "SELECT * FROM messages WHERE conversation_id NOT IN (SELECT conversation_id FROM private_conversations) ORDER BY id ASC", [], MessageRow::from_row)
     }
 
     pub fn import_rows_tx(conn: &rusqlite::Connection, rows: &[MessageRow]) -> Result<usize> {
@@ -396,7 +398,7 @@ impl Message {
                     &r.id,
                     r.conversation_id.as_slice(),
                     &r.sender_ipk,
-                    &r.content,
+                    crate::privacy::seal_tx(conn, &r.conversation_id, &r.content)?,
                     r.outgoing,
                     r.timestamp,
                     r.status,
@@ -476,6 +478,14 @@ impl Message {
         if needle.is_empty() {
             return Vec::new();
         }
+        if crate::privacy::is_private(conversation_id) {
+            let rows=Self::get_messages(conversation_id,u32::MAX, "");
+            let needle=needle.to_ascii_lowercase();
+            return rows.into_iter().rev().enumerate().filter_map(|(newer,row)| {
+                if row.system!=0 || !row.content.to_ascii_lowercase().contains(&needle) { return None }
+                Some((row.dispatch_id.as_slice().try_into().ok()?,newer as u32))
+            }).take(limit as usize).collect();
+        }
         let pattern =
             format!("%{}%", needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let hits = all(
@@ -505,13 +515,11 @@ impl Message {
 
     /// Oldest first, so a reconnect re-sends in send order.
     pub fn pending_outgoing() -> Vec<MessageRow> {
-        all(
+        let rows:Vec<MessageRow>=all(
             &core().db.messages().lock(),
-            "SELECT * FROM messages WHERE outgoing = 1 AND status = 0 AND deleted = 0 ORDER BY id ASC",
-            [],
-            MessageRow::from_row,
-        )
-        .unwrap_or_default()
+            "SELECT * FROM messages WHERE outgoing = 1 AND status = 0 AND deleted = 0 ORDER BY id ASC", [], MessageRow::from_row,
+        ).unwrap_or_default();
+        rows.into_iter().filter(|r|crate::privacy::require_access(&r.conversation_id).is_ok()).collect()
     }
 
     pub fn get_conversations() -> Vec<MessageRow> {
@@ -521,7 +529,7 @@ impl Message {
              JOIN messages m ON m.id = (
                  SELECT id FROM messages WHERE conversation_id = c.id AND deleted = 0 ORDER BY id DESC LIMIT 1
              )
-             ORDER BY m.id DESC",
+             WHERE c.id NOT IN (SELECT conversation_id FROM private_conversations) ORDER BY m.id DESC",
             [],
             MessageRow::from_row,
         )
@@ -545,7 +553,7 @@ impl Message {
             &core().db.messages().lock(),
             "SELECT m.conversation_id, COUNT(*) FROM incoming_receipts r
              CROSS JOIN messages m ON m.id = r.message_id
-             WHERE r.is_read = 0 AND m.deleted = 0 AND m.system = 0
+             WHERE r.is_read = 0 AND m.deleted = 0 AND m.system = 0 AND m.conversation_id NOT IN (SELECT conversation_id FROM private_conversations)
              GROUP BY m.conversation_id",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -605,6 +613,7 @@ impl Message {
     /// Snapshot only unseen, unread arrivals. Message ids avoid sender clock
     /// skew and multiple messages in the same timestamp second.
     pub fn pending_notification_ids(conversation_id: &[u8; 16]) -> Result<Vec<String>> {
+        if crate::privacy::is_private(conversation_id) { return Ok(Vec::new()) }
         pending_notification_ids(&core().db.messages().lock(), conversation_id)
     }
 

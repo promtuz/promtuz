@@ -48,3 +48,5 @@ pub fn parse_seeds(text: &str) -> Result<Vec<ResolverSeed>> {
 
     Ok(seeds)
 }
+
+pub(crate) mod private_backup;

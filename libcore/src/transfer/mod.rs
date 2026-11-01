@@ -214,22 +214,22 @@ pub fn should_auto_download(ipk: &[u8; 32], size: u64, on_wifi: bool) -> bool {
 pub fn prepare_send(
     path: &str, ttl_secs: u64, hold: impl FnOnce([u8; 32]),
 ) -> anyhow::Result<([u8; 32], u64)> {
-    let m = wire::Manifest::from_file(path)?;
+    let size = std::fs::metadata(path)?.len();
+    let (kept,m) = crate::private_files::stage_reader(&mut std::fs::File::open(path)?,size)?;
     let file_id = m.file_id();
     hold(file_id);
-    let size = m.total_size;
-    let kept = format!("{}/{}.src", core().db.files_dir("transfers"), hex::encode(file_id));
-    if kept != path && std::fs::rename(path, &kept).is_err() {
-        std::fs::copy(path, &kept)?;
-        let _ = std::fs::remove_file(path);
-    }
-    if let Some(old) = store::retention_get(&file_id).filter(|r| r.path != kept) {
-        let _ = std::fs::remove_file(&old.path);
-    }
     let expires = now_secs() + ttl_secs;
     let manifest = postcard::to_allocvec(&m)?;
     let db = core().db.transfers().lock();
-    store::retention_put_tx(&db, &file_id, &kept, size, m.chunk_size, &manifest, expires)?;
+    if let Some(old) = store::retention_get_tx(&db,&file_id) {
+        // An already retained file can be shared by other messages. Leave it immutable.
+        crate::private_files::remove_temporary(&kept);
+        store::retention_put_tx(&db,&file_id,&old.path,size,m.chunk_size,&manifest,old.expires_at.max(expires))?;
+    } else {
+        store::retention_put_tx(&db,&file_id,&kept,size,m.chunk_size,&manifest,expires)?;
+    }
+    // The caller handed over a disposable copy, never the source document.
+    if !path.starts_with("/proc/self/fd/") && !path.starts_with("/dev/fd/") { let _=std::fs::remove_file(path); }
     Ok((file_id, size))
 }
 

@@ -1,8 +1,6 @@
-use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use uuid::Uuid;
+use anyhow::Result;
 
 use super::ports::SourceLease;
 
@@ -15,26 +13,17 @@ pub struct ImportedSource {
 
 impl ImportedSource {
     pub fn from_lease(mut source: SourceLease, directory: &Path) -> Result<Self> {
-        fs::create_dir_all(directory).context("create media import directory")?;
-
-        for _ in 0..4 {
-            let path = directory.join(format!("{}.source", Uuid::now_v7()));
-            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error).context("create private media import"),
-            };
-            let result = source.copy_to(&mut file);
-            drop(file);
-            match result {
-                Ok(size) => return Ok(Self { path, size }),
-                Err(error) => {
-                    let _ = fs::remove_file(&path);
-                    return Err(error);
-                },
+        use std::io::{self,Read};
+        let size=source.image_size()?;
+        struct Reader<'a>{source:&'a mut SourceLease,offset:u64}
+        impl Read for Reader<'_>{
+            fn read(&mut self,output:&mut[u8])->io::Result<usize>{
+                let bytes=self.source.read_chunk(self.offset,output.len().min(1024*1024) as u32).map_err(io::Error::other)?;
+                output[..bytes.len()].copy_from_slice(&bytes);self.offset+=bytes.len() as u64;Ok(bytes.len())
             }
         }
-        anyhow::bail!("could not reserve private media import")
+        let (path,_)=crate::private_files::stage_reader_in(&mut Reader{source:&mut source,offset:0},size,directory)?;
+        Ok(Self{path:path.into(),size})
     }
 
     pub fn path(&self) -> &Path {
@@ -48,7 +37,7 @@ impl ImportedSource {
 
 impl Drop for ImportedSource {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        crate::private_files::remove_temporary(&self.path.to_string_lossy());
     }
 }
 
@@ -91,10 +80,43 @@ mod tests {
         })).unwrap();
         let imported = ImportedSource::from_lease(lease, directory.path()).unwrap();
         assert_eq!(imported.size(), 12);
-        assert_eq!(std::fs::read(imported.path()).unwrap(), vec![4; 12]);
+        let mut visible=Vec::new();
+        std::io::Read::read_to_end(&mut crate::private_files::StorageFile::open(&imported.path().to_string_lossy(),false).unwrap(),&mut visible).unwrap();
+        assert_eq!(visible,vec![4;12]);
+        assert_ne!(std::fs::read(imported.path()).unwrap(),visible);
         assert_eq!(*releases.lock().unwrap(), 1);
         let path = imported.path().to_owned();
         drop(imported);
         assert!(!path.exists());
     }
+}
+
+
+/// Codec APIs require a seekable OS path. Android gets a RAM-backed anonymous file rather than
+/// plaintext disk scratch. Encoded output remains capped by the media policy and is encrypted
+/// immediately when staging takes ownership.
+pub(crate) struct AnonymousFile {file:std::fs::File,path:PathBuf}
+impl AnonymousFile {
+    pub(crate) fn new()->Result<Self> {
+        #[cfg(any(target_os="android",target_os="linux"))]
+        {
+            use std::os::fd::{FromRawFd,AsRawFd};
+            let name=c"promtuz-media";
+            // SAFETY: the constant is NUL terminated; ownership transfers only for a valid fd.
+            let fd=unsafe{libc::memfd_create(name.as_ptr(),libc::MFD_CLOEXEC)};
+            if fd<0{return Err(std::io::Error::last_os_error().into())}
+            let file=unsafe{std::fs::File::from_raw_fd(fd)};
+            let path=PathBuf::from(format!("/proc/self/fd/{}",file.as_raw_fd()));
+            Ok(Self{file,path})
+        }
+        #[cfg(not(any(target_os="android",target_os="linux")))]
+        {
+            use std::os::fd::AsRawFd;
+            let file=tempfile::tempfile()?;
+            let path=PathBuf::from(format!("/dev/fd/{}",file.as_raw_fd()));
+            Ok(Self{file,path})
+        }
+    }
+    pub(crate) fn path(&self)->&Path {&self.path}
+    pub(crate) fn size(&self)->Result<u64>{Ok(self.file.metadata()?.len())}
 }

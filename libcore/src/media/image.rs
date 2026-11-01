@@ -90,7 +90,7 @@ pub fn platform_image_candidate(header: &[u8]) -> bool {
 /// never reach this layer, and ordinary formats stream from that private copy.
 pub fn inspect_path(path: &Path) -> Result<ImageKind> {
     let mut header = [0_u8; 64];
-    let used = File::open(path)?.read(&mut header)?;
+    let used = crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?.read(&mut header)?;
     let header = &header[..used];
     if is_jxl(header) || is_isobmff(header) {
         return Ok(if has_avif_brand(header) { ImageKind::Avif } else { ImageKind::Platform });
@@ -134,7 +134,7 @@ pub fn decode_sdr_still(bytes: &[u8]) -> Result<DecodedStill> {
 
 pub fn decode_sdr_still_path(path: &Path) -> Result<DecodedStill> {
     let kind = inspect_path(path)?;
-    decode_sdr_still_reader(kind, BufReader::new(File::open(path)?))
+    decode_sdr_still_reader(kind, BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))
 }
 
 fn decode_sdr_still_reader(
@@ -163,15 +163,15 @@ pub fn decode_animation_path(path: &Path) -> Result<DecodedFrames> {
     let kind = inspect_path(path)?;
     match kind {
         ImageKind::Gif => collect_frames(
-            ::image::codecs::gif::GifDecoder::new(BufReader::new(File::open(path)?))?.into_frames(),
+            ::image::codecs::gif::GifDecoder::new(BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))?.into_frames(),
         ),
         ImageKind::Png => {
-            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?;
+            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))?;
             ensure!(decoder.is_apng()?, "The PNG is not animated.");
             collect_frames(decoder.apng()?.into_frames())
         },
         ImageKind::WebP => collect_frames(
-            ::image::codecs::webp::WebPDecoder::new(BufReader::new(File::open(path)?))?
+            ::image::codecs::webp::WebPDecoder::new(BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))?
                 .into_frames(),
         ),
         _ => bail!("This image format does not use the core animation decoder."),
@@ -284,7 +284,7 @@ pub fn prepare_image_path(path: &Path, request: MediaRequest) -> Result<Prepared
     let animated = match kind {
         ImageKind::Gif | ImageKind::WebP => true,
         ImageKind::Png => {
-            ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?.is_apng()?
+            ::image::codecs::png::PngDecoder::new(BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))?.is_apng()?
         },
         ImageKind::Avif => decode_avif_path(path)?.frame_count > 1,
         _ => false,
@@ -398,7 +398,7 @@ fn prepare_sdr_image_path(
     let (still, animation_fallback) = match kind {
         ImageKind::Jpeg => (decode_sdr_still_path(path)?, false),
         ImageKind::Png => {
-            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(File::open(path)?))?;
+            let decoder = ::image::codecs::png::PngDecoder::new(BufReader::new(crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?))?;
             if !decoder.is_apng()? {
                 (decode_sdr_still_path(path)?, false)
             } else {
@@ -852,7 +852,10 @@ pub fn decode_avif_sdr(bytes: &[u8], max_edge: u32) -> Result<DecodedStill> {
 }
 
 pub fn decode_avif_path(path: &Path) -> Result<DecodedAvif> {
-    let decoder = promtuz_avif::Decoder::open_file(path, avif_limits()?)
+    let mut source=crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?;
+    ensure!(source.len()<=super::policy::MAX_SOURCE_BYTES,"The image exceeds the import limit");
+    let mut bytes=zeroize::Zeroizing::new(Vec::new());source.read_to_end(&mut bytes)?;
+    let decoder = promtuz_avif::Decoder::open(&bytes, avif_limits()?)
         .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
     decode_avif_decoder(decoder)
 }
@@ -889,7 +892,10 @@ pub fn decode_avif_frames(bytes: &[u8]) -> Result<(DecodedAvif, FrameStore)> {
 }
 
 pub fn decode_avif_frames_path(path: &Path) -> Result<(DecodedAvif, FrameStore)> {
-    let decoder = promtuz_avif::Decoder::open_file(path, avif_limits()?)
+    let mut source=crate::private_files::StorageFile::open(&path.to_string_lossy(),false)?;
+    ensure!(source.len()<=super::policy::MAX_SOURCE_BYTES,"The image exceeds the import limit");
+    let mut bytes=zeroize::Zeroizing::new(Vec::new());source.read_to_end(&mut bytes)?;
+    let decoder = promtuz_avif::Decoder::open(&bytes, avif_limits()?)
         .map_err(|error| anyhow::anyhow!("AVIF decoder rejected the image: {error:?}"))?;
     decode_avif_frames_decoder(decoder)
 }

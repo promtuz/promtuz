@@ -190,6 +190,8 @@ impl PromtuzStorageProvider {
         value: Vec<u8>,
     ) -> Result<()> {
         self.write(|conn| {
+            let value = super::privacy::seal_storage(conn, group_id, &value)
+                .map_err(PromtuzMlsStorageError::encode)?;
             let prev_len: i64 = conn
                 .query_row(
                     "SELECT length(value) FROM mls_storage \
@@ -280,7 +282,9 @@ impl PromtuzStorageProvider {
                 "SELECT value FROM mls_storage \
                  WHERE group_id = ?1 AND key_tag = ?2 AND sub_key = ?3",
             )?;
-            Ok(stmt.query_row(params![group_id, key_tag, sub_key], |r| r.get(0)).optional()?)
+            let value: Option<Vec<u8>> = stmt.query_row(params![group_id, key_tag, sub_key], |r| r.get(0)).optional()?;
+            value.map(|value| super::privacy::open_storage(conn, group_id, &value)
+                .map_err(PromtuzMlsStorageError::decode)).transpose()
         })?;
         value.map(|b| Self::decode(&b)).transpose()
     }
@@ -329,6 +333,8 @@ impl PromtuzStorageProvider {
 
     fn list_append(&self, group_id: &[u8], key_tag: i64, value: Vec<u8>) -> Result<()> {
         self.write(|conn| {
+            let value = super::privacy::seal_storage(conn, group_id, &value)
+                .map_err(PromtuzMlsStorageError::encode)?;
             let max_idx: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT MAX(sub_key) FROM mls_storage \
@@ -374,23 +380,26 @@ impl PromtuzStorageProvider {
                  WHERE group_id = ?1 AND key_tag = ?2 \
                  ORDER BY sub_key ASC",
             )?;
-            Ok(stmt
-                .query_map(params![group_id, key_tag], |r| r.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
+            let values = stmt.query_map(params![group_id, key_tag], |r| r.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            values.into_iter().map(|value| super::privacy::open_storage(conn, group_id, &value)
+                .map_err(PromtuzMlsStorageError::decode)).collect()
         })
     }
 
     fn list_remove(&self, group_id: &[u8], key_tag: i64, value: &[u8]) -> Result<()> {
         self.write(|conn| {
-            let row: Option<(Vec<u8>, i64)> = conn
-                .query_row(
-                    "SELECT sub_key, length(value) FROM mls_storage \
-                     WHERE group_id = ?1 AND key_tag = ?2 AND value = ?3 \
-                     ORDER BY sub_key ASC LIMIT 1",
-                    params![group_id, key_tag, value],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
+            // Encrypted list elements have randomized ciphertext, so compare decoded bytes and
+            // delete by their stable sub-key rather than matching plaintext in SQL.
+            let candidates = crate::db::all(conn,
+                "SELECT sub_key,value FROM mls_storage WHERE group_id=?1 AND key_tag=?2 ORDER BY sub_key",
+                params![group_id,key_tag], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?)))?;
+            let mut row = None;
+            for (sub, bytes) in candidates {
+                let plain = super::privacy::open_storage(conn, group_id, &bytes)
+                    .map_err(PromtuzMlsStorageError::decode)?;
+                if plain == value { row = Some((sub, bytes.len() as i64)); break; }
+            }
             if let Some((sub_key, prev_len)) = row {
                 conn.execute(
                     "DELETE FROM mls_storage \

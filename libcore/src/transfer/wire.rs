@@ -19,7 +19,7 @@ pub struct Manifest {
 impl Manifest {
     pub fn from_file(path: &str) -> Result<Manifest> {
         use std::io::Read;
-        let mut f = std::fs::File::open(path)?;
+        let mut f = crate::private_files::StorageFile::open(path,false)?;
         let mut chunks = Vec::new();
         let mut total = 0u64;
         let mut buf = vec![0u8; CHUNK_SIZE];

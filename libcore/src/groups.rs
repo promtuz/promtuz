@@ -662,6 +662,7 @@ fn pending_key(conversation: &[u8; 16]) -> String {
 
 fn pending(conversation: &[u8; 16]) -> Vec<Pending> {
     crate::data::app_prefs::get(&pending_key(conversation))
+        .and_then(|value| if crate::privacy::is_private(conversation) { crate::privacy::open_content(conversation,&value).ok() } else { Some(value) })
         .and_then(|h| hex::decode(h).ok())
         .and_then(|b| postcard::from_bytes(&b).ok())
         .unwrap_or_default()
@@ -671,10 +672,9 @@ fn keep_pending(conversation: &[u8; 16], list: &[Pending]) -> Result<()> {
     if list.is_empty() {
         return crate::data::app_prefs::remove(&pending_key(conversation));
     }
-    crate::data::app_prefs::set(
-        &pending_key(conversation),
-        &hex::encode(postcard::to_allocvec(list)?),
-    )
+    let conn = core().db.messages().lock();
+    let protected = crate::privacy::seal_tx(&conn,conversation,&hex::encode(postcard::to_allocvec(list)?))?;
+    crate::data::app_prefs::set_tx(&conn, &pending_key(conversation), &protected)
 }
 
 fn remember(conversation: &[u8; 16], change: GroupChange) -> Result<()> {
@@ -763,7 +763,8 @@ pub(crate) fn on_reconnect() {
         let now = now_secs();
         let groups = Conversation::list()
             .into_iter()
-            .filter(|c| c.kind == KIND_GROUP && c.mls_group_id.is_some())
+            .filter(|c| c.kind == KIND_GROUP && c.mls_group_id.is_some()
+                && crate::privacy::require_access(&c.id).is_ok())
             .map(|c| c.id);
         for conversation in groups {
             let state = Conversation::state(&conversation);
@@ -803,6 +804,7 @@ pub(crate) fn on_reconnect() {
 /// current epoch; carried directly once this device commits.
 async fn follow_up(conversation: [u8; 16]) -> Result<()> {
     let _one = core().groups.follow_up.lock().await;
+    if crate::privacy::require_access(&conversation).is_err() { return Ok(()); }
     // Backups preserve the public group anchor and roster, not epoch secrets.
     // Request fresh keys without waiting for someone to send into the lost epoch.
     if let Some(gid) = Conversation::group_of(&conversation)

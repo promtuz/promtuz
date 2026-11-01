@@ -22,7 +22,7 @@ use crate::state::Core;
 pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8; 32]) -> bool {
     let paired = crate::data::contact::Contact::is_paired_tx(&c.db.contacts().lock(), peer);
     let db = c.db.messages().lock();
-    db.query_row(
+    let ordinary = db.query_row(
         "SELECT 1 FROM messages m
            JOIN conversations c ON c.id = m.conversation_id
            JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
@@ -46,7 +46,12 @@ pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8
         ],
         |_| Ok(()),
     )
-    .is_ok()
+    .is_ok();
+    if ordinary {return true}
+    if !crate::state::owns_stores(&c.db) {return false}
+    let Ok(rows)=crate::data::media::private_file_rows_tx(&db,file_id) else{return false};
+    rows.into_iter().any(|(conv,did,_)| db.query_row("SELECT EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id JOIN conversation_members cm ON cm.conversation_id=c.id LEFT JOIN conversation_members mine ON mine.conversation_id=c.id AND mine.member_ipk=?4 WHERE m.conversation_id=?1 AND m.dispatch_id=?2 AND m.outgoing=1 AND m.deleted=0 AND cm.member_ipk=?3 AND cm.active=1 AND ((c.kind=?5 AND mine.active=1) OR (c.kind=?6 AND ?7)))",
+        rusqlite::params![conv,did,peer,me,crate::data::conversation::KIND_GROUP,crate::data::conversation::KIND_DIRECT,paired],|r|r.get::<_,bool>(0)).unwrap_or(false))
 }
 
 pub(super) async fn serve_streams(c: &'static Core, link: crate::p2p::PeerLink, local: wire::Auth) {
@@ -129,9 +134,10 @@ fn can_serve(
     match grant {
         Some(id) => sharing::permitted(c, id, file_id, me, peer).is_some(),
         None => {
-            offered_to(c, file_id, peer, me)
-                && store::retention_get_tx(&c.db.transfers().lock(), file_id)
-                    .is_some_and(|ret| ret.expires_at > now_secs())
+            if !offered_to(c,file_id,peer,me) { return false; }
+            let ordinary = store::retention_get_tx(&c.db.transfers().lock(), file_id);
+            ordinary.or_else(||crate::state::owns_stores(&c.db).then(||crate::private_files::available_retention(file_id).ok().flatten()).flatten())
+                .is_some_and(|ret| ret.expires_at > now_secs())
         },
     }
 }
@@ -147,7 +153,8 @@ async fn serve_v2_file(
     let retained = if grant.is_some() {
         sharing::completed_copy(c, &file_id)
     } else {
-        store::retention_get_tx(&c.db.transfers().lock(), &file_id)
+        let ordinary=store::retention_get_tx(&c.db.transfers().lock(), &file_id);
+        ordinary.or_else(||crate::state::owns_stores(&c.db).then(||crate::private_files::available_retention(&file_id).ok().flatten()).flatten())
     };
     let Some(retained) = retained else { return v2_error(s, v2::ErrorCode::Unavailable).await };
     let manifest: wire::Manifest = match postcard::from_bytes(&retained.manifest) {
@@ -176,9 +183,9 @@ async fn serve_v2_file(
     let activity = c.transfers.activity.start_serving(&c.db, file_id, link.ipk, &manifest)
         .map_err(Failure::storage)?;
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = match std::fs::File::open(&retained.path) {
+    let mut file = match crate::private_files::StorageFile::open(&retained.path,false) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind() == std::io::ErrorKind::NotFound) => {
             return v2_error(s, v2::ErrorCode::Unavailable).await;
         },
         Err(_) => return v2_error(s, v2::ErrorCode::Storage).await,

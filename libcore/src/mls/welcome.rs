@@ -114,7 +114,7 @@ pub fn process_welcome(
         .build();
     provider.storage().atomic(|| {
         let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
-            .map_err(MlsGroupError::from_openmls)?;
+            .map_err(MlsGroupError::from_welcome)?;
 
         // Everything below runs before `into_group`, so a refused Welcome writes no state.
         let roster = staged.members().count();
@@ -172,7 +172,7 @@ pub fn process_welcome(
             ));
         }
 
-        let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
+        let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_welcome)?;
         Ok(MlsGroupHandle::wrap(mls_group))
     })
 }
