@@ -5,6 +5,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 object TopBarIconDefaults {
@@ -19,7 +20,8 @@ fun TopBarMorphIcon(
     description: String?,
     modifier: Modifier = Modifier,
     tint: Color = LocalContentColor.current,
-) = TopBarMorphIcon(rememberMorphIconState(glyph), description, modifier, tint)
+    strokeWidth: Dp = TopBarIconDefaults.StrokeWidth,
+) = TopBarMorphIcon(rememberMorphIconState(glyph), description, modifier, tint, strokeWidth)
 
 /** Use a hoisted [state] when the top bar switches between layouts. */
 @Composable
@@ -28,10 +30,11 @@ fun TopBarMorphIcon(
     description: String?,
     modifier: Modifier = Modifier,
     tint: Color = LocalContentColor.current,
+    strokeWidth: Dp = TopBarIconDefaults.StrokeWidth,
 ) = MorphIcon(
     state = state,
     description = description,
     modifier = modifier.size(TopBarIconDefaults.Size),
     tint = tint,
-    strokeWidth = TopBarIconDefaults.StrokeWidth,
+    strokeWidth = strokeWidth,
 )

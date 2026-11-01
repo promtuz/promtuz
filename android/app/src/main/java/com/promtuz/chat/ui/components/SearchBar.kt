@@ -75,8 +75,8 @@ fun HomeSearchBar(
             .background(colors.surfaceContainerHigh),
     ) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(56.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                DrawableIcon(R.drawable.oi_search, size = 20.dp, strokeWidth = 2.25f,
+            Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                DrawableIcon(R.drawable.oi_search, size = 18.dp, strokeWidth = 2.25f,
                     tint = colors.onSurfaceVariant,
                     modifier = Modifier.graphicsLayer {
                         alpha = if (expanded) 1f - motion.fraction().coerceIn(0f, 1f) else 1f
@@ -85,7 +85,7 @@ fun HomeSearchBar(
                     IconButton(onClick = { motion.onBack() }, modifier = Modifier.graphicsLayer {
                         alpha = motion.fraction().coerceIn(0f, 1f)
                     }) {
-                        TopBarMorphIcon(MorphGlyph.Back, "Back", tint = colors.onSurfaceVariant)
+                        TopBarMorphIcon(MorphGlyph.Back, "Back", tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp), strokeWidth = 2.25.dp)
                     }
                 }
             }
