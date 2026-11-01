@@ -17,7 +17,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -28,7 +31,16 @@ import com.promtuz.chat.ui.media.mediaOrigin
 import com.promtuz.chat.utils.media.AvatarPicture
 import com.promtuz.chat.utils.media.EncodedImageContent
 
-const val AVATAR_RADIUS_RATIO = 2.875f;
+const val AVATAR_RADIUS_RATIO = 2.875f
+
+private val EmbeddedAvatarLayers = AvatarLayers(
+    base = true,
+    specular = true,
+    rim = false,
+    innerShadow = false,
+    dropShadow = false,
+    glyphLighting = false,
+)
 
 @Composable
 fun Avatar(
@@ -41,12 +53,16 @@ fun Avatar(
     originKey: String? = null,
     identityKey: String = originKey ?: name,
 ) {
-    val clip = RoundedCornerShape(size / clipRatio)
-    val fallbackChars = name.split(" ")
-        .filter { it.isNotBlank() }
-        .map { it.first() }
-        .take(2)
-        .joinToString("").uppercase()
+    val clip = if (clipRatio == AVATAR_RADIUS_RATIO) SquircleShape else RoundedCornerShape(size / clipRatio)
+    val fallbackChars = remember(name) {
+        name.split(" ").filter { it.isNotBlank() }.take(2)
+            .joinToString("") { it.first().toString() }.uppercase()
+    }
+    val glyph = remember(fallbackChars) {
+        if (fallbackChars.isEmpty()) AvatarGlyph.None
+        else AvatarGlyph.Letter(fallbackChars, sizeFraction = 1f / 2.6f)
+    }
+    val hue = remember(identityKey) { avatarHue(identityKey) }
     val interactionSource = remember { MutableInteractionSource() }
     val frame = remember(identityKey, image) { MediaFrame() }
 
@@ -57,7 +73,6 @@ fun Avatar(
             Modifier
                 .fillMaxSize()
                 .clip(clip)
-                .background(if (image == null) avatarColor(identityKey) else Color.Transparent)
                 .clickable(
                     enabled = onClick != null,
                     interactionSource = interactionSource,
@@ -72,11 +87,13 @@ fun Avatar(
                 contentScale = ContentScale.Crop,
                 animate = MediaViewer.session == null,
                 onFrameChanged = { frame.image = it },
-            ) else Text(
-                fallbackChars,
-                fontWeight = FontWeight.Bold,
-                fontSize = (size.value / 2.6f).sp,
-                color = Color.White
+            ) else SquircleAvatar(
+                glyph = glyph,
+                modifier = Modifier.semantics { contentDescription = name },
+                size = size,
+                hue = hue,
+                layers = EmbeddedAvatarLayers,
+                fillBounds = true,
             )
         }
 
@@ -118,14 +135,17 @@ fun GroupAvatar(
         return
     }
 
-    val clip = RoundedCornerShape(size / clipRatio)
+    val clip = if (clipRatio == AVATAR_RADIUS_RATIO) SquircleShape else RoundedCornerShape(size / clipRatio)
     val pair = members.take(2)
+    val hue = remember(conversation, title) { avatarHue(conversation ?: title) }
     Box(
         Modifier
             .size(size)
             .clip(clip)
-            .background(avatarColor(conversation ?: title)).clickable(enabled = onClick != null) { onClick?.invoke() },
+            .clickable(enabled = onClick != null) { onClick?.invoke() },
     ) {
+        SquircleAvatar(AvatarGlyph.None, size = size, hue = hue,
+            layers = EmbeddedAvatarLayers, fillBounds = true)
         if (pair.isEmpty()) {
             Text(
                 "G",
@@ -155,4 +175,11 @@ fun avatarColor(identityKey: String): Color {
     val palette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
         0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)
     return Color(palette[Math.floorMod(identityKey.hashCode(), palette.size)])
+}
+
+/** Keep identity-based palette assignments while letting the lighting component shade that hue. */
+private fun avatarHue(identityKey: String): Float {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(avatarColor(identityKey).toArgb(), hsv)
+    return hsv[0]
 }

@@ -4,7 +4,6 @@ import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -22,7 +21,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.ProfileWork
-import com.promtuz.chat.ui.components.AVATAR_RADIUS_RATIO
+import com.promtuz.chat.ui.components.SquircleShape
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.utils.media.PhotoCrop
 import com.promtuz.chat.utils.media.AvatarSource
@@ -87,7 +86,7 @@ fun ProfilePhotoScreen(uri: String, viewModel: ProfileVM, onSaved: () -> Unit) {
                 if (photo != null) {
                     val image = photo.poster
                     Box(
-                        Modifier.size(edge).clip(RoundedCornerShape(edge / AVATAR_RADIUS_RATIO))
+                        Modifier.size(edge).clip(SquircleShape)
                             .semantics { contentDescription = "Profile photo preview" }
                             .pointerInput(photo, busy) {
                                 if (!busy) detectTransformGestures { centroid, pan, scale, _ ->
