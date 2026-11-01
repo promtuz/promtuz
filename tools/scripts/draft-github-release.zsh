@@ -104,8 +104,17 @@ if (( ${#codes} == ${#ABIS} )); then
 
     for abi in $ABIS; do
         apk="promtuz-$VERSION-$abi.apk"
-        curl -fsS -m 600 "$BASE_URL/apk/release/$abi/promtuz-$VERSION~${codes[$abi]}.apk" -o "$OUT/$apk" \
-            || _die "$abi APK download failed"
+        local_apk="$REPO/android/app/build/outputs/apk/release/app-$abi-release.apk"
+        if [[ -f "$local_apk" ]] && [[ "$(shasum -a 256 "$local_apk" | awk '{print $1}')" == "${shas[$abi]}" ]]; then
+            _info "Using local $apk (matches the signed manifest)"
+            cp "$local_apk" "$OUT/$apk"
+        else
+            _info "Downloading $apk"
+            curl -fS --progress-bar --connect-timeout 10 --speed-limit 1 --speed-time 30 -m 600 \
+                "$BASE_URL/apk/release/$abi/promtuz-$VERSION~${codes[$abi]}.apk" -o "$OUT/$apk" \
+                || _die "$abi APK download failed"
+        fi
+        _info "Verifying $apk"
         [[ "$(shasum -a 256 "$OUT/$apk" | awk '{print $1}')" == "${shas[$abi]}" ]] \
             || _die "$apk does not match its signed manifest"
         signer="$("$APKSIGNER" verify --print-certs "$OUT/$apk" \

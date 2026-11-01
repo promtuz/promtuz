@@ -227,3 +227,8 @@ and signs `SHA256SUMS` with your git signing key. The notes are the app's signed
 release notes plus a downloads section; `--extra FILE` adds operator notes after
 them. Review the draft on GitHub, then publish it with
 `gh release edit <tag> --draft=false`.
+
+Matching APKs in `android/app/build/outputs/apk/release/` are reused only when
+their SHA-256 matches the verified published manifest. Otherwise downloads show
+progress and fail after 30 seconds without receiving data. Reused and downloaded
+APKs both undergo the same checksum and signing-certificate checks.
