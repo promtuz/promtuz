@@ -41,7 +41,7 @@ import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.ScreenScaffold
-import com.promtuz.chat.ui.components.ContactPickerHeader
+import com.promtuz.chat.ui.components.SearchableHeader
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SimpleScreen
@@ -81,7 +81,7 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
     }
 
     ScreenScaffold(topBar = { scrollBehavior ->
-        ContactPickerHeader(
+        SearchableHeader(
             scrollBehavior = scrollBehavior,
             windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
             title = "Open source licenses",

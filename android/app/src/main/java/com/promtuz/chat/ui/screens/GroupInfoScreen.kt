@@ -274,7 +274,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     else { dismissRequested = true }
                 }
                 BackHandler(searching) { closePickerMode() }
-                ContactPickerHeader(topBarColors = TopAppBarDefaults.topAppBarColors(
+                SearchableHeader(topBarColors = TopAppBarDefaults.topAppBarColors(
                     containerColor = BottomSheetDefaults.ContainerColor,
                     scrolledContainerColor = BottomSheetDefaults.ContainerColor), title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
                     searching = searching, query = query, onQuery = { query = it }, close = true,

@@ -102,7 +102,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
     BackHandler(busy || selecting) { back() }
 
     ScreenScaffold(topBar = { scrollBehavior ->
-        ContactPickerHeader(
+        SearchableHeader(
             scrollBehavior = scrollBehavior,
             windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
             title = if (selecting && selectedPeople.isEmpty()) "Select contacts" else "Contacts",

@@ -30,7 +30,7 @@ import com.promtuz.chat.ui.stage.ChatMotion
 
 /** Search and selection replace the title in place; the screen owns Back precedence. */
 @Composable
-fun ContactPickerHeader(
+fun SearchableHeader(
     title: String,
     searching: Boolean = false,
     query: String = "",
@@ -51,7 +51,7 @@ fun ContactPickerHeader(
     val titleStyle = screenTitleStyle()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
-    PickerSearchBackHandler(searching) { if (enabled) onBack() }
+    SearchBackHandler(searching) { if (enabled) onBack() }
     LaunchedEffect(searching) {
         if (!searching) { keyboard?.hide(); focusManager.clearFocus() }
     }
@@ -59,20 +59,20 @@ fun ContactPickerHeader(
         title = {
             AnimatedContent(searching, Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.CenterStart, transitionSpec = {
                 (fadeIn(ChatMotion.spec()) togetherWith fadeOut(ChatMotion.spec())).using(null)
-            }, label = "picker search") { search ->
+            }, label = "header search") { search ->
                 if (search) {
                     val focus = remember { FocusRequester() }
                     LaunchedEffect(searching) { if (searching) focus.requestFocus() }
                     BasicTextField(query, onQuery, enabled = enabled && searching, singleLine = true,
                         modifier = Modifier.fillMaxSize().focusRequester(focus).semantics { contentDescription = searchLabel },
-                        textStyle = titleStyle.copy(color = colors.onSurface),
+                        textStyle = searchTextStyle().copy(color = colors.onSurface),
                         cursorBrush = SolidColor(colors.primary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
                         decorationBox = { inner ->
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
                                 if (query.isEmpty()) Text(searchLabel, color = colors.onSurfaceVariant,
-                                    style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    style = searchTextStyle(), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 inner()
                             }
                         })
@@ -83,7 +83,7 @@ fun ContactPickerHeader(
                             ((fadeIn(Tweens.microInteraction(300)) + slideInVertically(Tweens.microInteraction(300)) { it }) togetherWith
                                 (fadeOut(Tweens.microInteraction(300)) + slideOutVertically(Tweens.microInteraction(300)) { -it }))
                                 .using(null)
-                        }, label = "picker title mode") { counted ->
+                        }, label = "header title mode") { counted ->
                         if (counted) {
                             // Retain the outgoing count while selection mode animates away.
                             var lastCount by remember { mutableIntStateOf(selectionCount ?: 1) }

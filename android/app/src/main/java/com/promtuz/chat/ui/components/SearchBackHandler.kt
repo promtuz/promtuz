@@ -12,7 +12,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 
 /** Search is an overlay: Back closes the mode, including when the IME is open. */
 @Composable
-internal fun PickerSearchBackHandler(enabled: Boolean, onBack: () -> Unit) {
+internal fun SearchBackHandler(enabled: Boolean, onBack: () -> Unit) {
     BackHandler(enabled, onBack)
     if (Build.VERSION.SDK_INT >= 33) {
         val view = LocalView.current

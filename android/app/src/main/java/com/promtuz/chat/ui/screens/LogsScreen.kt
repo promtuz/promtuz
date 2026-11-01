@@ -53,7 +53,7 @@ import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.ScreenScaffold
-import com.promtuz.chat.ui.components.ContactPickerHeader
+import com.promtuz.chat.ui.components.SearchableHeader
 import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.MenuAction
 import com.promtuz.chat.ui.components.MorphGlyph
@@ -84,7 +84,7 @@ fun LogsScreen() {
     val listState = rememberLazyListState()
     val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     ScreenScaffold(scrollableState = listState, topBar = { scroll ->
-        ContactPickerHeader(
+        SearchableHeader(
             title = "App logs", close = false, searching = searching, query = query,
             onQuery = { query = it }, onSearch = { searching = true }, searchLabel = "Search logs",
             onBack = { if (searching) { searching = false; query = "" } else back?.onBackPressed() },
