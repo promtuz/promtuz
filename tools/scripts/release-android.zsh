@@ -519,6 +519,24 @@ for channel in $TARGETS; do
             rsync -q "$STAGE/$channel/$abi/$NOTES_NAME.sig" "$PUBLISH_HOST:$dest/" || _die "notes sig upload failed"
             rsync -q "$STAGE/$channel/$abi/$NOTES_NAME"     "$PUBLISH_HOST:$dest/" || _die "notes upload failed"
         fi
+        # Enumerate retained notes instead of making clients guess missing version codes.
+        # Build and sign locally; the server never receives the signing key.
+        ssh "$PUBLISH_HOST" "find '$dest' -maxdepth 1 -type f -name 'notes-*.md' -printf '%f\n'" \
+            > "$SCRATCH/note-files" || _die "could not list published release notes"
+        python3 - "$SCRATCH/note-files" "$STAGE/$channel/$abi/notes-index.json" <<'PYINDEX'
+import json, pathlib, re, sys
+names = pathlib.Path(sys.argv[1]).read_text().splitlines()
+codes = sorted({int(m.group(1)) for name in names if (m := re.fullmatch(r"notes-([0-9]+)\.md", name))}, reverse=True)
+pathlib.Path(sys.argv[2]).write_text(json.dumps(codes, separators=(",", ":")) + "\n")
+PYINDEX
+        openssl pkeyutl -sign -inkey "$SCRATCH/manifest.key" -rawin \
+            -in "$STAGE/$channel/$abi/notes-index.json" -out "$STAGE/$channel/$abi/notes-index.json.sig" \
+            || _die "could not sign the release notes index"
+        openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
+            -in "$STAGE/$channel/$abi/notes-index.json" -sigfile "$STAGE/$channel/$abi/notes-index.json.sig" >/dev/null 2>&1 \
+            || _die "release notes index signature did not verify"
+        rsync -q "$STAGE/$channel/$abi/notes-index.json.sig" "$PUBLISH_HOST:$dest/" || _die "notes index sig upload failed"
+        rsync -q "$STAGE/$channel/$abi/notes-index.json" "$PUBLISH_HOST:$dest/" || _die "notes index upload failed"
         rsync -q "$STAGE/$channel/$abi/manifest.json.sig" "$PUBLISH_HOST:$dest/" || _die "sig upload failed"
         rsync -q "$STAGE/$channel/$abi/manifest.json"     "$PUBLISH_HOST:$dest/" || _die "manifest upload failed"
 
@@ -549,6 +567,16 @@ for channel in $TARGETS; do
         openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
             -in "$SCRATCH/live.json" -sigfile "$SCRATCH/live.sig" >/dev/null 2>&1 \
             || _die "$channel/$abi live signature does not verify — clients would reject this"
+
+        curl -fsS -m 30 "$url/notes-index.json" -o "$SCRATCH/live-notes-index.json" \
+            || _die "$channel/$abi notes index unreachable"
+        curl -fsS -m 30 "$url/notes-index.json.sig" -o "$SCRATCH/live-notes-index.sig" \
+            || _die "$channel/$abi notes index sig unreachable"
+        cmp -s "$SCRATCH/live-notes-index.json" "$STAGE/$channel/$abi/notes-index.json" \
+            || _die "$channel/$abi live notes index differs from what we uploaded"
+        openssl pkeyutl -verify -pubin -inkey "$SCRATCH/mpub.pem" -rawin \
+            -in "$SCRATCH/live-notes-index.json" -sigfile "$SCRATCH/live-notes-index.sig" >/dev/null 2>&1 \
+            || _die "$channel/$abi live notes index signature does not verify"
 
         code="$(curl -fsS -m 30 -o /dev/null -w '%{http_code}' -r 0-0 "$url/$APK_NAME" || true)"
         [[ "$code" == 206 || "$code" == 200 ]] || _die "$channel/$abi APK unreachable (HTTP $code)"

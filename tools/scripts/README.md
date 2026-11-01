@@ -8,9 +8,10 @@ verifies the live files, and announces the release. `debug` builds are debuggabl
 
 Release notes are drafted from the `Notes:` trailers on the commits since the last
 release and published as a signed `notes-<versionCode>.md` beside the APK. The app
-shows the notes of every version between the installed and the offered build,
-skipping versions without any. A new major or minor version makes the update
-required. Nothing about notes is kept in the repo. See **Release notes** below.
+shows combined notes between the installed and offered builds, skipping releases
+without notes. It also retains notes for the last installed update and offers a
+release history, with downloaded notes available offline. A new major or minor version makes the update
+required. See **Release notes** below.
 
 The build uses the signing vault at `~/.promtuz-vault` (`PZ_VAULT` overrides it).
 Announcements also need Python 3 and an FCM service-account JSON for the app's
@@ -96,8 +97,18 @@ skips notes for this release entirely. Either way the script writes the
 `# <version> - <date>` first line, so never put a version number or a date in the
 file, and keep it under 64 KB.
 
-The app shows the notes of every release between the installed and the offered
-build, newest first, up to ten, each under its own version chip and date.
+Publication also signs a `notes-index.json` listing all retained note version codes
+in each channel/ABI directory. Clients use it to collect every release in a version
+jump, without the former ten-release limit. Older servers without an index fall
+back to scanning at most 200 build numbers. Individual notes still need a valid
+signature; index or note failures never prevent an otherwise valid update.
+
+The Updates screen combines notes under their existing headings and removes exact
+repeats. It keeps the previous-to-current installed version range until the next
+installation, separately from any available update. Release history shows each
+version and date. Cached notes and install tracking stay on the device, outside
+account backups. The first build with install tracking shows its own release notes;
+previously installed versions cannot be reconstructed retroactively.
 
 ### What the app renders
 

@@ -93,6 +93,7 @@ data class UpdateManifest(
 class UpdateRepository(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var checkJob: Job? = null
+    private var installedNotesJob: Job? = null
     private val notificationCheck = Mutex()
     private val notifier = UpdateNotifier(context)
     private var downloadJob: Job? = null
@@ -111,7 +112,6 @@ class UpdateRepository(private val context: Context) {
 
     companion object {
         internal val CHANNELS = listOf("debug", "release")
-        private const val NOTES_MAX = 10
         private const val TAG = "AppUpdater"
         private val log = { Timber.tag(TAG) }
     }
@@ -121,12 +121,31 @@ class UpdateRepository(private val context: Context) {
     } else {
         "release"
     }
-    private val _selectedChannel = MutableStateFlow(ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel)
+    private val notesStore = ReleaseNotesStore(context, installedVersionCode(), BuildConfig.VERSION_NAME, nativeChannel)
+    // A Studio install can replace a release build without touching account preferences.
+    // Follow the newly installed build; later explicit choices remain valid until another switch.
+    private val initialChannel = if (notesStore.channelChanged) {
+        ChatPrefs.updateChannel = null
+        nativeChannel
+    } else ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel
+    val installedChannel: String get() = nativeChannel
+    private val _installedChanges = MutableStateFlow(installedChanges(emptyList()))
+    val installedChanges: StateFlow<InstalledChanges> = _installedChanges.asStateFlow()
+    private val _history = MutableStateFlow<List<ReleaseNote>>(emptyList())
+    val history: StateFlow<List<ReleaseNote>> = _history.asStateFlow()
+    private val _historyLoading = MutableStateFlow(false)
+    val historyLoading: StateFlow<Boolean> = _historyLoading.asStateFlow()
+    private val _historyError = MutableStateFlow<String?>(null)
+    val historyError: StateFlow<String?> = _historyError.asStateFlow()
+    private var historyJob: Job? = null
+    private val _selectedChannel = MutableStateFlow(initialChannel)
     val selectedChannel: StateFlow<String> = _selectedChannel.asStateFlow()
     val channel: String get() = _selectedChannel.value
 
     init {
-        notifier.clearIfInstalled(installedVersionCode(), nativeChannel)
+        if (notesStore.channelChanged) notifier.clear()
+        else notifier.clearIfInstalled(installedVersionCode(), nativeChannel)
+        refreshInstalledNotes()
     }
 
     fun switchChannel(newChannel: String) {
@@ -160,7 +179,7 @@ class UpdateRepository(private val context: Context) {
     }
 
     private fun isRequired(manifest: UpdateManifest) =
-        CoreBridge.updateIsRequired(BuildConfig.VERSION_NAME, manifest.versionName)
+        manifest.versionCode.toLong() > installedVersionCode() && CoreBridge.updateIsRequired(BuildConfig.VERSION_NAME, manifest.versionName)
 
     private fun accept(offer: Offer?) {
         _notes.value = offer?.notes.orEmpty()
@@ -181,7 +200,8 @@ class UpdateRepository(private val context: Context) {
                     _state.value is UpdateState.Ready) {
                     notifier.clear()
                 } else {
-                    notifier.show(offer.manifest, selectedChannel, isRequired(offer.manifest))
+                    notifier.show(offer.manifest, selectedChannel, isRequired(offer.manifest),
+                        channelSwitch = offer.manifest.versionCode.toLong() == installedVersionCode() && selectedChannel != nativeChannel)
                 }
             }
         }
@@ -199,30 +219,106 @@ class UpdateRepository(private val context: Context) {
         return Offer(manifest, releaseNotes(selectedChannel, abi, manifest))
     }
 
-    /** A code without notes is a 404, and an update without notes is still an update. */
+    private fun installedChanges(notes: List<ReleaseNote>): InstalledChanges = InstalledChanges(
+        notesStore.previousVersion, notesStore.version, notesStore.previousCode, notesStore.code,
+        notes.filter {
+            it.code <= notesStore.code && it.code > (notesStore.previousCode ?: (notesStore.code - 1))
+        },
+    )
+
+    private suspend fun refreshNoteViews() {
+        val notes = withContext(Dispatchers.IO) {
+            notesStore.cached(nativeChannel).filter { it.code <= notesStore.code }
+        }
+        _history.value = notes
+        _installedChanges.value = installedChanges(notes)
+    }
+
+    private fun readNote(selectedChannel: String, abi: String, code: Long): ReleaseNote? {
+        notesStore.read(selectedChannel, code)?.let { return it }
+        return try {
+            val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/notes-$code.md"
+            notesStore.write(selectedChannel, code, getBytes(url, selectedChannel, 64 * 1024),
+                getBytes("$url.sig", selectedChannel, 64))
+        } catch (error: HttpError) {
+            if (error.status == 404) null else throw error
+        }
+    }
+
+    private fun noteCodes(selectedChannel: String, abi: String, after: Long, through: Long): List<Long> {
+        val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/notes-index.json"
+        val codes = try {
+            val raw = getBytes(url, selectedChannel, 256 * 1024)
+            val signature = getBytes("$url.sig", selectedChannel, 64)
+            require(CoreBridge.verifyUpdateManifest(raw, signature)) { "Notes index signature could not be verified." }
+            json.decodeFromString<List<Long>>(raw.decodeToString())
+        } catch (error: HttpError) {
+            if (error.status != 404) throw error
+            // Compatibility with releases published before the index existed.
+            return (through downTo maxOf(after + 1, through - 199)).toList()
+        }
+        require(codes.all { it in 1..2_100_000_000L }) { "Invalid release notes index." }
+        return codes.distinct().filter { it > after && it <= through }.sortedDescending()
+    }
+
+    /** Notes failure must not hide an otherwise valid update. Verified notes survive installation. */
     private fun releaseNotes(selectedChannel: String, abi: String, offered: UpdateManifest): List<ReleaseNote> {
         val installed = installedVersionCode()
-        val notes = ArrayList<ReleaseNote>()
-        var code = offered.versionCode.toLong()
-        while (code > installed && notes.size < NOTES_MAX) {
-            val url = "https://apt.promtuz.dev/apk/$selectedChannel/$abi/notes-$code.md"
-            try {
-                val raw = getBytes(url, selectedChannel, 64 * 1024)
-                val signature = getBytes("$url.sig", selectedChannel, 64)
-                require(CoreBridge.verifyUpdateManifest(raw, signature)) { "Notes signature could not be verified." }
-                notes += ReleaseNote.parse(code, raw.decodeToString())
-            } catch (error: Exception) {
-                if ((error as? HttpError)?.status != 404) {
-                    log().w(error, "Release notes unavailable")
-                    break
-                }
+        val after = if (offered.versionCode.toLong() == installed) installed - 1 else installed
+        try {
+            noteCodes(selectedChannel, abi, after, offered.versionCode.toLong()).forEach { code ->
+                readNote(selectedChannel, abi, code)
             }
-            code--
+        } catch (error: Exception) {
+            log().w(error, "Release notes unavailable")
         }
-        return notes
+        return notesStore.cached(selectedChannel).filter { it.code > after && it.code <= offered.versionCode }
+    }
+
+    private fun refreshInstalledNotes() {
+        if (installedNotesJob?.isActive == true) return
+        installedNotesJob = scope.launch {
+            refreshNoteViews()
+            try {
+                withContext(Dispatchers.IO) {
+                    val after = notesStore.previousCode ?: (notesStore.code - 1)
+                    noteCodes(nativeChannel, supportedAbi(), after, notesStore.code).forEach { code ->
+                        readNote(nativeChannel, supportedAbi(), code)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                log().w(error, "Installed release notes unavailable")
+            }
+            refreshNoteViews()
+        }
+    }
+
+    fun loadHistory() {
+        if (historyJob?.isActive == true) return
+        historyJob = scope.launch {
+            _historyLoading.value = true
+            _historyError.value = null
+            try {
+                withContext(Dispatchers.IO) {
+                    noteCodes(nativeChannel, supportedAbi(), 0, notesStore.code).forEach { code ->
+                        readNote(nativeChannel, supportedAbi(), code)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _historyError.value = "Couldn't load release history. Saved notes are still available."
+            } finally {
+                refreshNoteViews()
+                _historyLoading.value = false
+            }
+        }
     }
 
     fun check() {
+        refreshInstalledNotes()
         // A foreground check must not replace a downloaded update or interrupt a download.
         when (_state.value) {
             is UpdateState.Downloading, is UpdateState.Ready -> return
@@ -389,6 +485,8 @@ class UpdateRepository(private val context: Context) {
         val expectedPaths = setOf(
             "/apk/$selectedChannel/$abi/manifest.json",
             "/apk/$selectedChannel/$abi/manifest.json.sig",
+            "/apk/$selectedChannel/$abi/notes-index.json",
+            "/apk/$selectedChannel/$abi/notes-index.json.sig",
         )
         val apkPrefix = "/apk/$selectedChannel/$abi/promtuz-"
         val notes = Regex("/apk/$selectedChannel/$abi/notes-[0-9]{1,10}\\.md(\\.sig)?")

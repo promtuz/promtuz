@@ -127,6 +127,7 @@ fun AppNavigation(
                 onOpenLicenses = { appViewModel.navigator.push(Routes.OpenSourceLicenses) },
             ) }
             entry<Routes.Updates> { UpdateScreen() }
+            entry<Routes.ReleaseHistory> { ReleaseHistoryScreen() }
             entry<Routes.OpenSourceLicenses> { OpenSourceLicensesScreen(
                 onLibraryClick = { appViewModel.navigator.push(Routes.LibraryLicense(it)) },
             ) }

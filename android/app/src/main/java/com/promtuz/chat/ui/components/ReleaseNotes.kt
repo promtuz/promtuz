@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,23 +23,73 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.update.ReleaseNote
+import com.promtuz.chat.update.InstalledChanges
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 
 /** "What's new": every release after the installed build up to [offered], newest first. */
-fun LazyListScope.releaseNotes(notes: List<ReleaseNote>, offered: String) {
+fun LazyListScope.releaseNotes(
+    notes: List<ReleaseNote>, offered: String, heading: String = "What's new",
+    subtitle: String? = null, combined: Boolean = false, separator: Boolean = false,
+) {
     if (notes.isEmpty()) return
     item("notes") {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            Text("What's new", style = MaterialTheme.typography.titleLarge)
-            notes.forEach { ReleaseNoteCard(it, current = it.version == offered) }
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            if (separator) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(heading, style = MaterialTheme.typography.titleLarge)
+                subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            if (combined) NotesBody(combineNotes(notes))
+            else notes.forEach { ReleaseNoteCard(it, current = it.version == offered) }
         }
     }
 }
 
+fun LazyListScope.installedReleaseNotes(changes: InstalledChanges) {
+    if (changes.notes.isEmpty()) return
+    item("installed-notes") {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(if (changes.previousVersion == null) "What's new in this version" else "Changes since your last update",
+                    style = MaterialTheme.typography.titleLarge)
+                val range = if (changes.previousVersion == changes.version && changes.previousCode != null)
+                    "${changes.version} · Build ${changes.previousCode} → ${changes.code}"
+                else changes.previousVersion?.let { "$it → ${changes.version}" } ?: changes.version
+                Text(range,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            NotesBody(combineNotes(changes.notes))
+        }
+    }
+}
+
+/** Preserve authored copy, fold shared headings, and remove exact repeats across releases. */
+private fun combineNotes(notes: List<ReleaseNote>): String {
+    val sections = linkedMapOf<String, LinkedHashSet<String>>()
+    notes.sortedByDescending { it.code }.forEach { note ->
+        var heading = ""
+        note.body.lineSequence().map(String::trim).filter(String::isNotEmpty).forEach { line ->
+            if (line.startsWith("#")) heading = line.trimStart('#').trim()
+            else sections.getOrPut(heading) { linkedSetOf() }.add(line)
+        }
+    }
+    return sections.entries.joinToString("\n\n") { (heading, lines) ->
+        (if (heading.isBlank()) "" else "### $heading\n") + lines.joinToString("\n")
+    }
+}
+
+fun LazyListScope.releaseHistory(notes: List<ReleaseNote>, currentCode: Long) {
+    notes.forEach { note -> item("release-${note.code}") {
+        ReleaseNoteCard(note, note.code == currentCode, showBuild = true)
+    } }
+}
+
 @Composable
-private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean) {
+private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean, showBuild: Boolean = false) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -50,7 +101,9 @@ private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean) {
                 style = MaterialTheme.typography.labelLarge,
                 color = if (current) colors.onPrimaryContainer else colors.onSurface,
             )
-            Text(niceDate(note.date), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            val detail = listOfNotNull(niceDate(note.date).takeIf { it.isNotBlank() },
+                "Build ${note.code}".takeIf { showBuild }).joinToString(" · ")
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
         Spacer(Modifier.height(8.dp))
         NotesBody(note.body)

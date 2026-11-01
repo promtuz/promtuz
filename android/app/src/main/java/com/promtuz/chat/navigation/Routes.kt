@@ -88,6 +88,8 @@ object Routes : NavKey {
 
     @Serializable
     data object Updates : NavKey
+    @Serializable
+    data object ReleaseHistory : NavKey
 
     @Serializable
     data object OpenSourceLicenses : NavKey

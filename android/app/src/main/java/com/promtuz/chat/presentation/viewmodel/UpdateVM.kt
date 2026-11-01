@@ -10,6 +10,12 @@ class UpdateVM(private val updates: UpdateRepository) : ViewModel() {
     val channel = updates.selectedChannel
     val notes = updates.notes
     val required = updates.required
+    val installedChannel = updates.installedChannel
+    val installedChanges = updates.installedChanges
+    val history = updates.history
+    val historyLoading = updates.historyLoading
+    val historyError = updates.historyError
+    fun loadHistory() = updates.loadHistory()
     fun check() = updates.check()
     fun setScreenVisible(visible: Boolean) = updates.setScreenVisible(visible)
     fun switchChannel(channel: String) = updates.switchChannel(channel)
