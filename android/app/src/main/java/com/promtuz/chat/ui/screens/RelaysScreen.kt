@@ -41,14 +41,14 @@ import com.promtuz.chat.presentation.viewmodel.UiRelay
 import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.MenuAction
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
 fun RelaysScreen(viewModel: RelaysVM = koinViewModel()) {
     val relays by viewModel.relays.collectAsState()
 
-    SimpleScreen({ Text("Relay Nodes") }) { padding ->
+    GroupedScreen({ Text("Relay Nodes") }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(16.dp, 8.dp, 40.dp),

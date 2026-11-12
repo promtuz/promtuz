@@ -17,7 +17,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.components.listPadding
 
 private data class SettingItem(
@@ -65,11 +65,11 @@ fun SettingsScreen(appViewModel: AppVM) {
         )),
     )
 
-    SimpleScreen({ Text("Settings") }) { padding ->
+    GroupedScreen({ Text("Settings") }) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             groups.forEachIndexed { groupIndex, group ->
                 item(key = "heading-${group.name}", contentType = "heading") {
@@ -83,7 +83,7 @@ fun SettingsScreen(appViewModel: AppVM) {
                         onClick = { appViewModel.navigator.push(setting.route) },
                         supportingText = setting.summary,
                     ) {
-                        DrawableIcon(setting.icon, size = 26.dp)
+                        DrawableIcon(setting.icon, size = 24.dp)
                     }
                 }
             }

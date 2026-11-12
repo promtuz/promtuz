@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.GroupedScreen
 import android.text.format.Formatter
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.BackHandler
@@ -104,7 +105,7 @@ internal fun StorageManager(
     val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     val navigationMorph = rememberMorphIconState(if (selected.isNotEmpty()) MorphGlyph.Close else MorphGlyph.Back)
 
-    SimpleScreen(
+    GroupedScreen(
         scrollableState = listState,
         title = { Text(chatName ?: "Storage", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
@@ -136,7 +137,7 @@ internal fun StorageManager(
     ) { padding ->
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(top = 0.dp, bottom = if (chosen.isNotEmpty()) 88.dp else 24.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            verticalArrangement = Arrangement.Top) {
             if (busy && usage == null) item("progress") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             if (chat == null) {
                 item("overview") {
@@ -220,18 +221,18 @@ internal fun StorageManager(
                     if ((usage?.stickers ?: 0) > 0) add("sticker-cache" to { index, count ->
                         GroupedActionRow("Clear sticker cache", index, count, { confirmStickers = true },
                             enabled = !busy, supportingText = size(usage!!.stickers)) {
-                            DrawableIcon(R.drawable.oi_sticker, size = 26.dp)
+                            DrawableIcon(R.drawable.oi_sticker, size = 24.dp)
                         }
                     })
                     if ((usage?.shared ?: 0) > 0) add("copies" to { index, count ->
                         GroupedActionRow("Clear shared copies", index, count, { confirmCopies = true },
                             enabled = !busy, supportingText = size(usage!!.shared)) {
-                            DrawableIcon(R.drawable.oi_trash, size = 26.dp)
+                            DrawableIcon(R.drawable.oi_trash, size = 24.dp)
                         }
                     })
                     if (onOpenBackup != null) add("backup" to { index, count ->
                         GroupedActionRow("Backup & restore", index, count, onOpenBackup) {
-                            DrawableIcon(R.drawable.i_encrypted, size = 26.dp)
+                            DrawableIcon(R.drawable.i_encrypted, size = 24.dp)
                         }
                     })
                 }

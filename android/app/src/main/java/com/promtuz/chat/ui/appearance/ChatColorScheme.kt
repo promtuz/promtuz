@@ -8,6 +8,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.theme.PromtuzColors
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 
@@ -21,6 +22,7 @@ data class ChatColorScheme(
     val accent: Color,
     /** Tint base for the translucent bars' haze. */
     val bar: Color,
+    val wallpaper: Color,
     /** System-event labels (alpha applied at use). */
     val marker: Color,
     /** Kept off the accent so a sender's name never looks tappable. */
@@ -31,16 +33,19 @@ val LocalChatColors = staticCompositionLocalOf<ChatColorScheme> {
     error("No ChatColorScheme provided — PromtuzTheme mounts it.")
 }
 
-fun ChatColors.resolve(scheme: ColorScheme) = ChatColorScheme(
-    outgoingBubble = outgoing.orRole(scheme.primaryContainer),
-    onOutgoingBubble = outgoingText.orRole(outgoing?.let(::bestOn) ?: scheme.onPrimaryContainer),
-    incomingBubble = incoming.orRole(scheme.surfaceContainerHigh),
-    onIncomingBubble = incomingText.orRole(incoming?.let(::bestOn) ?: scheme.onSurface),
-    accent = accent.orRole(scheme.primary),
-    bar = scheme.surface,
-    marker = scheme.onSurfaceVariant,
-    senderPalette = SENDER_PALETTE,
-)
+fun ChatColors.resolve(scheme: ColorScheme, palette: PromtuzColors): ChatColorScheme {
+    return ChatColorScheme(
+        outgoingBubble = outgoing.orRole(scheme.primaryContainer),
+        onOutgoingBubble = outgoingText.orRole(outgoing?.let(::bestOn) ?: scheme.onPrimaryContainer),
+        incomingBubble = incoming.orRole(palette.bubbleIn),
+        onIncomingBubble = incomingText.orRole(incoming?.let(::bestOn) ?: scheme.onSurface),
+        accent = accent.orRole(scheme.primary),
+        bar = scheme.surface,
+        wallpaper = palette.wallpaper,
+        marker = scheme.onSurfaceVariant,
+        senderPalette = SENDER_PALETTE,
+    )
+}
 
 /** Fixed hues: a ramp off one seed color can't keep them distinguishable. */
 private val SENDER_PALETTE = listOf(

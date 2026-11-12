@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.appearance
 
+import com.promtuz.chat.ui.theme.Palette
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -11,6 +12,7 @@ data class ChatAppearance(
     val type: TypeStyle = TypeStyle(),
     val interaction: InteractionStyle = InteractionStyle(),
     val themeMode: ThemeMode = ThemeMode.System,
+    val palette: Palette = Palette.Graphite,
 ) {
     companion object {
         val Default = ChatAppearance()

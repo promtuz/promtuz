@@ -37,7 +37,7 @@ import com.promtuz.chat.presentation.viewmodel.BackupLogLevel
 import com.promtuz.chat.presentation.viewmodel.BackupLogLine
 import com.promtuz.chat.presentation.viewmodel.BackupRestoreVM
 import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import org.koin.androidx.compose.koinViewModel
 
 /** Developer utility. Restore is additive: it only adds rows it doesn't already have. */
@@ -54,7 +54,7 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let(viewModel::restoreFrom) }
 
-    SimpleScreen({ Text("Backup & Restore") }, actions = {
+    GroupedScreen({ Text("Backup & Restore") }, actions = {
         IconButton(viewModel::clearConsole) {
             DrawableIcon(R.drawable.oi_broom, desc = "Clear console", size = 20.dp)
         }

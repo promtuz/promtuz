@@ -23,12 +23,14 @@ fun PromtuzTheme(
         ThemeMode.Light -> false
         ThemeMode.Dark -> true
     }
-    val colorScheme = if (dark) DarkColors else LightColors
+    val palette = remember(appearance.palette, dark) { appearance.palette.colors(dark) }
+    val colorScheme = remember(palette) { palette.scheme() }
 
     CompositionLocalProvider(
         LocalChatAppearance provides appearance,
-        LocalChatColors provides remember(appearance.colors, colorScheme) {
-            appearance.colors.resolve(colorScheme)
+        LocalPromtuzColors provides palette,
+        LocalChatColors provides remember(appearance.colors, colorScheme, palette) {
+            appearance.colors.resolve(colorScheme, palette)
         },
     ) {
         MaterialExpressiveTheme(

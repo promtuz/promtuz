@@ -25,7 +25,7 @@ import com.promtuz.chat.presentation.viewmodel.GroupVM
 import com.promtuz.chat.presentation.viewmodel.GroupWork
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.components.listPadding
 import org.koin.androidx.compose.koinViewModel
 import uniffi.core.GroupRulesRecord
@@ -45,7 +45,7 @@ fun GroupSettingsScreen(conversationHex: String, viewModel: GroupVM = koinViewMo
     LaunchedEffect(work) { (work as? GroupWork.Failed)?.let { snackbar.showSnackbar(it.reason); viewModel.clearError() } }
     val busy = work is GroupWork.Busy
 
-    SimpleScreen({ Text("Group settings") }, snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+    GroupedScreen({ Text("Group settings") }, snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         if (loading || loadError || rules == null || role < 1) {
             Column(Modifier.fillMaxWidth().padding(padding).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 when {
@@ -57,15 +57,15 @@ fun GroupSettingsScreen(conversationHex: String, viewModel: GroupVM = koinViewMo
                     else -> Text("Group settings aren’t available")
                 }
             }
-            return@SimpleScreen
+            return@GroupedScreen
         }
-        val current = rules ?: return@SimpleScreen
+        val current = rules ?: return@GroupedScreen
         val set = { next: GroupRulesRecord -> if (!busy && next != current) viewModel.setRules(next) }
         Column(
             Modifier.fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(padding.listPadding()),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             SettingsSection("Members can")
             GroupedActionRow(

@@ -32,7 +32,7 @@ import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.core.push.Notifications
 
@@ -58,12 +58,12 @@ fun NotificationsSettingsScreen() {
         buzz = ChatPrefs.notifBuzz
     }
 
-    SimpleScreen({ Text("Notifications") }) { padding ->
+    GroupedScreen({ Text("Notifications") }) { padding ->
         Column(
             Modifier.fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(padding.listPadding()),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             GroupedActionRow(
                 title = "Message notifications",
@@ -79,11 +79,11 @@ fun NotificationsSettingsScreen() {
             )
 
             AnimatedVisibility(visible = enabled) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.Top) {
                     SettingsSection("Alert frequency")
                     Column(
                         Modifier.selectableGroup(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.Top,
                     ) {
                         NotifBuzz.entries.forEachIndexed { index, mode ->
                             GroupedActionRow(

@@ -2,7 +2,6 @@ package com.promtuz.chat.ui.components
 
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.compose.foundation.background
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -14,12 +13,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.graphics.drawable.toBitmap
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.appearance.Wallpaper
 
 /** Tint and alpha stay outside the remembered brush, so recoloring never rebuilds the bitmap. */
 @Composable
 fun rememberChatWallpaper(wallpaper: Wallpaper): Modifier {
-    val colors = MaterialTheme.colorScheme
     return when (wallpaper) {
         is Wallpaper.Solid -> Modifier.background(Color(wallpaper.argb))
         is Wallpaper.Pattern -> {
@@ -30,7 +29,7 @@ fun rememberChatWallpaper(wallpaper: Wallpaper): Modifier {
                     .asImageBitmap()
                 ShaderBrush(ImageShader(bmp, TileMode.Repeated, TileMode.Repeated))
             }
-            val base = wallpaper.tintArgb?.let { Color(it) } ?: colors.surface
+            val base = wallpaper.tintArgb?.let { Color(it) } ?: LocalChatColors.current.wallpaper
             Modifier
                 .background(base)
                 .background(brush, alpha = wallpaper.alpha)

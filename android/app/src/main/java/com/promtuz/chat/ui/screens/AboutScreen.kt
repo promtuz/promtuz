@@ -31,7 +31,7 @@ import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
@@ -49,11 +49,11 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
         }
     }
 
-    SimpleScreen({ Text("About Promtuz") }) { padding ->
+    GroupedScreen({ Text("About Promtuz") }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(top = 24.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             item("app") {
                 Column(
@@ -88,7 +88,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
                         ))
                     },
                     supportingText = "Android · ${channel.replaceFirstChar { it.uppercase() }}",
-                ) { DrawableIcon(R.drawable.i_link, size = 26.dp) }
+                ) { DrawableIcon(R.drawable.i_link, size = 24.dp) }
             }
             item("source") {
                 GroupedActionRow("Source code", 1, 3, onClick = {
@@ -97,7 +97,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
             }
             item("licenses") {
                 GroupedActionRow("Open source licenses", 2, 3, onOpenLicenses) {
-                    DrawableIcon(R.drawable.i_info, size = 26.dp)
+                    DrawableIcon(R.drawable.i_info, size = 24.dp)
                 }
             }
         }

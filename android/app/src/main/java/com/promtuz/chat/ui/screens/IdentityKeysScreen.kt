@@ -13,26 +13,26 @@ import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 
 @Composable
 fun IdentityKeysScreen(onShareIdentity: () -> Unit, onRecoveryPhrase: () -> Unit) {
-    SimpleScreen({ Text(stringResource(R.string.identity_keys_title)) }) { padding ->
+    GroupedScreen({ Text(stringResource(R.string.identity_keys_title)) }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             item {
                 GroupedActionRow(stringResource(R.string.identity_qr_title), 0, 2, onShareIdentity,
                     supportingText = stringResource(R.string.identity_qr_body)) {
-                    DrawableIcon(R.drawable.oi_qr_code, size = 26.dp)
+                    DrawableIcon(R.drawable.oi_qr_code, size = 24.dp)
                 }
             }
             item {
                 GroupedActionRow(stringResource(R.string.recovery_title), 1, 2, onRecoveryPhrase,
                     supportingText = stringResource(R.string.identity_recovery_body)) {
-                    DrawableIcon(R.drawable.i_key, size = 26.dp)
+                    DrawableIcon(R.drawable.i_key, size = 24.dp)
                 }
             }
             item {

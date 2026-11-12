@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +45,9 @@ import com.promtuz.chat.ui.appearance.Wallpaper
 import com.promtuz.chat.ui.components.MessageBubble
 import com.promtuz.chat.ui.components.SimpleScreen
 import com.promtuz.chat.ui.components.rememberChatWallpaper
+import com.promtuz.chat.ui.theme.Palette
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.theme.colors
 
 @Composable
 fun ChatAppearanceScreen() {
@@ -69,6 +73,9 @@ fun ChatAppearanceScreen() {
                     ) { Text(mode.name) }
                 }
             }
+
+            SectionLabel("Palette")
+            PalettePicker(appearance.palette) { set { copy(palette = it) } }
 
             SectionLabel("Bubbles")
             SliderRow("Roundness", appearance.bubble.cornerRadius, 2f..24f, { "${it.toInt()} dp" }) {
@@ -272,4 +279,33 @@ private fun Swatch(
         contentAlignment = Alignment.Center,
         content = { content() },
     )
+}
+
+/** Each card previews the palette in the theme on screen now, so the pick is what you'll see. */
+@Composable
+private fun PalettePicker(selected: Palette, onPick: (Palette) -> Unit) {
+    val dark = Promtuz.colors.isDark
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Palette.entries.forEach { palette ->
+            val p = palette.colors(dark)
+            val ring = if (palette == selected) p.accentFill else Promtuz.colors.divider
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(if (palette == selected) 2.dp else 1.dp, ring, RoundedCornerShape(16.dp))
+                    .background(p.wallpaper)
+                    .clickable { onPick(palette) }
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(Modifier.fillMaxWidth(0.7f).height(14.dp).clip(RoundedCornerShape(7.dp)).background(p.bubbleIn))
+                Box(Modifier.align(Alignment.End).fillMaxWidth(0.6f).height(14.dp).clip(RoundedCornerShape(7.dp)).background(p.bubbleOut))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(p.accent))
+                    Text(palette.label, style = MaterialTheme.typography.labelLarge, color = p.text)
+                }
+            }
+        }
+    }
 }

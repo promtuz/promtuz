@@ -147,7 +147,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                             enter = fadeIn(ChatMotion.spec()) + expandVertically(ChatMotion.spec()),
                             exit = fadeOut(ChatMotion.spec()) + shrinkVertically(ChatMotion.spec())) {
                             Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                verticalArrangement = Arrangement.Top) {
                                 GroupedActionRow("Create group", 0, 2,
                                     onClick = { selecting = true }, enabled = !busy && !selecting && people.isNotEmpty()) {
                                     Icon(painterResource(R.drawable.i_users), null, Modifier.size(26.dp))

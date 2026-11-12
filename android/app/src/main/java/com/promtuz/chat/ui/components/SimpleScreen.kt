@@ -5,6 +5,9 @@ import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material3.FabPosition
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.graphics.Color
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.material3.TopAppBarColors
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.runtime.Composable
@@ -26,10 +29,12 @@ fun SimpleScreen(
     snackbarHost: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
     floatingActionButtonPosition: FabPosition = FabPosition.End,
+    containerColor: Color = MaterialTheme.colorScheme.background,
     content: @Composable ((PaddingValues) -> Unit)
 ) {
     ScreenScaffold(
         modifier = modifier,
+        containerColor = containerColor,
         topBar = { scrollBehavior ->
             AppTopBar(
                 title = title,
@@ -49,9 +54,36 @@ fun SimpleScreen(
     )
 }
 
+/** A [SimpleScreen] of cards: light themes put white cards on a grey page. */
+@Composable
+fun GroupedScreen(
+    title: @Composable (() -> Unit),
+    modifier: Modifier = Modifier,
+    actions: @Composable RowScope.() -> Unit = {},
+    navigationIcon: @Composable () -> Unit = { GoBackButton() },
+    connectionStatus: Boolean = true,
+    scrollableState: ScrollableState? = null,
+    snackbarHost: @Composable () -> Unit = {},
+    floatingActionButton: @Composable () -> Unit = {},
+    floatingActionButtonPosition: FabPosition = FabPosition.End,
+    content: @Composable ((PaddingValues) -> Unit)
+) = SimpleScreen(
+    title = title,
+    modifier = modifier,
+    actions = actions,
+    navigationIcon = navigationIcon,
+    connectionStatus = connectionStatus,
+    scrollableState = scrollableState,
+    snackbarHost = snackbarHost,
+    floatingActionButton = floatingActionButton,
+    floatingActionButtonPosition = floatingActionButtonPosition,
+    containerColor = Promtuz.colors.groupedPage,
+    content = content,
+)
+
 /** The screen's padding plus [h] on each side and [top] and [bottom] more, for its scrolling content. */
 @Composable
-fun PaddingValues.listPadding(h: Dp = 18.dp, top: Dp = 12.dp, bottom: Dp = 24.dp): PaddingValues {
+fun PaddingValues.listPadding(h: Dp = 12.dp, top: Dp = 12.dp, bottom: Dp = 24.dp): PaddingValues {
     val direction = LocalLayoutDirection.current
     return PaddingValues(
         start = calculateStartPadding(direction) + h,

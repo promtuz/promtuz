@@ -96,26 +96,26 @@ fun ProfileScreen(viewModel: ProfileVM, onChoosePhoto: (Uri) -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.Top) {
                     GroupedActionRow("Edit profile", 0, 2, enabled = !busy,
                         supportingText = "Name and bio", onClick = {
                             viewModel.dismissError()
                             app.navigator.push(Routes.EditProfile)
-                        }) { DrawableIcon(R.drawable.i_user, size = 26.dp) }
+                        }) { DrawableIcon(R.drawable.i_user, size = 24.dp) }
                     GroupedActionRow("Share my identity", 1, 2,
                         supportingText = "Your QR code and invite link",
-                        onClick = { app.navigator.push(Routes.ShareIdentity) }) { DrawableIcon(R.drawable.oi_qr_code, size = 26.dp) }
+                        onClick = { app.navigator.push(Routes.ShareIdentity) }) { DrawableIcon(R.drawable.oi_qr_code, size = 24.dp) }
                 }
             }
             item { SettingsSection("Account") }
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.Top) {
                     GroupedActionRow("Identity & keys", 0, 2,
                         supportingText = "Public identity and recovery phrase",
-                        onClick = { app.navigator.push(Routes.IdentityKeys) }) { DrawableIcon(R.drawable.i_key, size = 26.dp) }
+                        onClick = { app.navigator.push(Routes.IdentityKeys) }) { DrawableIcon(R.drawable.i_key, size = 24.dp) }
                     GroupedActionRow("Backup & restore", 1, 2,
                         supportingText = "Keep a copy of your chats",
-                        onClick = { app.navigator.push(Routes.BackupRestore) }) { DrawableIcon(R.drawable.i_chat_backup, size = 26.dp) }
+                        onClick = { app.navigator.push(Routes.BackupRestore) }) { DrawableIcon(R.drawable.i_chat_backup, size = 24.dp) }
                 }
             }
             (work as? ProfileWork.Failed)?.let { failure ->

@@ -44,7 +44,7 @@ import com.promtuz.chat.ui.components.ScreenScaffold
 import com.promtuz.chat.ui.components.SearchableHeader
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -100,7 +100,7 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(bottom = 48.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             when {
                 catalog == null -> item { LicenseLoading() }
@@ -132,7 +132,7 @@ fun LibraryLicenseScreen(id: String) {
     val content = library?.getOrNull()
     val projectUrl = content?.url?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
-    SimpleScreen(
+    GroupedScreen(
         title = { Text(content?.name ?: "License", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         actions = {
             if (projectUrl != null) IconButton(onClick = {

@@ -76,7 +76,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     }) { padding ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 18.dp, end = 18.dp,
             top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Top) {
             item {
                 if (!profile?.nickname.isNullOrBlank() && profile?.name != name)
                     Text(profile?.name.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -91,17 +91,17 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                 Button(onClick = { app.openChat(chat.conversationHex, name) }) { Text("Message") }
                 Spacer(Modifier.height(16.dp))
                 GroupedActionRow("Nickname", 0, 2, supportingText = profile?.nickname?.ifBlank { "Only visible to you" },
-                    onClick = { nickname = profile?.nickname.orEmpty(); error = null }) { DrawableIcon(R.drawable.i_user, size = 26.dp) }
+                    onClick = { nickname = profile?.nickname.orEmpty(); error = null }) { DrawableIcon(R.drawable.i_user, size = 24.dp) }
             }
             if (chat != null) item {
                 GroupedActionRow("Notifications", 1, 2, supportingText = if (chat.muted) "Muted" else "On",
                     onClick = { scope.launch { runCatching { CoreBridge.setConversationMuted(chat.conversationHex.fromHex(), !chat.muted) }
-                        .onFailure { error = "Couldn't change notifications" } } }) { DrawableIcon(R.drawable.i_notifications, size = 26.dp) }
+                        .onFailure { error = "Couldn't change notifications" } } }) { DrawableIcon(R.drawable.i_notifications, size = 24.dp) }
             }
             if (mediaCount > 0 && directConversation != null) item {
                 Spacer(Modifier.height(16.dp))
                 GroupedActionRow("Shared media", 0, 1, supportingText = if (mediaCount == 1) "1 attachment" else "$mediaCount attachments",
-                    onClick = { app.navigator.push(Routes.SharedMedia(directConversation, name)) }) { DrawableIcon(R.drawable.oi_image, size = 26.dp) }
+                    onClick = { app.navigator.push(Routes.SharedMedia(directConversation, name)) }) { DrawableIcon(R.drawable.oi_image, size = 24.dp) }
             }
             error?.let { item { Text(it, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error) } }
         }

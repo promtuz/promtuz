@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.GroupedScreen
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -32,9 +33,9 @@ fun ResetLockedChatsScreen() {
             withContext(Dispatchers.IO) { uniffi.core.lockedConversationResetOptions() }
         }
     }.collectAsState(emptyList())
-    SimpleScreen({ Text("Reset locked chat") }) { padding ->
+    GroupedScreen({ Text("Reset locked chat") }) { padding ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            verticalArrangement = Arrangement.Top) {
             if (options.isEmpty()) item { Text("No locked chats", Modifier.padding(12.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant) }
             itemsIndexed(options, key = { _, option -> option.conversationId.toHex() }) { index, option ->

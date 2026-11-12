@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.components.AppAlertDialog
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -45,15 +45,15 @@ fun PrivacySettingsScreen() {
     val blocked by remember { observeQuery(setOf("prefs")) { CoreBridge.blockedPeople() } }.collectAsState(emptyList())
     var unblocking by remember { mutableStateOf<BlockedPerson?>(null) }
 
-    SimpleScreen({ Text("Privacy") }) { padding ->
+    GroupedScreen({ Text("Privacy") }) { padding ->
         Column(
             Modifier.fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(padding.listPadding()),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             SettingsSection("Who can message me")
-            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.Top) {
                 listOf(true, false).forEachIndexed { index, option ->
                     GroupedActionRow(
                         title = if (option) "Everyone" else "My contacts",

@@ -32,7 +32,7 @@ import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.SimpleScreen
+import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.components.StickerPackSheet
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.utils.media.StickerImage
@@ -48,11 +48,11 @@ fun StickersScreen(
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refresh() }
     var sheet by remember { mutableStateOf<StickerRef?>(null) }
 
-    SimpleScreen({ Text("Stickers") }) { padding ->
+    GroupedScreen({ Text("Stickers") }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = padding.listPadding(bottom = 48.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Top,
         ) {
             item {
                 GroupedActionRow("Create a pack", 0, 1, onCreate) {
